@@ -46,14 +46,10 @@ pub(super) const CLAUDE_CODE_CAPABILITY: &str = "claudeCode";
 const CLAUDE_CODE_CAPABILITY_SNAKE: &str = "claude_code";
 const CLAUDE_CODE_CAPABILITY_VERSION: u64 = 1;
 /// Why a runtime's Claude Code cannot take a turn, as runtime-agent's probe
-/// reports it (docs/Local-Engine-Turns.md 3.2).
-const CLAUDE_CODE_NOT_READY_REASONS: [&str; 5] = [
-    "binary_missing",
-    "binary_unsafe",
-    "probe_failed",
-    "unsupported_version",
-    "bare_default",
-];
+/// reports it (docs/Local-Engine-Turns.md 3.2): runtime-contracts' list,
+/// which the runtime and Studio are tested against too.
+const CLAUDE_CODE_NOT_READY_REASONS: [&str; 5] =
+    runtime_contracts::claude_code_lane::NOT_READY_REASONS;
 
 /// A runtime's `claudeCode` capability, read from what the runtime reported
 /// (docs/Local-Engine-Turns.md 2.10): version 1 with a boolean `ready`, and
@@ -1777,6 +1773,34 @@ mod tests {
             "2.1.314-{}",
             "a".repeat(65)
         )));
+    }
+
+    /// Every not-ready reason runtime-contracts lists is kept, so the reason
+    /// a runtime attests reaches Studio, which words each one. No other code
+    /// of the lane is a reason: a runtime's failure codes and the
+    /// controller's own stop and sweep codes are dropped.
+    #[test]
+    fn claude_code_keeps_exactly_the_shared_not_ready_reasons() {
+        use runtime_contracts::claude_code_lane::{
+            NOT_READY_REASONS, RUNTIME_FAILURE_CODES, STOP_AND_SWEEP_FAILURE_CODES,
+        };
+        let reason_of = |reason: &str| {
+            ClaudeCodeCapability::from_reported(
+                &json!({ "version": 1, "ready": false, "reason": reason }),
+            )
+            .expect("a capability")
+            .reason
+        };
+        for reason in NOT_READY_REASONS {
+            assert_eq!(reason_of(reason), Some(reason));
+        }
+        for code in RUNTIME_FAILURE_CODES
+            .into_iter()
+            .chain(STOP_AND_SWEEP_FAILURE_CODES)
+            .filter(|code| !NOT_READY_REASONS.contains(code))
+        {
+            assert_eq!(reason_of(code), None, "{code}");
+        }
     }
 
     /// Only a token holding `claude_code.turns`, for a private self-hosted

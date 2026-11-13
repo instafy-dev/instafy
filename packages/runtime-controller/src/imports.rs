@@ -1331,7 +1331,7 @@ async fn load_project_secret_value_by_name(
 
     let row = match connection
         .query_opt(
-            "select nonce_b64, ciphertext_b64
+            "select id, name, nonce_b64, ciphertext_b64
              from project_secrets
              where project_id = $1
                and upper(name) = upper($2)
@@ -1368,11 +1368,30 @@ async fn load_project_secret_value_by_name(
         .map_err(|error| internal_error(format!("failed to decrypt project secret: {error}")))?;
     let value =
         String::from_utf8(plaintext).map_err(|_| internal_error("secret payload must be utf-8"))?;
-    let trimmed = value.trim().to_string();
-    if trimmed.is_empty() {
-        return Ok(None);
+    let token = github_token_from_secret_value(&value);
+    if token.is_none() && crate::claude_material::is_claude_secret_value(&value) {
+        let secret_id: Uuid = row.get("id");
+        let stored_name: String = row.get("name");
+        tracing::warn!(
+            %secret_id,
+            secret_name = %stored_name,
+            "not sending a project secret that holds a Claude sign-in to GitHub"
+        );
     }
-    Ok(Some(trimmed))
+    Ok(token)
+}
+
+/// What a GitHub import may send GitHub from a project secret's decrypted
+/// `value`: the value trimmed, or nothing when it is empty or holds Claude
+/// sign-in material, which never leaves the controller (crate::claude_material).
+/// The import then goes on as though the secret were not there, as a job's
+/// secret delivery skips it.
+fn github_token_from_secret_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || crate::claude_material::is_claude_secret_value(value) {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 #[instrument(skip(state, headers, body))]
@@ -5459,5 +5478,167 @@ mod tests {
 
         mock.assert_async().await;
         assert_eq!(result, None);
+    }
+
+    // Inert stand-ins with the shapes the credential guard reads. None is a
+    // real key or token.
+    const CLAUDE_SIGN_IN: &str = "sk-ant-oat01-inert-import-guard-access";
+    const GITHUB_TOKEN: &str = "ghp_inertImportGuardToken";
+
+    /// The credential guard on the import's project token
+    /// (docs/Local-Engine-Turns.md, section 6): a project secret that holds
+    /// Claude sign-in material is never sent to GitHub, and an empty one is
+    /// no token. The guard is narrow: a GitHub token, or a Claude API key, is
+    /// sent as it is stored, trimmed.
+    #[test]
+    fn a_project_secret_holding_a_claude_sign_in_is_no_github_token() {
+        for value in [
+            CLAUDE_SIGN_IN,
+            " SK-ANT-ORT01-inert-import-guard-refresh \n",
+            r#"{"claudeAiOauth":{"accessToken":"inert"}}"#,
+            "",
+            " \n ",
+        ] {
+            assert_eq!(
+                super::github_token_from_secret_value(value),
+                None,
+                "{value:?}"
+            );
+        }
+        for (value, sent) in [
+            (GITHUB_TOKEN, GITHUB_TOKEN),
+            (
+                " github_pat_inert_import_guard \n",
+                "github_pat_inert_import_guard",
+            ),
+            (
+                "sk-ant-api03-inert-import-guard-api-key",
+                "sk-ant-api03-inert-import-guard-api-key",
+            ),
+        ] {
+            assert_eq!(
+                super::github_token_from_secret_value(value).as_deref(),
+                Some(sent),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// The import's project-token fallback reads `GITHUB_TOKEN`, then
+    /// `GH_TOKEN`: one that holds a Claude sign-in is passed over, and with no
+    /// other the import goes on as a public one and sends GitHub no token.
+    #[tokio::test]
+    async fn the_import_passes_over_a_project_token_holding_a_claude_sign_in() -> anyhow::Result<()>
+    {
+        let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
+            eprintln!("skipping the import's credential guard test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        crate::secrets::ensure_secret_tables(&pool).await?;
+        let user_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        crate::tests::ensure_test_user(&pool, &user_id).await?;
+
+        let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+            crate::tests::sql(
+                &pool,
+                "insert into projects (id, owner_user_id, project_type, status)
+                 values ($1, $2, 'customer', 'active')",
+                &[&project_id, &user_id],
+            )
+            .await?;
+            let keys: crate::credential_keys::CredentialKeyRing =
+                crate::config::CredentialEncryptionKey::for_test(&format!(
+                    "import-guard-{project_id}"
+                ))
+                .into();
+            let mut config = crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                "github-import-credential-guard",
+            );
+            config.credential_keys = Some(keys.clone());
+            let state = crate::tests::build_test_state(pool.clone(), config);
+            // Stored as a release before the guard could have stored them.
+            let mut stored = Vec::new();
+            for (name, value) in [("GITHUB_TOKEN", CLAUDE_SIGN_IN), ("gh_token", GITHUB_TOKEN)] {
+                let (nonce, ciphertext) = keys.seal(value.as_bytes())?;
+                let secret_id = Uuid::new_v4();
+                crate::tests::sql(
+                    &pool,
+                    "insert into project_secrets
+                         (id, project_id, user_id, name, nonce_b64, ciphertext_b64)
+                     values ($1, $2, $3, $4, $5, $6)",
+                    &[
+                        &secret_id,
+                        &project_id,
+                        &user_id,
+                        &name,
+                        &nonce,
+                        &ciphertext,
+                    ],
+                )
+                .await?;
+                stored.push(secret_id);
+            }
+            let api_error = |(status, error): (StatusCode, axum::Json<crate::ApiError>)| {
+                anyhow::anyhow!("{status}: {}", error.0.message)
+            };
+            assert_eq!(
+                super::load_project_github_token(&state, &project_id)
+                    .await
+                    .map_err(api_error)?
+                    .as_deref(),
+                Some(GITHUB_TOKEN),
+                "GH_TOKEN, past the GITHUB_TOKEN that holds a Claude sign-in"
+            );
+
+            crate::tests::sql(
+                &pool,
+                "delete from project_secrets where id = $1",
+                &[&stored[1]],
+            )
+            .await?;
+            assert_eq!(
+                super::load_project_github_token(&state, &project_id)
+                    .await
+                    .map_err(api_error)?,
+                None
+            );
+            let auth = super::resolve_github_import_request_auth(
+                &state,
+                user_id,
+                &project_id,
+                ProjectGithubAuthPolicy::Automatic,
+                None,
+                None,
+            )
+            .await
+            .map_err(api_error)?;
+            assert_eq!(auth.token, None);
+            assert_eq!(auth.mode, "public");
+            assert_eq!(auth.source, GithubImportAuthSource::Public);
+            anyhow::Ok(())
+        }))
+        .await;
+
+        // The space's secrets, the space and its owner, however the test
+        // ended.
+        let cleanup = async {
+            crate::tests::sql(
+                &pool,
+                "delete from project_secrets where project_id = $1",
+                &[&project_id],
+            )
+            .await?;
+            crate::tests::sql(&pool, "delete from projects where id = $1", &[&project_id]).await?;
+            crate::tests::sql(&pool, "delete from auth.users where id = $1", &[&user_id]).await?;
+            anyhow::Ok(())
+        }
+        .await;
+        match outcome {
+            Ok(result) => result.and(cleanup),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 }

@@ -2284,6 +2284,9 @@ pub(crate) async fn agent_heartbeat(
 /// transaction commit. A concurrent human-answer cancellation then has one
 /// deterministic winner: cancellation first makes this SELECT return no row;
 /// message delivery first commits before cancellation can update the job.
+///
+/// Only the runtime that leased a local-engine turn posts to it: a token with
+/// no runtime never does (crate::claude_code_lane).
 fn agent_message_job_select_sql(runtime_scoped: bool) -> &'static str {
     if runtime_scoped {
         "select run_id,
@@ -2301,6 +2304,7 @@ fn agent_message_job_select_sql(runtime_scoped: bool) -> &'static str {
            and project_id = $2
            and status = 'leased'
            and coalesce(leased_by_runtime_id, $3::uuid) = $3
+           and (engine is null or leased_by_runtime_id = $3)
          for update"
     } else {
         "select run_id,
@@ -2317,6 +2321,7 @@ fn agent_message_job_select_sql(runtime_scoped: bool) -> &'static str {
          where id = $1
            and project_id = $2
            and status = 'leased'
+           and engine is null
          for update"
     }
 }
@@ -3441,6 +3446,11 @@ pub(crate) async fn agent_complete(
                        and project_id = $2
                        and status in ('leased','queued')
                        and coalesce(leased_by_runtime_id, $8::uuid) = $8
+                       -- A local-engine turn ends only by the runtime that
+                       -- leased it: one still queued ends through the sweeps,
+                       -- a stop of its runtime or a cancel, never by another
+                       -- runtime of the space (crate::claude_code_lane).
+                       and (engine is null or leased_by_runtime_id = $8)
                      returning id,
                                project_id,
                                run_id,
@@ -3482,6 +3492,9 @@ pub(crate) async fn agent_complete(
                          active_input_ready_turn_id = null,
                          heartbeat_at = now()
                      where id = $1 and project_id = $2 and status in ('leased','queued')
+                       -- A token with no runtime never ends a local-engine
+                       -- turn, which only its leasing runtime ends.
+                       and engine is null
                      returning id,
                                project_id,
                                run_id,
@@ -5008,6 +5021,7 @@ pub(crate) async fn lease_next_agent_job(
                        aj.conversation_id,
                        aj.priority,
                        aj.created_at,
+                       aj.engine,
                        aj.payload #>> '{user_id}' as job_user_id,
                        lower(replace(coalesce(
                            aj.payload #>> '{metadata,runtimeRouting,strategy}',
@@ -5298,8 +5312,15 @@ pub(crate) async fn lease_next_agent_job(
                               )
                         )
                       )
+                -- A local-engine turn first, whatever its priority and age:
+                -- its admission found its computer idle, and a job another
+                -- dispatch queued for that computer as it was admitted must
+                -- not use up the turn's minute to start
+                -- (`claude_code_lane::admit`, G7). Only its own computer
+                -- leases it, so no other runtime's order changes.
                 order by
                   case when target_runtime_id = $2 then 0 else 1 end,
+                  (engine is not null) desc,
                   priority asc,
                   created_at asc
                 limit 1
@@ -6494,9 +6515,16 @@ pub(crate) fn build_agent_job_payload(
         "intent".to_string(),
         JsonValue::String(request.intent.clone()),
     );
+    // A lane turn names the lane's one workspace mode, never one a client's
+    // metadata chose.
+    let workspace_mode = if lane {
+        crate::claude_code_lane::WORKSPACE_MODE
+    } else {
+        request.workspace_mode.as_str()
+    };
     map.insert(
         "executionMode".to_string(),
-        JsonValue::String(request.workspace_mode.clone()),
+        JsonValue::String(workspace_mode.to_string()),
     );
     // Controller-marked evaluations get their participation instruction inside
     // the delivered turn itself. The persisted conversation message keeps the
@@ -7482,6 +7510,11 @@ mod tests {
         assert!(agent_message_job_select_sql(true)
             .contains("coalesce(leased_by_runtime_id, $3::uuid) = $3"));
         assert!(!agent_message_job_select_sql(false).contains("$3"));
+        // A local-engine turn takes messages only from the runtime that
+        // leased it, never through a token with no runtime.
+        assert!(agent_message_job_select_sql(true)
+            .contains("and (engine is null or leased_by_runtime_id = $3)"));
+        assert!(agent_message_job_select_sql(false).contains("and engine is null"));
     }
 
     #[test]

@@ -44,7 +44,7 @@ pub(crate) const EXECUTION_MODE_APPLY: &str = "apply";
 const EXECUTION_MODE_APPROVAL: &str = "approval_required";
 const EXECUTION_MODE_PLAN_ONLY: &str = "plan_only";
 const WORKSPACE_MODE_SHARED_READ: &str = "shared_read";
-const WORKSPACE_MODE_SHARED_WRITE: &str = "shared_write";
+pub(crate) const WORKSPACE_MODE_SHARED_WRITE: &str = "shared_write";
 const WORKSPACE_MODE_ISOLATED_WRITE: &str = "isolated_write";
 const SHARED_BROWSER_CONSENT_VERSION: u64 = 1;
 /// Same bound as the runtime agent's Shared Browser `MAX_PAGE_ID_BYTES`.

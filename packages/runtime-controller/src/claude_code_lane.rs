@@ -61,6 +61,11 @@ type Refusal = (StatusCode, Json<ApiError>);
 pub(crate) const ENGINE: &str = "claude-code";
 /// The `aiAccessMode` of a lane turn's run, messages and job.
 pub(crate) const AI_ACCESS_MODE: &str = "claude-code";
+/// The workspace mode a lane job's payload names as its top-level
+/// `executionMode`, whatever a client's metadata asked for: a lane turn is
+/// one write turn in its space's own folder, and the runtime reads the key as
+/// written (docs/Local-Engine-Turns.md 2.5).
+pub(crate) const WORKSPACE_MODE: &str = crate::dispatch::WORKSPACE_MODE_SHARED_WRITE;
 /// The client's claim on a send, and the one value it may have. Both
 /// spellings are read, as the controller reads its other metadata, so a send
 /// can never carry the claim past the gate under the other one.
@@ -146,28 +151,13 @@ const USAGE_MODEL_MAX_CHARS: usize = 200;
 /// onto its failure message as [`FAILURE_KEY`]: the rows of the failure
 /// table above `claude_code_turn_not_allowed` (docs/Local-Engine-Turns.md
 /// 5.5). Any other code is left off, and Studio words the failure as one with
-/// no code.
-pub(crate) const RUNTIME_FAILURE_CODES: [&str; 16] = [
-    "not_signed_in",
-    "plan_limit",
-    "binary_missing",
-    "binary_unsafe",
-    "unsupported_version",
-    "probe_failed",
-    "bare_default",
-    "session_unavailable",
-    "turn_timeout",
-    "stalled",
-    "crashed",
-    "unexpected_configuration",
-    "project_config",
-    "unsafe_import",
-    "unsafe_link",
-    "preflight_failed",
-];
+/// no code. It is runtime-contracts' list, which the runtime and Studio are
+/// tested against too.
+pub(crate) const RUNTIME_FAILURE_CODES: [&str; 16] =
+    runtime_contracts::claude_code_lane::RUNTIME_FAILURE_CODES;
 /// The failure code of a lane job a runtime stop failed: the computer's
 /// Instafy stopped while the turn ran or before it started.
-pub(crate) const MACHINE_STOPPED: &str = "claude_code_machine_stopped";
+pub(crate) const MACHINE_STOPPED: &str = runtime_contracts::claude_code_lane::MACHINE_STOPPED;
 /// What the failure message of a lane job a runtime stop failed says, before
 /// Studio words it from [`FAILURE_KEY`].
 pub(crate) const MACHINE_STOPPED_MESSAGE: &str = "Instafy Desktop stopped on this turn's \
@@ -1306,13 +1296,15 @@ pub(crate) fn reported_failure_code(artifacts: &JsonValue) -> Option<&'static st
 }
 
 /// Stamps the failure message of a lane turn with what its author's Studio
-/// words it by (docs/Local-Engine-Turns.md 5.5): `aiAccessMode:
-/// "claude-code"` and the failure code as [`FAILURE_KEY`].
+/// words it by (docs/Local-Engine-Turns.md 5.5): the controller's own stamps
+/// ([`stamp`]: `claudeCode`, `aiAccessMode: "claude-code"` and
+/// `managedAiUsed: false`) and the failure code as [`FAILURE_KEY`]. Every
+/// writer of such a message stamps it so, the sweeps and a runtime stop
+/// included: a message a member records keeps only `aiAccessMode`, so
+/// Studio, which shows a lane failure only for a message with the
+/// controller's stamp, never takes one for a turn's failure.
 pub(crate) fn stamp_failure(map: &mut JsonMap<String, JsonValue>, code: &str) {
-    map.insert(
-        "aiAccessMode".to_string(),
-        JsonValue::String(AI_ACCESS_MODE.to_string()),
-    );
+    stamp(map);
     map.insert(FAILURE_KEY.to_string(), JsonValue::String(code.to_string()));
 }
 
@@ -1861,12 +1853,40 @@ mod tests {
             Some("plan_limit")
         );
 
+        // A failure message carries the controller's stamps beside its code,
+        // over anything the message's own metadata said.
         let mut map = JsonMap::new();
+        map.insert("source".to_string(), json!("controller"));
+        map.insert("aiAccessMode".to_string(), json!("managed"));
+        map.insert("managedAiUsed".to_string(), json!(true));
         stamp_failure(&mut map, MACHINE_STOPPED);
         assert_eq!(
             JsonValue::Object(map),
-            json!({ "aiAccessMode": "claude-code", "claudeCodeFailure": MACHINE_STOPPED })
+            json!({
+                "source": "controller",
+                "claudeCode": { "version": 1 },
+                "aiAccessMode": "claude-code",
+                "managedAiUsed": false,
+                "claudeCodeFailure": MACHINE_STOPPED,
+            })
         );
+    }
+
+    /// The codes only the controller writes, a runtime stop's and the
+    /// sweeps' (runtime-contracts' list, which Studio words), are never
+    /// copied from a runtime's failure artifact: a runtime cannot make its
+    /// failure read as one of them. [`MACHINE_STOPPED`] is in that list.
+    #[test]
+    fn a_runtime_never_reports_a_stop_or_sweep_code() {
+        use runtime_contracts::claude_code_lane::STOP_AND_SWEEP_FAILURE_CODES;
+        for code in STOP_AND_SWEEP_FAILURE_CODES {
+            assert_eq!(
+                reported_failure_code(&json!([{ "kind": FAILURE_ARTIFACT_KIND, "code": code }])),
+                None,
+                "{code}"
+            );
+        }
+        assert!(STOP_AND_SWEEP_FAILURE_CODES.contains(&MACHINE_STOPPED));
     }
 
     /// A lane job's metadata keeps only the controller's keys and the

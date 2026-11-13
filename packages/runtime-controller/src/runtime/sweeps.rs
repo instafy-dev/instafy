@@ -237,6 +237,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
     fail_claude_code_turns_whose_lease_expired(state, &mut tick).await?;
+    repair_stopped_claude_code_turns(state, &mut tick).await?;
     fail_jobs_that_can_no_longer_start(state, &mut tick).await?;
     // Last: each of its stops may wait out a provider release.
     stop_runtimes_of_deleted_projects(state, &mut tick).await?;
@@ -1711,6 +1712,91 @@ async fn fail_claude_code_turns_whose_lease_expired(
         );
     }
     publish_failed_queued_jobs(state, failed).await;
+    Ok(())
+}
+
+/// How long [`repair_stopped_claude_code_turns`] leaves a turn to the write
+/// its stop started (`stop::finish_failed_claude_code_turn`): longer than
+/// that write's tries can take, three waits of up to 10 s for a pool
+/// connection and the backoff between them.
+const STOPPED_CLAUDE_CODE_TURN_REPAIR_GRACE_SECONDS: i64 = 60;
+/// A turn a stop failed longer ago than this is no longer repaired.
+const STOPPED_CLAUDE_CODE_TURN_REPAIR_MAX_AGE_SECONDS: i64 = 24 * 60 * 60;
+/// The most turns one tick repairs, the oldest first.
+const STOPPED_CLAUDE_CODE_TURN_REPAIRS_PER_TICK: i64 = 32;
+
+/// Writes the end of each local-engine turn (crate::claude_code_lane) a
+/// runtime stop failed whose own write never committed. A stop fails only the
+/// turn's job, and once it commits a task of its own writes the run's
+/// failure, its Home row and its failure message
+/// (`stop::record_failed_claude_code_turn`). If the controller exits before
+/// that write commits, or the database refuses every try, nothing else would
+/// end the run: Home would list it as live work for good, its turn row would
+/// keep running, and Stop refuses its job, which is no longer queued or
+/// leased. A turn past the grace whose run is still unfinished is written
+/// here, one try per tick, and published once its write commits; a write
+/// that finds the turn's message already there records nothing twice.
+///
+/// Off while local-engine turns are on for nobody: then no such turn starts,
+/// and a deployment that never had one runs no query for it. The query reads
+/// `agent_jobs_stopped_claude_code_turn_recovery_idx`, which holds only failed
+/// engine jobs. A tick with nothing to repair runs one query, on the tick's
+/// connection.
+async fn repair_stopped_claude_code_turns(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    if !state.config.claude_code_lane.0.on() {
+        return Ok(());
+    }
+    let rows = tick
+        .client("failed to acquire connection for stopped local-engine turns")
+        .await?
+        .query(
+            "select j.id, j.project_id, j.run_id, j.conversation_id, j.session_id,
+                    j.prompt_id, j.payload
+               from agent_jobs j
+               join runs r on r.id = j.run_id
+              where j.engine is not null
+                and j.status = 'failed'
+                and j.error_message = $1
+                and j.completed_at < now() - ($2::bigint * interval '1 second')
+                and j.completed_at > now() - ($3::bigint * interval '1 second')
+                and r.status in ('queued', 'in_progress', 'awaiting_approval')
+              order by j.completed_at, j.id
+              limit $4",
+            &[
+                &crate::claude_code_lane::MACHINE_STOPPED_MESSAGE,
+                &STOPPED_CLAUDE_CODE_TURN_REPAIR_GRACE_SECONDS,
+                &STOPPED_CLAUDE_CODE_TURN_REPAIR_MAX_AGE_SECONDS,
+                &STOPPED_CLAUDE_CODE_TURN_REPAIRS_PER_TICK,
+            ],
+        )
+        .await
+        .context("failed to load stopped local-engine turns")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // Each write, and the publish after it, takes connections of its own.
+    tick.release();
+    for row in &rows {
+        let turn = super::stop::FailedClaudeCodeTurn::from_job_row(row);
+        match super::stop::write_and_publish_failed_claude_code_turn(state, &turn).await {
+            Ok(true) => info!(
+                job_id = %turn.job_id,
+                project_id = %turn.project_id,
+                "wrote the end of a local-engine turn a runtime stop failed, which its stop never wrote"
+            ),
+            Ok(false) => {}
+            // The turn stays a candidate, and the next tick tries it again.
+            Err((status, Json(error))) => warn!(
+                job_id = %turn.job_id,
+                status = status.as_u16(),
+                error = %error.message,
+                "failed to write the end of a local-engine turn a runtime stop failed"
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -3624,6 +3710,16 @@ mod tests {
             Some("managed_ai_hosted_runtime_required"),
             minutes(10)
         ));
+    }
+
+    /// A local-engine turn these sweeps fail carries the sweep's code as its
+    /// `claudeCodeFailure` (crate::claude_code_lane::stamp_failure), which
+    /// Studio words from runtime-contracts' list of stop and sweep codes.
+    #[test]
+    fn the_run_once_codes_are_the_lanes_shared_ones() {
+        use runtime_contracts::claude_code_lane::{RUN_ONCE_INTERRUPTED, START_BY_PASSED};
+        assert_eq!(super::START_BY_PASSED_CODE, START_BY_PASSED);
+        assert_eq!(super::RUN_ONCE_INTERRUPTED_CODE, RUN_ONCE_INTERRUPTED);
     }
 
     #[tokio::test]

@@ -133,8 +133,9 @@ pub(crate) struct StopOutcome {
     /// Orgs that a browser turn this stop failed gave a managed-AI reserve
     /// back to, each owed a `credits.updated` once the stop commits.
     pub(crate) refunded_org_ids: Vec<Uuid>,
-    /// The local-engine turns this stop failed, each with its failure
-    /// message, to publish once the stop commits.
+    /// The local-engine turns this stop failed, whose run, Home row and
+    /// failure message are written once the stop commits
+    /// ([`record_failed_claude_code_turn`]).
     pub(crate) failed_claude_code_turns: Vec<FailedClaudeCodeTurn>,
     pub(crate) skip_reason: Option<String>,
     pub(crate) released_runtime_lease_id: Option<Uuid>,
@@ -159,15 +160,43 @@ impl StopOutcome {
 }
 
 /// A local-engine turn (crate::claude_code_lane) a stop of its runtime failed
-/// as `claude_code_machine_stopped`, with the failure message it recorded in
-/// its conversation.
-#[derive(Debug)]
+/// as `claude_code_machine_stopped`. The stop's own transaction fails only its
+/// job. Its run's end, its Home row and its failure message all lock its
+/// conversation's row (the run's end through the deferred notification
+/// trigger on `runs`), and a dispatch into that chat holds that row while it
+/// waits for this runtime's: they are written once the stop has committed
+/// ([`record_failed_claude_code_turn`]), so the stop never waits on a chat
+/// while it holds its runtime. If that write never commits, the idle sweep
+/// writes them later, while local-engine turns are on for anyone
+/// (`sweeps::repair_stopped_claude_code_turns`).
+#[derive(Clone, Debug)]
 pub(crate) struct FailedClaudeCodeTurn {
     pub(crate) job_id: Uuid,
     pub(crate) project_id: Uuid,
     pub(crate) run_id: Option<Uuid>,
     pub(crate) conversation_id: Option<Uuid>,
-    pub(crate) message: Option<crate::conversations::ConversationMessageRow>,
+    pub(crate) session_id: Option<Uuid>,
+    pub(crate) prompt_id: Option<Uuid>,
+    /// The job's payload: whose @octo ran the turn, and for whom.
+    pub(crate) payload: JsonValue,
+}
+
+impl FailedClaudeCodeTurn {
+    /// The turn of a failed job's row, which carries `id, project_id, run_id,
+    /// conversation_id, session_id, prompt_id, payload`.
+    pub(super) fn from_job_row(row: &tokio_postgres::Row) -> Self {
+        Self {
+            job_id: row.get("id"),
+            project_id: row.get("project_id"),
+            run_id: row.get("run_id"),
+            conversation_id: row.get("conversation_id"),
+            session_id: row.get("session_id"),
+            prompt_id: row.get("prompt_id"),
+            payload: row
+                .get::<_, tokio_postgres::types::Json<JsonValue>>("payload")
+                .0,
+        }
+    }
 }
 
 impl RuntimeStopResponse {
@@ -2364,8 +2393,9 @@ pub(crate) async fn runtime_idle_reaper(
 
 /// What a stop publishes once its transaction commits: the inputs it
 /// rejected, a `credits.updated` for each org a browser turn it failed gave a
-/// reserve back to, and each local-engine turn it failed: its failure message
-/// and its run's end.
+/// reserve back to, and each local-engine turn it failed: its run's end, Home
+/// row and failure message are written first, on connections of their own,
+/// then published ([`finish_failed_claude_code_turn`]).
 fn publish_after_stop(
     state: &AppState,
     job_input_state_updates: &[crate::send_intents::JobInputStateUpdate],
@@ -2380,42 +2410,264 @@ fn publish_after_stop(
             crate::credits::CREDITS_UPDATED_LEDGER,
         );
     }
-    for turn in failed_claude_code_turns {
-        if let Some(message) = turn.message.as_ref() {
-            crate::conversations::publish_conversation_message_event(&state.events, message);
-            crate::notifications::enqueue_message_push_notifications(
-                state.clone(),
-                message.clone(),
-            );
-        }
-        if let Some(run_id) = turn.run_id {
-            // The run's end reads it on a connection of its own.
-            let state = state.clone();
-            let (project_id, job_id, conversation_id) =
-                (turn.project_id, turn.job_id, turn.conversation_id);
-            tokio::spawn(async move {
-                super::sweeps::publish_failed_run(
-                    &state,
-                    project_id,
-                    run_id,
-                    job_id,
-                    conversation_id,
-                    "failed",
-                    crate::claude_code_lane::MACHINE_STOPPED_MESSAGE,
-                    crate::claude_code_lane::MACHINE_STOPPED,
-                )
-                .await;
-            });
+    if !failed_claude_code_turns.is_empty() {
+        // Some callers hold their stop's connection until this returns: the
+        // writes wait for a pool slot of their own.
+        let state = state.clone();
+        let turns = failed_claude_code_turns.to_vec();
+        tokio::spawn(async move {
+            for turn in &turns {
+                finish_failed_claude_code_turn(&state, turn).await;
+            }
+        });
+    }
+}
+
+/// How many times [`finish_failed_claude_code_turn`] tries to write what a
+/// stop leaves of a local-engine turn, and how long it waits after a failed
+/// try, times the tries so far.
+const FAILED_CLAUDE_CODE_TURN_WRITE_ATTEMPTS: u32 = 3;
+const FAILED_CLAUDE_CODE_TURN_WRITE_BACKOFF: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
+/// Writes and publishes what a stop leaves of a local-engine turn it failed
+/// ([`write_and_publish_failed_claude_code_turn`]), trying again on an error.
+/// After its last failed try it publishes nothing, so no Studio shows an end
+/// that a reload would not: while local-engine turns are on for anyone, the
+/// idle sweep writes the turn's end later and publishes it then
+/// (`sweeps::repair_stopped_claude_code_turns`).
+pub(crate) async fn finish_failed_claude_code_turn(state: &AppState, turn: &FailedClaudeCodeTurn) {
+    let mut attempt = 1;
+    loop {
+        match write_and_publish_failed_claude_code_turn(state, turn).await {
+            Ok(_) => return,
+            Err((status, Json(error))) => {
+                warn!(
+                    job_id = %turn.job_id,
+                    attempt,
+                    status = status.as_u16(),
+                    error = %error.message,
+                    "failed to record the end of a Claude Code turn a runtime stop failed"
+                );
+                if attempt >= FAILED_CLAUDE_CODE_TURN_WRITE_ATTEMPTS {
+                    warn!(
+                        job_id = %turn.job_id,
+                        "left the end of a Claude Code turn a runtime stop failed to the idle sweep"
+                    );
+                    return;
+                }
+                tokio::time::sleep(FAILED_CLAUDE_CODE_TURN_WRITE_BACKOFF * attempt).await;
+                attempt += 1;
+            }
         }
     }
+}
+
+/// One try at what a stop leaves of a local-engine turn it failed: writes it
+/// ([`record_failed_claude_code_turn`]), then publishes what that write
+/// recorded, the failure message and the run's end. Nothing is published
+/// unless the write committed, and a write that finds the turn's end already
+/// written publishes nothing again. Returns whether it wrote anything.
+pub(super) async fn write_and_publish_failed_claude_code_turn(
+    state: &AppState,
+    turn: &FailedClaudeCodeTurn,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let RecordedClaudeCodeTurnEnd { message, ended_run } =
+        record_failed_claude_code_turn(state, turn).await?;
+    let wrote = message.is_some() || ended_run;
+    if let Some(message) = message {
+        crate::conversations::publish_conversation_message_event(&state.events, &message);
+        crate::notifications::enqueue_message_push_notifications(state.clone(), message);
+    }
+    if let (true, Some(run_id)) = (ended_run, turn.run_id) {
+        super::sweeps::publish_failed_run(
+            state,
+            turn.project_id,
+            run_id,
+            turn.job_id,
+            turn.conversation_id,
+            "failed",
+            crate::claude_code_lane::MACHINE_STOPPED_MESSAGE,
+            crate::claude_code_lane::MACHINE_STOPPED,
+        )
+        .await;
+    }
+    Ok(wrote)
+}
+
+/// What [`record_failed_claude_code_turn`] wrote, which is what is published.
+#[derive(Debug, Default)]
+pub(crate) struct RecordedClaudeCodeTurnEnd {
+    /// The failure message it recorded in the turn's conversation.
+    pub(crate) message: Option<crate::conversations::ConversationMessageRow>,
+    /// Whether it ended the turn's run, and wrote the run's Home row.
+    pub(crate) ended_run: bool,
+}
+
+/// Writes what a stop leaves of a local-engine turn it failed
+/// ([`FailedClaudeCodeTurn`]), once the stop has committed, in a short
+/// transaction of its own that holds no runtime: while its run is still
+/// unfinished, the run's failure and its Home row, then the failure message
+/// in its conversation, which carries what its author's Studio words it by
+/// (`claude_code_lane::stamp_failure`), unlike a failed browser turn's, which
+/// records none. The message is the write's receipt: a turn whose message is
+/// already there is left as it is, so a write tried again, or a second writer
+/// (the idle sweep's repair, on this controller or another), records nothing
+/// twice. Returns what it wrote, to publish.
+pub(crate) async fn record_failed_claude_code_turn(
+    state: &AppState,
+    turn: &FailedClaudeCodeTurn,
+) -> Result<RecordedClaudeCodeTurnEnd, (StatusCode, Json<ApiError>)> {
+    let message = crate::claude_code_lane::MACHINE_STOPPED_MESSAGE;
+    let mut connection = state.pool.get().await.map_err(|error| {
+        internal_error(format!(
+            "failed to get a connection for a stopped Claude Code turn: {error}"
+        ))
+    })?;
+    let transaction = connection.transaction().await.map_err(|error| {
+        internal_error(format!(
+            "failed to start the end of a stopped Claude Code turn: {error}"
+        ))
+    })?;
+    // The conversation's row first, held to the commit: everything below
+    // locks it too (the message and the conversation's own update, the Home
+    // row, and the run's notification at the commit), and this write takes
+    // it before it takes the run's. A second writer waits here until the
+    // first has committed, then finds its receipt. A conversation deleted
+    // since the stop gets no message.
+    let conversation_id = match turn.conversation_id {
+        Some(conversation_id) => transaction
+            .query_opt(
+                "select id from conversations where id = $1 for no key update",
+                &[&conversation_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to lock a stopped Claude Code turn's conversation: {error}"
+                ))
+            })?
+            .map(|_| conversation_id),
+        None => None,
+    };
+    if let Some(conversation_id) = conversation_id {
+        let recorded: bool = transaction
+            .query_one(
+                "select exists (
+                     select 1 from conversation_messages
+                      where conversation_id = $1
+                        and role = 'assistant'
+                        and metadata ->> 'jobId' = $2
+                        and metadata ->> 'kind' = $3
+                 )",
+                &[
+                    &conversation_id,
+                    &turn.job_id.to_string(),
+                    &crate::claude_code_lane::MACHINE_STOPPED,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to look for a stopped Claude Code turn's message: {error}"
+                ))
+            })?
+            .get(0);
+        if recorded {
+            return Ok(RecordedClaudeCodeTurnEnd::default());
+        }
+    }
+    // The run's end before its message: a failed run's `run.failed` already
+    // notifies everyone in its conversation, at the commit, and the reply
+    // notification stays silent for a message whose run has failed. A message
+    // written first would notify everyone a second time.
+    let mut ended_run = false;
+    if let Some(run_id) = turn.run_id {
+        let ended = transaction
+            .execute(
+                "update runs
+                 set status = 'failed',
+                     progress = greatest(progress, 100),
+                     progress_stage = null,
+                     last_message = $2,
+                     updated_at = now()
+                 where id = $1
+                   and status in ('queued', 'in_progress', 'awaiting_approval')",
+                &[&run_id, &message],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to fail the run of a Claude Code turn: {error}"
+                ))
+            })?;
+        if ended > 0 {
+            ended_run = true;
+            crate::activity::record_run_completed(
+                &transaction,
+                &turn.project_id,
+                &run_id,
+                turn.conversation_id,
+                None,
+                &turn.payload,
+                false,
+                None,
+                Some(message),
+            )
+            .await;
+        }
+    }
+    let recorded = match conversation_id {
+        Some(conversation_id) => {
+            let mut metadata = json!({
+                "source": "controller",
+                "kind": crate::claude_code_lane::MACHINE_STOPPED,
+                "outcome": "failed",
+                "messageType": "error",
+                "jobId": turn.job_id,
+                "runId": turn.run_id,
+                "errorMessage": message,
+                "agent": turn.payload.pointer("/metadata/agent").cloned(),
+            });
+            if let Some(map) = metadata.as_object_mut() {
+                crate::claude_code_lane::stamp_failure(
+                    map,
+                    crate::claude_code_lane::MACHINE_STOPPED,
+                );
+            }
+            Some(
+                crate::conversations::record_controller_assistant_message(
+                    &transaction,
+                    &turn.project_id,
+                    &conversation_id,
+                    turn.session_id,
+                    turn.prompt_id,
+                    turn.run_id,
+                    message,
+                    &metadata,
+                )
+                .await?,
+            )
+        }
+        None => None,
+    };
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!(
+            "failed to commit the end of a stopped Claude Code turn: {error}"
+        ))
+    })?;
+    Ok(RecordedClaudeCodeTurnEnd {
+        message: recorded,
+        ended_run,
+    })
 }
 
 /// Fails the local-engine turns (crate::claude_code_lane) leased by or
 /// queued for `runtime` as `claude_code_machine_stopped`: such a turn runs
 /// once, on its person's own computer, so a stop never requeues or moves it.
-/// Each failure records a message in its conversation that carries what its
-/// author's Studio words it by (`aiAccessMode` and `claudeCodeFailure`),
-/// unlike a failed browser turn's, which records none.
+/// Only its job is failed here, in the stop's transaction, which holds the
+/// runtime's row; the rest is written once the stop has committed
+/// ([`FailedClaudeCodeTurn`]).
 async fn fail_claude_code_jobs_for_unavailable_runtime(
     transaction: &Transaction<'_>,
     runtime: &RuntimeDetails,
@@ -2442,7 +2694,8 @@ async fn fail_claude_code_jobs_for_unavailable_runtime(
                  or (target_runtime_id = $1 and status = 'queued')
                )
                and engine is not null
-             returning id, run_id, conversation_id, session_id, prompt_id, payload",
+             returning id, project_id, run_id, conversation_id, session_id, prompt_id,
+                       payload",
             &[&runtime.id, &runtime.project_id, &message],
         )
         .await
@@ -2452,89 +2705,10 @@ async fn fail_claude_code_jobs_for_unavailable_runtime(
             ))
         })?;
 
-    let mut failed_turns = Vec::with_capacity(failed_rows.len());
-    for row in &failed_rows {
-        let job_id: Uuid = row.get("id");
-        let run_id: Option<Uuid> = row.get("run_id");
-        let conversation_id: Option<Uuid> = row.get("conversation_id");
-        let payload = row
-            .get::<_, tokio_postgres::types::Json<JsonValue>>("payload")
-            .0;
-        if let Some(run_id) = run_id {
-            transaction
-                .execute(
-                    "update runs
-                     set status = 'failed',
-                         progress = greatest(progress, 100),
-                         progress_stage = null,
-                         last_message = $2,
-                         updated_at = now()
-                     where id = $1
-                       and status in ('queued', 'in_progress', 'awaiting_approval')",
-                    &[&run_id, &message],
-                )
-                .await
-                .map_err(|error| {
-                    internal_error(format!(
-                        "failed to fail the run of a Claude Code turn: {error}"
-                    ))
-                })?;
-            crate::activity::record_run_completed(
-                transaction,
-                &runtime.project_id,
-                &run_id,
-                conversation_id,
-                None,
-                &payload,
-                false,
-                None,
-                Some(message),
-            )
-            .await;
-        }
-        let recorded = match conversation_id {
-            Some(conversation_id) => {
-                let mut metadata = json!({
-                    "source": "controller",
-                    "kind": crate::claude_code_lane::MACHINE_STOPPED,
-                    "outcome": "failed",
-                    "messageType": "error",
-                    "jobId": job_id,
-                    "runId": run_id,
-                    "errorMessage": message,
-                    "agent": payload.pointer("/metadata/agent").cloned(),
-                });
-                if let Some(map) = metadata.as_object_mut() {
-                    crate::claude_code_lane::stamp_failure(
-                        map,
-                        crate::claude_code_lane::MACHINE_STOPPED,
-                    );
-                }
-                Some(
-                    crate::conversations::record_controller_assistant_message(
-                        transaction,
-                        &runtime.project_id,
-                        &conversation_id,
-                        row.get("session_id"),
-                        row.get("prompt_id"),
-                        run_id,
-                        message,
-                        &metadata,
-                    )
-                    .await?,
-                )
-            }
-            None => None,
-        };
-        failed_turns.push(FailedClaudeCodeTurn {
-            job_id,
-            project_id: runtime.project_id,
-            run_id,
-            conversation_id,
-            message: recorded,
-        });
-    }
-    Ok(failed_turns)
+    Ok(failed_rows
+        .iter()
+        .map(FailedClaudeCodeTurn::from_job_row)
+        .collect())
 }
 
 async fn fail_browser_jobs_for_unavailable_runtime(

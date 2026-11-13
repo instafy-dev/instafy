@@ -16,7 +16,7 @@ use serde_json::json;
 use tokio_postgres::types::Json as PgJson;
 use uuid::Uuid;
 
-use crate::config::RuntimeProviderConfig;
+use crate::config::{ClaudeCodeLaneUsers, DeviceGrantUsers, RuntimeProviderConfig};
 use crate::tests::{
     build_app_config, build_test_state, pool_gets, require_origin_test_pool, spawn_aborting,
     test_origin_private_key, test_origin_public_key, with_empty_tables, with_shared_db_fixture,
@@ -52,31 +52,33 @@ const SWEEP_TABLES: [&str; 6] = [
 ];
 
 /// A tick with nothing to do takes one pool checkout for all of its steps,
-/// where each step used to take its own.
+/// where each step used to take its own, whether local-engine turns are on
+/// or not.
 #[tokio::test]
 async fn an_idle_sweep_tick_takes_one_pool_checkout() -> anyhow::Result<()> {
     with_empty_tables(&SWEEP_TABLES, |pool| async move {
-        let state = build_test_state(
-            pool.clone(),
-            build_app_config(
+        for lane in [DeviceGrantUsers::Nobody, DeviceGrantUsers::Everyone] {
+            let mut config = build_app_config(
                 test_origin_private_key(),
                 test_origin_public_key(),
                 "idle-sweep-tick-checkouts",
-            ),
-        );
-        for tick in 1..=2 {
-            let before = pool_gets(&pool);
-            crate::runtime::sweep_idle_activity(&state).await?;
-            assert_eq!(
-                pool_gets(&pool) - before,
-                1,
-                "idle tick {tick} takes one checkout"
             );
-            let pool_state = pool.state();
-            assert_eq!(
-                pool_state.idle_connections, pool_state.connections,
-                "tick {tick} gave its connection back"
-            );
+            config.claude_code_lane = ClaudeCodeLaneUsers(lane.clone());
+            let state = build_test_state(pool.clone(), config);
+            for tick in 1..=2 {
+                let before = pool_gets(&pool);
+                crate::runtime::sweep_idle_activity(&state).await?;
+                assert_eq!(
+                    pool_gets(&pool) - before,
+                    1,
+                    "idle tick {tick} takes one checkout (lane {lane:?})"
+                );
+                let pool_state = pool.state();
+                assert_eq!(
+                    pool_state.idle_connections, pool_state.connections,
+                    "tick {tick} gave its connection back (lane {lane:?})"
+                );
+            }
         }
         Ok(())
     })
@@ -150,6 +152,7 @@ struct Spaces {
     terminal: Uuid,
     stranded: Uuid,
     undeliverable: Uuid,
+    stopped_turn: Uuid,
     deleted: Uuid,
 }
 
@@ -166,6 +169,7 @@ impl Spaces {
             terminal: Uuid::new_v4(),
             stranded: Uuid::new_v4(),
             undeliverable: Uuid::new_v4(),
+            stopped_turn: Uuid::new_v4(),
             deleted: Uuid::new_v4(),
         }
     }
@@ -182,6 +186,7 @@ impl Spaces {
             self.terminal,
             self.stranded,
             self.undeliverable,
+            self.stopped_turn,
             self.deleted,
         ]
     }
@@ -202,6 +207,7 @@ struct Seeded {
     stranded_run: Uuid,
     undeliverable_job: Uuid,
     undeliverable_run: Uuid,
+    stopped_turn_run: Uuid,
     deleted_runtime: Uuid,
 }
 
@@ -523,6 +529,55 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         )
         .await?;
 
+    // A local-engine turn a runtime stop failed two minutes ago, whose run's
+    // end the stop's own write never wrote.
+    let stopped_turn_conversation = Uuid::new_v4();
+    client
+        .execute(
+            "insert into conversations (id, project_id, metadata, visibility)
+             values ($1, $2, '{}'::jsonb, 'public')",
+            &[&stopped_turn_conversation, &spaces.stopped_turn],
+        )
+        .await?;
+    let stopped_turn_run = Uuid::new_v4();
+    client
+        .execute(
+            "insert into runs (id, project_id, conversation_id, run_type, status, progress)
+             values ($1, $2, $3, 'prompt', 'in_progress', 0)",
+            &[
+                &stopped_turn_run,
+                &spaces.stopped_turn,
+                &stopped_turn_conversation,
+            ],
+        )
+        .await?;
+    let stopped_turn_job = insert_job(
+        client,
+        spaces.stopped_turn,
+        "failed",
+        "feature",
+        Some(stopped_turn_run),
+        None,
+        json!({ "metadata": { "agent": { "handle": "octo" } } }),
+        5 * 60,
+    )
+    .await?;
+    client
+        .execute(
+            "update agent_jobs
+                set engine = $2, conversation_id = $3, outcome = 'failed',
+                    error_message = $4, trigger_received_at = now() - interval '5 minutes',
+                    completed_at = now() - interval '2 minutes'
+              where id = $1",
+            &[
+                &stopped_turn_job,
+                &crate::claude_code_lane::ENGINE,
+                &stopped_turn_conversation,
+                &crate::claude_code_lane::MACHINE_STOPPED_MESSAGE,
+            ],
+        )
+        .await?;
+
     // A hosted runtime still up in a space deleted five minutes ago.
     let deleted_runtime = insert_runtime(
         client,
@@ -557,6 +612,7 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         stranded_run,
         undeliverable_job,
         undeliverable_run,
+        stopped_turn_run,
         deleted_runtime,
     })
 }
@@ -651,6 +707,8 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             test_origin_public_key(),
             "sweep-tick-pool-of-one",
         );
+        // The stopped turn's repair runs only while local-engine turns are on.
+        config.claude_code_lane = ClaudeCodeLaneUsers(DeviceGrantUsers::Everyone);
         for provider_id in [HOSTED_TEST_PROVIDER, MACHINE_TEST_PROVIDER] {
             config.runtime_providers.push(RuntimeProviderConfig {
                 id: provider_id.to_string(),
@@ -741,6 +799,26 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             ("failed".to_string(), Some("failed".to_string())),
             "the job that can no longer start did not fail"
         );
+        let stopped_turn = client
+            .query_one(
+                "select status,
+                        (select count(*) from conversation_messages
+                          where run_id = runs.id and metadata ->> 'kind' = $2)
+                   from runs where id = $1",
+                &[
+                    &seeded.stopped_turn_run,
+                    &crate::claude_code_lane::MACHINE_STOPPED,
+                ],
+            )
+            .await?;
+        assert_eq!(
+            (
+                stopped_turn.get::<_, String>(0),
+                stopped_turn.get::<_, i64>(1)
+            ),
+            ("failed".to_string(), 1),
+            "the stopped turn's repair did not write its end"
+        );
 
         // Each failed run is published with the run it read on a connection
         // of its own.
@@ -756,6 +834,7 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             seeded.requeued_run,
             seeded.stranded_run,
             seeded.undeliverable_run,
+            seeded.stopped_turn_run,
         ] {
             assert_eq!(
                 published.get(&run_id),

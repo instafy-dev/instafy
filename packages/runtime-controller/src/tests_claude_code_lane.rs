@@ -191,7 +191,8 @@ struct Lane {
 }
 
 /// Runs `body` on a fresh lane space whose config `configure` may change,
-/// then deletes it.
+/// then deletes it and its people, however `body` ends, a failed assertion
+/// included.
 async fn with_lane<C, F, Fut>(label: &str, configure: C, body: F) -> anyhow::Result<()>
 where
     C: FnOnce(&mut AppConfig, &Space),
@@ -244,29 +245,45 @@ where
         .merge(crate::automations::router())
         .merge(crate::device_grants::router())
         .merge(crate::secrets::router())
+        .merge(crate::runtime::router())
         .with_state(state.clone());
     let body_pool = pool.clone();
     let label = label.to_string();
-    let result = with_shared_db_fixture(fixture, async move {
-        let lane = Lane::seed(
-            body_pool,
-            state,
-            app,
-            space,
-            other_project,
-            service_user,
-            &label,
-        )
-        .await?;
-        body(lane).await
-    })
+    // The shared fixture deletes the space however its body ends, and then
+    // goes on with a panic; the people go after it.
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        with_shared_db_fixture(fixture, async move {
+            let lane = Lane::seed(
+                body_pool,
+                state,
+                app,
+                space,
+                other_project,
+                service_user,
+                &label,
+            )
+            .await?;
+            body(lane).await
+        }),
+    ))
     .await;
-    let cleanup = pool
-        .get()
-        .await?
-        .execute("delete from auth.users where id = any($1)", &[&users])
-        .await;
-    result.and(cleanup.map(|_| ()).map_err(anyhow::Error::from))
+    let cleanup = async {
+        pool.get()
+            .await?
+            .execute("delete from auth.users where id = any($1)", &[&users])
+            .await?;
+        anyhow::Ok(())
+    }
+    .await;
+    match result {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => {
+            if let Err(error) = cleanup {
+                eprintln!("[lane tests] could not delete the space's people: {error:#}");
+            }
+            std::panic::resume_unwind(panic)
+        }
+    }
 }
 
 impl Lane {
@@ -880,10 +897,13 @@ impl Lane {
         crate::runtime::sweep_idle_activity(state).await
     }
 
-    /// Stops `runtime` as a runtime stop does, then brings it back: the jobs
-    /// the stop put back in the queue, and the lane turns it failed, each
-    /// with whether it recorded a failure message.
-    async fn stop_runtime(&self, runtime: Uuid) -> anyhow::Result<(Vec<Uuid>, Vec<(Uuid, bool)>)> {
+    /// A runtime stop's transaction for `runtime`, committed: the jobs it put
+    /// back in the queue, and the lane turns it failed, whose end it leaves
+    /// to be written once it has committed ([`Self::record_stopped_turn`]).
+    async fn stop_runtime_only(
+        &self,
+        runtime: Uuid,
+    ) -> anyhow::Result<(Vec<Uuid>, Vec<crate::runtime::FailedClaudeCodeTurn>)> {
         let mut connection = self.pool().get().await?;
         let transaction = connection.transaction().await?;
         let details = crate::runtime::fetch_runtime_for_update(&transaction, &runtime)
@@ -904,29 +924,152 @@ impl Lane {
         .await
         .map_err(|(status, error)| anyhow::anyhow!("stop: {status} {}", error.message))?;
         transaction.commit().await?;
-        connection
-            .execute(
-                "update runtimes set status = 'ready', last_seen_at = now() where id = $1",
-                &[&runtime],
+        Ok((outcome.requeued_jobs, outcome.failed_claude_code_turns))
+    }
+
+    /// Writes what a runtime stop leaves of a lane turn it failed, as the
+    /// stop's publish does once it has committed: what it wrote.
+    async fn record_stopped_turn(
+        &self,
+        turn: &crate::runtime::FailedClaudeCodeTurn,
+    ) -> anyhow::Result<crate::runtime::RecordedClaudeCodeTurnEnd> {
+        crate::runtime::record_failed_claude_code_turn(&self.harness.state, turn)
+            .await
+            .map_err(|(status, error)| anyhow::anyhow!("record: {status} {}", error.message))
+    }
+
+    /// Stops `runtime` as a runtime stop does, writes what it leaves of each
+    /// lane turn it failed, then brings the runtime back: the jobs the stop
+    /// put back in the queue, and the lane turns it failed, each with whether
+    /// it recorded a failure message.
+    async fn stop_runtime(&self, runtime: Uuid) -> anyhow::Result<(Vec<Uuid>, Vec<(Uuid, bool)>)> {
+        let (requeued, turns) = self.stop_runtime_only(runtime).await?;
+        let mut failed = Vec::new();
+        for turn in &turns {
+            failed.push((
+                turn.job_id,
+                self.record_stopped_turn(turn).await?.message.is_some(),
+            ));
+        }
+        sql(
+            self.pool(),
+            "update runtimes set status = 'ready', last_seen_at = now() where id = $1",
+            &[&runtime],
+        )
+        .await?;
+        Ok((requeued, failed))
+    }
+
+    /// Moves the end of `job`, a lane turn a runtime stop failed, `seconds`
+    /// into the past.
+    async fn stopped_ago(&self, job: Uuid, seconds: i64) -> anyhow::Result<()> {
+        sql(
+            self.pool(),
+            "update agent_jobs set completed_at = now() - $2::bigint * interval '1 second'
+              where id = $1",
+            &[&job, &seconds],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// What a stopped lane turn's end wrote for `run`: its failure messages
+    /// and its Home rows.
+    async fn stopped_turn_rows(&self, run: Uuid) -> anyhow::Result<(i64, i64)> {
+        let messages = sql_one(
+            self.pool(),
+            "select count(*) from conversation_messages
+              where run_id = $1 and metadata ->> 'kind' = $2",
+            &[&run, &claude_code_lane::MACHINE_STOPPED],
+        )
+        .await?;
+        let home_rows = sql_one(
+            self.pool(),
+            "select count(*) from activity_events where run_id = $1 and kind = $2",
+            &[&run, &crate::activity::KIND_RUN_FAILED],
+        )
+        .await?;
+        Ok((messages, home_rows))
+    }
+
+    /// Everyone in `chat` hears once that the lane turn of `run` failed: the
+    /// chat's durable notifications hold one `run.failed`, for `run`, which
+    /// reaches its sender, and no `conversation.reply` for any of the run's
+    /// own messages, its failure message among them.
+    async fn assert_failure_notified_once(
+        &self,
+        chat: Uuid,
+        run: Uuid,
+        what: &str,
+    ) -> anyhow::Result<()> {
+        let connection = self.pool().get().await?;
+        let run_failures = connection
+            .query(
+                "select producer_key from notification_events
+                  where conversation_id = $1 and event_name = 'run.failed'",
+                &[&chat],
             )
-            .await?;
-        let failed = outcome
-            .failed_claude_code_turns
+            .await?
             .iter()
-            .map(|turn| (turn.job_id, turn.message.is_some()))
-            .collect();
-        Ok((outcome.requeued_jobs, failed))
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>();
+        assert_eq!(run_failures, vec![format!("run.failed:{run}")], "{what}");
+        let replies: i64 = connection
+            .query_one(
+                "select count(*) from notification_events event
+                   join conversation_messages message
+                     on event.producer_key = 'conversation.reply:' || message.id::text
+                  where message.run_id = $1 and message.role = 'assistant'",
+                &[&run],
+            )
+            .await?
+            .get(0);
+        assert_eq!(replies, 0, "{what}: a reply of the run notified");
+        let sender_told: i64 = connection
+            .query_one(
+                "select count(*) from notification_recipients recipient
+                   join notification_events event on event.id = recipient.event_id
+                  where event.producer_key = $1 and recipient.user_id = $2",
+                &[&format!("run.failed:{run}"), &self.space().owner],
+            )
+            .await?
+            .get(0);
+        assert_eq!(sender_told, 1, "{what}: its sender was not told");
+        Ok(())
     }
 }
 
+/// What has been published for a lane turn a runtime stop failed, in order:
+/// its failure message in `chat` and its run's end, each as its event's kind
+/// and data.
+fn stopped_turn_events(
+    events: &mut tokio::sync::broadcast::Receiver<crate::state::ControllerEvent>,
+    chat: Uuid,
+    run: Uuid,
+) -> Vec<(String, JsonValue)> {
+    let mut published = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        let of_the_turn = match event.kind.as_str() {
+            "conversation.message_created" => {
+                event.conversation_id == Some(chat)
+                    && event.data["metadata"]["kind"] == json!(claude_code_lane::MACHINE_STOPPED)
+            }
+            "run.completed" => event.run_id == Some(run),
+            _ => false,
+        };
+        if of_the_turn {
+            published.push((event.kind, event.data));
+        }
+    }
+    published
+}
+
 /// A failure message of a lane turn the controller ended as `code`: Studio
-/// words it by these two keys alone (docs/Local-Engine-Turns.md 5.5).
+/// words it by `aiAccessMode` and `claudeCodeFailure`, and shows it as a
+/// lane failure only with the controller's own stamps, which no recorded
+/// message keeps (docs/Local-Engine-Turns.md 5.5).
 fn assert_lane_failure(metadata: &JsonValue, code: &str, what: &str) {
-    assert_eq!(
-        metadata["aiAccessMode"],
-        json!("claude-code"),
-        "{what}: {metadata}"
-    );
+    assert_lane_stamps(metadata, what);
     assert_eq!(
         metadata["claudeCodeFailure"],
         json!(code),
@@ -1021,7 +1164,14 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
                 "claudeCode": { "version": 9 },
                 "claudeCodeFailure": "plan_limit",
             });
-            let body = lane_send(lane.desktop, lane_metadata(client_extras.clone()));
+            // A workspace mode of the client's choosing, which no gate reads.
+            let body = lane_send(
+                lane.desktop,
+                lane_metadata(with(
+                    client_extras.clone(),
+                    json!({ "workspaceMode": "shared_read" }),
+                )),
+            );
             let job_id = lane.admitted(chat, &body).await?;
 
             let job = lane.job(job_id).await?;
@@ -1050,9 +1200,42 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
                 json!(WORDS),
                 "no preamble or segment"
             );
-            for key in ["bootstrap", "plan_seed", "tool_limits", "repo"] {
-                assert!(payload.get(key).is_none(), "{key}: {payload}");
-            }
+            // The payload's keys are exactly these: no bootstrap, plan seed,
+            // tool limits, repo or anything else, and runtime-agent reads its
+            // `executionMode` as the lane's one workspace mode, whatever the
+            // client asked for.
+            let mut top_level = payload
+                .as_object()
+                .expect("payload")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            top_level.sort_unstable();
+            assert_eq!(
+                top_level,
+                [
+                    "conversation_id",
+                    "executionMode",
+                    "intent",
+                    "metadata",
+                    "project_id",
+                    "prompt_id",
+                    "prompt_text",
+                    "run_id",
+                    "targetThreadId",
+                    "user_id",
+                    "version",
+                    "writeIntent",
+                ],
+                "{payload}"
+            );
+            assert_eq!(
+                payload["executionMode"],
+                json!(claude_code_lane::WORKSPACE_MODE)
+            );
+            assert_eq!(payload["executionMode"], json!("shared_write"));
+            assert_eq!(payload["intent"], json!("feature"));
+            assert_eq!(payload["writeIntent"], json!(true));
             let metadata = payload["metadata"].as_object().expect("payload metadata");
             let mut keys = metadata.keys().map(String::as_str).collect::<Vec<_>>();
             keys.sort_unstable();
@@ -2960,6 +3143,200 @@ fn the_payload_and_reply_builders_keep_a_lane_turn_its_own() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+/// A lane job's payload names the lane's one workspace mode as its
+/// `executionMode`, which runtime-agent reads, whatever workspace mode the
+/// client's metadata asked for under any of the keys dispatch reads it by.
+/// Any other job keeps the mode dispatch resolved from it.
+#[test]
+fn a_lane_payload_names_one_workspace_mode_whatever_the_client_asks() {
+    let user = Uuid::new_v4();
+    let project = crate::ProjectRecord {
+        id: Uuid::new_v4(),
+        org_id: None,
+        name: None,
+        sandbox_session_id: None,
+        project_type: None,
+        owner_user_id: Some(user),
+        _status: None,
+    };
+    let context = person_context(user);
+    let (run, prompt) = (Uuid::new_v4(), Uuid::new_v4());
+    for (key, mode) in [
+        ("workspaceMode", "shared_read"),
+        ("workspaceMode", "isolated_write"),
+        ("executionMode", "isolated_write"),
+        ("workspace_mode", "shared_read"),
+        ("workspaceMode", "shared_write"),
+    ] {
+        let mut metadata = json!({ "input": { "kind": "person" }, "writeIntent": true });
+        metadata[key] = json!(mode);
+        let mut request = crate::dispatch::normalize_dispatch_request(
+            serde_json::from_value(json!({
+                "projectId": project.id.to_string(),
+                "conversationId": Uuid::new_v4().to_string(),
+                "promptText": WORDS,
+                "metadata": metadata,
+            }))
+            .expect("request"),
+        )
+        .expect("normalized");
+        assert_eq!(request.workspace_mode, mode, "{key}");
+        let codex = crate::agent::build_agent_job_payload(
+            &project, &context, &request, &run, &prompt, None,
+        )
+        .expect("a payload");
+        assert_eq!(codex["executionMode"], json!(mode), "{key}");
+        request.claude_code_lane = Some(claude_code_lane::LaneAdmission {
+            runtime_id: Uuid::new_v4(),
+        });
+        let lane = crate::agent::build_agent_job_payload(
+            &project, &context, &request, &run, &prompt, None,
+        )
+        .expect("a lane payload");
+        assert_eq!(
+            lane["executionMode"],
+            json!("shared_write"),
+            "{key}: {mode}"
+        );
+        assert_never_holds(&lane["metadata"], &["workspaceMode", "executionMode"], key);
+    }
+}
+
+/// A lane job's payload, as dispatch builds it for an admitted turn, is the
+/// one runtime-contracts records (claude_code_lane_fixtures.json), its ids
+/// aside. runtime-agent's lane tests run that same payload through
+/// `LaneJob::of`, so a payload key the controller renames, adds or drops
+/// fails here instead of every lane turn.
+#[test]
+fn a_lane_job_payload_is_the_one_runtime_contracts_records() {
+    /// `value` with each id of `ids` replaced by its placeholder.
+    fn with_placeholders(value: &mut JsonValue, ids: &[(Uuid, &str)]) {
+        match value {
+            JsonValue::String(text) => {
+                if let Some((_, placeholder)) = ids.iter().find(|(id, _)| *text == id.to_string()) {
+                    *text = placeholder.to_string();
+                }
+            }
+            JsonValue::Array(items) => {
+                for item in items {
+                    with_placeholders(item, ids);
+                }
+            }
+            JsonValue::Object(map) => {
+                for item in map.values_mut() {
+                    with_placeholders(item, ids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let fixtures: JsonValue = serde_json::from_str(include_str!(
+        "../../runtime-contracts/src/claude_code_lane_fixtures.json"
+    ))
+    .expect("the lane fixtures are JSON");
+    let recorded = &fixtures["laneJobPayload"];
+    let user = Uuid::new_v4();
+    let project = crate::ProjectRecord {
+        id: Uuid::new_v4(),
+        org_id: None,
+        name: None,
+        sandbox_session_id: None,
+        project_type: None,
+        owner_user_id: Some(user),
+        _status: None,
+    };
+    let (conversation, prompt, run, agent, runtime) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    // The send Studio makes, as the route hands it to dispatch.
+    let mut request = crate::dispatch::normalize_dispatch_request(
+        serde_json::from_value(json!({
+            "projectId": project.id.to_string(),
+            "conversationId": conversation.to_string(),
+            "sessionId": null,
+            "promptText": recorded["prompt_text"],
+            "intent": "feature",
+            "metadata": lane_metadata(json!({})),
+            "runtimeId": runtime.to_string(),
+            "preferRuntime": false,
+        }))
+        .expect("request"),
+    )
+    .expect("normalized");
+    assert_eq!(request.runtime_source.as_deref(), Some("conversation"));
+    // Stage 1 takes the claim; Stage 2 admits the turn on its computer and
+    // stamps it.
+    assert!(claude_code_lane::take_claim(&mut request.metadata).expect("the claim"));
+    claude_code_lane::stamp(request.metadata.as_object_mut().expect("metadata"));
+    request.claude_code_lane = Some(claude_code_lane::LaneAdmission {
+        runtime_id: runtime,
+    });
+    // What dispatch then adds for the computer, the sender's own @octo and the
+    // chat (its `merge_runtime_preference` and `inject_agent_target_metadata`
+    // are its own), and the turn's write scope.
+    let metadata = request.metadata.as_object_mut().expect("metadata");
+    metadata.insert(
+        "runtimePreference".to_string(),
+        json!({
+            "runtimeId": runtime.to_string(),
+            "source": "conversation",
+            "updatedAt": "2026-11-13T16:41:07.512345+00:00",
+        }),
+    );
+    metadata.insert(
+        "agent".to_string(),
+        json!({
+            "handle": "octo",
+            "id": agent.to_string(),
+            "displayName": "Octo",
+            "avatarSeed": "octo",
+        }),
+    );
+    metadata.insert(
+        crate::dispatch::CONVERSATION_VISIBILITY_KEY.to_string(),
+        json!("public"),
+    );
+    let octo = ["octo".to_string()];
+    let scopes = crate::agent_write_scopes::build_agent_write_scope_plan(
+        &request.metadata,
+        &request.prompt_text,
+        &octo,
+        &Default::default(),
+    );
+    crate::agent_write_scopes::apply_agent_write_scope_metadata(
+        &mut request.metadata,
+        scopes.get("octo"),
+    );
+
+    let mut payload = crate::agent::build_agent_job_payload(
+        &project,
+        &person_context(user),
+        &request,
+        &run,
+        &prompt,
+        None,
+    )
+    .expect("a lane payload");
+    with_placeholders(
+        &mut payload,
+        &[
+            (project.id, "<project_id>"),
+            (user, "<user_id>"),
+            (conversation, "<conversation_id>"),
+            (prompt, "<prompt_id>"),
+            (run, "<run_id>"),
+            (agent, "<agent_id>"),
+            (runtime, "<runtime_id>"),
+        ],
+    );
+    assert_eq!(&payload, recorded);
+}
+
 /// A lane session's conversation state, as the runtime saves it.
 fn lane_session(runtime: Uuid, session: Uuid) -> JsonValue {
     json!({
@@ -3134,42 +3511,84 @@ async fn only_its_own_ready_computer_leases_a_lane_turn_once() -> anyhow::Result
     .await
 }
 
-/// A lane turn is never batched: it is never a batch's second job, and a
-/// batch ends after it, whatever else its computer could lease.
+/// A lane turn is leased before any other job queued for its computer, and it
+/// is never batched. Its admission found the computer idle (G7), but another
+/// dispatch can queue a job for that computer as the turn is admitted, from a
+/// transaction that started earlier, so its job is older, and at any
+/// priority: the turn still goes first, so that job never uses up the turn's
+/// minute to start. The turn ends its batch, whatever else its computer could
+/// lease, and no batch's continuation takes it.
 #[tokio::test]
-async fn a_lane_turn_is_never_batched() -> anyhow::Result<()> {
+async fn a_lane_turn_is_leased_first_and_never_batched() -> anyhow::Result<()> {
     with_lane(
         "lane-batch",
         |_, _| {},
         |lane| async move {
-            let (_, job) = lane.lane_turn(lane.desktop).await?;
-            // A read-only job of a team's plan, ahead of it for the same
-            // computer: the batch it starts takes only its plan's read-only
-            // jobs.
+            let space = lane.space();
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            // Queued for the same computer as the turn was admitted, older
+            // and at the highest priorities: a read-only job of a team's
+            // plan, whose batch would take its plan's read-only jobs, and an
+            // ordinary one.
             let other_chat = lane.chat().await?;
-            let ahead = lane
+            let group = Uuid::new_v4().to_string();
+            let plan_job = lane
                 .queue_codex_job(
                     lane.desktop,
                     other_chat,
                     0,
                     json!({
                         "writeScope": { "mode": "read_only" },
-                        "multiAgentPlan": { "groupId": Uuid::new_v4().to_string() },
+                        "multiAgentPlan": { "groupId": group },
                     }),
                 )
                 .await?;
-            lane.lease_one(lane.desktop, ahead).await?;
-            lane.lease_one(lane.desktop, job).await?;
-
-            // Leased first, it ends its batch though its computer could
-            // lease another job.
-            lane.end_jobs().await?;
-            let (_, job) = lane.lane_turn(lane.desktop).await?;
-            let behind = lane
-                .queue_codex_job(lane.desktop, other_chat, 200, json!({}))
+            let ordinary = lane
+                .queue_codex_job(lane.desktop, other_chat, 1, json!({}))
                 .await?;
+            sql(
+                lane.pool(),
+                "update agent_jobs set created_at = now() - interval '1 minute'
+                  where id = any($1)",
+                &[&vec![plan_job, ordinary]],
+            )
+            .await?;
+            // The turn first, alone: it ends its batch.
             lane.lease_one(lane.desktop, job).await?;
-            lane.lease_one(lane.desktop, behind).await?;
+            lane.lease_one(lane.desktop, plan_job).await?;
+            lane.lease_one(lane.desktop, ordinary).await?;
+
+            // No batch's continuation takes a lane turn, not even one of a
+            // team's plan in the turn's own chat.
+            lane.end_jobs().await?;
+            let (chat_of_next, next) = lane.lane_turn(lane.desktop).await?;
+            assert_ne!(chat_of_next, chat);
+            {
+                let mut connection = lane.pool().get().await?;
+                let transaction = connection.transaction().await?;
+                let continued = crate::agent::lease_next_agent_job(
+                    &transaction,
+                    &space.project_id,
+                    Some(&lane.desktop),
+                    120,
+                    true,
+                    false,
+                    false,
+                    true,
+                    Some(&chat_of_next),
+                    Some(group.as_str()),
+                    true,
+                )
+                .await
+                .map_err(|(status, error)| anyhow::anyhow!("lease: {status} {}", error.message))?;
+                assert!(
+                    continued.is_none(),
+                    "a continuation leased {:?}",
+                    continued.map(|job| job.id)
+                );
+                transaction.rollback().await?;
+            }
+            lane.lease_one(lane.desktop, next).await?;
             Ok(())
         },
     )
@@ -3377,6 +3796,392 @@ async fn a_runtime_stop_fails_a_lane_turn_and_requeues_none_of_it() -> anyhow::R
             let run = lane.job(leased).await?.run_id.expect("run");
             let (_, metadata) = lane.failure_message(run).await?;
             assert_lane_failure(&metadata, claude_code_lane::MACHINE_STOPPED, "leased");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A runtime stop never waits on its lane turn's chat while it holds the
+/// computer's row: a dispatch into that chat holds the chat's row
+/// (`ensure_conversation_record`) while it waits for the computer's
+/// (`ensure_runtime_target_owner`), so the two would deadlock. The stop's
+/// transaction fails only the turn's job. The turn's run, Home row and
+/// failure message, which all lock the chat's row (the run's end through the
+/// notification trigger at its commit), are written once the stop has
+/// committed, holding no runtime: the run's end before the message, so
+/// everyone in the chat hears of the failure once, from the run's end.
+/// Written again, they record nothing twice.
+#[tokio::test]
+async fn a_runtime_stop_never_waits_on_its_lane_turns_chat() -> anyhow::Result<()> {
+    with_lane(
+        "lane-stop-lock-order",
+        |_, _| {},
+        |lane| async move {
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            let wait = std::time::Duration::from_secs(10);
+
+            // A dispatch into the turn's chat holds the chat's row.
+            let mut dispatch_connection = lane.pool().get().await?;
+            let dispatch = dispatch_connection.transaction().await?;
+            dispatch
+                .query_one(
+                    "select id from conversations where id = $1 for update",
+                    &[&chat],
+                )
+                .await?;
+            // The stop commits without waiting on it.
+            let (requeued, turns) =
+                tokio::time::timeout(wait, lane.stop_runtime_only(lane.desktop))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("the stop waited on its turn's chat"))??;
+            assert!(requeued.is_empty(), "{requeued:?}");
+            assert_eq!(
+                turns.iter().map(|turn| turn.job_id).collect::<Vec<_>>(),
+                vec![job]
+            );
+            assert_eq!(lane.job(job).await?.status, "failed");
+            assert_eq!(lane.run_status(run).await?, "in_progress", "not yet");
+            // The turn's end waits for the chat, holding nothing the dispatch
+            // needs: the dispatch takes the computer's row next, and commits.
+            let recorder = {
+                let state = lane.harness.state.clone();
+                let turn = turns[0].clone();
+                crate::tests::spawn_aborting(async move {
+                    crate::runtime::record_failed_claude_code_turn(&state, &turn)
+                        .await
+                        .map_err(|(status, error)| {
+                            anyhow::anyhow!("record: {status} {}", error.message)
+                        })
+                })
+            };
+            tokio::time::timeout(
+                wait,
+                dispatch.query_one(
+                    "select id from runtimes where id = $1 for share",
+                    &[&lane.desktop],
+                ),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("the dispatch waited on the stopped computer"))??;
+            dispatch.commit().await?;
+            drop(dispatch_connection);
+            let recorded = tokio::time::timeout(wait, recorder)
+                .await
+                .map_err(|_| anyhow::anyhow!("the turn's end never got the chat"))???;
+            assert!(recorded.ended_run, "it ended the run");
+            let message = recorded.message.expect("a failure message");
+            assert_eq!(message.conversation_id, chat);
+            assert_eq!(message.run_id, Some(run));
+            assert_eq!(message.content, claude_code_lane::MACHINE_STOPPED_MESSAGE);
+            assert_eq!(
+                message.metadata["kind"],
+                json!(claude_code_lane::MACHINE_STOPPED)
+            );
+            assert_lane_failure(
+                &message.metadata,
+                claude_code_lane::MACHINE_STOPPED,
+                "the turn's end",
+            );
+            assert_eq!(lane.run_status(run).await?, "failed");
+            assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
+            // The run's end notifies everyone in the chat once, and its
+            // failure message no one again.
+            lane.assert_failure_notified_once(chat, run, "the turn's end")
+                .await?;
+
+            // Written again, it records nothing twice.
+            let again = lane.record_stopped_turn(&turns[0]).await?;
+            assert!(again.message.is_none() && !again.ended_run, "{again:?}");
+            assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
+            lane.assert_failure_notified_once(chat, run, "written again")
+                .await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Two writers of one stopped lane turn's end at once, the stop's own and the
+/// idle sweep's repair (on this controller or another), write it once: the
+/// second waits for the turn's chat until the first has committed, then finds
+/// its failure message there and writes nothing.
+#[tokio::test]
+async fn two_writers_of_a_stopped_lane_turns_end_write_it_once() -> anyhow::Result<()> {
+    with_lane(
+        "lane-stop-two-writers",
+        |_, _| {},
+        |lane| async move {
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            let (_, turns) = lane.stop_runtime_only(lane.desktop).await?;
+            let wait = std::time::Duration::from_secs(10);
+
+            // Both start while another transaction holds the chat, so each is
+            // under way before either commits.
+            let mut holder_connection = lane.pool().get().await?;
+            let holder = holder_connection.transaction().await?;
+            holder
+                .query_one(
+                    "select id from conversations where id = $1 for update",
+                    &[&chat],
+                )
+                .await?;
+            let writers = [&turns[0], &turns[0]].map(|turn| {
+                let state = lane.harness.state.clone();
+                let turn = turn.clone();
+                crate::tests::spawn_aborting(async move {
+                    crate::runtime::record_failed_claude_code_turn(&state, &turn)
+                        .await
+                        .map_err(|(status, error)| {
+                            anyhow::anyhow!("record: {status} {}", error.message)
+                        })
+                })
+            });
+            eventually("both writers to wait", || async {
+                let waiting: i64 = sql_one(
+                    lane.pool(),
+                    "select count(*) from pg_stat_activity
+                      where datname = current_database() and wait_event_type = 'Lock'",
+                    &[],
+                )
+                .await?;
+                Ok((waiting >= 2).then_some(()))
+            })
+            .await?;
+            holder.commit().await?;
+            drop(holder_connection);
+            let mut wrote = Vec::new();
+            for writer in writers {
+                let recorded = tokio::time::timeout(wait, writer)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("a writer never finished"))???;
+                wrote.push((recorded.message.is_some(), recorded.ended_run));
+            }
+            wrote.sort_unstable();
+            assert_eq!(wrote, vec![(false, false), (true, true)], "one wrote it");
+            assert_eq!(lane.run_status(run).await?, "failed");
+            assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
+            lane.assert_failure_notified_once(chat, run, "two writers")
+                .await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// What a runtime stop publishes for a lane turn it failed: when the
+/// computer's Instafy stops on its way out (`POST /runtime/stop`), the turn's
+/// chat gets its failure message and its run's end, as
+/// `claude_code_machine_stopped`, each once the stop has committed and the
+/// turn's end is written (docs/Local-Engine-Turns.md 2.9, 5.5), and everyone
+/// in the chat is notified of the failure once.
+#[tokio::test]
+async fn a_runtime_stop_publishes_its_lane_turns_failure() -> anyhow::Result<()> {
+    with_lane(
+        "lane-stop-publish",
+        |_, _| {},
+        |lane| async move {
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            let mut events = lane.harness.state.events.subscribe();
+            let (status, body) = lane
+                .agent_call(
+                    lane.desktop,
+                    "/runtime/stop",
+                    json!({ "runtime_id": lane.desktop, "reason": "agent_shutdown" }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            let (mut message, mut ended) = (None, None);
+            while message.is_none() || ended.is_none() {
+                let event = tokio::time::timeout_at(deadline, events.recv())
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("timed out: message {message:?}, run's end {ended:?}")
+                    })??;
+                match event.kind.as_str() {
+                    "conversation.message_created"
+                        if event.conversation_id == Some(chat)
+                            && event.data["metadata"]["kind"]
+                                == json!(claude_code_lane::MACHINE_STOPPED) =>
+                    {
+                        // The stop committed, and the turn's end is written.
+                        assert_eq!(lane.job(job).await?.status, "failed");
+                        assert_eq!(lane.run_status(run).await?, "failed");
+                        message = Some(event.data);
+                    }
+                    "run.completed" if event.run_id == Some(run) => {
+                        assert_eq!(lane.job(job).await?.status, "failed");
+                        assert_eq!(lane.run_status(run).await?, "failed");
+                        ended = Some(event.data);
+                    }
+                    _ => {}
+                }
+            }
+            let (message, ended) = (message.expect("message"), ended.expect("run's end"));
+            assert_eq!(
+                message["content"],
+                json!(claude_code_lane::MACHINE_STOPPED_MESSAGE)
+            );
+            assert_eq!(message["runId"], json!(run));
+            assert_lane_failure(
+                &message["metadata"],
+                claude_code_lane::MACHINE_STOPPED,
+                "the message event",
+            );
+            assert_eq!(ended["finalStatus"], json!("failed"));
+            assert_eq!(
+                ended["failureCode"],
+                json!(claude_code_lane::MACHINE_STOPPED)
+            );
+            assert_eq!(
+                ended["errorMessage"],
+                json!(claude_code_lane::MACHINE_STOPPED_MESSAGE)
+            );
+            lane.assert_failure_notified_once(chat, run, "a stop of the computer")
+                .await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A runtime stop's own write of its lane turn's end may never commit: the
+/// controller exits first, or the database refuses every try. Its last try
+/// then publishes nothing, so no Studio shows an end that a reload would not,
+/// and the turn stays as the stop left it. Once that write's grace has
+/// passed, the idle sweep writes the end and publishes it: the run fails,
+/// with one Home row and one `run.failed` notification, and its failure
+/// message notifies no one again. Inside the grace the sweep leaves the turn
+/// to its stop's write, and a second sweep writes nothing twice.
+#[tokio::test]
+async fn the_idle_sweep_writes_a_stopped_lane_turns_end_its_stop_never_wrote() -> anyhow::Result<()>
+{
+    with_lane(
+        "lane-stop-repair",
+        |_, _| {},
+        |lane| async move {
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            let (_, turns) = lane.stop_runtime_only(lane.desktop).await?;
+            assert_eq!(
+                turns.iter().map(|turn| turn.job_id).collect::<Vec<_>>(),
+                vec![job]
+            );
+            let mut events = lane.harness.state.events.subscribe();
+
+            // Every try of the stop's own write fails (here its prompt is not
+            // there): nothing is written, and nothing published.
+            let refused = crate::runtime::FailedClaudeCodeTurn {
+                prompt_id: Some(Uuid::new_v4()),
+                ..turns[0].clone()
+            };
+            crate::runtime::finish_failed_claude_code_turn(&lane.harness.state, &refused).await;
+            assert_eq!(lane.run_status(run).await?, "in_progress");
+            assert_eq!(lane.stopped_turn_rows(run).await?, (0, 0));
+            let published = stopped_turn_events(&mut events, chat, run);
+            assert!(published.is_empty(), "{published:?}");
+
+            // Inside the grace, the sweep leaves it to the stop's write.
+            lane.sweep_while_active().await?;
+            assert_eq!(
+                lane.run_status(run).await?,
+                "in_progress",
+                "inside the grace"
+            );
+
+            // Past it, the sweep writes the turn's end, then publishes it.
+            lane.stopped_ago(job, 61).await?;
+            lane.sweep_while_active().await?;
+            assert_eq!(lane.run_status(run).await?, "failed");
+            assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
+            let (content, metadata) = lane.failure_message(run).await?;
+            assert_eq!(content, claude_code_lane::MACHINE_STOPPED_MESSAGE);
+            assert_eq!(metadata["jobId"], json!(job));
+            assert_lane_failure(
+                &metadata,
+                claude_code_lane::MACHINE_STOPPED,
+                "the sweep's write",
+            );
+            lane.assert_failure_notified_once(chat, run, "the sweep's write")
+                .await?;
+            let published = stopped_turn_events(&mut events, chat, run);
+            assert_eq!(
+                published
+                    .iter()
+                    .map(|(kind, _)| kind.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["conversation.message_created", "run.completed"],
+                "{published:?}"
+            );
+            assert_lane_failure(
+                &published[0].1["metadata"],
+                claude_code_lane::MACHINE_STOPPED,
+                "the published message",
+            );
+            assert_eq!(published[1].1["finalStatus"], json!("failed"));
+            assert_eq!(
+                published[1].1["failureCode"],
+                json!(claude_code_lane::MACHINE_STOPPED)
+            );
+
+            // A second sweep writes and publishes nothing more.
+            lane.sweep_while_active().await?;
+            assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
+            lane.assert_failure_notified_once(chat, run, "a second sweep")
+                .await?;
+            let published = stopped_turn_events(&mut events, chat, run);
+            assert!(published.is_empty(), "{published:?}");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// The idle sweep writes the end of a stopped lane turn only while
+/// local-engine turns are on for someone, and only for a turn stopped within
+/// the last day: past either bound the turn keeps its unfinished run.
+#[tokio::test]
+async fn the_idle_sweep_leaves_a_stopped_lane_turn_with_the_lane_off_or_too_old(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-stop-repair-bounds",
+        |_, _| {},
+        |lane| async move {
+            let (_, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            lane.stop_runtime_only(lane.desktop).await?;
+            lane.stopped_ago(job, 61).await?;
+
+            // A controller whose switch names nobody leaves it.
+            let mut off = lane.harness.state.clone();
+            off.config.claude_code_lane = ClaudeCodeLaneUsers(DeviceGrantUsers::Nobody);
+            off.runtime_activity
+                .mark_active(lane.space().project_id, Some(600), Some(Utc::now()))
+                .await;
+            crate::runtime::sweep_idle_activity(&off).await?;
+            assert_eq!(lane.run_status(run).await?, "in_progress", "lane off");
+
+            // So does one whose switch names someone, for a turn stopped more
+            // than a day ago.
+            lane.stopped_ago(job, 24 * 60 * 60 + 60).await?;
+            lane.sweep_while_active().await?;
+            assert_eq!(lane.run_status(run).await?, "in_progress", "too old");
+
+            // Within the day, it writes the turn's end.
+            lane.stopped_ago(job, 61).await?;
+            lane.sweep_while_active().await?;
+            assert_eq!(lane.run_status(run).await?, "failed");
+            assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
             Ok(())
         },
     )
@@ -3667,6 +4472,238 @@ async fn a_lane_turn_takes_no_input_secrets_proxy_token_or_plan() -> anyhow::Res
                 .await?;
             assert_eq!(status, StatusCode::OK, "{body}");
             assert_eq!(lane.job(job).await?.status, "canceled");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Only the computer that leased a lane turn ends it or posts to it
+/// (docs/Local-Engine-Turns.md 2.4, 2.6). Neither a token with no runtime,
+/// which any member with write access can mint for the agent routes, nor
+/// another runtime's of the space, a teammate's computer or the person's own
+/// other one, completes, fails or posts to the turn, queued or leased: each
+/// is answered as a job it cannot find, and writes no reply, usage row,
+/// failure, conversation state or run change. The turn's own computer still
+/// posts its steps and ends it.
+#[tokio::test]
+async fn only_the_computer_that_leased_a_lane_turn_ends_it_or_posts_to_it() -> anyhow::Result<()> {
+    with_lane(
+        "lane-foreign-completion",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (status, minted) = lane
+                .harness
+                .call(
+                    "POST",
+                    format!("/projects/{}/runtime/token", space.project_id),
+                    Some(&lane.token(space.member)),
+                    Some(json!({ "scopes": ["agent.complete", "agent.message"] })),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{minted}");
+            assert!(
+                minted.get("runtime_id").is_none() && minted.get("runtimeId").is_none(),
+                "a token with no runtime: {minted}"
+            );
+            let no_runtime = minted["token"].as_str().expect("a token").to_string();
+            let teammates_computer = lane.harness.agent_token(lane.member_desktop).await?;
+            let own_other_computer = lane.harness.agent_token(lane.second_desktop).await?;
+
+            let (_, job) = lane.lane_turn(lane.desktop).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            let step = json!({
+                "job_id": job,
+                "content": "Ran the tests.",
+                "message_type": "status",
+                "metadata": { "text": "Ran the tests." },
+            });
+            let forged = [
+                (
+                    "/agent/complete",
+                    json!({
+                        "job_id": job,
+                        "outcome": "succeeded",
+                        "summary": "Someone else's words.",
+                        "proxy_metadata": {
+                            "provider": "claude-code",
+                            "conversation": lane_session(lane.desktop, Uuid::new_v4()),
+                        },
+                        "artifacts": [{
+                            "kind": "claude-code/usage",
+                            "model": "claude-test-model",
+                            "usage": { "input_tokens": 1, "output_tokens": 1 },
+                        }],
+                    }),
+                ),
+                (
+                    "/agent/complete",
+                    json!({
+                        "job_id": job,
+                        "outcome": "failed",
+                        "error_message": "Claude Code isn't signed in.",
+                        "proxy_metadata": { "conversation": {
+                            "provider": "claude-code", "version": 1, "reset": true,
+                        } },
+                        "artifacts": [{ "kind": "claude-code/failure", "code": "not_signed_in" }],
+                    }),
+                ),
+                ("/agent/message", step.clone()),
+            ];
+            let snapshot = || {
+                let lane = &lane;
+                async move {
+                    anyhow::Ok((
+                        lane.written().await?,
+                        lane.ended(job).await?,
+                        lane.run_status(run).await?,
+                        lane.metadata_of("select metadata from runs where id = $1", run)
+                            .await?,
+                    ))
+                }
+            };
+            for leased in [false, true] {
+                if leased {
+                    lane.lease_one(lane.desktop, job).await?;
+                }
+                let before = snapshot().await?;
+                for (who, token) in [
+                    ("no runtime", &no_runtime),
+                    ("a teammate's computer", &teammates_computer),
+                    ("the person's other computer", &own_other_computer),
+                ] {
+                    for (path, body) in &forged {
+                        let (status, response) = lane
+                            .harness
+                            .call("POST", *path, Some(token.as_str()), Some(body.clone()))
+                            .await?;
+                        assert_eq!(
+                            status,
+                            StatusCode::NOT_FOUND,
+                            "{who}, {path}, leased {leased}: {response}"
+                        );
+                    }
+                }
+                assert_eq!(snapshot().await?, before, "leased {leased}");
+                assert_eq!(
+                    lane.job(job).await?.status,
+                    if leased { "leased" } else { "queued" }
+                );
+            }
+
+            // Its own computer posts its steps and ends it.
+            let (status, body) = lane
+                .agent_call(lane.desktop, "/agent/message", step)
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            lane.harness
+                .complete(
+                    lane.desktop,
+                    job,
+                    json!({ "outcome": "succeeded", "summary": "Fixed the build." }),
+                )
+                .await?;
+            assert_eq!(lane.job(job).await?.status, "completed");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// The notes a lane turn's runtime posts under its reply (a save that kept
+/// its changes on the computer, steps skipped for want of an OK) carry a
+/// generic placement hint, `presentation: {"placement": "reply_note"}`, which
+/// Studio places them by. The controller keeps the runtime's metadata under
+/// `details` and keeps the hint there as the runtime sent it, for the turn's
+/// author and a teammate alike.
+#[tokio::test]
+async fn a_lane_turns_notes_keep_their_placement_hint() -> anyhow::Result<()> {
+    with_lane(
+        "lane-reply-notes",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let hint = json!({ "placement": "reply_note" });
+            let notes = [
+                (
+                    "Claude Code's changes stayed on this computer and weren't saved to the space.",
+                    json!({
+                        "kind": "claude_code_changes_not_saved",
+                        "reason": "status_unreadable",
+                        "presentation": hint,
+                    }),
+                ),
+                (
+                    "Claude Code skipped 2 steps that need your OK, since nobody can give it \
+                     here. You can allow them in your own Claude Code settings.",
+                    json!({
+                        "kind": "claude_code_permission_denials",
+                        "count": 2,
+                        "presentation": hint,
+                    }),
+                ),
+            ];
+            for (content, details) in &notes {
+                let (status, body) = lane
+                    .agent_call(
+                        lane.desktop,
+                        "/agent/message",
+                        json!({
+                            "job_id": job,
+                            "content": content,
+                            "message_type": "status",
+                            "metadata": details,
+                        }),
+                    )
+                    .await?;
+                assert_eq!(status, StatusCode::OK, "{body}");
+            }
+            let stored = lane
+                .pool()
+                .get()
+                .await?
+                .query(
+                    "select content, metadata from conversation_messages
+                      where conversation_id = $1 and metadata ->> 'messageType' = 'status'
+                      order by created_at, id",
+                    &[&chat],
+                )
+                .await?;
+            assert_eq!(stored.len(), notes.len());
+            // Every key the runtime sent is kept under `details` as it sent it,
+            // beside the ones the controller adds there.
+            for (row, (content, details)) in stored.iter().zip(&notes) {
+                let metadata: JsonValue = row.get("metadata");
+                assert_eq!(row.get::<_, String>("content"), *content);
+                assert_eq!(metadata["source"], json!("agent"), "{metadata}");
+                assert_eq!(metadata["messageType"], json!("status"), "{metadata}");
+                for (key, value) in details.as_object().expect("details") {
+                    assert_eq!(&metadata["details"][key], value, "{key}: {metadata}");
+                }
+            }
+            for viewer in [space.owner, space.member] {
+                let (status, page) = lane
+                    .harness
+                    .call(
+                        "GET",
+                        format!("/conversations/{chat}/messages"),
+                        Some(&lane.token(viewer)),
+                        None,
+                    )
+                    .await?;
+                assert_eq!(status, StatusCode::OK, "{page}");
+                let listed = page["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .filter(|message| message["metadata"]["messageType"] == json!("status"))
+                    .map(|message| message["metadata"]["details"]["presentation"].clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(listed, vec![hint.clone(); notes.len()], "{viewer}: {page}");
+            }
             Ok(())
         },
     )

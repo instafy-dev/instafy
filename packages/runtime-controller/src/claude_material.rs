@@ -11,7 +11,9 @@
 //!   row stored earlier fails in `decode_authoritative_credential_payload`;
 //! - a project secret: create refuses a reserved name or a Claude value, update
 //!   a Claude value or a new value for a reserved name, delivery to a job skips
-//!   such a secret, and the listing marks it `refused`.
+//!   such a secret, the GitHub import's project-token fallback
+//!   (`imports::load_project_secret_value_by_name`) treats one that holds a
+//!   Claude value as absent, and the listing marks it `refused`.
 //!
 //! The guard is narrow (D23). A Claude API key (`sk-ant-api…`) or Admin API key
 //! (`sk-ant-admin…`) is not a sign-in and keeps working everywhere, for example

@@ -30,7 +30,10 @@
 //! not be opened with the configured keys, in which case the report lists it
 //! by name and its value went unchecked; 1 on any other error.
 //!
-//! Its tests: `cargo test --example claude-material-census --manifest-path
+//! Its tests need no database or network, and run with the controller's own
+//! (`cargo test --manifest-path packages/runtime-controller/Cargo.toml`;
+//! Cargo.toml lists this example with `test = true`), or alone with
+//! `cargo test --example claude-material-census --manifest-path
 //! packages/runtime-controller/Cargo.toml`.
 
 // The guard's rules, compiled unchanged. Only its classification is used here;
