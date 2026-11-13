@@ -1,4 +1,5 @@
 import { requestOriginAccessToken } from "./origins";
+import { diag, diagId, diagUrlKind } from "../../browserFlakeDiag";
 
 export type RuntimeBrowserSessionPage = {
   id: string;
@@ -317,6 +318,7 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
             : null;
       const isActive = record.isActive === true;
       if (!id || !url || !label) {
+        diag("pages:mapper-drop", { page: diagId("P", id), url: diagUrlKind(url), label: Boolean(label), active: isActive });
         return null;
       }
       const openedBy = parseBrowserTabOpener(record.openedBy);

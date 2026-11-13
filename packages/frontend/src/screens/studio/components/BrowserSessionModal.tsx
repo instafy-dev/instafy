@@ -126,6 +126,7 @@ import {
   type RemoteBrowserVirtualInputMessage,
 } from "./remoteBrowserInput";
 import { normalizedRemoteBrowserPoint } from "./remoteBrowserSurfaceGeometry";
+import { diag, diagChanged, diagId } from "../../../browserFlakeDiag";
 import {
   resolveSharedBrowserFallbackViewerKind,
   resolveSharedBrowserViewerForParticipant,
@@ -1110,6 +1111,25 @@ export function BrowserSessionModal({
   stageDrawsChatPageRef.current = stageDrawsChatPage;
   const sharedBrowserConnectionPageId =
     activeSharedBrowserViewerKind === "rfb" ? null : sharedBrowserPageId;
+  // DIAGNOSTIC ONLY (diag/shared-studio-white-frame).
+  useEffect(() => {
+    diagChanged("modal:state", {
+      open: isOpen,
+      viewer: activeSharedBrowserViewerKind,
+      transportActive,
+      viewportOnly: sharedBrowserViewportOnly,
+      active: diagId("P", sharedBrowserActivePage?.id),
+      chatPageIds: chatPageIds?.map((id) => diagId("P", id)) ?? null,
+      inFront: chatPageInFront,
+      anotherChatTurn,
+      showsAnother: screenShowsAnotherTab,
+      draws: stageDrawsChatPage,
+      connPage: diagId("P", sharedBrowserConnectionPageId),
+      clearing: browserDataClearInFlight,
+      origin: browserOriginConnection ? diagId("O", browserOriginConnection.originId) : null,
+      runtime: browserOriginConnection ? diagId("R", browserOriginConnection.runtimeId) : null,
+    });
+  });
   // URL resolution follows renderer selection in an effect. Never mount the
   // newly selected protocol with the previous renderer's URL in between, nor
   // one RFB lane with the other's: control changing hands switches the lane.
@@ -2357,6 +2377,15 @@ export function BrowserSessionModal({
       !stageDrawsChatPage ||
       wholeScreenBehindChat
     ) {
+      diag("modal:urls", {
+        set: false,
+        open: isOpen,
+        clearing: browserDataClearInFlight,
+        connection: Boolean(connection),
+        viewer: activeSharedBrowserViewerKind,
+        draws: stageDrawsChatPage,
+        wholeScreenBehindChat,
+      });
       if (wholeScreenBehindChat) freezeCurrentBrowserFrame();
       // A picture closed because the stage draws none of the chat's page
       // (another chat's turn) is not held: the chat's next one is its first.
@@ -2418,6 +2447,14 @@ export function BrowserSessionModal({
         }
       })(),
       ...controlDebugRef.current,
+    });
+    diag("modal:urls", {
+      set: true,
+      viewer: activeSharedBrowserViewerKind,
+      page: diagId("P", sharedBrowserConnectionPageId),
+      input: Boolean(inputUrl),
+      origin: diagId("O", connection.originId),
+      sameTarget: mountedViewerTargetRef.current === `${activeSharedBrowserViewerKind}\n${url}`,
     });
     // A viewer that keeps its URL does not connect again, so it would never
     // report again: only a new target is "connecting" (a reconnect attempt that

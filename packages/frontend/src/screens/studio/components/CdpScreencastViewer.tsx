@@ -10,6 +10,10 @@ import {
   type RemoteBrowserInputMessage,
 } from "./remoteBrowserInput";
 import { setRemoteBrowserSurfaceContentSize } from "./remoteBrowserSurfaceGeometry";
+import { diag, diagCanvasLook, diagLive, diagSocketPage } from "../../../browserFlakeDiag";
+
+let diagCastCount = 0;
+let diagInputCount = 0;
 
 export type CdpScreencastDisconnect = {
   connected: boolean;
@@ -180,6 +184,11 @@ export function CdpScreencastViewer({
 
       const nextSocket = new WebSocket(withInitialViewport(wsUrl, currentViewport));
       socket = nextSocket;
+      const diagSock = `S${++diagCastCount}`;
+      let diagFrames = 0;
+      let diagPainted = 0;
+      diag("cast:open", { sock: diagSock, page: diagSocketPage(wsUrl), gen: connectionGeneration, retriesLeft });
+      nextSocket.addEventListener("open", () => diag("cast:socket-open", { sock: diagSock }));
       // Whether the browser said anything on this socket; and whether it was
       // given up for a new ask, so nothing it does later counts.
       let heard = false;
@@ -219,10 +228,12 @@ export function CdpScreencastViewer({
         if (message.type === "ready" || message.type === "viewport") {
           if (message.type === "ready") {
             readyReceived = true;
+            diag("cast:ready", { sock: diagSock, frames: diagFrames });
           }
           return;
         }
         if (message.type === "error") {
+          diag("cast:server-error", { sock: diagSock, fatal: message.fatal });
           callbacksRef.current.onTransportError(message.message, message.fatal);
           if (message.fatal) {
             nextSocket.close(1011, "renderer error");
@@ -232,6 +243,8 @@ export function CdpScreencastViewer({
 
         const frameId = message.frameId;
         latestFrameId = Math.max(latestFrameId, frameId);
+        diagFrames += 1;
+        diagLive(diagSock, { frames: diagFrames, painted: diagPainted, lastAt: Math.round(performance.now()) });
         void decodeFrame(message)
           .then((bitmap) => {
             let painted = false;
@@ -243,6 +256,11 @@ export function CdpScreencastViewer({
                 paintFrame(canvas, bitmap);
                 paintedFrameId = frameId;
                 painted = true;
+                diagPainted += 1;
+                diagLive(diagSock, { frames: diagFrames, painted: diagPainted, lastAt: Math.round(performance.now()) });
+                if (diagPainted <= 3 || diagPainted % 25 === 0) {
+                  diag("cast:frame", { sock: diagSock, n: diagPainted, frameId, look: diagCanvasLook(canvas) });
+                }
               }
             } finally {
               bitmap.close();
@@ -277,6 +295,7 @@ export function CdpScreencastViewer({
           });
       });
       nextSocket.addEventListener("error", () => {
+        diag("cast:error", { sock: diagSock, disposed, superseded, heard, connected });
         if (!disposed && !askAgain()) {
           callbacksRef.current.onTransportError(
             "Shared Browser renderer connection failed.",
@@ -285,6 +304,10 @@ export function CdpScreencastViewer({
         }
       });
       nextSocket.addEventListener("close", (event) => {
+        diag("cast:close", {
+          sock: diagSock, code: event.code, reason: event.reason.slice(0, 40), frames: diagFrames, painted: diagPainted,
+          disposed, superseded, heard, connected,
+        });
         if (!disposed && !askAgain()) {
           if (firstFrameTimer !== null) {
             window.clearTimeout(firstFrameTimer);
@@ -339,6 +362,7 @@ export function CdpScreencastViewer({
       if (socket) {
         pictureClosedAtRef.current = Date.now();
       }
+      diag("cast:dispose", { page: diagSocketPage(wsUrl), gen: connectionGeneration, hadSocket: Boolean(socket), connected });
       socket?.close(1000, "viewer disposed");
     };
   }, [connectionGeneration, wsUrl]);
@@ -365,6 +389,8 @@ export function CdpScreencastViewer({
     const startedWithAuthority = inputEnabledRef.current;
     inputSocketStartedWithAuthorityRef.current = startedWithAuthority;
     const socket = new WebSocket(withInitialViewport(inputWsUrl, currentViewport));
+    const diagInput = `I${++diagInputCount}`;
+    diag("input:open", { sock: diagInput, page: diagSocketPage(inputWsUrl), gen: connectionGeneration });
     const readyTimer = window.setTimeout(() => {
       if (!disposed && !ready) {
         callbacksRef.current.onTransportError(
@@ -446,6 +472,7 @@ export function CdpScreencastViewer({
         currentViewport = message;
         if (message.type === "viewport") confirmedViewport = message;
         if (message.type === "ready") {
+          diag("input:ready", { sock: diagInput });
           ready = true;
           setReadyInputConnectionKey(inputConnectionKey);
           window.clearTimeout(readyTimer);
@@ -475,6 +502,7 @@ export function CdpScreencastViewer({
       }
     });
     socket.addEventListener("close", (event) => {
+      diag("input:close", { sock: diagInput, code: event.code, reason: event.reason.slice(0, 40), disposed, ready });
       if (!disposed) {
         setReadyInputConnectionKey((current) => current === inputConnectionKey ? null : current);
         callbacksRef.current.onTransportError(

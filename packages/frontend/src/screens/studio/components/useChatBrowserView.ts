@@ -5,6 +5,7 @@ import {
   nextChatBrowserViewStep,
   type ChatBrowserViewState,
 } from "./chatBrowserTab";
+import { diag, diagChat, diagId } from "../../../browserFlakeDiag";
 
 type ViewInput = Omit<Parameters<typeof nextChatBrowserViewStep>[0], "state" | "tab"> & {
   scopeKey: string;
@@ -33,6 +34,7 @@ export function useChatBrowserView(input: ViewInput): ChatBrowserTabOpening | nu
   const [feedback, setFeedback] = useState<{ scopeKey: string; pending: boolean; error: string | null } | null>(null);
 
   useEffect(() => {
+    diag("view:reset", { scope: diagId("V", scopeKey), onScreen });
     state.current = CHAT_BROWSER_VIEW_START;
     pending.current = false;
     setFeedback(null);
@@ -45,6 +47,22 @@ export function useChatBrowserView(input: ViewInput): ChatBrowserTabOpening | nu
       onScreen, free, chatId, tab: tabId ? { id: tabId, isActive: tabActive } : null,
       canOpenTab, chatTurnUnderWay, anyTurnUnderWay, state: state.current,
     });
+    if (next.step !== "none" || JSON.stringify(next.state) !== JSON.stringify(state.current)) {
+      diag("view:step", {
+        step: next.step,
+        scope: diagId("V", scopeKey),
+        onScreen,
+        free,
+        chat: diagChat(chatId),
+        tab: diagId("P", tabId),
+        tabActive,
+        canOpenTab,
+        chatTurn: chatTurnUnderWay,
+        anyTurn: anyTurnUnderWay,
+        before: { ...state.current, shown: state.current.shown ? "set" : null, blankTabFor: diagChat(state.current.blankTabFor) },
+        after: { ...next.state, shown: next.state.shown ? "set" : null, blankTabFor: diagChat(next.state.blankTabFor) },
+      });
+    }
     state.current = next.state;
     if (tabId) setFeedback(null);
     if (next.step === "open-blank-tab") {

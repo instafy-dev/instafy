@@ -218,6 +218,7 @@ import {
   useChatViewTabs,
 } from "./chatBrowserTab";
 import { useChatBrowserView } from "./useChatBrowserView";
+import { diagChanged, diagChat, diagId } from "../../../browserFlakeDiag";
 import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
 import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
@@ -1973,6 +1974,38 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     anyTurnUnderWay: anyBrowserTurnUnderWay,
     resolveTab: resolveChatBrowserTab,
     focusTab: focusSharedBrowserPageQuietly,
+  });
+  // DIAGNOSTIC ONLY (diag/shared-studio-white-frame).
+  useEffect(() => {
+    diagChanged("chat:state", {
+      local: diagId("L", activeConversationId),
+      controller: diagId("C", activeConversationControllerId),
+      scope: diagChat(chatBrowserScopeId),
+      runtime: diagId("R", resolvedBrowserRuntimeId),
+      preferredRuntime: diagId("R", preferredBrowserRuntimeId),
+      surfaceSession: diagId("B", sharedBrowserSurfaceSessionId),
+      open: browserSessionOpen,
+      hidden: hasHiddenBrowserSession,
+      visible: browserVisible,
+      transport: browserTransport,
+      activated: sharedBrowserActivated,
+      viewKind: sharedBrowserViewKind,
+      pagesActive: sharedBrowserPagesActive,
+      resolved: sharedBrowserChromeResolved,
+      canOpen: sharedBrowserCanOpenPage,
+      canWrite: canWriteProject,
+      presence: sharedBrowserPresence?.status ?? null,
+      remote: sharedBrowserRemoteController,
+      selfControls: sharedBrowserSelfControls,
+      chatTurn: chatBrowserTurnUnderWay,
+      anyTurn: anyBrowserTurnUnderWay,
+      pages: sharedBrowserChromePages.map((page) => `${diagId("P", page.id)}${page.isActive ? "*" : ""}`),
+      chatTab: diagId("P", chatBrowserTab.tab?.id),
+      stepTab: diagId("P", chatViewStepTabId),
+      stepTabActive: chatViewStepTabActive,
+      viewIds: chatViewPageIds?.map((id) => diagId("P", id)) ?? null,
+      opening: chatTabOpening ? { pending: chatTabOpening.pending, error: Boolean(chatTabOpening.error) } : null,
+    });
   });
   const browserModeActive = browserSessionOpen && browserVisible;
   // A skill setup's composer answers the setup: its replies stay chat turns

@@ -6,6 +6,7 @@ import {
   type BrowserSessionPage,
   type BrowserSessionPageTarget,
 } from "./browserSessionPages";
+import { diag, diagChanged, diagChat, diagId } from "../../../browserFlakeDiag";
 
 /**
  * One tab per chat in Instafy's browser.
@@ -610,10 +611,34 @@ export function useChatBrowserTab(input: {
   useEffect(() => {
     const current = latest.current.scope;
     if (!newChatId || !current.conversationId || current.conversationId === newChatId) return;
-    if (keepNewChatTabs(current, newChatId)) setChosenVersion((version) => version + 1);
+    const kept = keepNewChatTabs(current, newChatId);
+    diag("tab:keep-new-chat", { from: diagChat(newChatId), to: diagChat(current.conversationId), kept });
+    if (kept) setChosenVersion((version) => version + 1);
   }, [key, newChatId]);
   const tab = useMemo(
-    () => chatBrowserTab({ scope, runs, pages }),
+    () => {
+      const found = chatBrowserTab({ scope, runs, pages });
+      const chosen = chosenChatBrowserTab(scope);
+      const ran = lastChatBrowserTab(runs, scope);
+      diagChanged("tab:calc", {
+        scope: scopeKey(scope) ? "full" : [
+          scope.userId ? "" : "no-user",
+          scope.projectId ? "" : "no-project",
+          scope.conversationId ? "" : "no-conv",
+          scope.runtimeId ? "" : "no-runtime",
+        ].filter(Boolean).join(","),
+        conv: diagChat(scope.conversationId),
+        runtime: diagId("R", scope.runtimeId),
+        chosen: chosen ? diagId("P", chosen.pageId) : null,
+        chosenListed: chosen ? pages.some((page) => page.id === chosen.pageId) : null,
+        ran: ran ? diagId("P", ran.pageId) : null,
+        remembered: [...rememberedTabs.values()].map((entry) =>
+          `${diagChat(entry.conversationId)}:${diagId("P", entry.pageId)}${entry.browser === browserKey(scope) ? "" : "@other"}`),
+        listed: pages.map((page) => diagId("P", page.id)),
+        tab: diagId("P", found?.id),
+      });
+      return found;
+    },
     // `scope` is read through its key; `chosenVersion` stands for the memory.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [key, runs, pages, chosenVersion],
@@ -624,6 +649,7 @@ export function useChatBrowserTab(input: {
   const give = useCallback((scope: ChatBrowserTabScope, pageId: string) => {
     const browser = browserKey(scope);
     const id = pageId.trim();
+    diag("tab:give", { conv: diagChat(scope.conversationId), page: diagId("P", id), ok: Boolean(browser && scope.conversationId && scope.runtimeId && id) });
     if (!browser || !scope.conversationId || !scope.runtimeId || !id) return;
     remember({ browser, conversationId: scope.conversationId, pageId: id, atMs: chosenAt(latest.current.runs, scope.runtimeId) });
     setChosenVersion((version) => version + 1);
@@ -659,16 +685,29 @@ export function useChatBrowserTab(input: {
     if (!browser) return null;
     const turnKey = scopeKey(turnScope) ?? JSON.stringify([browser, "a new chat"]);
     const own = chatBrowserTab({ scope: turnScope, runs: current.runs, pages: current.pages });
-    if (own) return toBrowserSessionPageTarget(own);
+    const diagListed = current.pages.map((page) => diagId("P", page.id));
+    if (own) {
+      diag("tab:resolve", { branch: "own", page: diagId("P", own.id), conv: diagChat(turnScope.conversationId), listed: diagListed });
+      return toBrowserSessionPageTarget(own);
+    }
     const blank = unusedBlankBrowserTab({ runs: current.runs, pages: current.pages });
     if (blank) {
+      diag("tab:resolve", { branch: "blank", page: diagId("P", blank.id), conv: diagChat(turnScope.conversationId), listed: diagListed });
       give(turnScope, blank.id);
       return toBrowserSessionPageTarget(blank);
     }
-    if (current.canOpenPage === false) return null;
+    if (current.canOpenPage === false) {
+      diag("tab:resolve", { branch: "cannot", conv: diagChat(turnScope.conversationId), listed: diagListed });
+      return null;
+    }
     // Two sends at once open one tab between them.
-    if (opening.current?.key === turnKey) return opening.current.promise;
+    if (opening.current?.key === turnKey) {
+      diag("tab:resolve", { branch: "joined", conv: diagChat(turnScope.conversationId), listed: diagListed });
+      return opening.current.promise;
+    }
+    diag("tab:resolve", { branch: "open", conv: diagChat(turnScope.conversationId), listed: diagListed });
     const promise = current.openPage().then((pageId) => {
+      diag("tab:opened", { page: diagId("P", pageId), conv: diagChat(turnScope.conversationId) });
       if (!pageId) throw new Error(CHAT_BROWSER_TAB_COPY.notOpened);
       give(turnScope, pageId);
       return { id: pageId, ...BLANK_TAB_TARGET };

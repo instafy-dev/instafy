@@ -227,6 +227,34 @@ async function expectBrowserReady(page: Page) {
   await expect(modal.getByTestId("shared-browser-address")).toBeEnabled();
 }
 
+// DIAGNOSTIC ONLY (diag/shared-studio-white-frame): the app's ordinal trace
+// (src/browserFlakeDiag.ts) holds ordinals, URL kinds, flags and counts only.
+async function diagMark(page: Page, label: string) {
+  await page.evaluate((entry) => {
+    const w = window as unknown as { __instafyBrowserDiag?: unknown[] };
+    (w.__instafyBrowserDiag ??= []).push({ t: Math.round(performance.now()), e: `spec:${entry}` });
+  }, label).catch(() => undefined);
+}
+
+let diagDumps = 0;
+let diagPaintFailDumped = false;
+let diagCurrentPage: Page | null = null;
+async function dumpDiag(page: Page, tag: string) {
+  if (tag === "paint-fail") diagPaintFailDumped = true;
+  const name = `${++diagDumps}-${tag}`;
+  const data = await page.evaluate(() => {
+    const w = window as unknown as { __instafyBrowserDiag?: unknown[]; __instafyBrowserDiagLive?: unknown };
+    return { entries: w.__instafyBrowserDiag ?? [], live: w.__instafyBrowserDiagLive ?? {}, now: Math.round(performance.now()) };
+  }).catch((error: unknown) => ({ entries: [] as unknown[], live: {}, now: -1, error: String(error).slice(0, 120) }));
+  try {
+    fs.writeFileSync(test.info().outputPath(`diag-${name}.json`), JSON.stringify(data));
+  } catch {
+    // The log below still has it.
+  }
+  console.log(`[shared-studio-diag:${name}] entries=${data.entries.length} now=${data.now} live=${JSON.stringify(data.live)}`);
+  for (const entry of data.entries) console.log(`[sd:${name}] ${JSON.stringify(entry)}`);
+}
+
 async function expectPaintedFixture(surface: Locator, reportSocketCounts: () => void) {
   let diagnostic: Record<string, number | boolean> | null = null;
   try {
@@ -266,6 +294,8 @@ async function expectPaintedFixture(surface: Locator, reportSocketCounts: () => 
     // WebSocket payloads, grants, or the disposable session's values.
     console.log(`[shared-studio-paint] ${JSON.stringify(diagnostic ?? { available: false })}`);
     reportSocketCounts();
+    await diagMark(surface.page(), "paint-fail");
+    await dumpDiag(surface.page(), "paint-fail");
     throw cause;
   }
 }
@@ -273,11 +303,14 @@ async function expectPaintedFixture(surface: Locator, reportSocketCounts: () => 
 async function navigateAndObserve(page: Page, fixture: StudioFixture, expected: "empty" | "signed-in", reportSocketCounts: () => void) {
   const baseline = await state(fixture);
   const address = page.getByTestId("shared-browser-address");
+  await diagMark(page, `navigate-start ${expected}`);
   await address.fill(fixture.fixturePageURL);
   await address.press("Enter");
+  await diagMark(page, `navigate-entered ${expected}`);
   await expect(address).toHaveValue(fixture.fixturePageURL, { timeout: 45_000 });
   await expect.poll(async () => (await state(fixture)).observations, { timeout: 45_000 })
     .toBeGreaterThan(baseline.observations);
+  await diagMark(page, `navigate-observed ${expected}`);
   const observed = await state(fixture);
   expect(cookies(observed.cookie)).toEqual(expected === "empty" ? {} : {
     fixture_js: PROOF_VALUE,
@@ -286,6 +319,7 @@ async function navigateAndObserve(page: Page, fixture: StudioFixture, expected: 
   expect(observed.storage).toBe(expected === "empty" ? null : PROOF_VALUE);
   expect(observed.httpOnlyVisible).toBe(false);
   await expectPaintedFixture(page.getByTestId("shared-browser-cdp-screencast"), reportSocketCounts);
+  await diagMark(page, `navigate-painted ${expected}`);
   await expect(page.getByTestId("browser-session-frozen-frame")).toBeHidden();
   return observed;
 }
@@ -320,9 +354,15 @@ async function clickRemoteInput(page: Page) {
 test.describe("Disposable signed-in Studio Shared Browser", () => {
   test.skip(!ENABLED, "The standalone Studio CI lane provisions its own local Supabase/runtime fixture.");
   test.setTimeout(600_000);
+  test.afterEach(async ({}, testInfo) => {
+    if (testInfo.status !== testInfo.expectedStatus && !diagPaintFailDumped && diagCurrentPage && !diagCurrentPage.isClosed()) {
+      await dumpDiag(diagCurrentPage, "after-fail");
+    }
+  });
 
   test("signed-in Studio controls Shared Browser, restores its login, and clears project data", async ({ page: initialPage }) => {
     let page = initialPage;
+    diagCurrentPage = page;
     const context = page.context();
     const fixture = readFixture();
     const grants: BrowserGrant[] = [];
@@ -411,24 +451,29 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
 
     await control(fixture, "/checkpoint", {});
     const beforeLogin = await state(fixture);
+    await diagMark(page, "login-click");
     await clickRemoteInput(page);
     await page.keyboard.type(PROOF_VALUE, { delay: 35 });
     await page.keyboard.press("Enter");
+    await diagMark(page, "login-submitted");
     await expect.poll(async () => (await state(fixture)).submissions, { timeout: 30_000 })
       .toBe(beforeLogin.submissions + 1);
     await expectLoginObserved(fixture, beforeLogin);
+    await diagMark(page, "login-observed");
     await navigateAndObserve(page, fixture, "signed-in", reportSocketCounts);
     await control(fixture, "/wait-snapshot", { runtimeId: initial.runtimeId });
 
     // Close the viewer first so its reconnect loop cannot race the explicit
     // production stop. A fresh tab retains real Auth localStorage but does not
     // inherit the previous tab's restored browser/sessionStorage selection.
+    await dumpDiag(page, "session-1-end");
     await page.close();
     const stopped = await control<{ retiredRuntimeId: string }>(fixture, "/stop-runtime", {
       runtimeId: initial.runtimeId,
     });
     expect(stopped.retiredRuntimeId).toBe(initial.runtimeId);
     page = await context.newPage();
+    diagCurrentPage = page;
     observeGrants(page);
     await page.setViewportSize({ width: 1100, height: 900 });
     await page.goto(studioURL.toString());
@@ -446,6 +491,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     const clearResponse = page.waitForResponse(response =>
       response.request().method() === "DELETE" &&
       isControllerURL(response.url(), fixture, `/projects/${fixture.projectId}/browser-profile`));
+    await diagMark(page, "clear-data");
     page.once("dialog", async dialog => {
       expect(dialog.type()).toBe("confirm");
       expect(dialog.message()).toContain("Clear Shared Browser data for everyone in this space?");
@@ -465,5 +511,6 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     expect(empty.submissions).toBe(restored.submissions);
     await expectSignedIn(page, fixture);
     expect((await state(fixture)).modelJobs).toBe(0);
+    await dumpDiag(page, "session-2-end");
   });
 });

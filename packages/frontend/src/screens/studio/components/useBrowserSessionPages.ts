@@ -10,6 +10,9 @@ import { SHARED_BROWSER_HOST_WAIT_TIMEOUT_MS } from "./sharedBrowserHostAttach";
 import { BOOT_BROWSER_RESTARTING_CODE } from "./bootBrowserWait";
 import { useAdaptivePoll } from "../../../runtime/pollingGate";
 import { BrowserTabRefusedError } from "../../../services/runtimeController/browserSession";
+import { diag, diagChanged, diagId, diagUrlKind } from "../../../browserFlakeDiag";
+
+let diagHookCount = 0;
 
 const BROWSER_SESSION_POLL_INTERVAL_MS = 2500;
 /**
@@ -146,6 +149,9 @@ export function useBrowserSessionPages(params: {
   const scopeKey = `${enabled ? "enabled" : "disabled"}\u0000${browserSessionId}\u0000${projectId ?? ""}\u0000${preferRuntimeId ?? ""}\u0000${includePlaceholder ? "placeholders" : "pages"}\u0000${suspendOnUnavailable ? "suspend" : "continue"}`;
   const scopeKeyRef = useRef(scopeKey);
   scopeKeyRef.current = scopeKey;
+  const diagHookRef = useRef<string | null>(null);
+  if (diagHookRef.current === null) diagHookRef.current = `H${++diagHookCount}${includePlaceholder ? "ph" : ""}`;
+  const diagHook = diagHookRef.current;
   const mountedRef = useRef(true);
   const [pageState, setPageState] = useState<{
     scopeKey: string;
@@ -228,6 +234,7 @@ export function useBrowserSessionPages(params: {
       if (!scopeIsCurrent(requestScope)) {
         return false;
       }
+      diag("pages:unavailable", { h: diagHook, s: diagId("S", requestScope), suspend: suspendOnUnavailable });
       preferredActivePageIdRef.current = { scopeKey: requestScope, pageId: null };
       unavailableSuspendedRef.current = {
         scopeKey: requestScope,
@@ -287,6 +294,15 @@ export function useBrowserSessionPages(params: {
           }),
         ]);
       } catch (error) {
+        diag("pages:error", {
+          h: diagHook,
+          s: diagId("S", requestScope),
+          current: scopeIsCurrent(requestScope),
+          unavailable: controllerClient.browserSessions.isUnavailableError(error),
+          code: String((error as { code?: unknown })?.code ?? ""),
+          status: Number((error as { status?: unknown })?.status ?? 0),
+          aborted: abort.signal.aborted,
+        });
         if (!scopeIsCurrent(requestScope)) {
           return false;
         }
@@ -314,6 +330,7 @@ export function useBrowserSessionPages(params: {
       }
 
       if (!scopeIsCurrent(requestScope) || livePages === null) {
+        diag("pages:read-dropped", { h: diagHook, s: diagId("S", requestScope), nullPages: livePages === null });
         return false;
       }
 
@@ -345,6 +362,21 @@ export function useBrowserSessionPages(params: {
         scopeKey: requestScope,
         pageId: resolvedActivePageId,
       };
+      diagChanged(`pages:read:${diagHook}`, {
+        s: diagId("S", requestScope),
+        pages: livePages.map((page) => [
+          diagId("P", page.id),
+          diagUrlKind(page.url),
+          page.isActive ? "act" : "",
+          page.loading ? "load" : "",
+          page.openedBy ?? "",
+          page.leftByRun ? "left" : "",
+        ].filter(Boolean).join(" ")),
+        server: diagId("P", livePages.find((page) => page.isActive)?.id),
+        focused: diagId("P", focusedPageId),
+        preferred: diagId("P", preferredPageId),
+        resolved: diagId("P", resolvedActivePageId),
+      });
       const signature = JSON.stringify([resolvedActivePageId, livePages]);
       const previousSignature = pagesSignatureRef.current;
       pagesChangedRef.current =
@@ -498,6 +530,7 @@ export function useBrowserSessionPages(params: {
         commandPendingRef.current?.scopeKey === requestScope &&
         commandPendingRef.current.generation === generation;
       try {
+        diag("cmd:start", { h: diagHook, action: params.action, page: diagId("P", pageId), url: diagUrlKind(url) });
         const commanded = await controllerClient.browserSessions.commandPage({
           projectId,
           browserSessionId,
@@ -506,6 +539,7 @@ export function useBrowserSessionPages(params: {
           url,
           preferRuntimeId,
         });
+        diag("cmd:end", { h: diagHook, action: params.action, page: diagId("P", pageId), commanded, current: commandIsCurrent() });
         if (!commandIsCurrent()) {
           return false;
         }
@@ -520,6 +554,7 @@ export function useBrowserSessionPages(params: {
         await refreshAfterMutation().catch(() => false);
         return commanded;
       } catch (error) {
+        diag("cmd:throw", { h: diagHook, action: params.action, page: diagId("P", pageId), current: commandIsCurrent() });
         if (!commandIsCurrent()) {
           return false;
         }
@@ -587,6 +622,7 @@ export function useBrowserSessionPages(params: {
       }));
 
       let focused = false;
+      diag("focus:start", { h: diagHook, page: diagId("P", trimmedPageId), gen: generation });
       try {
         try {
           focused = await controllerClient.browserSessions.focusPage({
@@ -595,10 +631,12 @@ export function useBrowserSessionPages(params: {
             pageId: trimmedPageId,
             preferRuntimeId,
           });
+          diag("focus:end", { h: diagHook, page: diagId("P", trimmedPageId), gen: generation, focused, current: focusIsCurrent() });
         } finally {
           settle();
         }
       } catch (error) {
+        diag("focus:throw", { h: diagHook, page: diagId("P", trimmedPageId), gen: generation, current: focusIsCurrent() });
         if (!focusIsCurrent()) {
           return false;
         }
@@ -666,6 +704,7 @@ export function useBrowserSessionPages(params: {
     }
     const requestScope = scopeKey;
     let opened: string | null = null;
+    diag("open:start", { h: diagHook, s: diagId("S", requestScope) });
     try {
       opened = await controllerClient.browserSessions.openPage({
         projectId,
@@ -673,9 +712,11 @@ export function useBrowserSessionPages(params: {
         preferRuntimeId,
       });
     } catch (error) {
+      diag("open:throw", { h: diagHook, refused: error instanceof BrowserTabRefusedError });
       if (error instanceof BrowserTabRefusedError) throw error;
       opened = null;
     }
+    diag("open:end", { h: diagHook, opened: diagId("P", opened), current: scopeIsCurrent(requestScope) });
     if (!scopeIsCurrent(requestScope)) {
       return null;
     }
@@ -686,6 +727,14 @@ export function useBrowserSessionPages(params: {
   }, [browserSessionId, enabled, preferRuntimeId, projectId, refreshAfterMutation, scopeIsCurrent, scopeKey]);
 
   useEffect(() => {
+    diag("pages:scope-reset", {
+      h: diagHook,
+      s: diagId("S", scopeKey),
+      enabled,
+      runtime: diagId("R", preferRuntimeId),
+      session: diagId("B", browserSessionId),
+      suspend: suspendOnUnavailable,
+    });
     preferredActivePageIdRef.current = { scopeKey, pageId: null };
     unavailableSuspendedRef.current = { scopeKey, suspended: false };
     commandGenerationRef.current += 1;
@@ -759,6 +808,7 @@ export function useBrowserSessionPages(params: {
   }, [capabilitiesRetryable, enabled, pollPages, projectId, refreshCapabilities]);
 
   useEffect(() => {
+    diagChanged(`pages:poll:${diagHook}`, { s: diagId("S", scopeKey), enabled, project: Boolean(projectId), pollPages });
     if (!enabled || !projectId || !pollPages) {
       setPageState({ scopeKey, pages: [], resolved: false });
       preferredActivePageIdRef.current = { scopeKey, pageId: null };
@@ -773,6 +823,7 @@ export function useBrowserSessionPages(params: {
     try {
       return !(await refresh()) || pagesChangedRef.current;
     } catch {
+      diag("pages:poll-throw", { h: diagHook, s: diagId("S", scopeKey), current: scopeIsCurrent(scopeKey) });
       if (scopeIsCurrent(scopeKey)) {
         setPageState((current) => ({
           scopeKey,

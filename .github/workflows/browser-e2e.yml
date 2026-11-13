@@ -10,6 +10,7 @@ permissions:
 jobs:
   personal:
     name: Personal Browser E2E
+    if: false
     runs-on: >-
       ${{ vars.CI_BROWSER_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -104,7 +105,7 @@ jobs:
     needs:
       - browser-ui-1
       - browser-ui-2
-    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
+    if: false
     runs-on: >-
       ${{ vars.CI_BROWSER_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -177,6 +178,7 @@ jobs:
 
   browser-ui-1:
     name: Browser UI rendering (1 of 2)
+    if: false
     runs-on: >-
       ${{ vars.CI_BROWSER_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -259,6 +261,7 @@ jobs:
 
   browser-ui-2:
     name: Browser UI rendering (2 of 2)
+    if: false
     runs-on: >-
       ${{ vars.CI_BROWSER_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -339,7 +342,7 @@ jobs:
     needs:
       - shared-profile-lifecycle
       - shared-studio
-    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
+    if: false
     permissions: {}
     runs-on: >-
       ${{ vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
@@ -402,6 +405,7 @@ jobs:
 
   shared-profile-lifecycle:
     name: Shared Browser profile lifecycle
+    if: false
     runs-on: >-
       ${{ vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -574,7 +578,11 @@ jobs:
         run: pnpm supabase:down
 
   shared-studio:
-    name: Shared Browser Studio journey
+    name: Shared Browser Studio journey (diag ${{ matrix.iteration }})
+    strategy:
+      fail-fast: false
+      matrix:
+        iteration: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     runs-on: >-
       ${{ vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -728,6 +736,7 @@ jobs:
         run: |
           pnpm supabase:up
       - name: Test fixture safety guards
+        continue-on-error: true
         run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs scripts/ensure-hosted-chromium-host.test.mjs
       - name: Exercise signed-in Studio launch, input, snapshot restore and clear
         env:
@@ -737,10 +746,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: shared-studio
+          name: shared-studio-diag-${{ matrix.iteration }}
           path: |
             packages/frontend/test-results/browser-ci/shared-studio/result.json
             packages/frontend/test-results/browser-ci/shared-studio/required-browser-result.json
+            packages/frontend/test-results/browser-ci/shared-studio/**/diag-*.json
           if-no-files-found: error
           retention-days: 7
       - name: Stop the disposable authentication stack
