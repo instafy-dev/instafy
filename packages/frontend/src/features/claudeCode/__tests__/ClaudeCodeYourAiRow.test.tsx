@@ -8,6 +8,7 @@ import type {
   FetchRuntimeStatusResult,
 } from "../../../services/runtimeController/runtimes";
 import { CLAUDE_CODE_FIRST_USE_NOTE_STORAGE_KEY, ClaudeCodeYourAiRow } from "../ClaudeCodeYourAiRow";
+import { CLAUDE_CODE_COPY } from "../claudeCodeCopy";
 import { forgetClaudeCodeDesktopRefusalForTests } from "../claudeCodeDesktop";
 import { bannedWordIn } from "./claudeCodeBannedWords";
 
@@ -353,6 +354,11 @@ describe("Claude Code in Your AI", () => {
     // with no second path: the new settings are for that same copy.
     expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
     expect(text("credentials-claude-code-candidate-path")).toBeNull();
+    // The shell no longer sets the recorded value, and choosing Find is done:
+    // the status line says what the runtime says, and the candidate what is left.
+    expect(text("credentials-claude-code-status")).not.toContain("Your login shell sets");
+    expect(text("credentials-claude-code-row")).not.toContain("Fix it, then choose Find.");
+    expect(text("credentials-claude-code-status")).toBe(CLAUDE_CODE_COPY.yourAi.notReady.binary_unsafe);
     expect(text("credentials-claude-code-candidate-status")).toBe(
       "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use for my messages to use them.",
     );

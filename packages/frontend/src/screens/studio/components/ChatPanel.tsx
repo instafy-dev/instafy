@@ -4105,12 +4105,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       inputValue,
       hasImageAttachments: imageAttachments.length > 0,
       resolvePromptAgentTargets,
+      turnEngineChosen,
     });
   }, [
     imageAttachments.length,
     inputValue,
     messages,
     resolvePromptAgentTargets,
+    turnEngineChosen,
   ]);
 
   const inputReplyToOcto = useMemo(() => {

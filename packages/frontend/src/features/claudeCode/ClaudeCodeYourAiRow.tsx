@@ -107,6 +107,8 @@ function candidateReadings(desktop: ClaudeCodeDesktopStatus): {
   path: string | null;
   sentence: string;
   usable: boolean;
+  /** New login-shell settings for the copy in use, not another copy. */
+  renewsInUse: boolean;
 } | null {
   if (!desktop.consented) {
     return null;
@@ -120,19 +122,19 @@ function candidateReadings(desktop: ClaudeCodeDesktopStatus): {
   const problem = desktop.candidateProblem ?? null;
   if (!problem) {
     if (path) {
-      return { path, sentence: COPY.candidateUse, usable: true };
+      return { path, sentence: COPY.candidateUse, usable: true, renewsInUse: false };
     }
-    return renewsInUse ? { path: null, sentence: COPY.candidateRenewed, usable: true } : null;
+    return renewsInUse ? { path: null, sentence: COPY.candidateRenewed, usable: true, renewsInUse: true } : null;
   }
   if (problem === "not_found") {
-    return { path: null, sentence: COPY.candidateNotFound, usable: false };
+    return { path: null, sentence: COPY.candidateNotFound, usable: false, renewsInUse: false };
   }
   // Desktop names a login-shell setting for the candidate only when the copy in use has none of its own.
   const shellSetting =
     problem === "shell_setting_unusable" && desktop.problem !== "shell_setting_unusable"
       ? desktop.shellSetting ?? null
       : null;
-  return { path, sentence: claudeCodeDesktopProblemSentence(problem, shellSetting), usable: false };
+  return { path, sentence: claudeCodeDesktopProblemSentence(problem, shellSetting), usable: false, renewsInUse: false };
 }
 
 /**
@@ -241,8 +243,11 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
   const { desktop, capability } = readings;
   const busy = pendingAction !== null;
   const path = foundPath(desktop);
-  const problem = inUseProblemSentence(desktop);
   const candidate = candidateReadings(desktop);
+  // Once Find read usable settings for the copy in use, the recorded setting's
+  // sentence ("Your login shell sets … Fix it, then choose Find.") no longer
+  // describes the shell, and its step is done: the candidate says what is left.
+  const problem = candidate?.renewsInUse ? null : inUseProblemSentence(desktop);
   const showFirstUseNote = desktop.consented && !firstUseNoteRead;
   const actionButton = (
     action: ClaudeCodeDesktopAction,

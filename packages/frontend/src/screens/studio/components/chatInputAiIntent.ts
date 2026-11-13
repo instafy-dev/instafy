@@ -21,6 +21,7 @@ export function resolveChatInputRequiresAi({
   inputValue,
   hasImageAttachments,
   resolvePromptAgentTargets,
+  turnEngineChosen = false,
 }: {
   activeConversationMessages: ChatMessage[];
   inputValue: string;
@@ -29,7 +30,17 @@ export function resolveChatInputRequiresAi({
     prompt: string,
     options: { useSticky: boolean },
   ) => PromptAgentSelectionLike;
+  /**
+   * The person chose a turn engine for this draft. Such a draft goes to that
+   * engine or is not sent at all, never to Instafy's AI
+   * (docs/Local-Engine-Turns.md 5.2), so the AI gate neither checks nor shows
+   * for it.
+   */
+  turnEngineChosen?: boolean;
 }): boolean {
+  if (turnEngineChosen) {
+    return false;
+  }
   const effectiveText = inputValue.trim();
   if (!effectiveText && !hasImageAttachments) {
     return false;

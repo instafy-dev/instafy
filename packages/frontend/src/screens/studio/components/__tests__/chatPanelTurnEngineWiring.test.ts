@@ -163,6 +163,15 @@ describe("ChatPanel's turn-engine wiring", () => {
     );
   });
 
+  // resolveChatInputRequiresAi (chatInputAiIntent.test.ts) answers false for
+  // such a draft, so the AI gate neither checks Instafy's AI nor shows its card.
+  it("keeps the AI gate off a draft while an engine is chosen", () => {
+    const requiresAi = between(chatPanel, "const inputRequiresAi = useMemo(", "const inputReplyToOcto");
+    expect(requiresAi).toContain("turnEngineChosen,\n    });");
+    expect(requiresAi).toMatch(/\}, \[[^\]]*turnEngineChosen,\s*\]\);/);
+    expect(chatPanel.indexOf("const turnEngineChosen = ")).toBeLessThan(chatPanel.indexOf("const inputRequiresAi = useMemo("));
+  });
+
   // newestTurnEngineStartingLine (runFailurePresentationTurnEngine.test.ts)
   // words it for the sender and for a teammate.
   it("words a turn-engine turn's start in the typing row, for one agent and for whoever views it", () => {
