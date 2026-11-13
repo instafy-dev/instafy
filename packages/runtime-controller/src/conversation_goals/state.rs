@@ -364,16 +364,17 @@ pub(crate) fn publish_update(state: &AppState, conversation: &ConversationRecord
     );
 }
 
-/// A team's final lead that will never start (the lost-handoff recovery gave it
-/// up) leaves the goal its planning turn still holds blocked, with `reason`: a
-/// planning receipt records no wakeup and the goal sweep skips it, so nothing
-/// else would continue that goal. Blocked as a failed run is in `settle_job`,
-/// and only while that turn holds it: its binding is current, it is the newest
-/// source of its revision, and the goal is active. The revision is kept, so a
-/// late lead, which inherits it, finds the goal inactive. The planning job has
-/// ended and its binding is written once, so its row is not locked; the
-/// conversation lock `load_bound_goal` takes must be the caller's first row
-/// lock, before it writes any row that references the conversation.
+/// A team's final lead that will never start (its dispatch was refused, or the
+/// lost-handoff recovery gave it up) leaves the goal its planning turn still
+/// holds blocked, with `reason`: a planning receipt records no wakeup and the
+/// goal sweep skips it, so nothing else would continue that goal. Blocked as a
+/// failed run is in `settle_job`, and only while that turn holds it: its
+/// binding is current, it is the newest source of its revision, and the goal
+/// is active. The revision is kept, so a late lead, which inherits it, finds
+/// the goal inactive. The planning job has ended and its binding is written
+/// once, so its row is not locked; the conversation lock `load_bound_goal`
+/// takes must be the caller's first row lock, before it writes any row that
+/// references the conversation.
 pub(crate) async fn block_for_unstarted_team_lead(
     transaction: &Transaction<'_>,
     planning_job_id: Uuid,

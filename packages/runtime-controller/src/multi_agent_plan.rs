@@ -1700,6 +1700,8 @@ async fn dispatch_lead_checkpoint(
             .and_then(JsonValue::as_str)
             .and_then(|id| Uuid::parse_str(id).ok());
     }
+    // Set for the final lead only: the planning turn whose goal it would carry.
+    let goal_parent_job_id = normalized.goal_parent_job_id;
     // The lost-handoff recovery admits its lead only while the lead's agent is
     // free in the conversation, else 409 `dispatch_lane_busy`: no job of that
     // agent queued or running, no send waiting in the queue for it (a send that
@@ -1712,7 +1714,9 @@ async fn dispatch_lead_checkpoint(
         // A lead without a credential of its own would be pinned to the
         // desktop or self-hosted runtime its workers ran on, which never runs
         // platform AI jobs. Say so in the conversation rather than leave the
-        // plan waiting for a checkpoint that cannot come.
+        // plan waiting for a checkpoint that cannot come. A refused final lead
+        // also blocks the goal its planning turn still holds, which nothing
+        // else would continue.
         Err(error) if is_managed_ai_hosted_runtime_refusal(&error) => {
             let reason = format!(
                 "@{} could not continue the plan. {}",
@@ -1735,7 +1739,7 @@ async fn dispatch_lead_checkpoint(
                 checkpoint_kind,
                 MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE,
                 &reason,
-                None,
+                goal_parent_job_id,
             )
             .await?;
             return Ok(false);
@@ -1760,10 +1764,11 @@ async fn dispatch_lead_checkpoint(
 /// once per plan group and kind: an early checkpoint and the final one would
 /// otherwise both say it. The caller holds the group's checkpoint lock
 /// (`checkpoint_plan_group`, or `give_up_lost_final_checkpoint`), so two
-/// notices of one group cannot race. With `goal_planning_job_id`, the same
-/// transaction first blocks the goal that planning turn still holds
-/// (`block_for_unstarted_team_lead`), and `conversation.updated` is published
-/// after the message.
+/// notices of one group cannot race. With `goal_planning_job_id` (a final
+/// lead's), the same transaction first blocks the goal that planning turn still
+/// holds (`block_for_unstarted_team_lead`), even when an early checkpoint's
+/// notice already said it, and `conversation.updated` is published after the
+/// message.
 #[allow(clippy::too_many_arguments)]
 async fn record_lead_checkpoint_notice(
     state: &AppState,
@@ -1786,6 +1791,19 @@ async fn record_lead_checkpoint_notice(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    // This transaction's first row lock, before the notice's insert references the conversation.
+    let blocked_goal = match goal_planning_job_id {
+        Some(planning_job_id) => {
+            crate::conversation_goals::state::block_for_unstarted_team_lead(
+                &transaction,
+                planning_job_id,
+                conversation_id,
+                reason,
+            )
+            .await?
+        }
+        None => None,
+    };
     let already_recorded: bool = transaction
         .query_one(
             "select exists (
@@ -1807,59 +1825,51 @@ async fn record_lead_checkpoint_notice(
             ))
         })?
         .get(0);
-    if already_recorded {
-        return Ok(());
-    }
-    // This transaction's first row lock, before the notice's insert references the conversation.
-    let blocked_goal = match goal_planning_job_id {
-        Some(planning_job_id) => {
-            crate::conversation_goals::state::block_for_unstarted_team_lead(
+    let message = if already_recorded {
+        None
+    } else {
+        Some(
+            crate::conversations::record_controller_assistant_message(
                 &transaction,
-                planning_job_id,
-                conversation_id,
+                &project_id,
+                &conversation_id,
+                session_id,
+                None,
+                None,
                 reason,
+                &json!({
+                    "source": "controller",
+                    "kind": kind,
+                    "outcome": "failed",
+                    "messageType": "error",
+                    "errorMessage": reason,
+                    "multiAgentPlan": {
+                        "groupId": group_id,
+                        "role": "lead_continuation",
+                        "checkpointKind": checkpoint_kind.unwrap_or("final"),
+                        "triggerJobId": trigger_job_id,
+                    },
+                }),
             )
-            .await?
-        }
-        None => None,
+            .await?,
+        )
     };
-    let message = crate::conversations::record_controller_assistant_message(
-        &transaction,
-        &project_id,
-        &conversation_id,
-        session_id,
-        None,
-        None,
-        reason,
-        &json!({
-            "source": "controller",
-            "kind": kind,
-            "outcome": "failed",
-            "messageType": "error",
-            "errorMessage": reason,
-            "multiAgentPlan": {
-                "groupId": group_id,
-                "role": "lead_continuation",
-                "checkpointKind": checkpoint_kind.unwrap_or("final"),
-                "triggerJobId": trigger_job_id,
-            },
-        }),
-    )
-    .await?;
-    // The notice moved the conversation's last message: publish the record as it is now.
-    let blocked_goal = match blocked_goal {
-        Some(_) => Some(
+    let blocked_goal = match (blocked_goal, &message) {
+        // The notice moved the conversation's last message: publish the record as it is now.
+        (Some(_), Some(_)) => Some(
             crate::conversations::load_conversation_record(&transaction, &conversation_id).await?,
         ),
-        None => None,
+        (blocked_goal, _) => blocked_goal,
     };
     transaction.commit().await.map_err(|error| {
         internal_error(format!(
             "failed to commit a lead checkpoint notice: {error}"
         ))
     })?;
-    crate::conversations::publish_conversation_message_event(&state.events, &message);
-    crate::notifications::enqueue_message_push_notifications(state.clone(), message);
+    if let Some(message) = message {
+        crate::conversations::publish_conversation_message_event(&state.events, &message);
+        crate::notifications::enqueue_message_push_notifications(state.clone(), message);
+    }
     if let Some(conversation) = blocked_goal.as_ref() {
         crate::conversation_goals::state::publish_update(state, conversation);
     }

@@ -2188,6 +2188,369 @@ async fn lead_checkpoint_pinned_to_a_private_runtime_is_written_to_the_conversat
     cleanup
 }
 
+/// Insert a leased worker `handle` of plan `group_id` in `conversation_id`,
+/// planned by `planning_job_id` on the space's desktop, which its runtime
+/// preference names, with `@octo` (no credential) as the plan's lead.
+async fn insert_desktop_plan_worker(
+    space: &ManagedSpace,
+    conversation_id: Uuid,
+    group_id: Uuid,
+    planning_job_id: Uuid,
+    handle: &str,
+) -> anyhow::Result<(Uuid, serde_json::Value)> {
+    let job_id = Uuid::new_v4();
+    let payload = json!({
+        "project_id": space.project_id,
+        "conversation_id": conversation_id,
+        "user_id": space.owner_user_id,
+        "prompt_text": "Review one part of the change.",
+        "metadata": {
+            "agent": { "handle": handle },
+            "runtimePreference": { "runtimeId": space.desktop_runtime_id },
+            "multiAgentPlan": {
+                "groupId": group_id,
+                "role": "worker",
+                "parentJobId": planning_job_id,
+                "lead": { "leadHandle": "octo" }
+            }
+        },
+    });
+    space
+        .pool
+        .get()
+        .await?
+        .execute(
+            "insert into agent_jobs (
+                 id, project_id, conversation_id, status, intent, target_runtime_id,
+                 leased_by_runtime_id, leased_at, lease_expires_at, lease_attempts,
+                 plan_group_id, agent_role, parent_job_id, payload
+             ) values ($1, $2, $3, 'leased', 'feature', $4, $4, now(),
+                       now() + interval '5 minutes', 1, $5, 'worker', $6, $7)",
+            &[
+                &job_id,
+                &space.project_id,
+                &conversation_id,
+                &space.desktop_runtime_id,
+                &group_id,
+                &planning_job_id,
+                &PgJson(payload.clone()),
+            ],
+        )
+        .await?;
+    Ok((job_id, payload))
+}
+
+/// A goal turn that planned a team on the desktop leaves the goal to the
+/// team's final lead. When that lead is refused, as a lead pinned to the
+/// desktop is, nothing else would continue the goal: a planning receipt
+/// records no wakeup, the goal sweep skips it, and the lost-handoff recovery
+/// leaves a refused group alone. So the refusal blocks the goal with its text
+/// and keeps the revision, once, also when an early checkpoint was refused
+/// first and its notice already said it. A goal a newer turn carries is left
+/// alone.
+#[tokio::test]
+async fn a_refused_final_lead_blocks_the_goal_its_planning_turn_holds() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping refused final lead goal test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let reason = format!("@octo could not continue the plan. {SELF_HOSTED_REFUSAL}");
+    for case in ["final", "early_first", "newer_turn"] {
+        let space = ManagedSpace::seed(pool.clone(), "refused-lead-goal").await?;
+        let test_result: anyhow::Result<()> = async {
+            let state = build_test_state(space.pool.clone(), space.config("refused-lead-goal"));
+            let mut events = state.events.subscribe();
+            let (conversation_id, prompt_id, planning_job_id) =
+                (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            let (group_id, goal_id, revision) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            let goal_binding = json!({
+                "revision": revision,
+                "ownerUserId": space.owner_user_id,
+                "userTurn": true
+            });
+            // The person's goal turn planned the team: the planning job holds the goal's
+            // revision, and its receipt leaves the goal to the team's final lead.
+            let connection = space.pool.get().await?;
+            connection
+                .execute(
+                    "insert into conversations (id, project_id, created_by, metadata, visibility)
+                     values ($1, $2, $3, $4, 'private')",
+                    &[
+                        &conversation_id,
+                        &space.project_id,
+                        &space.owner_user_id,
+                        &PgJson(json!({
+                            "instafyGoal": {
+                                "id": goal_id,
+                                "objective": "Ship the reviewed change",
+                                "status": "active"
+                            },
+                            "_goalController": {
+                                "revision": revision,
+                                "ownerUserId": space.owner_user_id
+                            },
+                        })),
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into prompts (id, project_id, conversation_id, user_id, prompt_text)
+                     values ($1, $2, $3, $4, 'Split this review across a team.')",
+                    &[
+                        &prompt_id,
+                        &space.project_id,
+                        &conversation_id,
+                        &space.owner_user_id,
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into agent_jobs (
+                         id, project_id, conversation_id, prompt_id, status, outcome,
+                         planning_receipt_state, created_at, completed_at, payload
+                     ) values ($1, $2, $3, $4, 'completed', 'succeeded', '{}'::jsonb,
+                               now() - interval '5 minutes', now() - interval '4 minutes', $5)",
+                    &[
+                        &planning_job_id,
+                        &space.project_id,
+                        &conversation_id,
+                        &prompt_id,
+                        &PgJson(json!({
+                            "user_id": space.owner_user_id,
+                            "metadata": { "_controllerGoal": goal_binding.clone() },
+                        })),
+                    ],
+                )
+                .await?;
+            if case == "newer_turn" {
+                // Another agent answered the same goal turn after the team was planned: that
+                // newer job of the revision carries the goal on.
+                connection
+                    .execute(
+                        "insert into agent_jobs (
+                             project_id, conversation_id, prompt_id, status, outcome,
+                             completed_at, payload
+                         ) values ($1, $2, $3, 'completed', 'succeeded', now(), $4)",
+                        &[
+                            &space.project_id,
+                            &conversation_id,
+                            &prompt_id,
+                            &PgJson(json!({
+                                "user_id": space.owner_user_id,
+                                "metadata": {
+                                    "agent": { "handle": "scribe" },
+                                    "_controllerGoal": goal_binding.clone()
+                                },
+                            })),
+                        ],
+                    )
+                    .await?;
+            }
+            let (first, first_payload) = insert_desktop_plan_worker(
+                &space,
+                conversation_id,
+                group_id,
+                planning_job_id,
+                "scout-a",
+            )
+            .await?;
+            let (last, last_payload) = insert_desktop_plan_worker(
+                &space,
+                conversation_id,
+                group_id,
+                planning_job_id,
+                "scout-b",
+            )
+            .await?;
+            let notices = || {
+                let pool = &space.pool;
+                async move {
+                    Ok::<_, anyhow::Error>(
+                        pool.get()
+                            .await?
+                            .query(
+                                "select metadata from conversation_messages
+                                 where conversation_id = $1
+                                   and metadata #>> '{multiAgentPlan,role}' = 'lead_continuation'",
+                                &[&conversation_id],
+                            )
+                            .await?
+                            .iter()
+                            .map(|row| row.get::<_, PgJson<serde_json::Value>>(0).0)
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            };
+            let goal_metadata = || {
+                let pool = &space.pool;
+                async move {
+                    Ok::<_, anyhow::Error>(
+                        pool.get()
+                            .await?
+                            .query_one(
+                                "select metadata from conversations where id = $1",
+                                &[&conversation_id],
+                            )
+                            .await?
+                            .get::<_, PgJson<serde_json::Value>>(0)
+                            .0,
+                    )
+                }
+            };
+            if case == "early_first" {
+                // One worker fails while the other still runs: the early checkpoint's lead,
+                // which carries no goal, is refused first and says so.
+                connection
+                    .execute(
+                        "update agent_jobs
+                         set status = 'failed', outcome = 'failed', completed_at = now(),
+                             error_message = 'The agent could not read the files.'
+                         where id = $1",
+                        &[&first],
+                    )
+                    .await?;
+                let dispatched =
+                    crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
+                        &state,
+                        first,
+                        &first_payload,
+                    )
+                    .await
+                    .map_err(|error| controller_error("refused early checkpoint", error))?;
+                assert!(!dispatched, "the early lead is refused");
+                let early = notices().await?;
+                assert_eq!(early.len(), 1);
+                assert_eq!(
+                    early[0]["multiAgentPlan"]["checkpointKind"],
+                    "early_failure"
+                );
+                assert_eq!(
+                    goal_metadata().await?["instafyGoal"]["status"],
+                    "active",
+                    "the team still owes its final lead"
+                );
+            } else {
+                connection
+                    .execute(
+                        "update agent_jobs
+                         set status = 'completed', outcome = 'succeeded', summary = 'Read it.',
+                             completed_at = now()
+                         where id = $1",
+                        &[&first],
+                    )
+                    .await?;
+            }
+            connection
+                .execute(
+                    "update agent_jobs
+                     set status = 'completed', outcome = 'succeeded', summary = 'Read it.',
+                         completed_at = now()
+                     where id = $1",
+                    &[&last],
+                )
+                .await?;
+            drop(connection);
+            for attempt in 0..2 {
+                let dispatched =
+                    crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
+                        &state,
+                        last,
+                        &last_payload,
+                    )
+                    .await
+                    .map_err(|error| controller_error("refused final checkpoint", error))?;
+                assert!(!dispatched, "{case}: attempt {attempt} queued no lead");
+            }
+
+            let notices = notices().await?;
+            assert_eq!(notices.len(), 1, "{case}: said once");
+            assert_eq!(notices[0]["kind"], SELF_HOSTED_REFUSAL_CODE);
+            assert_eq!(
+                notices[0]["multiAgentPlan"]["checkpointKind"],
+                if case == "early_first" {
+                    "early_failure"
+                } else {
+                    "final"
+                }
+            );
+            let connection = space.pool.get().await?;
+            let leads: i64 = connection
+                .query_one(
+                    "select count(*)::bigint from agent_jobs
+                     where conversation_id = $1
+                       and payload #>> '{metadata,multiAgentPlan,role}' = 'lead_continuation'",
+                    &[&conversation_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(leads, 0, "{case}: no lead was queued");
+            let wakeups: i64 = connection
+                .query_one(
+                    "select count(*)::bigint from conversation_goal_continuations
+                     where conversation_id = $1",
+                    &[&conversation_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(wakeups, 0, "{case}: no wakeup was recorded");
+            let metadata = goal_metadata().await?;
+            assert_eq!(
+                metadata["_goalController"]["revision"],
+                json!(revision.to_string()),
+                "{case}: the revision is kept"
+            );
+            let mut blocked_events = 0;
+            loop {
+                match events.try_recv() {
+                    Ok(event) => {
+                        if event.kind == "conversation.updated"
+                            && event.conversation_id == Some(conversation_id)
+                            && event.data["metadata"]["instafyGoal"]["status"] == "blocked"
+                        {
+                            blocked_events += 1;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                    Err(error) => anyhow::bail!("reading goal events: {error}"),
+                }
+            }
+            if case == "newer_turn" {
+                assert_eq!(
+                    metadata["instafyGoal"]["status"], "active",
+                    "{case}: the newer turn carries the goal"
+                );
+                assert_eq!(blocked_events, 0, "{case}");
+            } else {
+                assert_eq!(
+                    metadata["instafyGoal"]["status"], "blocked",
+                    "{case}: nothing else would continue it"
+                );
+                assert_eq!(
+                    metadata["instafyGoal"]["progressSummary"],
+                    json!(reason),
+                    "{case}"
+                );
+                assert_eq!(
+                    metadata["instafyGoal"]["updatedBy"],
+                    json!(space.owner_user_id.to_string())
+                );
+                assert_eq!(
+                    blocked_events, 1,
+                    "{case}: one conversation.updated carries the blocked goal"
+                );
+            }
+            Ok(())
+        }
+        .await;
+        let cleanup = space.cleanup().await;
+        test_result.map_err(|error| error.context(case))?;
+        cleanup?;
+    }
+    Ok(())
+}
+
 /// The plan-authoring message of a read-only plan with two credential-less
 /// scouts, spread over runtimes when `spread` says so.
 fn scout_plan_message(spread: bool) -> serde_json::Value {
