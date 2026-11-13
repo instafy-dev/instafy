@@ -174,6 +174,67 @@ colon-delimited credentials are redacted. URL/DSN userinfo is removed and query 
 fragments are stripped. Scanning is bounded per string. This server-side boundary applies even
 when a client also provides a diagnostic preview.
 
+### AI connection limits
+
+Saving, testing and connecting AI accounts is limited for every person, in every mode. Like the
+bug report limits, each count is taken in the database under an advisory lock with the database
+clock, so more controller instances or a restart do not widen it. The limits are per account:
+each account has its own allowance, and only ChatGPT logins also have caps across everyone. A
+request the counts already refuse is answered before it waits for that lock. Windows are rolling.
+
+- New AI connections: 20 per person per hour, counted from `user_credentials.created_at` with
+  revoked connections included. This covers `POST /me/credentials/codex` and a completed ChatGPT
+  login, which saves its connection the same way; over the limit the request answers HTTP 429
+  `credential_create_rate_limited`, and the login fails with that message.
+- Connection tests (`POST /me/credentials/:id/test`): 60 per person per hour, HTTP 429
+  `credential_test_rate_limited`. A test counts before it reaches the provider. An unknown,
+  revoked or foreign connection answers 404 and counts nothing. The test returns its database
+  connection before the provider answers, and waits for it at most 60 seconds. Marking the
+  connection used afterwards is best effort, so a busy database cannot fail a test the provider
+  passed.
+- ChatGPT logins (`POST /me/auth/device/codex/start`): 10 starts per person per hour, HTTP 429
+  `codex_device_auth_rate_limited`, and a start needs room for one more new connection (429
+  `credential_create_rate_limited`). A start that reached OpenAI counts even when OpenAI's
+  answer failed. A person has one pending login: a new start replaces the older one, whose
+  status turns `cancelled` on the controller that received the new start. On any other
+  controller, or when the older start was still waiting for OpenAI's code, the older login fails
+  with "A newer ChatGPT login replaced this one." once its poller next looks. A replaced or
+  cancelled login never saves a connection, even one OpenAI approved just before: its poller
+  looks at the login again before it saves, and the save closes the login's receipt in its own
+  transaction and is refused when a newer start, on any controller, closed it first. A cancel
+  that comes while the connection is being saved waits for the save to end and leaves the login
+  as it ended, `completed` when the connection was saved. It waits five seconds at most: a save
+  that outlasts that goes on, and the cancel answers HTTP 409 `codex_device_auth_saving` and
+  changes nothing. A login whose code expires while its connection is being saved stays
+  `pending` until the save ends. Across everyone, 60 starts per minute
+  and 256 pending logins; past either the start answers HTTP 503
+  `codex_device_auth_capacity_reached`. These two caps are shared, so many accounts together can
+  fill them, and then everyone's starts wait. A login stops counting as pending when its poller
+  ends (it completed, failed or timed out), when it is cancelled or a newer start replaces it, or
+  when its 15-minute code expires. OpenAI answers a poll for a code nobody has entered as it
+  answers one for a code still being entered, so a code that is never entered keeps its place for
+  the full 15 minutes. So does the login of a controller that restarts: its poller stops with the
+  process and never closes its receipt.
+
+A refused request is refused before the provider or OpenAI is called, and records nothing. The
+exception is a ChatGPT login whose connection can no longer be saved when it completes, because
+the person saved others meanwhile: it fails after OpenAI approved it, and its start still counts.
+Refusals carry `details.retryable` and `details.retryAfterSeconds`, how long until one more fits
+as the clock runs (a pending login that ends early frees its place sooner); the 429s also carry
+`details.limit` and `details.windowSeconds`. The message gives the wait in seconds up to two
+minutes and in minutes past that, for example `Too many connection tests. Try again in 14 min.`
+Tests and ChatGPT-login starts leave receipts in `ai_connection_attempts`, which only the
+controller reads and writes and which the retention loop prunes after a day. The status and
+cancel calls of a ChatGPT login stay in the process that started it. The status call makes no
+database call. A cancel also closes the login's receipt; when the database cannot be reached it
+still cancels, and the login still saves nothing. Inline editor completions and conversation
+titles also send requests to the provider with a saved connection; these limits do not count
+them.
+
+Apply the migration `20261113143008_ai_connection_attempts` before deploying the controller that
+counts these limits: without its table, connection tests and ChatGPT-login starts fail. Older
+controllers ignore the table and enforce none of these limits.
+
 ### Support report conversations
 
 Each customer report has a controller-projected, customer-visible message ledger:

@@ -16,6 +16,7 @@ mod agent;
 mod agent_contexts;
 mod agent_write_scopes;
 mod ai_agents;
+mod ai_connection_limits;
 mod ai_metering;
 mod auth;
 mod author_identity;
@@ -101,6 +102,8 @@ mod telemetry;
 mod tests;
 #[cfg(test)]
 mod tests_agent_job_credential_removal;
+#[cfg(test)]
+mod tests_ai_connection_limits;
 #[cfg(test)]
 mod tests_ai_metering_schema;
 #[cfg(test)]
@@ -447,6 +450,11 @@ async fn main() -> anyhow::Result<()> {
             }
             if let Err(error) = previews::prune_preview_sessions(&retention_state.pool).await {
                 tracing::warn!(?error, "runtime_preview_sessions retention prune failed");
+            }
+            if let Err(error) =
+                ai_connection_limits::prune_ai_connection_attempts(&retention_state.pool).await
+            {
+                tracing::warn!(?error, "ai_connection_attempts retention prune failed");
             }
         }
     });
