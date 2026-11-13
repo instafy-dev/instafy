@@ -656,21 +656,29 @@ function sameOrigin(left: string | null | undefined, right: string | null | unde
  * The saved session a runtime agent run as a local process re-reads when the controller refuses its
  * token, as INSTAFY_CLI_CONFIG, or null to leave the agent's default, ~/.instafy/config.json. The
  * agent sends the token it re-reads to its controller without checking whose it is. So it is given
- * the saved session only when this command started it with that session's token, `tokenSource`
- * "config", and the session is saved for the agent's controller: a selected profile's file rather
- * than the default one, which may be another account's. Otherwise it gets an empty file, so nothing
- * is re-read. INSTAFY_CLI_CONFIG set by the person wins.
+ * the saved session only when this command started it with that session's token: it minted the
+ * agent's runtime token from the controller token, which came from the saved session (`tokenSource`
+ * "config"), rather than being given a runtime token, which may be another account's. The session
+ * must also be saved for the agent's controller, and a selected profile's file is named rather than
+ * the default one. Otherwise it gets an empty file, so nothing is re-read. INSTAFY_CLI_CONFIG set by
+ * the person wins.
  */
 export function runtimeAgentSessionFile(params: {
   env: NodeJS.ProcessEnv;
   profile: string | null;
   savedControllerUrl: string | null;
   tokenSource: AccessTokenSource;
+  /** True when the runtime token came from --runtime-token or RUNTIME_ACCESS_TOKEN, not from this command. */
+  runtimeTokenGiven: boolean;
 }): string | null {
   if (normalizeToken(params.env["INSTAFY_CLI_CONFIG"])) {
     return null;
   }
-  if (params.tokenSource !== "config" || !sameOrigin(params.savedControllerUrl, params.env["CONTROLLER_BASE_URL"])) {
+  if (
+    params.runtimeTokenGiven ||
+    params.tokenSource !== "config" ||
+    !sameOrigin(params.savedControllerUrl, params.env["CONTROLLER_BASE_URL"])
+  ) {
     return os.devNull;
   }
   return params.profile ? getInstafyProfileConfigPath(params.profile) : null;
@@ -717,8 +725,9 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   );
   let controllerAccessToken = controllerAccessTokenResult.token;
   const controllerAccessTokenSource = controllerAccessTokenResult.source;
-  let runtimeAccessToken =
+  const givenRuntimeToken =
     normalizeToken(options.runtimeToken) ?? normalizeToken(env["RUNTIME_ACCESS_TOKEN"]);
+  let runtimeAccessToken = givenRuntimeToken;
   const agentKey = env["AGENT_LOGIN_KEY"] ?? env["AGENT_KEY"];
   if (!agentKey && !controllerAccessToken && !runtimeAccessToken) {
     throw new Error(
@@ -962,6 +971,7 @@ export async function runtimeStart(options: RuntimeStartOptions) {
       profile,
       savedControllerUrl,
       tokenSource: controllerAccessTokenSource,
+      runtimeTokenGiven: Boolean(givenRuntimeToken),
     });
     if (sessionFile) {
       childEnvironment["INSTAFY_CLI_CONFIG"] = sessionFile;

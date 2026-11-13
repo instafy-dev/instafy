@@ -118,7 +118,7 @@ describe("runtime docker launch", () => {
 describe("the saved session a runtime agent re-reads", () => {
   const controller = "https://controller.example";
   const workFile = path.join(os.homedir(), ".instafy", "profiles", "work.json");
-  const fromSaved = { tokenSource: "config" } as const;
+  const fromSaved = { tokenSource: "config", runtimeTokenGiven: false } as const;
 
   it("is the selected profile's file when the runtime started from it, on the same controller", () => {
     const file = runtimeAgentSessionFile({
@@ -156,10 +156,27 @@ describe("the saved session a runtime agent re-reads", () => {
     for (const tokenSource of ["explicit", "env", "none"] as const) {
       for (const profile of ["work", null]) {
         expect(
-          runtimeAgentSessionFile({ env: { CONTROLLER_BASE_URL: controller }, profile, savedControllerUrl: controller, tokenSource }),
+          runtimeAgentSessionFile({ env: { CONTROLLER_BASE_URL: controller }, profile, savedControllerUrl: controller, tokenSource, runtimeTokenGiven: false }),
           `${tokenSource} ${profile}`,
         ).toBe(os.devNull);
       }
+    }
+  });
+
+  it("is an empty file when the runtime was given its own runtime token, though a session is saved", () => {
+    // --runtime-token and RUNTIME_ACCESS_TOKEN can be another account's: the command mints nothing
+    // from the saved session then, so the agent must not fall back to that session either.
+    for (const profile of ["work", null]) {
+      expect(
+        runtimeAgentSessionFile({
+          env: { CONTROLLER_BASE_URL: controller },
+          profile,
+          savedControllerUrl: controller,
+          tokenSource: "config",
+          runtimeTokenGiven: true,
+        }),
+        `${profile}`,
+      ).toBe(os.devNull);
     }
   });
 
@@ -170,6 +187,7 @@ describe("the saved session a runtime agent re-reads", () => {
         profile: "work",
         savedControllerUrl: controller,
         tokenSource: "explicit",
+        runtimeTokenGiven: true,
       }),
     ).toBeNull();
     expect(
