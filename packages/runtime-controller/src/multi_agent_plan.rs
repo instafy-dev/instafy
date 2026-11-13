@@ -499,8 +499,20 @@ async fn finish_parent_plan_job(
     // started by itself whose plan is refused ends without one, so it costs
     // nothing when it left the person nothing else (crate::system_turns); its
     // late receipt bills no tokens either (agent::planning_receipts).
+    //
+    // The refusal's notice below updates the conversation, then its root. The
+    // give-back locks the org's balance, so the conversation and its root are
+    // locked first, after the job and run, as a dispatch locks them before it
+    // reserves (crate::conversations::lock_conversations_for_writes).
     let refunded_org_id = match (refusal, completed_row.as_ref()) {
         (Some(_), Some(row)) => {
+            crate::conversations::lock_conversations_for_writes(&transaction, &[conversation_id])
+                .await
+                .map_err(|error| {
+                    internal_error(format!(
+                        "failed to lock the refused plan's conversation: {error}"
+                    ))
+                })?;
             crate::system_turns::give_back_reserve_without_reply(
                 &transaction,
                 &project_id,
@@ -3097,6 +3109,10 @@ pub(crate) mod user_input;
 #[cfg(test)]
 #[path = "multi_agent_plan/completion_tests.rs"]
 mod completion_tests;
+
+#[cfg(test)]
+#[path = "multi_agent_plan/refusal_lock_order_tests.rs"]
+mod refusal_lock_order_tests;
 
 #[cfg(test)]
 mod tests {

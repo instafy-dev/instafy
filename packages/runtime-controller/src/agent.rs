@@ -2458,6 +2458,7 @@ pub(crate) async fn agent_message(
                 &job_payload,
                 run_id,
                 prompt_id,
+                conversation_uuid,
                 leased_by_runtime_id,
             )
             .await?;
@@ -2831,12 +2832,47 @@ async fn restore_agent_evaluation_after_decline(
     Ok(())
 }
 
+/// Locks `conversation_id`, the conversation a turn's message or completion
+/// writes into, and its root, threads first
+/// ([`crate::conversations::lock_conversations_for_writes`]), before a burn,
+/// refund or give-back of the turn's managed-AI reserve locks the org's
+/// balance.
+///
+/// The message updates the conversation, then its root
+/// ([`insert_agent_conversation_message`]). A dispatch locks its conversation
+/// `for update`, updates its root with the person's message, then reserves
+/// the org's credit, and a Stop locks both before it gives a reserve back. A
+/// writer that held the balance while it waited for the conversation or the
+/// root deadlocked with either of them anywhere in the root's tree, and
+/// Postgres failed one side: the person's message, the Stop's refund or this
+/// write. The caller has locked the turn's job before this, as a Stop locks
+/// its jobs first.
+async fn lock_turn_conversation_before_balance(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation_id: Option<Uuid>,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let Some(conversation_id) = conversation_id else {
+        return Ok(());
+    };
+    crate::conversations::lock_conversations_for_writes(transaction, &[conversation_id])
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to lock the turn's conversation before its credits: {error}"
+            ))
+        })
+}
+
 /// SKILL-MODE deferred billing: an ambient evaluation dispatched without a
 /// burn pays for its managed-AI prompt the moment the agent visibly speaks.
 /// The burn is idempotent on the same reserve key dispatch would have used,
 /// so completion-time usage reconciliation keeps working unchanged.
 /// Returns the org id when this call wrote the burn's ledger row, so the
 /// caller can publish `credits.updated` once its transaction commits.
+///
+/// `conversation_id` is the conversation the caller writes the agent's
+/// message into; it and its root are locked before the burn locks the org's
+/// balance ([`lock_turn_conversation_before_balance`]).
 #[allow(clippy::too_many_arguments)]
 async fn apply_deferred_managed_ai_billing_on_first_visible_message(
     state: &AppState,
@@ -2846,6 +2882,7 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
     job_payload: &JsonValue,
     run_id: Option<Uuid>,
     prompt_id: Option<Uuid>,
+    conversation_id: Uuid,
     leased_runtime_id: Option<Uuid>,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
     // Only ambient skill-mode evaluations are eligible for deferred managed
@@ -2875,6 +2912,7 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
     let Some(org_id) = project.org_id else {
         return Ok(None);
     };
+    lock_turn_conversation_before_balance(transaction, Some(conversation_id)).await?;
 
     let mut burn_metadata = json!({
         "source": "managed_ai",
@@ -3093,6 +3131,10 @@ fn usage_receipt_shows_a_model_answered(artifacts: &JsonValue) -> bool {
 /// runtime ran before the model, and an error that the request was refused before any model answered
 /// (`managed_ai_failure_refund_reason`). Returns the org id when this call
 /// wrote the refund, for a post-commit `credits.updated`.
+///
+/// `conversation_id` is the conversation the completion writes its reply
+/// into; it and its root are locked before the refund locks the org's
+/// balance ([`lock_turn_conversation_before_balance`]).
 #[allow(clippy::too_many_arguments)]
 async fn refund_managed_ai_reserve_on_failed_completion(
     transaction: &mut tokio_postgres::Transaction<'_>,
@@ -3101,6 +3143,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     job_payload: &JsonValue,
     run_id: Option<Uuid>,
     prompt_id: Option<Uuid>,
+    conversation_id: Option<Uuid>,
     leased_runtime_id: Option<Uuid>,
     error_message: Option<&str>,
     artifacts_value: &JsonValue,
@@ -3137,6 +3180,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     let Some(org_id) = project.org_id else {
         return Ok(None);
     };
+    lock_turn_conversation_before_balance(transaction, conversation_id).await?;
 
     // The refund runs inside a savepoint: a ledger failure must never block
     // the completion that persists the run's terminal state.
@@ -3580,6 +3624,15 @@ pub(crate) async fn agent_complete(
 
     // Set when this completion wrote a ledger row (refund or usage
     // reconciliation), for a credits.updated after the commit below.
+    //
+    // The refund, the deferred billing and the give-back below lock the
+    // org's balance. Each first locks the conversation the reply goes into,
+    // and its root (lock_turn_conversation_before_balance), after the job
+    // and run above, as a dispatch locks them before it reserves. So the run
+    // metadata written after them is locked `for no key update`
+    // (persist_run_completion_metadata): a message naming the run, such as a
+    // dispatch's runtime alert, holds a key-share lock on it while it waits
+    // for the conversation.
     let mut completion_credit_org_id: Option<Uuid> = None;
     if outcome_lower == "failed" {
         completion_credit_org_id = refund_managed_ai_reserve_on_failed_completion(
@@ -3589,6 +3642,7 @@ pub(crate) async fn agent_complete(
             &job_payload,
             run_id,
             run_prompt_id,
+            run_conversation_id,
             leased_runtime_id,
             error_message.as_deref(),
             &artifacts_value,
@@ -3600,16 +3654,17 @@ pub(crate) async fn agent_complete(
     // Establish deferred billing before usage reconciliation, and clear a prior
     // decline for managed and BYOC jobs alike. Generated status/error text and
     // the decline sentinel do not establish that the agent spoke.
-    if run_conversation_id.is_some()
-        && outcome_lower == "succeeded"
-        && error_message.is_none()
-        && (crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
-            || crate::group_participation::job_payload_marks_agent_declined(&job_payload))
-        && summary.as_deref().is_some_and(|content| {
-            !content.trim().is_empty()
-                && !crate::group_participation::is_group_participation_decline_sentinel(content)
-        })
-    {
+    let answering_evaluation = run_conversation_id.filter(|_| {
+        outcome_lower == "succeeded"
+            && error_message.is_none()
+            && (crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
+                || crate::group_participation::job_payload_marks_agent_declined(&job_payload))
+            && summary.as_deref().is_some_and(|content| {
+                !content.trim().is_empty()
+                    && !crate::group_participation::is_group_participation_decline_sentinel(content)
+            })
+    });
+    if let Some(reply_conversation_id) = answering_evaluation {
         restore_agent_evaluation_after_decline(
             &transaction,
             &project_id,
@@ -3626,6 +3681,7 @@ pub(crate) async fn agent_complete(
             &job_payload,
             run_id,
             run_prompt_id.or(job_prompt_id),
+            reply_conversation_id,
             leased_runtime_id,
         )
         .await?;
@@ -3674,6 +3730,7 @@ pub(crate) async fn agent_complete(
     )
     .await?;
     if let Some(reason) = costs_nothing {
+        lock_turn_conversation_before_balance(&transaction, run_conversation_id).await?;
         if let Some(org_id) = crate::system_turns::give_back_reserve(
             &transaction,
             &project_id,
@@ -6064,9 +6121,14 @@ pub(crate) async fn persist_run_completion_metadata(
         )
         .await?;
 
+    // `for no key update`, the lock the metadata update takes: a completion
+    // that refunds, bills or gives back a reserve already holds its
+    // conversation here, and a message naming the run, such as a dispatch's
+    // runtime alert, holds a key-share lock on the run while it waits for
+    // that conversation (crate::conversations::lock_conversations_for_writes).
     let row = transaction
         .query_opt(
-            "select metadata from runs where id = $1 for update",
+            "select metadata from runs where id = $1 for no key update",
             &[run_id],
         )
         .await?;
