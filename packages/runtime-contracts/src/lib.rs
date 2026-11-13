@@ -5,6 +5,7 @@ pub mod proto {
 pub use proto::*;
 pub mod agent_face;
 pub mod chat_activity;
+pub mod claude_code_lane;
 pub mod multi_agent;
 pub mod own_ai_model;
 pub mod research;

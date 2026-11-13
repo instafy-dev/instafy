@@ -1,0 +1,79 @@
+{
+  "_comment": "Local-engine turns (docs/Local-Engine-Turns.md): the codes the runtime writes, the controller keeps and Studio words, and one lane job's payload, named once. runtime-contracts (claude_code_lane.rs) checks NOT_READY_REASONS, RUNTIME_FAILURE_CODES and STOP_AND_SWEEP_FAILURE_CODES against notReadyReasons, runtimeFailureCodes and stopAndSweepFailureCodes. The controller keeps the first two as its own lists (runtime/register.rs, claude_code_lane.rs) and checks its stop and sweep codes against the third (claude_code_lane.rs, runtime/sweeps.rs); runtime-agent checks NotReadyReason and FailureCode (claude_code/mod.rs); Studio checks runtimes.ts, claudeCodeCopy.ts and claudeCodeTurnPresentation.ts. laneJobPayload is the payload agent::build_agent_job_payload writes for an admitted lane turn, the first in its chat: the controller's test a_lane_job_payload_is_the_one_runtime_contracts_records builds it the way dispatch does and compares, and runtime-agent's lane tests run it through LaneJob::of (claude_code/job.rs). Its ids are placeholders: <project_id>, <user_id> (the sender), <conversation_id>, <prompt_id>, <run_id>, <agent_id> (the sender's own @octo) and <runtime_id> (the computer the turn was admitted on).",
+  "notReadyReasons": [
+    "binary_missing",
+    "binary_unsafe",
+    "probe_failed",
+    "unsupported_version",
+    "bare_default"
+  ],
+  "runtimeFailureCodes": [
+    "not_signed_in",
+    "plan_limit",
+    "binary_missing",
+    "binary_unsafe",
+    "unsupported_version",
+    "probe_failed",
+    "bare_default",
+    "session_unavailable",
+    "turn_timeout",
+    "stalled",
+    "crashed",
+    "unexpected_configuration",
+    "project_config",
+    "unsafe_import",
+    "unsafe_link",
+    "preflight_failed"
+  ],
+  "stopAndSweepFailureCodes": [
+    "claude_code_machine_stopped",
+    "start_by_passed",
+    "run_once_interrupted"
+  ],
+  "laneJobPayload": {
+    "version": "1.0",
+    "project_id": "<project_id>",
+    "user_id": "<user_id>",
+    "conversation_id": "<conversation_id>",
+    "targetThreadId": "<conversation_id>",
+    "prompt_id": "<prompt_id>",
+    "run_id": "<run_id>",
+    "intent": "feature",
+    "executionMode": "shared_write",
+    "prompt_text": "Rename the project in README.md.\n\n  Keep the old name in a note.",
+    "metadata": {
+      "agent": {
+        "handle": "octo",
+        "id": "<agent_id>",
+        "displayName": "Octo",
+        "avatarSeed": "octo",
+        "writeScope": {
+          "mode": "unscoped",
+          "ownedPaths": [],
+          "readOnlyPaths": [],
+          "rationale": "single-agent write job has no sibling write scope to coordinate with",
+          "source": "dispatch"
+        }
+      },
+      "writeScope": {
+        "mode": "unscoped",
+        "ownedPaths": [],
+        "readOnlyPaths": [],
+        "rationale": "single-agent write job has no sibling write scope to coordinate with",
+        "source": "dispatch"
+      },
+      "conversationVisibility": "public",
+      "runtimePreference": {
+        "runtimeId": "<runtime_id>",
+        "source": "conversation",
+        "updatedAt": "2026-11-13T16:41:07.512345+00:00"
+      },
+      "input": { "kind": "person" },
+      "writeIntent": true,
+      "claudeCode": { "version": 1 },
+      "aiAccessMode": "claude-code",
+      "managedAiUsed": false
+    },
+    "writeIntent": true
+  }
+}
