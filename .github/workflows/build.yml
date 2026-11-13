@@ -310,7 +310,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 1
+          # Keep github.sha's parents: the migration ordering check compares a
+          # pull request with the base GitHub merged it into, and a merge
+          # group with its parent.
+          fetch-depth: 2
           submodules: recursive
           persist-credentials: false
           ref: ${{ github.sha }}
@@ -333,7 +336,7 @@ jobs:
         run: node --test scripts/check-javascript-ci.test.mjs
 
       - name: Validate public migration ordering
-        run: node scripts/check-supabase-migrations.mjs
+        run: node scripts/check-supabase-migrations.mjs --base-from-github-event
 
       - name: Test public migration and self-host contracts
         run: |

@@ -530,10 +530,11 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // compaction, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the pages of their own chats, saved change reload, turn wrap-up, client time zone and proxy stream selectors, the hermetic local-engine turn targets and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings and local tunnel suites, and the tunnel
   // broker test lane with its Rust tests aggregate entry, and the dead-code gate (RUSTFLAGS in every
   // lane but runtime-agent's, --all-targets in their check lanes, runtime-agent's clippy check with
-  // its clippy component, and its comment): retains all functional commands, aggregate guards,
-  // routing, permissions and other jobs.
+  // its clippy component, and its comment), and the contracts lane's migration ordering check
+  // against a pull request's or merge group's base with its two-deep checkout: retains all
+  // functional commands, aggregate guards, routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '75c31bbf745ec8330481ff5babcafd331a2ea75b9c0e59dfec27cec004b2a0d6');
+    'dc340413911d8337af589005bf9700d46bcec0ab2987699716d1c3dc3063f94b');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

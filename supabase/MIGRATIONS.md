@@ -9,6 +9,17 @@ even final digit. Do not backfill unused numbers: migration history is append-on
 Downstream distributions may use current timestamps in the reserved odd-numbered lane,
 without changing or becoming a prerequisite of the public history.
 
+CI holds every pull request and merge queue group to that order:
+`node scripts/check-supabase-migrations.mjs --base-from-github-event` fails when a migration
+the change adds is not newer than every migration at its base, the branch GitHub merged a pull
+request into or a queued group's parent. A local database that already applied a newer
+migration refuses an older one, because the local stack scripts run `supabase migration up`
+without `--include-all`. So when another pull request lands a newer migration first, rename
+yours to a current timestamp before it merges. To check a branch before you push it, run
+`git fetch origin main` and then `node scripts/check-supabase-migrations.mjs --base origin/main`;
+the check compares with the `origin/main` your last fetch brought, and from a fork you fetch
+and pass this repository's `main` instead.
+
 The private distribution records every successfully released public-plus-private migration
 as a content-bound version set. Before applying, it requires every recorded migration to be
 unchanged and present, and permits production history to contain only that released set plus
