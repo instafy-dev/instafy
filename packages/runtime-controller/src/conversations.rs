@@ -1867,6 +1867,8 @@ pub(crate) async fn interrupt_conversation_runs(
             .await?;
     }
     let conversation_raw = conversation.id.to_string();
+    // The lock leaves each job's key free: a plan's dispatch inserts a worker
+    // under its lead while it holds the conversation this then waits for.
     let rows = transaction
         .query(
             "select id, run_id
@@ -1877,7 +1879,7 @@ pub(crate) async fn interrupt_conversation_runs(
                      or payload->>'conversation_id' = $3
                    )
                and status in ('queued','leased')
-             order by id for update",
+             order by id for no key update",
             &[
                 &conversation.project_id,
                 &conversation.id,
@@ -2445,12 +2447,14 @@ pub(crate) async fn cancel_agent_job(
         .map(ActiveJobAuthorization::subject_context)
         .unwrap_or_else(|| context.clone());
 
+    // The lock leaves the job's key free: a plan's dispatch inserts a worker
+    // under its lead while it holds the conversation this then waits for.
     let row = transaction
         .query_opt(
             "select id, project_id, run_id, status, conversation_id, payload, plan_group_id
              from agent_jobs
              where id = $1
-             for update",
+             for no key update",
             &[&job_id],
         )
         .await
@@ -2714,11 +2718,13 @@ pub(crate) async fn cancel_plan_group_jobs(
         .collect();
     // Re-read under row locks: a worker that completed during authorization
     // stays completed, while a leased/queued worker cannot race cancellation.
+    // The locks leave each job's key free: a plan's dispatch inserts a worker
+    // under its lead while it holds the conversation this then waits for.
     let rows = transaction
         .query(
             "select id, run_id from agent_jobs
          where id = any($1) and project_id = $2 and status in ('queued','leased')
-         order by id for update",
+         order by id for no key update",
             &[&ids, &conversation.project_id],
         )
         .await
