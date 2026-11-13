@@ -498,8 +498,11 @@ usage it reports can be billed.
 
 The usage such a turn shows is Claude Code's own report, in Details only: "Claude Code reported:
 input N, cached M, output K", with the model it ran (a `claude_code_turn_usage` row marked
-`billed: false`). It counts tokens and never shows a cost: the runtime drops Claude Code's own
-cost estimate, which is an API price, not what a Claude plan costs.
+`billed: false`). Input counts every input token Claude Code reported, its cache writes and reads
+included, as a Codex turn's input includes its cached tokens, and cached counts the cache reads;
+a message's stats count them the same way and name the model. It counts tokens and never shows a
+cost: the runtime drops Claude Code's own cost estimate, which is an API price, not what a Claude
+plan costs.
 
 ### What one turn is billed for
 

@@ -12,8 +12,13 @@ Instafy Studio is a chat-first filesystem UI backed by the runtime controller. T
 
 The public frontend is the complete default application. Optional product
 integrations are selected at build time through
-`INSTAFY_FRONTEND_FEATURE_MANIFEST`; the default manifest contains only the
-public-core feature module.
+`INSTAFY_FRONTEND_FEATURE_MANIFEST`; the default manifest contains the
+public-core feature module and the module for
+[local-engine turns](Local-Engine-Turns.md), turns that run the person's own
+Claude Code. That module offers such a turn only inside Instafy Desktop on
+macOS, to a person `CLAUDE_CODE_LANE_USER_IDS` covers, and words such turns
+wherever they show. The hosted web app's manifest does not list it yet
+([Hosted web release](Web-Release.md)).
 
 Feature modules contribute typed assistants, capabilities, routes, native
 extensions, runtime families, and background Studio runtime bridges. The
@@ -348,19 +353,26 @@ any user id goes into it.
   Nothing Instafy sends by itself, queues, resends or delegates is admitted.
 - The job holds no credential, device grant or plan role, is leased once and only within a minute
   of the send, by that runtime alone, and gets no proxy token, model-facing controller token,
-  project secret or history. It costs no credits. Nobody can steer it; any member with write
-  access may stop it.
+  project secret or history. That runtime leases it before any other job pinned to it. Only that
+  runtime can complete it or post its steps: a token that names no runtime, or another runtime's,
+  never can, so a queued one ends only by the sweeps, a stop of its runtime or a cancel. It costs
+  no credits. Nobody can steer it; any member with write access may stop it.
+- A runtime stop fails such a job in its own transaction. The turn's run, its Home row and its
+  failure message are written just after the stop commits, in a short transaction that locks the
+  turn's chat and no runtime, and a step of the 10 s idle sweep writes them for a turn whose own
+  write never committed. That step runs only while `CLAUDE_CODE_LANE_USER_IDS` names someone.
 - Apply the migrations that add `agent_jobs.engine` before deploying the controller that reads
   them. Keep `CLAUDE_CODE_LANE_USER_IDS` empty until the previous controller pool is retired and
   no load balancer still sends it requests: an older controller would unpin and requeue such a
   job. To roll back, empty it first, then wait until no job with `engine = 'claude-code'` is
   queued or leased: queued ones start or fail within about 70 s, and a running turn keeps its
   lease until it ends, at most 3000 s after its one-minute start window. Stopping the runtime that
-  runs one fails it at once. Then roll back. The older controller stores the `claudeCode`
-  capability a runtime reports about itself as it is, unattested, and it stays until that runtime
-  registers again with a current controller: when this release is deployed again, keep
-  `CLAUDE_CODE_LANE_USER_IDS` empty until every runtime has registered again with the current
-  controller.
+  runs one fails it at once. Then roll back. With the switch empty, the sweep step above no longer
+  runs, so the run of a stopped turn whose own write was lost stays unfinished. The older
+  controller stores the `claudeCode` capability a runtime reports about itself as it is,
+  unattested, and it stays until that runtime registers again with a current controller: when this
+  release is deployed again, keep `CLAUDE_CODE_LANE_USER_IDS` empty until every runtime has
+  registered again with the current controller.
 
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:

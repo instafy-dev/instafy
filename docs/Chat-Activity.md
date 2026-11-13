@@ -104,10 +104,19 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   Claude Code in plain text as the program that ran the turn, never as something Instafy offers.
   Its failure block has no "Manage AI" and no "Try again", a stopped one offers no Continue, and
   Instafy never sends such a turn again by itself: only its sender gets "Send again with Claude
-  Code", which puts the message back in the composer with Claude Code chosen. Details keeps the
-  raw text. Notes the turn writes itself are status steps, never lines added to its reply.
+  Code", in Instafy Desktop, which puts the message back in the composer with Claude Code chosen.
+  The sender's Details keep the raw text; everyone else's keep the steps but not the raw text,
+  which can name the sender's own Claude sign-in or plan. A failure block in these words needs the
+  controller's own mark on the message: a message a member records with the same `aiAccessMode`
+  reads as an ordinary failure, still with no "Try again". Notes the turn writes itself are never
+  lines added to its reply: once the turn is done they show as plain lines under the reply and its
+  files, whether Details is open or not, and they never show in Details or count toward the line.
+  - Until its first step, the line, and the typing row before it, read "Starting Claude Code on
+    this computer…" for its sender, "Starting Claude Code on {Name}'s computer…" for everyone
+    else, and "Starting Claude Code…" when the chat can't tell who sent it.
   - Under Octo's name on the reply, its sender reads "Ran on your own Claude Code, on your
     computer", and everyone else reads "Ran on {Name}'s own Claude Code, on their computer".
+    That line shows even when the reply's header is hidden, and never on a failed turn.
   - A send the controller refuses writes no message, so only its sender reads why, in place of
     the error row, and the text goes back in the composer with Claude Code still chosen:
     - `claude_code_turn_not_allowed`: "Claude Code turns aren't on for your account yet."
@@ -121,8 +130,11 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
       didn't start in time. Send this again in a few seconds."
     - `claude_code_machine_busy`: "Your computer is busy with another turn. Send this when it's
       done."
-    - `claude_code_runtime_not_ready`: "Your computer isn't connected to this space. Open this
-      space in Instafy Desktop, then send your message again."
+    - `claude_code_runtime_not_ready`, by the refusal's reason: when the computer is connected but
+      its Claude Code can't take a turn (`capability_missing`, `capability_not_ready`), "Claude
+      Code on this computer isn't ready to take turns. Check it in Your AI, then send your message
+      again."; for any other reason, "Your computer isn't connected to this space. Open this space
+      in Instafy Desktop, then send your message again."
     - `dispatch_lane_busy`, for a send that chose Claude Code: "Octo is still working on another
       message in this chat. Send this when it's done."
     - any other `claude_code_*` code: "Claude Code couldn't take this message."
@@ -139,7 +151,11 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
     - `binary_missing`: "Instafy Desktop can't find Claude Code on this computer. Set it up again
       in Your AI, then send your message again."
     - `binary_unsafe`: "Instafy Desktop won't start this copy of Claude Code because other
-      accounts on this computer can change it. Set it up again in Your AI."
+      accounts on this computer can change it, or a setting from your login shell
+      (CLAUDE_CONFIG_DIR or NODE_EXTRA_CA_CERTS) points somewhere it can't use. Set it up again in
+      Your AI." It names both causes because the computer reports them with one code; Your AI
+      names the setting when Instafy Desktop finds one it can't use
+      ([Settings UI](Settings-UI.md)).
     - `unsupported_version` and `probe_failed`: "This version of Claude Code can't take turns from
       Instafy. Update Claude Code, then send your message again."
     - `bare_default`: "This version of Claude Code no longer lets other apps use your sign-in for
@@ -170,18 +186,25 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
       stopped, and it won't run again. Send it again to start over."
     - anything else: "Claude Code stopped with an error.", with the failure's own first line after
       it only when that line passes the rule above.
-  - Its status steps, which everyone in the chat reads:
+  - Its notes, which everyone in the chat reads under the reply once the turn is done:
     - "Claude Code skipped N steps that need your OK, since nobody can give it here. You can allow
-      them in your own Claude Code settings.", with the tools in Details. The turn still succeeds.
+      them in your own Claude Code settings." The turn still succeeds.
     - What its save kept on this computer, each file by name
       ([Runtime machines](Runtime-Machines.md#workspace-durability)):
       `Not saved: <paths> (Claude Code's own files stay on this computer)` for `.claude/` paths,
-      `CLAUDE.local.md` and the root `.mcp.json`, and
-      `Not saved: <paths> (it looks like a Claude key is in it, so it stays on this computer)`.
+      `CLAUDE.local.md` and the root `.mcp.json`,
+      `Not saved: <paths> (it looks like a Claude key is in it, so it stays on this computer)` for
+      a file whose name or content holds one (a key in a name is replaced), and
+      `Not saved: <paths> (Instafy couldn't check it for a Claude key)` for one it couldn't read.
     - "Claude Code's changes stayed on this computer and weren't saved to the space.", when the
-      turn finished but its save failed (the error is in Details) or Instafy couldn't read what
-      it changed. The reply still shows, and the files card lists nothing, so there is nothing to
-      Undo.
+      turn finished but its save failed (Instafy keeps the error with the turn), and the same
+      sentence ending ": Instafy couldn't read what changed in this space's folder." when Instafy
+      couldn't tell what it changed. The reply still shows, and the files card lists nothing, so
+      there is nothing to Undo.
+    - "Claude Code left N programs running when it finished; Instafy stopped them.", when a
+      turn that went well left programs running.
+    - The lines a Codex turn adds to its reply about pages made in another chat and about files
+      the save left out, which here are notes of their own.
 - While Instafy tries a failed turn again by itself (`useRunFailureAutoRetry`), the turn is one
   quiet line, "Trying again…", with no failure sentence, no red and no actions; a countdown before
   a rate-limited resend reads "Trying again in 20 s" with Cancel. Only a dropped reply and a short

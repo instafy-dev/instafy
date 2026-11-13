@@ -65,7 +65,10 @@ and a hosted runtime takes it. The private runtime never receives it.
 A local-engine job is not a platform AI job, though it holds no credential: only its sender's own
 private runtime with the attested `claudeCode` capability leases it, once and within a minute of
 the send, and it gets no proxy token, model-facing controller token or project secrets
-([Local-engine turns](Local-Engine-Turns.md)).
+([Local-engine turns](Local-Engine-Turns.md)). Only the runtime that leased it can complete it or
+post its steps, whatever `STRICT_MODE` says: a scoped token that names no runtime, which a write
+member can mint while `STRICT_MODE` is off, and another runtime's token are both refused, and
+nothing is written.
 
 `POST /agent/secrets` independently requires the same signed runtime identity and current
 generation. The requested job must belong to that exact runtime, remain leased, and have a
