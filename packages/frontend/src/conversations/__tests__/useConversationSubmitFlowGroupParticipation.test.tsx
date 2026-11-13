@@ -116,6 +116,7 @@ function HookHarness({
     setConversationTitle: vi.fn(),
     setConversationGoal: setConversationGoalMock,
     appendMessages,
+    removeUnsentMessage: vi.fn(),
     updateMessage,
     linkRunToConversation: vi.fn(),
   });

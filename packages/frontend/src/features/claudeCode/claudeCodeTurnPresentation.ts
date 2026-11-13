@@ -2,7 +2,7 @@ import type {
   FrontendTurnEnginePresentation,
   TurnEngineFailureInput,
   TurnEngineTurnOwner,
-} from "../../conversations/runFailurePresentation";
+} from "../frontendFeatureModule";
 import { CLAUDE_CODE_TURN_ENGINE_ID } from "./claudeCodeComposer";
 
 /**
@@ -54,8 +54,10 @@ export const CLAUDE_CODE_FAILURE_SENTENCES: Readonly<Record<ClaudeCodeFailureCod
     "Your Claude plan's usage limit was reached, so this turn stopped. Send your message again after it resets.",
   binary_missing:
     "Instafy Desktop can't find Claude Code on this computer. Set it up again in Your AI, then send your message again.",
+  // The runtime refuses the copy, or a setting from the login shell that
+  // Desktop granted with it (D26), with this one code.
   binary_unsafe:
-    "Instafy Desktop won't start this copy of Claude Code because other accounts on this computer can change it. Set it up again in Your AI.",
+    "Instafy Desktop won't start this copy of Claude Code because other accounts on this computer can change it, or a setting from your login shell (CLAUDE_CONFIG_DIR or NODE_EXTRA_CA_CERTS) points somewhere it can't use. Set it up again in Your AI.",
   unsupported_version:
     "This version of Claude Code can't take turns from Instafy. Update Claude Code, then send your message again.",
   probe_failed:
@@ -114,6 +116,16 @@ export const CLAUDE_CODE_SEND_REFUSAL_SENTENCES: Readonly<Record<string, string>
 
 const TURN_ACTIVE_START_WINDOW_PASSED =
   "Your last Claude Code turn didn't start in time. Send this again in a few seconds.";
+/** The send refusal of a computer that isn't ready (G6), whose `details.reason` says why. */
+const RUNTIME_NOT_READY_CODE = "claude_code_runtime_not_ready";
+// G6's reasons when the computer is connected and Claude Code on it can't
+// take a turn: too old, signed out or not found, as its runtime last said.
+const CLAUDE_CODE_NOT_READY_REASONS: ReadonlySet<string> = new Set([
+  "capability_missing",
+  "capability_not_ready",
+]);
+const CLAUDE_CODE_NOT_READY_HERE =
+  "Claude Code on this computer isn't ready to take turns. Check it in Your AI, then send your message again.";
 // A refusal code the controller may add later: never its raw text, which
 // can name the plumbing.
 const OTHER_SEND_REFUSAL = "Claude Code couldn't take this message.";
@@ -124,6 +136,23 @@ export const CLAUDE_CODE_STEER_REFUSED =
 
 /** The sender's action on a failed turn: the composer gets the message back, with Claude Code chosen (5.6). */
 export const CLAUDE_CODE_RESEND_LABEL = "Send again with Claude Code";
+
+/** What the sender of a Claude Code turn reads from its send until its first step (5.7). */
+export const CLAUDE_CODE_STARTING_LINE = "Starting Claude Code on this computer…";
+/** The same when the chat cannot tell who sent the turn: it names no computer. */
+const CLAUDE_CODE_STARTING_LINE_UNKNOWN_OWNER = "Starting Claude Code…";
+
+/**
+ * What a Claude Code turn reads from its send until its first step (5.7), by
+ * viewer: it starts on its sender's computer, never on a teammate's, as the
+ * speaker line and the failure sentence say (5.5, D20).
+ */
+export function claudeCodeStartingLine(owner: TurnEngineTurnOwner | null): string {
+  if (!owner) {
+    return CLAUDE_CODE_STARTING_LINE_UNKNOWN_OWNER;
+  }
+  return owner.isViewer ? CLAUDE_CODE_STARTING_LINE : `Starting Claude Code on ${possessive(owner.name)} computer…`;
+}
 
 /** The plain-text line under a Claude Code reply's header (5.7, D20). */
 export function claudeCodeSpeakerLine(owner: TurnEngineTurnOwner | null): string {
@@ -202,11 +231,15 @@ export function describeClaudeCodeTurnFailure(failure: TurnEngineFailureInput): 
 /** The sentence for a send that claimed Claude Code and that the controller refused, or null. */
 export function describeClaudeCodeSendRefusal(refusal: { code: string; details: unknown }): string | null {
   const code = refusal.code.trim();
+  const reason = isRecord(refusal.details) ? refusal.details["reason"] : null;
   if (code === "claude_code_turn_active") {
-    const reason = isRecord(refusal.details) ? refusal.details["reason"] : null;
     return reason === START_WINDOW_PASSED_REASON
       ? TURN_ACTIVE_START_WINDOW_PASSED
       : CLAUDE_CODE_SEND_REFUSAL_SENTENCES.claude_code_turn_active;
+  }
+  if (code === RUNTIME_NOT_READY_CODE && typeof reason === "string" && CLAUDE_CODE_NOT_READY_REASONS.has(reason)) {
+    // The computer is connected; Claude Code on it is what isn't ready.
+    return CLAUDE_CODE_NOT_READY_HERE;
   }
   if (Object.prototype.hasOwnProperty.call(CLAUDE_CODE_SEND_REFUSAL_SENTENCES, code)) {
     return CLAUDE_CODE_SEND_REFUSAL_SENTENCES[code] ?? null;
@@ -226,6 +259,7 @@ export function isClaudeCodeControllerStamped(metadata: Record<string, unknown>)
 
 export const CLAUDE_CODE_TURN_PRESENTATION: FrontendTurnEnginePresentation = Object.freeze({
   isControllerStamped: isClaudeCodeControllerStamped,
+  describeStart: claudeCodeStartingLine,
   describeTurnFailure: describeClaudeCodeTurnFailure,
   describeTeammateTurnFailure: claudeCodeTeammateFailureSentence,
   describeSendRefusal: describeClaudeCodeSendRefusal,

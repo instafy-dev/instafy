@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CLAUDE_CODE_DESKTOP_EXTENSION_ID,
+  ClaudeCodeDesktopActionError,
   claudeCodeDesktopHostAvailable,
   forgetClaudeCodeDesktopRefusalForTests,
+  invokeClaudeCodeDesktopAction,
   parseClaudeCodeDesktopStatus,
   readClaudeCodeDesktopStatus,
   readThisComputerRuntimeId,
@@ -37,6 +39,86 @@ describe("parseClaudeCodeDesktopStatus", () => {
     expect(
       parseClaudeCodeDesktopStatus({ supported: true, found: true, consented: true, path: 42 }),
     ).toMatchObject({ path: null });
+  });
+
+  // While it is on, Desktop answers the path in use, and what Find or Locate
+  // turned up beside it (docs/Local-Engine-Turns.md 4.1).
+  it("reads what Find or Locate turned up beside the path in use, and the login-shell setting Desktop names", () => {
+    expect(
+      parseClaudeCodeDesktopStatus({
+        supported: true,
+        found: true,
+        path: "/opt/homebrew/bin/claude",
+        consented: true,
+        candidatePath: "/Users/sam/.local/bin/claude",
+        candidateProblem: "shell_setting_unusable",
+        shellSetting: "NODE_EXTRA_CA_CERTS",
+      }),
+    ).toEqual({
+      supported: true,
+      found: true,
+      path: "/opt/homebrew/bin/claude",
+      consented: true,
+      candidatePath: "/Users/sam/.local/bin/claude",
+      candidateProblem: "shell_setting_unusable",
+      shellSetting: "NODE_EXTRA_CA_CERTS",
+    });
+    expect(
+      parseClaudeCodeDesktopStatus({
+        supported: true,
+        found: false,
+        path: "/opt/homebrew/bin/claude",
+        consented: false,
+        problem: "shell_setting_unusable",
+        shellSetting: "CLAUDE_CONFIG_DIR",
+      }),
+    ).toMatchObject({ problem: "shell_setting_unusable", shellSetting: "CLAUDE_CONFIG_DIR" });
+    expect(
+      parseClaudeCodeDesktopStatus({ supported: true, found: true, consented: true, candidateProblem: "not_found" }),
+    ).toMatchObject({ candidateProblem: "not_found" });
+    // The path in use beside itself: new login-shell values Find read for it (D26).
+    expect(
+      parseClaudeCodeDesktopStatus({
+        supported: true,
+        found: false,
+        path: "/opt/homebrew/bin/claude",
+        consented: true,
+        problem: "shell_setting_unusable",
+        shellSetting: "NODE_EXTRA_CA_CERTS",
+        candidatePath: "/opt/homebrew/bin/claude",
+      }),
+    ).toEqual({
+      supported: true,
+      found: false,
+      path: "/opt/homebrew/bin/claude",
+      consented: true,
+      problem: "shell_setting_unusable",
+      shellSetting: "NODE_EXTRA_CA_CERTS",
+      candidatePath: "/opt/homebrew/bin/claude",
+    });
+  });
+
+  it("leaves out a field it doesn't know the value of, and ignores fields it doesn't know", () => {
+    const parsed = parseClaudeCodeDesktopStatus({
+      supported: true,
+      found: true,
+      consented: true,
+      path: "/opt/homebrew/bin/claude",
+      candidatePath: "",
+      candidateProblem: "made_up",
+      problem: "made_up_too",
+      shellSetting: "HTTPS_PROXY",
+      somethingNew: { nested: true },
+    });
+    expect(parsed).toEqual({ supported: true, found: true, path: "/opt/homebrew/bin/claude", consented: true });
+    expect(
+      parseClaudeCodeDesktopStatus({
+        supported: true,
+        found: true,
+        consented: true,
+        candidatePath: `/${"x".repeat(5000)}`,
+      }),
+    ).not.toHaveProperty("candidatePath");
   });
 });
 
@@ -86,6 +168,64 @@ describe("the Desktop module", () => {
     await expect(readClaudeCodeDesktopStatus(CONTROLLER_URL)).resolves.toBeNull();
     await expect(readClaudeCodeDesktopStatus(CONTROLLER_URL)).resolves.toBeNull();
     expect(invokeDesktopExtension).toHaveBeenCalledTimes(1);
+  });
+
+  // A refused action is the person's to read, never a sign that Desktop has
+  // no module: only a refused `status` stops the status reads.
+  it("keeps asking for the status after Desktop refuses an action", async () => {
+    const invokeDesktopExtension = vi.fn(async (request: InstafyDesktopExtensionInvokeOptions) => {
+      if (request.method === "detect") {
+        throw new Error(
+          "Error invoking remote method 'instafy:desktopExtensionInvoke': Error: Find the claude program on this computer first.",
+        );
+      }
+      return { supported: true, found: false, consented: false };
+    });
+    stubDesktop({ invokeDesktopExtension });
+    await expect(invokeClaudeCodeDesktopAction("detect", CONTROLLER_URL)).rejects.toEqual(
+      new ClaudeCodeDesktopActionError("Find the claude program on this computer first."),
+    );
+    await expect(readClaudeCodeDesktopStatus(CONTROLLER_URL)).resolves.toMatchObject({ supported: true });
+    await expect(readClaudeCodeDesktopStatus(CONTROLLER_URL)).resolves.toMatchObject({ supported: true });
+    expect(invokeDesktopExtension.mock.calls.map(([request]) => request.method)).toEqual(["detect", "status", "status"]);
+  });
+
+  // Electron hands the renderer a rejection's `toString()`: "<name>: <message>".
+  it("keeps only Desktop's own words of a refusal, whatever the error's name", async () => {
+    for (const thrown of [
+      "Error invoking remote method 'instafy:desktopExtensionInvoke': Error: Instafy is still working on this computer, so that change was not made.",
+      "Error invoking remote method 'instafy:desktopExtensionInvoke': DesktopExtensionChangeNotMadeError: Instafy is still working on this computer, so that change was not made.",
+      "Error invoking remote method 'instafy:desktopExtensionInvoke': TypeError: Instafy is still working on this computer, so that change was not made.",
+    ]) {
+      stubDesktop({
+        invokeDesktopExtension: vi.fn(async () => {
+          throw new Error(thrown);
+        }),
+      });
+      await expect(invokeClaudeCodeDesktopAction("enable", CONTROLLER_URL)).rejects.toEqual(
+        new ClaudeCodeDesktopActionError("Instafy is still working on this computer, so that change was not made."),
+      );
+    }
+  });
+
+  it("still sends an action after a refused status, and asks for the status again once one is answered", async () => {
+    let statusRefused = true;
+    const invokeDesktopExtension = vi.fn(async (request: InstafyDesktopExtensionInvokeOptions) => {
+      if (request.method === "status" && statusRefused) {
+        throw new Error("Unknown desktop extension");
+      }
+      return { supported: true, found: true, path: "/opt/homebrew/bin/claude", consented: false };
+    });
+    stubDesktop({ invokeDesktopExtension });
+    await expect(readClaudeCodeDesktopStatus(CONTROLLER_URL)).resolves.toBeNull();
+    statusRefused = false;
+    // Not asked again on this page...
+    await expect(readClaudeCodeDesktopStatus(CONTROLLER_URL)).resolves.toBeNull();
+    expect(invokeDesktopExtension).toHaveBeenCalledTimes(1);
+    // ...until an action shows that Desktop has the module.
+    await expect(invokeClaudeCodeDesktopAction("detect", CONTROLLER_URL)).resolves.toMatchObject({ found: true });
+    await expect(readClaudeCodeDesktopStatus(CONTROLLER_URL)).resolves.toMatchObject({ found: true });
+    expect(invokeDesktopExtension.mock.calls.map(([request]) => request.method)).toEqual(["status", "detect", "status"]);
   });
 
   it("names this computer's runtime only for the space Desktop runs", async () => {

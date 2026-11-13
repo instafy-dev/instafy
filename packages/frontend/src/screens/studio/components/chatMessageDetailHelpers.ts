@@ -225,6 +225,8 @@ export type TokenUsageSummary = {
   cachedInputTokens: number;
   outputTokens: number;
   context: PromptContextUsage | null;
+  /** The model the turn ran, when its usage row names one (`details.model`). */
+  model?: string;
 };
 
 /**
@@ -679,18 +681,36 @@ export function parseUsage(details: Record<string, unknown> | null): TokenUsageS
   if (!isRecord(usageValue)) {
     return null;
   }
-  const input = getNumberValue(usageValue, ["input_tokens", "inputTokens"]);
-  const cached = getNumberValue(usageValue, ["cached_input_tokens", "cachedInputTokens"]);
+  const reportedInput = getNumberValue(usageValue, ["input_tokens", "inputTokens"]);
+  const cachedInput = getNumberValue(usageValue, ["cached_input_tokens", "cachedInputTokens"]);
+  const cacheReads = getNumberValue(usageValue, ["cache_read_input_tokens", "cacheReadInputTokens"]);
+  const cacheWrites = getNumberValue(usageValue, ["cache_creation_input_tokens", "cacheCreationInputTokens"]);
   const output = getNumberValue(usageValue, ["output_tokens", "outputTokens"]);
+  // A usage that counts the input read from the cache, and the input written
+  // to it, apart from the rest of its input reads as the row's own words do:
+  // all three as input, and the reads as cached.
+  const countsCacheApart = cachedInput === null && (cacheReads !== null || cacheWrites !== null);
+  const input = countsCacheApart ? (reportedInput ?? 0) + (cacheReads ?? 0) + (cacheWrites ?? 0) : reportedInput;
+  const cached = countsCacheApart ? cacheReads : cachedInput;
   if (input === null && cached === null && output === null) {
     return null;
   }
+  const model = readUsageModel(details);
   return {
     inputTokens: input ?? 0,
     cachedInputTokens: cached ?? 0,
     outputTokens: output ?? 0,
     context: parsePromptContext(details),
+    ...(model ? { model } : {}),
   };
+}
+
+const MAX_USAGE_MODEL_LENGTH = 200;
+
+/** The model a usage row names, or null. */
+function readUsageModel(details: Record<string, unknown>): string | null {
+  const model = typeof details["model"] === "string" ? details["model"].trim() : "";
+  return model && model.length <= MAX_USAGE_MODEL_LENGTH ? model : null;
 }
 
 export function formatPromptContextModeLabel(context: PromptContextUsage): string {

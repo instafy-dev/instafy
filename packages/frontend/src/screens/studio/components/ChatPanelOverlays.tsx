@@ -40,6 +40,10 @@ function MessageStats({ usage }: { usage: NonNullable<SelectedMessageTokenUsage>
     ["Omitted", context.omittedTurns && context.omittedTurns > 0 ? context.omittedTurns : null],
   ] : [];
   return <div className="space-y-3 px-2.5 py-2">
+    {usage.model ? <div className="min-w-0" data-testid="message-stats-model">
+      <Text variant="bodyCompact" tone="muted">Model</Text>
+      <Text variant="bodyCompact" tone="primary" className="break-all">{usage.model}</Text>
+    </div> : null}
     <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2">
       {counts.map(([label, value]) => <div key={label} className="contents">
         <Text as="dt" variant="bodyCompact" tone="muted">{label}</Text>

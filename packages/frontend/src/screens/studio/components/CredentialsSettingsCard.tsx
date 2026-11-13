@@ -4,7 +4,7 @@ import { useStudioGuardedNavigation } from "../../../navigation/StudioDraftNavig
 import { AgentAvatar } from "../../../components/AgentAvatar";
 import { uploadIdentityImage } from "../../../lib/identityImages";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Brain, CheckCircle, Cpu, EditPencil, MoreHoriz, Trash, Upload, WarningTriangle, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
@@ -62,31 +62,7 @@ import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
 import { isExpiredCredentialProxyError } from "./proxyError";
 import { canChooseManagedAi, describeManagedAiUnavailable } from "./managedAiAllowance";
 import { APPLICATION_FRONTEND_FEATURES } from "../../../features/applicationFrontendFeatureComposition";
-import type {
-  FetchRuntimeStatusParams,
-  FetchRuntimeStatusResult,
-} from "../../../services/runtimeController/runtimes";
-
-/** What Your AI gives a turn engine's row (docs/Local-Engine-Turns.md 5.3). */
-export interface FrontendTurnEngineYourAiRowProps {
-  /** A space's runtime status, including whether the engine's lane covers the viewer. */
-  fetchRuntimeStatus: (params: FetchRuntimeStatusParams) => Promise<FetchRuntimeStatusResult | null>;
-  /** The controller this Studio talks to now, or null. */
-  resolveControllerUrl: () => Promise<string | null>;
-}
-
-declare module "../../../features/frontendFeatureModule" {
-  interface FrontendTurnEngineContribution {
-    /**
-     * A status row among Your AI's connections. It is never a connection,
-     * never the default and never in the connect modal; it renders nothing
-     * where the engine is not offered. Declared here, beside the settings
-     * card that renders it, for as long as the contribution type itself does
-     * not name it.
-     */
-    YourAiRow?: ComponentType<FrontendTurnEngineYourAiRowProps>;
-  }
-}
+import type { FetchRuntimeStatusParams } from "../../../services/runtimeController/runtimes";
 
 function fetchTurnEngineRuntimeStatus(params: FetchRuntimeStatusParams) {
   return controllerClient.runtimes.fetchStatus(params);

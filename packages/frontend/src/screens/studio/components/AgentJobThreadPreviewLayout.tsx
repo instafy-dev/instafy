@@ -67,6 +67,7 @@ import { TurnBrowserApprovalRow, type TurnBrowserApproval } from "./turnBrowserA
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
 const NO_EARLIER_ATTEMPTS: EarlierAttemptDetails[] = [];
+const NO_REPLY_NOTES: ChatMessage[] = [];
 const TRY_ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth", "Ninth", "Tenth"];
 const TRY_COUNTS = ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 
@@ -291,6 +292,12 @@ export type AgentJobThreadPreviewLayoutProps = {
   detailsOpen: boolean;
   /** Cards stay in the turn's default view: they ask the person for something or show what it made. */
   cards: ChatMessage[];
+  /**
+   * The notes its runtime placed under the reply (`presentation.placement:
+   * "reply_note"`), such as changes that stayed on the computer: plain lines
+   * under the reply and its files once the turn is done, Details open or not.
+   */
+  replyNotes?: ChatMessage[];
   isThreadUnresolved: boolean;
   canCancelTerminalRun: boolean;
   cancelPending: boolean;
@@ -345,6 +352,7 @@ export function AgentJobThreadPreviewLayout({
   browserApproval = null,
   detailsOpen,
   cards,
+  replyNotes = NO_REPLY_NOTES,
   isThreadUnresolved,
   expandedUpdateIds,
   finalSummaryMessage,
@@ -620,6 +628,9 @@ export function AgentJobThreadPreviewLayout({
     top: showThreadPreviewHeader ? threadPreviewRailStyle.top : "0px",
   } as CSSProperties;
 
+  // The turn's notes under its reply: once it is done, Details open or not,
+  // and not while Instafy tries a failed turn again by itself.
+  const shownReplyNotes = isCompleted && !quietRetry ? replyNotes : NO_REPLY_NOTES;
   const isEmptySettledTurn =
     !isRunning &&
     !isThreadUnresolved &&
@@ -630,7 +641,8 @@ export function AgentJobThreadPreviewLayout({
     replyDraft === null &&
     cards.length === 0 &&
     (!latestFiles || latestFiles.length === 0) &&
-    branchThreads.length === 0;
+    branchThreads.length === 0 &&
+    shownReplyNotes.length === 0;
   if (isEmptySettledTurn) {
     return null;
   }
@@ -1049,6 +1061,24 @@ export function AgentJobThreadPreviewLayout({
                 madeSite={madeSite}
               />
             </div>
+          </div>
+        ) : null}
+        {shownReplyNotes.length > 0 ? (
+          // What the turn's runtime says about the turn itself, such as
+          // changes that stayed on the computer: plain words under the reply.
+          <div className="relative min-w-0 space-y-1 pt-1" data-testid="turn-reply-notes">
+            {shownReplyNotes.map((note) => (
+              <Text
+                key={note.id}
+                as="p"
+                variant="caption"
+                tone="secondary"
+                className="whitespace-pre-wrap break-words"
+                data-testid="turn-reply-note"
+              >
+                {note.content.trim()}
+              </Text>
+            ))}
           </div>
         ) : null}
         {/* The end cap marks a settled turn. Keyed to isRunning it came and

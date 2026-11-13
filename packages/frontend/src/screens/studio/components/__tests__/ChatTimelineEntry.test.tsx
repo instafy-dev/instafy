@@ -124,3 +124,78 @@ describe("a standalone command in the conversation", () => {
     expect(container.querySelector('[data-testid="chat-command-output"]')?.textContent).toContain("bash -lc 'ls'");
   });
 });
+
+// docs/Local-Engine-Turns.md 5.7: a Claude Code turn's usage row shows the
+// model it ran and the token counts, never a cost.
+describe("a turn's usage row in the run trace", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  function usageRow(details: Record<string, unknown>): ChatMessage {
+    return {
+      id: "usage-1",
+      role: "assistant",
+      authorId: null,
+      content: "Claude Code reported: input 1000, cached 850, output 40",
+      timestamp: 0,
+      files: null,
+      messageType: "token_usage",
+      metadata: { source: "agent", jobId: JOB_ID, messageType: "token_usage", details },
+    };
+  }
+
+  async function render(message: ChatMessage) {
+    await act(async () => {
+      root.render(
+        <TimelineEntry
+          message={message}
+          conversationMessages={[message]}
+          details={(message.metadata?.details as Record<string, unknown>) ?? null}
+          metadataRecord={message.metadata ?? null}
+          MessageContent={MessageContent}
+          ChatFileChangeList={() => null}
+          renderContext="runTrace"
+        />,
+      );
+    });
+  }
+
+  it("names the model and counts the cache as the row's words do", async () => {
+    await render(
+      usageRow({
+        kind: "claude_code_turn_usage",
+        billed: false,
+        usage: { input_tokens: 120, cache_creation_input_tokens: 30, cache_read_input_tokens: 850, output_tokens: 40 },
+        model: "claude-test-model",
+      }),
+    );
+    expect(container.querySelector('[data-testid="timeline-usage-model"]')?.textContent).toBe("Model claude-test-model");
+    expect(container.textContent).toContain("Input 1000");
+    expect(container.textContent).toContain("Cached 850");
+    expect(container.textContent).toContain("Output 40");
+    expect(container.textContent).not.toMatch(/cost|\$/i);
+  });
+
+  it("shows no model for a usage row that names none", async () => {
+    await render(
+      usageRow({ kind: "codex_turn_usage", usage: { input_tokens: 1200, cached_input_tokens: 900, output_tokens: 75 } }),
+    );
+    expect(container.querySelector('[data-testid="timeline-usage-model"]')).toBeNull();
+    expect(container.textContent).toContain("Input 1200");
+  });
+});

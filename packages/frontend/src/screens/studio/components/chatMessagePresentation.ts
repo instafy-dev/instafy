@@ -6,7 +6,7 @@ import { isUUID } from "../../../utils/uuid";
 import { isRecoverableRuntimeStartAlert as runtimeStartAlertIsRecoverable } from "./runtimeAlertPresentation";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { isEmptyCommandExecution } from "./chatContentHelpers";
-import { extractMessageDetails, getMessageType, isHiddenByPresentation } from "./chatMessageMetadata";
+import { extractMessageDetails, getMessageType, isHiddenByPresentation, isTurnReplyNote } from "./chatMessageMetadata";
 import { continuePromptIds, getControllerConversationNoticeKind, readChatRunStopNotice } from "./controllerConversationNotice";
 import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
 import { readEarlierAttempts, readPendingRetry, resolveAutomaticRetryFold } from "./automaticRetryFold";
@@ -408,11 +408,19 @@ export function synthesizeAgentJobThreadMessages(
   ]);
 
   const multiAgentWorkerJobIds = new Set<string>();
+  // Turns with a note their runtime placed under the reply (isTurnReplyNote).
+  // Only a turn row shows such a note, and the flat list shows no status, so
+  // each of these turns is a row, also one that took no step: its first
+  // message of Octo's the chat shows (its reply, as a rule) starts it.
+  const replyNoteJobIds = new Set<string>();
   collapsedAll.forEach((message) => {
+    const jobId = extractAgentJobId(message);
+    if (jobId && isTurnReplyNote(message)) {
+      replyNoteJobIds.add(jobId);
+    }
     if (extractMultiAgentPlanRole(message) !== "worker") {
       return;
     }
-    const jobId = extractAgentJobId(message);
     if (jobId) {
       multiAgentWorkerJobIds.add(jobId);
     }
@@ -480,7 +488,8 @@ export function synthesizeAgentJobThreadMessages(
       firstCardIdByJobId.set(jobId, message.id);
     }
     const hasFileChanges = Array.isArray(message.files) && message.files.length > 0;
-    if (hasFileChanges || threadTriggerTypes.has(messageType)) {
+    const showsReplyNotes = message.role === "assistant" && replyNoteJobIds.has(jobId);
+    if (hasFileChanges || threadTriggerTypes.has(messageType) || showsReplyNotes) {
       threadStartMessageIdByJobId.set(jobId, message.id);
     }
   });

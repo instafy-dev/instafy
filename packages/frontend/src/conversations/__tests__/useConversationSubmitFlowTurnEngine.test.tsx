@@ -5,6 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { createInitialConversation, type ConversationState } from "../conversationState";
 import type { ResolvedPromptAgentSelection } from "../assistantMentions";
+import { isTurnEngineSendRefusedError, type TurnEngineSendRefusedError } from "../turnEngineSendRefusal";
+import type { ChatMessage } from "../../screens/studio/types";
 
 const resolveParticipationMock = vi.hoisted(() => vi.fn());
 const ensureControllerConversationIdMock = vi.hoisted(() => vi.fn());
@@ -12,6 +14,8 @@ const recordMessageToControllerMock = vi.hoisted(() => vi.fn());
 const sendPromptToControllerMock = vi.hoisted(() => vi.fn());
 const queueAutoTitleConversationMock = vi.hoisted(() => vi.fn());
 const resolveLocalCapabilityHandleMock = vi.hoisted(() => vi.fn());
+const appendMessagesMock = vi.hoisted(() => vi.fn());
+const removeUnsentMessageMock = vi.hoisted(() => vi.fn());
 
 const controllerDispatchMock = vi.hoisted(() => ({
   resolveProjectId: vi.fn(),
@@ -111,7 +115,8 @@ function HookHarness({
     setConversationControllerId: vi.fn(),
     setConversationTitle: vi.fn(),
     setConversationGoal: vi.fn(),
-    appendMessages: vi.fn(),
+    appendMessages: appendMessagesMock,
+    removeUnsentMessage: removeUnsentMessageMock,
     updateMessage: vi.fn() as Mock,
     linkRunToConversation: vi.fn(),
   });
@@ -153,6 +158,8 @@ describe("useConversationSubmitFlow for a send that claims a turn engine", () =>
       sendPromptToControllerMock,
       queueAutoTitleConversationMock,
       resolveLocalCapabilityHandleMock,
+      appendMessagesMock,
+      removeUnsentMessageMock,
       controllerDispatchMock.resolveProjectId,
       controllerDispatchMock.resolveRuntimeTarget,
       controllerDispatchMock.ensureConversation,
@@ -233,6 +240,50 @@ describe("useConversationSubmitFlow for a send that claims a turn engine", () =>
     expect(resolveLocalCapabilityHandleMock).not.toHaveBeenCalled();
     // No title request at send: a title is asked of a model.
     expect(queueAutoTitleConversationMock).not.toHaveBeenCalled();
+  });
+
+  it("takes a refused send's message out of the chat and says so to the composer", async () => {
+    const refusal = {
+      engineId: "claude-code",
+      code: "claude_code_machine_busy",
+      sentence: "Your computer is busy with another turn. Send this when it's done.",
+    };
+    sendPromptToControllerMock.mockResolvedValue({ ok: false, errorMessage: refusal.sentence, turnEngineRefusal: refusal });
+
+    let thrown: unknown = null;
+    await act(async () => {
+      await flow!
+        .handleSubmit("conversation-local", "@octo fix the failing login test", {
+          metadata: ROUTED_METADATA,
+          runtimeOverride: ROUTED_RUNTIME,
+          expectedLaneIdle: true,
+        })
+        .catch((error: unknown) => {
+          thrown = error;
+        });
+    });
+
+    // The message was shown, then taken out again by its own client id: the
+    // controller recorded nothing for it.
+    const shown = appendMessagesMock.mock.calls.flatMap(([, rows]) => rows as ChatMessage[]);
+    const sentMessage = shown.find((row) => row.role === "user");
+    const clientMessageId = (sentMessage?.metadata as Record<string, unknown> | null)?.clientMessageId;
+    expect(typeof clientMessageId).toBe("string");
+    expect(removeUnsentMessageMock).toHaveBeenCalledExactlyOnceWith("conversation-local", clientMessageId);
+    expect(isTurnEngineSendRefusedError(thrown)).toBe(true);
+    expect((thrown as TurnEngineSendRefusedError).refusal).toEqual(refusal);
+  });
+
+  it("leaves a send that failed any other way in the chat", async () => {
+    sendPromptToControllerMock.mockResolvedValue({ ok: false, errorMessage: "Controller unavailable. Try again shortly." });
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "@octo fix the failing login test", {
+        metadata: ROUTED_METADATA,
+        runtimeOverride: ROUTED_RUNTIME,
+        expectedLaneIdle: true,
+      });
+    });
+    expect(removeUnsentMessageMock).not.toHaveBeenCalled();
   });
 
   it("asks for a title for the same first message without the claim", async () => {

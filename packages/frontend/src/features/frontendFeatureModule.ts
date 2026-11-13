@@ -25,6 +25,7 @@ import type { VisionClassifierRegistration } from "../camera/visionTypes";
 import type { SubmitConversationRuntimeOverride } from "../conversations/conversationSubmitTypes";
 import type { RuntimeMenuOption } from "../runtime/useRuntimeMenu";
 import type {
+  ControllerRuntimeStatusEntry,
   FetchRuntimeStatusParams,
   FetchRuntimeStatusResult,
 } from "../services/runtimeController/runtimes";
@@ -110,20 +111,34 @@ export function withoutTurnEngineClaim(
   return rest;
 }
 
+// The `aiAccessMode` of a turn the runtime's own engine runs: on Instafy AI,
+// or on the person's own AI connection. The controller stamps any other mode
+// only on the messages of a turn an engine ran instead.
+const RUNTIME_ENGINE_AI_ACCESS_MODES: ReadonlySet<string> = new Set(["managed", "byoc"]);
+
+/**
+ * Whether the metadata's `aiAccessMode` names an engine other than the
+ * runtime's own: a turn engine's id, whether or not this Studio was built
+ * with that engine. A build without an engine's module, such as a tab opened
+ * before a deploy, so still never resends, retries or titles from its turns.
+ */
+export function namesTurnEngineAccessMode(metadata: unknown): boolean {
+  const accessMode = readMetadataRecord(metadata)?.aiAccessMode;
+  if (typeof accessMode !== "string") {
+    return false;
+  }
+  const normalized = accessMode.trim().toLowerCase();
+  return normalized.length > 0 && !RUNTIME_ENGINE_AI_ACCESS_MODES.has(normalized);
+}
+
 /**
  * Whether a message belongs to a turn-engine turn: it carries a claim (the
  * sender's own copy before the controller answers), or the controller stamped
- * an engine's id as its `aiAccessMode`.
+ * another engine than the runtime's own as its `aiAccessMode`
+ * ({@link namesTurnEngineAccessMode}).
  */
-export function messageUsesTurnEngine(
-  metadata: unknown,
-  turnEngineIds: readonly string[],
-): boolean {
-  if (carriesTurnEngineClaim(metadata)) {
-    return true;
-  }
-  const accessMode = readMetadataRecord(metadata)?.aiAccessMode;
-  return typeof accessMode === "string" && turnEngineIds.includes(accessMode);
+export function messageUsesTurnEngine(metadata: unknown): boolean {
+  return carriesTurnEngineClaim(metadata) || namesTurnEngineAccessMode(metadata);
 }
 
 /** What the core composer tells a turn engine about the composer it serves. */
@@ -216,6 +231,67 @@ export interface FrontendTurnEngineComposerBridgeProps {
   onOfferChange: (offer: FrontendTurnEngineComposerOffer | null) => void;
 }
 
+/** Who sent a turn-engine turn, as far as the chat can tell. */
+export type TurnEngineTurnOwner = {
+  /** The person viewing sent it. */
+  isViewer: boolean;
+  /** Their name, when the chat knows it. */
+  name: string | null;
+};
+
+/** What a turn engine is told about one of its failed turns. */
+export type TurnEngineFailureInput = {
+  /** The failure message's metadata, as the controller wrote it. */
+  metadata: Record<string, unknown>;
+  /** The failure's own text, which Details keeps. */
+  rawText: string;
+  /** The raw text's first line when it reads plainly (docs/Chat-Activity.md), else null. */
+  plainFirstLine: string | null;
+  /** Whether words read plainly, by the same rule. */
+  readsPlainly: (text: string) => boolean;
+  /** The status entry of the runtime that ran the turn, when the viewer has it. */
+  runtime: ControllerRuntimeStatusEntry | null;
+};
+
+/** How a turn engine's turns read in the chat. */
+export interface FrontendTurnEnginePresentation {
+  /**
+   * Whether the controller stamped this message as one of the engine's turns.
+   * A client's claim, or an `aiAccessMode` a client could record, never counts.
+   */
+  isControllerStamped(metadata: Record<string, unknown>): boolean;
+  /**
+   * What one of the engine's turns reads from its send until its first step,
+   * in the typing row and the turn's own line, in place of "Starting…", worded
+   * for whoever views it; `owner` is null when the chat cannot tell who sent
+   * the turn.
+   */
+  describeStart(owner: TurnEngineTurnOwner | null): string;
+  /** The sentence the person who sent a failed turn reads. */
+  describeTurnFailure(failure: TurnEngineFailureInput): string;
+  /** What everyone else reads for a failed turn; `ownerName` is null when the chat does not know it. */
+  describeTeammateTurnFailure(ownerName: string | null): string;
+  /**
+   * The sentence for a send that claimed this engine and that the controller
+   * refused with `code`, or null when the engine does not word that code.
+   */
+  describeSendRefusal(refusal: { code: string; details: unknown }): string | null;
+  /** The sentence for a refused Steer into one of the engine's turns, or null. */
+  describeSteerRefusal(code: string): string | null;
+  /** The plain-text line under a reply's header; `owner` is null when the chat cannot tell who sent the turn. */
+  describeSpeaker(owner: TurnEngineTurnOwner | null): string;
+  /** The sender's action on a failed turn that puts its message back in the composer with this engine chosen. */
+  resendLabel: string;
+}
+
+/** What Your AI gives a turn engine's row (docs/Local-Engine-Turns.md 5.3). */
+export interface FrontendTurnEngineYourAiRowProps {
+  /** A space's runtime status, including whether the engine's lane covers the viewer. */
+  fetchRuntimeStatus: (params: FetchRuntimeStatusParams) => Promise<FetchRuntimeStatusResult | null>;
+  /** The controller this Studio talks to now, or null. */
+  resolveControllerUrl: () => Promise<string | null>;
+}
+
 /**
  * An engine one composer message can run on instead of the runtime's own.
  * The core composer renders its row, its token and its send gate from the
@@ -227,6 +303,14 @@ export interface FrontendTurnEngineContribution {
   id: string;
   /** Mounted once beside the composer; renders nothing itself. */
   ComposerBridge: ComponentType<FrontendTurnEngineComposerBridgeProps>;
+  /** How the engine's turns read in the chat; without it the chat words them as any other turn. */
+  presentation?: FrontendTurnEnginePresentation;
+  /**
+   * A status row among Your AI's connections. It is never a connection,
+   * never the default and never in the connect modal; it renders nothing
+   * where the engine is not offered.
+   */
+  YourAiRow?: ComponentType<FrontendTurnEngineYourAiRowProps>;
 }
 
 export interface FrontendFeatureContributions {

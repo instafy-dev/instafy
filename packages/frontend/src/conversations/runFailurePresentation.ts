@@ -1,5 +1,12 @@
 import { APPLICATION_FRONTEND_FEATURES } from "../features/applicationFrontendFeatureComposition";
-import { carriesTurnEngineClaim } from "../features/frontendFeatureModule";
+import {
+  carriesTurnEngineClaim,
+  messageUsesTurnEngine,
+  readTurnEngineClaim,
+  type FrontendTurnEnginePresentation,
+  type TurnEngineFailureInput,
+  type TurnEngineTurnOwner,
+} from "../features/frontendFeatureModule";
 import { isPersonRuntimeStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
 import { resolveProxyUpstreamErrorGuidance } from "../screens/studio/components/proxyError";
 import type { ChatMessage } from "../screens/studio/types";
@@ -55,62 +62,8 @@ export type RunFailurePresentation = {
 // its contribution's `presentation`; nothing here names one.
 // ---------------------------------------------------------------------------
 
-/** Who sent a turn-engine turn, as far as the chat can tell. */
-export type TurnEngineTurnOwner = {
-  /** The person viewing sent it. */
-  isViewer: boolean;
-  /** Their name, when the chat knows it. */
-  name: string | null;
-};
-
-/** What a turn engine is told about one of its failed turns. */
-export type TurnEngineFailureInput = {
-  /** The failure message's metadata, as the controller wrote it. */
-  metadata: Record<string, unknown>;
-  /** The failure's own text, which Details keeps. */
-  rawText: string;
-  /** The raw text's first line when it reads plainly (docs/Chat-Activity.md), else null. */
-  plainFirstLine: string | null;
-  /** Whether words read plainly, by the same rule. */
-  readsPlainly: (text: string) => boolean;
-  /** The status entry of the runtime that ran the turn, when the viewer has it. */
-  runtime: ControllerRuntimeStatusEntry | null;
-};
-
-/** How a turn engine's turns read in the chat. */
-export interface FrontendTurnEnginePresentation {
-  /**
-   * Whether the controller stamped this message as one of the engine's turns.
-   * A client's claim, or an `aiAccessMode` a client could record, never counts.
-   */
-  isControllerStamped(metadata: Record<string, unknown>): boolean;
-  /** The sentence the person who sent a failed turn reads. */
-  describeTurnFailure(failure: TurnEngineFailureInput): string;
-  /** What everyone else reads for a failed turn; `ownerName` is null when the chat does not know it. */
-  describeTeammateTurnFailure(ownerName: string | null): string;
-  /**
-   * The sentence for a send that claimed this engine and that the controller
-   * refused with `code`, or null when the engine does not word that code.
-   */
-  describeSendRefusal(refusal: { code: string; details: unknown }): string | null;
-  /** The sentence for a refused Steer into one of the engine's turns, or null. */
-  describeSteerRefusal(code: string): string | null;
-  /** The plain-text line under a reply's header; `owner` is null when the chat cannot tell who sent the turn. */
-  describeSpeaker(owner: TurnEngineTurnOwner | null): string;
-  /** The sender's action on a failed turn that puts its message back in the composer with this engine chosen. */
-  resendLabel: string;
-}
-
-declare module "../features/frontendFeatureModule" {
-  interface FrontendTurnEngineContribution {
-    /**
-     * How the engine's turns read in the chat. Declared here, beside the
-     * chat code that reads it, for as long as the contribution type itself
-     * does not name it.
-     */
-    presentation?: FrontendTurnEnginePresentation;
-  }
-}
+// The chat's names for the contribution's types, which its cards and lines use.
+export type { FrontendTurnEnginePresentation, TurnEngineFailureInput, TurnEngineTurnOwner };
 
 /** A failed turn-engine turn, as its card words it. */
 export type TurnEngineRunFailure = {
@@ -153,15 +106,16 @@ function aiAccessModeTurnEngine(record: Record<string, unknown> | null): string 
 
 /**
  * Whether a message belongs to a turn-engine turn: its own metadata or its
- * stored prompt's carries a claim (the sender's copy), or names an engine's
- * id as its `aiAccessMode` (the controller's stamp). A claim of any value
- * counts, so a message that claimed an engine this Studio does not know is
- * never sent again as an ordinary turn.
+ * stored prompt's carries a claim (the sender's copy), or names an engine
+ * other than the runtime's own as its `aiAccessMode` (the controller's
+ * stamp). A claim of any value and any such mode count, so a message of an
+ * engine this Studio does not know is never sent again as an ordinary turn,
+ * by hand or by itself. This fails safe: it never decides how a turn reads,
+ * which only an engine this Studio knows, and the controller's own stamp,
+ * do ({@link readControllerStampedTurnEngine}).
  */
 export function usesTurnEngine(metadata: unknown): boolean {
-  return promptMetadataRecords(metadata).some(
-    (record) => carriesTurnEngineClaim(record) || aiAccessModeTurnEngine(record) !== null,
-  );
+  return promptMetadataRecords(metadata).some((record) => messageUsesTurnEngine(record));
 }
 
 /**
@@ -178,6 +132,94 @@ export function readControllerStampedTurnEngine(
     return null;
   }
   return { engineId, presentation };
+}
+
+/**
+ * Whether a message shows its turn engine's line under its header (5.7): a
+ * reply the controller stamped as one of an engine's turns. A failed turn has
+ * no reply; its failure sentence names the engine itself.
+ */
+export function showsTurnEngineSpeakerLine(metadata: unknown): boolean {
+  return !hasFailedRunMetadata(metadata) && readControllerStampedTurnEngine(metadata) !== null;
+}
+
+/**
+ * What a turn reads from its send until its first step when a turn engine
+ * runs it (docs/Local-Engine-Turns.md 5.7), or null for any other turn. Its
+ * run says which engine runs it, by the controller's stamp; a run whose
+ * `aiAccessMode` carries no engine's stamp runs on none. Until the page has
+ * that run's metadata (a teammate's page has none while the turn runs), its
+ * prompt says it: by the controller's stamp, or by the claim on the sender's
+ * own copy. The engine words it for whoever views it, by the turn's `owner`
+ * ({@link turnEngineTurnOwner}); without one, it names nobody's computer.
+ */
+export function turnEngineStartingLine(turn: {
+  runMetadata?: unknown;
+  promptMetadata?: unknown;
+  owner?: TurnEngineTurnOwner | null;
+}): string | null {
+  const run = isRecord(turn.runMetadata) ? turn.runMetadata : null;
+  const stampedRun = readControllerStampedTurnEngine(run);
+  const presentation = stampedRun
+    ? stampedRun.presentation
+    : typeof run?.["aiAccessMode"] === "string"
+      ? null
+      : (turnEnginePresentation(readTurnEngineClaim(turn.promptMetadata)) ??
+        readControllerStampedTurnEngine(turn.promptMetadata)?.presentation ??
+        null);
+  return presentation?.describeStart(turn.owner ?? null) ?? null;
+}
+
+/** Who views the chat, as a turn engine's words for its turns need it. */
+export type TurnEngineViewer = {
+  currentUserId: string | null;
+  /** The name the chat shows for a person, when it knows one. */
+  nameOf?: (userId: string) => string | null | undefined;
+};
+
+/**
+ * Who sent a turn-engine turn, from the prompt that started it, as far as the
+ * chat can tell; null when that prompt is no turn-engine one or names nobody.
+ * A copy that still carries the claim is the viewer's own: the controller
+ * takes the claim from every send and never stores it, so only the page that
+ * sent the message holds one. Any other copy names its author, who is the
+ * viewer or someone else.
+ */
+export function turnEngineTurnOwner(
+  prompt: Pick<ChatMessage, "authorId" | "metadata"> | null | undefined,
+  viewer: TurnEngineViewer,
+): TurnEngineTurnOwner | null {
+  if (!prompt || !usesTurnEngine(prompt.metadata)) {
+    return null;
+  }
+  const senderId = typeof prompt.authorId === "string" ? prompt.authorId.trim() : "";
+  const name = senderId ? viewer.nameOf?.(senderId)?.trim() || null : null;
+  if (promptMetadataRecords(prompt.metadata).some((record) => carriesTurnEngineClaim(record))) {
+    return { isViewer: true, name };
+  }
+  if (!senderId) {
+    return null;
+  }
+  return { isViewer: Boolean(viewer.currentUserId) && senderId === viewer.currentUserId, name };
+}
+
+/**
+ * What the chat's typing row reads before its newest turn's first step when
+ * a turn engine runs that turn (5.7), or null: by that turn's run, or until
+ * the page has it, by its prompt ({@link resolveNewestTurnPrompt}), worded
+ * for whoever views it.
+ */
+export function newestTurnEngineStartingLine(chat: {
+  conversationMessages: readonly ChatMessage[];
+  run: { id: string; metadata?: unknown } | null | undefined;
+  viewer: TurnEngineViewer;
+}): string | null {
+  const prompt = resolveNewestTurnPrompt(chat.conversationMessages, chat.run?.id ?? null);
+  return turnEngineStartingLine({
+    runMetadata: chat.run?.metadata ?? null,
+    promptMetadata: prompt?.metadata ?? null,
+    owner: turnEngineTurnOwner(prompt, chat.viewer),
+  });
 }
 
 /** The sentence for a refused Steer into a turn-engine turn, or null when no engine words `code`. */
@@ -310,19 +352,22 @@ function readsPlainlyForChatActivity(text: string): boolean {
 }
 
 /**
- * A failed turn of a turn engine: the run's `aiAccessMode` is the engine's
- * id. Its engine words it, for its sender and for everyone else, before any
- * of the patterns below can read its text as the runtime's own engine's.
+ * A failed turn of a turn engine: the controller stamped its failure as one
+ * of the engine's turns. Its engine words it, for its sender and for everyone
+ * else, before any of the patterns below can read its text as the runtime's
+ * own engine's. An `aiAccessMode` alone is what any member could record on a
+ * message: such a message reads as any other failure, and still is never
+ * sent again ({@link usesTurnEngine}).
  */
 function turnEngineFailurePresentation(
   metadata: Record<string, unknown> | null,
   rawText: string,
 ): RunFailurePresentation | null {
-  const engineId = aiAccessModeTurnEngine(metadata);
-  const presentation = turnEnginePresentation(engineId);
-  if (!metadata || !engineId || !presentation) {
+  const stamped = readControllerStampedTurnEngine(metadata);
+  if (!metadata || !stamped) {
     return null;
   }
+  const { engineId, presentation } = stamped;
   const firstLine = failureFirstLine(rawText);
   const plainFirstLine =
     firstLine && readsPlainlyForChatActivity(firstLine) ? boundInlineFailureLine(firstLine) : null;
@@ -1229,23 +1274,49 @@ export function resolveRunFailureRetrySource(params: {
 }): ChatMessage | null {
   const { conversationMessages, failureMessage } = params;
   const { before } = locateRunFailureMessage(conversationMessages, failureMessage);
-  const end = Math.min(before, conversationMessages.length);
-  const isPrompt = (candidate: ChatMessage) =>
+  return findTurnPrompt(
+    conversationMessages,
+    Math.min(before, conversationMessages.length),
+    new Set(readRunFailureRunIds(failureMessage)),
+  );
+}
+
+/**
+ * The prompt of the chat's newest turn: the first one that names its run,
+ * when the page knows that run, else the newest prompt. A steer is never one.
+ */
+export function resolveNewestTurnPrompt(
+  conversationMessages: readonly ChatMessage[],
+  runId: string | null,
+): ChatMessage | null {
+  return findTurnPrompt(conversationMessages, conversationMessages.length, new Set(runId ? [runId] : []));
+}
+
+function isTurnPrompt(candidate: ChatMessage): boolean {
+  return (
     candidate.role === "user" &&
     candidate.content.trim().length > 0 &&
-    readSteerSendIntent(candidate) === null;
-  const failureRunIds = new Set(readRunFailureRunIds(failureMessage));
-  if (failureRunIds.size > 0) {
+    readSteerSendIntent(candidate) === null
+  );
+}
+
+/** The first prompt before `end` whose stored copy names one of `runIds`, else the nearest one before `end`. */
+function findTurnPrompt(
+  conversationMessages: readonly ChatMessage[],
+  end: number,
+  runIds: ReadonlySet<string>,
+): ChatMessage | null {
+  if (runIds.size > 0) {
     for (let index = 0; index < end; index += 1) {
       const candidate = conversationMessages[index];
-      if (isPrompt(candidate) && readPromptRunIds(candidate).some((id) => failureRunIds.has(id))) {
+      if (isTurnPrompt(candidate) && readPromptRunIds(candidate).some((id) => runIds.has(id))) {
         return candidate;
       }
     }
   }
   for (let index = end - 1; index >= 0; index -= 1) {
     const candidate = conversationMessages[index];
-    if (isPrompt(candidate)) {
+    if (isTurnPrompt(candidate)) {
       return candidate;
     }
   }

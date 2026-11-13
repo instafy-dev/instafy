@@ -15,8 +15,20 @@ const CONTROLLER_URL = "https://controller.example.test";
 const PROJECT_ID = "11111111-2222-4333-8444-555555555555";
 const RUNTIME_ID = "99999999-8888-4777-8666-555555555555";
 const CLAUDE = "/opt/homebrew/bin/claude";
+const NATIVE_CLAUDE = "/Users/sam/.local/bin/claude";
+const NOT_MADE =
+  "Error invoking remote method 'instafy:desktopExtensionInvoke': DesktopExtensionChangeNotMadeError: Instafy is still working on this computer, so that change was not made.";
 
-type DesktopStatus = { supported: boolean; found: boolean; consented: boolean; path?: string; problem?: string };
+type DesktopStatus = {
+  supported: boolean;
+  found: boolean;
+  consented: boolean;
+  path?: string;
+  problem?: string;
+  candidatePath?: string;
+  candidateProblem?: string;
+  shellSetting?: string;
+};
 
 const READY: ControllerRuntimeClaudeCode = { ready: true, reason: null, cli: "2.1.320", verified: true, planSignIn: true };
 
@@ -232,8 +244,251 @@ describe("Claude Code in Your AI", () => {
   it("says why Desktop won't use the program it has", async () => {
     desktopStatus = { supported: true, found: false, consented: false, path: CLAUDE, problem: "writable_by_others" };
     await render();
+    expect(text("credentials-claude-code-path")).toBe("Not found");
     expect(text("credentials-claude-code-status")).toBe(
       "Other accounts on this computer can change this file, so Instafy Desktop won't use it. Locate a copy only you can change.",
     );
+  });
+
+  // D26: Desktop checks a login-shell CLAUDE_CONFIG_DIR or NODE_EXTRA_CA_CERTS
+  // as runtime-agent does before every turn, and names the one it can't use.
+  it("names the login-shell setting Desktop can't use, and the copy itself is not blamed", async () => {
+    desktopStatus = {
+      supported: true,
+      found: false,
+      consented: false,
+      path: CLAUDE,
+      problem: "shell_setting_unusable",
+      shellSetting: "NODE_EXTRA_CA_CERTS",
+    };
+    await render();
+    // Desktop checks the settings only once the program passed: it was found.
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-status")).toBe(
+      "Your login shell sets NODE_EXTRA_CA_CERTS to something Instafy Desktop can't use. It must be the full path of a file that only you can change. Fix it, then choose Find.",
+    );
+    expect(button("credentials-claude-code-enable")?.disabled).toBe(true);
+
+    // Once it is on, a folder that changed after consent shows the same way.
+    desktopStatus = {
+      supported: true,
+      found: false,
+      consented: true,
+      path: CLAUDE,
+      problem: "shell_setting_unusable",
+      shellSetting: "CLAUDE_CONFIG_DIR",
+    };
+    await render();
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-status")).toBe(
+      "Your login shell sets CLAUDE_CONFIG_DIR to something Instafy Desktop can't use. It must be the full path of a folder that only you can change. Fix it, then choose Find.",
+    );
+
+    // A Desktop that names no setting still gets a sentence about settings.
+    desktopStatus = { supported: true, found: false, consented: false, path: CLAUDE, problem: "shell_setting_unusable" };
+    await render();
+    expect(text("credentials-claude-code-status")).toContain("CLAUDE_CONFIG_DIR or NODE_EXTRA_CA_CERTS");
+    expect(bannedWordIn(text("credentials-claude-code-row") ?? "")).toBeNull();
+  });
+
+  // docs/Local-Engine-Turns.md 4.1: while it is on, Find and Locate answer
+  // the path in use, with what they turned up beside it.
+  it("shows what Find turned up beside the copy in use, and uses it only once the person confirms it", async () => {
+    const on = { supported: true, found: true, consented: true, path: CLAUDE };
+    desktopStatus = on;
+    invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+      if (options.method === "status") return desktopStatus;
+      if (options.method === "detect") return { ...on, candidatePath: NATIVE_CLAUDE };
+      if (options.method === "enable") return { ...on, path: NATIVE_CLAUDE };
+      throw new Error("unexpected");
+    });
+    await render();
+    expect(text("credentials-claude-code-candidate")).toBeNull();
+    expect(button("credentials-claude-code-enable")).toBeNull();
+
+    await press("credentials-claude-code-detect");
+    // Turns keep the copy in use, and so does the row.
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-status")).toBe("Ready on this computer.");
+    expect(text("credentials-claude-code-candidate-path")).toBe(`Also found at ${NATIVE_CLAUDE}`);
+    expect(text("credentials-claude-code-candidate-status")).toBe("Choose Use for my messages to use it instead.");
+    expect(button("credentials-claude-code-disable")?.textContent).toBe("Turn off");
+    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
+
+    // Desktop's own consent dialog confirms it.
+    await press("credentials-claude-code-enable");
+    expect(invokeDesktopExtension).toHaveBeenCalledWith(expect.objectContaining({ method: "enable" }));
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${NATIVE_CLAUDE}`);
+    expect(text("credentials-claude-code-candidate")).toBeNull();
+    expect(button("credentials-claude-code-enable")).toBeNull();
+  });
+
+  // D26: a recorded NODE_EXTRA_CA_CERTS whose file went away after consent
+  // makes every turn refuse. Once the person fixes their login shell, Find
+  // reads new settings for the copy in use, and only Use for my messages,
+  // through Desktop's consent dialog, puts them in use (4.1). The answers are
+  // Desktop's own (packages/desktop-app/test/claude-code-desktop.test.mjs).
+  it("offers new login-shell settings Find read for the copy in use, once the recorded ones no longer work", async () => {
+    const on = { supported: true, found: true, consented: true, path: CLAUDE };
+    const stale = { ...on, found: false, problem: "shell_setting_unusable", shellSetting: "NODE_EXTRA_CA_CERTS" };
+    const renewed = { ...stale, candidatePath: CLAUDE };
+    desktopStatus = stale;
+    fetchRuntimeStatus.mockResolvedValue(statusAnswer({ ...READY, ready: false, reason: "binary_unsafe" }));
+    invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+      if (options.method === "status") return desktopStatus;
+      if (options.method === "detect") return renewed;
+      if (options.method === "enable") return on;
+      throw new Error("unexpected");
+    });
+    await render();
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-status")).toBe(
+      "Your login shell sets NODE_EXTRA_CA_CERTS to something Instafy Desktop can't use. It must be the full path of a file that only you can change. Fix it, then choose Find.",
+    );
+    expect(text("credentials-claude-code-candidate")).toBeNull();
+    expect(button("credentials-claude-code-enable")).toBeNull();
+
+    await press("credentials-claude-code-detect");
+    // Turns keep the recorded settings, and the row keeps the copy in use,
+    // with no second path: the new settings are for that same copy.
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-candidate-path")).toBeNull();
+    expect(text("credentials-claude-code-candidate-status")).toBe(
+      "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use for my messages to use them.",
+    );
+    expect(button("credentials-claude-code-disable")?.textContent).toBe("Turn off");
+    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
+    expect(button("credentials-claude-code-enable")?.disabled).toBe(false);
+    expect(bannedWordIn(text("credentials-claude-code-row") ?? "")).toBeNull();
+
+    // Desktop's own consent dialog confirms them, and the runtime it starts
+    // with the new grant is ready.
+    fetchRuntimeStatus.mockResolvedValue(statusAnswer(READY));
+    await press("credentials-claude-code-enable");
+    expect(invokeDesktopExtension).toHaveBeenCalledWith(
+      expect.objectContaining({ extensionId: "claude-code", method: "enable", controllerUrl: CONTROLLER_URL }),
+    );
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-status")).toBe("Ready on this computer.");
+    expect(text("credentials-claude-code-candidate")).toBeNull();
+    expect(button("credentials-claude-code-enable")).toBeNull();
+  });
+
+  it("keeps the copy in use when Find turns up nothing, or one Desktop won't use", async () => {
+    const on = { supported: true, found: true, consented: true, path: CLAUDE };
+    desktopStatus = on;
+    let found: DesktopStatus = { ...on, candidateProblem: "not_found" };
+    invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+      if (options.method === "status") return desktopStatus;
+      if (options.method === "detect") return found;
+      throw new Error("unexpected");
+    });
+    await render();
+    await press("credentials-claude-code-detect");
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-status")).toBe("Ready on this computer.");
+    expect(text("credentials-claude-code-candidate-path")).toBeNull();
+    expect(text("credentials-claude-code-candidate-status")).toBe(
+      "Find didn't turn up any other copy. Your messages keep using this one.",
+    );
+    expect(button("credentials-claude-code-enable")).toBeNull();
+
+    found = {
+      ...on,
+      candidatePath: NATIVE_CLAUDE,
+      candidateProblem: "shell_setting_unusable",
+      shellSetting: "CLAUDE_CONFIG_DIR",
+    };
+    await press("credentials-claude-code-detect");
+    expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-candidate-path")).toBe(`Also found at ${NATIVE_CLAUDE}`);
+    expect(text("credentials-claude-code-candidate-status")).toBe(
+      "Your login shell sets CLAUDE_CONFIG_DIR to something Instafy Desktop can't use. It must be the full path of a folder that only you can change. Fix it, then choose Find.",
+    );
+    expect(button("credentials-claude-code-enable")).toBeNull();
+
+    found = { ...on, candidatePath: NATIVE_CLAUDE, candidateProblem: "not_executable" };
+    await press("credentials-claude-code-detect");
+    expect(text("credentials-claude-code-candidate-status")).toBe(
+      "Instafy Desktop can't run the file at this path. Locate the claude program.",
+    );
+    expect(button("credentials-claude-code-enable")).toBeNull();
+  });
+
+  it("shows only Desktop's words for a change it didn't make, whatever its error's name", async () => {
+    desktopStatus = { supported: true, found: true, consented: false, path: CLAUDE };
+    invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+      if (options.method === "status") return desktopStatus;
+      throw new Error(NOT_MADE);
+    });
+    await render();
+    await press("credentials-claude-code-enable");
+    expect(text("credentials-claude-code-error")).toBe(
+      "Instafy is still working on this computer, so that change was not made.",
+    );
+  });
+
+  // Desktop puts a refused change back after the person chose Keep working. A
+  // status read that began before that (a focus while Desktop asked) must not
+  // show the change beside the words that say it wasn't made.
+  it("reads the status again after a refused change, so an older read never shows it as made", async () => {
+    const off = { supported: true, found: true, consented: false, path: CLAUDE };
+    desktopStatus = off;
+    let heldStatus = null as { resolve: (status: DesktopStatus) => void } | null;
+    let holdNextStatus = false;
+    let rejectEnable = null as ((error: Error) => void) | null;
+    invokeDesktopExtension.mockImplementation((options: { method: string }) => {
+      if (options.method === "status") {
+        if (holdNextStatus) {
+          holdNextStatus = false;
+          return new Promise<DesktopStatus>((resolve) => {
+            heldStatus = { resolve };
+          });
+        }
+        return Promise.resolve(desktopStatus);
+      }
+      if (options.method === "enable") {
+        // Desktop wrote the record, then shows its "still working" sheet.
+        desktopStatus = { ...off, consented: true };
+        return new Promise((_, reject) => {
+          rejectEnable = reject;
+        });
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+    await render();
+    const methods = () => invokeDesktopExtension.mock.calls.map(([request]) => request.method);
+
+    await press("credentials-claude-code-enable");
+    expect(methods()).toEqual(["status", "enable"]);
+    // The window gets focus while the sheet is open: that read sees the record.
+    holdNextStatus = true;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(heldStatus).not.toBeNull();
+
+    // Keep working: Desktop puts the store back and refuses the change. The
+    // row reads the status again.
+    desktopStatus = off;
+    await act(async () => {
+      rejectEnable?.(new Error(NOT_MADE));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(methods()).toEqual(["status", "enable", "status", "status"]);
+
+    // The read from before the refusal answers last, and changes nothing.
+    await act(async () => {
+      heldStatus?.resolve({ ...off, consented: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(text("credentials-claude-code-error")).toBe(
+      "Instafy is still working on this computer, so that change was not made.",
+    );
+    expect(text("credentials-claude-code-status")).toBe(
+      "Off. Choose Use for my messages to turn it on for this computer.",
+    );
+    expect(button("credentials-claude-code-disable")).toBeNull();
+    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
   });
 });

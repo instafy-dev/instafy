@@ -178,6 +178,55 @@ describe("useRunFailureRetryActions for a turn-engine turn", () => {
     expect(latest?.pendingRetryKey).toBeNull();
   });
 
+  // docs/Local-Engine-Turns.md 5.6: a teammate never reruns its sender's
+  // words as a turn of their own, also from a failure that reads as any other
+  // (one without the controller's stamp, or of an engine this Studio was not
+  // built with).
+  it("never sends a turn-engine turn again from a card that reads as any other failure", async () => {
+    const submit = vi.fn<Submit>(async () => true);
+    const unstamped = createMessage({
+      id: "failure-unstamped",
+      content: "The build script stopped halfway",
+      timestamp: Date.now() - 60_000 + 2,
+      messageType: "error",
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-lane", aiAccessMode: "claude-code" },
+    });
+    const otherEngine = createMessage({
+      ...unstamped,
+      id: "failure-other-engine",
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-x", aiAccessMode: "future-engine" },
+    });
+    // A failure whose own metadata says nothing, after a teammate's stamped prompt.
+    const afterTeammate = createMessage({
+      ...unstamped,
+      id: "failure-after-teammate",
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-y" },
+    });
+    for (const [messages, failed] of [
+      [[TEAMMATE_PROMPT], unstamped],
+      [[TEAMMATE_PROMPT], otherEngine],
+      [[TEAMMATE_PROMPT], afterTeammate],
+      [[LANE_PROMPT], afterTeammate],
+    ] as const) {
+      await render({ messages: [...messages, failed], submit });
+      expect(latest?.isTurnEngineTurn?.(failed), failed.id).toBe(true);
+      await act(async () => {
+        await latest?.requestRetry(failed);
+      });
+      expect(submit, failed.id).not.toHaveBeenCalled();
+    }
+
+    // Any other failure is still sent again from its card.
+    const ordinaryPrompt = createMessage({ ...LANE_PROMPT, id: "prompt-ordinary", metadata: null });
+    await render({ messages: [ordinaryPrompt, afterTeammate], submit });
+    expect(latest?.isTurnEngineTurn?.(afterTeammate)).toBe(false);
+    await act(async () => {
+      await latest?.requestRetry(afterTeammate);
+    });
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0]?.[0]).toMatchObject({ message: "Fix the failing login test" });
+  });
+
   it("tells who sent the turn: the viewer, or a teammate by the name the chat shows", async () => {
     const mine = laneFailure("failure-mine", "claude exited", 2);
     await render({ messages: [LANE_PROMPT, mine], submit: vi.fn<Submit>() });

@@ -5,6 +5,7 @@ import {
   isRunFailureRetrySuperseded,
   resolveRunFailurePresentation,
   resolveRunFailureRetrySource,
+  turnEngineTurnOwner,
   type TurnEngineTurnOwner,
   usesTurnEngine,
 } from "../../../conversations/runFailurePresentation";
@@ -224,6 +225,27 @@ export function useRunFailureRetryActions({
     [messages, queuedSends, retriedFailureIds],
   );
 
+  /**
+   * Whether a failure belongs to a turn-engine turn: its own metadata says
+   * so, or its prompt's does, by a claim or by an `aiAccessMode` of another
+   * engine than the runtime's own ({@link usesTurnEngine}). That holds also
+   * for an engine this Studio was not built with, and for a failure without
+   * the controller's stamp, which reads as any other failure.
+   */
+  const isTurnEngineTurn = useCallback(
+    (failureMessage: ChatMessage) => {
+      if (usesTurnEngine(failureMessage.metadata)) {
+        return true;
+      }
+      const promptMessage = resolveRunFailureRetrySource({
+        conversationMessages: messages,
+        failureMessage,
+      });
+      return promptMessage !== null && usesTurnEngine(promptMessage.metadata);
+    },
+    [messages],
+  );
+
   const requestRetry = useCallback(
     async (failureMessage: ChatMessage) => {
       // A second press before the pending state renders, or on a card whose
@@ -233,8 +255,9 @@ export function useRunFailureRetryActions({
       }
       // A turn-engine turn is one turn its sender started: a resend from its
       // card would go out without the engine, and the controller refuses a
-      // resend that claims it. Its card offers no Try again.
-      if (failedTurnEngineOf(failureMessage) !== null) {
+      // resend that claims it. Its card offers no Try again, and a teammate
+      // never reruns its sender's words as a turn of their own (5.6).
+      if (usesTurnEngine(failureMessage.metadata)) {
         return;
       }
       const promptMessage = resolveRunFailureRetrySource({
@@ -243,6 +266,9 @@ export function useRunFailureRetryActions({
       });
       if (!promptMessage) {
         showStatus("Couldn't find the original message to send again.", "info", 4000);
+        return;
+      }
+      if (usesTurnEngine(promptMessage.metadata)) {
         return;
       }
       // A continuation of a browser card shows a one-line notice in place of
@@ -297,29 +323,21 @@ export function useRunFailureRetryActions({
   );
 
   /**
-   * Who sent the turn-engine turn a message belongs to: the author of the
+   * Who sent the turn-engine turn a message belongs to: the sender of the
    * prompt that started it, when that prompt is a turn-engine one (the
-   * sender's own copy, or the controller's stamped one). Null when the chat
-   * cannot tell, which every card and line words for everyone else.
+   * sender's own copy, or the controller's stamped one), by
+   * {@link turnEngineTurnOwner}. Null when the chat cannot tell, which every
+   * card and line words for everyone else.
    */
   const turnEngineOwnerOf = useCallback(
-    (message: Pick<ChatMessage, "id" | "timestamp" | "metadata">): TurnEngineTurnOwner | null => {
-      const promptMessage = resolveRunFailureRetrySource({
-        conversationMessages: messages,
-        failureMessage: message,
-      });
-      if (!promptMessage || !usesTurnEngine(promptMessage.metadata)) {
-        return null;
-      }
-      const senderId = typeof promptMessage.authorId === "string" ? promptMessage.authorId.trim() : "";
-      if (!senderId) {
-        return null;
-      }
-      return {
-        isViewer: Boolean(currentUserId) && senderId === currentUserId,
-        name: humanLabelByUserId?.get(senderId)?.trim() || null,
-      };
-    },
+    (message: Pick<ChatMessage, "id" | "timestamp" | "metadata">): TurnEngineTurnOwner | null =>
+      turnEngineTurnOwner(
+        resolveRunFailureRetrySource({
+          conversationMessages: messages,
+          failureMessage: message,
+        }),
+        { currentUserId, nameOf: (userId) => humanLabelByUserId?.get(userId) },
+      ),
     [currentUserId, humanLabelByUserId, messages],
   );
 
@@ -378,12 +396,14 @@ export function useRunFailureRetryActions({
       onConnectAi,
       turnEngineOwnerOf,
       resendWithTurnEngine,
+      isTurnEngineTurn,
     }),
     [
       autoRetryingKey,
       cancelScheduledAutoRetry,
       isRetrySuperseded,
       isRetryWithdrawn,
+      isTurnEngineTurn,
       onConnectAi,
       pendingRetryKey,
       requestRetry,

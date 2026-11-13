@@ -336,6 +336,11 @@ export function TimelineEntry({
       ) : null}
       {usage && (!isPlanMessage || planExpanded) ? (
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          {usage.model ? (
+            <Badge size="xs" className="max-w-full break-all text-slate-600" data-testid="timeline-usage-model">
+              Model {usage.model}
+            </Badge>
+          ) : null}
           <Badge size="xs" className="text-slate-600">
             Input {usage.inputTokens}
           </Badge>

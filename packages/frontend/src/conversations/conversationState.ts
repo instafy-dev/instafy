@@ -119,6 +119,7 @@ export type ConversationsAction =
   | { type: "REMOVE_AGENT_HANDLE"; id: string; handle: string }
   | { type: "APPEND"; id: string; messages: ChatMessage[] }
   | { type: "REPLACE"; id: string; messages: ChatMessage[] }
+  | { type: "REMOVE_UNSENT_MESSAGE"; id: string; clientMessageId: string }
   | {
       type: "UPDATE_MESSAGE";
       conversationId: string;
@@ -658,6 +659,30 @@ export function conversationsReducer(
             : conversation,
         ),
       };
+    }
+    case "REMOVE_UNSENT_MESSAGE": {
+      // The person's own message the controller refused to take: it was
+      // never recorded, so only this page's copy of it goes.
+      let removed = false;
+      const conversations = state.conversations.map((conversation) => {
+        if (conversation.localId !== action.id) {
+          return conversation;
+        }
+        const nextMessages = conversation.messages.filter(
+          (message) =>
+            message.role !== "user" || resolveAppendClientMessageId(message) !== action.clientMessageId,
+        );
+        if (nextMessages.length === conversation.messages.length) {
+          return conversation;
+        }
+        removed = true;
+        return {
+          ...conversation,
+          messages: nextMessages,
+          runtimePreference: deriveRuntimePreferenceFromMessages(nextMessages),
+        };
+      });
+      return removed ? { ...state, conversations } : state;
     }
     case "UPDATE_MESSAGE": {
       return {

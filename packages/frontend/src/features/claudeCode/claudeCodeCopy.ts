@@ -1,5 +1,5 @@
 import type { ControllerRuntimeClaudeCodeNotReadyReason } from "../../services/runtimeController/runtimes";
-import type { ClaudeCodeDesktopProblem } from "./claudeCodeDesktop";
+import type { ClaudeCodeDesktopProblem, ClaudeCodeShellSetting } from "./claudeCodeDesktop";
 
 /**
  * Every sentence the composer shows for Claude Code turns
@@ -27,8 +27,10 @@ export const CLAUDE_CODE_COPY = {
   notReady: {
     binary_missing:
       "Instafy Desktop can't find Claude Code on this computer. Set it up again in Your AI.",
+    // The runtime refuses the copy, or a setting from the login shell that
+    // Desktop granted with it (D26): it can't tell the person which.
     binary_unsafe:
-      "Instafy Desktop won't start this copy of Claude Code because other accounts on this computer can change it. Set it up again in Your AI.",
+      "Instafy Desktop won't start this copy of Claude Code because other accounts on this computer can change it, or a setting from your login shell (CLAUDE_CONFIG_DIR or NODE_EXTRA_CA_CERTS) points somewhere it can't use. Set it up again in Your AI.",
     probe_failed: "This version of Claude Code can't take turns from Instafy. Update Claude Code.",
     unsupported_version:
       "This version of Claude Code can't take turns from Instafy. Update Claude Code.",
@@ -75,7 +77,7 @@ export const CLAUDE_CODE_COPY = {
     notReady: {
       binary_missing: "Instafy Desktop can't find Claude Code at this path. Find it again, or Locate it.",
       binary_unsafe:
-        "Other accounts on this computer can change this copy of Claude Code, so Instafy Desktop won't start it. Locate a copy only you can change.",
+        "Other accounts on this computer can change this copy of Claude Code, or a setting from your login shell (CLAUDE_CONFIG_DIR or NODE_EXTRA_CA_CERTS) points somewhere it can't use, so Instafy Desktop won't start it. Locate a copy only you can change, or fix that setting, then choose Find.",
       probe_failed: "This version of Claude Code can't take turns from Instafy. Update Claude Code.",
       unsupported_version: "This version of Claude Code can't take turns from Instafy. Update Claude Code.",
       bare_default:
@@ -94,7 +96,29 @@ export const CLAUDE_CODE_COPY = {
         "Other accounts on this computer can change this file, so Instafy Desktop won't use it. Locate a copy only you can change.",
       inside_instafy_folder:
         "This file is inside a folder Instafy uses, so Instafy Desktop won't use it. Locate the claude program you installed.",
+      // When Desktop does not name the setting; see claudeCodeDesktopProblemSentence.
+      shell_setting_unusable:
+        "Your login shell sets CLAUDE_CONFIG_DIR or NODE_EXTRA_CA_CERTS to something Instafy Desktop can't use. It must be the full path of a folder or file that only you can change. Fix it, then choose Find.",
     } satisfies Record<ClaudeCodeDesktopProblem, string>,
+    /** A login-shell setting Desktop can't use, by its name (D26). */
+    shellSettings: {
+      CLAUDE_CONFIG_DIR:
+        "Your login shell sets CLAUDE_CONFIG_DIR to something Instafy Desktop can't use. It must be the full path of a folder that only you can change. Fix it, then choose Find.",
+      NODE_EXTRA_CA_CERTS:
+        "Your login shell sets NODE_EXTRA_CA_CERTS to something Instafy Desktop can't use. It must be the full path of a file that only you can change. Fix it, then choose Find.",
+    } satisfies Record<ClaudeCodeShellSetting, string>,
+    /** While it is on: another copy Find or Locate turned up, which turns don't use yet. */
+    candidateFoundAt: "Also found at",
+    candidateUse: "Choose Use for my messages to use it instead.",
+    /**
+     * While it is on: Find read login-shell settings for the copy in use that
+     * Instafy Desktop can use in place of the ones it has, which it no longer
+     * can (D26). Turns don't use them yet.
+     */
+    candidateRenewed:
+      "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use for my messages to use them.",
+    /** While it is on: Find turned up nothing, and the copy in use stays. */
+    candidateNotFound: "Find didn't turn up any other copy. Your messages keep using this one.",
     actionFailed: "Instafy Desktop couldn't do that. Try again.",
     /** The one-time note once it is on (5.3). */
     firstUse: "Sign in to Claude Code on this computer first: run claude in a terminal once.",
@@ -112,4 +136,18 @@ export function claudeCodeNotReadySentence(
 /** The plan or sign-in line (5.4). */
 export function claudeCodeSignInLine(planSignIn: boolean): string {
   return planSignIn ? CLAUDE_CODE_COPY.planLine : CLAUDE_CODE_COPY.signInLine;
+}
+
+/**
+ * Why Desktop won't use a copy of Claude Code, in words: for a login-shell
+ * setting it can't use, the setting by name when Desktop named it.
+ */
+export function claudeCodeDesktopProblemSentence(
+  problem: ClaudeCodeDesktopProblem,
+  shellSetting: ClaudeCodeShellSetting | null,
+): string {
+  if (problem === "shell_setting_unusable" && shellSetting) {
+    return CLAUDE_CODE_COPY.yourAi.shellSettings[shellSetting];
+  }
+  return CLAUDE_CODE_COPY.yourAi.problems[problem];
 }

@@ -102,6 +102,8 @@ interface ConversationsContextValue {
   removeConversationAgentHandle: (conversationId: string, handle: string) => void;
   appendMessages: (conversationId: string, messages: ChatMessage[]) => void;
   replaceMessages: (conversationId: string, messages: ChatMessage[]) => void;
+  /** Takes the person's own message the controller refused to take, which it never recorded, out of the chat. */
+  removeUnsentMessage: (conversationId: string, clientMessageId: string) => void;
   updateMessage: (
     conversationId: string,
     messageId: string,
@@ -409,6 +411,10 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
     dispatch({ type: "REPLACE", id: conversationId, messages });
   }, []);
 
+  const removeUnsentMessage = useCallback((conversationId: string, clientMessageId: string) => {
+    dispatch({ type: "REMOVE_UNSENT_MESSAGE", id: conversationId, clientMessageId });
+  }, []);
+
   const updateMessage = useCallback(
     (conversationId: string, messageId: string, updater: (message: ChatMessage) => ChatMessage) => {
       dispatch({ type: "UPDATE_MESSAGE", conversationId, messageId, updater });
@@ -529,6 +535,7 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
       removeConversationAgentHandle,
       appendMessages,
       replaceMessages,
+      removeUnsentMessage,
       updateMessage,
       setConversationControllerId,
       setConversationTitle,
@@ -557,6 +564,7 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
       removeConversationAgentHandle,
       appendMessages,
       replaceMessages,
+      removeUnsentMessage,
       updateMessage,
       setConversationControllerId,
       setConversationTitle,

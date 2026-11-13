@@ -112,6 +112,16 @@ describe("useConversationAutoTitle and turn-engine turns", () => {
     expect(requestTitleMock).toHaveBeenCalledWith({ projectId: PROJECT_ID, message: "Plan the spring launch" });
   });
 
+  // A Studio built without an engine's module (the hosted one before it
+  // lists it, or a tab opened before the deploy) still never sends that
+  // engine's messages to a model for a title.
+  it("never seeds a title with a message of an engine this Studio was not built with", async () => {
+    await renderAndSettle([
+      buildConversation([userMessage("Fix the failing login test", 0, { aiAccessMode: "future-engine" })]),
+    ]);
+    expect(requestTitleMock).not.toHaveBeenCalled();
+  });
+
   it("still seeds a title with any other message", async () => {
     await renderAndSettle([
       buildConversation([userMessage("Plan the summer launch", 0, { aiAccessMode: "managed" })]),

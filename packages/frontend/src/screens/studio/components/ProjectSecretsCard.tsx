@@ -49,7 +49,7 @@ export const REFUSED_SECRET_NOTICE = "Instafy no longer stores Claude sign-ins; 
  * stays listed, with a notice to remove it, instead of quietly not working.
  */
 function isRefusedSecret(secret: ControllerProjectSecret): boolean {
-  return (secret as ControllerProjectSecret & { refused?: unknown }).refused === true;
+  return secret.refused === true;
 }
 
 function normalizeAgentHandle(handle: string): string {

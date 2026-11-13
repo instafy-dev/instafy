@@ -14,6 +14,18 @@ export interface ControllerProjectSecret {
   revokedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * True only for a secret the controller's credential guard refuses: its
+   * name is reserved, or its value is sign-in material the guard keeps out.
+   * It is never delivered, and Secrets asks for it to be removed. Absent for
+   * every other secret.
+   */
+  refused?: boolean;
+}
+
+/** The controller's mark on a secret its credential guard refuses, as the listing and an update carry it. */
+function refusedMark(record: Record<string, unknown>): { refused?: boolean } {
+  return record.refused === true ? { refused: true } : {};
 }
 
 export interface ListProjectSecretsResult {
@@ -92,6 +104,7 @@ export async function listProjectSecrets(
           revokedAt: typeof record.revokedAt === "string" ? record.revokedAt : null,
           createdAt: typeof record.createdAt === "string" ? record.createdAt : "",
           updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+          ...refusedMark(record),
         };
       })
       .filter((entry): entry is ControllerProjectSecret => Boolean(entry));
@@ -260,6 +273,7 @@ export async function updateProjectSecret(
           revokedAt: typeof record.revokedAt === "string" ? record.revokedAt : null,
           createdAt: typeof record.createdAt === "string" ? record.createdAt : "",
           updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+          ...refusedMark(record),
         } satisfies ControllerProjectSecret)
       : null;
 

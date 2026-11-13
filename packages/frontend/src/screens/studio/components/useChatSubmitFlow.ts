@@ -1009,8 +1009,10 @@ export function useChatSubmitFlow({
       automatic,
     });
     if (!sent) {
-      // An attachment upload failed and the draft is back in the composer: it
-      // keeps the browser page or new-page launch it was aimed at.
+      // An attachment upload failed, or the controller refused a send that
+      // claimed a turn engine, and the draft is back in the composer: it
+      // keeps the browser page or new-page launch it was aimed at, and the
+      // engine stays chosen for it.
       return false;
     }
     consumeBrowserComposerTarget();

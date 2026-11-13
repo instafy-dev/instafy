@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FrontendTurnEngineYourAiRowProps } from "../CredentialsSettingsCard";
+import type { FrontendTurnEngineYourAiRowProps } from "../../../../features/frontendFeatureModule";
 
 const mocks = vi.hoisted(() => ({
   // One object, as the real provider keeps it: the card's loads follow its identity.

@@ -3,9 +3,9 @@ import { Laptop } from "iconoir-react";
 import { Button } from "../../components/Button";
 import { EntityRow } from "../../components/EntityRow";
 import { Text } from "../../components/Text";
-import type { FrontendTurnEngineYourAiRowProps } from "../../screens/studio/components/CredentialsSettingsCard";
+import type { FrontendTurnEngineYourAiRowProps } from "../frontendFeatureModule";
 import type { ControllerRuntimeClaudeCode } from "../../services/runtimeController/runtimes";
-import { CLAUDE_CODE_COPY, claudeCodeSignInLine } from "./claudeCodeCopy";
+import { CLAUDE_CODE_COPY, claudeCodeDesktopProblemSentence, claudeCodeSignInLine } from "./claudeCodeCopy";
 import {
   ClaudeCodeDesktopActionError,
   claudeCodeDesktopHostAvailable,
@@ -72,6 +72,67 @@ function readinessSentence(readings: Readings): string {
     return COPY.ready;
   }
   return capability.reason ? COPY.notReady[capability.reason] : COPY.notReadyYet;
+}
+
+/** Why Desktop won't use the copy in use, in words, or null. */
+function inUseProblemSentence(desktop: ClaudeCodeDesktopStatus): string | null {
+  if (!desktop.problem) {
+    return null;
+  }
+  // Desktop names the login-shell setting of the copy in use when its problem is one.
+  const shellSetting = desktop.problem === "shell_setting_unusable" ? desktop.shellSetting ?? null : null;
+  return claudeCodeDesktopProblemSentence(desktop.problem, shellSetting);
+}
+
+/**
+ * Where the row says Claude Code is: the copy Desktop found or uses, also
+ * when only a login-shell setting with it is unusable. Desktop checks those
+ * settings only once the program itself passed (4.1, D26), so that copy was
+ * found. Null for anything else.
+ */
+function foundPath(desktop: ClaudeCodeDesktopStatus): string | null {
+  if (!desktop.path) {
+    return null;
+  }
+  return desktop.found || desktop.problem === "shell_setting_unusable" ? desktop.path : null;
+}
+
+/**
+ * While it is on: what the last Find or Locate turned up beside the copy in
+ * use, which turns keep using until Use for my messages confirms another one,
+ * or new login-shell settings for this one (docs/Local-Engine-Turns.md 4.1).
+ * Null when it turned up nothing else.
+ */
+function candidateReadings(desktop: ClaudeCodeDesktopStatus): {
+  path: string | null;
+  sentence: string;
+  usable: boolean;
+} | null {
+  if (!desktop.consented) {
+    return null;
+  }
+  // Desktop offers the copy in use itself, with no problem, when Find read
+  // login-shell settings for it that Desktop can use in place of recorded ones
+  // it no longer can (D26). Use for my messages confirms those, as it would
+  // another copy.
+  const renewsInUse = Boolean(desktop.candidatePath) && desktop.candidatePath === desktop.path;
+  const path = desktop.candidatePath && !renewsInUse ? desktop.candidatePath : null;
+  const problem = desktop.candidateProblem ?? null;
+  if (!problem) {
+    if (path) {
+      return { path, sentence: COPY.candidateUse, usable: true };
+    }
+    return renewsInUse ? { path: null, sentence: COPY.candidateRenewed, usable: true } : null;
+  }
+  if (problem === "not_found") {
+    return { path: null, sentence: COPY.candidateNotFound, usable: false };
+  }
+  // Desktop names a login-shell setting for the candidate only when the copy in use has none of its own.
+  const shellSetting =
+    problem === "shell_setting_unusable" && desktop.problem !== "shell_setting_unusable"
+      ? desktop.shellSetting ?? null
+      : null;
+  return { path, sentence: claudeCodeDesktopProblemSentence(problem, shellSetting), usable: false };
 }
 
 /**
@@ -163,6 +224,10 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
       } catch (error) {
         const words = error instanceof ClaudeCodeDesktopActionError ? error.message : "";
         setActionError(words || COPY.actionFailed);
+        // A refused change may have been put back after another read began
+        // (a focus while Desktop asked, say): read the status again, so the
+        // row never shows that change beside the words that say it wasn't made.
+        void refresh();
       } finally {
         setPendingAction(null);
       }
@@ -175,7 +240,9 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
   }
   const { desktop, capability } = readings;
   const busy = pendingAction !== null;
-  const problem = desktop.problem ? COPY.problems[desktop.problem] : null;
+  const path = foundPath(desktop);
+  const problem = inUseProblemSentence(desktop);
+  const candidate = candidateReadings(desktop);
   const showFirstUseNote = desktop.consented && !firstUseNoteRead;
   const actionButton = (
     action: ClaudeCodeDesktopAction,
@@ -214,9 +281,7 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
         }
         title={COPY.title}
         subtitle={
-          <span data-testid="credentials-claude-code-path">
-            {desktop.found && desktop.path ? `${COPY.foundAt} ${desktop.path}` : COPY.notFound}
-          </span>
+          <span data-testid="credentials-claude-code-path">{path ? `${COPY.foundAt} ${path}` : COPY.notFound}</span>
         }
         detail={
           <div className="space-y-1.5">
@@ -230,6 +295,24 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
               <Text as="div" variant="caption" tone="muted">
                 {COPY.on}
               </Text>
+            ) : null}
+            {candidate ? (
+              <div data-testid="credentials-claude-code-candidate" className="space-y-0.5">
+                {candidate.path ? (
+                  <Text
+                    as="div"
+                    variant="caption"
+                    tone="secondary"
+                    className="break-all"
+                    data-testid="credentials-claude-code-candidate-path"
+                  >
+                    {`${COPY.candidateFoundAt} ${candidate.path}`}
+                  </Text>
+                ) : null}
+                <Text as="div" variant="caption" tone="muted" data-testid="credentials-claude-code-candidate-status">
+                  {candidate.sentence}
+                </Text>
+              </div>
             ) : null}
             {actionError ? (
               <Text as="div" variant="caption" tone="danger" role="alert" data-testid="credentials-claude-code-error">
@@ -261,6 +344,10 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
                 ? actionButton("disable", COPY.disable, { variant: "secondary" })
                 : // Desktop's consent dialog names the program it found or was shown.
                   actionButton("enable", COPY.enable, { variant: "secondary", unavailable: !desktop.found })}
+              {/* While it is on, another copy Find or Locate turned up, or new
+                  login-shell settings Find read for the copy in use, are used
+                  only once the person confirms them in Desktop's consent dialog. */}
+              {desktop.consented && candidate?.usable ? actionButton("enable", COPY.enable, { variant: "secondary" }) : null}
               {actionButton("detect", COPY.find)}
               {actionButton("locate", COPY.locate)}
             </div>

@@ -1,7 +1,19 @@
 import { Capacitor } from "@capacitor/core";
 import { useCallback, useRef, type MutableRefObject } from "react";
+import { isTurnEngineSendRefusedError } from "../../../conversations/turnEngineSendRefusal";
 import type { SubmitConversationOptions } from "../../../conversations/useConversation";
 import { isChatAttachmentUploadError } from "../../../lib/chatAttachments";
+
+/**
+ * The composer's text once `draft` goes back into it: above whatever the
+ * person typed since, or null when the composer holds that draft already.
+ */
+export function composerTextWithDraftRestored(draft: string, current: string): string | null {
+  if (current.trim() === draft.trim()) {
+    return null;
+  }
+  return current.trim() ? `${draft}\n\n${current}` : draft;
+}
 
 export type ChatSubmitDispatchPayload = {
   message: string;
@@ -62,9 +74,10 @@ export function useChatSubmitDispatch({
   const activeConversationIdRef = useRef(activeConversationId);
   activeConversationIdRef.current = activeConversationId;
 
-  // An attachment upload failed, so nothing was sent: the draft goes back
-  // into the composer it came from. Text the person has typed since is kept
-  // below it, and the staged attachments were never cleared.
+  // Nothing was sent (an attachment upload failed, or the controller refused
+  // a send that claimed a turn engine): the draft goes back into the composer
+  // it came from. Text the person has typed since is kept below it, and the
+  // staged attachments were never cleared.
   const restoreUnsentDraft = useCallback(
     (conversationId: string, draft: string, editorState: string | null) => {
       if (activeConversationIdRef.current !== conversationId) {
@@ -72,10 +85,10 @@ export function useChatSubmitDispatch({
         return;
       }
       const current = latestInputValueRef.current ?? "";
-      if (current.trim() === draft.trim()) {
+      const restored = composerTextWithDraftRestored(draft, current);
+      if (restored === null) {
         return;
       }
-      const restored = current.trim() ? `${draft}\n\n${current}` : draft;
       latestInputValueRef.current = restored;
       onInputChange(conversationId, restored, current.trim() ? null : editorState);
     },
@@ -113,8 +126,9 @@ export function useChatSubmitDispatch({
 
   /**
    * Sends one message. Resolves true once it went out, and false when an
-   * attachment upload failed: then nothing was sent, the draft is back in its
-   * composer and the staged images are still there.
+   * attachment upload failed or the controller refused a send that claimed a
+   * turn engine: then nothing was sent, the draft is back in its composer and
+   * the staged images are still there.
    */
   const performSubmit = useCallback(
     async (payload: ChatSubmitDispatchPayload): Promise<boolean> => {
@@ -156,7 +170,7 @@ export function useChatSubmitDispatch({
           });
         } catch (error) {
           // The submit flow has already said why in plain copy.
-          if (!isChatAttachmentUploadError(error)) {
+          if (!isChatAttachmentUploadError(error) && !isTurnEngineSendRefusedError(error)) {
             throw error;
           }
           if (touchComposer && activeConversationId) {

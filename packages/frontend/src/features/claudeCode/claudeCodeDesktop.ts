@@ -11,15 +11,33 @@ export interface ClaudeCodeDesktopStatus {
   /** True only where Desktop offers Claude Code turns (macOS in v1). */
   supported: boolean;
   found: boolean;
-  /** The binary Desktop found; shown only on this computer and never sent anywhere. */
+  /**
+   * While it is on, the binary its turns use; otherwise the one Find or
+   * Locate turned up. Shown only on this computer and never sent anywhere.
+   */
   path: string | null;
   /** This Instafy account turned Claude Code on for this computer. */
   consented: boolean;
   /** Why Desktop won't use the path it has (DA/claudeCode/validate.ts), or null. */
   problem?: ClaudeCodeDesktopProblem | null;
+  /**
+   * While it is on: another binary Find or Locate turned up, or the binary in
+   * use itself (equal to `path`, with no `candidateProblem`) when Find read
+   * login-shell values for it that Desktop can use in place of recorded ones
+   * it no longer can (D26). Turns keep the binary and values in use until Use
+   * for my messages confirms this one.
+   */
+  candidatePath?: string | null;
+  /** While it is on: why Desktop won't use `candidatePath`, or that Find found nothing. */
+  candidateProblem?: ClaudeCodeDesktopProblem | null;
+  /**
+   * The login-shell setting a `shell_setting_unusable` problem is about:
+   * `problem`'s when it is one, otherwise `candidateProblem`'s. Never its value.
+   */
+  shellSetting?: ClaudeCodeShellSetting | null;
 }
 
-/** Why Desktop won't use a `claude` it found or was shown (4.1). */
+/** Why Desktop won't use a `claude` it found or was shown, or the login-shell values with it (4.1, D26). */
 export type ClaudeCodeDesktopProblem =
   | "not_found"
   | "relative_path"
@@ -29,7 +47,11 @@ export type ClaudeCodeDesktopProblem =
   | "foreign_owner"
   | "writable_by_others"
   | "inside_instafy_folder"
-  | "too_many_links";
+  | "too_many_links"
+  | "shell_setting_unusable";
+
+/** The login-shell settings that name a place on disk, which Desktop checks as runtime-agent does (D26). */
+export type ClaudeCodeShellSetting = "CLAUDE_CONFIG_DIR" | "NODE_EXTRA_CA_CERTS";
 
 const DESKTOP_PROBLEMS: ReadonlySet<string> = new Set<ClaudeCodeDesktopProblem>([
   "not_found",
@@ -41,11 +63,31 @@ const DESKTOP_PROBLEMS: ReadonlySet<string> = new Set<ClaudeCodeDesktopProblem>(
   "writable_by_others",
   "inside_instafy_folder",
   "too_many_links",
+  "shell_setting_unusable",
+]);
+
+const SHELL_SETTINGS: ReadonlySet<string> = new Set<ClaudeCodeShellSetting>([
+  "CLAUDE_CONFIG_DIR",
+  "NODE_EXTRA_CA_CERTS",
 ]);
 
 const MAX_DESKTOP_PATH_LENGTH = 4096;
 
-/** The module's `status` answer, or null for anything but its exact shape. */
+function desktopPath(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_DESKTOP_PATH_LENGTH
+    ? value
+    : null;
+}
+
+function desktopProblem(value: unknown): ClaudeCodeDesktopProblem | null {
+  return typeof value === "string" && DESKTOP_PROBLEMS.has(value) ? (value as ClaudeCodeDesktopProblem) : null;
+}
+
+/**
+ * The module's answer, or null for anything but its shape. The optional
+ * fields a Desktop adds are read when they hold what they should and left
+ * out otherwise, so an older Desktop, which sends none of them, still works.
+ */
 export function parseClaudeCodeDesktopStatus(value: unknown): ClaudeCodeDesktopStatus | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -58,22 +100,22 @@ export function parseClaudeCodeDesktopStatus(value: unknown): ClaudeCodeDesktopS
   ) {
     return null;
   }
-  const path =
-    typeof record.path === "string" &&
-    record.path.length > 0 &&
-    record.path.length <= MAX_DESKTOP_PATH_LENGTH
-      ? record.path
-      : null;
-  const problem =
-    typeof record.problem === "string" && DESKTOP_PROBLEMS.has(record.problem)
-      ? (record.problem as ClaudeCodeDesktopProblem)
+  const problem = desktopProblem(record.problem);
+  const candidatePath = desktopPath(record.candidatePath);
+  const candidateProblem = desktopProblem(record.candidateProblem);
+  const shellSetting =
+    typeof record.shellSetting === "string" && SHELL_SETTINGS.has(record.shellSetting)
+      ? (record.shellSetting as ClaudeCodeShellSetting)
       : null;
   return {
     supported: record.supported,
     found: record.found,
-    path,
+    path: desktopPath(record.path),
     consented: record.consented,
     ...(problem ? { problem } : {}),
+    ...(candidatePath ? { candidatePath } : {}),
+    ...(candidateProblem ? { candidateProblem } : {}),
+    ...(shellSetting ? { shellSetting } : {}),
   };
 }
 
@@ -81,9 +123,12 @@ function desktopBridge() {
   return typeof window === "undefined" ? undefined : window.instafyDesktop;
 }
 
-// A Desktop that refused once (one without the module refuses every time)
-// is not asked again until the page loads again, so its main process does
-// not log a refusal on every focus.
+// A Desktop that refused a `status` read once (one without the module
+// refuses every time) is not asked for it again until the page loads again,
+// so its main process does not log a refusal on every focus. Only `status`
+// sets this or reads it: an action Desktop refuses is the person's to see
+// ("Find the claude program on this computer first."), never a sign that the
+// module is missing, and an action Desktop answers clears it.
 let desktopModuleRefused = false;
 
 export function forgetClaudeCodeDesktopRefusalForTests(): void {
@@ -110,7 +155,7 @@ export async function readClaudeCodeDesktopStatus(
   if (typeof bridge?.invokeDesktopExtension !== "function" || desktopModuleRefused) {
     return null;
   }
-  const request: InstafyDesktopExtensionInvokeOptions & { controllerUrl?: string } = {
+  const request: InstafyDesktopExtensionInvokeOptions = {
     extensionId: CLAUDE_CODE_DESKTOP_EXTENSION_ID,
     method: "status",
     ...(controllerUrl ? { controllerUrl } : {}),
@@ -134,9 +179,11 @@ export class ClaudeCodeDesktopActionError extends Error {
   }
 }
 
-// Electron wraps a refusal from the main process: "Error invoking remote
-// method 'instafy:desktopExtensionInvoke': Error: <Desktop's own words>".
-const ELECTRON_INVOKE_ERROR_PREFIX = /^Error invoking remote method '[^']*':\s*(?:Error:\s*)?/u;
+// Electron wraps a refusal from the main process in the error's
+// `toString()`: "Error invoking remote method 'instafy:desktopExtensionInvoke':
+// Error: <Desktop's own words>", where "Error" is the error's name, which a
+// Desktop error class may have set to its own ("...: SomethingError: ...").
+const ELECTRON_INVOKE_ERROR_PREFIX = /^Error invoking remote method '[^']*':\s*(?:[A-Za-z]*Error:\s*)?/u;
 const MAX_DESKTOP_ERROR_LENGTH = 240;
 
 function desktopActionErrorMessage(error: unknown): string {
@@ -159,7 +206,7 @@ export async function invokeClaudeCodeDesktopAction(
   if (typeof bridge?.invokeDesktopExtension !== "function") {
     throw new ClaudeCodeDesktopActionError("");
   }
-  const request: InstafyDesktopExtensionInvokeOptions & { controllerUrl?: string } = {
+  const request: InstafyDesktopExtensionInvokeOptions = {
     extensionId: CLAUDE_CODE_DESKTOP_EXTENSION_ID,
     method: action,
     ...(controllerUrl ? { controllerUrl } : {}),

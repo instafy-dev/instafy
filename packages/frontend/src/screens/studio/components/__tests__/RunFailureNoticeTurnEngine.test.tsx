@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -50,13 +50,15 @@ const FAILURE: ChatMessage = {
   },
 };
 
-function presentation(): RunFailurePresentation {
-  const resolved = resolveRunFailurePresentation({ metadata: FAILURE.metadata, content: FAILURE.content, assumeFailed: true });
+function presentationOf(message: ChatMessage): RunFailurePresentation {
+  const resolved = resolveRunFailurePresentation({ metadata: message.metadata, content: message.content, assumeFailed: true });
   if (!resolved) {
     throw new Error("expected a failure presentation");
   }
   return resolved;
 }
+
+const STEPS = <div data-testid="fixture-turn-steps">Edited README.md</div>;
 
 function context(owner: TurnEngineTurnOwner | null, overrides: Partial<RunFailureRetryContextValue> = {}) {
   return {
@@ -90,11 +92,14 @@ describe("the failure card of a turn-engine turn", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function render(value: RunFailureRetryContextValue | null) {
+  async function render(
+    value: RunFailureRetryContextValue | null,
+    { message = FAILURE, steps = null }: { message?: ChatMessage; steps?: ReactNode } = {},
+  ) {
     await act(async () => {
       root.render(
         <RunFailureRetryProvider value={value}>
-          <RunFailureMessageBody message={FAILURE} presentation={presentation()} />
+          <RunFailureMessageBody message={message} presentation={presentationOf(message)} steps={steps} />
         </RunFailureRetryProvider>,
       );
     });
@@ -144,22 +149,119 @@ describe("the failure card of a turn-engine turn", () => {
     );
   });
 
+  // docs/Local-Engine-Turns.md 5.5: "Teammates see only" that it couldn't
+  // finish. The raw text is about the sender's own sign-in, plan or computer.
   it("tells a teammate only that it couldn't finish, with no Try again and no way to send it as theirs", async () => {
     const resendWithTurnEngine = vi.fn();
     await render(context({ isViewer: false, name: "Ada" }, { resendWithTurnEngine }));
     expect(sentence()).toBe("Claude Code couldn't finish this turn on Ada's computer.");
     expect(query("run-failure-retry")).toBeNull();
     expect(query("run-failure-turn-engine-resend")).toBeNull();
-    // The sender's wording stays theirs; Details still has the raw text.
+    // The sender's wording and the raw text stay theirs: with no steps, there
+    // is no Details to open.
     expect(container.textContent).not.toContain("Open a terminal");
+    expect(query("run-failure-details-toggle")).toBeNull();
+    expect(container.textContent).not.toContain(RAW);
+  });
+
+  it("gives a teammate's Details the turn's steps, never the raw text", async () => {
+    await render(context({ isViewer: false, name: "Ada" }), { steps: STEPS });
+    await act(async () => {
+      query("run-failure-details-toggle")?.click();
+    });
+    expect(container.querySelector('[data-testid="fixture-turn-steps"]')?.textContent).toBe("Edited README.md");
+    expect(query("run-failure-details")).toBeNull();
+    expect(container.textContent).not.toContain(RAW);
+
+    // Its sender gets both.
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await render(context({ isViewer: true, name: "Ada" }), { steps: STEPS });
+    await act(async () => {
+      query("run-failure-details-toggle")?.click();
+    });
+    expect(query("run-failure-details")?.textContent).toBe(RAW);
+    expect(container.querySelector('[data-testid="fixture-turn-steps"]')).not.toBeNull();
   });
 
   it("words it for everyone else when the chat cannot tell who sent it", async () => {
     await render(context(null));
     expect(sentence()).toBe("Claude Code couldn't finish this turn on the sender's computer.");
     expect(query("run-failure-retry")).toBeNull();
+    expect(container.textContent).not.toContain(RAW);
     await render(null);
     expect(sentence()).toBe("Claude Code couldn't finish this turn on the sender's computer.");
     expect(query("run-failure-retry")).toBeNull();
+    expect(container.textContent).not.toContain(RAW);
+  });
+});
+
+// A failure the controller did not stamp, or one of an engine this Studio was
+// not built with, reads as any other failure: only the controller's stamp
+// makes the engine word it. Its card still never sends the turn again.
+describe("the failure card of a turn without the controller's stamp", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    runtimeState.runtimeStatuses = [];
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  function failure(metadata: Record<string, unknown>): ChatMessage {
+    return { ...FAILURE, id: "failure-plain", content: "The build script stopped halfway", metadata };
+  }
+
+  async function render(message: ChatMessage, value: RunFailureRetryContextValue) {
+    await act(async () => {
+      root.render(
+        <RunFailureRetryProvider value={value}>
+          <RunFailureMessageBody message={message} presentation={presentationOf(message)} />
+        </RunFailureRetryProvider>,
+      );
+    });
+  }
+
+  const query = (testId: string) => container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`);
+  const sentence = () => container.querySelector('[data-testid="run-failure-body"] p')?.textContent ?? "";
+
+  it("reads a recorded message that names the engine as an ordinary failure, without Try again or Retried", async () => {
+    // What any member could record: the mode, without the stamp or the code.
+    const recorded = failure({ source: "agent", messageType: "error", outcome: "failed", aiAccessMode: "claude-code" });
+    await render(recorded, context({ isViewer: true, name: "Ada" }, { isRetrySuperseded: () => true }));
+    expect(sentence()).toBe("The build script stopped halfway");
+    expect(container.textContent).not.toContain("Claude Code");
+    expect(query("run-failure-retry")).toBeNull();
+    expect(query("run-failure-retried")).toBeNull();
+    expect(query("run-failure-turn-engine-resend")).toBeNull();
+  });
+
+  it("never offers Try again for an engine this Studio was not built with", async () => {
+    const otherEngine = failure({ source: "agent", outcome: "failed", jobId: "job-1", aiAccessMode: "future-engine" });
+    await render(otherEngine, context(null));
+    expect(sentence()).toBe("The build script stopped halfway");
+    expect(query("run-failure-retry")).toBeNull();
+  });
+
+  it("never offers Try again for a failure whose prompt was a turn-engine one", async () => {
+    const plain = failure({ source: "agent", outcome: "failed", jobId: "job-1", aiAccessMode: "managed" });
+    await render(plain, context(null, { isTurnEngineTurn: () => true }));
+    expect(query("run-failure-retry")).toBeNull();
+    // Any other failure keeps its Try again.
+    await render(plain, context(null, { isTurnEngineTurn: () => false }));
+    expect(query("run-failure-retry")?.textContent).toBe("Try again");
   });
 });

@@ -15,6 +15,7 @@ import { Button } from "../../../components/Button";
 import {
   hasFailedRunMetadata,
   readControllerStampedTurnEngine,
+  usesTurnEngine,
   type RunFailurePresentation,
   type TurnEngineTurnOwner,
 } from "../../../conversations/runFailurePresentation";
@@ -73,6 +74,13 @@ export type RunFailureRetryContextValue = {
    * never sends anything itself.
    */
   resendWithTurnEngine?: (failureMessage: ChatMessage) => void;
+  /**
+   * True when a failure belongs to a turn-engine turn by its own metadata or
+   * by its prompt's, whether or not this Studio knows the engine and whether
+   * or not the controller stamped the failure. Its card offers no Try again:
+   * nothing sends such a turn again from it (docs/Local-Engine-Turns.md 5.6).
+   */
+  isTurnEngineTurn?: (failureMessage: ChatMessage) => boolean;
 };
 
 const RunFailureRetryContext = createContext<RunFailureRetryContextValue | null>(null);
@@ -304,6 +312,14 @@ export function RunFailureMessageBody({
     : presentation.friendlyText;
   const resendWithTurnEngine =
     turnEngine && turnEngineSender ? retryContext?.resendWithTurnEngine ?? null : null;
+  // Nothing sends a turn-engine turn again from its card, also one this
+  // Studio does not word as its engine's (an engine it was not built with,
+  // or a failure without the controller's stamp): the failure, or its
+  // prompt, says it ran on another engine than the runtime's own.
+  const turnEngineTurn =
+    turnEngine !== null ||
+    usesTurnEngine(message.metadata) ||
+    (retryContext?.isTurnEngineTurn?.(message) ?? false);
   const retryPending = retryContext !== null && retryContext.pendingRetryKey === message.id;
   const otherRetryInFlight =
     retryContext !== null && retryContext.pendingRetryKey !== null && !retryPending;
@@ -339,10 +355,15 @@ export function RunFailureMessageBody({
   // reads "Retried".
   const quiet = autoRetrying || scheduledAutoRetry !== null;
   // Details opens what the sentence above it leaves out: the raw text, unless
-  // it is that same sentence, and the turn's steps.
-  const detailsText = sameSentence(presentation.rawText, friendlyText) ? null : presentation.rawText;
+  // it is that same sentence, and the turn's steps. A turn engine's failure
+  // keeps its raw text for its sender: it is about their own sign-in, plan or
+  // computer, and everyone else reads only that it couldn't finish (5.5).
+  const detailsText =
+    (turnEngine && !turnEngineSender) || sameSentence(presentation.rawText, friendlyText)
+      ? null
+      : presentation.rawText;
   const hasDetails = Boolean(detailsText?.trim()) || Boolean(steps);
-  const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit && !turnEngine;
+  const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit && !turnEngineTurn;
   const showRetry = showManualControls && (retryPending || (!superseded && !withdrawn));
   const showRetried = showManualControls && superseded && !retryPending;
 

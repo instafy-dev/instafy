@@ -51,6 +51,12 @@ type InstafyDesktopExtensionInvokeOptions = {
   extensionId: string;
   method: string;
   payload?: unknown;
+  /**
+   * The controller this Studio talks to, for a module that keys what it
+   * keeps by controller (Desktop's own trust policy decides whether it
+   * accepts it).
+   */
+  controllerUrl?: string;
 };
 
 type InstafyDesktopCodexAuthJsonStatus = {

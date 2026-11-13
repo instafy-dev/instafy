@@ -146,4 +146,15 @@ describe("useConversation's title seed and turn-engine turns", () => {
     expect(state.maybeAutoTitleConversation).toHaveBeenCalledTimes(1);
     expect(state.maybeAutoTitleConversation.mock.calls[0]?.[1]).toBe("Plan the spring launch");
   });
+
+  // A Studio built without an engine's module still passes over its turns.
+  it("also passes over a message of an engine this Studio was not built with", async () => {
+    state.messages = [
+      userMessage("Plan the autumn launch", 0, { aiAccessMode: "byoc" }),
+      userMessage("Fix the failing login test", 1, { aiAccessMode: "future-engine" }),
+    ];
+    await act(async () => root.render(<Harness />));
+    expect(state.maybeAutoTitleConversation).toHaveBeenCalledTimes(1);
+    expect(state.maybeAutoTitleConversation.mock.calls[0]?.[1]).toBe("Plan the autumn launch");
+  });
 });

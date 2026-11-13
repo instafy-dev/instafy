@@ -78,6 +78,7 @@ import {
 } from "./sentPromptRegistry";
 import { useConversationAutoTitle } from "./useConversationAutoTitle";
 import { useConversationControllerDispatch } from "./useConversationControllerDispatch";
+import { TurnEngineSendRefusedError } from "./turnEngineSendRefusal";
 import { withUserMentionMetadata } from "./userMentions";
 import { carriesTurnEngineClaim, readTurnEngineClaim } from "../features/frontendFeatureModule";
 
@@ -155,6 +156,7 @@ export function useConversationSubmitFlow({
   setConversationTitle,
   setConversationGoal,
   appendMessages,
+  removeUnsentMessage,
   updateMessage,
   linkRunToConversation,
 }: UseConversationSubmitFlowArgs) {
@@ -587,10 +589,11 @@ export function useConversationSubmitFlow({
       // Every turn saves, so prompts no longer carry an auto-save choice;
       // the stored choice from the removed setting is dropped here.
       forgetRetiredGitAutoSyncPreference();
+      const clientMessageId = generateUUID();
       let promptMetadata: Record<string, unknown> | null = {
         ...submittedMetadata,
         client: buildConversationClientMetadata(chatClientSessionId, currentUserId),
-        clientMessageId: generateUUID(),
+        clientMessageId,
       };
       const goalMetadata = activeGoalPromptMetadata(targetConversation.activeGoal);
       if (goalMetadata) {
@@ -1345,7 +1348,7 @@ export function useConversationSubmitFlow({
           }).catch(() => null);
         }
 
-        await dispatch(
+        const dispatched = await dispatch(
           targetConversationId,
           dispatchTrimmed,
           promptMetadata,
@@ -1354,6 +1357,15 @@ export function useConversationSubmitFlow({
           terminalRequest ? "terminal_command" : undefined,
           options?.expectedLaneIdle ?? false,
         );
+        if (dispatched.turnEngineRefusal) {
+          // The controller refused a send that claimed a turn engine before
+          // it recorded anything (docs/Local-Engine-Turns.md 5.5): the
+          // message never went out, so it leaves the chat, where the
+          // engine's sentence says why, and the composer gets its words back
+          // with the engine still chosen.
+          removeUnsentMessage(displayConversationId, clientMessageId);
+          throw new TurnEngineSendRefusedError(dispatched.turnEngineRefusal);
+        }
       } else {
         await recordPrompt(
           displayConversationId,
@@ -1374,6 +1386,7 @@ export function useConversationSubmitFlow({
       ensureControllerConversationId,
       queueAutoTitleConversation,
       recordMessageToController,
+      removeUnsentMessage,
       resolveProjectId,
       resolveRuntimeTarget,
       runtimeStatuses,

@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { TurnEngineFailureInput } from "../../../conversations/runFailurePresentation";
 import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
@@ -15,6 +18,15 @@ import {
   type ClaudeCodeFailureCode,
 } from "../claudeCodeTurnPresentation";
 import { bannedWordIn } from "./claudeCodeBannedWords";
+
+// The codes a failed turn carries are runtime-contracts' lists: the same file
+// the runtime's and the controller's tests read, so a code renamed on one
+// side and not here fails at once.
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "../../../../../..");
+const LANE = JSON.parse(
+  readFileSync(resolve(repo, "packages/runtime-contracts/src/claude_code_lane_fixtures.json"), "utf8"),
+) as { runtimeFailureCodes: string[]; stopAndSweepFailureCodes: string[] };
 
 const plain = (text: string) => !/\b(?:codex|proxy|https?)\b|[{}]/i.test(text);
 
@@ -48,8 +60,10 @@ const EXPECTED: Record<ClaudeCodeFailureCode, string> = {
     "Your Claude plan's usage limit was reached, so this turn stopped. Send your message again after it resets.",
   binary_missing:
     "Instafy Desktop can't find Claude Code on this computer. Set it up again in Your AI, then send your message again.",
+  // The runtime gives this one code for the copy and for a login-shell
+  // setting Desktop granted with it (D26), so the sentence names both.
   binary_unsafe:
-    "Instafy Desktop won't start this copy of Claude Code because other accounts on this computer can change it. Set it up again in Your AI.",
+    "Instafy Desktop won't start this copy of Claude Code because other accounts on this computer can change it, or a setting from your login shell (CLAUDE_CONFIG_DIR or NODE_EXTRA_CA_CERTS) points somewhere it can't use. Set it up again in Your AI.",
   unsupported_version:
     "This version of Claude Code can't take turns from Instafy. Update Claude Code, then send your message again.",
   probe_failed:
@@ -93,6 +107,7 @@ function everyTurnSentence(): string[] {
       (code) => describeClaudeCodeSendRefusal({ code, details: null }) ?? "",
     ),
     describeClaudeCodeSendRefusal({ code: "claude_code_turn_active", details: { reason: "start_window_passed" } }) ?? "",
+    describeClaudeCodeSendRefusal({ code: "claude_code_runtime_not_ready", details: { reason: "capability_not_ready" } }) ?? "",
     describeClaudeCodeSendRefusal({ code: "claude_code_turn_engine_unknown", details: null }) ?? "",
     CLAUDE_CODE_STEER_REFUSED,
     CLAUDE_CODE_RESEND_LABEL,
@@ -109,6 +124,12 @@ describe("Claude Code turn wording", () => {
     for (const [code, sentence] of Object.entries(EXPECTED)) {
       expect(describeClaudeCodeTurnFailure(failure(code)), code).toBe(sentence);
     }
+  });
+
+  it("words exactly the codes runtime-contracts lists: the runtime's, and the controller's stops and sweeps", () => {
+    const codes = [...LANE.runtimeFailureCodes, ...LANE.stopAndSweepFailureCodes];
+    expect(codes.length).toBeGreaterThan(0);
+    expect(Object.keys(CLAUDE_CODE_FAILURE_SENTENCES).sort()).toEqual([...codes].sort());
   });
 
   it("never uses a word the banned-word fixture lists", () => {
@@ -193,6 +214,38 @@ describe("Claude Code turn wording", () => {
     // controller's raw text; any other code is not Claude Code's to word.
     expect(refusal("claude_code_turn_engine_unknown")).toBe("Claude Code couldn't take this message.");
     expect(refusal("project_not_found")).toBeNull();
+  });
+
+  // The test drive of Nov 13: a send refused because Claude Code itself
+  // wasn't ready (too old, signed out, not found) said the computer wasn't
+  // connected. G6's `details.reason` says which it is.
+  it("says Claude Code on this computer isn't ready when that is the reason, and that the computer isn't connected otherwise", () => {
+    const refusal = (reason: unknown) =>
+      describeClaudeCodeSendRefusal({ code: "claude_code_runtime_not_ready", details: { reason } });
+    const notReady =
+      "Claude Code on this computer isn't ready to take turns. Check it in Your AI, then send your message again.";
+    const notConnected =
+      "Your computer isn't connected to this space. Open this space in Instafy Desktop, then send your message again.";
+    expect(refusal("capability_not_ready")).toBe(notReady);
+    expect(refusal("capability_missing")).toBe(notReady);
+    for (const reason of [
+      "no_runtime",
+      "runtime_missing",
+      "not_private",
+      "not_owner",
+      "personal_browser",
+      "not_dispatch_ready",
+      "something_new",
+      null,
+      42,
+    ]) {
+      expect(refusal(reason), String(reason)).toBe(notConnected);
+    }
+    expect(describeClaudeCodeSendRefusal({ code: "claude_code_runtime_not_ready", details: null })).toBe(notConnected);
+    // The reason belongs to this code alone.
+    expect(describeClaudeCodeSendRefusal({ code: "claude_code_machine_busy", details: { reason: "capability_not_ready" } })).toBe(
+      "Your computer is busy with another turn. Send this when it's done.",
+    );
   });
 
   it("words a refused Steer, and only Claude Code's own refusal", () => {

@@ -70,6 +70,10 @@ import {
   normalizeConversationGoalProgressSummaryForDisplay,
 } from "../../../conversations/conversationGoals";
 import { isRunActivelyProgressing } from "../../../conversations/runLiveness";
+import {
+  newestTurnEngineStartingLine,
+  showsTurnEngineSpeakerLine,
+} from "../../../conversations/runFailurePresentation";
 import { usePromptSendFailureVersion } from "../../../conversations/sentPromptRegistry";
 import { useRuntimeMenuOptions, type RuntimeMenuOption } from "../../../runtime/useRuntimeMenu";
 import {
@@ -210,6 +214,7 @@ import {
   readComposerInlineCompletionPreference,
   shouldRequestComposerInlineCompletion,
 } from "./composerInlineCompletion";
+import { composerTurnEngineFor } from "./composerTurnEngine";
 import { shouldSuppressOuterAvatarForConversationThread } from "./conversationThreadPreviewLayout";
 import { resolveComposerGhostSuggestion } from "./composerGhostSuggestion";
 import { useChatBrowserSessionState } from "./useChatBrowserSessionState";
@@ -282,8 +287,8 @@ import {
   useChatServerSendQueue,
 } from "./useChatServerSendQueue";
 import { useChatMessageStashes } from "./useChatMessageStashes";
-import { useChatSubmitDispatch } from "./useChatSubmitDispatch";
-import { useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
+import { composerTextWithDraftRestored, useChatSubmitDispatch } from "./useChatSubmitDispatch";
+import { TURN_ENGINE_UNAVAILABLE_NOTICE, useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
 import { useChatVoiceComposerController } from "./useChatVoiceComposerController";
 import { useChatGettingStartedState } from "./useChatGettingStartedState";
 import { mergeMentionableMembers } from "./mentionableMembers";
@@ -951,6 +956,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const pendingTurnEngineOffer = pendingTurnEngineId
     ? turnEngineOffers[pendingTurnEngineId] ?? null
     : null;
+  // While an engine is chosen, the draft is that engine's message: only the
+  // composer's own Send takes it there, and nothing else sends it, on its own
+  // or to a model (docs/Local-Engine-Turns.md 5.2).
+  const turnEngineChosen = pendingTurnEngineId !== null;
   useEffect(() => {
     setPendingTurnEngineId(null);
   }, [activeConversationId, activeProjectId]);
@@ -2525,7 +2534,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         : options;
     // Only the composer's own Send of the draft it shows carries the engine
     // chosen for the next message; every other caller passes its own words.
-    const composerTurnEngine = !override && !automatic ? pendingTurnEngineIdRef.current : null;
+    const composerTurnEngine = composerTurnEngineFor({
+      override,
+      automatic,
+      pendingEngineId: pendingTurnEngineIdRef.current,
+    });
     const submitted = await submitMessageRef.current(
       nextOverride,
       composerTurnEngine ? { ...nextOptions, turnEngine: composerTurnEngine } : nextOptions,
@@ -2672,6 +2685,38 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       browserRequestRetryRef.current?.(promptMessage, retryMetadata) ?? Promise.resolve(false),
     [],
   );
+  const humanLabelByUserId = useMemo(() => {
+    return buildHumanLabelByUserId({
+      directoryMembers: mentionableUsers,
+      conversationParticipants,
+    });
+  }, [conversationParticipants, mentionableUsers]);
+  // "Send again with <engine>" on a failed turn of a turn engine
+  // (docs/Local-Engine-Turns.md 5.6): its sender's words go back in the
+  // composer, above anything typed since, with that engine chosen for the
+  // next message. Nothing is sent; the person sends it themselves.
+  const refillComposerWithTurnEngine = useCallback(
+    ({ text, turnEngine }: { text: string; turnEngine: string }) => {
+      if (!activeConversationId) {
+        return;
+      }
+      const refilled = composerTextWithDraftRestored(text, latestInputValueRef.current ?? "");
+      if (refilled !== null) {
+        latestInputValueRef.current = refilled;
+        chatInputRef.current?.focusAfterValueSync();
+        onInputChange(activeConversationId, refilled, null);
+      }
+      if (turnEngineOffers[turnEngine]) {
+        setPendingTurnEngineId(turnEngine);
+      } else {
+        // The engine is no longer offered here: the words are back, and a
+        // Send would go out without it.
+        showStatus(TURN_ENGINE_UNAVAILABLE_NOTICE, "warning", 4500);
+      }
+      focusInput({ force: true });
+    },
+    [activeConversationId, focusInput, onInputChange, showStatus, turnEngineOffers],
+  );
   const runFailureRetryContextValue = useRunFailureRetryActions({
     messages,
     queuedSends: combinedChatSendQueue,
@@ -2687,6 +2732,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     resendBrowserRequest,
     showStatus,
     onConnectAi: openAiManager,
+    // A failed turn of a turn engine reads its sender's name to teammates.
+    humanLabelByUserId,
+    // Only where an engine is offered can its sender get their words back
+    // with it chosen; elsewhere (outside Desktop) the card offers nothing.
+    refillComposerWithTurnEngine:
+      Object.keys(turnEngineOffers).length > 0 ? refillComposerWithTurnEngine : undefined,
   });
 
   const scheduleSubmitMessage = () => {
@@ -2731,7 +2782,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     imageAttachmentCount: imageAttachments.length,
     inputValue,
     invokeSubmitMessage: invokeComposerPrimaryAction,
-    manualSubmitOnly: Boolean(workerQuestionReply.active),
+    // A dictated turn is sent by itself, with its words as an override,
+    // which never carries an engine chosen for the next message: while one
+    // is, the words stay in the composer for the person's own Send.
+    manualSubmitOnly: Boolean(workerQuestionReply.active) || turnEngineChosen,
     isAssistantTyping,
     latestInputValueRef,
     messages,
@@ -2997,13 +3051,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     currentUserId,
     typingRealtimeEnabled,
   ]);
-
-  const humanLabelByUserId = useMemo(() => {
-    return buildHumanLabelByUserId({
-      directoryMembers: mentionableUsers,
-      conversationParticipants,
-    });
-  }, [conversationParticipants, mentionableUsers]);
 
   const conversationRosterHumans = useMemo(
     () =>
@@ -3594,6 +3641,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     messages,
     agentDisplayName: hasMultipleTypingAgents ? null : typingAgentDisplayName,
   });
+  // A turn a turn engine runs words its own start (docs/Local-Engine-Turns.md
+  // 5.7), as its run or, until the page has that run, its prompt says, for
+  // whoever views it: it starts on its sender's computer, not a teammate's.
+  const typingTurnEngineStartingLine = useMemo(
+    () =>
+      isAssistantTyping && !hasMultipleTypingAgents
+        ? newestTurnEngineStartingLine({
+            conversationMessages: messages,
+            run: activeConversationRun,
+            viewer: { currentUserId, nameOf: (userId) => humanLabelByUserId.get(userId) },
+          })
+        : null,
+    [activeConversationRun, currentUserId, hasMultipleTypingAgents, humanLabelByUserId, isAssistantTyping, messages],
+  );
   const waitingActivityCopy = resolveAgentWaitingActivityCopy({
     displayNames: hasMultipleTypingAgents
       ? typingAgents.map((agent) => agent.displayName)
@@ -3608,6 +3669,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             blockerRuntimeLabel: runtimeEnsureLimit.blockerRuntimeLabel,
           }
         : null,
+    turnEngineStartingLine: typingTurnEngineStartingLine,
   });
   // The row before a turn's first step, which the turn's own line takes over
   // from: one "Starting…" from the send until then, however long it takes.
@@ -3970,7 +4032,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             : ""
         }`
       : "";
-    const summary = `Message stats. Input: ${selectedMessageTokenUsage.inputTokens}, cached: ${selectedMessageTokenUsage.cachedInputTokens}, output: ${selectedMessageTokenUsage.outputTokens}${contextSummary}`;
+    const modelSummary = selectedMessageTokenUsage.model ? ` Model: ${selectedMessageTokenUsage.model}.` : "";
+    const summary = `Message stats.${modelSummary} Input: ${selectedMessageTokenUsage.inputTokens}, cached: ${selectedMessageTokenUsage.cachedInputTokens}, output: ${selectedMessageTokenUsage.outputTokens}${contextSummary}`;
     try {
       await writeClipboardText(summary);
       showStatus("Copied message stats.", "success", 2000, { presentation: "confirmation" });
@@ -5899,6 +5962,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         onboardingInputLocked,
         sendingAttachment,
         inlineCompletionEnabled: readComposerInlineCompletionPreference(),
+        turnEnginePending: turnEngineChosen,
       })
     ) {
       setComposerInlineCompletion(null);
@@ -5942,6 +6006,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     inputValue,
     onboardingInputLocked,
     sendingAttachment,
+    turnEngineChosen,
   ]);
   onGithubImportSuccessRef.current = dismissGettingStarted;
 
@@ -6048,6 +6113,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       return;
     }
     pendingCredentialAutoSubmitRef.current = false;
+    // The draft of an engine chosen for the next message goes out only by
+    // the composer's own Send, on that engine: never from here, on another.
+    if (pendingTurnEngineIdRef.current !== null) {
+      return;
+    }
     void submitMessage(undefined, { allowWhileBusy: true });
   }, [credentialsReady, inputValue, onboardingInputLocked, sendingAttachment, submitMessage]);
 
@@ -6063,6 +6133,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       return;
     }
     if (inputValue.trim().length === 0) {
+      return;
+    }
+    // While an engine is chosen for the next message the draft is its
+    // message: the person sends it, or drops the choice, themselves.
+    if (pendingTurnEngineIdRef.current !== null) {
       return;
     }
     void submitMessage(undefined, { allowWhileBusy: true });
@@ -6360,21 +6435,29 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     timestamp={message.timestamp}
                   />
                 ) : null;
+              const showsAssistantHeader = message.role === "assistant" && !suppressOuterAssistantAvatar;
+              // The trace shows an assistant's header only where its gutter
+              // face is gone. A turn engine's reply keeps it everywhere, for
+              // the line under it that says whose own engine ran the turn
+              // (docs/Local-Engine-Turns.md 5.7); its face stays in the gutter.
+              const assistantHeaderEverywhere = showsAssistantHeader && showsTurnEngineSpeakerLine(messageMetadata);
+              const assistantSpeakerIdentity = showsAssistantHeader ? (
+                <AssistantSpeakerIdentityLabel
+                  handle={messageAgentIdentity?.handle ?? getDefaultAssistantHandle()}
+                  agentIdentity={messageAgentIdentity}
+                  metadata={messageMetadata}
+                  timestamp={message.timestamp}
+                  avatarVisibility={assistantHeaderEverywhere ? "narrow" : "always"}
+                />
+              ) : null;
 
                 return (
                   <ChatBubbleRow
                     key={message.id}
                     align={isLeftAligned ? "left" : "right"}
                     avatar={avatar}
-                    speakerIdentity={humanSpeakerIdentity}
-                    narrowSpeakerIdentity={message.role === "assistant" && !suppressOuterAssistantAvatar ? (
-                      <AssistantSpeakerIdentityLabel
-                        handle={messageAgentIdentity?.handle ?? getDefaultAssistantHandle()}
-                        agentIdentity={messageAgentIdentity}
-                        metadata={messageMetadata}
-                        timestamp={message.timestamp}
-                      />
-                    ) : null}
+                    speakerIdentity={assistantHeaderEverywhere ? assistantSpeakerIdentity : humanSpeakerIdentity}
+                    narrowSpeakerIdentity={assistantHeaderEverywhere ? null : assistantSpeakerIdentity}
                     onContextMenu={
                       message.role === "assistant"
                         ? (event) => handleMessageContextMenu(event, message.id)

@@ -3,9 +3,10 @@
 import { act, type MutableRefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useChatSubmitDispatch } from "../useChatSubmitDispatch";
+import { composerTextWithDraftRestored, useChatSubmitDispatch } from "../useChatSubmitDispatch";
 import { useChatComposerAttachments } from "../useChatComposerAttachments";
 import { ChatAttachmentUploadError } from "../../../../lib/chatAttachments";
+import { TurnEngineSendRefusedError } from "../../../../conversations/turnEngineSendRefusal";
 import type { SubmitConversationOptions } from "../../../../conversations/useConversation";
 
 type HookOptions = Parameters<typeof useChatSubmitDispatch>[0];
@@ -274,6 +275,74 @@ describe("useChatSubmitDispatch", () => {
         resultRef.current!.performSubmit({ message: "hi", editorState: null, imageFiles: [] }),
       ).rejects.toThrow("browser task was not dispatched");
       expect(options.setSendingAttachment).toHaveBeenLastCalledWith(false);
+    });
+  });
+
+  describe("when the controller refuses a send that claimed a turn engine", () => {
+    // docs/Local-Engine-Turns.md 5.5: nothing went out, so the words go back
+    // in the composer and the send resolves false, which keeps the engine
+    // chosen for them (useChatSubmitFlow uses the choice up only for a send
+    // that went out).
+    const refused = new TurnEngineSendRefusedError({
+      engineId: "claude-code",
+      code: "claude_code_machine_busy",
+      sentence: "Your computer is busy with another turn. Send this when it's done.",
+    });
+
+    it("puts the words back in the composer, with their editor state, and reports nothing sent", async () => {
+      const latestInputValueRef = { current: "@octo fix the failing login test" };
+      const options: HookOptions = {
+        activeConversationId: "conversation-1",
+        clearInputEditor: vi.fn(),
+        removeSentImageAttachments: vi.fn(),
+        focusInput: vi.fn(),
+        isChatInputFocused: vi.fn(() => false),
+        latestInputValueRef,
+        mentionableAgentHandles: ["octo"],
+        onInputChange: vi.fn(),
+        onSubmit: vi.fn(async () => {
+          throw refused;
+        }),
+        scrollToBottom: vi.fn(),
+        setSendingAttachment: vi.fn(),
+        shouldAutoScrollRef: { current: false },
+      };
+      const resultRef: MutableRefObject<HookResult | null> = { current: null };
+      await act(async () => {
+        root.render(<Harness options={options} resultRef={resultRef} />);
+      });
+      let sent: boolean | undefined;
+      await act(async () => {
+        sent = await resultRef.current?.performSubmit({
+          message: "@octo fix the failing login test",
+          editorState: "{\"root\":{}}",
+          imageFiles: [],
+          metadata: { turnEngine: "claude-code" },
+          expectedLaneIdle: true,
+        });
+      });
+
+      expect(sent).toBe(false);
+      // Cleared for the send, then given back.
+      expect(options.onInputChange).toHaveBeenNthCalledWith(1, "conversation-1", "", null);
+      expect(options.onInputChange).toHaveBeenLastCalledWith(
+        "conversation-1",
+        "@octo fix the failing login test",
+        "{\"root\":{}}",
+      );
+      expect(latestInputValueRef.current).toBe("@octo fix the failing login test");
+      expect(options.setSendingAttachment).toHaveBeenLastCalledWith(false);
+    });
+  });
+
+  describe("composerTextWithDraftRestored", () => {
+    it("puts a draft above what was typed since, and leaves a composer that holds it alone", () => {
+      expect(composerTextWithDraftRestored("Fix the login test", "")).toBe("Fix the login test");
+      expect(composerTextWithDraftRestored("Fix the login test", "  ")).toBe("Fix the login test");
+      expect(composerTextWithDraftRestored("Fix the login test", "and the signup")).toBe(
+        "Fix the login test\n\nand the signup",
+      );
+      expect(composerTextWithDraftRestored("Fix the login test", " Fix the login test ")).toBeNull();
     });
   });
 

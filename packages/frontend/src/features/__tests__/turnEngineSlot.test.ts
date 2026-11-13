@@ -4,6 +4,7 @@ import {
   carriesTurnEngineClaim,
   createFrontendFeatureComposition,
   messageUsesTurnEngine,
+  namesTurnEngineAccessMode,
   readTurnEngineClaim,
   withoutTurnEngineClaim,
   type FrontendFeatureModule,
@@ -63,6 +64,27 @@ describe("the turnEngines slot", () => {
       createFrontendFeatureComposition(APPLICATION_FRONTEND_FEATURE_MODULES).turnEngines.map((engine) => engine.id),
     ).toEqual(["claude-code"]);
   });
+
+  it("carries an engine's chat wording and its Your AI row in the contribution itself", () => {
+    const [engine] = createFrontendFeatureComposition(APPLICATION_FRONTEND_FEATURE_MODULES).turnEngines;
+    expect(engine?.presentation?.describeStart({ isViewer: true, name: null })).toBe(
+      "Starting Claude Code on this computer…",
+    );
+    expect(engine?.presentation?.describeStart({ isViewer: false, name: "Sam" })).toBe(
+      "Starting Claude Code on Sam's computer…",
+    );
+    expect(engine?.presentation?.resendLabel).toBe("Send again with Claude Code");
+    expect(typeof engine?.YourAiRow).toBe("function");
+    // Both are optional: an engine without them is still an engine.
+    const bare: FrontendFeatureModule = {
+      apiVersion: INSTAFY_FEATURE_MODULE_API_VERSION,
+      id: "fixture.bare-engine",
+      turnEngines: [{ id: "bare-engine", ComposerBridge: FixtureBridge }],
+    };
+    const [bareEngine] = createFrontendFeatureComposition([bare]).turnEngines;
+    expect(bareEngine?.presentation).toBeUndefined();
+    expect(bareEngine?.YourAiRow).toBeUndefined();
+  });
 });
 
 describe("turn-engine claims", () => {
@@ -96,10 +118,27 @@ describe("turn-engine claims", () => {
   });
 
   it("knows a turn's messages by their claim or by the controller's aiAccessMode", () => {
-    expect(messageUsesTurnEngine({ turnEngine: "claude-code" }, [])).toBe(true);
-    expect(messageUsesTurnEngine({ aiAccessMode: "claude-code" }, ["claude-code"])).toBe(true);
-    expect(messageUsesTurnEngine({ aiAccessMode: "claude-code" }, [])).toBe(false);
-    expect(messageUsesTurnEngine({ aiAccessMode: "managed" }, ["claude-code"])).toBe(false);
-    expect(messageUsesTurnEngine(null, ["claude-code"])).toBe(false);
+    expect(messageUsesTurnEngine({ turnEngine: "claude-code" })).toBe(true);
+    expect(messageUsesTurnEngine({ turn_engine: "future-engine" })).toBe(true);
+    expect(messageUsesTurnEngine({ aiAccessMode: "claude-code" })).toBe(true);
+    expect(messageUsesTurnEngine({ aiAccessMode: "managed" })).toBe(false);
+    expect(messageUsesTurnEngine({ aiAccessMode: "byoc" })).toBe(false);
+    expect(messageUsesTurnEngine({ aiAccessMode: " Managed " })).toBe(false);
+    expect(messageUsesTurnEngine({ aiAccessMode: "" })).toBe(false);
+    expect(messageUsesTurnEngine({ aiAccessMode: 1 })).toBe(false);
+    expect(messageUsesTurnEngine(null)).toBe(false);
+  });
+
+  // A build without an engine's module (the hosted Studio before it lists
+  // one, or a tab opened before the deploy) still never retries, resends or
+  // titles from that engine's turns.
+  it("counts any aiAccessMode but the runtime's own engine's, also of an engine this Studio was not built with", () => {
+    expect(namesTurnEngineAccessMode({ aiAccessMode: "future-engine" })).toBe(true);
+    expect(messageUsesTurnEngine({ aiAccessMode: "future-engine" })).toBe(true);
+    expect(namesTurnEngineAccessMode({ aiAccessMode: "managed" })).toBe(false);
+    expect(namesTurnEngineAccessMode({ aiAccessMode: "byoc" })).toBe(false);
+    expect(namesTurnEngineAccessMode({ aiAccessMode: "   " })).toBe(false);
+    expect(namesTurnEngineAccessMode({ turnEngine: "claude-code" })).toBe(false);
+    expect(namesTurnEngineAccessMode(["claude-code"])).toBe(false);
   });
 });

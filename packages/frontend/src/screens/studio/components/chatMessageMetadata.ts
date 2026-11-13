@@ -82,6 +82,32 @@ export function isHiddenByPresentation(message: ChatMessage): boolean {
   return isRecord(nestedPresentation) && nestedPresentation.hidden === true;
 }
 
+/** Where a runtime places a status note of the turn that belongs under its reply. */
+export const REPLY_NOTE_PLACEMENT = "reply_note";
+
+/**
+ * A note the runtime placed under the turn's reply
+ * (`presentation.placement: "reply_note"`, kept under `details` by the
+ * controller), such as changes that stayed on the computer and weren't
+ * saved: it shows under the reply once the turn is done, whether Details is
+ * open or not, and is neither in Details nor a note the line counts. A turn
+ * that has one is shown as a turn row, also when it took no step
+ * (synthesizeAgentJobThreadMessages), since the chat's flat list shows no
+ * status.
+ */
+export function isTurnReplyNote(message: ChatMessage): boolean {
+  if (
+    message.role !== "assistant" ||
+    (getMessageType(message) ?? "").trim().toLowerCase() !== "status" ||
+    !message.content.trim()
+  ) {
+    return false;
+  }
+  const details = extractMessageDetails(isRecord(message.metadata) ? message.metadata : null);
+  const presentation = details && isRecord(details.presentation) ? details.presentation : null;
+  return presentation?.placement === REPLY_NOTE_PLACEMENT;
+}
+
 export function getMessageType(message: ChatMessage): string | null {
   const directMessageType = normalizeMetadataMessageType(message.messageType);
   if (directMessageType) {

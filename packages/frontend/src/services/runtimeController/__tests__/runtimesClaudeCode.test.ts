@@ -1,5 +1,17 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchRuntimeStatus, mapControllerRuntimeClaudeCode } from "../runtimes";
+
+// The lane's codes are runtime-contracts' lists: the same file the runtime's
+// and the controller's tests read, so a reason renamed on one side and not
+// here fails at once.
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "../../../../../..");
+const LANE = JSON.parse(
+  readFileSync(resolve(repo, "packages/runtime-contracts/src/claude_code_lane_fixtures.json"), "utf8"),
+) as { notReadyReasons: string[]; runtimeFailureCodes: string[]; stopAndSweepFailureCodes: string[] };
 
 const { resolveContext } = vi.hoisted(() => ({ resolveContext: vi.fn() }));
 vi.mock("../projectNotFound", () => ({ reportControllerProjectNotFound: vi.fn() }));
@@ -51,6 +63,21 @@ describe("mapControllerRuntimeClaudeCode", () => {
     expect(mapped).not.toHaveProperty("path");
     // A reason means nothing on a ready capability.
     expect(mapControllerRuntimeClaudeCode({ ...READY, reason: "bare_default" })?.reason).toBeNull();
+  });
+
+  it("keeps exactly the not-ready reasons runtime-contracts lists", () => {
+    expect(LANE.notReadyReasons.length).toBeGreaterThan(0);
+    for (const reason of LANE.notReadyReasons) {
+      expect(mapControllerRuntimeClaudeCode({ ready: false, reason })?.reason, reason).toBe(reason);
+    }
+    // Every other code of the lane is a failure's, never a reason.
+    const others = [...LANE.runtimeFailureCodes, ...LANE.stopAndSweepFailureCodes].filter(
+      (code) => !LANE.notReadyReasons.includes(code),
+    );
+    expect(others.length).toBeGreaterThan(0);
+    for (const code of others) {
+      expect(mapControllerRuntimeClaudeCode({ ready: false, reason: code })?.reason, code).toBeNull();
+    }
   });
 });
 

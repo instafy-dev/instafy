@@ -25,20 +25,9 @@ import type {
   UseConversationSubmitFlowArgs,
 } from "./conversationSubmitTypes";
 import { turnEnginePresentation } from "./runFailurePresentation";
+import type { TurnEngineSendRefusal } from "./turnEngineSendRefusal";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
-
-/**
- * A send that claimed a turn engine and that the controller refused before
- * it recorded anything (docs/Local-Engine-Turns.md 2.2, 5.5): no message, run
- * or job exists for it, and the engine words the refusal by its code.
- */
-export interface TurnEngineSendRefusal {
-  engineId: string;
-  code: string;
-  /** The engine's sentence, shown in place of the controller's own text. */
-  sentence: string;
-}
 
 export interface ConversationDispatchResult {
   ok: boolean;

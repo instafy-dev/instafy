@@ -87,3 +87,17 @@ it("does not let a saved command overwrite a newer goal snapshot", async () => {
   expect(current.activeConversation?.activeGoal).toEqual(replacement);
   expect(updateMetadata).not.toHaveBeenCalled();
 });
+
+// docs/Local-Engine-Turns.md 5.5: a send the controller refused was never
+// recorded, so its message leaves the chat, and nothing else does.
+it("takes a refused send's own message out of the chat, and only that one", async () => {
+  await render();
+  const id = current.activeConversationId!;
+  const message = (messageId: string, clientMessageId: string, role: "user" | "assistant" = "user") => ({
+    id: messageId, role, authorId: role === "user" ? session.userId : null, content: messageId, timestamp: 1,
+    files: null, messageType: null, metadata: { clientMessageId },
+  });
+  await act(async () => current.appendMessages(id, [message("earlier", "client-1"), message("unsent", "client-2")]));
+  await act(async () => current.removeUnsentMessage(id, "client-2"));
+  expect(current.activeConversation?.messages.map((entry) => entry.id)).toEqual(["earlier"]);
+});

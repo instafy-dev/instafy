@@ -74,8 +74,8 @@ describe("chat attachments through the real submit flow", () => {
         currentUserId: "user-1", preferredRuntimeId: null, runtimeStatuses: [], effectiveRuntimeId: null,
         effectiveRuntimeSource: "auto", createConversation: vi.fn(), selectConversation: vi.fn(),
         markConversationRead: vi.fn(), setConversationDraft: vi.fn(),
-        setConversationTitle: vi.fn(), setConversationGoal: vi.fn(), updateMessage: vi.fn(),
-        linkRunToConversation: vi.fn(), ...args,
+        setConversationTitle: vi.fn(), setConversationGoal: vi.fn(), removeUnsentMessage: vi.fn(),
+        updateMessage: vi.fn(), linkRunToConversation: vi.fn(), ...args,
       });
       return null;
     }

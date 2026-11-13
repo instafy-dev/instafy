@@ -14,7 +14,7 @@ import {
   runMatchesThreadJobId,
   shouldDisplayChatMessage,
 } from "./chatMessagePresentation";
-import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
+import { extractMessageDetails, getMessageType, isTurnReplyNote } from "./chatMessageMetadata";
 import { getControllerConversationNoticeKind, readChatRunStopNotice } from "./controllerConversationNotice";
 import { normalizeAssistantStatusText } from "./assistantStatusHeuristics";
 import { isThreadPreviewUnresolved } from "./threadPreviewState";
@@ -40,9 +40,12 @@ import type { EarlierAttemptDetails } from "./AgentJobThreadPreviewLayout";
 import {
   hasFailedRunMetadata,
   resolveRunFailurePresentation,
+  resolveRunFailureRetrySource,
+  turnEngineStartingLine,
 } from "../../../conversations/runFailurePresentation";
 import { isInProgressRunStale, isQueuedRunStale } from "../../../conversations/runLiveness";
 import { readTurnReplyDraft } from "../../../conversations/replyDrafts";
+import { useRunFailureRetry } from "./RunFailureNotice";
 
 const CHAT_SPINE_GUTTER_PX = 26;
 // Steps are the activity line's and Details'; they are never update rows.
@@ -667,8 +670,13 @@ export function useAgentJobThreadPreviewState({
     () => intermediateUpdates.filter((update) => CARD_MESSAGE_TYPES.has(messageType(update))),
     [intermediateUpdates],
   );
+  // The turn's notes its runtime placed under the reply, in the order they came.
+  const replyNotes = useMemo(() => threadMessages.filter(isTurnReplyNote), [threadMessages]);
   const detailUpdates = useMemo(
-    () => intermediateUpdates.filter((update) => !CARD_MESSAGE_TYPES.has(messageType(update))),
+    () =>
+      intermediateUpdates.filter(
+        (update) => !CARD_MESSAGE_TYPES.has(messageType(update)) && !isTurnReplyNote(update),
+      ),
     [intermediateUpdates],
   );
 
@@ -706,6 +714,34 @@ export function useAgentJobThreadPreviewState({
     }
     return recorded.length > 0 ? recorded : null;
   }, [jobId, threadMessages, turnJobIds]);
+  // A turn a turn engine runs words its own start until its first step
+  // (docs/Local-Engine-Turns.md 5.7): its run says so, or, on a page that has
+  // no metadata for that run (a teammate's, while it runs), its prompt does.
+  // It is worded for whoever views it, by who sent the turn, as its reply's
+  // line is: it starts on its sender's computer, not a teammate's.
+  const turnStarting = activityPhase === "starting" || activityPhase === "running";
+  const owningConversationMessages = owningConversation?.messages;
+  const turnEngineOwnerOf = useRunFailureRetry()?.turnEngineOwnerOf;
+  const startingLine = useMemo(() => {
+    if (!turnStarting) {
+      return null;
+    }
+    const run = jobId
+      ? Object.values(runs ?? {}).find((candidate) => runMatchesThreadJobId(candidate, jobId)) ?? null
+      : null;
+    const firstMessage = runMessages[0] ?? threadMessages[0] ?? null;
+    const prompt = firstMessage
+      ? resolveRunFailureRetrySource({
+          conversationMessages: owningConversationMessages ?? [],
+          failureMessage: firstMessage,
+        })
+      : null;
+    return turnEngineStartingLine({
+      runMetadata: run?.metadata ?? null,
+      promptMetadata: prompt?.metadata ?? null,
+      owner: firstMessage ? turnEngineOwnerOf?.(firstMessage) ?? null : null,
+    });
+  }, [jobId, owningConversationMessages, runMessages, runs, threadMessages, turnEngineOwnerOf, turnStarting]);
   const activity = useMemo(() => {
     const options = {
       jobId: jobId || null,
@@ -714,6 +750,7 @@ export function useAgentJobThreadPreviewState({
       updates: detailUpdates,
       viewerCanAnswer: browserApproval.viewerCanAnswer,
       approvals: browserApproval.settled,
+      startingLine,
     };
     const loaded = summarizeTurnActivity(threadMessages, options);
     if (!recordedSteps || (activityPhase !== "completed" && activityPhase !== "cancelled")) {
@@ -730,6 +767,7 @@ export function useAgentJobThreadPreviewState({
     detailUpdates,
     jobId,
     recordedSteps,
+    startingLine,
     threadMessages,
     turnJobIds,
   ]);
@@ -878,6 +916,7 @@ export function useAgentJobThreadPreviewState({
     browserApproval: browserApproval.row,
     detailsOpen,
     cards,
+    replyNotes,
     isThreadUnresolved,
     canCancelTerminalRun,
     cancelPending,

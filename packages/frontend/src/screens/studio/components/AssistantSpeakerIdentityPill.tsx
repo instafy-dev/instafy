@@ -14,6 +14,7 @@ import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltIn
 import { Text } from "../../../components/Text";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 import { useTurnEngineSpeakerLine } from "./RunFailureNotice";
+import type { ChatMessage } from "../types";
 import "./ChatIdentityLayout.css";
 
 function resolveAvatarSeed(
@@ -130,9 +131,25 @@ export function AssistantSpeakerIdentityLabel({
   return (
     <div className="flex min-w-0 max-w-full flex-col items-start">
       {label}
-      <Text as="p" variant="caption" tone="muted" className="max-w-full break-words" data-testid="turn-engine-speaker-line">
-        {turnEngineSpeakerLine}
-      </Text>
+      <TurnEngineSpeakerLineText line={turnEngineSpeakerLine} />
     </div>
   );
+}
+
+function TurnEngineSpeakerLineText({ line }: { line: string }) {
+  return (
+    <Text as="p" variant="caption" tone="muted" className="max-w-full break-words" data-testid="turn-engine-speaker-line">
+      {line}
+    </Text>
+  );
+}
+
+/**
+ * A turn engine's line for a reply whose header the chat does not show (a
+ * quiet reply in a chat of one, or the same speaker again): the line still
+ * says whose own engine ran the turn (docs/Local-Engine-Turns.md 5.7).
+ */
+export function TurnEngineSpeakerLine({ message }: { message: Pick<ChatMessage, "id" | "timestamp" | "metadata"> }) {
+  const line = useTurnEngineSpeakerLine(message);
+  return line ? <TurnEngineSpeakerLineText line={line} /> : null;
 }
