@@ -7,6 +7,11 @@ Claude Code runs on your machine, under your own Claude plan or API key, in Anth
 Instafy provides tools: it issues no model request, holds no Anthropic credential, and cannot start a
 turn.
 
+Separately, Instafy Desktop can run your own Claude Code for one message you choose in an Instafy
+chat ([local-engine turns](../../docs/Local-Engine-Turns.md)). If you installed the plugin, its skill
+is available in such a turn, as in your own sessions, but its tools are not, and they still cannot
+start a turn.
+
 ## Install
 
 You need an Instafy CLI that has `instafy mcp` on your `PATH`, and a signed-in session:

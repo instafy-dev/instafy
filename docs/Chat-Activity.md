@@ -99,6 +99,89 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   raw text behind Details keeps them all (`runFailurePresentation.ts`), except the proxy's own
   address that Codex adds to its diagnostic (", url: http://proxy:…"): an AI that didn't answer
   keeps its status and what the service said.
+- A local-engine turn ([Local-engine turns](Local-Engine-Turns.md)), one message its sender had
+  their own Claude Code carry out on their own computer, follows the same rule. Its words name
+  Claude Code in plain text as the program that ran the turn, never as something Instafy offers.
+  Its failure block has no "Manage AI" and no "Try again", a stopped one offers no Continue, and
+  Instafy never sends such a turn again by itself: only its sender gets "Send again with Claude
+  Code", which puts the message back in the composer with Claude Code chosen. Details keeps the
+  raw text. Notes the turn writes itself are status steps, never lines added to its reply.
+  - Under Octo's name on the reply, its sender reads "Ran on your own Claude Code, on your
+    computer", and everyone else reads "Ran on {Name}'s own Claude Code, on their computer".
+  - A send the controller refuses writes no message, so only its sender reads why, in place of
+    the error row, and the text goes back in the composer with Claude Code still chosen:
+    - `claude_code_turn_not_allowed`: "Claude Code turns aren't on for your account yet."
+    - `claude_code_turn_not_person`: "Claude Code takes only a message you send yourself."
+    - `claude_code_turn_not_plain`: "Claude Code takes only a plain message to Octo, of at most
+      100,000 characters, without attachments or a command."
+    - `claude_code_conversation_granted`: "In this chat, Octo takes turns only from the person who
+      started the chat, so Claude Code can't run your message here."
+    - `claude_code_turn_active`: "You already have a Claude Code turn running. Send this when it
+      ends.", or, when the earlier turn's start window has passed, "Your last Claude Code turn
+      didn't start in time. Send this again in a few seconds."
+    - `claude_code_machine_busy`: "Your computer is busy with another turn. Send this when it's
+      done."
+    - `claude_code_runtime_not_ready`: "Your computer isn't connected to this space. Open this
+      space in Instafy Desktop, then send your message again."
+    - `dispatch_lane_busy`, for a send that chose Claude Code: "Octo is still working on another
+      message in this chat. Send this when it's done."
+    - any other `claude_code_*` code: "Claude Code couldn't take this message."
+  - A Steer into the running turn (`claude_code_turn_takes_no_input`) tells whoever tried it:
+    "This Claude Code turn can't take more words while it runs. Queue your message instead."
+  - A failed turn reads "Claude Code couldn't finish this turn on {Name}'s computer." for everyone
+    but its sender, who reads the sentence for its code:
+    - `not_signed_in`: "Claude Code isn't signed in on this computer. Open a terminal, run claude
+      and sign in, then send your message again." On a Claude Code newer than the versions
+      Instafy has checked, it adds "If you're signed in, this newer Claude Code may no longer let
+      other apps use your sign-in."
+    - `plan_limit`: "Your Claude plan's usage limit was reached, so this turn stopped. Send your
+      message again after it resets.", with the reset time when Claude Code's text gives one.
+    - `binary_missing`: "Instafy Desktop can't find Claude Code on this computer. Set it up again
+      in Your AI, then send your message again."
+    - `binary_unsafe`: "Instafy Desktop won't start this copy of Claude Code because other
+      accounts on this computer can change it. Set it up again in Your AI."
+    - `unsupported_version` and `probe_failed`: "This version of Claude Code can't take turns from
+      Instafy. Update Claude Code, then send your message again."
+    - `bare_default`: "This version of Claude Code no longer lets other apps use your sign-in for
+      a turn, so Instafy can't use it yet."
+    - `session_unavailable`: "Claude Code couldn't continue its earlier session on this computer.
+      Send your message again to start a new one."
+    - `turn_timeout`: "Claude Code worked past its time limit for one turn, so it was stopped. Its
+      changes stay on this computer and weren't saved to the space."
+    - `stalled`: "Claude Code stopped responding, so this turn was stopped."
+    - `crashed`: "Claude Code stopped unexpectedly, so this turn ended."
+    - `unexpected_configuration`: "Claude Code started with settings Instafy didn't ask for, so
+      Instafy stopped this turn."
+    - `project_config`: "This space's folder on this computer holds Claude Code files, so Claude
+      Code turns from Instafy can't run here. Move the files that Details names out of the
+      folder, then send your message again."
+    - `unsafe_import`: "A CLAUDE.md, CLAUDE.local.md or AGENTS.md file in this space's folder
+      brings in files that aren't part of the space, so Claude Code turns from Instafy can't run
+      here."
+    - `unsafe_link`: "This space links to a file outside it, so Claude Code turns from Instafy
+      can't run here."
+    - `preflight_failed`, which a folder with no git repository also gets (Details says so):
+      "Instafy couldn't check this space's folder on this computer, so Claude Code didn't start."
+    - `claude_code_machine_stopped`: "Instafy Desktop stopped on your computer while Claude Code
+      was working, so the turn ended. Send it again to run it."
+    - `start_by_passed`: "This Claude Code turn didn't start in time, so it won't run. Send it
+      again."
+    - `run_once_interrupted`: "This Claude Code turn stopped because Instafy on your computer
+      stopped, and it won't run again. Send it again to start over."
+    - anything else: "Claude Code stopped with an error.", with the failure's own first line after
+      it only when that line passes the rule above.
+  - Its status steps, which everyone in the chat reads:
+    - "Claude Code skipped N steps that need your OK, since nobody can give it here. You can allow
+      them in your own Claude Code settings.", with the tools in Details. The turn still succeeds.
+    - What its save kept on this computer, each file by name
+      ([Runtime machines](Runtime-Machines.md#workspace-durability)):
+      `Not saved: <paths> (Claude Code's own files stay on this computer)` for `.claude/` paths,
+      `CLAUDE.local.md` and the root `.mcp.json`, and
+      `Not saved: <paths> (it looks like a Claude key is in it, so it stays on this computer)`.
+    - "Claude Code's changes stayed on this computer and weren't saved to the space.", when the
+      turn finished but its save failed (the error is in Details) or Instafy couldn't read what
+      it changed. The reply still shows, and the files card lists nothing, so there is nothing to
+      Undo.
 - While Instafy tries a failed turn again by itself (`useRunFailureAutoRetry`), the turn is one
   quiet line, "Trying again…", with no failure sentence, no red and no actions; a countdown before
   a rate-limited resend reads "Trying again in 20 s" with Cancel. Only a dropped reply and a short

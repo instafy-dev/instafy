@@ -350,6 +350,12 @@ On phones these forms retain `MobileFocusDialog`, including its visual-viewport
 handling, Back behavior and very-short-viewport fallback. The footer scrolls with the
 form when there is too little room to fix both header and actions on screen.
 
+A secret the controller refuses as a Claude sign-in (the name `CLAUDE_CODE_OAUTH_TOKEN`, or a
+value that holds Claude sign-in material) stays in the Secrets list, marked "Instafy no longer
+stores Claude sign-ins; remove it", instead of being hidden: the controller never delivers it to
+a job. A Claude API key, such as one stored as `ANTHROPIC_API_KEY`, is not refused and keeps
+working.
+
 `/tests/fixtures/menus-forms/index.html` mounts the production Secrets and Your AI
 pages with local sample data, plus the shared Select. Its isolated browser suite covers
 light/dark themes at 390, 1280 and 2560px, form drafts across viewport changes, local
@@ -719,6 +725,24 @@ Controllers without managed AI show "Unavailable on this server" without a Defau
 quota or switch action. An unresolved or failed capability check must not be presented as
 confirmed unavailability. Reserve the separate status summary for loading, errors or a saved
 account that needs to be selected as default.
+
+In Instafy Desktop on macOS, and only for a person `CLAUDE_CODE_LANE_USER_IDS` covers (the space's
+runtime status carries `claudeCodeLane`), Connections also shows **Claude Code on this computer**
+after saved connections and before **Connect an account**: the status of local-engine turns on
+this computer ([Local-engine turns](Local-Engine-Turns.md)). Like the Instafy AI row it is not a
+connection; unlike it, it is never the default, has no Make default action and never appears in
+the connection chooser. It shows where Desktop found `claude` ("Found at …", a path shown only on
+this computer) or "Not found", with the actions **Find** (Desktop looks for `claude` from the
+person's login shell and the usual install folders), **Locate…** (a file picker), and **Use for my
+messages**, which opens Desktop's own consent dialog, or **Turn off** once it is on. Its sign-in
+line says "Runs on your own Claude plan, under Anthropic's current terms." only when this
+computer's Claude Code reports a Claude plan sign-in, and otherwise "Uses your own Claude Code
+sign-in, under Anthropic's current terms."; nothing on the row says included, free or unlimited,
+or mentions credits. Once it is on, the row says whether this computer can take such a turn now
+("Ready on this computer.") and, when it cannot, what fixes it: start the space on this computer,
+update Claude Code, find or locate it again, or locate a copy only the person can change. A
+one-time note asks the person to sign in to Claude Code first ("run claude in a terminal once").
+The web, phones and Desktop on other systems show no such row.
 
 Show supported connection methods directly under **Connect an account**, after saved connections,
 even when the account has no connections yet. The page and existing connection chooser share

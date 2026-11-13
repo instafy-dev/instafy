@@ -62,6 +62,11 @@ A job pinned to the dispatch's chosen runtime while that runtime is not dispatch
 stopped desktop, say) is not refused: dispatch unpins it, as from any runtime that is not ready,
 and a hosted runtime takes it. The private runtime never receives it.
 
+A local-engine job is not a platform AI job, though it holds no credential: only its sender's own
+private runtime with the attested `claudeCode` capability leases it, once and within a minute of
+the send, and it gets no proxy token, model-facing controller token or project secrets
+([Local-engine turns](Local-Engine-Turns.md)).
+
 `POST /agent/secrets` independently requires the same signed runtime identity and current
 generation. The requested job must belong to that exact runtime, remain leased, and have a
 future expiry before granted secrets can be decrypted. Missing runtime ownership or expiry
