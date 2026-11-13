@@ -242,7 +242,9 @@ impl<'a> LaneJob<'a> {
 }
 
 /// The job applies its turn: its execution mode, where it says one, is `apply` (`execution_mode`
-/// in the job loop reads `metadata.execution_mode`; the controller also writes `executionMode`).
+/// in the job loop reads `metadata.execution_mode`). The payload's top-level `executionMode` is
+/// something else, the workspace mode the controller writes on every write job (`shared_write`),
+/// so it is not read here.
 fn applies_its_turn(payload: &Value) -> bool {
     let is_apply = |value: Option<&Value>| match value {
         None | Some(Value::Null) => true,
@@ -251,7 +253,6 @@ fn applies_its_turn(payload: &Value) -> bool {
     };
     is_apply(payload.pointer("/metadata/execution_mode"))
         && is_apply(payload.pointer("/metadata/executionMode"))
-        && is_apply(payload.get("executionMode"))
 }
 
 /// The controller's mark of a group turn where Octo first decides whether to answer
@@ -323,28 +324,43 @@ mod tests {
         .unwrap()
     }
 
+    /// A lane job as the controller leases it: the payload keys and metadata of a real lane send
+    /// (recorded from a controller and runtime driven end to end), the ids aside.
     fn lane_job(user_id: Uuid) -> LeaseJob {
+        let conversation_id = Uuid::new_v4();
         serde_json::from_value(json!({
             "id": Uuid::new_v4(),
             "intent": "feature",
             "project_id": Uuid::new_v4(),
             "run_id": Uuid::new_v4(),
-            "conversation_id": Uuid::new_v4(),
+            "conversation_id": conversation_id,
             "engine": "claude-code",
             "lease_attempts": 1,
             "workspace_token": "workspace-token",
             "payload": {
+                "intent": "feature",
+                "version": "1.0",
                 "user_id": user_id.to_string(),
                 "prompt_text": "  Rename the project in README.md\n",
-                "executionMode": "apply",
+                "writeIntent": true,
+                // The workspace mode, not the execution mode.
+                "executionMode": "shared_write",
+                "targetThreadId": conversation_id,
+                "conversation_id": conversation_id,
                 "metadata": {
-                    "agent": { "handle": "octo" },
-                    "writeScope": { "mode": "unscoped" },
+                    "agent": {
+                        "handle": "octo",
+                        "displayName": "Octo",
+                        "writeScope": { "mode": "unscoped", "ownedPaths": [], "readOnlyPaths": [] },
+                    },
+                    "writeScope": { "mode": "unscoped", "ownedPaths": [], "readOnlyPaths": [] },
                     "claudeCode": { "version": 1 },
                     "aiAccessMode": "claude-code",
                     "managedAiUsed": false,
                     "input": { "kind": "person" },
                     "writeIntent": true,
+                    "runtimePreference": { "source": "conversation" },
+                    "conversationVisibility": "public",
                 },
             },
         }))
@@ -449,7 +465,9 @@ mod tests {
             ),
             (
                 "approval required".into(),
-                job_with(&|job| job.payload["executionMode"] = json!("approval_required")),
+                job_with(&|job| {
+                    job.payload["metadata"]["executionMode"] = json!("approval_required")
+                }),
             ),
             (
                 "a plan seed".into(),

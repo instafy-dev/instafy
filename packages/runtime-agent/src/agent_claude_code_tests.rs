@@ -462,7 +462,8 @@ impl Space {
             "payload": {
                 "user_id": self.person.to_string(),
                 "prompt_text": PROMPT,
-                "executionMode": "apply",
+                // As the controller writes it on every write job: the workspace mode.
+                "executionMode": "shared_write",
                 "metadata": {
                     "agent": { "handle": "octo" },
                     "writeScope": { "mode": "unscoped" },
