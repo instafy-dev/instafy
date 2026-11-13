@@ -40,7 +40,7 @@ mod agent_faces;
 
 pub(crate) const DEFAULT_PROMPT_INTENT: &str = "feature";
 const DEFAULT_PROMPT_PRIORITY: i32 = 100;
-const EXECUTION_MODE_APPLY: &str = "apply";
+pub(crate) const EXECUTION_MODE_APPLY: &str = "apply";
 const EXECUTION_MODE_APPROVAL: &str = "approval_required";
 const EXECUTION_MODE_PLAN_ONLY: &str = "plan_only";
 const WORKSPACE_MODE_SHARED_READ: &str = "shared_read";
@@ -58,7 +58,7 @@ const DISPATCHABLE_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS: i64 = 90;
 /// ([`conversations::effective_visibility`]): the runtime titles a version in
 /// History, which the whole space reads, with the person's words only when it
 /// says `"public"`.
-const CONVERSATION_VISIBILITY_KEY: &str = "conversationVisibility";
+pub(crate) const CONVERSATION_VISIBILITY_KEY: &str = "conversationVisibility";
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -244,6 +244,11 @@ pub(crate) struct DispatchPromptNormalized {
     /// The device grants its one job holds. Set only by dispatch itself
     /// ([`crate::device_grants::grants_for_dispatch`]).
     pub(crate) grant_ids: Vec<Uuid>,
+    /// Its one job runs on its sender's own Claude Code, on this admitted
+    /// runtime (`agent_jobs.engine`). Set only by dispatch itself, when
+    /// [`crate::claude_code_lane::admit`] admits the turn, never from a
+    /// request body.
+    pub(crate) claude_code_lane: Option<crate::claude_code_lane::LaneAdmission>,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -1081,6 +1086,25 @@ pub(crate) async fn process_dispatch_prompt_timed(
         // the controller dispatches the team itself, as the service role.
         conversations::strip_client_plan_claims(&mut request.metadata);
     }
+    // "Run this on my own Claude Code" is the controller's to grant
+    // (crate::claude_code_lane): the claim is taken from every caller, the
+    // service role included, and never persisted, and the controller's own
+    // lane stamps never come from a client. A claimed send passes Stage 1 here
+    // or is refused before anything is written.
+    let lane_send = if crate::claude_code_lane::take_claim(&mut request.metadata)? {
+        Some(crate::claude_code_lane::check_sender(
+            &state.config,
+            context,
+            &mut request,
+            crate::claude_code_lane::TakenClaims {
+                site_intent: site_intent_claim.is_some(),
+                hand_back: hand_back_claim.is_some(),
+                automatic_retry: automatic_retry_claim.is_some(),
+            },
+        )?)
+    } else {
+        None
+    };
     // Browser control is bound to the runtime that owns the visible page.
     // Capture the caller's explicit runtime before project/conversation
     // preferences are considered so these requests can never drift to an
@@ -1336,6 +1360,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
     )
     .await?
     {
+        // A claimed send is refused here rather than recorded as a message
+        // that started nothing.
+        if lane_send.is_some() {
+            return Err(crate::claude_code_lane::conversation_granted());
+        }
         let user_message = if existing_recorded_message.is_some()
             || should_suppress_dispatch_user_message(&request.metadata)
         {
@@ -1512,9 +1541,17 @@ pub(crate) async fn process_dispatch_prompt_timed(
     }
 
     // Goal authority depends on authenticated ingress and verified system-turn
-    // provenance, not just the person whose access an internal send uses.
-    crate::conversation_goals::bind_dispatch(&transaction, context, &conversation, &mut request)
+    // provenance, not just the person whose access an internal send uses. A
+    // lane turn is never bound, so it never becomes a goal's source.
+    if lane_send.is_none() {
+        crate::conversation_goals::bind_dispatch(
+            &transaction,
+            context,
+            &conversation,
+            &mut request,
+        )
         .await?;
+    }
 
     // An ambient multi-human turn dispatches to the default agent stamped with
     // the agent_evaluation marker; the agent's participation skill decides
@@ -1534,7 +1571,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
             has_repo_request: request.repo.is_some(),
             has_preview_request: request.requested_preview == Some(true),
             execution_mode: &request.execution_mode,
-            strict_browser_target: strict_browser_runtime_id.is_some(),
+            // A lane send, like a strict browser target, is never turned into
+            // an evaluation.
+            strict_browser_target: strict_browser_runtime_id.is_some() || lane_send.is_some(),
             authenticated_human: context.user_id.is_some() && !context.is_service_role,
             verified_custom_agent_mention,
         });
@@ -1805,8 +1844,48 @@ pub(crate) async fn process_dispatch_prompt_timed(
         && !metadata_allows_runtime_spread(&request.metadata)
         && !skill_mode_ambient_evaluation
         && request.plan_seed.is_none();
+    // Stage 2 of a claimed send (crate::claude_code_lane): admitted here, or
+    // refused before anything is written, a conversation this send inserted
+    // included. An admitted turn's one job runs on its sender's own computer,
+    // with no credential, no grant and no runtime preference of the chat's,
+    // and the runtime row admission loaded is the dispatch's strict record.
+    let (lane, strict_runtime_record) = match lane_send.as_ref() {
+        Some(send) => {
+            let targets = agent_targets
+                .iter()
+                .map(|target| crate::claude_code_lane::Target {
+                    handle: &target.handle,
+                    agent_id: target.agent_id,
+                })
+                .collect::<Vec<_>>();
+            let (admission, record) = crate::claude_code_lane::admit(
+                state,
+                &transaction,
+                &project.id,
+                &conversation,
+                &request,
+                send,
+                crate::claude_code_lane::Turn {
+                    plain_turn,
+                    skill_mode_ambient_evaluation,
+                    targets: &targets,
+                    recorded_earlier: existing_recorded_message.is_some(),
+                },
+            )
+            .await?;
+            for target in agent_targets.iter_mut() {
+                target.credential_id = None;
+            }
+            request.runtime_id = Some(admission.runtime_id);
+            request.prefer_runtime = false;
+            crate::claude_code_lane::stamp(ensure_object(&mut request.metadata));
+            request.claude_code_lane = Some(admission);
+            (Some(admission), Some(record))
+        }
+        None => (None, strict_browser_runtime_record),
+    };
     request.grant_ids = match agent_targets.as_slice() {
-        [target] if plain_turn => {
+        [target] if plain_turn && lane.is_none() => {
             crate::device_grants::grants_for_dispatch(
                 &state.config,
                 &transaction,
@@ -1827,7 +1906,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
     let mut runtime_display_name = request.runtime_display_name.clone();
 
     let allow_runtime_spread = metadata_allows_runtime_spread(&request.metadata);
-    if runtime_id.is_none() && !allow_runtime_spread {
+    if runtime_id.is_none() && !allow_runtime_spread && lane.is_none() {
         if let Some(entry) = project_runtime_preference.as_ref() {
             if let Some(preference_id) = entry.runtime_id {
                 runtime_id = Some(preference_id);
@@ -1889,7 +1968,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
 
     for (run_id, target) in agent_runs.iter() {
         let mut run_request = request.clone();
-        apply_agent_prompt_segment(&mut run_request, &prompt_segments, target);
+        // A lane turn's words are the recorded message's, whole.
+        if lane.is_none() {
+            apply_agent_prompt_segment(&mut run_request, &prompt_segments, target);
+        }
         inject_agent_target_metadata(&mut run_request.metadata, target);
         apply_agent_write_scope_metadata(
             &mut run_request.metadata,
@@ -1929,13 +2011,14 @@ pub(crate) async fn process_dispatch_prompt_timed(
 
     // A natural reply can resolve pending worker questions only for one ordinary
     // human turn. Never race several independently routed agents or reinterpret
-    // an explicitly addressed, browser, automation or controller-owned turn.
+    // an explicitly addressed, browser, automation or controller-owned turn, or
+    // a lane turn, whose words go to the sender's own Claude Code alone.
     if should_route_worker_input(
         &request,
         context,
         conversation.thread_kind.as_deref(),
         agent_runs.len(),
-        strict_browser_runtime_id.is_some(),
+        strict_browser_runtime_id.is_some() || lane_send.is_some(),
     ) {
         if let Some(message) = user_message.as_ref() {
             if let Some(snapshot) = crate::user_input_requests::routing::snapshot(
@@ -2004,11 +2087,12 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .or(selected_runtime_provider.as_deref())
         .unwrap_or(default_provider_id.as_str());
 
-    let runtime_record = if let Some(record) = strict_browser_runtime_record {
-        // Exact browser targets were already validated under this transaction.
-        // Re-ensuring them with the project's default provider can both mutate
-        // the record and misclassify a valid self-hosted Personal runtime as an
-        // unavailable Instafy Cloud runtime.
+    let runtime_record = if let Some(record) = strict_runtime_record {
+        // Exact browser targets, and a lane turn's runtime, were already
+        // validated under this transaction. Re-ensuring them with the
+        // project's default provider can both mutate the record and
+        // misclassify a valid self-hosted Personal runtime as an unavailable
+        // Instafy Cloud runtime.
         Some(record)
     } else {
         // The dispatch goes on without the record when ensuring it fails, so the attempt runs in
@@ -2107,8 +2191,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // Terminal commands are executed directly by the selected runtime before
     // the Codex/provider lane is entered. They must remain usable when the
     // assistant is disabled or the user has not connected an AI credential,
-    // and must not consume an included-AI prompt or credit.
-    let platform_lane_ai_dispatch = dispatch_requires_ai_access(&request.intent)
+    // and must not consume an included-AI prompt or credit. A lane turn has no
+    // credential and is not Instafy AI either: it has no unpin, no private
+    // runtime refusal, no managed gate, reserve or daily count.
+    let platform_lane_ai_dispatch = lane.is_none()
+        && dispatch_requires_ai_access(&request.intent)
         && agent_runs
             .iter()
             .any(|(_, target)| target.credential_id.is_none());
@@ -2423,6 +2510,8 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 "failed to persist managed AI credit trace onto queued runs"
             );
         }
+    } else if lane.is_some() {
+        crate::claude_code_lane::stamp(ensure_object(&mut request.metadata));
     } else {
         let map = ensure_object(&mut request.metadata);
         map.insert(
@@ -2441,17 +2530,22 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // mark: managedAiUsed flips to true (and the burn lands) only when the
     // run's first visible assistant message persists.
     let managed_ai_used_at_dispatch = uses_managed_ai && !skill_mode_ambient_evaluation;
-    persist_prompt_ai_access_metadata(
+    let access_mode = if lane.is_some() {
+        crate::claude_code_lane::AI_ACCESS_MODE
+    } else {
+        ai_access_mode(uses_managed_ai)
+    };
+    persist_prompt_ai_access_mode(
         &transaction,
         &prompt_id,
-        uses_managed_ai,
+        access_mode,
         managed_ai_used_at_dispatch,
     )
     .await?;
-    persist_run_ai_access_metadata(
+    persist_run_ai_access_mode(
         &transaction,
         &run_ids,
-        uses_managed_ai,
+        access_mode,
         managed_ai_used_at_dispatch,
     )
     .await?;
@@ -2498,7 +2592,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
             continue;
         }
         let mut agent_request = request.clone();
-        apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
+        // A lane turn's words are the recorded message's, whole.
+        if lane.is_none() {
+            apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
+        }
         inject_agent_target_metadata(&mut agent_request.metadata, target);
         // Job-payload-only, and never the sender's word for it.
         ensure_object(&mut agent_request.metadata).insert(
@@ -2547,7 +2644,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 );
             }
         }
-        let input_source_job =
+        // A lane turn continues no worker and resumes no Codex thread: each
+        // engine resumes only its own state.
+        let input_source_job = if lane.is_some() {
+            None
+        } else {
             crate::multi_agent_plan::user_input::continuation_source_for_dispatch(
                 &transaction,
                 context,
@@ -2558,14 +2659,35 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 target.credential_id,
                 &target.handle,
             )
-            .await?;
+            .await?
+        };
         // A granted turn resumes no provider thread. The conversation's holds
         // other people's words, and a thread of its own would replay every
         // earlier granted turn's tool calls and results, which nothing here
         // can cap. So each granted turn starts afresh from the history its
         // lease carries: its person's words and the granted turns' replies.
-        let resumes_provider_thread = supports_provider_state && agent_request.grant_ids.is_empty();
-        let provider_conversation_state = if resumes_provider_thread {
+        let resumes_provider_thread =
+            lane.is_none() && supports_provider_state && agent_request.grant_ids.is_empty();
+        // A lane turn resumes only its own engine's session: its sender's,
+        // with this agent, in this conversation, on the computer it was
+        // admitted on (docs/Local-Engine-Turns.md 2.7).
+        let lane_session = match (lane, lane_send.as_ref(), request.conversation_id) {
+            (Some(admission), Some(send), Some(conversation_id)) => {
+                crate::claude_code_lane::load_session(
+                    &transaction,
+                    &project.id,
+                    &conversation_id,
+                    &send.sender,
+                    target.agent_id.as_ref(),
+                    &admission.runtime_id,
+                )
+                .await?
+            }
+            _ => None,
+        };
+        let provider_conversation_state = if lane.is_some() {
+            lane_session
+        } else if resumes_provider_thread {
             if let Some(conversation_id) = request.conversation_id {
                 load_provider_conversation_state_for_job(
                     &transaction,
@@ -2583,8 +2705,15 @@ pub(crate) async fn process_dispatch_prompt_timed(
         } else {
             None
         };
-        let target_runtime_id =
-            target_runtime_for_agent_job(&agent_request.metadata, target.runtime_id, runtime_id);
+        // A lane job is pinned to the runtime it was admitted on, as a
+        // browser job is to its explicit runtime: neither the agent's own
+        // per-project runtime nor spread metadata can move it.
+        let target_runtime_id = match lane {
+            Some(admission) => Some(admission.runtime_id),
+            None => {
+                target_runtime_for_agent_job(&agent_request.metadata, target.runtime_id, runtime_id)
+            }
+        };
         ensure_runtime_target_owner(
             &state,
             &transaction,
@@ -2633,9 +2762,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
             // A credential-less AI job runs on the platform key, service-role
             // dispatches included, so it gets its platform job record here.
             // The waiver follows this dispatch's own ambient decision, never
-            // the job payload.
+            // the job payload. A lane job runs on no Instafy key.
             let platform_org_id = project.org_id.filter(|_| {
-                dispatch_requires_ai_access(&request.intent) && target.credential_id.is_none()
+                lane.is_none()
+                    && dispatch_requires_ai_access(&request.intent)
+                    && target.credential_id.is_none()
             });
             if let Some(org_id) = platform_org_id {
                 let decline_waiver_units = if skill_mode_ambient_evaluation {
@@ -2883,7 +3014,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
         let mut retargeted_job_ids: Vec<Uuid> = unpinned_job_ids.clone();
         let mut cleared_runtime_preference = false;
         let mut reconnect_metadata: Option<JsonValue> = None;
-        if should_retarget_unavailable_runtime(reason, strict_browser_runtime_id) {
+        // A lane job, like a strict browser one, stays on its runtime: it is
+        // never unpinned, the preference is never cleared, and nothing is
+        // reconnected or launched for it.
+        let strict_runtime_id = strict_browser_runtime_id.or(lane.map(|lane| lane.runtime_id));
+        if should_retarget_unavailable_runtime(reason, strict_runtime_id) {
             if let Some(target_runtime_id) = runtime_id {
                 for job_id in &job_ids {
                     match connection
@@ -2895,6 +3030,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                                and project_id = $2
                                and status = 'queued'
                                and target_runtime_id = $3
+                               and engine is null
                              returning id",
                             &[job_id, &project.id, &target_runtime_id],
                         )
@@ -3383,6 +3519,7 @@ pub(crate) fn normalize_dispatch_request(
         allow_internal_review: false,
         trigger: None,
         grant_ids: Vec::new(),
+        claude_code_lane: None,
     })
 }
 
@@ -4554,7 +4691,7 @@ fn should_retarget_unavailable_runtime(
 /// its status is ready or running, its last heartbeat (`candidate`, its row)
 /// is at most [`DISPATCHABLE_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS`] old, and it
 /// has the agent and origin capabilities.
-fn runtime_not_dispatch_ready_detail(
+pub(crate) fn runtime_not_dispatch_ready_detail(
     record: &runtime::RuntimeRecord,
     candidate: Option<&workspace::RuntimeCandidate>,
     now: DateTime<Utc>,
@@ -5304,10 +5441,37 @@ fn merge_run_managed_ai_credit_metadata(
     JsonValue::Object(root)
 }
 
+/// The `aiAccessMode` of a dispatch that is not a lane turn: `managed` for
+/// Instafy AI, `byoc` for the person's own credential.
+fn ai_access_mode(managed_ai_access: bool) -> &'static str {
+    if managed_ai_access {
+        "managed"
+    } else {
+        "byoc"
+    }
+}
+
 pub(crate) async fn persist_run_ai_access_metadata(
     transaction: &Transaction<'_>,
     run_ids: &[Uuid],
     managed_ai_access: bool,
+    managed_ai_used: bool,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    persist_run_ai_access_mode(
+        transaction,
+        run_ids,
+        ai_access_mode(managed_ai_access),
+        managed_ai_used,
+    )
+    .await
+}
+
+/// Records `mode` as the authoritative `aiAccessMode` of `run_ids`
+/// (`managed`, `byoc` or `claude-code`), with `managed_ai_used`.
+pub(crate) async fn persist_run_ai_access_mode(
+    transaction: &Transaction<'_>,
+    run_ids: &[Uuid],
+    mode: &str,
     managed_ai_used: bool,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     if run_ids.is_empty() {
@@ -5333,8 +5497,7 @@ pub(crate) async fn persist_run_ai_access_metadata(
         let existing = row
             .get::<_, Option<PgJson<JsonValue>>>("metadata")
             .map(|json| json.0);
-        let merged =
-            merge_ai_access_metadata(existing.as_ref(), managed_ai_access, managed_ai_used);
+        let merged = merge_ai_access_metadata(existing.as_ref(), mode, managed_ai_used);
         let merged_param = PgJson(&merged);
         transaction
             .execute(
@@ -5356,6 +5519,23 @@ pub(crate) async fn persist_prompt_ai_access_metadata(
     managed_ai_access: bool,
     managed_ai_used: bool,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
+    persist_prompt_ai_access_mode(
+        transaction,
+        prompt_id,
+        ai_access_mode(managed_ai_access),
+        managed_ai_used,
+    )
+    .await
+}
+
+/// Records `mode` as the authoritative `aiAccessMode` of `prompt_id`
+/// (`managed`, `byoc` or `claude-code`), with `managed_ai_used`.
+pub(crate) async fn persist_prompt_ai_access_mode(
+    transaction: &Transaction<'_>,
+    prompt_id: &Uuid,
+    mode: &str,
+    managed_ai_used: bool,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
     let row = transaction
         .query_opt(
             "select metadata from prompts where id = $1 for update",
@@ -5374,7 +5554,7 @@ pub(crate) async fn persist_prompt_ai_access_metadata(
     let existing = row
         .get::<_, Option<PgJson<JsonValue>>>("metadata")
         .map(|json| json.0);
-    let merged = merge_ai_access_metadata(existing.as_ref(), managed_ai_access, managed_ai_used);
+    let merged = merge_ai_access_metadata(existing.as_ref(), mode, managed_ai_used);
     let merged_param = PgJson(&merged);
     transaction
         .execute(
@@ -5391,7 +5571,7 @@ pub(crate) async fn persist_prompt_ai_access_metadata(
 
 fn merge_ai_access_metadata(
     existing: Option<&JsonValue>,
-    managed_ai_access: bool,
+    mode: &str,
     managed_ai_used: bool,
 ) -> JsonValue {
     let mut root = match existing.cloned() {
@@ -5400,7 +5580,7 @@ fn merge_ai_access_metadata(
     };
     root.insert(
         "aiAccessMode".to_string(),
-        JsonValue::String(if managed_ai_access { "managed" } else { "byoc" }.to_string()),
+        JsonValue::String(mode.to_string()),
     );
     root.insert(
         "managedAiUsed".to_string(),
@@ -5529,6 +5709,9 @@ pub(crate) async fn load_provider_conversation_state_for_job(
                and j.conversation_id = r.conversation_id
              where r.project_id = $1 and r.conversation_id = $2
                and ($6::uuid is null or j.id=$6)
+               -- Each engine resumes only its own state: a local-engine
+               -- turn's is claude_code_lane::load_session's.
+               and j.engine is null
                and j.proxy_metadata->'conversation' is not null
                and j.proxy_metadata->'conversation' <> 'null'::jsonb
                and (r.metadata->>'jobId' is null
@@ -7693,7 +7876,7 @@ mod tests {
             "managedAiUsed": true,
         });
 
-        let merged = merge_ai_access_metadata(Some(&existing), false, false);
+        let merged = merge_ai_access_metadata(Some(&existing), ai_access_mode(false), false);
 
         assert_eq!(merged["custom"], json!(true));
         assert_eq!(merged["aiAccessMode"], json!("byoc"));
@@ -7702,7 +7885,7 @@ mod tests {
 
     #[test]
     fn run_ai_access_metadata_records_deferred_managed_access_without_usage() {
-        let merged = merge_ai_access_metadata(None, true, false);
+        let merged = merge_ai_access_metadata(None, ai_access_mode(true), false);
 
         assert_eq!(merged["aiAccessMode"], json!("managed"));
         assert_eq!(merged["managedAiUsed"], json!(false));
@@ -7715,10 +7898,29 @@ mod tests {
             "managedAiUsed": false,
         });
 
-        let merged = merge_ai_access_metadata(Some(&existing), true, true);
+        let merged = merge_ai_access_metadata(Some(&existing), ai_access_mode(true), true);
 
         assert_eq!(merged["aiAccessMode"], json!("managed"));
         assert_eq!(merged["managedAiUsed"], json!(true));
+    }
+
+    #[test]
+    fn run_ai_access_metadata_records_a_lane_turn_as_claude_code() {
+        let existing = json!({
+            "claudeCode": { "version": 1 },
+            "aiAccessMode": "byoc",
+            "managedAiUsed": true,
+        });
+
+        let merged = merge_ai_access_metadata(
+            Some(&existing),
+            crate::claude_code_lane::AI_ACCESS_MODE,
+            false,
+        );
+
+        assert_eq!(merged["claudeCode"], json!({ "version": 1 }));
+        assert_eq!(merged["aiAccessMode"], json!("claude-code"));
+        assert_eq!(merged["managedAiUsed"], json!(false));
     }
 
     #[test]

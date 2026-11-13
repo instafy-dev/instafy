@@ -366,11 +366,14 @@ fn runtime_is_private(r: &str) -> String {
 }
 
 /// Whether the job `j` is a platform AI job (an AI job whose target has no
-/// credential), which runs only on Instafy-hosted runtimes.
+/// credential), which runs only on Instafy-hosted runtimes. A local-engine
+/// turn (`engine`, crate::claude_code_lane) has no credential either, but
+/// runs on its person's own computer and is not one.
 fn job_is_platform_ai(j: &str) -> String {
     format!(
         "({j}.credential_id is null
-          and lower(btrim(coalesce({j}.intent, ''))) <> 'terminal_command')"
+          and lower(btrim(coalesce({j}.intent, ''))) <> 'terminal_command'
+          and {j}.engine is null)"
     )
 }
 

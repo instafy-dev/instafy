@@ -864,6 +864,10 @@ pub struct AppConfig {
     /// Who may let their agents use their own devices
     /// (`DEVICE_GRANTS_USER_IDS`): nobody by default.
     pub device_grants: DeviceGrantUsers,
+    /// Who may send a turn that their own Claude Code carries out on their
+    /// own computer (`CLAUDE_CODE_LANE_USER_IDS`, docs/Local-Engine-Turns.md):
+    /// nobody by default.
+    pub claude_code_lane: ClaudeCodeLaneUsers,
     pub runtime_idle_release_seconds: i64,
     /// Stop a healthy hosted runtime after this many seconds with no user
     /// activity and no leased job. Without this, an abandoned runtime bills
@@ -1117,6 +1121,12 @@ impl DeviceGrantUsers {
     /// logged and means nobody: the switch that turns grants off must never
     /// keep the controller from starting.
     pub(crate) fn from_env_value(raw: Option<&str>) -> Self {
+        Self::from_switch_value("DEVICE_GRANTS_USER_IDS", "device grants", raw)
+    }
+
+    /// A switch named `variable` that turns `feature` on for users, read as
+    /// [`Self::from_env_value`] says.
+    fn from_switch_value(variable: &str, feature: &str, raw: Option<&str>) -> Self {
         match raw.map(str::trim).unwrap_or_default() {
             "" => Self::Nobody,
             "*" => Self::Everyone,
@@ -1128,8 +1138,8 @@ impl DeviceGrantUsers {
                 Ok(ids) => Self::Only(ids),
                 Err(_) => {
                     tracing::error!(
-                        "DEVICE_GRANTS_USER_IDS must be * or a comma-separated list of user ids; \
-                         device grants are off for everyone"
+                        "{variable} must be * or a comma-separated list of user ids; \
+                         {feature} are off for everyone"
                     );
                     Self::Nobody
                 }
@@ -1150,6 +1160,36 @@ impl DeviceGrantUsers {
             Self::Everyone => true,
             Self::Only(user_ids) => user_ids.contains(&user_id),
         }
+    }
+}
+
+/// The longest message, in characters (Unicode scalar values), that one
+/// local-engine turn carries: the dispatch gate refuses a longer one, and
+/// runtime-agent checks the same limit before it starts `claude`
+/// (docs/Local-Engine-Turns.md 2.2 G5 and 3.9).
+pub const CLAUDE_CODE_LANE_MAX_PROMPT_CHARS: usize = 100_000;
+
+/// Who local-engine turns are on for (docs/Local-Engine-Turns.md 2.11):
+/// nobody, everyone, or only the listed users, as for device grants.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClaudeCodeLaneUsers(pub DeviceGrantUsers);
+
+impl ClaudeCodeLaneUsers {
+    /// `CLAUDE_CODE_LANE_USER_IDS`, read exactly as `DEVICE_GRANTS_USER_IDS`
+    /// is ([`DeviceGrantUsers::from_env_value`]): unset or empty is nobody,
+    /// `*` everyone, anything else a comma-separated list of user ids, and a
+    /// malformed value is logged and means nobody.
+    pub(crate) fn from_env_value(raw: Option<&str>) -> Self {
+        Self(DeviceGrantUsers::from_switch_value(
+            "CLAUDE_CODE_LANE_USER_IDS",
+            "local-engine turns",
+            raw,
+        ))
+    }
+
+    /// Whether local-engine turns are on for `user_id`.
+    pub fn allow(&self, user_id: Uuid) -> bool {
+        self.0.allow(user_id)
     }
 }
 
@@ -1458,6 +1498,9 @@ impl AppConfig {
             .unwrap_or_default();
         let device_grants = DeviceGrantUsers::from_env_value(
             std::env::var("DEVICE_GRANTS_USER_IDS").ok().as_deref(),
+        );
+        let claude_code_lane = ClaudeCodeLaneUsers::from_env_value(
+            std::env::var("CLAUDE_CODE_LANE_USER_IDS").ok().as_deref(),
         );
         let desktop_release_github_owner = read_first_env(&["DESKTOP_RELEASE_GITHUB_OWNER"]);
         let desktop_release_github_repo = read_first_env(&["DESKTOP_RELEASE_GITHUB_REPO"]);
@@ -1893,6 +1936,7 @@ impl AppConfig {
             dev_isolation_mode,
             dev_mode,
             device_grants,
+            claude_code_lane,
             runtime_idle_release_seconds,
             runtime_idle_stop_seconds,
             runtime_limit_reclaim_idle_seconds,
@@ -2046,8 +2090,8 @@ mod tests {
         normalized_admin_user_email, parse_browser_profile_persist_project_ids,
         published_development_key_warning, resolve_credential_encryption_key,
         resolve_credential_key_ring, resolve_user_token_secret, working_state_saves_enabled,
-        AdminUserLookup, AdminUsersPage, CredentialEncryptionKey, DeviceGrantUsers,
-        HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
+        AdminUserLookup, AdminUsersPage, ClaudeCodeLaneUsers, CredentialEncryptionKey,
+        DeviceGrantUsers, HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -2122,6 +2166,53 @@ mod tests {
         assert!(only.on());
         assert!(only.allow(listed));
         assert!(!only.allow(other));
+    }
+
+    /// `CLAUDE_CODE_LANE_USER_IDS` is read exactly like
+    /// `DEVICE_GRANTS_USER_IDS`, and is its own switch: nobody when unset,
+    /// empty or malformed, everyone for `*`, else only the listed users.
+    #[test]
+    fn local_engine_turns_are_on_for_nobody_everyone_or_the_listed_users() {
+        let (listed, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let users = |raw: &str| ClaudeCodeLaneUsers::from_env_value(Some(raw));
+        assert_eq!(
+            ClaudeCodeLaneUsers::from_env_value(None),
+            ClaudeCodeLaneUsers::default()
+        );
+        assert_eq!(
+            ClaudeCodeLaneUsers::default(),
+            ClaudeCodeLaneUsers(DeviceGrantUsers::Nobody)
+        );
+        assert_eq!(users(" "), ClaudeCodeLaneUsers(DeviceGrantUsers::Nobody));
+        assert_eq!(
+            users(" * "),
+            ClaudeCodeLaneUsers(DeviceGrantUsers::Everyone)
+        );
+        assert_eq!(
+            users(&format!("{listed}, {other}")),
+            ClaudeCodeLaneUsers(DeviceGrantUsers::Only(vec![listed, other]))
+        );
+        for bad in [
+            "on".to_string(),
+            "claude-code".to_string(),
+            format!("*,{listed}"),
+            format!("{listed},"),
+            format!("{listed} {other}"),
+        ] {
+            assert_eq!(
+                users(&bad),
+                ClaudeCodeLaneUsers(DeviceGrantUsers::Nobody),
+                "{bad}"
+            );
+            assert!(!users(&bad).allow(listed), "{bad}");
+        }
+
+        assert!(!ClaudeCodeLaneUsers::default().allow(listed));
+        assert!(users("*").allow(other));
+        let only = users(&listed.to_string());
+        assert!(only.allow(listed));
+        assert!(!only.allow(other));
+        assert_eq!(super::CLAUDE_CODE_LANE_MAX_PROMPT_CHARS, 100_000);
     }
 
     #[test]

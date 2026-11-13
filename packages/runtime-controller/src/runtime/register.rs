@@ -29,7 +29,7 @@ use super::lease::parse_lease_scope;
 use super::provider::authorize_provider_for_project;
 use super::token::{
     default_runtime_token_scopes, effective_runtime_generation, ensure_runtime_generation_matches,
-    set_runtime_generation_capability, PERSONAL_BROWSER_RUNTIME_SCOPE,
+    set_runtime_generation_capability, CLAUDE_CODE_TURNS_SCOPE, PERSONAL_BROWSER_RUNTIME_SCOPE,
     RUNTIME_TOKEN_GENERATION_CAPABILITY, RUNTIME_TOKEN_REQUIRED_SCOPES,
 };
 use super::utils::normalize_display_name_owned;
@@ -37,6 +37,125 @@ use super::utils::normalize_display_name_owned;
 use crate::runtime::RUNTIME_TOKEN_DEFAULT_SCOPES;
 
 const RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS: i64 = 3600;
+
+/// The capability that says whether a runtime's own Claude Code can run
+/// local-engine turns (docs/Local-Engine-Turns.md 2.10, 3.2). Only
+/// registration writes it ([`attest_runtime_capabilities`]); dispatch's G6
+/// and the lease read it as the controller's.
+pub(super) const CLAUDE_CODE_CAPABILITY: &str = "claudeCode";
+const CLAUDE_CODE_CAPABILITY_SNAKE: &str = "claude_code";
+const CLAUDE_CODE_CAPABILITY_VERSION: u64 = 1;
+/// Why a runtime's Claude Code cannot take a turn, as runtime-agent's probe
+/// reports it (docs/Local-Engine-Turns.md 3.2).
+const CLAUDE_CODE_NOT_READY_REASONS: [&str; 5] = [
+    "binary_missing",
+    "binary_unsafe",
+    "probe_failed",
+    "unsupported_version",
+    "bare_default",
+];
+
+/// A runtime's `claudeCode` capability, read from what the runtime reported
+/// (docs/Local-Engine-Turns.md 2.10): version 1 with a boolean `ready`, and
+/// of the rest only the known fields, each kept only when well-formed. A
+/// path, or any other key, is never kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ClaudeCodeCapability {
+    pub(super) ready: bool,
+    /// Why it is not ready, from [`CLAUDE_CODE_NOT_READY_REASONS`]; never set
+    /// while ready.
+    pub(super) reason: Option<&'static str>,
+    /// The probed Claude Code version, as a semver such as `2.1.314`
+    /// ([`is_claude_code_cli_version`]).
+    pub(super) cli: Option<String>,
+    /// Whether `cli` is at most the newest version Instafy verified
+    /// (`CLAUDE_CODE_LANE_VERIFIED_THROUGH`).
+    pub(super) verified: Option<bool>,
+    /// Whether the probe found a Claude plan sign-in.
+    pub(super) plan_sign_in: Option<bool>,
+    /// Whether the runtime streams partial messages.
+    pub(super) partial_messages: Option<bool>,
+}
+
+impl ClaudeCodeCapability {
+    /// The capability `reported` describes, or none: a value that is not
+    /// version 1 with a boolean `ready` is no capability at all.
+    pub(super) fn from_reported(reported: &JsonValue) -> Option<Self> {
+        if reported.get("version").and_then(JsonValue::as_u64)
+            != Some(CLAUDE_CODE_CAPABILITY_VERSION)
+        {
+            return None;
+        }
+        let ready = reported.get("ready")?.as_bool()?;
+        let reason = reported
+            .get("reason")
+            .and_then(JsonValue::as_str)
+            .filter(|_| !ready)
+            .and_then(|reason| {
+                CLAUDE_CODE_NOT_READY_REASONS
+                    .into_iter()
+                    .find(|known| *known == reason)
+            });
+        let cli = reported
+            .get("cli")
+            .and_then(JsonValue::as_str)
+            .filter(|cli| is_claude_code_cli_version(cli))
+            .map(str::to_string);
+        let flag = |key: &str| reported.get(key).and_then(JsonValue::as_bool);
+        Some(Self {
+            ready,
+            reason,
+            cli,
+            verified: flag("verified"),
+            plan_sign_in: flag("planSignIn"),
+            partial_messages: flag("partialMessages"),
+        })
+    }
+
+    /// The value registration stores: version 1 and the fields this has.
+    fn to_json(&self) -> JsonValue {
+        let mut capability = serde_json::Map::new();
+        capability.insert("version".to_string(), json!(CLAUDE_CODE_CAPABILITY_VERSION));
+        capability.insert("ready".to_string(), JsonValue::Bool(self.ready));
+        if let Some(reason) = self.reason {
+            capability.insert("reason".to_string(), json!(reason));
+        }
+        if let Some(cli) = &self.cli {
+            capability.insert("cli".to_string(), json!(cli));
+        }
+        for (key, value) in [
+            ("verified", self.verified),
+            ("planSignIn", self.plan_sign_in),
+            ("partialMessages", self.partial_messages),
+        ] {
+            if let Some(value) = value {
+                capability.insert(key.to_string(), JsonValue::Bool(value));
+            }
+        }
+        JsonValue::Object(capability)
+    }
+}
+
+/// A Claude Code version as a semver, read as Studio reads it:
+/// `MAJOR.MINOR.PATCH` of one to six digits each, and at most one
+/// pre-release or build suffix of one to 64 characters from `[0-9A-Za-z.-]`.
+fn is_claude_code_cli_version(text: &str) -> bool {
+    let (core, suffix) = match text.find(|ch| ch == '-' || ch == '+') {
+        Some(index) => (&text[..index], Some(&text[index + 1..])),
+        None => (text, None),
+    };
+    let number =
+        |part: &str| (1..=6).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit());
+    let mut parts = core.split('.');
+    let core_ok = (0..3).all(|_| parts.next().is_some_and(number)) && parts.next().is_none();
+    core_ok
+        && suffix.map_or(true, |suffix| {
+            (1..=64).contains(&suffix.len())
+                && suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        })
+}
 
 #[derive(Debug)]
 struct RuntimeRegistrationIdentity {
@@ -331,12 +450,46 @@ fn registration_shared_browser_consent(
     }
 }
 
+/// The person this registration attests the runtime's `claudeCode`
+/// capability for (docs/Local-Engine-Turns.md 2.10), when all of these hold:
+/// - the runtime token holds [`CLAUDE_CODE_TURNS_SCOPE`], which only a
+///   person's own session gets, while the switch covers them;
+/// - the runtime is private self-hosted;
+/// - its attested owner is a person, the token's own subject, and never the
+///   controller's service runtime user;
+/// - it is not a Personal Browser runtime, which leases only browser jobs and
+///   which dispatch's G6 refuses.
+///
+/// Registration renewal carries the scope forward to that person only.
+fn attested_claude_code_owner(
+    claims: Option<&AccessTokenClaims>,
+    private_self_hosted: bool,
+    self_hosted_owner: Option<Uuid>,
+    personal_browser_owner: Option<Uuid>,
+    service_runtime_user_id: Option<Uuid>,
+) -> Option<Uuid> {
+    let claims = claims?;
+    if !private_self_hosted
+        || personal_browser_owner.is_some()
+        || !claims
+            .scopes
+            .iter()
+            .any(|scope| scope == CLAUDE_CODE_TURNS_SCOPE)
+        || runtime_token_subject_is_controller_service(&claims.sub, service_runtime_user_id)
+    {
+        return None;
+    }
+    let owner = self_hosted_owner.filter(|owner| service_runtime_user_id != Some(*owner))?;
+    (Uuid::parse_str(claims.sub.trim()).ok() == Some(owner)).then_some(owner)
+}
+
 fn attest_runtime_capabilities(
     supplied: Option<JsonValue>,
     personal_browser_owner: Option<Uuid>,
     self_hosted_owner: Option<Uuid>,
     shared_browser_agent_consent: bool,
     browser_host: Option<Uuid>,
+    claude_code_lane: bool,
 ) -> JsonValue {
     let mut capabilities = match supplied {
         Some(JsonValue::Object(map)) => map,
@@ -346,6 +499,11 @@ fn attest_runtime_capabilities(
     // Personal Browser or choose its owner without the signed token scope.
     capabilities.remove("personalBrowser");
     capabilities.remove("personal_browser");
+    // So is `claudeCode`: dispatch and the lease read it as leave to run
+    // local-engine turns. It is written back, rebuilt from its known fields,
+    // only for a runtime `attested_claude_code_owner` admits.
+    let reported_claude_code = capabilities.remove(CLAUDE_CODE_CAPABILITY);
+    capabilities.remove(CLAUDE_CODE_CAPABILITY_SNAKE);
     capabilities.remove(RUNTIME_TOKEN_GENERATION_CAPABILITY);
     capabilities.remove(super::managed::SHARED_BROWSER_AGENT_CONSENT_CAPABILITY);
     // The runtime reports `browserHost` as `{version, modes}`; the stored
@@ -378,6 +536,13 @@ fn attest_runtime_capabilities(
             super::managed::BROWSER_HOST_CAPABILITY.to_string(),
             super::managed::browser_host_capability(lease_id),
         );
+    }
+    if let Some(capability) = reported_claude_code
+        .filter(|_| claude_code_lane)
+        .as_ref()
+        .and_then(ClaudeCodeCapability::from_reported)
+    {
+        capabilities.insert(CLAUDE_CODE_CAPABILITY.to_string(), capability.to_json());
     }
     JsonValue::Object(capabilities)
 }
@@ -867,12 +1032,24 @@ pub(crate) async fn runtime_register(
             )
         })
         .unwrap_or_default();
+    let claude_code_owner = attested_claude_code_owner(
+        scoped_claims.as_ref(),
+        super::access::runtime_is_private_self_hosted(
+            &state,
+            &runtime.provider,
+            &runtime.capabilities,
+        ),
+        self_hosted_owner,
+        personal_browser_owner,
+        state.config.service_runtime_user_id,
+    );
     let mut capabilities = attest_runtime_capabilities(
         payload.capabilities,
         personal_browser_owner,
         self_hosted_owner,
         shared_browser.consent,
         shared_browser.browser_host,
+        claude_code_owner.is_some(),
     );
     if let Some(generation) = runtime_generation {
         set_runtime_generation_capability(&mut capabilities, generation);
@@ -1004,6 +1181,7 @@ pub(crate) async fn runtime_register(
             scopes: default_runtime_token_scopes()
                 .into_iter()
                 .chain(personal_browser_owner.map(|_| PERSONAL_BROWSER_RUNTIME_SCOPE.to_string()))
+                .chain(claude_code_owner.map(|_| CLAUDE_CODE_TURNS_SCOPE.to_string()))
                 .collect(),
             lease_id: lease_details.as_ref().map(|lease| lease.id.to_string()),
             run_id: None,
@@ -1039,6 +1217,10 @@ pub(crate) async fn runtime_register(
 
     Ok(Json(response))
 }
+
+#[cfg(test)]
+#[path = "claude_code_capability_tests.rs"]
+mod claude_code_capability_tests;
 
 #[cfg(test)]
 mod concurrency_tests {
@@ -1428,6 +1610,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         );
         assert_eq!(spoofed["agent"], json!(true));
         assert!(spoofed.get("personalBrowser").is_none());
@@ -1440,6 +1623,7 @@ mod tests {
             Some(owner_user_id),
             false,
             None,
+            false,
         );
         assert_eq!(attested["personalBrowser"]["enabled"], json!(true));
         assert_eq!(
@@ -1449,6 +1633,242 @@ mod tests {
         assert_eq!(
             attested[crate::runtime::access::SELF_HOSTED_ACCESS_CAPABILITY]["ownerUserId"],
             json!(owner_user_id.to_string())
+        );
+    }
+
+    /// A runtime-reported `claudeCode` is always removed, and written back
+    /// rebuilt from its known, well-formed fields only for a runtime the
+    /// controller attests as lane-capable (docs/Local-Engine-Turns.md 2.10).
+    #[test]
+    fn claude_code_capability_is_rebuilt_only_for_a_lane_attested_runtime() {
+        let ready = json!({
+            "version": 1,
+            "ready": true,
+            "cli": "2.1.314",
+            "verified": true,
+            "planSignIn": true,
+            "partialMessages": true,
+            "reason": "binary_missing",
+            "path": "/Users/someone/.local/bin/claude",
+            "env": { "CLAUDE_CONFIG_DIR": "/Users/someone/.claude" },
+        });
+        let reported = json!({
+            "agent": true,
+            "claudeCode": ready,
+            "claude_code": { "version": 1, "ready": true },
+        });
+
+        let unattested = attest_runtime_capabilities(
+            Some(reported.clone()),
+            None,
+            Some(Uuid::new_v4()),
+            false,
+            None,
+            false,
+        );
+        assert_eq!(unattested["agent"], json!(true));
+        assert!(unattested.get("claudeCode").is_none());
+        assert!(unattested.get("claude_code").is_none());
+
+        let attested = attest_runtime_capabilities(
+            Some(reported),
+            None,
+            Some(Uuid::new_v4()),
+            false,
+            None,
+            true,
+        );
+        assert_eq!(
+            attested["claudeCode"],
+            json!({
+                "version": 1,
+                "ready": true,
+                "cli": "2.1.314",
+                "verified": true,
+                "planSignIn": true,
+                "partialMessages": true,
+            })
+        );
+        assert!(attested.get("claude_code").is_none());
+        assert_eq!(attested["agent"], json!(true));
+
+        let lane = |claude_code: JsonValue| {
+            attest_runtime_capabilities(
+                Some(json!({ "agent": true, "claudeCode": claude_code })),
+                None,
+                Some(Uuid::new_v4()),
+                false,
+                None,
+                true,
+            )
+            .get("claudeCode")
+            .cloned()
+        };
+        // Not ready: the reason is kept only from the list.
+        assert_eq!(
+            lane(
+                json!({ "version": 1, "ready": false, "reason": "bare_default", "cli": "2.2.0", "verified": false })
+            ),
+            Some(
+                json!({ "version": 1, "ready": false, "reason": "bare_default", "cli": "2.2.0", "verified": false })
+            )
+        );
+        assert_eq!(
+            lane(json!({ "version": 1, "ready": false, "reason": "signed_out" })),
+            Some(json!({ "version": 1, "ready": false }))
+        );
+        // Ill-formed fields are dropped, and the rest kept.
+        assert_eq!(
+            lane(json!({
+                "version": 1,
+                "ready": true,
+                "cli": "/opt/homebrew/bin/claude",
+                "verified": "yes",
+                "planSignIn": 1,
+                "partialMessages": null,
+            })),
+            Some(json!({ "version": 1, "ready": true }))
+        );
+        // No capability at all without version 1 and a boolean `ready`.
+        for malformed in [
+            json!({ "version": 2, "ready": true }),
+            json!({ "version": "1", "ready": true }),
+            json!({ "version": 1.5, "ready": true }),
+            json!({ "version": 1, "ready": "true" }),
+            json!({ "version": 1 }),
+            json!({ "ready": true }),
+            json!(true),
+            json!("ready"),
+            JsonValue::Null,
+        ] {
+            assert_eq!(lane(malformed.clone()), None, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn claude_code_cli_versions_are_semvers() {
+        for good in [
+            "2.1.314",
+            "0.0.0",
+            "123456.0.1",
+            "2.2.0-beta.1",
+            "2.1.314+build.7",
+            "2.1.314-rc-1",
+        ] {
+            assert!(is_claude_code_cli_version(good), "{good}");
+        }
+        for bad in [
+            "",
+            "2.1",
+            "2.1.314.1",
+            "v2.1.314",
+            "2.1.314 (Claude Code)",
+            "1234567.0.0",
+            "2.1.x",
+            "2.1.314-",
+            "2.1.314-beta+build",
+            "2..314",
+            "/usr/local/bin/claude",
+            "2.1.314\n",
+        ] {
+            assert!(!is_claude_code_cli_version(bad), "{bad:?}");
+        }
+        assert!(!is_claude_code_cli_version(&format!(
+            "2.1.314-{}",
+            "a".repeat(65)
+        )));
+    }
+
+    /// Only a token holding `claude_code.turns`, for a private self-hosted
+    /// runtime that its person owns, attests the capability: never an
+    /// unscoped, hosted, service-owned or Personal Browser registration.
+    #[test]
+    fn claude_code_is_attested_only_for_a_scoped_private_person_owned_runtime() {
+        let person = Uuid::new_v4();
+        let service = Uuid::new_v4();
+        let mut lane_scopes = RUNTIME_TOKEN_DEFAULT_SCOPES.to_vec();
+        lane_scopes.push(CLAUDE_CODE_TURNS_SCOPE);
+        let mut scoped = runtime_claims(&lane_scopes);
+        scoped.sub = person.to_string();
+
+        assert_eq!(
+            attested_claude_code_owner(Some(&scoped), true, Some(person), None, Some(service)),
+            Some(person)
+        );
+        assert_eq!(
+            attested_claude_code_owner(Some(&scoped), true, Some(person), None, None),
+            Some(person)
+        );
+
+        // Unscoped: no token, or a token without the scope.
+        assert_eq!(
+            attested_claude_code_owner(None, true, Some(person), None, Some(service)),
+            None
+        );
+        let mut unscoped = runtime_claims(RUNTIME_TOKEN_DEFAULT_SCOPES);
+        unscoped.sub = person.to_string();
+        assert_eq!(
+            attested_claude_code_owner(Some(&unscoped), true, Some(person), None, Some(service)),
+            None
+        );
+
+        // Hosted.
+        assert_eq!(
+            attested_claude_code_owner(Some(&scoped), false, None, None, Some(service)),
+            None
+        );
+        assert_eq!(
+            attested_claude_code_owner(Some(&scoped), false, Some(person), None, Some(service)),
+            None
+        );
+
+        // Service-owned, by the token's subject or by the attested owner.
+        for subject in [service.to_string(), "runtime.service".to_string()] {
+            let mut service_owned = scoped.clone();
+            service_owned.sub = subject.clone();
+            assert_eq!(
+                attested_claude_code_owner(
+                    Some(&service_owned),
+                    true,
+                    Some(service),
+                    None,
+                    Some(service)
+                ),
+                None,
+                "{subject}"
+            );
+        }
+        assert_eq!(
+            attested_claude_code_owner(Some(&scoped), true, Some(service), None, Some(service)),
+            None
+        );
+
+        // An owner that is not the token's subject, or no owner.
+        assert_eq!(
+            attested_claude_code_owner(
+                Some(&scoped),
+                true,
+                Some(Uuid::new_v4()),
+                None,
+                Some(service)
+            ),
+            None
+        );
+        assert_eq!(
+            attested_claude_code_owner(Some(&scoped), true, None, None, Some(service)),
+            None
+        );
+
+        // A Personal Browser runtime.
+        assert_eq!(
+            attested_claude_code_owner(
+                Some(&scoped),
+                true,
+                Some(person),
+                Some(person),
+                Some(service)
+            ),
+            None
         );
     }
 
@@ -1464,6 +1884,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         );
         assert_eq!(spoofed["agent"], true);
         assert!(spoofed.get(protected).is_none());
@@ -1477,6 +1898,7 @@ mod tests {
             None,
             true,
             None,
+            false,
         );
         assert_eq!(attested[protected], json!({ "version": 1 }));
     }
@@ -1495,13 +1917,14 @@ mod tests {
             (BROWSER_HOST_CAPABILITY_SNAKE): { "version": 1, "modes": ["lazy"] },
         });
         // A spoofed value is always stripped.
-        let spoofed = attest_runtime_capabilities(Some(reported.clone()), None, None, false, None);
+        let spoofed =
+            attest_runtime_capabilities(Some(reported.clone()), None, None, false, None, false);
         assert_eq!(spoofed["agent"], true);
         assert!(spoofed.get(BROWSER_HOST_CAPABILITY).is_none());
         assert!(spoofed.get(BROWSER_HOST_CAPABILITY_SNAKE).is_none());
 
         let attested =
-            attest_runtime_capabilities(Some(reported), None, None, true, Some(lease_id));
+            attest_runtime_capabilities(Some(reported), None, None, true, Some(lease_id), false);
         assert_eq!(
             attested[BROWSER_HOST_CAPABILITY],
             json!({ "version": 1, "mode": "lazy", "generation": lease_id.to_string() })

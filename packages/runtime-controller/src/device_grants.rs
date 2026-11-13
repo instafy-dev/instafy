@@ -47,17 +47,20 @@ use runtime_contracts::AccessTokenClaims;
 pub(crate) const GRANT_SCOPE: &str = "device_grant.call";
 /// A granted turn starts within this long of its message, a queued one's
 /// time in the queue included (`agent_jobs.trigger_received_at`), or not at
-/// all.
+/// all. A local-engine turn (`agent_jobs.engine`, crate::claude_code_lane)
+/// has the same window.
 pub(crate) const GRANTED_TURN_START_WITHIN_SECONDS: i32 = 60;
-/// Whether a queued `agent_jobs` row holds device grants and will never be
-/// leased: a lease of it ended (a granted turn runs once), or its
-/// [`GRANTED_TURN_START_WITHIN_SECONDS`], bound at the placeholder `$seconds`
-/// names, passed. A SQL condition over the job's own columns: the lease and
-/// the idle poll leave such a job out, and the idle sweep fails it.
-macro_rules! granted_job_cannot_start {
+/// Whether a queued `agent_jobs` row runs only once and will never be leased:
+/// it holds device grants or runs on its person's own engine
+/// (`engine`, crate::claude_code_lane), and a lease of it ended (such a turn
+/// runs once), or its [`GRANTED_TURN_START_WITHIN_SECONDS`], bound at the
+/// placeholder `$seconds` names, passed. A SQL condition over the job's own
+/// columns: the lease and the idle poll leave such a job out, and the idle
+/// sweep fails it.
+macro_rules! run_once_job_cannot_start {
     ($seconds:literal) => {
         concat!(
-            "(grant_ids is not null
+            "((grant_ids is not null or engine is not null)
               and (lease_attempts > 0
                    or trigger_received_at + ",
             $seconds,
@@ -65,7 +68,7 @@ macro_rules! granted_job_cannot_start {
         )
     };
 }
-pub(crate) use granted_job_cannot_start;
+pub(crate) use run_once_job_cannot_start;
 /// A granted turn's calls and searches end this long after its lease, which
 /// is within the start window of its message: its grant token's lifetime.
 pub(crate) const GRANTED_TURN_MAX_SECONDS: i64 = 600;

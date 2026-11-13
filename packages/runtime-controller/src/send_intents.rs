@@ -669,6 +669,31 @@ pub(crate) async fn apply_steer_send_intent(
         return Ok(SendIntentResponse::steer(&existing, client_send_id, true));
     }
 
+    // Nothing can deliver words into a running local-engine turn
+    // (crate::claude_code_lane), so a steer into one is refused for everyone,
+    // its author included. This comes before the active-job query, which
+    // takes only a job whose runtime polls for input, as a local-engine turn's
+    // never does: the steer would otherwise get `active_job_conflict`.
+    let steers_a_local_engine_turn = transaction
+        .query_one(
+            "select exists (
+                 select 1 from agent_jobs
+                  where id = $1 and project_id = $2 and conversation_id = $3
+                    and engine is not null
+             )",
+            &[
+                &expected_active_job_id,
+                &conversation.project_id,
+                &conversation_id,
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to read the turn to steer: {error}")))?
+        .get::<_, bool>(0);
+    if steers_a_local_engine_turn {
+        return Err(crate::claude_code_lane::takes_no_input());
+    }
+
     let rows = transaction
         .query(
             "select jobs.id,

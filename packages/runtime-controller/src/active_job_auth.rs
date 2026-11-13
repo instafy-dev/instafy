@@ -244,6 +244,7 @@ pub(crate) async fn authorize_active_job(
                     j.conversation_id,
                     j.payload,
                     j.plan_group_id,
+                    j.engine,
                     r.provider,
                     r.capabilities,
                     r.active_lease_id,
@@ -269,6 +270,12 @@ pub(crate) async fn authorize_active_job(
         .await
         .map_err(|error| internal_error(format!("failed to validate active job: {error}")))?
         .ok_or_else(|| unauthorized("job token is no longer active"))?;
+    // A local-engine turn is never minted a job token, so none acts for it:
+    // nothing it runs can start turns, automations or device calls in its
+    // person's name (crate::claude_code_lane).
+    if row.get::<_, Option<String>>("engine").is_some() {
+        return Err(crate::claude_code_lane::has_no_job_token());
+    }
 
     let active_runtime_lease_id: Option<Uuid> = row.get("active_lease_id");
     let generation_marked = claims

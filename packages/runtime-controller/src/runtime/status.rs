@@ -130,6 +130,42 @@ pub(crate) struct RuntimeStatusEntry {
     /// skills, although their files are never saved with the space. Absent when it named none.
     #[serde(skip_serializing_if = "Option::is_none")]
     skill_packs: Option<Vec<RuntimeSkillPack>>,
+    /// This runtime's own Claude Code, as registration attested it
+    /// (docs/Local-Engine-Turns.md 2.10). Present only on the viewer's own
+    /// private runtime, and only while local-engine turns are on for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claude_code: Option<RuntimeClaudeCodeStatus>,
+}
+
+/// `claudeCode` on a runtime status entry: `{ready, reason, cli, verified,
+/// planSignIn}`. `reason`, `cli` and `verified` are null, and `planSignIn`
+/// false, when the runtime did not say.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RuntimeClaudeCodeStatus {
+    ready: bool,
+    reason: Option<&'static str>,
+    cli: Option<String>,
+    verified: Option<bool>,
+    plan_sign_in: bool,
+}
+
+/// `claudeCode` from a runtime's stored capabilities, read as registration
+/// attests it ([`super::register::ClaudeCodeCapability`]); none when absent
+/// or malformed.
+fn claude_code_status_from_capabilities(
+    capabilities: &JsonValue,
+) -> Option<RuntimeClaudeCodeStatus> {
+    let capability = super::register::ClaudeCodeCapability::from_reported(
+        capabilities.get(super::register::CLAUDE_CODE_CAPABILITY)?,
+    )?;
+    Some(RuntimeClaudeCodeStatus {
+        ready: capability.ready,
+        reason: capability.reason,
+        cli: capability.cli,
+        verified: capability.verified,
+        plan_sign_in: capability.plan_sign_in == Some(true),
+    })
 }
 
 /// One entry of `skillPacks` on a runtime status entry.
@@ -239,6 +275,12 @@ pub(crate) struct RuntimeStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     preferred_runtime_id: Option<String>,
     shared_browser_host_policy: &'static str,
+    /// `true` when local-engine turns are on for the viewer
+    /// (`CLAUDE_CODE_LANE_USER_IDS`, docs/Local-Engine-Turns.md 2.10), and
+    /// absent otherwise. Studio needs it to offer their setup: until then no
+    /// runtime has `claudeCode`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    claude_code_lane: bool,
 }
 
 /// Whether a status row shows `sharedBrowserHost`: its active lease is live
@@ -779,12 +821,19 @@ pub(crate) async fn runtime_status(
     };
     ensure_project_access(&transaction, &project, &auth_context, session_id).await?;
 
+    // Local-engine turns are shown only to a person's own session that the
+    // switch covers: never to the service role or a scoped token
+    // (docs/Local-Engine-Turns.md 2.10).
+    let claude_code_viewer = crate::auth::require_user_session(&auth_context)
+        .ok()
+        .filter(|viewer| state.config.claude_code_lane.allow(*viewer));
     let response = load_runtime_status_response_for_viewer(
         &state,
         &transaction,
         &project_id,
         auth_context.user_id,
         auth_context.is_service_role,
+        claude_code_viewer,
     )
     .await?;
 
@@ -803,12 +852,15 @@ pub(crate) async fn runtime_status(
     Ok(Json(response))
 }
 
+/// Every runtime of the space, private ones included, for a caller with no
+/// viewer, such as the operator support snapshot. It shows no runtime's
+/// `claudeCode`, which only its owner sees.
 pub(crate) async fn load_runtime_status_response(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
 ) -> Result<RuntimeStatusResponse, (StatusCode, Json<ApiError>)> {
-    load_runtime_status_response_for_viewer(state, transaction, project_id, None, true).await
+    load_runtime_status_response_for_viewer(state, transaction, project_id, None, true, None).await
 }
 
 /// Fence a user-owned desktop runtime from taking another lease while allowing
@@ -1014,12 +1066,18 @@ async fn deleted_space_drain_state(
     }))
 }
 
+/// The space's runtimes as `viewer_user_id` may see them: another person's
+/// private runtime only with `include_all_private_runtimes`.
+/// `claude_code_viewer` is the person whose own private runtimes show their
+/// `claudeCode`, set only for a person's own session that local-engine turns
+/// are on for; it also sets `claudeCodeLane`.
 async fn load_runtime_status_response_for_viewer(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     viewer_user_id: Option<Uuid>,
     include_all_private_runtimes: bool,
+    claude_code_viewer: Option<Uuid>,
 ) -> Result<RuntimeStatusResponse, (StatusCode, Json<ApiError>)> {
     let rows = transaction
         .query(
@@ -1201,6 +1259,14 @@ async fn load_runtime_status_response_for_viewer(
             row.get("lease_status"),
             row.get("lease_released_at"),
         );
+        // Checked here rather than left to the private-row filter above,
+        // which the service role and the operator snapshot skip.
+        let claude_code = claude_code_viewer
+            .filter(|viewer| {
+                is_private_self_hosted
+                    && super::access::self_hosted_owner_user_id(&capabilities) == Some(*viewer)
+            })
+            .and_then(|_| claude_code_status_from_capabilities(&capabilities));
 
         entries.push(RuntimeStatusEntry {
             runtime_id: runtime_id.to_string(),
@@ -1229,6 +1295,7 @@ async fn load_runtime_status_response_for_viewer(
             runtime_image,
             shared_browser_host,
             skill_packs: skill_packs_from_capabilities(&capabilities),
+            claude_code,
         });
         // Apply the public response cap only after private-runtime ownership
         // filtering. Otherwise another user's private rows can consume the SQL
@@ -1252,6 +1319,7 @@ async fn load_runtime_status_response_for_viewer(
         } else {
             SHARED_BROWSER_HOST_POLICY_OFF
         },
+        claude_code_lane: claude_code_viewer.is_some(),
     })
 }
 
@@ -1967,6 +2035,81 @@ mod tests {
         }
         let entry = serde_json::to_value(&packs[1]).unwrap();
         assert_eq!(entry, json!({ "name": "plain", "version": "2.0.0" }));
+    }
+
+    /// The status shape of `claudeCode` (docs/Local-Engine-Turns.md 2.10):
+    /// `{ready, reason, cli, verified, planSignIn}` from a well-formed stored
+    /// capability, and nothing from a malformed one.
+    #[test]
+    fn claude_code_status_shows_only_the_known_fields() {
+        let status = |claude_code: JsonValue| {
+            claude_code_status_from_capabilities(
+                &json!({ "agent": true, "claudeCode": claude_code }),
+            )
+            .map(|status| serde_json::to_value(status).unwrap())
+        };
+        assert_eq!(
+            status(json!({
+                "version": 1,
+                "ready": true,
+                "cli": "2.1.314",
+                "verified": true,
+                "planSignIn": true,
+                "partialMessages": true,
+            })),
+            Some(json!({
+                "ready": true,
+                "reason": null,
+                "cli": "2.1.314",
+                "verified": true,
+                "planSignIn": true,
+            }))
+        );
+        assert_eq!(
+            status(json!({ "version": 1, "ready": false, "reason": "binary_missing" })),
+            Some(json!({
+                "ready": false,
+                "reason": "binary_missing",
+                "cli": null,
+                "verified": null,
+                "planSignIn": false,
+            }))
+        );
+        // A stored value is read as registration attests one: unknown fields
+        // and ill-formed values never show.
+        assert_eq!(
+            status(json!({
+                "version": 1,
+                "ready": true,
+                "reason": "bare_default",
+                "cli": "/Users/someone/.local/bin/claude",
+                "verified": "true",
+                "planSignIn": "yes",
+                "path": "/Users/someone/.local/bin/claude",
+            })),
+            Some(json!({
+                "ready": true,
+                "reason": null,
+                "cli": null,
+                "verified": null,
+                "planSignIn": false,
+            }))
+        );
+        for malformed in [
+            json!({ "version": 2, "ready": true }),
+            json!({ "version": 1, "ready": "true" }),
+            json!({ "ready": true }),
+            json!(null),
+        ] {
+            assert_eq!(status(malformed.clone()), None, "{malformed}");
+        }
+        assert_eq!(claude_code_status_from_capabilities(&json!({})), None);
+        assert_eq!(
+            claude_code_status_from_capabilities(
+                &json!({ "claude_code": { "version": 1, "ready": true } })
+            ),
+            None
+        );
     }
 
     #[test]

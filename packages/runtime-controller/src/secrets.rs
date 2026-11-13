@@ -1230,7 +1230,7 @@ async fn agent_secrets(
     let row = transaction
         .query_opt(
             "select id, status, leased_by_runtime_id, lease_expires_at, payload, credential_id,
-                    intent, run_id
+                    intent, run_id, engine
              from agent_jobs
              where id = $1 and project_id = $2
              for share",
@@ -1255,6 +1255,11 @@ async fn agent_secrets(
     let lease_expires_at: Option<DateTime<Utc>> = row.get("lease_expires_at");
     if lease_expires_at.is_none_or(|expires_at| expires_at <= Utc::now()) {
         return Err(unauthorized("job lease is no longer active"));
+    }
+    // A local-engine turn gets no project secrets, Codex model settings or
+    // research budget token (crate::claude_code_lane).
+    if row.get::<_, Option<String>>("engine").is_some() {
+        return Err(crate::claude_code_lane::takes_no_secrets());
     }
 
     // Resolve execution policy only after exact live-job authorization. Neither

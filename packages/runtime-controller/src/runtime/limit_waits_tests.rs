@@ -1769,6 +1769,87 @@ async fn a_desktop_is_not_the_live_runner_of_a_platform_job_pinned_to_it() -> an
     Ok(())
 }
 
+/// A local-engine turn (crate::claude_code_lane) has no credential either,
+/// but it is no platform AI job: the person's own computer it is pinned to
+/// leases it, so the limit wait never takes that computer for one that would
+/// never run it.
+#[tokio::test]
+async fn a_desktop_is_the_live_runner_of_a_lane_turn_pinned_to_it() -> anyhow::Result<()> {
+    if std::env::var("TEST_DATABASE_URL").is_err() {
+        eprintln!("skipping pinned lane turn live runner test: TEST_DATABASE_URL not set");
+        return Ok(());
+    }
+    let (mut client, driver) = raw_client().await?;
+    let transaction = client.transaction().await?;
+    let project_id = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let desktop = Uuid::new_v4();
+    transaction
+        .execute(
+            "insert into projects (id, project_type, status) values ($1, 'customer', 'active')",
+            &[&project_id],
+        )
+        .await?;
+    transaction
+        .execute(
+            "insert into runtimes
+                (id, project_id, provider, status, idle_ttl_seconds, last_seen_at, capabilities)
+             values ($1, $2, 'self_hosted', 'ready', 600, now(), $3)",
+            &[
+                &desktop,
+                &project_id,
+                &json!({
+                    "_instafySelfHostedAccess": {
+                        "mode": "private",
+                        "ownerUserId": owner.to_string(),
+                    },
+                    "claudeCode": { "version": 1, "ready": true },
+                }),
+            ],
+        )
+        .await?;
+    let lane_turn = Uuid::new_v4();
+    let platform_job = Uuid::new_v4();
+    transaction
+        .execute(
+            "insert into agent_jobs (id, project_id, status, intent, target_runtime_id, payload,
+                                     engine, trigger_received_at)
+             values ($1, $2, 'queued', 'feature', $3, jsonb_build_object('user_id', $4::text),
+                     'claude-code', now()),
+                    ($5, $2, 'queued', 'feature', $3, jsonb_build_object('user_id', $4::text),
+                     null, now())",
+            &[
+                &lane_turn,
+                &project_id,
+                &desktop,
+                &owner.to_string(),
+                &platform_job,
+            ],
+        )
+        .await?;
+    let live_runner_query = format!(
+        "select {} as live from agent_jobs j where j.id = $1",
+        job_has_live_runner("j")
+    );
+    let lane_live: bool = transaction
+        .query_one(&live_runner_query, &[&lane_turn])
+        .await?
+        .get("live");
+    let platform_live: bool = transaction
+        .query_one(&live_runner_query, &[&platform_job])
+        .await?
+        .get("live");
+    transaction.rollback().await?;
+    drop(client);
+    let _ = driver.await;
+    assert!(lane_live, "the desktop leases its owner's lane turn");
+    assert!(
+        !platform_live,
+        "the desktop still never leases a platform job"
+    );
+    Ok(())
+}
+
 /// A desktop (or any machine) that is up does not end a wait for work it
 /// would never run: a job pinned to the space's hosted runtime, unpinned work
 /// of another user, or its owner's platform AI job (no credential), which

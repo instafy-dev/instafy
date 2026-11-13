@@ -374,6 +374,10 @@ async fn prepare_queue_message(
     // queued, and only the checked copy is stored: the drain re-checks it
     // without counting it again.
     let mut message_value = message_value;
+    // A turn on its person's own Claude Code runs only from a message they
+    // send now, never from the queue (crate::claude_code_lane): a busy chat
+    // refuses it rather than queue it.
+    crate::claude_code_lane::refuse_claim_outside_a_send(message_value.get("metadata"), "queued")?;
     // A hand-back from a browser turn resumes an idle lane or is refused; it
     // never waits in the queue (crate::browser_hand_back).
     if let Some(metadata) = message_value.get_mut("metadata") {
