@@ -752,7 +752,9 @@ export async function logout(options?: { json?: boolean; profile?: string }): Pr
   const note = implicitProfileNote(active);
   if (note) {
     console.log(kleur.gray(note));
-    if (!cleared && readInstafyCliConfig().accessToken) {
+    // Logging out of a profile leaves the default session, and the git credential helper that
+    // can use it, as they were; someone who did not choose the profile may expect both gone.
+    if (readInstafyCliConfig().accessToken) {
       console.log(
         kleur.gray(`The default session in ${getInstafyConfigPath()} is still signed in; commands use it where no profile is selected.`),
       );

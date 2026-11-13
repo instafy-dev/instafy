@@ -311,6 +311,8 @@ describe("instafy login and logout save the session every other command reads", 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('Logged out (cleared saved access token for profile "work").');
     expect(result.stdout).toContain(`Profile "work", selected by ${folder.manifestPath}.`);
+    // The default session, which git's credential helper may use, stays signed in, and it says so.
+    expect(result.stdout).toContain(`The default session in ${setup.configPath} is still signed in`);
     expect(readJson(setup.workPath).accessToken).toBeNull();
     expect(fs.readFileSync(setup.configPath, "utf8")).toBe(setup.defaultBefore);
     expect(await listConversations(setup, { cwd: folder.cwd })).toEqual({
