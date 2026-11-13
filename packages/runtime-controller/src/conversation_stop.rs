@@ -156,12 +156,14 @@ async fn stop_jobs_in_transaction(
         crate::multi_agent_plan::lock_plan_group_checkpoint(transaction, &group.to_string())
             .await?;
     }
+    // The lock leaves each job's key free: a plan's dispatch inserts a worker
+    // under its lead while it holds the conversation the Stop then waits for.
     let rows = transaction
         .query(
             "select id, run_id, status, payload from agent_jobs
          where id = any($1) and project_id = $2
            and coalesce(conversation_id::text, payload->>'conversation_id') = $3
-         order by id for update",
+         order by id for no key update",
             &[&ids, &conversation.project_id, &conversation_id.to_string()],
         )
         .await
@@ -256,6 +258,8 @@ async fn stop_jobs_in_transaction(
     details.insert("agents".into(), json!(agents));
     details.insert("agentHandles".into(), json!(handles));
     details.insert("suppressedPlanGroupIds".into(), json!(suppressed_groups));
+    // Before the cancel locks the conversation and its root.
+    lock_parent_thread_key(transaction, &conversation).await?;
     let cancellation = conversations::cancel_jobs_with_notice(
         config,
         transaction,
@@ -279,6 +283,39 @@ async fn stop_jobs_in_transaction(
         Vec::new(),
         goal_update,
     ))
+}
+
+/// Locks the key of `conversation`'s parent when the parent is itself a
+/// thread, before the Stop locks any conversation.
+///
+/// The Stop's notice updates the conversation and pausing an active goal
+/// updates it again, and Postgres rechecks a row's foreign keys when a
+/// transaction updates it a second time: in a thread of a thread, that locks
+/// the parent's key, by when the Stop holds the root. A dispatch into the
+/// parent locks the parent `for update`, then the root
+/// (`dispatch_agent_faces.rs`, and its message's bump of the root), so the two
+/// would wait for each other. A thread of a root rechecks the root's key, which
+/// the Stop holds by then.
+async fn lock_parent_thread_key(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation: &conversations::ConversationRecord,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let Some(parent) = conversation.parent_conversation_id else {
+        return Ok(());
+    };
+    if conversation.root_conversation_id == Some(parent) {
+        return Ok(());
+    }
+    transaction
+        .query_opt(
+            "select 1 from conversations where id = $1 for key share",
+            &[&parent],
+        )
+        .await
+        .map_err(|error| {
+            crate::internal_error(format!("failed to lock the thread's parent: {error}"))
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]
