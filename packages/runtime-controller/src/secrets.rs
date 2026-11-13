@@ -23,7 +23,11 @@ use crate::agent::{
     verify_agent_token_with_scopes,
 };
 use crate::auth::authenticate_request;
+use crate::claude_material::{
+    claude_credential_refused, is_claude_secret_value, is_refused_secret, is_reserved_secret_name,
+};
 use crate::config::PgPool;
+use crate::credential_keys::CredentialKeyRing;
 use crate::model_defaults::{resolve_agent_model_for_provider, DEFAULT_MANAGED_AI_PROVIDER_ID};
 use crate::projects::load_project_record;
 use crate::{
@@ -51,6 +55,11 @@ struct ProjectSecretListItem {
     revoked_at: Option<String>,
     created_at: String,
     updated_at: String,
+    /// Present, and true, only for a secret the credential guard refuses: its
+    /// name is reserved or its value is a Claude sign-in. Such a secret is
+    /// never delivered, and Studio asks for it to be removed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    refused: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,6 +190,65 @@ fn normalize_secret_value(value: &str) -> Result<String, (StatusCode, Json<ApiEr
         )));
     }
     Ok(trimmed.to_string())
+}
+
+/// Whether the credential guard refuses a stored secret, judged as
+/// `agent_secrets` judges it. The value is opened here, inside the controller,
+/// and never returned. A row no configured key opens, or whose value is not
+/// UTF-8, is judged by its name alone and logged by its id.
+fn stored_secret_is_refused(
+    keys: Option<&CredentialKeyRing>,
+    secret_id: Uuid,
+    name: &str,
+    nonce_b64: &str,
+    ciphertext_b64: &str,
+) -> bool {
+    if is_reserved_secret_name(name) {
+        return true;
+    }
+    let Some(keys) = keys else {
+        return false;
+    };
+    let value = keys
+        .open(nonce_b64, ciphertext_b64)
+        .ok()
+        .and_then(|plaintext| String::from_utf8(plaintext).ok());
+    if value.is_none() {
+        tracing::warn!(
+            %secret_id,
+            "could not read a project secret to check it for a Claude sign-in"
+        );
+    }
+    is_refused_secret(name, value.as_deref())
+}
+
+/// Opens a secret granted to a job, or gives `None` for one the credential
+/// guard refuses: a reserved name, which is skipped before anything is
+/// decrypted, or a value that is Claude sign-in material. A skipped secret is
+/// logged by its id and name only.
+fn open_deliverable_secret(
+    keys: &CredentialKeyRing,
+    secret_id: Uuid,
+    name: &str,
+    nonce_b64: &str,
+    ciphertext_b64: &str,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    if !is_reserved_secret_name(name) {
+        let plaintext = keys.open(nonce_b64, ciphertext_b64).map_err(|error| {
+            internal_error(format!("failed to decrypt secret payload: {error}"))
+        })?;
+        let value = String::from_utf8(plaintext)
+            .map_err(|_| internal_error("secret payload must be utf-8"))?;
+        if !is_claude_secret_value(&value) {
+            return Ok(Some(value));
+        }
+    }
+    tracing::warn!(
+        %secret_id,
+        secret_name = %name,
+        "not delivering a project secret that holds a Claude sign-in"
+    );
+    Ok(None)
 }
 
 async fn ensure_project_secrets_table(
@@ -394,7 +462,8 @@ async fn list_project_secrets(
 
     let rows = transaction
         .query(
-            "select id, name, description, last_used_at, revoked_at, created_at, updated_at
+            "select id, name, description, last_used_at, revoked_at, created_at, updated_at,
+                    nonce_b64, ciphertext_b64
              from project_secrets
              where project_id = $1 and revoked_at is null
              order by created_at desc",
@@ -403,6 +472,7 @@ async fn list_project_secrets(
         .await
         .map_err(|error| internal_error(format!("failed to list secrets: {error}")))?;
 
+    let keys = state.config.credential_keys.as_ref();
     let mut secret_ids: Vec<Uuid> = Vec::new();
     let mut base: Vec<(Uuid, ProjectSecretListItem)> = Vec::new();
     for row in rows {
@@ -413,6 +483,9 @@ async fn list_project_secrets(
         let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
         let created_at: DateTime<Utc> = row.get("created_at");
         let updated_at: DateTime<Utc> = row.get("updated_at");
+        let nonce_b64: String = row.get("nonce_b64");
+        let ciphertext_b64: String = row.get("ciphertext_b64");
+        let refused = stored_secret_is_refused(keys, id, &name, &nonce_b64, &ciphertext_b64);
         secret_ids.push(id);
         base.push((
             id,
@@ -426,6 +499,7 @@ async fn list_project_secrets(
                 revoked_at: revoked_at.map(|dt| dt.to_rfc3339()),
                 created_at: created_at.to_rfc3339(),
                 updated_at: updated_at.to_rfc3339(),
+                refused,
             },
         ));
     }
@@ -524,6 +598,11 @@ async fn create_project_secret(
     let name = normalize_secret_name(&body.name)?;
     let description = normalize_optional_description(body.description)?;
     let value = normalize_secret_value(&body.value)?;
+    // The credential guard: no Claude sign-in is stored, under the reserved
+    // name or as any secret's value. API keys stay allowed under any other name.
+    if is_reserved_secret_name(&name) || is_claude_secret_value(&value) {
+        return Err(claude_credential_refused());
+    }
 
     let keys = state
         .config
@@ -679,6 +758,9 @@ async fn update_project_secret(
         .as_deref()
         .map(normalize_secret_value)
         .transpose()?;
+    if value.as_deref().is_some_and(is_claude_secret_value) {
+        return Err(claude_credential_refused());
+    }
 
     let keys = state
         .config
@@ -710,6 +792,23 @@ async fn update_project_secret(
     ensure_project_write_access(&transaction, &project, &context, None).await?;
     ensure_secret_tables_for_request(&transaction).await?;
 
+    // An update carries no name, so a new value for a secret stored under the
+    // reserved name is refused by the name already stored.
+    if value.is_some() {
+        let stored_name = transaction
+            .query_opt(
+                "select name from project_secrets
+                 where id = $1 and project_id = $2 and revoked_at is null",
+                &[&secret_id, &project_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to load secret: {error}")))?
+            .map(|row| row.get::<_, String>("name"));
+        if stored_name.as_deref().is_some_and(is_reserved_secret_name) {
+            return Err(claude_credential_refused());
+        }
+    }
+
     let updated = transaction
         .query_opt(
             "update project_secrets
@@ -718,7 +817,8 @@ async fn update_project_secret(
                  ciphertext_b64 = coalesce($6, ciphertext_b64),
                  updated_at = now()
              where id = $1 and project_id = $2 and revoked_at is null
-             returning id, name, description, last_used_at, revoked_at, created_at, updated_at",
+             returning id, name, description, last_used_at, revoked_at, created_at, updated_at,
+                       nonce_b64, ciphertext_b64",
             &[
                 &secret_id,
                 &project_id,
@@ -861,6 +961,11 @@ async fn update_project_secret(
     let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
     let created_at: DateTime<Utc> = row.get("created_at");
     let updated_at: DateTime<Utc> = row.get("updated_at");
+    let nonce_b64: String = row.get("nonce_b64");
+    let ciphertext_b64: String = row.get("ciphertext_b64");
+    // A secret stored before the guard keeps its mark after an edit of its
+    // description or grants, as the listing shows it.
+    let refused = stored_secret_is_refused(Some(keys), id, &name, &nonce_b64, &ciphertext_b64);
 
     Ok(Json(ProjectSecretListItem {
         id: id.to_string(),
@@ -872,6 +977,7 @@ async fn update_project_secret(
         revoked_at: revoked_at.map(|dt| dt.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
         updated_at: updated_at.to_rfc3339(),
+        refused,
     }))
 }
 
@@ -1408,11 +1514,11 @@ async fn agent_secrets(
             let description: Option<String> = row.get("description");
             let nonce_b64: String = row.get("nonce_b64");
             let ciphertext_b64: String = row.get("ciphertext_b64");
-            let plaintext = keys.open(&nonce_b64, &ciphertext_b64).map_err(|error| {
-                internal_error(format!("failed to decrypt secret payload: {error}"))
-            })?;
-            let value = String::from_utf8(plaintext)
-                .map_err(|_| internal_error("secret payload must be utf-8"))?;
+            let Some(value) =
+                open_deliverable_secret(keys, secret_id, &name, &nonce_b64, &ciphertext_b64)?
+            else {
+                continue;
+            };
             env.insert(name.clone(), JsonValue::String(value));
             inventory_by_secret_id
                 .insert(secret_id, AgentSecretInventoryItem { name, description });
@@ -1462,11 +1568,11 @@ async fn agent_secrets(
             let description: Option<String> = row.get("description");
             let nonce_b64: String = row.get("nonce_b64");
             let ciphertext_b64: String = row.get("ciphertext_b64");
-            let plaintext = keys.open(&nonce_b64, &ciphertext_b64).map_err(|error| {
-                internal_error(format!("failed to decrypt secret payload: {error}"))
-            })?;
-            let value = String::from_utf8(plaintext)
-                .map_err(|_| internal_error("secret payload must be utf-8"))?;
+            let Some(value) =
+                open_deliverable_secret(keys, secret_id, &name, &nonce_b64, &ciphertext_b64)?
+            else {
+                continue;
+            };
             env.insert(name.clone(), JsonValue::String(value));
             inventory_by_secret_id
                 .insert(secret_id, AgentSecretInventoryItem { name, description });
@@ -1512,6 +1618,10 @@ mod security_tests;
 #[cfg(test)]
 #[path = "secrets_managed_model_tests.rs"]
 mod managed_model_tests;
+
+#[cfg(test)]
+#[path = "secrets_claude_material_tests.rs"]
+mod claude_material_tests;
 
 #[cfg(test)]
 mod tests {

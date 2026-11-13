@@ -31,6 +31,7 @@ mod change_undone;
 mod chat_activity;
 mod chat_attachments;
 mod claude_code_lane;
+mod claude_material;
 mod config;
 mod connection_limit;
 mod conversation_goals;
