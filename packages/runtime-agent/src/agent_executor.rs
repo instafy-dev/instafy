@@ -219,12 +219,19 @@ impl AgentExecutor {
         if let Some(signal) = lease_lost_signal.as_ref() {
             signal.check_lease_with(lease_check(client.clone(), registration.clone(), job.id));
         }
-        let (proxy_auth, _proxy_auth_guard) = crate::job_proxy_auth::for_job(
-            client.clone(),
-            registration,
-            job,
-            lease_lost_signal.clone(),
-        )?;
+        // A local-engine turn's traffic never goes through the Instafy proxy, and its job holds no
+        // envelope (docs/Local-Engine-Turns.md 3.1, step 3): building the grant from the
+        // registration's envelope would fail it before it starts.
+        let (proxy_auth, _proxy_auth_guard) = if crate::claude_code::job::has_engine(job) {
+            (None, None)
+        } else {
+            crate::job_proxy_auth::for_job(
+                client.clone(),
+                registration,
+                job,
+                lease_lost_signal.clone(),
+            )?
+        };
         let (progress_tx, progress_status, progress_task) = spawn_progress_dispatch(
             client.clone(),
             registration,

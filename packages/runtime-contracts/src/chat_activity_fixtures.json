@@ -10,6 +10,7 @@
     "Läser sidor",
     "Retrying",
     "Trying again",
+    "Looking through files",
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   ],
   "liveInvalid": [
@@ -47,7 +48,8 @@
     "read the research notes",
     "ran tests",
     "öppnade kartan",
-    "you said no"
+    "you said no",
+    "looked through files"
   ],
   "doneInvalid": [
     "",

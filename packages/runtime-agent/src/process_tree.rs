@@ -1,13 +1,19 @@
 //! Retain child identities across polls: a shell may create another process group/session.
-//! Cooperative Codex shutdown is the primary path; this guard handles failures and dropped runs.
+//! Cooperative shutdown of the supervised program is the primary path; this guard handles
+//! failures and dropped runs.
+//!
+//! Each supervisor passes its own cleanup latch: the isolated tool worker's, or the local-engine
+//! lane's (`claude_code`). A tree whose descendants cannot be confirmed gone sets that latch,
+//! and the lease loop stops taking work while any latch is set (`agent::runtime_reuse_is_safe`).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use sysinfo::{Pid, ProcessRefreshKind, System};
 
-pub(super) fn prepare_child() -> Result<()> {
+pub(crate) fn prepare_child() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         // Detached grandchildren reparent to this worker, not init, while it is alive.
@@ -18,15 +24,17 @@ pub(super) fn prepare_child() -> Result<()> {
     Ok(())
 }
 
-pub(super) struct ProcessTree {
+pub(crate) struct ProcessTree {
     root: Pid,
     identities: HashMap<Pid, u64>,
     system: System,
     armed: bool,
+    /// Set when this tree's cleanup cannot be confirmed.
+    cleanup_unconfirmed: &'static AtomicBool,
 }
 
 impl ProcessTree {
-    pub(super) fn new(pid: u32) -> Self {
+    pub(crate) fn new(pid: u32, cleanup_unconfirmed: &'static AtomicBool) -> Self {
         let mut system = System::new();
         system.refresh_processes_specifics(ProcessRefreshKind::new());
         let root = Pid::from_u32(pid);
@@ -39,10 +47,15 @@ impl ProcessTree {
             identities,
             system,
             armed: true,
+            cleanup_unconfirmed,
         }
     }
 
-    pub(super) fn observe(&mut self) {
+    fn mark_cleanup_unconfirmed(&self) {
+        self.cleanup_unconfirmed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn observe(&mut self) {
         self.system
             .refresh_processes_specifics(ProcessRefreshKind::new());
         loop {
@@ -121,7 +134,26 @@ impl ProcessTree {
         }
     }
 
-    pub(super) async fn terminate_and_confirm(&mut self) -> Result<()> {
+    /// How many observed descendants still run, the root left out: what the kill path is about
+    /// to stop. It signals nothing. Fresh process records, as `terminate_and_confirm` reads
+    /// them, so an exited child that waits to be reaped does not count.
+    pub(crate) fn running_descendants(&mut self) -> usize {
+        self.observe();
+        let mut fresh = System::new();
+        fresh.refresh_processes_specifics(ProcessRefreshKind::new());
+        self.identities
+            .iter()
+            .filter(|(pid, start)| {
+                **pid != self.root
+                    && fresh.process(**pid).is_some_and(|process| {
+                        process.start_time() == **start
+                            && process.status() != sysinfo::ProcessStatus::Zombie
+                    })
+            })
+            .count()
+    }
+
+    pub(crate) async fn terminate_and_confirm(&mut self) -> Result<()> {
         self.stop_and_kill();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -144,8 +176,8 @@ impl ProcessTree {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                super::mark_cleanup_unconfirmed();
-                bail!("isolated worker descendants survived termination");
+                self.mark_cleanup_unconfirmed();
+                bail!("supervised descendants survived termination");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -157,7 +189,7 @@ impl Drop for ProcessTree {
         if self.armed {
             // A dropped future cannot await confirmation. Its runtime must retire even if
             // the best-effort kill succeeds, rather than treating the capacity as reusable.
-            super::mark_cleanup_unconfirmed();
+            self.mark_cleanup_unconfirmed();
             self.stop_and_kill();
         }
     }
@@ -170,13 +202,14 @@ mod tests {
 
     #[tokio::test]
     async fn termination_drains_background_descendants_without_stopping_another_worker() {
+        static LATCH: AtomicBool = AtomicBool::new(false);
         let mut unrelated = tokio::process::Command::new("/bin/sh")
             .args(["-c", "sleep 30"])
             .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut other_tree = ProcessTree::new(unrelated.id().unwrap());
+        let mut other_tree = ProcessTree::new(unrelated.id().unwrap(), &LATCH);
         let mut root = tokio::process::Command::new("/bin/sh")
             .args(["-c", "sleep 30 & printf '%s\\n' $!; wait"])
             .process_group(0)
@@ -184,7 +217,7 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut tree = ProcessTree::new(root.id().unwrap());
+        let mut tree = ProcessTree::new(root.id().unwrap(), &LATCH);
         let mut line = String::new();
         tokio::io::BufReader::new(root.stdout.take().unwrap())
             .read_line(&mut line)
@@ -193,7 +226,10 @@ mod tests {
         let descendant = Pid::from_u32(line.trim().parse().unwrap());
         tree.observe();
         assert!(tree.identities.contains_key(&descendant));
+        // The background `sleep`, not the shell that started it.
+        assert_eq!(tree.running_descendants(), 1);
         let result = tree.terminate_and_confirm().await;
+        assert_eq!(tree.running_descendants(), 0);
         let other_alive = unrelated.try_wait().unwrap().is_none();
         let _ = other_tree.terminate_and_confirm().await;
         let _ = root.wait().await;
@@ -202,6 +238,101 @@ mod tests {
         assert!(
             other_alive,
             "termination crossed the worker process boundary"
+        );
+        assert!(
+            !LATCH.load(Ordering::Acquire),
+            "a confirmed termination set the cleanup latch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_tree_sets_only_the_latch_it_was_given() {
+        static CONFIRMED: AtomicBool = AtomicBool::new(false);
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+        let sleeper = || {
+            tokio::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 30"])
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        };
+        let mut first = sleeper();
+        let mut second = sleeper();
+        let mut confirmed = ProcessTree::new(first.id().unwrap(), &CONFIRMED);
+        confirmed.terminate_and_confirm().await.unwrap();
+        drop(confirmed);
+        // A tree dropped before its termination was confirmed cannot vouch for its descendants.
+        drop(ProcessTree::new(second.id().unwrap(), &DROPPED));
+        let _ = first.wait().await;
+        let _ = second.wait().await;
+        assert!(DROPPED.load(Ordering::Acquire));
+        assert!(!CONFIRMED.load(Ordering::Acquire));
+    }
+
+    /// The CPU time this process has used: user, then system.
+    fn cpu_time() -> (Duration, Duration) {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: getrusage fills the struct it is given.
+        let usage = unsafe {
+            libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
+            usage.assume_init()
+        };
+        let time = |value: libc::timeval| {
+            Duration::from_secs(value.tv_sec as u64) + Duration::from_micros(value.tv_usec as u64)
+        };
+        (time(usage.ru_utime), time(usage.ru_stime))
+    }
+
+    /// Phase 4's measurement of what tracking costs (docs/Local-Engine-Turns.md 3.6): one tree
+    /// observing every 50 ms, as a local-engine turn's does for as long as the turn runs, over
+    /// `INSTAFY_PROCESS_TREE_MEASURE_SECONDS` (60 by default). It prints the CPU time it used.
+    /// Run it by hand, alone, on the machine being measured:
+    /// `cargo test --lib process_tree::tests::what_observing_every_50_ms_costs -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "a measurement: run by hand with --ignored --nocapture"]
+    async fn what_observing_every_50_ms_costs() {
+        static LATCH: AtomicBool = AtomicBool::new(false);
+        let seconds = std::env::var("INSTAFY_PROCESS_TREE_MEASURE_SECONDS")
+            .ok()
+            .and_then(|seconds| seconds.parse().ok())
+            .unwrap_or(60u64);
+        let mut root = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 3600 & wait"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut tree = ProcessTree::new(root.id().unwrap(), &LATCH);
+        let mut system = System::new();
+        system.refresh_processes_specifics(ProcessRefreshKind::new());
+        let processes = system.processes().len();
+        let mut ticker = tokio::time::interval(Duration::from_millis(50));
+        let before = cpu_time();
+        let started = std::time::Instant::now();
+        let mut observations = 0u32;
+        while started.elapsed() < Duration::from_secs(seconds) {
+            ticker.tick().await;
+            tree.observe();
+            observations += 1;
+        }
+        let after = cpu_time();
+        let (user, system) = (
+            after.0.saturating_sub(before.0),
+            after.1.saturating_sub(before.1),
+        );
+        let used = user + system;
+        let elapsed = started.elapsed();
+        tree.terminate_and_confirm().await.unwrap();
+        let _ = root.wait().await;
+        println!(
+            "{observations} observations in {:.1} s, with {processes} processes on this machine: {} ms of CPU ({} ms user, {} ms system), {:.2}% of one core, {:.2} ms each",
+            elapsed.as_secs_f64(),
+            used.as_millis(),
+            user.as_millis(),
+            system.as_millis(),
+            100.0 * used.as_secs_f64() / elapsed.as_secs_f64(),
+            used.as_secs_f64() * 1000.0 / f64::from(observations.max(1)),
         );
     }
 }

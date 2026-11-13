@@ -45,6 +45,13 @@
 //! (`/git/revert` with `expected`, on this machine's own origin) and only
 //! for files the turn found as saved; otherwise it would also take back work
 //! that is not the turn's.
+//!
+//! A local-engine turn's report (docs/Local-Engine-Turns.md 3.6, step 5)
+//! leaves out what its saves leave out (`claude_code::saves`: `.claude/`,
+//! `CLAUDE.local.md`, the root `.mcp.json`, files that hold a Claude key),
+//! names its files by their folder-relative paths, as the lane's own steps
+//! do, and says `claude-code` made them. One that the runtime's shutdown
+//! ended reports nothing ([`ShutdownReportsNothing`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -86,11 +93,54 @@ pub(super) async fn a_stop_refused_the_save(cancel: Option<&JobCancelSignal>) ->
 /// How a turn's folder began, for what the turn changed should it lose its
 /// lease. Set once the turn has taken the folder's `git status`.
 #[derive(Default)]
-pub(super) struct TurnStart(Mutex<Option<(PathBuf, HashMap<String, GitStatusEntry>)>>);
+pub(super) struct TurnStart(Mutex<Option<RecordedStart>>);
+
+struct RecordedStart {
+    workspace_dir: PathBuf,
+    status: HashMap<String, GitStatusEntry>,
+    /// A local-engine turn's: its report goes through the lane filter.
+    local_engine: bool,
+}
+
+/// The error of a local-engine turn that the runtime's shutdown ended: it
+/// reads as a lost lease, so the job loop sends no completion, and nothing
+/// reports what the turn changed (docs/Local-Engine-Turns.md 3.6, "Shutdown").
+#[derive(Debug)]
+pub(super) struct ShutdownReportsNothing;
+
+impl std::fmt::Display for ShutdownReportsNothing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("job lease lost: the runtime is shutting down")
+    }
+}
+
+impl std::error::Error for ShutdownReportsNothing {}
 
 impl TurnStart {
     pub(super) fn record(&self, workspace_dir: &Path, status: &HashMap<String, GitStatusEntry>) {
-        *self.0.lock() = Some((workspace_dir.to_path_buf(), status.clone()));
+        self.record_turn(workspace_dir, status, false);
+    }
+
+    /// [`Self::record`] for a local-engine turn.
+    pub(super) fn record_local_engine_turn(
+        &self,
+        workspace_dir: &Path,
+        status: &HashMap<String, GitStatusEntry>,
+    ) {
+        self.record_turn(workspace_dir, status, true);
+    }
+
+    fn record_turn(
+        &self,
+        workspace_dir: &Path,
+        status: &HashMap<String, GitStatusEntry>,
+        local_engine: bool,
+    ) {
+        *self.0.lock() = Some(RecordedStart {
+            workspace_dir: workspace_dir.to_path_buf(),
+            status: status.clone(),
+            local_engine,
+        });
     }
 
     /// `result`, with what the turn changed in its folder on the error when
@@ -103,13 +153,30 @@ impl TurnStart {
             Err(error) if crate::agent_executor::is_lease_lost(&error) => error,
             other => return other,
         };
-        let Some((workspace_dir, before)) = self.0.lock().take() else {
+        if error.downcast_ref::<ShutdownReportsNothing>().is_some() {
+            return Err(error);
+        }
+        let Some(start) = self.0.lock().take() else {
             return Err(error);
         };
+        let RecordedStart {
+            workspace_dir,
+            status: before,
+            local_engine,
+        } = start;
         let Some(after) = super::collect_git_status_porcelain(&workspace_dir).await else {
             return Err(error);
         };
-        let files = super::status_delta_files_for_checkpoint(&before, &after, &[]);
+        let mut files = super::status_delta_files_for_checkpoint(&before, &after, &[]);
+        if local_engine {
+            let paths = files
+                .iter()
+                .map(|file| file.workspace_path.clone())
+                .collect();
+            let kept = crate::claude_code::saves::kept_off_all(&workspace_dir, paths).await;
+            let mut kept = kept.into_iter();
+            files.retain(|_| kept.next().flatten().is_none());
+        }
         if files.is_empty() {
             return Err(error);
         }
@@ -119,6 +186,7 @@ impl TurnStart {
             files,
             save: None,
             undo,
+            local_engine,
         }))
     }
 }
@@ -213,6 +281,9 @@ pub(crate) struct StoppedTurnChanges {
     /// What the turn left in its files, for Undo with no turn: known for a
     /// turn that lost its lease, whose start the folder's record holds.
     undo: Option<FolderUndo>,
+    /// A local-engine turn's: its files are named by their folder-relative
+    /// paths, and `claude-code` made them.
+    local_engine: bool,
 }
 
 impl std::fmt::Display for StoppedTurnChanges {
@@ -270,6 +341,7 @@ impl StoppedTurnChanges {
             files,
             save: of_kind("origin/apply").cloned(),
             undo: None,
+            local_engine: execution.provider == crate::claude_code::events::PROVIDER,
         })
     }
 
@@ -285,13 +357,19 @@ impl StoppedTurnChanges {
     /// do: the controller leaves out of it what those already showed.
     fn report(&self, runtime_id: &uuid::Uuid) -> (JobMessage, Vec<JsonValue>) {
         let files = self.listed();
+        // A local-engine turn's steps name files relative to its folder, with
+        // any `sk-ant-` token replaced (docs/Local-Engine-Turns.md 3.6, 3.7).
         let paths: Vec<String> = files
             .iter()
             .map(|file| {
-                self.workspace_dir
-                    .join(&file.workspace_path)
-                    .display()
-                    .to_string()
+                if self.local_engine {
+                    crate::claude_code::events::redact_tokens(&file.workspace_path)
+                } else {
+                    self.workspace_dir
+                        .join(&file.workspace_path)
+                        .display()
+                        .to_string()
+                }
             })
             .collect();
         let mut metadata = json!({
@@ -312,7 +390,12 @@ impl StoppedTurnChanges {
             },
             runtime_id,
         );
-        let mut artifact_metadata = json!({ "provider": "codex-embedded" });
+        let provider = if self.local_engine {
+            crate::claude_code::events::PROVIDER
+        } else {
+            "codex-embedded"
+        };
+        let mut artifact_metadata = json!({ "provider": provider });
         if self.save.is_none() {
             // No save took these: Studio marks them Not saved.
             artifact_metadata["stoppedBeforeSave"] = json!(true);

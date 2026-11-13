@@ -44,6 +44,9 @@ mod client_timezone;
 #[path = "support/code_mode_host.rs"]
 mod code_mode_host_support;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "proxy_integration/codex_never_starts_claude.rs"]
+mod codex_never_starts_claude;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/evidence_retry.rs"]
 mod evidence_retry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1155,6 +1158,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
     let registration = registration_for_live(Uuid::new_v4());
     // Where a write turn records how its folder began, until its job ends.
@@ -1510,6 +1514,7 @@ async fn codex_embedded_via_proxy_creates_file_inner() -> Result<()> {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
 
     let execution = tokio::time::timeout(
@@ -1766,6 +1771,7 @@ async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
 
     let execution = tokio::time::timeout(
@@ -1960,6 +1966,7 @@ async fn codex_proxy_live_creates_file() -> Result<()> {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
 
     let execution = tokio::time::timeout(
@@ -2197,6 +2204,7 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
 
     let execution = tokio::time::timeout(

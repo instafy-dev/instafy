@@ -319,6 +319,11 @@ impl Config {
                 crate::skill_packs::node_on_path(),
             ),
         );
+        // Probes the granted `claude` once, when Desktop granted one on macOS.
+        apply_claude_code_capability(
+            &mut capabilities,
+            crate::claude_code::registration_capability(),
+        );
 
         let metadata = launch_metadata()
             .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -692,6 +697,20 @@ fn apply_skill_packs_capability(capabilities: &mut Value, skill_packs: Option<Va
     }
 }
 
+/// `claudeCode` says whether this runtime can run a local-engine turn on the person's own
+/// Claude Code ([`crate::claude_code::registration_capability`]). Like `localBrowser`, a value
+/// from the launch capabilities is never trusted, and the controller rebuilds what it keeps.
+fn apply_claude_code_capability(capabilities: &mut Value, claude_code: Option<Value>) {
+    let Some(map) = capabilities.as_object_mut() else {
+        return;
+    };
+    map.remove(crate::claude_code::CAPABILITY_KEY);
+    map.remove("claude_code");
+    if let Some(capability) = claude_code {
+        map.insert(crate::claude_code::CAPABILITY_KEY.to_string(), capability);
+    }
+}
+
 fn detect_rathole_use_subcommands(bin: &str) -> bool {
     let Ok(output) = Command::new(bin).arg("--help").output() else {
         return false;
@@ -713,9 +732,9 @@ fn detect_rathole_use_subcommands(bin: &str) -> bool {
 mod tests {
     use super::{
         CONFIGURED_LAUNCH_CREDENTIAL_KEYS, Config, LAUNCH_METADATA_ENV_KEY,
-        apply_browser_host_capability, apply_local_browser_capability,
-        apply_skill_packs_capability, capture_and_scrub_launch_credentials,
-        normalize_lease_max_jobs,
+        apply_browser_host_capability, apply_claude_code_capability,
+        apply_local_browser_capability, apply_skill_packs_capability,
+        capture_and_scrub_launch_credentials, normalize_lease_max_jobs,
     };
     use crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS;
     use serde_json::json;
@@ -751,6 +770,12 @@ mod tests {
             child.env(
                 LAUNCH_METADATA_ENV_KEY,
                 r#"{"env":{"INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON":"turn-secret"}}"#,
+            );
+            // A launcher cannot claim the local-engine lane: without a captured grant there is
+            // no `claudeCode` capability.
+            child.env(
+                "RUNTIME_CAPABILITIES",
+                r#"{"agent":true,"claudeCode":{"version":1,"ready":true,"cli":"9.9.9"}}"#,
             );
             child
                 .env("CONTROLLER_BASE_URL", "http://127.0.0.1:9")
@@ -796,6 +821,7 @@ mod tests {
         );
         // Without it the controller leases this runtime no job holding device grants.
         assert_eq!(config.capabilities["grantedTurns"], json!(true));
+        assert!(config.capabilities.get("claudeCode").is_none());
         assert_eq!(
             config.runtime_access_token.as_deref(),
             Some("launch-RUNTIME_ACCESS_TOKEN")
@@ -869,6 +895,21 @@ mod tests {
         apply_skill_packs_capability(&mut capabilities, Some(packs.clone()));
         assert_eq!(capabilities["custom"], json!({ "preserved": true }));
         assert_eq!(capabilities["skillPacks"], packs);
+    }
+
+    #[test]
+    fn claude_code_registration_is_process_owned() {
+        let mut capabilities = json!({
+            "custom": { "preserved": true },
+            "claudeCode": { "version": 1, "ready": true, "cli": "9.9.9", "path": "/spoofed" },
+            "claude_code": { "version": 1, "ready": true }
+        });
+        apply_claude_code_capability(&mut capabilities, None);
+        assert_eq!(capabilities, json!({ "custom": { "preserved": true } }));
+        let lane = json!({ "version": 1, "ready": false, "reason": "binary_missing" });
+        apply_claude_code_capability(&mut capabilities, Some(lane.clone()));
+        assert_eq!(capabilities["custom"], json!({ "preserved": true }));
+        assert_eq!(capabilities["claudeCode"], lane);
     }
 
     #[test]

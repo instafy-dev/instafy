@@ -2078,14 +2078,14 @@ impl CodexClient {
                                 self.config.workspace_dir.join(".codex-runtime-fallback");
                             let _ =
                                 prepare_fallback_codex_home(self.workspace_dir(), &fallback_home);
-                            ConfigBuilder::default()
-                                .codex_home(fallback_home)
-                                .cli_overrides(cli_overrides.clone())
-                                .harness_overrides(overrides.clone())
-                                .build()
-                                .await
-                                .map_err(|fallback| anyhow!(fallback))
-                                .context("failed to load fallback Codex configuration")?
+                            load_fallback_codex_config(
+                                &fallback_home,
+                                cli_overrides.clone(),
+                                overrides.clone(),
+                            )
+                            .await
+                            .map_err(|fallback| anyhow!(fallback))
+                            .context("failed to load fallback Codex configuration")?
                         }
                     }
                 } else {
@@ -2095,14 +2095,14 @@ impl CodexClient {
                     );
                     let fallback_home = self.config.workspace_dir.join(".codex-runtime-fallback");
                     let _ = prepare_fallback_codex_home(self.workspace_dir(), &fallback_home);
-                    ConfigBuilder::default()
-                        .codex_home(fallback_home)
-                        .cli_overrides(cli_overrides.clone())
-                        .harness_overrides(overrides.clone())
-                        .build()
-                        .await
-                        .map_err(|fallback| anyhow!(fallback))
-                        .context("failed to load fallback Codex configuration")?
+                    load_fallback_codex_config(
+                        &fallback_home,
+                        cli_overrides.clone(),
+                        overrides.clone(),
+                    )
+                    .await
+                    .map_err(|fallback| anyhow!(fallback))
+                    .context("failed to load fallback Codex configuration")?
                 }
             }
         };
@@ -2118,14 +2118,14 @@ impl CodexClient {
             );
             let fallback_home = self.config.workspace_dir.join(".codex-runtime-fallback");
             prepare_fallback_codex_home(self.workspace_dir(), &fallback_home)?;
-            config = ConfigBuilder::default()
-                .codex_home(fallback_home)
-                .cli_overrides(cli_overrides.clone())
-                .harness_overrides(overrides.clone())
-                .build()
-                .await
-                .map_err(|fallback| anyhow!(fallback))
-                .context("failed to load fallback Codex configuration after missing home")?;
+            config = load_fallback_codex_config(
+                &fallback_home,
+                cli_overrides.clone(),
+                overrides.clone(),
+            )
+            .await
+            .map_err(|fallback| anyhow!(fallback))
+            .context("failed to load fallback Codex configuration after missing home")?;
         }
 
         let bounded_proxy_retries = uses_bounded_proxy_retries(&options);
@@ -6767,6 +6767,106 @@ fn resolve_codex_home(workspace_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| workspace_dir.join(".codex"))
 }
 
+/// The program names Codex may not start: `claude` in every letter case. macOS folders are
+/// case-insensitive by default, so `CLAUDE` there starts the same program.
+fn claude_program_spellings() -> Vec<String> {
+    const NAME: &str = "claude";
+    (0..1u32 << NAME.len())
+        .map(|uppercase| {
+            NAME.chars()
+                .enumerate()
+                .map(|(index, letter)| {
+                    if uppercase & (1 << index) == 0 {
+                        letter
+                    } else {
+                        letter.to_ascii_uppercase()
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// What Codex tells the model when it refuses such a command: "`claude -p …` rejected: <this>".
+/// It goes into the requirement's TOML as a basic string, so it holds no `"` or `\`.
+const CLAUDE_REFUSAL_JUSTIFICATION: &str = "This runtime does not let an agent start Claude Code. Do the work without it, and do not try another way to start it.";
+
+/// The source Codex names for the requirement below, where it names a requirement's source.
+const HARNESS_REQUIREMENTS_ID: &str = "instafy-runtime-agent";
+const HARNESS_REQUIREMENTS_NAME: &str = "Instafy runtime";
+
+/// The requirement as Codex's `requirements.toml` writes it: one `prefix_rule` on the program,
+/// forbidden, with every spelling of [`claude_program_spellings`] as the first token.
+fn harness_requirements_toml() -> String {
+    let spellings = claude_program_spellings()
+        .iter()
+        .map(|spelling| format!("\"{spelling}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "[[rules.prefix_rules]]\npattern = [{{ any_of = [{spellings}] }}]\ndecision = \"forbidden\"\njustification = \"{CLAUDE_REFUSAL_JUSTIFICATION}\"\n"
+    )
+}
+
+/// Codex may not start the person's own `claude` (docs/Local-Engine-Turns.md, D22). A Codex turn
+/// on Desktop runs with full access as the person's OS user, unattended turns included, and
+/// Claude Code there is signed in to the person's own account: a turn that started it would hand
+/// it text Instafy wrote, which local-engine turns exist to rule out (1.1, limits 1-3).
+///
+/// The rule is Codex's own mechanism, a `prefix_rule` on the program, kept in Codex's managed
+/// requirements. Requirements apply to every session whatever the loader overrides say
+/// (`ignore_user_and_project_exec_policy_rules` drops only user and project `.rules` files), an
+/// isolated session included; they outrank an `allow` rule a user or project file adds for the
+/// same program, since Codex takes the strictest decision; and a session's native subagents keep
+/// them. Codex reads requirements from the system's `requirements.toml`, managed preferences and a
+/// bundle its host supplies: the runtime supplies this one as that bundle, which adds to the
+/// others and replaces none.
+///
+/// As far as a prefix rule reaches, it refuses:
+/// - `claude …` in any letter case;
+/// - an absolute path to it, such as `/opt/homebrew/bin/claude …`: Codex also checks an absolute
+///   program against the rules for its file name;
+/// - each such command inside a `bash -lc`, `zsh -lc` or `sh -c` script that Codex can split
+///   into plain commands, which it then checks one by one.
+///
+/// It cannot refuse a relative path (`./claude`), another name for the same file (a link), a
+/// program that starts it (`env claude`, `npx @anthropic-ai/claude-code`, `node cli.js`), a script
+/// Codex cannot split (one with a substitution or a redirection, which Codex checks as one shell
+/// command), or a script that builds the name. An absolute path also escapes it when a user or
+/// project rules file names that exact path, or narrows the name with `host_executable`, since
+/// Codex then never falls back to the file name. The owner accepted that a prefix rule cannot stop
+/// every indirect launch (D22).
+fn harness_exec_policy() -> codex_config::CloudConfigBundleLoader {
+    let bundle = codex_config::CloudConfigBundle {
+        config_toml: codex_config::CloudConfigTomlBundle::default(),
+        requirements_toml: codex_config::CloudRequirementsTomlBundle {
+            enterprise_managed: vec![codex_config::CloudRequirementsFragment {
+                id: HARNESS_REQUIREMENTS_ID.to_string(),
+                name: HARNESS_REQUIREMENTS_NAME.to_string(),
+                contents: harness_requirements_toml(),
+            }],
+        },
+    };
+    codex_config::CloudConfigBundleLoader::new(async move {
+        Ok::<_, codex_config::CloudConfigBundleLoadError>(Some(bundle))
+    })
+}
+
+/// Every Codex config a turn runs with starts here: [`load_runtime_codex_config`], its
+/// [`load_fallback_codex_config`] and [`load_hardened_codex_config`]. So each one carries
+/// [`harness_exec_policy`].
+fn runtime_codex_config_builder(
+    codex_home: &Path,
+    cli_overrides: Vec<(String, codex_config::TomlValue)>,
+    overrides: ConfigOverrides,
+) -> ConfigBuilder {
+    ConfigBuilder::default()
+        .codex_home(codex_home.to_path_buf())
+        .cli_overrides(cli_overrides)
+        .harness_overrides(overrides)
+        .cloud_config_bundle(harness_exec_policy())
+}
+
 async fn load_runtime_codex_config(
     codex_home: &Path,
     cli_overrides: Vec<(String, codex_config::TomlValue)>,
@@ -6775,12 +6875,19 @@ async fn load_runtime_codex_config(
     // Codex's default loader discovers the desktop user's home independently
     // of resolve_codex_home. Pin the same runtime home that we repair and trust,
     // so an ordinary Chat turn cannot inherit unrelated host tools or plugins.
-    ConfigBuilder::default()
-        .codex_home(codex_home.to_path_buf())
-        .cli_overrides(cli_overrides)
-        .harness_overrides(overrides)
+    runtime_codex_config_builder(codex_home, cli_overrides, overrides)
         .build()
         .await
+}
+
+/// The config of a turn whose own Codex home would not load, or cannot be written: the ordinary
+/// loader's, from the fresh home `prepare_fallback_codex_home` seeds with the sanitized config.
+async fn load_fallback_codex_config(
+    fallback_home: &Path,
+    cli_overrides: Vec<(String, codex_config::TomlValue)>,
+    overrides: ConfigOverrides,
+) -> std::io::Result<Config> {
+    load_runtime_codex_config(fallback_home, cli_overrides, overrides).await
 }
 
 /// The config of a turn that must not run what the workspace's own Codex config adds, such as a
@@ -6791,10 +6898,7 @@ async fn load_hardened_codex_config(
     cli_overrides: Vec<(String, codex_config::TomlValue)>,
     overrides: ConfigOverrides,
 ) -> std::io::Result<Config> {
-    ConfigBuilder::default()
-        .codex_home(codex_home.to_path_buf())
-        .cli_overrides(cli_overrides)
-        .harness_overrides(overrides)
+    runtime_codex_config_builder(codex_home, cli_overrides, overrides)
         .loader_overrides(codex_config::LoaderOverrides {
             ignore_user_config: true,
             ignore_project_config: true,
@@ -8819,6 +8923,318 @@ mod tests {
         assert_eq!(config.notify, None);
         assert!(!config.otel.log_user_prompt);
         assert!(config.mcp_servers.is_empty());
+    }
+
+    /// The rules of a Codex exec policy that `$command` matches, as Codex serializes them, checked
+    /// the way a session checks a command: an absolute program also matches the rules for its
+    /// file name (`MatchOptions { resolve_host_executables: true }`, codex-core's exec_policy.rs).
+    /// codex-execpolicy's types are not re-exported, so the options take their type from a first,
+    /// empty check.
+    macro_rules! session_policy_matches {
+        ($policy:expr, $command:expr) => {{
+            let policy = $policy;
+            let mut options = Default::default();
+            let _ = policy.matches_for_command_with_options(&[], None, &options);
+            options.resolve_host_executables = true;
+            let command: Vec<String> = $command.iter().map(|token| token.to_string()).collect();
+            policy
+                .matches_for_command_with_options(&command, None, &options)
+                .into_iter()
+                .map(|rule| serde_json::to_value(rule).expect("a rule match serializes"))
+                .collect::<Vec<JsonValue>>()
+        }};
+    }
+
+    /// The decision Codex takes for these rule matches, the strictest one, with the
+    /// justification of the rule that gave it. `None` when no rule matched.
+    fn strictest_decision(matches: &[JsonValue]) -> Option<(String, Option<String>)> {
+        let rank = |decision: &str| match decision {
+            "allow" => 0,
+            "prompt" => 1,
+            "forbidden" => 2,
+            other => panic!("an unknown decision {other}"),
+        };
+        matches
+            .iter()
+            .map(|rule| {
+                let rule = &rule["prefixRuleMatch"];
+                (
+                    rule["decision"].as_str().expect("a decision").to_string(),
+                    rule["justification"].as_str().map(str::to_string),
+                )
+            })
+            .max_by_key(|(decision, _)| rank(decision))
+    }
+
+    /// Commands that start `claude`, as a model might write them: the bare name in several
+    /// letter cases, and absolute paths where Desktop users install it.
+    const COMMANDS_THAT_START_CLAUDE: &[&[&str]] = &[
+        &["claude"],
+        &["claude", "-p", "Tidy the README"],
+        &["claude", "--resume", "5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50"],
+        &["Claude", "--version"],
+        &["CLAUDE", "-p", "hi"],
+        &["/opt/homebrew/bin/claude", "-p", "hi"],
+        &["/usr/local/bin/claude"],
+        &["/Users/person/.local/bin/claude", "--print"],
+        &["/Users/person/.local/bin/ClAuDe"],
+    ];
+
+    /// Commands that only name it, or start another program.
+    const COMMANDS_THAT_DO_NOT: &[&[&str]] = &[
+        &["echo", "claude"],
+        &["ls", "/opt/homebrew/bin/claude"],
+        &["claudette"],
+        &["/usr/local/bin/claudette"],
+        &["git", "status"],
+    ];
+
+    /// A Codex home whose user rules allow `claude` and `git status`: an ordinary turn loads them,
+    /// a hardened one does not.
+    fn codex_home_with_user_rules() -> tempfile::TempDir {
+        let home = tempfile::tempdir().expect("codex home");
+        fs::write(home.path().join("config.toml"), "").expect("user config");
+        fs::create_dir_all(home.path().join("rules")).expect("user rules folder");
+        fs::write(
+            home.path().join("rules").join("allow.rules"),
+            "prefix_rule(pattern = [\"claude\"], decision = \"allow\")\nprefix_rule(pattern = [\"git\", \"status\"], decision = \"allow\")\n",
+        )
+        .expect("user rules");
+        home
+    }
+
+    /// D22: the exec policy of a session started from `config` refuses every command in
+    /// [`COMMANDS_THAT_START_CLAUDE`], with the harness's justification, both the policy an
+    /// ordinary session loads (its rules files and its requirements) and an isolated session's
+    /// (the requirements alone); a `claude` inside a shell script Codex splits into plain commands
+    /// too; and it leaves every other command to the rules it had. `user_rules` says whether
+    /// `config` loads the home's user rules.
+    async fn assert_sessions_refuse_starting_claude(config: &Config, user_rules: bool) {
+        let session = codex_core::load_exec_policy(&config.config_layer_stack)
+            .await
+            .expect("a session's exec policy");
+        let requirements = config
+            .config_layer_stack
+            .requirements()
+            .exec_policy
+            .as_deref()
+            .expect("the harness's requirement");
+        let isolated = requirements.as_ref();
+        let refused = Some((
+            "forbidden".to_string(),
+            Some(CLAUDE_REFUSAL_JUSTIFICATION.to_string()),
+        ));
+        for command in COMMANDS_THAT_START_CLAUDE {
+            for (policy, matches) in [
+                ("session", session_policy_matches!(&session, command)),
+                ("isolated", session_policy_matches!(isolated, command)),
+            ] {
+                assert_eq!(
+                    strictest_decision(&matches),
+                    refused,
+                    "{policy}: {command:?} {matches:?}"
+                );
+            }
+        }
+        // Codex checks each plain command of a shell wrapper on its own.
+        for script in [
+            ["/bin/zsh", "-lc", "cd docs && claude -p 'Tidy the README'"],
+            [
+                "/bin/bash",
+                "-c",
+                "echo start; /opt/homebrew/bin/claude --print",
+            ],
+        ] {
+            let script = script.map(str::to_string);
+            let commands = codex_shell_command::bash::parse_shell_lc_plain_commands(&script)
+                .expect("a script Codex splits into plain commands");
+            assert!(
+                commands
+                    .iter()
+                    .any(
+                        |command| strictest_decision(&session_policy_matches!(&session, command))
+                            == refused
+                    ),
+                "{script:?} {commands:?}"
+            );
+        }
+        for command in COMMANDS_THAT_DO_NOT {
+            let decision = strictest_decision(&session_policy_matches!(&session, command));
+            let expected =
+                (user_rules && **command == ["git", "status"]).then(|| ("allow".to_string(), None));
+            assert_eq!(decision, expected, "{command:?}");
+            assert_eq!(
+                strictest_decision(&session_policy_matches!(isolated, command)),
+                None,
+                "isolated: {command:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_turns_codex_may_not_start_claude() {
+        let home = codex_home_with_user_rules();
+        let config = load_runtime_codex_config(
+            home.path(),
+            Vec::new(),
+            ConfigOverrides {
+                cwd: Some(home.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("ordinary config");
+        // The user's `allow` for `claude` is loaded, and the requirement outranks it.
+        let session = codex_core::load_exec_policy(&config.config_layer_stack)
+            .await
+            .expect("rules");
+        let matches = session_policy_matches!(&session, ["claude", "-p", "hi"]);
+        assert!(
+            matches
+                .iter()
+                .any(|rule| rule["prefixRuleMatch"]["decision"] == "allow"),
+            "{matches:?}"
+        );
+        assert_sessions_refuse_starting_claude(&config, true).await;
+    }
+
+    #[tokio::test]
+    async fn a_fallback_turns_codex_may_not_start_claude() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let fallback_home = workspace.path().join(".codex-runtime-fallback");
+        fs::create_dir_all(fallback_home.join("rules")).expect("fallback rules folder");
+        fs::write(fallback_home.join("config.toml"), "").expect("fallback config");
+        fs::write(
+            fallback_home.join("rules").join("allow.rules"),
+            "prefix_rule(pattern = [\"claude\"], decision = \"allow\")\nprefix_rule(pattern = [\"git\", \"status\"], decision = \"allow\")\n",
+        )
+        .expect("fallback user rules");
+        let config = load_fallback_codex_config(
+            &fallback_home,
+            Vec::new(),
+            ConfigOverrides {
+                cwd: Some(workspace.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fallback config");
+        assert_eq!(config.codex_home.as_path(), fallback_home);
+        assert_sessions_refuse_starting_claude(&config, true).await;
+    }
+
+    #[tokio::test]
+    async fn a_hardened_turns_codex_may_not_start_claude() {
+        let home = codex_home_with_user_rules();
+        let config = load_hardened_codex_config(
+            home.path(),
+            Vec::new(),
+            ConfigOverrides {
+                cwd: Some(home.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("hardened config");
+        // A hardened turn loads no user rule, and still the harness's requirement.
+        assert!(
+            config
+                .config_layer_stack
+                .ignore_user_and_project_exec_policy_rules()
+        );
+        assert_sessions_refuse_starting_claude(&config, false).await;
+    }
+
+    /// The rule is all the harness adds: Codex's own load of the same home, overrides and loader
+    /// settings has the same config layers, every other requirement and the same config, for an
+    /// ordinary and a hardened turn; the rule is one requirement, named as the runtime's, the
+    /// same in every loader.
+    #[tokio::test]
+    async fn the_claude_rule_is_all_a_runtime_codex_config_adds() {
+        let home = tempfile::tempdir().expect("codex home");
+        fs::write(
+            home.path().join("config.toml"),
+            "model = 'runtime-config-marker'\n[mcp_servers.runtime_marker]\ncommand = 'runtime-marker'\n",
+        )
+        .expect("user config");
+        let overrides = || ConfigOverrides {
+            cwd: Some(home.path().to_path_buf()),
+            ..Default::default()
+        };
+        let besides_the_rule = |config: &Config| {
+            let mut requirements = config.config_layer_stack.requirements().clone();
+            requirements.exec_policy = None;
+            let mut requirements_toml = config.config_layer_stack.requirements_toml().clone();
+            requirements_toml.rules = None;
+            let layers: Vec<_> = config
+                .config_layer_stack
+                .all_layers_low_to_high()
+                .cloned()
+                .collect();
+            (requirements, requirements_toml, layers)
+        };
+        let ordinary = load_runtime_codex_config(home.path(), Vec::new(), overrides())
+            .await
+            .expect("ordinary config");
+        let hardened = load_hardened_codex_config(home.path(), Vec::new(), overrides())
+            .await
+            .expect("hardened config");
+        let codexs_own = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .harness_overrides(overrides())
+            .build()
+            .await
+            .expect("Codex's own config");
+        let codexs_own_hardened = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .harness_overrides(overrides())
+            .loader_overrides(codex_config::LoaderOverrides {
+                ignore_user_config: true,
+                ignore_project_config: true,
+                ignore_user_and_project_exec_policy_rules: true,
+                ..Default::default()
+            })
+            .strict_config(true)
+            .build()
+            .await
+            .expect("Codex's own hardened config");
+        for (ours, codexs) in [(&ordinary, &codexs_own), (&hardened, &codexs_own_hardened)] {
+            assert_eq!(besides_the_rule(ours), besides_the_rule(codexs));
+            let mut rest = ours.clone();
+            rest.config_layer_stack = codexs.config_layer_stack.clone();
+            assert_eq!(&rest, codexs);
+        }
+        assert_ne!(
+            ordinary.model, hardened.model,
+            "the hardened turn skipped config.toml"
+        );
+
+        let rule = ordinary
+            .config_layer_stack
+            .requirements()
+            .exec_policy
+            .as_ref()
+            .expect("the harness's requirement");
+        assert!(
+            rule.source.to_string().contains(HARNESS_REQUIREMENTS_NAME),
+            "{}",
+            rule.source
+        );
+        let fallback = load_fallback_codex_config(home.path(), Vec::new(), overrides())
+            .await
+            .expect("fallback config");
+        for config in [&hardened, &fallback] {
+            assert_eq!(
+                config
+                    .config_layer_stack
+                    .requirements()
+                    .exec_policy
+                    .as_deref(),
+                Some(&**rule)
+            );
+        }
+        assert_eq!(claude_program_spellings().len(), 64);
+        assert!(claude_program_spellings().contains(&"cLAUDE".to_string()));
     }
 
     #[test]

@@ -689,6 +689,7 @@ async fn exercise(case: Case) -> Result<()> {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
     let cancel = JobCancelSignal::new();
     let cancel_run = cancel.clone();

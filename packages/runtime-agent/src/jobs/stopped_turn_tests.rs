@@ -265,6 +265,7 @@ fn the_report_is_the_edit_step_and_the_files_it_changed() {
         }],
         save: None,
         undo: None,
+        local_engine: false,
     };
     let runtime_id = Uuid::new_v4();
     let (step, artifacts) = changes.report(&runtime_id);
@@ -623,4 +624,110 @@ exit 1
         assert_eq!(reloads().len(), 1, "{:?}", reloads());
     });
     drop(runtime);
+}
+
+/// A stopped local-engine turn (docs/Local-Engine-Turns.md 3.6, step 5): its report leaves out
+/// what lane saves leave out, names its files by their folder-relative paths, as its own steps
+/// do, and says `claude-code` made them.
+#[tokio::test]
+async fn a_stopped_local_engine_turns_report_leaves_out_what_its_saves_leave_out() {
+    let workspace = tempfile::tempdir().unwrap();
+    checkout(workspace.path());
+    let start = TurnStart::default();
+    let before = super::super::collect_git_status_porcelain(workspace.path())
+        .await
+        .unwrap();
+    start.record_local_engine_turn(workspace.path(), &before);
+    fs::write(
+        workspace.path().join("sites/porto/app.js"),
+        "hours: \"9-5\"\n",
+    )
+    .unwrap();
+    for (path, text) in [
+        (".claude/settings.json", "{\"hooks\":{}}\n"),
+        ("sites/.Claude/agents/helper.md", "helper\n"),
+        ("claude.local.md", "notes\n"),
+        (".mcp.json", "{}\n"),
+        ("sites/porto/.mcp.json", "{}\n"),
+        (
+            "sites/porto/key.txt",
+            "sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZ\n",
+        ),
+    ] {
+        let path = workspace.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    let error = start
+        .attach_to_lost_lease(Err(anyhow!("job lease lost while Claude Code ran")))
+        .await
+        .expect_err("the turn lost its lease");
+    assert!(is_lease_lost(&error));
+    assert_eq!(
+        changed_paths(&error),
+        vec![
+            ("sites/porto/.mcp.json".to_string(), "created".to_string()),
+            ("sites/porto/app.js".to_string(), "changed".to_string()),
+        ]
+    );
+    let changes = StoppedTurnChanges::of_lost_lease(&error).expect("the turn's changes");
+    let (step, artifacts) = changes.report(&Uuid::new_v4());
+    assert_eq!(
+        step.metadata.as_ref().unwrap()["paths"],
+        json!(["sites/porto/.mcp.json", "sites/porto/app.js"])
+    );
+    assert_eq!(
+        step.content,
+        "Applied file changes: sites/porto/.mcp.json, sites/porto/app.js"
+    );
+    assert_eq!(artifacts[0]["metadata"]["provider"], "claude-code");
+    assert_eq!(artifacts[0]["metadata"]["stoppedBeforeSave"], true);
+
+    // A file name that holds a token is reported with the token replaced.
+    let named = StoppedTurnChanges {
+        workspace_dir: workspace.path().to_path_buf(),
+        files: vec![CodexFileDescriptor {
+            path: "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ.txt".to_string(),
+            workspace_path: "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ.txt".to_string(),
+            label: None,
+            description: None,
+            mime_type: None,
+            content: None,
+            content_base64: None,
+            change: super::super::FileChangeDescriptor::parse(json!({ "type": "created" })),
+        }],
+        save: None,
+        undo: None,
+        local_engine: true,
+    };
+    let (step, _) = named.report(&Uuid::new_v4());
+    assert!(!step.content.contains("ABCDEFGHIJ"), "{}", step.content);
+
+    // One the runtime's shutdown ended reports nothing.
+    let start = TurnStart::default();
+    start.record_local_engine_turn(workspace.path(), &before);
+    let error = start
+        .attach_to_lost_lease(Err(anyhow::Error::new(ShutdownReportsNothing)))
+        .await
+        .expect_err("ended");
+    assert!(is_lease_lost(&error));
+    assert!(StoppedTurnChanges::of_lost_lease(&error).is_none());
+
+    // A finished lane turn whose completion a Stop refused reports as a lane turn too.
+    let mut execution = finished_execution(vec![json!({
+        "kind": "apply/files",
+        "files": [{ "path": "sites/porto/app.js", "workspacePath": "sites/porto/app.js",
+                    "changeType": "changed", "change": { "type": "changed" } }],
+        "metadata": { "provider": "claude-code" },
+    })]);
+    execution.provider = "claude-code".to_string();
+    let finished = StoppedTurnChanges::of_finished_turn(workspace.path().to_path_buf(), &execution)
+        .expect("the turn changed a file");
+    let (step, artifacts) = finished.report(&Uuid::new_v4());
+    assert_eq!(
+        step.metadata.as_ref().unwrap()["paths"],
+        json!(["sites/porto/app.js"])
+    );
+    assert_eq!(artifacts[0]["metadata"]["provider"], "claude-code");
 }

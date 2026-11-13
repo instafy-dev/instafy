@@ -37,7 +37,9 @@ use crate::tunnels::{TunnelLifecycle, request_tunnel_assignment};
 static JOB_PROCESS_ENV_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
 fn runtime_reuse_is_safe() -> bool {
-    crate::isolated_tool_worker::runtime_reuse_is_safe() && crate::codex::runtime_reuse_is_safe()
+    crate::isolated_tool_worker::runtime_reuse_is_safe()
+        && crate::codex::runtime_reuse_is_safe()
+        && crate::claude_code::runtime_reuse_is_safe()
 }
 
 /// The exit status of a runtime-agent process that stopped because its space
@@ -208,6 +210,10 @@ mod turn_tests;
 #[cfg(test)]
 #[path = "agent_origin_cycle_tests.rs"]
 mod origin_cycle_tests;
+
+#[cfg(all(test, unix))]
+#[path = "agent_claude_code_tests.rs"]
+mod claude_code_tests;
 
 struct JobInputTask {
     stop_signal: ShutdownSignal,
@@ -518,6 +524,38 @@ struct RegistrationRenewalTask {
     handle: JoinHandle<()>,
 }
 
+/// The configuration a registration sends: the local-engine lane's `claudeCode` capability as the
+/// lane last published it, since a per-turn probe that disagrees with it, or a timed probe while it
+/// says not ready, changes it after startup (docs/Local-Engine-Turns.md 3.2).
+fn registration_config<'a>(
+    config: &'a Config,
+    lane: Option<&crate::claude_code::Lane>,
+) -> std::borrow::Cow<'a, Config> {
+    match lane {
+        Some(lane) => {
+            let mut config = config.clone();
+            config.capabilities =
+                crate::claude_code::with_published_capability(&config.capabilities, lane);
+            std::borrow::Cow::Owned(config)
+        }
+        None => std::borrow::Cow::Borrowed(config),
+    }
+}
+
+/// Resolves once the lane's capability changes; never without a lane.
+async fn lane_capability_changed(
+    capability: &mut Option<watch::Receiver<Option<serde_json::Value>>>,
+) {
+    match capability {
+        Some(receiver) => {
+            if receiver.changed().await.is_err() {
+                pending::<()>().await;
+            }
+        }
+        None => pending::<()>().await,
+    }
+}
+
 impl RegistrationRenewalTask {
     fn spawn(
         config: Arc<Config>,
@@ -525,8 +563,11 @@ impl RegistrationRenewalTask {
         registration: Registration,
         shutdown: ShutdownSignal,
         renewed: watch::Sender<Option<Registration>>,
+        lane: Option<&'static crate::claude_code::Lane>,
     ) -> Self {
         let token_store = client.runtime_token_handle();
+        // The capability is fixed for each registration; a change registers again at once.
+        let mut lane_capability = lane.map(crate::claude_code::Lane::subscribe);
         let handle = tokio::spawn(async move {
             let mut current = registration;
             let mut last_attempt_failed = false;
@@ -581,9 +622,20 @@ impl RegistrationRenewalTask {
                             "controller credential rejected by a consumer; re-registering on demand"
                         );
                     }
+                    // A probe changed the local-engine lane's capability: the controller attests
+                    // only what a registration carries, so it gates sends on the new value.
+                    _ = lane_capability_changed(&mut lane_capability) => {
+                        info!(
+                            runtime_id = %current.runtime_id,
+                            "the Claude Code capability changed; re-registering"
+                        );
+                    }
                 }
 
-                match client.register_runtime(&config).await {
+                match client
+                    .register_runtime(&registration_config(&config, lane))
+                    .await
+                {
                     Ok(renewed_registration) => {
                         info!(
                             runtime_id = %renewed_registration.runtime_id,
@@ -711,6 +763,9 @@ impl RuntimeAgent {
 
         let client = Arc::new(ControllerClient::new(&config)?);
         let executor = Arc::new(AgentExecutor::new(config.clone()));
+        // A local-engine turn running as the runtime shuts down reports nothing
+        // (docs/Local-Engine-Turns.md 3.6).
+        executor.processor().set_shutdown_signal(shutdown.clone());
         // A turn that changed an open preview's site sends its new picture
         // with this runtime's own credential, after the turn's reply.
         executor.send_card_pictures_with(client.clone());
@@ -728,15 +783,27 @@ impl RuntimeAgent {
         // A browser session machine's boot-time Chromium is started again
         // when it exits, for as long as this process runs.
         crate::boot_browser::install(shutdown.clone());
+        // While the local-engine lane's capability says not ready, it is probed again on a timer:
+        // no lane turn runs to notice that the person fixed Claude Code, and the registration
+        // renewal registers again with the new value (docs/Local-Engine-Turns.md 3.2).
+        let lane_reprobe = crate::claude_code::lane().map(|lane| {
+            tokio::spawn(
+                lane.reprobe_while_not_ready(crate::claude_code::NOT_READY_REPROBE_INTERVAL),
+            )
+        });
 
-        Self::run_registration_loop(
+        let result = Self::run_registration_loop(
             config.clone(),
             client,
             executor,
             shutdown.clone(),
             secret_env_keys,
         )
-        .await
+        .await;
+        if let Some(task) = lane_reprobe {
+            task.abort();
+        }
+        result
     }
 
     async fn run_registration_loop(
@@ -802,7 +869,10 @@ impl RuntimeAgent {
     ) -> Result<RegistrationOutcome> {
         let registration = match renewed_registration {
             Some(registration) => registration,
-            None => match client.register_runtime(&config).await {
+            None => match client
+                .register_runtime(&registration_config(&config, crate::claude_code::lane()))
+                .await
+            {
                 Ok(registration) => registration,
                 Err(error) if error.is::<SpaceDeleted>() => {
                     // A deleted space has no use for its browser or a save of it.
@@ -942,6 +1012,7 @@ impl RuntimeAgent {
             registration.clone(),
             shutdown.clone(),
             renewal_sender,
+            crate::claude_code::lane(),
         );
 
         let lease_result = Self::lease_loop(
@@ -1206,6 +1277,12 @@ impl RuntimeAgent {
         heartbeat_seconds: u32,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
     ) -> Result<()> {
+        // A local-engine turn runs alone (docs/Local-Engine-Turns.md 3.1, step 5): one that
+        // arrives in a batch with any other job fails, and the others go on as before.
+        let jobs = Self::fail_local_engine_turns_in_a_batch(&client, registration, jobs).await;
+        if jobs.is_empty() {
+            return Ok(());
+        }
         let processor = executor.processor();
         // A batch's jobs share their conversation's chat attachments until
         // the last of them is done.
@@ -1322,6 +1399,45 @@ impl RuntimeAgent {
         Ok(())
     }
 
+    /// `jobs`, without the local-engine turns among them when there is more than one job: each of
+    /// those fails, and runs nothing.
+    async fn fail_local_engine_turns_in_a_batch(
+        client: &ControllerClient,
+        registration: &Registration,
+        jobs: Vec<LeaseJob>,
+    ) -> Vec<LeaseJob> {
+        if jobs.len() <= 1 || !jobs.iter().any(crate::claude_code::job::has_engine) {
+            return jobs;
+        }
+        let (lane_jobs, others): (Vec<LeaseJob>, Vec<LeaseJob>) = jobs
+            .into_iter()
+            .partition(crate::claude_code::job::has_engine);
+        for job in lane_jobs {
+            warn!(
+                job_id = %job.id,
+                batch_size = others.len() + 1,
+                "refusing a local-engine turn leased together with other jobs"
+            );
+            if let Err(report_error) = client
+                .fail_job_with_artifacts(
+                    registration,
+                    job.id,
+                    "This Claude Code turn reached this computer together with other work, so it didn't start.",
+                    &[],
+                    None,
+                )
+                .await
+            {
+                warn!(
+                    ?report_error,
+                    job_id = %job.id,
+                    "failed to report the refusal of a batched local-engine turn"
+                );
+            }
+        }
+        others
+    }
+
     async fn handle_job(
         client: Arc<ControllerClient>,
         executor: Arc<AgentExecutor>,
@@ -1349,6 +1465,41 @@ impl RuntimeAgent {
                     ?report_error,
                     job_id = %job.id,
                     "failed to report Personal Browser capability rejection"
+                );
+            }
+            return Ok(());
+        }
+        // A local-engine turn (docs/Local-Engine-Turns.md 3.1, step 1) fails before heartbeats,
+        // secrets or its folder when this process cannot run it: an unknown engine, no ready
+        // grant, or a check of 3.9 that needs only the job and the grant. It never falls back to
+        // the embedded engine.
+        let local_engine = crate::claude_code::job::has_engine(&job);
+        if local_engine
+            && let Some(failure) = crate::claude_code::job::refuse_unless_runnable(
+                &job,
+                executor.processor().claude_code_lane(),
+            )
+        {
+            warn!(
+                job_id = %job.id,
+                code = ?failure.code,
+                message = %failure.message,
+                "refusing a local-engine turn this runtime cannot run"
+            );
+            if let Err(report_error) = client
+                .fail_job_with_artifacts(
+                    registration,
+                    job.id,
+                    &failure.message,
+                    &crate::claude_code::job::failure_artifacts(&failure),
+                    None,
+                )
+                .await
+            {
+                warn!(
+                    ?report_error,
+                    job_id = %job.id,
+                    "failed to report the refusal of a local-engine turn"
                 );
             }
             return Ok(());
@@ -1392,9 +1543,10 @@ impl RuntimeAgent {
         // lease, then serialize the env-sensitive part of each job inside one runtime process.
         // Isolated scoped workers receive per-job credentials through private IPC, so
         // disjoint workers can execute concurrently without mutating this process environment.
-        let parallel_scoped = executor
-            .processor()
-            .can_run_parallel_scoped_worker(registration, &job);
+        let parallel_scoped = !local_engine
+            && executor
+                .processor()
+                .can_run_parallel_scoped_worker(registration, &job);
         let _job_process_env_guard = if parallel_scoped {
             None
         } else {
@@ -1422,7 +1574,9 @@ impl RuntimeAgent {
             return Ok(());
         }
 
-        let runtime_settings = if parallel_scoped {
+        // A local-engine turn takes no project secrets (2.5): its `claude` gets an environment
+        // of its own, from the launch snapshot (3.4).
+        let runtime_settings = if parallel_scoped || local_engine {
             AgentRuntimeSettings::default()
         } else {
             let fetched = client.fetch_job_secrets(registration, job.id, true).await;
@@ -1463,7 +1617,7 @@ impl RuntimeAgent {
         }
 
         let secrets_refresh_seconds = resolve_secrets_refresh_interval_seconds();
-        if secrets_refresh_seconds > 0 && !parallel_scoped {
+        if secrets_refresh_seconds > 0 && !parallel_scoped && !local_engine {
             periodic_secrets_refresh = Some(SecretsRefreshTask::spawn(
                 client.clone(),
                 registration.clone(),
@@ -1477,9 +1631,11 @@ impl RuntimeAgent {
         let (mut job_input_task, mut active_turn_input): (
             Option<JobInputTask>,
             Option<ActiveTurnInputReceiver>,
-        ) = if !executor
-            .processor()
-            .can_run_isolated_scoped_worker(registration, &job)
+        ) = if !local_engine
+            // Nothing can deliver words into a running `claude -p` (2.8).
+            && !executor
+                .processor()
+                .can_run_isolated_scoped_worker(registration, &job)
             && registration
                 .agent_token_scopes
                 .iter()
@@ -3123,6 +3279,7 @@ mod tests {
             lease_attempts: 1,
             grants: Vec::new(),
             grant_token: None,
+            engine: None,
         }
     }
 }

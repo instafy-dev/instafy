@@ -160,6 +160,7 @@ fn job(chat: Uuid, prompt: &str, history: Value) -> LeaseJob {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     }
 }
 

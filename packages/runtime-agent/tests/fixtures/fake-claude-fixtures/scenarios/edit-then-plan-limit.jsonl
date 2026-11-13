@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","cwd":"@CWD@","session_id":"@SESSION@","tools":["Bash","Read","Edit","Write"],"mcp_servers":[],"model":"claude-sonnet-4-5","permissionMode":"acceptEdits","apiKeySource":"none","claude_code_version":"2.1.314","uuid":"0b8f1a2c-3d4e-4f50-8a6b-7c8d9e0f1a2b"}
+#!write README.md # Demo, half renamed
+{"type":"assistant","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"tool_use","id":"toolu_readme","name":"Edit","input":{"file_path":"@CWD@/README.md","old_string":"# Demo","new_string":"# Demo, half renamed"}}]},"parent_tool_use_id":null,"session_id":"@SESSION@"}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_readme","type":"tool_result","content":"The file @CWD@/README.md has been updated."}]},"parent_tool_use_id":null,"session_id":"@SESSION@"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1763060400,"rateLimitType":"five_hour","errorCode":"credits_required"},"uuid":"1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f","session_id":"@SESSION@"}
+{"type":"result","subtype":"success","is_error":true,"duration_ms":120,"num_turns":1,"result":"You've hit your limit · resets 7pm","session_id":"@SESSION@","total_cost_usd":0,"usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20},"permission_denials":[]}
+#!exit 1

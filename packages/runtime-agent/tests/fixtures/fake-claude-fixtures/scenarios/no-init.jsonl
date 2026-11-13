@@ -1,0 +1,2 @@
+{"type":"assistant","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Working before reporting settings."}]},"parent_tool_use_id":null,"session_id":"@SESSION@"}
+#!hang

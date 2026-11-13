@@ -282,6 +282,15 @@ const TOOL: BuiltinLabel = BuiltinLabel {
     live: "Using a tool",
     done: counted("used a tool", "used {n} tools", "used tools"),
 };
+// A read or search of files by the person's own Claude Code in a local-engine turn (`Read`,
+// `Grep`, `Glob`): a look around the folder, which Studio leaves off the line as it does a
+// command made only of looks. Its `done` is the step's past tense in Details.
+const FILE_LOOK: BuiltinLabel = BuiltinLabel {
+    key: "builtin/look",
+    role: ActivityRole::Quiet,
+    live: "Looking through files",
+    done: single("looked through files"),
+};
 const SAVING: BuiltinLabel = BuiltinLabel {
     key: "runtime/save",
     role: ActivityRole::Quiet,
@@ -1555,6 +1564,25 @@ pub fn mcp_tool_activity(server: &str) -> Option<JsonValue> {
     activity_json(vec![Found::builtin(label, Some(1))])
 }
 
+/// The tools of a local-engine turn that read or search the folder.
+const CLAUDE_CODE_LOOK_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead"];
+
+/// The label of a local-engine turn's tool step (`mcp_tool_call` with server `claude-code`,
+/// docs/Local-Engine-Turns.md 3.7), from a fixed table on the tool's name alone: a quiet label
+/// for reads and searches, the web-read label for `WebFetch`, the generic tool label for every
+/// other tool (`Agent`, `Task`, and any tool a later Claude Code adds). The tool step reads it in
+/// `extract_codex_messages`.
+pub fn claude_code_tool_activity(tool: &str) -> Option<JsonValue> {
+    let label = if CLAUDE_CODE_LOOK_TOOLS.contains(&tool) {
+        &FILE_LOOK
+    } else if tool == "WebFetch" {
+        &WEB_READ
+    } else {
+        &TOOL
+    };
+    activity_json(vec![Found::builtin(label, Some(1))])
+}
+
 /// The label of a step the browser refused because it is the person's (`refused`, one of
 /// `shared_browser_activity::REFUSED_STEPS`).
 fn browser_refused_label(refused: &str) -> Option<&'static BuiltinLabel> {
@@ -2519,6 +2547,7 @@ mod tests {
             &FILE_EDIT,
             &BROWSER,
             &TOOL,
+            &FILE_LOOK,
             &SAVING,
             &RETRYING,
             &EVIDENCE_RETRY,
@@ -2558,6 +2587,69 @@ mod tests {
         assert_eq!(evidence_retry["live"], json!("Working"));
         assert_eq!(evidence_retry["role"], json!("quiet"));
         assert_eq!(evidence_retry["key"], json!("runtime/evidence-retry"));
+    }
+
+    /// The label fixtures runtime-contracts, the controller and Studio all check
+    /// (packages/runtime-contracts/src/chat_activity_fixtures.json).
+    fn contract_fixtures() -> JsonValue {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../runtime-contracts/src/chat_activity_fixtures.json");
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+        serde_json::from_str(&text).expect("the fixtures are JSON")
+    }
+
+    fn listed(fixtures: &JsonValue, list: &str, label: &str) -> bool {
+        fixtures[list]
+            .as_array()
+            .is_some_and(|labels| labels.iter().any(|listed| listed == label))
+    }
+
+    // A local-engine turn's tool steps (docs/Local-Engine-Turns.md 3.7): a quiet look for reads
+    // and searches, the web-read label for WebFetch, the generic tool label for the rest.
+    #[test]
+    fn claude_code_tools_have_a_fixed_label_table_that_the_fixtures_pin() {
+        for tool in ["Read", "Grep", "Glob", "LS", "NotebookRead"] {
+            let activity = claude_code_tool_activity(tool).expect("labelled");
+            assert_eq!(activity["key"], json!("builtin/look"), "{tool}");
+            assert_eq!(activity["role"], json!("quiet"), "{tool}");
+            assert_eq!(activity["live"], json!("Looking through files"));
+            assert_eq!(activity["done"], json!("looked through files"));
+        }
+        let fetch = claude_code_tool_activity("WebFetch").expect("labelled");
+        assert_eq!(fetch["key"], json!("instafy/web-read"));
+        assert_eq!(fetch["live"], json!("Reading pages"));
+        for tool in [
+            "Agent",
+            "Task",
+            "Bash",
+            "TaskList",
+            "read",
+            "SomeFutureTool",
+            "",
+        ] {
+            let activity = claude_code_tool_activity(tool).expect("labelled");
+            assert_eq!(activity["key"], json!("tool/use"), "{tool}");
+            assert_eq!(activity["done"]["one"], json!("used a tool"));
+        }
+
+        // Every label the table gives passes the contract's own check, and the new one is pinned
+        // in the contract fixtures, so the runtime, the controller and Studio all check its words.
+        for label in [&FILE_LOOK, &WEB_READ, &TOOL] {
+            let activity = activity_json(vec![Found::builtin(label, Some(1))]).unwrap();
+            assert_eq!(
+                check_activity(&activity),
+                Some(activity.clone()),
+                "{}",
+                label.key
+            );
+        }
+        let fixtures = contract_fixtures();
+        assert!(listed(&fixtures, "liveValid", FILE_LOOK.live));
+        let Some(BuiltinDone::Single(done)) = &FILE_LOOK.done else {
+            panic!("a look has one past tense");
+        };
+        assert!(listed(&fixtures, "doneValid", done));
     }
 
     // Browser steps name their site from the browser's own state; pages are told apart by

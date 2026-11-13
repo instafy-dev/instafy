@@ -562,6 +562,7 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
 
     // The turn, as the job loop runs it.
