@@ -430,12 +430,15 @@ fn lost_final_checkpoint_gives_up(
 /// Stop, a lead managed AI refused or the recovery gave up (`$2` is the
 /// given-up notice's kind), a question pending or answered and not yet handed
 /// back, a last worker a person's runtime stop expired (`$3` and `$4`; its
-/// expiry runs no checkpoint), and a last worker that planned again (its end
-/// never checkpoints its own group). Only jobs of the group's own space count
-/// as its lead, its open work or its planned-again child: another space's job
-/// never speaks for it. `$5` is the one conversation to look in, or null for
-/// all. The recovery below acts on these groups and a goal's next turn waits
-/// for them (`conversation_owes_final_lead`), so the two read one definition.
+/// expiry runs no checkpoint), a last worker that planned again (its end
+/// never checkpoints its own group), and a plan that lost a job to a deleted
+/// AI connection ([`OWED_NO_LEAD_AFTER_A_REMOVED_CREDENTIAL`], which
+/// [`groups_owed_a_final_lead`] adds once its column exists). Only jobs of the
+/// group's own space count as its lead, its open work or its planned-again
+/// child: another space's job never speaks for it. `$5` is the one
+/// conversation to look in, or null for all. The recovery below acts on these
+/// groups and a goal's next turn waits for them
+/// (`conversation_owes_final_lead`), so the two read one definition.
 const GROUPS_OWED_A_FINAL_LEAD: &str = "
     select g.plan_group_id, g.trigger_job_id, g.conversation_id, g.completed_at
     from (
@@ -482,6 +485,36 @@ const GROUPS_OWED_A_FINAL_LEAD: &str = "
             and child.plan_group_id is distinct from g.plan_group_id
       )";
 
+/// A plan that lost a job when the AI connection it was sent with was deleted
+/// wakes no lead (`multi_agent_plan::checkpoint_plan_group` reads the same
+/// jobs), so it is owed none: the recovery would retry it on every tick and,
+/// once the conversation moved on, tell the person its lead could not start,
+/// and the goal's next turn would wait for it. It names
+/// `agent_jobs.credential_removed_at`, which ships in a migration that may land
+/// after this controller.
+const OWED_NO_LEAD_AFTER_A_REMOVED_CREDENTIAL: &str = "
+      and not exists (
+          select 1 from agent_jobs removed
+          where removed.project_id = g.project_id
+            and removed.conversation_id = g.conversation_id
+            and (removed.plan_group_id = g.plan_group_id
+                or removed.payload #>> '{metadata,multiAgentPlan,groupId}'
+                    = g.plan_group_id::text)
+            and removed.credential_removed_at is not null
+      )";
+
+/// [`GROUPS_OWED_A_FINAL_LEAD`], with
+/// [`OWED_NO_LEAD_AFTER_A_REMOVED_CREDENTIAL`] once its column exists.
+async fn groups_owed_a_final_lead(
+    client: &impl tokio_postgres::GenericClient,
+) -> Result<String, tokio_postgres::Error> {
+    Ok(if credential_removed_at_exists(client).await? {
+        format!("{GROUPS_OWED_A_FINAL_LEAD}{OWED_NO_LEAD_AFTER_A_REMOVED_CREDENTIAL}")
+    } else {
+        GROUPS_OWED_A_FINAL_LEAD.to_string()
+    })
+}
+
 /// Whether a plan group of `conversation_id` is still owed its final lead
 /// (`GROUPS_OWED_A_FINAL_LEAD`), from the moment its workers end, so within
 /// the settlement's grace too. The settlement or the recovery below queues
@@ -493,7 +526,8 @@ pub(crate) async fn conversation_owes_final_lead(
     conversation_id: Uuid,
 ) -> Result<bool, tokio_postgres::Error> {
     let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
-    let query = format!("select exists ({GROUPS_OWED_A_FINAL_LEAD}) as owed");
+    let owed = groups_owed_a_final_lead(client).await?;
+    let query = format!("select exists ({owed}) as owed");
     let row = client
         .query_one(
             query.as_str(),
@@ -518,8 +552,9 @@ pub(crate) async fn conversations_owing_a_lost_final_lead(
     client: &impl tokio_postgres::GenericClient,
 ) -> Result<Vec<Uuid>, tokio_postgres::Error> {
     let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
+    let owed = groups_owed_a_final_lead(client).await?;
     let query = format!(
-        "select distinct g.conversation_id from ({GROUPS_OWED_A_FINAL_LEAD}) g
+        "select distinct g.conversation_id from ({owed}) g
          where g.completed_at < now() - ($6::bigint * interval '1 second')"
     );
     let rows = client
@@ -604,9 +639,15 @@ pub(crate) async fn recover_lost_final_plan_checkpoints_within(
     let person_reasons: Vec<&str> = REQUEUE_REASONS_OF_A_PERSON.to_vec();
     let message_belongs = belongs_to_a_turn_received_by_the_end("sent");
     let job_belongs = belongs_to_a_turn_received_by_the_end("turn");
+    let client = tick
+        .client("lost final checkpoint recovery connection")
+        .await?;
+    let owed = groups_owed_a_final_lead(&*client)
+        .await
+        .context("failed to look up agent_jobs.credential_removed_at")?;
     let query = format!(
         "with owed as (
-             select * from ({GROUPS_OWED_A_FINAL_LEAD}) g
+             select * from ({owed}) g
              where g.completed_at < now() - ($6::bigint * interval '1 second')
          ), tried as (
              (select * from owed order by completed_at desc, trigger_job_id desc limit $7)
@@ -635,9 +676,7 @@ pub(crate) async fn recover_lost_final_plan_checkpoints_within(
          from tried g
          order by g.completed_at, g.trigger_job_id"
     );
-    let rows = tick
-        .client("lost final checkpoint recovery connection")
-        .await?
+    let rows = client
         .query(
             query.as_str(),
             &[
@@ -1691,8 +1730,10 @@ pub(crate) async fn credential_removed_at_exists(
 /// - No plan checkpoint runs. A lead continuation dispatched now would resolve
 ///   its person's credentials again and could fall back to the platform lane.
 ///   For the same reason no later checkpoint wakes the lead of a plan that
-///   lost a job this way (`multi_agent_plan::checkpoint_plan_group`), and
-///   [`recover_deferred_plan_checkpoints`] passes such a plan over. The goal
+///   lost a job this way (`multi_agent_plan::checkpoint_plan_group`),
+///   [`recover_deferred_plan_checkpoints`] passes such a plan over, and
+///   [`recover_lost_final_plan_checkpoints`] owes it no lead
+///   ([`OWED_NO_LEAD_AFTER_A_REMOVED_CREDENTIAL`]). The goal
 ///   the plan was sent for, which only its final lead would have carried on,
 ///   is blocked instead (`conversation_goals::state::block_plan_goal`).
 ///

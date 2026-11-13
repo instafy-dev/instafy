@@ -166,7 +166,9 @@ on purpose:
 - a worker's question that is still waiting for a person, or answered and not yet handed back
   to its worker;
 - a last worker that expired after a person stopped its runtime;
-- a last worker that planned again.
+- a last worker that planned again;
+- a plan that lost a job because the AI connection it was sent with was deleted, which wakes
+  no lead at all (see the mixed terminal states row below).
 
 If the conversation moved on after the workers ended, a late lead would answer out of turn. In
 that case the conversation instead shows one error notice: "@octo could not continue the plan
