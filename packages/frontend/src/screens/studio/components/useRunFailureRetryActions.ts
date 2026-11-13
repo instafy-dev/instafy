@@ -3,7 +3,10 @@ import {
   buildRunFailureRetryMetadata,
   isRunFailureRetryQueued,
   isRunFailureRetrySuperseded,
+  resolveRunFailurePresentation,
   resolveRunFailureRetrySource,
+  type TurnEngineTurnOwner,
+  usesTurnEngine,
 } from "../../../conversations/runFailurePresentation";
 import {
   claimAutoRetryForPromptSentFromThisPage,
@@ -28,6 +31,17 @@ const NO_QUEUED_SENDS: ReadonlyArray<{ metadata?: Record<string, unknown> | null
  * send one.
  */
 const HAND_BACK_NOT_SENT_AGAIN = "Octo can't try this again from here. Ask Octo to continue instead.";
+
+/** The engine of a failed turn-engine turn, from its failure message, or null. */
+function failedTurnEngineOf(failureMessage: ChatMessage): string | null {
+  return (
+    resolveRunFailurePresentation({
+      metadata: failureMessage.metadata,
+      content: failureMessage.content,
+      assumeFailed: true,
+    })?.turnEngine?.engineId ?? null
+  );
+}
 
 /** How a resend asks the panel's submit to behave. */
 export type RunFailureResendOptions = {
@@ -56,6 +70,11 @@ export type RunFailureResendOptions = {
  * `messages` or `queuedSends`. A resend the controller did not take (its
  * dispatch failed) retires nothing: its local copy keeps the link, but the
  * card keeps its "Try again".
+ *
+ * A failed turn of a turn engine is never sent again from its card, by hand
+ * or automatically (docs/Local-Engine-Turns.md 5.6): its sender gets the
+ * message back in the composer with the engine chosen
+ * (`refillComposerWithTurnEngine`), and sends it themselves.
  */
 export function useRunFailureRetryActions({
   messages,
@@ -69,6 +88,8 @@ export function useRunFailureRetryActions({
   resendBrowserRequest,
   showStatus,
   onConnectAi,
+  humanLabelByUserId,
+  refillComposerWithTurnEngine,
 }: {
   messages: ChatMessage[];
   /** Sends waiting in the local and controller send queues. */
@@ -101,6 +122,14 @@ export function useRunFailureRetryActions({
   resendBrowserRequest?: (promptMessage: ChatMessage, retryMetadata: Record<string, unknown>) => Promise<boolean>;
   showStatus: (message: string, intent?: StatusIntent, durationMs?: number) => void;
   onConnectAi?: () => void;
+  /** The names the chat shows for people, by user id: what a turn-engine turn's teammates read. */
+  humanLabelByUserId?: ReadonlyMap<string, string>;
+  /**
+   * Puts `text` in the composer with the engine chosen for the next message,
+   * as the person's own draft. Without it, a failed turn-engine turn offers
+   * its sender nothing to press.
+   */
+  refillComposerWithTurnEngine?: (input: { text: string; turnEngine: string }) => void;
 }): RunFailureRetryContextValue {
   const [pendingRetryKey, setPendingRetryKey] = useState<string | null>(null);
   const retryInFlightRef = useRef(false);
@@ -202,6 +231,12 @@ export function useRunFailureRetryActions({
       if (retryInFlightRef.current || isRetrySuperseded(failureMessage)) {
         return;
       }
+      // A turn-engine turn is one turn its sender started: a resend from its
+      // card would go out without the engine, and the controller refuses a
+      // resend that claims it. Its card offers no Try again.
+      if (failedTurnEngineOf(failureMessage) !== null) {
+        return;
+      }
       const promptMessage = resolveRunFailureRetrySource({
         conversationMessages: messages,
         failureMessage,
@@ -261,6 +296,55 @@ export function useRunFailureRetryActions({
     [isRetrySuperseded, markNotRetried, markRetried, messages, resend, resendBrowserRequest, showStatus, withdrawRetry],
   );
 
+  /**
+   * Who sent the turn-engine turn a message belongs to: the author of the
+   * prompt that started it, when that prompt is a turn-engine one (the
+   * sender's own copy, or the controller's stamped one). Null when the chat
+   * cannot tell, which every card and line words for everyone else.
+   */
+  const turnEngineOwnerOf = useCallback(
+    (message: Pick<ChatMessage, "id" | "timestamp" | "metadata">): TurnEngineTurnOwner | null => {
+      const promptMessage = resolveRunFailureRetrySource({
+        conversationMessages: messages,
+        failureMessage: message,
+      });
+      if (!promptMessage || !usesTurnEngine(promptMessage.metadata)) {
+        return null;
+      }
+      const senderId = typeof promptMessage.authorId === "string" ? promptMessage.authorId.trim() : "";
+      if (!senderId) {
+        return null;
+      }
+      return {
+        isViewer: Boolean(currentUserId) && senderId === currentUserId,
+        name: humanLabelByUserId?.get(senderId)?.trim() || null,
+      };
+    },
+    [currentUserId, humanLabelByUserId, messages],
+  );
+
+  const resendWithTurnEngine = useMemo(() => {
+    if (!refillComposerWithTurnEngine) {
+      return undefined;
+    }
+    return (failureMessage: ChatMessage) => {
+      const turnEngine = failedTurnEngineOf(failureMessage);
+      // Only the turn's sender gets their own message back.
+      if (!turnEngine || turnEngineOwnerOf(failureMessage)?.isViewer !== true) {
+        return;
+      }
+      const promptMessage = resolveRunFailureRetrySource({
+        conversationMessages: messages,
+        failureMessage,
+      });
+      if (!promptMessage) {
+        showStatus("Couldn't find the original message to send again.", "info", 4000);
+        return;
+      }
+      refillComposerWithTurnEngine({ text: promptMessage.content, turnEngine });
+    };
+  }, [messages, refillComposerWithTurnEngine, showStatus, turnEngineOwnerOf]);
+
   // The automatic re-dispatch shares the resend but deliberately does NOT touch
   // pendingRetryKey; that state is the manual "Try again" in-flight signal, and
   // the auto path presents its own calm states via the hook below.
@@ -292,6 +376,8 @@ export function useRunFailureRetryActions({
       isRetrySuperseded,
       isRetryWithdrawn,
       onConnectAi,
+      turnEngineOwnerOf,
+      resendWithTurnEngine,
     }),
     [
       autoRetryingKey,
@@ -301,7 +387,9 @@ export function useRunFailureRetryActions({
       onConnectAi,
       pendingRetryKey,
       requestRetry,
+      resendWithTurnEngine,
       scheduledAutoRetry,
+      turnEngineOwnerOf,
     ],
   );
 }

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { controllerClient } from "../sdk/instafy";
+import { APPLICATION_FRONTEND_FEATURES } from "../features/applicationFrontendFeatureComposition";
+import { messageUsesTurnEngine } from "../features/frontendFeatureModule";
 import {
   getConversationAutoTitleSeed,
   getFallbackConversationTitle,
@@ -13,6 +15,26 @@ const { requestTitle: requestProjectConversationTitle, updateMetadata: updateCon
   controllerClient.conversations;
 
 const attemptedAutoTitleKeys = new Set<string>();
+
+/**
+ * The conversation without the messages of turn-engine turns, for picking a
+ * title seed: a title is asked of a model, and nothing Instafy runs for such
+ * a turn calls one (docs/Local-Engine-Turns.md 5.2).
+ */
+function withoutTurnEngineMessages(
+  conversation: ConversationState,
+  turnEngineIds: readonly string[],
+): ConversationState {
+  if (!conversation.messages.some((message) => messageUsesTurnEngine(message.metadata, turnEngineIds))) {
+    return conversation;
+  }
+  return {
+    ...conversation,
+    messages: conversation.messages.filter(
+      (message) => !messageUsesTurnEngine(message.metadata, turnEngineIds),
+    ),
+  };
+}
 
 interface UseConversationAutoTitleArgs {
   conversations: ConversationState[];
@@ -174,8 +196,11 @@ export function useConversationAutoTitle({
   );
 
   useEffect(() => {
+    const turnEngineIds = APPLICATION_FRONTEND_FEATURES.turnEngines.map((engine) => engine.id);
     for (const conversation of conversations) {
-      const seed = getConversationAutoTitleSeed(conversation);
+      const seed = getConversationAutoTitleSeed(
+        withoutTurnEngineMessages(conversation, turnEngineIds),
+      );
       if (!seed) {
         continue;
       }

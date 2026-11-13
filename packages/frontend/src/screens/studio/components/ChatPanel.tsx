@@ -174,6 +174,13 @@ import {
   type QueuedChatSendItem,
   writeChatSendQueue,
 } from "./chatSendQueueStorage";
+import { APPLICATION_FRONTEND_FEATURES } from "../../../features/applicationFrontendFeatureComposition";
+import {
+  carriesTurnEngineClaim,
+  type FrontendTurnEngineComposerContext,
+  type FrontendTurnEngineComposerOffer,
+} from "../../../features/frontendFeatureModule";
+import type { ComposerTurnEngineRow } from "./ComposerActionMenu";
 import {
   shouldAssistantMessagesShareVisualGroup,
 } from "./assistantMessageGrouping";
@@ -468,6 +475,12 @@ const {
 const { createInvitationStrict: createControllerOrgInvitationStrict } =
   controllerClient.organizations;
 const { fetchStatus: fetchRuntimeStatus } = controllerClient.runtimes;
+
+/** The controller this Studio talks to now, for a turn engine's composer bridge. */
+async function resolveTurnEngineControllerUrl(): Promise<string | null> {
+  const requestContext = await controllerClient.core.resolveRequestContext(null);
+  return requestContext.baseUrl.trim() || null;
+}
 const { requestProjectEditorInline: requestProjectEditorInlineCompletion } = controllerClient.completions;
 
 const AI_CONNECT_WIZARD_STORAGE_PREFIX = "instafy.chat.aiConnectWizard.v1";
@@ -574,6 +587,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeStatuses,
     runs,
     sharedBrowserHostPolicy,
+    showDesktopRuntimeHelp,
   } = runtimeContext;
   const {
     projectKey: conversationsProjectKey,
@@ -890,6 +904,74 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return conversations.find((conversation) => conversation.localId === activeConversationId) ?? null;
   }, [activeConversationId, conversations]);
+  // Engines the next message can run on instead of the runtime's own
+  // (FrontendTurnEngineContribution). Each engine's bridge reports what it
+  // offers this composer; the person's choice is for one message, never
+  // sticky, and is dropped with the chat, the space, or the engine's offer.
+  const [turnEngineOffers, setTurnEngineOffers] = useState<
+    Readonly<Record<string, FrontendTurnEngineComposerOffer>>
+  >({});
+  const [pendingTurnEngineId, setPendingTurnEngineId] = useState<string | null>(null);
+  const pendingTurnEngineIdRef = useRef<string | null>(pendingTurnEngineId);
+  pendingTurnEngineIdRef.current = pendingTurnEngineId;
+  const turnEngineOfferReporters = useMemo(
+    () =>
+      Object.fromEntries(
+        APPLICATION_FRONTEND_FEATURES.turnEngines.map((engine) => [
+          engine.id,
+          (offer: FrontendTurnEngineComposerOffer | null) => {
+            setTurnEngineOffers((current) => {
+              if (offer ? current[engine.id] === offer : !(engine.id in current)) {
+                return current;
+              }
+              const next = { ...current };
+              if (offer) {
+                next[engine.id] = offer;
+              } else {
+                delete next[engine.id];
+              }
+              return next;
+            });
+          },
+        ]),
+      ),
+    [],
+  );
+  const turnEngineComposerContext = useMemo<FrontendTurnEngineComposerContext>(
+    () => ({
+      projectId: activeProjectId ?? null,
+      threadKind: activeConversationEntry?.threadKind ?? null,
+      runtimeOptions: runtimeMenu.runtimeOptions,
+      fetchRuntimeStatus,
+      resolveControllerUrl: resolveTurnEngineControllerUrl,
+      startOnThisComputer: showDesktopRuntimeHelp,
+    }),
+    [activeConversationEntry?.threadKind, activeProjectId, runtimeMenu.runtimeOptions, showDesktopRuntimeHelp],
+  );
+  const pendingTurnEngineOffer = pendingTurnEngineId
+    ? turnEngineOffers[pendingTurnEngineId] ?? null
+    : null;
+  useEffect(() => {
+    setPendingTurnEngineId(null);
+  }, [activeConversationId, activeProjectId]);
+  useEffect(() => {
+    if (pendingTurnEngineId && !turnEngineOffers[pendingTurnEngineId]) {
+      setPendingTurnEngineId(null);
+    }
+  }, [pendingTurnEngineId, turnEngineOffers]);
+  const consumeTurnEngineChoice = useCallback((engineId: string) => {
+    setPendingTurnEngineId((current) => (current === engineId ? null : current));
+  }, []);
+  const turnEngineMenuRows = useMemo<ComposerTurnEngineRow[]>(
+    () =>
+      APPLICATION_FRONTEND_FEATURES.turnEngines.flatMap((engine) => {
+        const offer = turnEngineOffers[engine.id];
+        return offer
+          ? [{ id: engine.id, icon: offer.icon, ...offer.row, pending: pendingTurnEngineId === engine.id }]
+          : [];
+      }),
+    [pendingTurnEngineId, turnEngineOffers],
+  );
   const isAtLeastSmallViewport = useBreakpoint("sm");
   const { showComposerNavigationButton, touchLikeInput } = useStudioNavigationPosture();
   const compactBrowserViewport = !isAtLeastSmallViewport;
@@ -2441,7 +2523,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             metadata,
           }
         : options;
-    const submitted = await submitMessageRef.current(nextOverride, nextOptions);
+    // Only the composer's own Send of the draft it shows carries the engine
+    // chosen for the next message; every other caller passes its own words.
+    const composerTurnEngine = !override && !automatic ? pendingTurnEngineIdRef.current : null;
+    const submitted = await submitMessageRef.current(
+      nextOverride,
+      composerTurnEngine ? { ...nextOptions, turnEngine: composerTurnEngine } : nextOptions,
+    );
     if (submitted && !automatic && pendingReplyContextRef.current === pendingReplyContext) {
       pendingReplyContextRef.current = null;
     }
@@ -4409,6 +4497,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       if (!activeConversationId) {
         return;
       }
+      if (carriesTurnEngineClaim(payload.metadata)) {
+        // This queue keeps an item's full metadata in memory, and a message
+        // that claims a turn engine is for now only: it never waits here.
+        showStatus("This message can't wait in the queue. Send it again when this chat is free.", "warning", 4500);
+        return;
+      }
       const id =
         typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
           ? crypto.randomUUID()
@@ -4429,7 +4523,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       setChatSendQueue((previous) => [...previous, nextItem]);
       setChatSendQueueExpanded(false);
     },
-    [activeConversationId],
+    [activeConversationId, showStatus],
   );
 
   const removeChatSendQueueItem = useCallback(
@@ -4605,6 +4699,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     clearComposerAfterQueue,
     clearComposerIfUnchanged,
     clearPendingBrowserLaunchMode,
+    consumeTurnEngineChoice,
     createConversation,
     createOrgInvitation: createControllerOrgInvitationStrict,
     credentialsReady,
@@ -4664,6 +4759,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     skillSetupConversation,
     submitSendIntent,
     targetsOverlapActiveRuns,
+    turnEngineOffers,
   });
   submitMessageRef.current = submitMessage;
 
@@ -5166,6 +5262,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       clearInputEditor?.();
       pendingReplyContextRef.current = null;
       setPendingBrowserLaunchMode(null);
+      // An engine chosen for the next message stays with no stash.
+      setPendingTurnEngineId(null);
       setRestoredMessageStash(null);
       showStatus("Draft stashed privately.", "success", 2500);
       focusInput();
@@ -5932,6 +6030,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sharedBrowserSendBlocked: sharedBrowserSendBlocker !== null,
     submissionPending,
     totalQueuedCount,
+    turnEnginePending: pendingTurnEngineOffer !== null,
     voiceHoldActive,
     voiceInputListening,
     voiceInputStarting,
@@ -6840,6 +6939,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
+      {APPLICATION_FRONTEND_FEATURES.turnEngines.map((engine) => (
+        <engine.ComposerBridge
+          key={engine.id}
+          context={turnEngineComposerContext}
+          onOfferChange={turnEngineOfferReporters[engine.id]}
+        />
+      ))}
+
       <ChatComposerSurface
         scrollbarInset={chatVisible ? chatScrollbarWidth : 0}
         composerRunStopController={runStop}
@@ -6869,6 +6976,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         accessChecking={!projectReadOnly && projectCapabilitiesResolved === false}
         pendingNewTab={pendingBrowserLaunchMode === "new_page"
           ? { onCancel: handleClearPendingNewBrowserSession }
+          : null}
+        pendingTurnEngine={pendingTurnEngineOffer
+          ? {
+              icon: pendingTurnEngineOffer.icon,
+              ...pendingTurnEngineOffer.token,
+              onCancel: () => {
+                setPendingTurnEngineId(null);
+                focusInput({ force: true });
+              },
+            }
           : null}
         composerOverlayRef={composerOverlayRef}
         composerAutoHidden={composerAutoHidden}
@@ -6974,6 +7091,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             canOpenProjectDeviceHandoff(activeProjectId, projectCapabilitiesResolved),
           inviteActionLabel: projectReadOnly ? "Open on another device" : "Invite or open elsewhere",
           pendingNewBrowser: pendingBrowserLaunchMode === "new_page",
+          turnEngineRows: turnEngineMenuRows,
+          onChooseTurnEngine: (engineId: string) => {
+            setPendingTurnEngineId(engineId);
+            focusInput({ force: true });
+          },
           onOpenBrowser: handleOpenBrowserFromLauncher,
           onOpenNewBrowser: handlePrepareNewBrowserSession,
           onOpenInvite: () => setAddMenuOpen(true),

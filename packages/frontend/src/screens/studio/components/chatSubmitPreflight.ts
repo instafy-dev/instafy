@@ -88,6 +88,13 @@ type RunChatSubmitPreflightParams = {
   targetAgentHandles: string[];
   targetsOverlapActiveRuns: (targetAgentHandles: string[]) => boolean;
   trimmed: string;
+  /**
+   * The send carries a turn-engine claim (useChatSubmitFlow): it goes out as
+   * the person's own message to that engine or not at all. No local command
+   * takes it, the Instafy AI and credit gates do not apply, and it is never
+   * queued; the submit flow refused a busy chat before this ran.
+   */
+  turnEngineSend?: boolean;
 };
 
 async function tryHandleInviteCommand({
@@ -130,6 +137,7 @@ async function tryHandleInviteCommand({
   | "targetsOverlapActiveRuns"
   | "trimmed"
   | "clearQueuedComposerDraft"
+  | "turnEngineSend"
 > & {
   attachedImageCount: number;
 }): Promise<ChatSubmitPreflightResult | null> {
@@ -267,6 +275,7 @@ async function tryHandleGithubRepoImport({
   | "trimmed"
   | "clearQueuedComposerDraft"
   | "consumeBrowserComposerTarget"
+  | "turnEngineSend"
 > & {
   attachedImageCount: number;
 }): Promise<ChatSubmitPreflightResult | null> {
@@ -435,27 +444,32 @@ export async function runChatSubmitPreflight(
   params: RunChatSubmitPreflightParams,
 ): Promise<ChatSubmitPreflightResult> {
   const editorState = params.override ? params.override.editorState : params.trimmed ? params.inputEditorState ?? null : null;
+  const turnEngineSend = params.turnEngineSend === true;
 
-  const inviteResult = await tryHandleInviteCommand(params);
-  if (inviteResult) {
-    return inviteResult;
-  }
+  if (!turnEngineSend) {
+    const inviteResult = await tryHandleInviteCommand(params);
+    if (inviteResult) {
+      return inviteResult;
+    }
 
-  const githubImportResult = await tryHandleGithubRepoImport(params);
-  if (githubImportResult) {
-    return githubImportResult;
+    const githubImportResult = await tryHandleGithubRepoImport(params);
+    if (githubImportResult) {
+      return githubImportResult;
+    }
   }
 
   // Participation arbitration has already neutralized record-only human turns.
   // Gate a responding AI turn before checking or provisioning a runtime so a
   // credential-less teammate cannot accidentally start runtime work or get
   // redirected to credits before they can connect an existing subscription.
-  if (params.messageRequiresAi && !params.credentialsReady) {
+  // A turn-engine send runs on the person's own engine, not on Instafy AI.
+  const instafyAiGated = params.messageRequiresAi && !turnEngineSend;
+  if (instafyAiGated && !params.credentialsReady) {
     params.showCredentialsGate();
     return { status: "handled", submitted: false };
   }
 
-  if (params.messageRequiresAi && params.handleOutOfCredits()) {
+  if (instafyAiGated && params.handleOutOfCredits()) {
     return { status: "handled", submitted: false };
   }
 
@@ -496,7 +510,11 @@ export async function runChatSubmitPreflight(
     return { status: "handled", submitted: false };
   }
 
-  if (!params.allowWhileBusy && (params.isAssistantTyping || params.sendingAttachment)) {
+  if (
+    !params.allowWhileBusy &&
+    !turnEngineSend &&
+    (params.isAssistantTyping || params.sendingAttachment)
+  ) {
     if (params.attachedImageCount > 0) {
       // A reply in progress was handled above: here the previous message
       // (and its images) is still being sent.

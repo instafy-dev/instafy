@@ -25,6 +25,8 @@ import {
   type ConversationGroupParticipationPreflightResult,
 } from "./groupParticipation";
 import { hasNonRecoverableErrorForRun } from "./conversationGoals";
+import { APPLICATION_FRONTEND_FEATURES } from "../features/applicationFrontendFeatureComposition";
+import { messageUsesTurnEngine } from "../features/frontendFeatureModule";
 export type { SubmitConversationOptions, SubmitConversationRuntimeOverride } from "./useConversationSubmitFlow";
 
 const { updateMetadata: updateControllerConversationMetadata } = controllerClient.conversations;
@@ -179,8 +181,16 @@ export function useConversation(): UseConversationResult {
       }
       return;
     }
+    // A turn-engine turn's message never seeds a title: titles are asked of a
+    // model, and nothing Instafy runs for such a turn calls one.
+    const turnEngineIds = APPLICATION_FRONTEND_FEATURES.turnEngines.map((engine) => engine.id);
     const latestUserMessage = messages
-      .filter((message) => message.role === "user" && message.content.trim().length > 0)
+      .filter(
+        (message) =>
+          message.role === "user" &&
+          message.content.trim().length > 0 &&
+          !messageUsesTurnEngine(message.metadata, turnEngineIds),
+      )
       .at(-1);
     const seed = latestUserMessage?.content.trim() ?? "";
     if (!seed) {

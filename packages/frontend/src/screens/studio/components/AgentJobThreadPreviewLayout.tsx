@@ -32,12 +32,18 @@ import {
   truncate,
 } from "./chatContentHelpers";
 import {
+  readControllerStampedTurnEngine,
   resolveRetryingStatusPresentation,
   resolveRunFailurePresentation,
 } from "../../../conversations/runFailurePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { agentJobThreadAcknowledgementIds, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
-import { RunFailureMessageBody, takeFoldedRetryFocus, useRunFailureAutoRetryActive } from "./RunFailureNotice";
+import {
+  RunFailureMessageBody,
+  takeFoldedRetryFocus,
+  useRunFailureAutoRetryActive,
+  useTurnEngineSpeakerLine,
+} from "./RunFailureNotice";
 import { ChatRunStopActions } from "./ChatRunStopNotice";
 import { isCompactionStatusText } from "./assistantStatusHeuristics";
 import type { AgentThreadBranchParticipant, AgentThreadBranchRow } from "./agentThreadBranchRows";
@@ -85,6 +91,25 @@ function normalizeAgentHandle(value: unknown): string | null {
   }
   const trimmed = value.trim().replace(/^@+/, "").trim().toLowerCase();
   return trimmed ? `@${trimmed}` : null;
+}
+
+/**
+ * The message of this turn that carries a turn engine's controller stamp:
+ * its reply or failure, which the controller stamps from the job, or another
+ * of its messages. Null for every other turn.
+ */
+function turnEngineStampedMessage(
+  row: ChatMessage,
+  finalSummaryMessage: ChatMessage | null,
+): ChatMessage | null {
+  const metadata = isRecord(row.metadata) ? row.metadata : null;
+  const threadMessages = Array.isArray(metadata?.threadMessages) ? metadata.threadMessages : [];
+  for (const candidate of [finalSummaryMessage, ...threadMessages]) {
+    if (isRecord(candidate) && readControllerStampedTurnEngine(candidate.metadata) !== null) {
+      return candidate as unknown as ChatMessage;
+    }
+  }
+  return null;
 }
 
 function formatHiddenUpdateLabel(count: number, noun: string): string {
@@ -358,6 +383,14 @@ export function AgentJobThreadPreviewLayout({
   const headerIdentityVisible = showHeaderIdentity && showHeaderAvatar;
   const threadOwnerHandle = normalizeAgentHandle(agentMetadata?.handle);
   const ownerBadge = showHeaderIdentity ? threadOwnerHandle : null;
+  // The reply stays the agent's; a turn that ran on a turn engine says so in
+  // one plain line under the header, from the controller's stamp alone
+  // (docs/Local-Engine-Turns.md 5.7).
+  const speakerLineMessage = useMemo(
+    () => turnEngineStampedMessage(message, finalSummaryMessage),
+    [finalSummaryMessage, message],
+  );
+  const turnEngineSpeakerLine = useTurnEngineSpeakerLine(speakerLineMessage);
   const terminalStatusMarker = resolveTerminalStatusMarker(finalSpineTone, isCompleted);
   const finalSummaryContent = finalSummaryMessage?.content.trim() ?? "";
   const formattedFinalSummaryContent =
@@ -894,6 +927,15 @@ export function AgentJobThreadPreviewLayout({
                 </span>
               ) : null}
             </div>
+          </div>
+        ) : null}
+
+        {turnEngineSpeakerLine ? (
+          // Words, not a badge or a logo: whose own engine ran this turn.
+          <div className="relative min-w-0 pb-0.5">
+            <Text as="p" variant="caption" tone="muted" className="break-words" data-testid="turn-engine-speaker-line">
+              {turnEngineSpeakerLine}
+            </Text>
           </div>
         ) : null}
 

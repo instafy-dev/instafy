@@ -38,3 +38,11 @@ describe("describeSendIntentError", () => {
     );
   });
 });
+
+describe("describeSendIntentError for a turn-engine turn", () => {
+  it("words a refused Steer into a Claude Code turn as its engine does", () => {
+    expect(describeSendIntentError("claude_code_turn_takes_no_input", "claude_code_turn_takes_no_input")).toBe(
+      "This Claude Code turn can't take more words while it runs. Queue your message instead.",
+    );
+  });
+});

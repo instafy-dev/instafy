@@ -14,6 +14,7 @@ export function resolveChatComposerAffordances({
   sharedBrowserSendBlocked,
   submissionPending,
   totalQueuedCount,
+  turnEnginePending = false,
   voiceHoldActive,
   voiceInputListening,
   voiceInputStarting,
@@ -39,6 +40,12 @@ export function resolveChatComposerAffordances({
   sharedBrowserSendBlocked: boolean;
   submissionPending: boolean;
   totalQueuedCount: number;
+  /**
+   * An engine is chosen for the next message. That message runs on the
+   * person's own engine, not on Instafy AI, so the AI connection and credit
+   * gates do not hold the send button; the submit flow decides the send.
+   */
+  turnEnginePending?: boolean;
   voiceHoldActive: boolean;
   voiceInputListening: boolean;
   voiceInputStarting: boolean;
@@ -67,7 +74,7 @@ export function resolveChatComposerAffordances({
   // record-only message; any responding result still hits the normal gates in
   // submit preflight before runtime work. Explicit AI targets remain gated here.
   const synchronouslyGateAiIntent =
-    inputRequiresAi && !deferAiGatesForAmbientParticipation;
+    inputRequiresAi && !deferAiGatesForAmbientParticipation && !turnEnginePending;
   const sendButtonDisabled =
     submissionPending ||
     sendingAttachment ||

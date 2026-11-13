@@ -531,6 +531,41 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="composer-new-tab-token"]')).toBeNull();
   });
 
+  it("names an engine chosen for the next message as one removable token in the same row", async () => {
+    const onCancel = vi.fn();
+    const onSubmit = vi.fn((event) => event.preventDefault());
+    const props = createProps({ onSubmit });
+    const pendingTurnEngine = {
+      icon: <svg data-testid="turn-engine-icon" />,
+      label: "Claude Code · next message",
+      cancelLabel: "Don't use Claude Code",
+      testId: "composer-claude-code",
+      onCancel,
+    };
+    await act(async () => root.render(<ChatComposerSurface {...props} pendingTurnEngine={pendingTurnEngine} />));
+    const token = container.querySelector<HTMLElement>('[data-testid="composer-claude-code-token"]')!;
+    expect(token).not.toBeNull();
+    expect(token.textContent).toBe("Claude Code · next message");
+    expect(token.querySelector('[data-testid="turn-engine-icon"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-composer-joined-toolbar"]')!.contains(token)).toBe(true);
+    const cancel = container.querySelector<HTMLButtonElement>('[data-testid="composer-claude-code-cancel"]')!;
+    expect(cancel.getAttribute("aria-label")).toBe("Don't use Claude Code");
+    expect(cancel.type).toBe("button");
+    await act(async () => cancel.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+    // Both tokens show when a new tab is also pending.
+    await act(async () =>
+      root.render(
+        <ChatComposerSurface {...props} pendingNewTab={{ onCancel: vi.fn() }} pendingTurnEngine={pendingTurnEngine} />,
+      ),
+    );
+    expect(container.querySelector('[data-testid="composer-new-tab-token"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="composer-claude-code-token"]')).not.toBeNull();
+    await act(async () => root.render(<ChatComposerSurface {...props} pendingTurnEngine={null} />));
+    expect(container.querySelector('[data-testid="composer-claude-code-token"]')).toBeNull();
+  });
+
   it("hides a wide composer with the class alone, without an inline transform", async () => {
     const props = createProps({ composerAutoHidden: true, compactBrowserViewport: false });
     await act(async () => root.render(<ChatComposerSurface {...props} />));

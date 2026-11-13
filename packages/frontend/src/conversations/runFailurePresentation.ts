@@ -1,6 +1,9 @@
+import { APPLICATION_FRONTEND_FEATURES } from "../features/applicationFrontendFeatureComposition";
+import { carriesTurnEngineClaim } from "../features/frontendFeatureModule";
 import { isPersonRuntimeStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
 import { resolveProxyUpstreamErrorGuidance } from "../screens/studio/components/proxyError";
 import type { ChatMessage } from "../screens/studio/types";
+import type { ControllerRuntimeStatusEntry } from "../services/runtimeController/runtimes";
 
 /**
  * Presentation helpers for failed agent runs.
@@ -23,6 +26,7 @@ export type RunFailureKind =
   | "browser_page_missing"
   | "interrupted_run_expired"
   | "ai_unavailable"
+  | "turn_engine"
   | "generic";
 
 export type RunFailurePresentation = {
@@ -31,12 +35,166 @@ export type RunFailurePresentation = {
   rawText: string;
   /** The failure block offers "Manage AI": the person's own AI connection can fix it. */
   manageAi?: boolean;
+  /**
+   * A failed turn of a turn engine (kind `turn_engine`): its engine words it,
+   * by viewer, and its card never sends it again (docs/Local-Engine-Turns.md
+   * 5.5, 5.6). `friendlyText` is the sender's sentence without what the
+   * runtime that ran it says.
+   */
+  turnEngine?: TurnEngineRunFailure;
 };
+
+// ---------------------------------------------------------------------------
+// Turn engines (docs/Local-Engine-Turns.md 5.5-5.7)
+//
+// A turn engine runs one turn on something other than the runtime's own
+// engine, such as the sender's own Claude Code. The chat keys everything on
+// the engine's id: a send's `turnEngine` claim (the sender's own copy, before
+// the controller answers) or the `aiAccessMode` the controller stamps on the
+// turn's messages. Its words come from the engine's feature module, through
+// its contribution's `presentation`; nothing here names one.
+// ---------------------------------------------------------------------------
+
+/** Who sent a turn-engine turn, as far as the chat can tell. */
+export type TurnEngineTurnOwner = {
+  /** The person viewing sent it. */
+  isViewer: boolean;
+  /** Their name, when the chat knows it. */
+  name: string | null;
+};
+
+/** What a turn engine is told about one of its failed turns. */
+export type TurnEngineFailureInput = {
+  /** The failure message's metadata, as the controller wrote it. */
+  metadata: Record<string, unknown>;
+  /** The failure's own text, which Details keeps. */
+  rawText: string;
+  /** The raw text's first line when it reads plainly (docs/Chat-Activity.md), else null. */
+  plainFirstLine: string | null;
+  /** Whether words read plainly, by the same rule. */
+  readsPlainly: (text: string) => boolean;
+  /** The status entry of the runtime that ran the turn, when the viewer has it. */
+  runtime: ControllerRuntimeStatusEntry | null;
+};
+
+/** How a turn engine's turns read in the chat. */
+export interface FrontendTurnEnginePresentation {
+  /**
+   * Whether the controller stamped this message as one of the engine's turns.
+   * A client's claim, or an `aiAccessMode` a client could record, never counts.
+   */
+  isControllerStamped(metadata: Record<string, unknown>): boolean;
+  /** The sentence the person who sent a failed turn reads. */
+  describeTurnFailure(failure: TurnEngineFailureInput): string;
+  /** What everyone else reads for a failed turn; `ownerName` is null when the chat does not know it. */
+  describeTeammateTurnFailure(ownerName: string | null): string;
+  /**
+   * The sentence for a send that claimed this engine and that the controller
+   * refused with `code`, or null when the engine does not word that code.
+   */
+  describeSendRefusal(refusal: { code: string; details: unknown }): string | null;
+  /** The sentence for a refused Steer into one of the engine's turns, or null. */
+  describeSteerRefusal(code: string): string | null;
+  /** The plain-text line under a reply's header; `owner` is null when the chat cannot tell who sent the turn. */
+  describeSpeaker(owner: TurnEngineTurnOwner | null): string;
+  /** The sender's action on a failed turn that puts its message back in the composer with this engine chosen. */
+  resendLabel: string;
+}
+
+declare module "../features/frontendFeatureModule" {
+  interface FrontendTurnEngineContribution {
+    /**
+     * How the engine's turns read in the chat. Declared here, beside the
+     * chat code that reads it, for as long as the contribution type itself
+     * does not name it.
+     */
+    presentation?: FrontendTurnEnginePresentation;
+  }
+}
+
+/** A failed turn-engine turn, as its card words it. */
+export type TurnEngineRunFailure = {
+  engineId: string;
+  /** The sender's sentence, given the status entry of the runtime that ran the turn. */
+  authorText: (runtime: ControllerRuntimeStatusEntry | null) => string;
+  /** What everyone else reads. */
+  teammateText: (ownerName: string | null) => string;
+  /** The sender's action that puts the message back in the composer with the engine chosen. */
+  resendLabel: string;
+};
+
+/** The ids of the turn engines this Studio was built with. */
+export function turnEngineIds(): string[] {
+  return APPLICATION_FRONTEND_FEATURES.turnEngines.map((engine) => engine.id);
+}
+
+/** The presentation of the turn engine with this id, or null. */
+export function turnEnginePresentation(
+  engineId: string | null | undefined,
+): FrontendTurnEnginePresentation | null {
+  if (!engineId) {
+    return null;
+  }
+  return (
+    APPLICATION_FRONTEND_FEATURES.turnEngines.find((engine) => engine.id === engineId)?.presentation ??
+    null
+  );
+}
+
+/** The turn engine whose id a message names as its `aiAccessMode`, or null. */
+function aiAccessModeTurnEngine(record: Record<string, unknown> | null): string | null {
+  const mode = record?.["aiAccessMode"];
+  if (typeof mode !== "string") {
+    return null;
+  }
+  const normalized = mode.trim().toLowerCase();
+  return turnEngineIds().find((id) => id === normalized) ?? null;
+}
+
+/**
+ * Whether a message belongs to a turn-engine turn: its own metadata or its
+ * stored prompt's carries a claim (the sender's copy), or names an engine's
+ * id as its `aiAccessMode` (the controller's stamp). A claim of any value
+ * counts, so a message that claimed an engine this Studio does not know is
+ * never sent again as an ordinary turn.
+ */
+export function usesTurnEngine(metadata: unknown): boolean {
+  return promptMetadataRecords(metadata).some(
+    (record) => carriesTurnEngineClaim(record) || aiAccessModeTurnEngine(record) !== null,
+  );
+}
+
+/**
+ * The turn engine whose controller stamp this message carries, with its
+ * presentation, or null. Only what the controller wrote counts.
+ */
+export function readControllerStampedTurnEngine(
+  metadata: unknown,
+): { engineId: string; presentation: FrontendTurnEnginePresentation } | null {
+  const record = isRecord(metadata) ? metadata : null;
+  const engineId = aiAccessModeTurnEngine(record);
+  const presentation = turnEnginePresentation(engineId);
+  if (!record || !engineId || !presentation || !presentation.isControllerStamped(record)) {
+    return null;
+  }
+  return { engineId, presentation };
+}
+
+/** The sentence for a refused Steer into a turn-engine turn, or null when no engine words `code`. */
+export function describeTurnEngineSteerRefusal(code: string): string | null {
+  for (const engine of APPLICATION_FRONTEND_FEATURES.turnEngines) {
+    const sentence = engine.presentation?.describeSteerRefusal(code) ?? null;
+    if (sentence) {
+      return sentence;
+    }
+  }
+  return null;
+}
 
 // What a person reads for a failed turn. Plain words only: never "upstream",
 // "provider", "credential", "runtime", "switch", "Codex", "workspace" or
 // "request", which name the plumbing; the raw text keeps them behind Details.
-const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
+const RUN_FAILURE_FRIENDLY_TEXT: Record<Exclude<RunFailureKind, "turn_engine">, string> = {
   missing_final_message:
     "The reply didn't come through. This is usually temporary.",
   // Used when the failure names no agent; see noChangesFriendlyText.
@@ -109,6 +267,23 @@ function notSavedFriendlyText(metadata: Record<string, unknown> | null): string 
  * kept behind the Details disclosure. */
 const GENERIC_INLINE_FAILURE_MAX_LENGTH = 240;
 
+/** The first meaningful line of a failure's text. */
+function failureFirstLine(rawText: string): string {
+  return (
+    rawText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? rawText.trim()
+  );
+}
+
+function boundInlineFailureLine(line: string): string {
+  if (line.length <= GENERIC_INLINE_FAILURE_MAX_LENGTH) {
+    return line;
+  }
+  return `${line.slice(0, GENERIC_INLINE_FAILURE_MAX_LENGTH - 1).trimEnd()}…`;
+}
+
 /**
  * For an unclassified ("generic") failure there is no friendlier summary than
  * the real reason, so surface it inline instead of a canned sentence (#145):
@@ -116,18 +291,60 @@ const GENERIC_INLINE_FAILURE_MAX_LENGTH = 240;
  * available behind the Details disclosure.
  */
 function inlineGenericFailureText(rawText: string): string {
-  const firstLine =
-    rawText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find((line) => line.length > 0) ?? rawText.trim();
+  const firstLine = failureFirstLine(rawText);
   if (!firstLine || TECHNICAL_FAILURE_WORDS.test(firstLine)) {
     return RUN_FAILURE_FRIENDLY_TEXT.generic;
   }
-  if (firstLine.length <= GENERIC_INLINE_FAILURE_MAX_LENGTH) {
-    return firstLine;
+  return boundInlineFailureLine(firstLine);
+}
+
+// The whole rule of docs/Chat-Activity.md for a turn engine's words: the
+// plumbing words above, and also "runtime" and "switch", which the generic
+// line above has always let through; and no id, which names nothing a person
+// knows.
+const TURN_ENGINE_EXTRA_PLUMBING =
+  /\b(?:runtimes?|switch(?:es|ed|ing)?)\b|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i;
+
+function readsPlainlyForChatActivity(text: string): boolean {
+  return !TECHNICAL_FAILURE_WORDS.test(text) && !TURN_ENGINE_EXTRA_PLUMBING.test(text);
+}
+
+/**
+ * A failed turn of a turn engine: the run's `aiAccessMode` is the engine's
+ * id. Its engine words it, for its sender and for everyone else, before any
+ * of the patterns below can read its text as the runtime's own engine's.
+ */
+function turnEngineFailurePresentation(
+  metadata: Record<string, unknown> | null,
+  rawText: string,
+): RunFailurePresentation | null {
+  const engineId = aiAccessModeTurnEngine(metadata);
+  const presentation = turnEnginePresentation(engineId);
+  if (!metadata || !engineId || !presentation) {
+    return null;
   }
-  return `${firstLine.slice(0, GENERIC_INLINE_FAILURE_MAX_LENGTH - 1).trimEnd()}…`;
+  const firstLine = failureFirstLine(rawText);
+  const plainFirstLine =
+    firstLine && readsPlainlyForChatActivity(firstLine) ? boundInlineFailureLine(firstLine) : null;
+  const authorText = (runtime: ControllerRuntimeStatusEntry | null) =>
+    presentation.describeTurnFailure({
+      metadata,
+      rawText,
+      plainFirstLine,
+      readsPlainly: readsPlainlyForChatActivity,
+      runtime,
+    });
+  return {
+    kind: "turn_engine",
+    friendlyText: authorText(null),
+    rawText,
+    turnEngine: {
+      engineId,
+      authorText,
+      teammateText: (ownerName) => presentation.describeTeammateTurnFailure(ownerName),
+      resendLabel: presentation.resendLabel,
+    },
+  };
 }
 
 export const RETRYING_STATUS_DISPLAY_TEXT = "Trying again…";
@@ -479,11 +696,18 @@ function hasMessageTarget(record: Record<string, unknown>): boolean {
  *   as a turn of their own, without what the browser found, and be charged;
  * - a prompt dispatched with other text than it shows (`dispatchContent`),
  *   which is how a targeted or fresh browser page and a goal command wrap the
- *   typed text.
+ *   typed text;
+ * - a prompt of a turn-engine turn ({@link usesTurnEngine}): it claimed
+ *   one turn the person started, which nothing sends again by itself
+ *   (docs/Local-Engine-Turns.md 5.6), and its words alone would run on
+ *   another engine.
  */
 export function isRunFailurePromptAutoResendable(
   promptMessage: Pick<ChatMessage, "content" | "metadata">,
 ): boolean {
+  if (usesTurnEngine(promptMessage.metadata)) {
+    return false;
+  }
   const records = promptMetadataRecords(promptMessage.metadata);
   if (records.some(
       (record) =>
@@ -726,7 +950,9 @@ export function runFailureOriginKey(promptText: string): string {
   return promptText.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-export function classifyRunFailureText(rawText: string): Exclude<RunFailureKind, "generic"> | null {
+export function classifyRunFailureText(
+  rawText: string,
+): Exclude<RunFailureKind, "generic" | "turn_engine"> | null {
   if (BROWSER_PAGE_MISSING_PATTERNS.some((pattern) => pattern.test(rawText))) {
     return "browser_page_missing";
   }
@@ -821,6 +1047,10 @@ export function resolveRunFailurePresentation(params: {
   if (!failedByMetadata && !params.assumeFailed) {
     return null;
   }
+  const turnEngineFailure = turnEngineFailurePresentation(metadata, rawText);
+  if (turnEngineFailure) {
+    return turnEngineFailure;
+  }
   const classified = classifyRunFailureText(rawText);
   if (normalizedStringField(metadata, "kind") !== INTERRUPTED_RUN_EXPIRED_KIND) {
     // A proxy diagnostic reads as the AI not answering, unless it is a spent
@@ -842,7 +1072,7 @@ export function resolveRunFailurePresentation(params: {
 }
 
 function runFailureFriendlyText(
-  kind: RunFailureKind,
+  kind: Exclude<RunFailureKind, "turn_engine">,
   rawText: string,
   metadata: Record<string, unknown> | null,
 ): string {

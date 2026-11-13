@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { usesTurnEngine } from "../../../conversations/runFailurePresentation";
 import type { ControllerCredentialListItem } from "../../../sdk/instafy";
 import { controllerClient } from "../../../sdk/instafy";
 import type { StatusIntent } from "../../../status/useStatus";
@@ -467,6 +468,12 @@ export function useChatCredentialGate({
         continue;
       }
       if (!isExpiredCredentialProxyError(candidate.content)) {
+        continue;
+      }
+      // A turn-engine turn ran on the sender's own engine, not on an AI
+      // connection of theirs, so its failure is not one to reconnect
+      // (docs/Local-Engine-Turns.md 5.6).
+      if (usesTurnEngine(candidate.metadata)) {
         continue;
       }
       // Instafy AI's own sign-in is not the person's to fix, so the newest

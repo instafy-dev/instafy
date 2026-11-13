@@ -38,6 +38,22 @@ describe("normalizeChatMessageStashEnvelope", () => {
     });
   });
 
+  it("never restores a turn-engine claim, nor the runtime it pinned", () => {
+    expect(
+      normalizeChatMessageStashEnvelope({
+        targetAgentHandles: ["octo"],
+        metadata: { turnEngine: "claude-code", replyContext: { messageId: "message-1" } },
+        runtimeOverride: { runtimeId: "desktop-runtime", runtimeDisplayName: null, preferRuntime: false },
+      }),
+    ).toEqual({
+      targetAgentHandles: ["octo"],
+      browserPageTarget: null,
+      browserLaunchMode: null,
+      metadata: { replyContext: { messageId: "message-1" } },
+      runtimeOverride: null,
+    });
+  });
+
   it("fails closed to a text-only untargeted envelope", () => {
     expect(normalizeChatMessageStashEnvelope({ targetAgentHandles: [null], runtimeOverride: [] })).toEqual({
       targetAgentHandles: [],
