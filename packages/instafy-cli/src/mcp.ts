@@ -1267,9 +1267,23 @@ function fitsInResult(candidate: unknown): boolean {
 type PathStep = string | number;
 
 function describePath(steps: PathStep[]): string {
-  const joined = steps.map((step) => (typeof step === "number" ? `[${step}]` : `.${step}`)).join("").replace(/^\./, "") || "the result";
+  const joined =
+    steps.map((step) => (typeof step === "number" ? `[${step}]` : PLAIN_KEY.test(step) ? `.${step}` : `[${quotedForNote(step)}]`)).join("").replace(/^\./, "") ||
+    "the result";
   // A path deep enough to crowd the note keeps its two ends.
   return joined.length > 80 ? `${joined.slice(0, 30)}…${joined.slice(-45)}` : joined;
+}
+
+const PLAIN_KEY = /^[A-Za-z_$][\w$-]{0,63}$/;
+
+/**
+ * A key the data chose, as it appears inside a note: as a JSON string, with brackets and every
+ * character outside printable ASCII escaped. A note is the server's own words, set apart from the
+ * data by its brackets, so nothing the data holds may close one or start another. (The ids a note
+ * names are the controller's own.)
+ */
+function quotedForNote(text: string): string {
+  return JSON.stringify(text).replace(/[^\x20-\x7e]|[[\]]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 /** True when `steps` is `prefix` or lies under it. */
