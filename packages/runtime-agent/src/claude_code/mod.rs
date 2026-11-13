@@ -36,7 +36,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -117,7 +117,8 @@ pub const LANE_FLAGS: [&str; 10] = [
     "--resume",
 ];
 
-/// Why the lane is not ready (3.2). The controller keeps only these values (2.10).
+/// Why the lane is not ready (3.2). The controller keeps only these values (2.10):
+/// `runtime_contracts::claude_code_lane::NOT_READY_REASONS`, which a test holds [`Self::ALL`] to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NotReadyReason {
     /// No runnable file at the granted path, or no granted path.
@@ -133,6 +134,15 @@ pub enum NotReadyReason {
 }
 
 impl NotReadyReason {
+    /// Every reason, in the order of the shared list.
+    pub const ALL: [Self; 5] = [
+        Self::BinaryMissing,
+        Self::BinaryUnsafe,
+        Self::ProbeFailed,
+        Self::UnsupportedVersion,
+        Self::BareDefault,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BinaryMissing => "binary_missing",
@@ -152,8 +162,9 @@ impl fmt::Display for NotReadyReason {
 
 /// Why a lane turn failed: the code of its `claude-code/failure` artifact, which the controller
 /// checks and copies onto the failure message as `claudeCodeFailure` (2.6). These are the rows
-/// of 5.5's table above `claude_code_turn_not_allowed`. A failure that is none of them (5.5's
-/// "anything else") has no code.
+/// of 5.5's table above `claude_code_turn_not_allowed`, the controller's list
+/// (`runtime_contracts::claude_code_lane::RUNTIME_FAILURE_CODES`), which a test holds
+/// [`Self::ALL`] to. A failure that is none of them (5.5's "anything else") has no code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FailureCode {
     /// Claude Code is not signed in (an `assistant` message's `error` is `authentication_failed`).
@@ -1243,8 +1254,14 @@ impl Lane {
     /// folder as working directory, [`PROBE_TIMEOUT`] and [`PROBE_OUTPUT_CAP`]. It never sends a
     /// prompt. Probes run one at a time.
     pub async fn probe(&self) -> Readiness {
+        self.probe_by(None).await
+    }
+
+    /// [`Self::probe`], with every command ending by `deadline` when there is one. A command the
+    /// deadline cuts short fails the probe as `probe_failed`, `auth status` too.
+    async fn probe_by(&self, deadline: Option<Instant>) -> Readiness {
         let mut cached_help = self.help.lock().await;
-        match self.probe_with(&mut cached_help).await {
+        match self.probe_with(&mut cached_help, deadline).await {
             Ok(ready) => Readiness::Ready(ready),
             Err(reason) => Readiness::NotReady(reason),
         }
@@ -1253,11 +1270,12 @@ impl Lane {
     async fn probe_with(
         &self,
         cached_help: &mut Option<CachedHelp>,
+        deadline: Option<Instant>,
     ) -> Result<ReadyLane, NotReadyReason> {
         let launch = self.grant.check()?;
         let environment = command::lane_environment(&self.grant, &launch);
         let version = self
-            .run(&launch, &environment, &["--version"])
+            .run(&launch, &environment, &["--version"], deadline)
             .await
             .ok()
             .filter(|run| run.status.success())
@@ -1274,7 +1292,7 @@ impl Lane {
             Some(facts) => facts,
             None => {
                 let run = self
-                    .run(&launch, &environment, &["--help"])
+                    .run(&launch, &environment, &["--help"], deadline)
                     .await
                     .ok()
                     .filter(|run| run.status.success())
@@ -1298,8 +1316,16 @@ impl Lane {
         if help.bare_is_default() {
             return Err(NotReadyReason::BareDefault);
         }
-        let plan_sign_in = match self.run(&launch, &environment, &["auth", "status"]).await {
+        let plan_sign_in = match self
+            .run(&launch, &environment, &["auth", "status"], deadline)
+            .await
+        {
             Ok(run) => plan_sign_in(run.status.success(), &run.stdout, version),
+            Err(ProbeRunError::TimedOut)
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
+            {
+                return Err(NotReadyReason::ProbeFailed);
+            }
             Err(_) => false,
         };
         Ok(ReadyLane {
@@ -1316,11 +1342,21 @@ impl Lane {
         launch: &CheckedLaunch,
         environment: &[(OsString, OsString)],
         args: &[&str],
+        deadline: Option<Instant>,
     ) -> Result<BoundedRun, ProbeRunError> {
+        let limit = match deadline {
+            Some(deadline) => self
+                .probe_timeout
+                .min(deadline.saturating_duration_since(Instant::now())),
+            None => self.probe_timeout,
+        };
+        if limit.is_zero() {
+            return Err(ProbeRunError::TimedOut);
+        }
         let folder = runtime_owned_dir(&self.grant, "instafy-claude-code-probe-")
             .map_err(ProbeRunError::Io)?;
         let command = command::probe_command(launch, environment, args, folder.path());
-        let run = run_bounded(command, self.probe_timeout).await;
+        let run = run_bounded(command, limit).await;
         if let Err(error) = &run {
             debug!(%error, command = args.join(" "), "a claude probe command failed");
         }
@@ -1329,7 +1365,21 @@ impl Lane {
 
     /// Probes, then publishes the capability it gives.
     pub async fn probe_and_publish(&self) -> LaneProbe {
-        let readiness = self.probe().await;
+        self.probe_and_publish_by(None).await
+    }
+
+    /// The startup probe (3.2): [`Self::probe_and_publish`], with one limit for its commands
+    /// together, the limit of one ([`PROBE_TIMEOUT`]). The runtime registers, and so takes any
+    /// turn, Codex's too, only once it ended, so a `claude` that stalls delays that by this limit
+    /// and the last command's kill at most. A probe that runs out of it is `probe_failed`, which
+    /// the timed re-probe ([`Self::reprobe_while_not_ready`]) corrects by registering again.
+    pub async fn probe_and_publish_at_startup(&self) -> LaneProbe {
+        self.probe_and_publish_by(Some(Instant::now() + self.probe_timeout))
+            .await
+    }
+
+    async fn probe_and_publish_by(&self, deadline: Option<Instant>) -> LaneProbe {
+        let readiness = self.probe_by(deadline).await;
         let capability_changed = self.publish(readiness.capability());
         if capability_changed {
             match &readiness {
@@ -1404,7 +1454,7 @@ impl Lane {
                         .enable_all()
                         .build()
                         .ok()?;
-                    Some(runtime.block_on(self.probe_and_publish()))
+                    Some(runtime.block_on(self.probe_and_publish_at_startup()))
                 })
                 .join()
                 .ok()
@@ -2192,6 +2242,19 @@ mod tests {
         );
     }
 
+    /// Nothing in this test process ran the capture: a leased lane job has no lane, and fails as
+    /// `binary_missing` (the child-process tests of tests/claude_code_lane.rs cover a capture).
+    #[test]
+    fn without_a_capture_a_lane_job_has_no_lane() {
+        assert!(captured_launch_grant().is_none());
+        assert!(lane().is_none());
+        assert!(matches!(
+            lane_for_jobs(),
+            Err(NotReadyReason::BinaryMissing)
+        ));
+        assert_eq!(registration_capability(), None);
+    }
+
     #[test]
     fn a_lane_publishes_only_changes() {
         let grant = parse(raw("/usr/local/bin/claude")).unwrap().unwrap();
@@ -2208,42 +2271,30 @@ mod tests {
         assert_eq!(lane.startup_capability(), missing);
     }
 
+    /// The codes and reasons are runtime-contracts' lists, which the controller keeps and Studio
+    /// words (claude_code_lane_fixtures.json).
     #[test]
     fn failure_codes_are_the_rows_of_5_5_above_turn_not_allowed() {
+        use runtime_contracts::claude_code_lane::{
+            NOT_READY_REASONS, RUNTIME_FAILURE_CODES, STOP_AND_SWEEP_FAILURE_CODES,
+        };
         let codes: Vec<&str> = FailureCode::ALL.iter().map(|code| code.as_str()).collect();
-        assert_eq!(
-            codes,
-            [
-                "not_signed_in",
-                "plan_limit",
-                "binary_missing",
-                "binary_unsafe",
-                "unsupported_version",
-                "probe_failed",
-                "bare_default",
-                "session_unavailable",
-                "turn_timeout",
-                "stalled",
-                "crashed",
-                "unexpected_configuration",
-                "project_config",
-                "unsafe_import",
-                "unsafe_link",
-                "preflight_failed",
-            ]
-        );
+        assert_eq!(codes, RUNTIME_FAILURE_CODES);
+        let reasons: Vec<&str> = NotReadyReason::ALL
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect();
+        assert_eq!(reasons, NOT_READY_REASONS);
         for code in FailureCode::ALL {
             assert_eq!(FailureCode::parse(code.as_str()), Some(code));
         }
         assert_eq!(FailureCode::parse("claude_code_turn_not_allowed"), None);
+        // Only the controller writes a stop's or a sweep's code.
+        for code in STOP_AND_SWEEP_FAILURE_CODES {
+            assert_eq!(FailureCode::parse(code), None, "{code}");
+        }
         // A probe's reason is the failure of a turn whose per-turn probe gave it.
-        for reason in [
-            NotReadyReason::BinaryMissing,
-            NotReadyReason::BinaryUnsafe,
-            NotReadyReason::ProbeFailed,
-            NotReadyReason::UnsupportedVersion,
-            NotReadyReason::BareDefault,
-        ] {
+        for reason in NotReadyReason::ALL {
             assert_eq!(FailureCode::from(reason).as_str(), reason.as_str());
         }
     }

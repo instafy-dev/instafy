@@ -324,45 +324,62 @@ mod tests {
         .unwrap()
     }
 
-    /// A lane job as the controller leases it: the payload keys and metadata of a real lane send
-    /// (recorded from a controller and runtime driven end to end), the ids aside.
+    /// A lane job as the controller leases it. Its payload is runtime-contracts' recorded lane job
+    /// payload (claude_code_lane_fixtures.json), which the controller's own test builds the way
+    /// dispatch does, with this job's ids in place of its placeholders and `user_id` as its
+    /// sender. Its top-level `executionMode` is the workspace mode the controller writes on every
+    /// write job (`shared_write`), not an execution mode.
     fn lane_job(user_id: Uuid) -> LeaseJob {
-        let conversation_id = Uuid::new_v4();
+        /// `value` with each placeholder of `ids` replaced by its id.
+        fn with_ids(value: &mut Value, ids: &[(&str, Uuid)]) {
+            match value {
+                Value::String(text) => {
+                    if let Some((_, id)) = ids
+                        .iter()
+                        .find(|(placeholder, _)| text.as_str() == *placeholder)
+                    {
+                        *text = id.to_string();
+                    }
+                }
+                Value::Array(items) => items.iter_mut().for_each(|item| with_ids(item, ids)),
+                Value::Object(map) => map.values_mut().for_each(|item| with_ids(item, ids)),
+                _ => {}
+            }
+        }
+
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../runtime-contracts/src/claude_code_lane_fixtures.json"
+        ))
+        .expect("the lane fixtures are JSON");
+        let (project_id, run_id, conversation_id) =
+            (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut payload = fixtures["laneJobPayload"].clone();
+        with_ids(
+            &mut payload,
+            &[
+                ("<project_id>", project_id),
+                ("<user_id>", user_id),
+                ("<conversation_id>", conversation_id),
+                ("<prompt_id>", Uuid::new_v4()),
+                ("<run_id>", run_id),
+                ("<agent_id>", Uuid::new_v4()),
+                ("<runtime_id>", Uuid::new_v4()),
+            ],
+        );
+        assert!(
+            !payload.to_string().contains("\"<"),
+            "a placeholder is left: {payload}"
+        );
         serde_json::from_value(json!({
             "id": Uuid::new_v4(),
             "intent": "feature",
-            "project_id": Uuid::new_v4(),
-            "run_id": Uuid::new_v4(),
+            "project_id": project_id,
+            "run_id": run_id,
             "conversation_id": conversation_id,
             "engine": "claude-code",
             "lease_attempts": 1,
             "workspace_token": "workspace-token",
-            "payload": {
-                "intent": "feature",
-                "version": "1.0",
-                "user_id": user_id.to_string(),
-                "prompt_text": "  Rename the project in README.md\n",
-                "writeIntent": true,
-                // The workspace mode, not the execution mode.
-                "executionMode": "shared_write",
-                "targetThreadId": conversation_id,
-                "conversation_id": conversation_id,
-                "metadata": {
-                    "agent": {
-                        "handle": "octo",
-                        "displayName": "Octo",
-                        "writeScope": { "mode": "unscoped", "ownedPaths": [], "readOnlyPaths": [] },
-                    },
-                    "writeScope": { "mode": "unscoped", "ownedPaths": [], "readOnlyPaths": [] },
-                    "claudeCode": { "version": 1 },
-                    "aiAccessMode": "claude-code",
-                    "managedAiUsed": false,
-                    "input": { "kind": "person" },
-                    "writeIntent": true,
-                    "runtimePreference": { "source": "conversation" },
-                    "conversationVisibility": "public",
-                },
-            },
+            "payload": payload,
         }))
         .unwrap()
     }
@@ -375,9 +392,14 @@ mod tests {
     fn a_plain_message_of_the_grants_person_runs_with_its_exact_words() {
         let person = Uuid::new_v4();
         let job = lane_job(person);
+        // The controller trims a send's ends; whatever words it records run as they are.
+        let mut spaced = lane_job(person);
+        spaced.payload["prompt_text"] = json!("  Rename the project in README.md\n");
         let lane_job = LaneJob::of(&job, &grant(person)).expect("runnable");
-        assert_eq!(lane_job.prompt(), "  Rename the project in README.md\n");
+        assert_eq!(Some(lane_job.prompt()), job.payload["prompt_text"].as_str());
         assert_eq!(lane_job.job().id, job.id);
+        let spaced = LaneJob::of(&spaced, &grant(person)).expect("runnable");
+        assert_eq!(spaced.prompt(), "  Rename the project in README.md\n");
     }
 
     #[test]

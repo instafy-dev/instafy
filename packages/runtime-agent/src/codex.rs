@@ -6829,13 +6829,19 @@ fn harness_requirements_toml() -> String {
 /// - each such command inside a `bash -lc`, `zsh -lc` or `sh -c` script that Codex can split
 ///   into plain commands, which it then checks one by one.
 ///
-/// It cannot refuse a relative path (`./claude`), another name for the same file (a link), a
-/// program that starts it (`env claude`, `npx @anthropic-ai/claude-code`, `node cli.js`), a script
-/// Codex cannot split (one with a substitution or a redirection, which Codex checks as one shell
-/// command), or a script that builds the name. An absolute path also escapes it when a user or
-/// project rules file names that exact path, or narrows the name with `host_executable`, since
-/// Codex then never falls back to the file name. The owner accepted that a prefix rule cannot stop
-/// every indirect launch (D22).
+/// It does not refuse a direct launch Codex checks as one shell command: a script with a
+/// redirection (`claude -p … 2>&1 | tail`), a substitution, a heredoc, a variable set before the
+/// name, a quoted name, or a word with a glob, `~` or `$` (`~/.local/bin/claude`). Nor a
+/// `bash -c 'claude …'` nested in a script, or text written into a terminal session the turn
+/// opened (`write_stdin`). Closing those direct forms is a phase 8 gate (docs/Local-Engine-Turns.md
+/// 1.2 and phase 8). An absolute path also escapes it when a user or project rules file names that
+/// exact path, or narrows the name with `host_executable`, since Codex then never falls back to the
+/// file name.
+///
+/// The owner accepted that a prefix rule cannot stop every indirect launch (D22): a relative path
+/// (`./claude`), another name for the same file (a link), a program that starts it (`env claude`,
+/// `npx @anthropic-ai/claude-code`, `node cli.js`), a script that builds the name, and starts that
+/// Codex's own configuration makes (an MCP server's `command`, `notify`, hooks).
 fn harness_exec_policy() -> codex_config::CloudConfigBundleLoader {
     let bundle = codex_config::CloudConfigBundle {
         config_toml: codex_config::CloudConfigTomlBundle::default(),
@@ -8945,25 +8951,44 @@ mod tests {
         }};
     }
 
-    /// The decision Codex takes for these rule matches, the strictest one, with the
-    /// justification of the rule that gave it. `None` when no rule matched.
-    fn strictest_decision(matches: &[JsonValue]) -> Option<(String, Option<String>)> {
-        let rank = |decision: &str| match decision {
-            "allow" => 0,
-            "prompt" => 1,
-            "forbidden" => 2,
-            other => panic!("an unknown decision {other}"),
-        };
+    /// Whether the harness's rule is among these rule matches: its justification.
+    fn matched_by_the_rule(matches: &[JsonValue]) -> bool {
         matches
             .iter()
-            .map(|rule| {
-                let rule = &rule["prefixRuleMatch"];
-                (
-                    rule["decision"].as_str().expect("a decision").to_string(),
-                    rule["justification"].as_str().map(str::to_string),
+            .any(|rule| rule["prefixRuleMatch"]["justification"] == CLAUDE_REFUSAL_JUSTIFICATION)
+    }
+
+    /// Whether the harness's rule refuses the command these rule matches are of. Codex takes the
+    /// strictest decision of every match, and `forbidden` is the strictest, so no other rule, the
+    /// host's own included, can let the command run.
+    fn refused_by_the_rule(matches: &[JsonValue]) -> bool {
+        matches.iter().any(|rule| {
+            let rule = &rule["prefixRuleMatch"];
+            rule["justification"] == CLAUDE_REFUSAL_JUSTIFICATION && rule["decision"] == "forbidden"
+        })
+    }
+
+    /// The justification of the test home's own user rules, which tells their matches from those
+    /// of rules the host may have (/etc/codex, managed preferences).
+    const USER_RULE_JUSTIFICATION: &str = "A user rule of the test home.";
+
+    /// The user rules of a test Codex home: they allow `claude` and `git status`.
+    fn user_rules() -> String {
+        ["[\"claude\"]", "[\"git\", \"status\"]"]
+            .map(|pattern| {
+                format!(
+                    "prefix_rule(pattern = {pattern}, decision = \"allow\", justification = \"{USER_RULE_JUSTIFICATION}\")\n"
                 )
             })
-            .max_by_key(|(decision, _)| rank(decision))
+            .concat()
+    }
+
+    /// Whether these rule matches hold the test home's own `allow`.
+    fn allowed_by_the_users_rule(matches: &[JsonValue]) -> bool {
+        matches.iter().any(|rule| {
+            let rule = &rule["prefixRuleMatch"];
+            rule["decision"] == "allow" && rule["justification"] == USER_RULE_JUSTIFICATION
+        })
     }
 
     /// Commands that start `claude`, as a model might write them: the bare name in several
@@ -8995,20 +9020,19 @@ mod tests {
         let home = tempfile::tempdir().expect("codex home");
         fs::write(home.path().join("config.toml"), "").expect("user config");
         fs::create_dir_all(home.path().join("rules")).expect("user rules folder");
-        fs::write(
-            home.path().join("rules").join("allow.rules"),
-            "prefix_rule(pattern = [\"claude\"], decision = \"allow\")\nprefix_rule(pattern = [\"git\", \"status\"], decision = \"allow\")\n",
-        )
-        .expect("user rules");
+        fs::write(home.path().join("rules").join("allow.rules"), user_rules()).expect("user rules");
         home
     }
 
     /// D22: the exec policy of a session started from `config` refuses every command in
-    /// [`COMMANDS_THAT_START_CLAUDE`], with the harness's justification, both the policy an
-    /// ordinary session loads (its rules files and its requirements) and an isolated session's
-    /// (the requirements alone); a `claude` inside a shell script Codex splits into plain commands
-    /// too; and it leaves every other command to the rules it had. `user_rules` says whether
-    /// `config` loads the home's user rules.
+    /// [`COMMANDS_THAT_START_CLAUDE`] by the harness's rule, both the policy an ordinary session
+    /// loads (its rules files and its requirements) and an isolated session's (the requirements
+    /// alone); a `claude` inside a shell script Codex splits into plain commands too; and the rule
+    /// matches no other command. `user_rules` says whether `config` loads the home's user rules.
+    ///
+    /// It reads only the rule's own matches and the home's own user rule, never a whole decision:
+    /// a policy of the host's (/etc/codex rules, its requirements.toml, managed preferences) is in
+    /// every session too, and may decide other commands.
     async fn assert_sessions_refuse_starting_claude(config: &Config, user_rules: bool) {
         let session = codex_core::load_exec_policy(&config.config_layer_stack)
             .await
@@ -9020,18 +9044,13 @@ mod tests {
             .as_deref()
             .expect("the harness's requirement");
         let isolated = requirements.as_ref();
-        let refused = Some((
-            "forbidden".to_string(),
-            Some(CLAUDE_REFUSAL_JUSTIFICATION.to_string()),
-        ));
         for command in COMMANDS_THAT_START_CLAUDE {
             for (policy, matches) in [
                 ("session", session_policy_matches!(&session, command)),
                 ("isolated", session_policy_matches!(isolated, command)),
             ] {
-                assert_eq!(
-                    strictest_decision(&matches),
-                    refused,
+                assert!(
+                    refused_by_the_rule(&matches),
                     "{policy}: {command:?} {matches:?}"
                 );
             }
@@ -9051,24 +9070,34 @@ mod tests {
             assert!(
                 commands
                     .iter()
-                    .any(
-                        |command| strictest_decision(&session_policy_matches!(&session, command))
-                            == refused
-                    ),
+                    .any(|command| refused_by_the_rule(&session_policy_matches!(
+                        &session, command
+                    ))),
                 "{script:?} {commands:?}"
             );
         }
         for command in COMMANDS_THAT_DO_NOT {
-            let decision = strictest_decision(&session_policy_matches!(&session, command));
-            let expected =
-                (user_rules && **command == ["git", "status"]).then(|| ("allow".to_string(), None));
-            assert_eq!(decision, expected, "{command:?}");
-            assert_eq!(
-                strictest_decision(&session_policy_matches!(isolated, command)),
-                None,
-                "isolated: {command:?}"
-            );
+            for (policy, matches) in [
+                ("session", session_policy_matches!(&session, command)),
+                ("isolated", session_policy_matches!(isolated, command)),
+            ] {
+                assert!(
+                    !matched_by_the_rule(&matches),
+                    "{policy}: {command:?} {matches:?}"
+                );
+            }
         }
+        // The home's own rule for `git status` is there exactly when user rules load.
+        let git_status = session_policy_matches!(&session, ["git", "status"]);
+        assert_eq!(
+            allowed_by_the_users_rule(&git_status),
+            user_rules,
+            "{git_status:?}"
+        );
+        assert!(!allowed_by_the_users_rule(&session_policy_matches!(
+            isolated,
+            ["git", "status"]
+        )));
     }
 
     #[tokio::test]
@@ -9089,12 +9118,7 @@ mod tests {
             .await
             .expect("rules");
         let matches = session_policy_matches!(&session, ["claude", "-p", "hi"]);
-        assert!(
-            matches
-                .iter()
-                .any(|rule| rule["prefixRuleMatch"]["decision"] == "allow"),
-            "{matches:?}"
-        );
+        assert!(allowed_by_the_users_rule(&matches), "{matches:?}");
         assert_sessions_refuse_starting_claude(&config, true).await;
     }
 
@@ -9106,7 +9130,7 @@ mod tests {
         fs::write(fallback_home.join("config.toml"), "").expect("fallback config");
         fs::write(
             fallback_home.join("rules").join("allow.rules"),
-            "prefix_rule(pattern = [\"claude\"], decision = \"allow\")\nprefix_rule(pattern = [\"git\", \"status\"], decision = \"allow\")\n",
+            user_rules(),
         )
         .expect("fallback user rules");
         let config = load_fallback_codex_config(

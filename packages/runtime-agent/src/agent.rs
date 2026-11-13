@@ -542,6 +542,41 @@ fn registration_config<'a>(
     }
 }
 
+/// The `claudeCode` capability a registration with `config` carries.
+fn sent_claude_code(config: &Config) -> Option<serde_json::Value> {
+    config
+        .capabilities
+        .get(crate::claude_code::CAPABILITY_KEY)
+        .cloned()
+}
+
+/// A registration and the `claudeCode` capability it carried. The renewal task that starts from it
+/// registers again at once when the lane published another value since: a probe can publish one
+/// after the registration read the capability and before the task subscribed, and the subscription
+/// would count that value as seen (docs/Local-Engine-Turns.md 3.2).
+#[derive(Clone, Debug)]
+struct Registered {
+    registration: Registration,
+    claude_code: Option<serde_json::Value>,
+}
+
+impl Registered {
+    /// Registers with the configuration [`registration_config`] builds, and keeps the `claudeCode`
+    /// capability it sent.
+    async fn register(
+        client: &ControllerClient,
+        config: &Config,
+        lane: Option<&crate::claude_code::Lane>,
+    ) -> Result<Self> {
+        let sent = registration_config(config, lane);
+        let registration = client.register_runtime(&sent).await?;
+        Ok(Self {
+            registration,
+            claude_code: sent_claude_code(&sent),
+        })
+    }
+}
+
 /// Resolves once the lane's capability changes; never without a lane.
 async fn lane_capability_changed(
     capability: &mut Option<watch::Receiver<Option<serde_json::Value>>>,
@@ -560,16 +595,23 @@ impl RegistrationRenewalTask {
     fn spawn(
         config: Arc<Config>,
         client: Arc<ControllerClient>,
-        registration: Registration,
+        registered: Registered,
         shutdown: ShutdownSignal,
-        renewed: watch::Sender<Option<Registration>>,
+        renewed: watch::Sender<Option<Registered>>,
         lane: Option<&'static crate::claude_code::Lane>,
     ) -> Self {
         let token_store = client.runtime_token_handle();
-        // The capability is fixed for each registration; a change registers again at once.
+        // The capability is fixed for each registration; a change registers again at once. The
+        // subscription counts the value published now as seen, so one that differs from what
+        // `registered` carried is a change too.
         let mut lane_capability = lane.map(crate::claude_code::Lane::subscribe);
+        if let Some(receiver) = lane_capability.as_mut()
+            && sent_claude_code(&registration_config(&config, lane)) != registered.claude_code
+        {
+            receiver.mark_changed();
+        }
         let handle = tokio::spawn(async move {
-            let mut current = registration;
+            let mut current = registered.registration;
             let mut last_attempt_failed = false;
             let mut last_on_demand_renewal: Option<Instant> = None;
             loop {
@@ -632,18 +674,15 @@ impl RegistrationRenewalTask {
                     }
                 }
 
-                match client
-                    .register_runtime(&registration_config(&config, lane))
-                    .await
-                {
+                match Registered::register(&client, &config, lane).await {
                     Ok(renewed_registration) => {
                         info!(
-                            runtime_id = %renewed_registration.runtime_id,
-                            agent_token_expires_at = renewed_registration.agent_token_expires_at.as_deref(),
+                            runtime_id = %renewed_registration.registration.runtime_id,
+                            agent_token_expires_at = renewed_registration.registration.agent_token_expires_at.as_deref(),
                             "renewed runtime registration before agent token expiry"
                         );
                         last_attempt_failed = false;
-                        current = renewed_registration.clone();
+                        current = renewed_registration.registration.clone();
                         if renewed.send(Some(renewed_registration)).is_err() {
                             // The lease loop is gone; nothing left to hand the renewal to.
                             return;
@@ -723,7 +762,7 @@ enum RegistrationOutcome {
     /// renewal). Carries the already-renewed registration when the renewal
     /// task obtained one, so the next cycle adopts it without another
     /// register round-trip.
-    Reregister(Option<Registration>),
+    Reregister(Option<Registered>),
     /// The controller refused the runtime because its space was deleted.
     /// The delete stopped the runtime already, so nothing is stopped or
     /// snapshotted on the way out.
@@ -815,7 +854,7 @@ impl RuntimeAgent {
     ) -> Result<AgentExit> {
         // A registration renewed proactively by the previous cycle; adopted
         // instead of registering again so the fresh tokens are not wasted.
-        let mut renewed_registration: Option<Registration> = None;
+        let mut renewed_registration: Option<Registered> = None;
         loop {
             match Self::register_and_process(
                 config.clone(),
@@ -835,12 +874,12 @@ impl RuntimeAgent {
                     info!("this runtime's space was deleted; the agent stops for good");
                     return Ok(AgentExit::SpaceDeleted);
                 }
-                Ok(RegistrationOutcome::Reregister(Some(registration))) => {
+                Ok(RegistrationOutcome::Reregister(Some(registered))) => {
                     info!(
-                        runtime_id = %registration.runtime_id,
+                        runtime_id = %registered.registration.runtime_id,
                         "restarting lease loop with renewed registration"
                     );
-                    renewed_registration = Some(registration);
+                    renewed_registration = Some(registered);
                     continue;
                 }
                 Ok(RegistrationOutcome::Reregister(None)) => {
@@ -865,15 +904,16 @@ impl RuntimeAgent {
         executor: Arc<AgentExecutor>,
         shutdown: ShutdownSignal,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
-        renewed_registration: Option<Registration>,
+        renewed_registration: Option<Registered>,
     ) -> Result<RegistrationOutcome> {
-        let registration = match renewed_registration {
-            Some(registration) => registration,
-            None => match client
-                .register_runtime(&registration_config(&config, crate::claude_code::lane()))
-                .await
-            {
-                Ok(registration) => registration,
+        let lane = crate::claude_code::lane();
+        let Registered {
+            registration,
+            claude_code: registered_claude_code,
+        } = match renewed_registration {
+            Some(registered) => registered,
+            None => match Registered::register(&client, &config, lane).await {
+                Ok(registered) => registered,
                 Err(error) if error.is::<SpaceDeleted>() => {
                     // A deleted space has no use for its browser or a save of it.
                     crate::browser_host::kill_now();
@@ -1005,14 +1045,17 @@ impl RuntimeAgent {
         // minted alongside it) expires. Waiting for the lease call to return 401
         // is too late: by then the stored runtime token has expired as well and
         // every re-register attempt fails with 401 until the process restarts.
-        let (renewal_sender, mut renewal_receiver) = watch::channel::<Option<Registration>>(None);
+        let (renewal_sender, mut renewal_receiver) = watch::channel::<Option<Registered>>(None);
         let renewal_task = RegistrationRenewalTask::spawn(
             config.clone(),
             client.clone(),
-            registration.clone(),
+            Registered {
+                registration: registration.clone(),
+                claude_code: registered_claude_code,
+            },
             shutdown.clone(),
             renewal_sender,
-            crate::claude_code::lane(),
+            lane,
         );
 
         let lease_result = Self::lease_loop(
@@ -1077,7 +1120,9 @@ impl RuntimeAgent {
         if shutdown_triggered {
             // Prefer the freshest tokens for the final calls: the original agent
             // token may have lapsed during a long job that spanned a renewal.
-            let registration = renewed_registration.as_ref().unwrap_or(&registration);
+            let registration = renewed_registration
+                .as_ref()
+                .map_or(&registration, |renewed| &renewed.registration);
 
             // A lazy browser host stops with the runtime (re-registration
             // never stops it), closing Chromium and saving its profile before
@@ -1128,7 +1173,7 @@ impl RuntimeAgent {
         registration: &Registration,
         shutdown: ShutdownSignal,
         refresh: Option<Arc<Notify>>,
-        renewal: &mut watch::Receiver<Option<Registration>>,
+        renewal: &mut watch::Receiver<Option<Registered>>,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
     ) -> Result<bool> {
         let poll_interval = client.poll_interval();
@@ -2243,7 +2288,7 @@ impl RuntimeAgent {
         duration: Duration,
         shutdown: ShutdownSignal,
         refresh: Option<Arc<Notify>>,
-        renewal: Option<&mut watch::Receiver<Option<Registration>>>,
+        renewal: Option<&mut watch::Receiver<Option<Registered>>>,
     ) -> LoopSignal {
         tokio::select! {
             _ = shutdown.cancelled() => LoopSignal::Shutdown,
@@ -2263,14 +2308,14 @@ impl RuntimeAgent {
 
     /// The check `wait_for_renewal` makes, without waiting: a renewed
     /// registration was published and this loop has not acted on it yet.
-    fn renewal_pending(renewal: &watch::Receiver<Option<Registration>>) -> bool {
+    fn renewal_pending(renewal: &watch::Receiver<Option<Registered>>) -> bool {
         renewal.has_changed().unwrap_or(false) && renewal.borrow().is_some()
     }
 
     /// Resolves once the renewal task has published a renewed registration.
     /// `watch` is level-triggered: a value published while the loop was busy
     /// executing a job is observed at the next idle point instead of being lost.
-    async fn wait_for_renewal(renewal: Option<&mut watch::Receiver<Option<Registration>>>) {
+    async fn wait_for_renewal(renewal: Option<&mut watch::Receiver<Option<Registered>>>) {
         if let Some(receiver) = renewal {
             while receiver.changed().await.is_ok() {
                 if receiver.borrow().is_some() {
@@ -2638,12 +2683,12 @@ mod tests {
 
     #[test]
     fn a_renewed_registration_is_pending_until_the_loop_takes_it() {
-        let (sender, mut receiver) = watch::channel::<Option<Registration>>(None);
+        let (sender, mut receiver) = watch::channel::<Option<Registered>>(None);
         assert!(!RuntimeAgent::renewal_pending(&receiver));
         sender.send_replace(None);
         assert!(!RuntimeAgent::renewal_pending(&receiver));
         receiver.borrow_and_update();
-        sender.send_replace(Some(test_registration()));
+        sender.send_replace(Some(test_registered()));
         assert!(RuntimeAgent::renewal_pending(&receiver));
     }
 
@@ -3029,10 +3074,10 @@ mod tests {
 
     #[tokio::test]
     async fn renewal_published_while_busy_is_observed_at_the_next_idle_point() {
-        let (sender, mut receiver) = watch::channel::<Option<Registration>>(None);
+        let (sender, mut receiver) = watch::channel::<Option<Registered>>(None);
         // The renewal task publishes while the lease loop is executing a job...
         sender
-            .send(Some(test_registration()))
+            .send(Some(test_registered()))
             .expect("receiver alive");
 
         // ...and the loop picks it up as soon as it reaches an idle wait.
@@ -3053,7 +3098,7 @@ mod tests {
 
     #[tokio::test]
     async fn idle_wait_completes_normally_without_a_renewal() {
-        let (sender, mut receiver) = watch::channel::<Option<Registration>>(None);
+        let (sender, mut receiver) = watch::channel::<Option<Registered>>(None);
         // A renewal task that exited without renewing (unknown expiry) drops the sender.
         drop(sender);
 
@@ -3089,6 +3134,14 @@ mod tests {
             agent_token_issued_at: None,
             agent_token_expires_at: Some("2026-08-18T13:03:43Z".to_string()),
             agent_token_ttl: Some(3600),
+        }
+    }
+
+    /// A renewed registration, as the renewal task publishes it: one of a runtime without a lane.
+    fn test_registered() -> Registered {
+        Registered {
+            registration: test_registration(),
+            claude_code: None,
         }
     }
 

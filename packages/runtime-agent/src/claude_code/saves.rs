@@ -6,17 +6,22 @@
 //! - the `.mcp.json` at the folder's root, which would offer teammates MCP servers to run. A saved
 //!   one, like a saved `.claude/` path, would also make the pre-flight refuse every later lane
 //!   turn in the space. A deeper `.mcp.json` belongs to a plugin, and saves;
-//! - every file whose content holds a token: `sk-ant-`, followed by at least 20 of
-//!   `[A-Za-z0-9_-]`, not preceded by a letter or digit. A bare mention of the prefix saves.
+//! - every file whose name or content holds a token: `sk-ant-`, followed by at least 20 of
+//!   `[A-Za-z0-9_-]`, not preceded by a letter or digit. A bare mention of the prefix saves. A
+//!   name that holds one would put it in every teammate's checkout and in what the save reports.
 //!
-//! Names compare ignoring ASCII case, as macOS folders do (`.Claude/`, `claude.local.md`). The
-//! publish policy matches file names only, so without the content check a token that Claude Code
-//! or a tool wrote into an ordinary file would reach every teammate's checkout. The filter applies
-//! to lane saves only (D21).
+//! Names compare as a Mac's folders compare them ([`same_name`]): ignoring case, Unicode's
+//! included, so `.Claude/`, `claude.local.md` and `.mcp.jſon` (a long s) are the files Claude Code
+//! opens as `.claude/`, `CLAUDE.local.md` and `.mcp.json`. The publish policy matches file names
+//! only, so without the content check a token that Claude Code or a tool wrote into an ordinary
+//! file would reach every teammate's checkout. The filter applies to lane saves only (D21).
 
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
+
+use caseless::Caseless;
+use unicode_normalization::UnicodeNormalization;
 
 /// The prefix of a token the content check looks for, matched ignoring ASCII case.
 const TOKEN_PREFIX: &[u8] = b"sk-ant-";
@@ -37,6 +42,26 @@ pub enum KeptOff {
     Unchecked,
 }
 
+/// `name` as a Mac's case-insensitive folder compares it: Unicode's canonical caseless form (NFD,
+/// then default case folding, then NFD again). APFS ignores case beyond ASCII and how a letter is
+/// composed: it opens `.mcp.jſon` (a long s, U+017F) as `.mcp.json`, a name with a Kelvin sign
+/// (U+212A) as one with a `k`, and a composed `é` as a decomposed one.
+pub fn name_key(name: &str) -> String {
+    if name.is_ascii() {
+        return name.to_ascii_lowercase();
+    }
+    name.chars().nfd().default_case_fold().nfd().collect()
+}
+
+/// Whether `name` and `wanted` name the same file on a Mac's case-insensitive folder
+/// ([`name_key`]).
+pub fn same_name(name: &str, wanted: &str) -> bool {
+    if name.is_ascii() && wanted.is_ascii() {
+        return name.eq_ignore_ascii_case(wanted);
+    }
+    name_key(name) == name_key(wanted)
+}
+
 /// Whether a lane save leaves the folder-relative, `/`-separated `path` on this computer by its
 /// name.
 pub fn is_claude_code_file(path: &str) -> bool {
@@ -44,13 +69,11 @@ pub fn is_claude_code_file(path: &str) -> bool {
         .split(['/', '\\'])
         .filter(|segment| !segment.is_empty() && *segment != ".")
         .collect();
-    segments
-        .iter()
-        .any(|segment| segment.eq_ignore_ascii_case(".claude"))
+    segments.iter().any(|segment| same_name(segment, ".claude"))
         || segments
             .last()
-            .is_some_and(|name| name.eq_ignore_ascii_case("CLAUDE.local.md"))
-        || matches!(segments.as_slice(), [name] if name.eq_ignore_ascii_case(".mcp.json"))
+            .is_some_and(|name| same_name(name, "CLAUDE.local.md"))
+        || matches!(segments.as_slice(), [name] if same_name(name, ".mcp.json"))
 }
 
 fn is_token_char(byte: u8) -> bool {
@@ -148,6 +171,11 @@ pub fn kept_off(folder: &Path, path: &str) -> Option<KeptOff> {
     if is_claude_code_file(path) {
         return Some(KeptOff::ClaudeCodeFile);
     }
+    // A token in the name stays too, deleted or not: the save, its report and the stopped turn's
+    // would carry the path itself.
+    if holds_claude_token(path.as_bytes()) {
+        return Some(KeptOff::HoldsAToken);
+    }
     match file_holds_claude_token(&folder.join(path)) {
         Ok(false) => None,
         // A file the turn deleted holds nothing, and its deletion saves.
@@ -227,14 +255,19 @@ mod tests {
             ".mcp.json",
             ".MCP.json",
             "./.mcp.json",
+            // A Mac opens a long s (U+017F) as an s.
+            ".mcp.j\u{17f}on",
+            ".MCP.J\u{17f}ON",
         ] {
             assert!(is_claude_code_file(kept), "{kept}");
         }
         for saved in [
             "CLAUDE.md",
             "AGENTS.md",
+            "AGENT\u{17f}.md",
             "claude-plugin/instafy/.mcp.json",
             "docs/.mcp.json",
+            "docs/.mcp.j\u{17f}on",
             ".claudex/settings.json",
             "x.claude",
             "notes/claude.md",
@@ -242,6 +275,55 @@ mod tests {
         ] {
             assert!(!is_claude_code_file(saved), "{saved}");
         }
+    }
+
+    /// Names compare as APFS compares them: case folded beyond ASCII, and however a letter is
+    /// composed.
+    #[test]
+    fn names_compare_as_a_macs_folder_compares_them() {
+        for (name, wanted) in [
+            (".mcp.json", ".MCP.JSON"),
+            (".mcp.j\u{17f}on", ".mcp.json"),
+            ("AGENT\u{17f}.md", "agents.md"),
+            ("mar\u{212a}.txt", "mark.txt"),
+            ("caf\u{e9}.md", "cafe\u{301}.md"),
+            ("CAF\u{c9}.md", "cafe\u{301}.md"),
+        ] {
+            assert!(same_name(name, wanted), "{name} {wanted}");
+            assert_eq!(name_key(name), name_key(wanted), "{name} {wanted}");
+        }
+        for (name, wanted) in [
+            (".mcp.json", ".mcp.jsonx"),
+            ("AGENTS.md", "AGENT.md"),
+            // A zero-width joiner is a character of the name.
+            ("AGENT\u{200d}S.md", "AGENTS.md"),
+            (".claude", ".claudex"),
+        ] {
+            assert!(!same_name(name, wanted), "{name} {wanted}");
+        }
+    }
+
+    /// A file whose name holds a token stays on this computer whatever it holds, and so does its
+    /// deletion: its path would carry the token.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_whose_name_holds_a_token_is_kept_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path();
+        std::fs::create_dir_all(folder.join("cache")).unwrap();
+        let named = "cache/sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV.json";
+        std::fs::write(folder.join(named), "{\"clean\": true}\n").unwrap();
+        assert_eq!(kept_off(folder, named), Some(KeptOff::HoldsAToken));
+        assert_eq!(
+            kept_off(
+                folder,
+                "cache/sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUV-gone.json"
+            ),
+            Some(KeptOff::HoldsAToken)
+        );
+        // A name that only mentions the prefix saves.
+        std::fs::write(folder.join("cache/sk-ant-notes.md"), "notes\n").unwrap();
+        assert_eq!(kept_off(folder, "cache/sk-ant-notes.md"), None);
     }
 
     #[test]

@@ -110,6 +110,7 @@ fn a_local_engine_turns_tool_steps_have_the_lanes_own_labels() {
                 "server": crate::claude_code::events::TOOL_SERVER,
                 "tool": tool,
                 "status": "completed",
+                "engine": crate::claude_code::job::ENGINE,
             }
         })];
         let messages = extract_codex_messages(&events);
@@ -131,6 +132,44 @@ fn a_local_engine_turns_tool_steps_have_the_lanes_own_labels() {
     assert_eq!(
         other[0].metadata.as_ref().unwrap().get("activity"),
         activity_labels::mcp_tool_activity("github").as_ref()
+    );
+}
+
+/// A Codex turn whose configuration names an MCP server `claude-code` (`claude mcp serve`) keeps
+/// the label any server's tool gets: only the lane's own steps, which carry its mark, get the
+/// lane's table (regression-1).
+#[test]
+fn a_codex_turns_mcp_server_named_claude_code_keeps_the_tool_label() {
+    for tool in ["Read", "Grep", "Glob", "LS", "NotebookRead", "WebFetch"] {
+        let events = vec![json!({
+            "type": "item.completed",
+            "item": { "id": format!("call_{tool}"), "type": "mcp_tool_call",
+                      "server": "claude-code", "tool": tool, "status": "completed" }
+        })];
+        let messages = extract_codex_messages(&events);
+        assert_eq!(messages.len(), 1, "{tool}");
+        let activity = messages[0].metadata.as_ref().unwrap().get("activity");
+        assert_eq!(
+            activity,
+            activity_labels::mcp_tool_activity("claude-code").as_ref(),
+            "{tool}"
+        );
+        assert_ne!(
+            activity.and_then(|activity| activity.get("key")),
+            Some(&json!("builtin/look")),
+            "{tool}"
+        );
+    }
+    // A mark of another engine is no lane step either.
+    let events = vec![json!({
+        "type": "item.completed",
+        "item": { "id": "call", "type": "mcp_tool_call", "server": "claude-code",
+                  "tool": "Read", "status": "completed", "engine": "another-engine" }
+    })];
+    let messages = extract_codex_messages(&events);
+    assert_eq!(
+        messages[0].metadata.as_ref().unwrap().get("activity"),
+        activity_labels::mcp_tool_activity("claude-code").as_ref()
     );
 }
 
@@ -198,10 +237,48 @@ fn a_turn_says_how_many_programs_it_left_running_were_stopped() {
     let metadata = one.metadata.expect("metadata");
     assert_eq!(metadata["kind"], "claude_code_programs_stopped");
     assert_eq!(metadata["count"], 1);
+    assert_eq!(
+        metadata["presentation"],
+        json!({ "placement": "reply_note" })
+    );
     let three = claude_code_turn::programs_stopped_step(3).expect("a step");
     assert_eq!(
         three.content,
         "Claude Code left 3 programs running when it finished; Instafy stopped them."
     );
     assert_eq!(three.metadata.expect("metadata")["count"], 3);
+}
+
+/// Every note of a local-engine turn is a status step Studio shows under the reply once the turn
+/// is done, Details closed or not: its metadata carries the generic placement, which the
+/// controller keeps under `details` (xpc-notes-1), beside the note's own keys.
+#[test]
+fn a_turns_notes_carry_the_reply_note_placement() {
+    let note = claude_code_turn::status_step(
+        "Claude Code's changes stayed on this computer and weren't saved to the space.".into(),
+        "claude_code_changes_not_saved",
+        json!({ "reason": "save_failed", "paths": ["README.md"] }),
+    );
+    assert_eq!(note.message_type.as_deref(), Some("status"));
+    assert_eq!(
+        note.metadata,
+        Some(json!({
+            "kind": "claude_code_changes_not_saved",
+            "presentation": { "placement": "reply_note" },
+            "reason": "save_failed",
+            "paths": ["README.md"],
+        }))
+    );
+    let bare = claude_code_turn::status_step("Held.".into(), "claude_code_held_pages", json!({}));
+    assert_eq!(
+        bare.metadata,
+        Some(json!({
+            "kind": "claude_code_held_pages",
+            "presentation": { "placement": "reply_note" },
+        }))
+    );
+    assert_eq!(
+        crate::claude_code::events::reply_note(),
+        json!({ "placement": crate::claude_code::events::REPLY_NOTE_PLACEMENT })
+    );
 }

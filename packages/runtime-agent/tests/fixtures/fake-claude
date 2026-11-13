@@ -11,6 +11,7 @@
 #   FAKE_CLAUDE_VERSION     the `--version` answer: version/<name>.txt (default: supported)
 #   FAKE_CLAUDE_HELP        the `--help` answer: help/<name>.txt (default: full)
 #   FAKE_CLAUDE_AUTH        the `auth status` answer: auth/<name>.json (default: claude-ai)
+#   FAKE_CLAUDE_PROBE_DELAY seconds each of those three answers waits first (default: none)
 #   FAKE_CLAUDE_SCENARIO    the `--print` run: scenarios/<name>.jsonl (default: record-only,
 #                           which only records the call)
 #   FAKE_CLAUDE_SESSION     the session id a scenario prints for @SESSION@ (default: a fixed UUID)
@@ -74,6 +75,9 @@ respond() {
   kind="$1"
   name="$2"
   extension="$3"
+  if [ -n "${FAKE_CLAUDE_PROBE_DELAY:-}" ]; then
+    /bin/sleep "$FAKE_CLAUDE_PROBE_DELAY" </dev/null >/dev/null 2>&1
+  fi
   case "$name" in
     hang) exec /bin/sleep 60 ;;
     flood) /usr/bin/yes 'fake claude output' | /usr/bin/head -c 400000; exit 0 ;;

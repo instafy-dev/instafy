@@ -18,14 +18,21 @@
 //!    [`JobExecution`]: provider `claude-code`, the lane's conversation state, `apply/files`,
 //!    `origin/apply`, `claude-code/usage` and `claude-code/run-log`, never a `codex/run-log`.
 //!
-//! A failure saves nothing and fails the job with its `claude-code/failure` code; a resume miss
-//! also resets the session (2.7). A Stop ends as a lost lease, and the executor reports what the
-//! turn changed. While the runtime shuts down, the turn reports nothing.
+//! However `claude` ended, what it changed under another chat's page is put back first. A failure
+//! saves nothing and fails the job with its `claude-code/failure` code; a resume miss also resets
+//! the session (2.7). A save that fails after a run that went well fails nothing: the reply is
+//! delivered, with a note that the changes stayed on this computer (D-C/D-V). A Stop ends as a
+//! lost lease, and the executor reports what the turn changed. While the runtime shuts down, the
+//! turn reports nothing.
+//!
+//! Every status step the turn sends as a note (what stayed on this computer, what was not saved,
+//! permission denials, programs stopped) carries `presentation.placement: "reply_note"`: Studio
+//! shows it under the reply once the turn is done, whether Details is open or not.
 
 use super::*;
 use crate::claude_code::command::{McpConfigFile, turn_command};
-use crate::claude_code::events::redact_tokens;
 use crate::claude_code::events::{EventAdapter, LaneFailure, PROVIDER};
+use crate::claude_code::events::{redact_tokens, reply_note};
 use crate::claude_code::job::{LaneJob, failure_artifacts, not_ready_failure, resume_session};
 use crate::claude_code::saves::{KeptOff, kept_off_all, kept_off_sentence};
 use crate::claude_code::supervise::{TurnEnd, TurnSpec, supervise};
@@ -43,6 +50,11 @@ fn lane_error(failure: LaneFailure, extra: Vec<JsonValue>) -> anyhow::Error {
     })
 }
 
+/// The note of a turn that went well whose save failed: its changes are in the folder on this
+/// computer only (D-C/D-V). Details holds the error (`origin/apply-error`).
+const CHANGES_NOT_SAVED: &str =
+    "Claude Code's changes stayed on this computer and weren't saved to the space.";
+
 /// A failure with no code of 5.5's table: its own words, in Details.
 fn uncoded(message: impl Into<String>) -> LaneFailure {
     LaneFailure {
@@ -52,9 +64,10 @@ fn uncoded(message: impl Into<String>) -> LaneFailure {
     }
 }
 
-/// A status step of the turn: a note under its reply, never part of it (3.7).
-fn status_step(content: String, kind: &str, details: JsonValue) -> JobMessage {
-    let mut metadata = json!({ "kind": kind });
+/// A status step of the turn: a note under its reply, never part of it (3.7), which Studio shows
+/// there once the turn is done ([`reply_note`]).
+pub(super) fn status_step(content: String, kind: &str, details: JsonValue) -> JobMessage {
+    let mut metadata = json!({ "kind": kind, "presentation": reply_note() });
     if let (Some(map), JsonValue::Object(details)) = (metadata.as_object_mut(), details) {
         map.extend(details);
     }
@@ -285,11 +298,9 @@ impl JobProcessor {
             cleanup_confirmed = outcome.cleanup_confirmed,
             "Claude Code's turn ended"
         );
-        if matches!(outcome.end, TurnEnd::Shutdown) {
-            return Err(anyhow::Error::new(stopped_turn::ShutdownReportsNothing));
-        }
-        // Whether or not the run ended well, a page another chat made is as it was before
-        // anything reads the folder.
+        // However the run ended, the runtime's shutdown included, a page another chat made is as
+        // it was before anything reads the folder (3.8, step 2). It is a change on this computer
+        // only, so a turn that reports nothing still makes it.
         held_pages
             .put_back(
                 &folder,
@@ -297,6 +308,9 @@ impl JobProcessor {
                 space_pages::TurnSteps::of_events(&folder, &events),
             )
             .await;
+        if matches!(outcome.end, TurnEnd::Shutdown) {
+            return Err(anyhow::Error::new(stopped_turn::ShutdownReportsNothing));
+        }
         let mut artifacts: Vec<JsonValue> = Vec::new();
         artifacts.extend(adapter.usage_artifact());
         artifacts.push(adapter.run_log().artifact());
@@ -424,17 +438,31 @@ impl JobProcessor {
                                 error.context("job lease lost before its changes were saved")
                             );
                         }
-                        artifacts.push(apply_files_artifact(&files));
+                        // The run went well, so its reply is delivered: the turn is not failed.
+                        // Its changes stay on this computer, a note says so, and Details has the
+                        // error. Nothing was saved, so `apply/files` lists nothing (D-C/D-V).
+                        let error = adapter.redactor().text(&format!("{error:#}"));
+                        warn!(
+                            job_id = %job.id,
+                            %error,
+                            "Claude Code's changes couldn't be saved to the space; they stay on this computer"
+                        );
                         artifacts.push(json!({
                             "kind": "origin/apply-error",
-                            "metadata": { "error": error.to_string() },
+                            "metadata": { "error": error },
                         }));
-                        return Err(lane_error(
-                            uncoded(adapter.redactor().text(&format!(
-                                "Claude Code finished, but its changes couldn't be saved to the space: {error}"
-                            ))),
-                            artifacts,
+                        status_steps.push(status_step(
+                            CHANGES_NOT_SAVED.to_string(),
+                            "claude_code_changes_not_saved",
+                            json!({
+                                "reason": "save_failed",
+                                "paths": files
+                                    .iter()
+                                    .map(|file| redact_tokens(&file.workspace_path))
+                                    .collect::<Vec<_>>(),
+                            }),
                         ));
+                        files.clear();
                     }
                 }
             }

@@ -20,10 +20,12 @@
 //!   programs the turn left running that it stopped, for the status step that says so.
 //! - **Shutdown.** While the runtime's shutdown signal is set, the turn reports nothing.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -99,6 +101,9 @@ pub struct TurnLimits {
     max_unparsed_lines: usize,
     stderr_tail_bytes: usize,
     cleanup_latch: &'static AtomicBool,
+    /// For tests of the unconfirmed cleanup: a process of the turn outlives every kill.
+    #[cfg(test)]
+    unkillable: bool,
 }
 
 impl TurnLimits {
@@ -114,7 +119,17 @@ impl TurnLimits {
             max_unparsed_lines: MAX_UNPARSED_LINES,
             stderr_tail_bytes: STDERR_TAIL_BYTES,
             cleanup_latch: &super::CLEANUP_UNCONFIRMED,
+            #[cfg(test)]
+            unkillable: false,
         }
+    }
+
+    /// For tests of the unconfirmed cleanup: one process of the turn outlives every kill, which
+    /// nothing hermetic does otherwise.
+    #[cfg(test)]
+    pub(crate) fn with_a_process_that_outlives_the_kill(mut self) -> Self {
+        self.unkillable = true;
+        self
     }
 
     pub fn wall_clock(&self) -> Duration {
@@ -331,34 +346,66 @@ async fn read_some(stdout: &mut Option<ChildStdout>, buffer: &mut [u8]) -> io::R
     }
 }
 
-/// The last `keep` bytes `reader` printed. When it printed more, the first line kept is cut
-/// short, and is left out: a cut inside a path would leave a part of it that redaction no longer
-/// recognizes.
-async fn tail_of(mut reader: impl AsyncRead + Unpin, keep: usize) -> Vec<u8> {
-    let mut tail = std::collections::VecDeque::with_capacity(keep.min(READ_CHUNK_BYTES));
-    let mut chunk = vec![0u8; 8 * 1024];
-    let mut cut = false;
-    loop {
-        match reader.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                tail.extend(&chunk[..read]);
-                let excess = tail.len().saturating_sub(keep);
-                cut |= excess > 0;
-                tail.drain(..excess);
+/// The last bytes a stream printed, kept as they are read: a reader stopped before the stream
+/// ended, because a process left behind holds it open, still leaves what it read.
+#[derive(Clone)]
+struct Tail {
+    keep: usize,
+    kept: Arc<std::sync::Mutex<Kept>>,
+}
+
+#[derive(Default)]
+struct Kept {
+    bytes: VecDeque<u8>,
+    /// More was read than is kept.
+    cut: bool,
+}
+
+impl Tail {
+    fn new(keep: usize) -> Self {
+        Self {
+            keep,
+            kept: Arc::default(),
+        }
+    }
+
+    fn kept(&self) -> std::sync::MutexGuard<'_, Kept> {
+        self.kept.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Reads `reader` to its end, keeping its last bytes.
+    async fn read(self, mut reader: impl AsyncRead + Unpin) {
+        let mut chunk = vec![0u8; 8 * 1024];
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    let mut kept = self.kept();
+                    kept.bytes.extend(&chunk[..read]);
+                    let excess = kept.bytes.len().saturating_sub(self.keep);
+                    kept.cut |= excess > 0;
+                    kept.bytes.drain(..excess);
+                }
             }
         }
     }
-    let mut tail: Vec<u8> = tail.into_iter().collect();
-    if cut {
-        let start = tail
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .or_else(|| tail.iter().position(u8::is_ascii_whitespace))
-            .map_or(tail.len(), |at| at + 1);
-        tail.drain(..start);
+
+    /// What was read so far, at most the last `keep` bytes. When more was read, the first line
+    /// kept is cut short, and is left out: a cut inside a path would leave a part of it that
+    /// redaction no longer recognizes.
+    fn bytes(&self) -> Vec<u8> {
+        let kept = self.kept();
+        let mut tail: Vec<u8> = kept.bytes.iter().copied().collect();
+        if kept.cut {
+            let start = tail
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .or_else(|| tail.iter().position(u8::is_ascii_whitespace))
+                .map_or(tail.len(), |at| at + 1);
+            tail.drain(..start);
+        }
+        tail
     }
-    tail
 }
 
 /// SIGTERM to `claude`'s pid only: the group holds runtime-agent itself.
@@ -446,6 +493,24 @@ fn take_line(
     }
 }
 
+/// Whether a turn's cleanup is confirmed: every process the tracker saw is gone (`cleanup`) and
+/// `claude` was reaped (`status`). When it is not, `latch` is set and the runtime takes no more
+/// work (3.6).
+fn settle_cleanup(
+    cleanup: &anyhow::Result<()>,
+    status: Option<ExitStatus>,
+    latch: &AtomicBool,
+) -> bool {
+    let confirmed = cleanup.is_ok() && status.is_some();
+    if !confirmed {
+        latch.store(true, Ordering::Release);
+        warn!(
+            "a Claude Code turn's programs could not be confirmed stopped; this runtime takes no more work"
+        );
+    }
+    confirmed
+}
+
 /// A spawn that failed: nothing at the checked path, or a file it may not run.
 fn spawn_failure(error: &io::Error) -> LaneFailure {
     let code = match error.kind() {
@@ -490,6 +555,10 @@ pub async fn supervise(
         )));
     };
     let mut tree = ProcessTree::new(pid, limits.cleanup_latch);
+    #[cfg(test)]
+    if limits.unkillable {
+        tree = tree.with_a_survivor(Duration::from_millis(100));
+    }
     let prompt_writer = child.stdin.take().map(|stdin| {
         let prompt = spec.prompt.to_owned();
         OwnedTask::spawn(async move {
@@ -498,10 +567,11 @@ pub async fn supervise(
             }
         })
     });
-    let stderr_tail = child
+    let stderr_tail = Tail::new(limits.stderr_tail_bytes);
+    let stderr_reader = child
         .stderr
         .take()
-        .map(|stderr| OwnedTask::spawn(tail_of(stderr, limits.stderr_tail_bytes)));
+        .map(|stderr| OwnedTask::spawn(stderr_tail.clone().read(stderr)));
     let mut stdout = child.stdout.take();
 
     let started = Instant::now();
@@ -630,21 +700,15 @@ pub async fn supervise(
             }
         }
     };
-    let cleanup_confirmed = cleanup.is_ok() && status.is_some();
-    if !cleanup_confirmed {
-        limits.cleanup_latch.store(true, Ordering::Release);
-        warn!(
-            "a Claude Code turn's programs could not be confirmed stopped; this runtime takes no more work"
-        );
-    }
+    let cleanup_confirmed = settle_cleanup(&cleanup, status, limits.cleanup_latch);
     drop(prompt_writer);
-    let stderr_bytes = match stderr_tail {
-        Some(task) => task.join_within(STDERR_WITHIN).await.unwrap_or_default(),
-        None => Vec::new(),
-    };
+    if let Some(reader) = stderr_reader {
+        // A process left behind may hold stderr open: what was read by then is kept.
+        let _ = reader.join_within(STDERR_WITHIN).await;
+    }
     let stderr = adapter
         .redactor()
-        .text(String::from_utf8_lossy(&stderr_bytes).trim());
+        .text(String::from_utf8_lossy(&stderr_tail.bytes()).trim());
     adapter.note_ignored(ignored);
 
     let (reason, term_sent) = match stopping {
@@ -805,6 +869,13 @@ mod tests {
         assert_eq!(split(3, &[b"\n\n"]), [Some(Vec::new()), Some(Vec::new())]);
     }
 
+    /// The last `keep` bytes `reader` printed, read to its end.
+    async fn tail_of(reader: impl AsyncRead + Unpin, keep: usize) -> Vec<u8> {
+        let tail = Tail::new(keep);
+        tail.clone().read(reader).await;
+        tail.bytes()
+    }
+
     #[tokio::test]
     async fn stderr_keeps_its_tail_from_its_first_whole_line() {
         let lines: Vec<u8> = (0..4_000u32)
@@ -825,5 +896,108 @@ mod tests {
         assert!(tail.starts_with(b"word") && words.ends_with(&tail));
         let long: Vec<u8> = (0..40_000u32).map(|n| b'a' + (n % 26) as u8).collect();
         assert!(tail_of(&long[..], 16 * 1024).await.is_empty());
+    }
+
+    /// A process left behind holds `claude`'s stderr open, so its reader never sees the end and is
+    /// stopped: what it read by then, the crash text that classifies the failure, is kept.
+    #[tokio::test]
+    async fn stderr_keeps_what_it_read_when_its_stream_never_ends() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+        writer
+            .write_all(
+                b"Starting\nTypeError: undefined is not a function\n    at /Users/person/.local/share/claude/cli.js:12:34\n",
+            )
+            .await
+            .unwrap();
+        let tail = Tail::new(STDERR_TAIL_BYTES);
+        let reader = OwnedTask::spawn(tail.clone().read(reader));
+        assert!(
+            reader
+                .join_within(Duration::from_millis(200))
+                .await
+                .is_none(),
+            "the stream is still open"
+        );
+        let kept = String::from_utf8(tail.bytes()).unwrap();
+        assert!(
+            kept.contains("TypeError: undefined is not a function")
+                && kept.contains("/.local/share/claude/cli.js"),
+            "{kept}"
+        );
+        drop(writer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_is_confirmed_only_when_every_process_is_gone_and_claude_was_reaped() {
+        use std::os::unix::process::ExitStatusExt;
+        static CONFIRMED: AtomicBool = AtomicBool::new(false);
+        static SURVIVORS: AtomicBool = AtomicBool::new(false);
+        static UNREAPED: AtomicBool = AtomicBool::new(false);
+        let exited = Some(ExitStatus::from_raw(0));
+        assert!(settle_cleanup(&Ok(()), exited, &CONFIRMED));
+        assert!(!CONFIRMED.load(Ordering::Acquire));
+        // Processes survived the kill.
+        let survivors = Err(anyhow::anyhow!(
+            "supervised descendants survived termination"
+        ));
+        assert!(!settle_cleanup(&survivors, exited, &SURVIVORS));
+        assert!(SURVIVORS.load(Ordering::Acquire));
+        // Every tracked process is gone, but `claude` itself was never reaped.
+        assert!(!settle_cleanup(&Ok(()), None, &UNREAPED));
+        assert!(UNREAPED.load(Ordering::Acquire));
+    }
+
+    /// A turn whose processes cannot be confirmed gone sets the latch it was given and still
+    /// reports how it ended (3.6).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_whose_processes_outlive_the_kill_sets_its_latch_and_still_ends() {
+        static LATCH: AtomicBool = AtomicBool::new(false);
+        let folder = tempfile::tempdir().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "cat >/dev/null; echo 'TypeError: the turn broke' >&2; exit 1",
+            ])
+            .current_dir(folder.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let limits = TurnLimits::standard()
+            .with_cleanup_latch(&LATCH)
+            .with_a_process_that_outlives_the_kill();
+        let stop = JobCancelSignal::new();
+        let shutdown = ShutdownSignal::new();
+        let mut adapter = EventAdapter::new(folder.path(), None);
+        let outcome = supervise(
+            command,
+            TurnSpec {
+                prompt: "Fix the test\n",
+                resumed: false,
+                stop: &stop,
+                shutdown: &shutdown,
+            },
+            &limits,
+            &mut adapter,
+            &mut |_| {},
+        )
+        .await;
+        assert!(!outcome.cleanup_confirmed);
+        assert!(LATCH.load(Ordering::Acquire));
+        assert!(!super::super::CLEANUP_UNCONFIRMED.load(Ordering::Acquire));
+        assert_eq!(
+            outcome.exit_status.and_then(|status| status.code()),
+            Some(1)
+        );
+        assert!(
+            matches!(&outcome.end, TurnEnd::Failed(failure) if failure.code == Some(FailureCode::Crashed)),
+            "{:?}",
+            outcome.end
+        );
+        assert!(outcome.stderr.contains("TypeError: the turn broke"));
     }
 }

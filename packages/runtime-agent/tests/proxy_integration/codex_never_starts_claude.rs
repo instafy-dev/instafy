@@ -2,6 +2,12 @@
 //! real turn with an inert, localhost provider: the model asks for `claude` by its bare name and
 //! by an absolute path, and Codex refuses both before anything runs, with the harness's reason.
 //! The same program under another name runs, so the refusal is the rule's and not the shell's.
+//!
+//! Were the rule lost, the bare name would run whatever `claude` Codex's shell finds, so the model
+//! asks for it only after Codex's shell showed that `claude` is the test's stand-in: commands run
+//! in a shell that is no login shell (`login: false`), which keeps the test's PATH. A login shell
+//! would put the system's folders (/usr/local/bin, /opt/homebrew/bin) first. If the name resolves
+//! elsewhere, the turn ends there and the test fails, with nothing named `claude` started.
 
 use super::*;
 use std::collections::HashMap;
@@ -37,8 +43,11 @@ fn a_codex_turn_is_refused_claude_by_name_and_by_path_via_proxy() -> Result<()> 
 }
 
 struct Provider {
-    /// The commands the model asks for, in order.
+    /// The commands the model asks for, in order. The first finds where `claude` resolves.
     commands: Vec<String>,
+    /// The stand-in: the model asks for anything after the first command only when `claude`
+    /// resolved to it.
+    stand_in: String,
     requests: StdMutex<Vec<Value>>,
 }
 
@@ -61,6 +70,19 @@ fn final_answer(summary: &str) -> Value {
     })
 }
 
+/// The text of a tool output, whether Codex sent it as a string or as content items.
+fn output_text(output: &Value) -> String {
+    match output {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    }
+}
+
 fn tool_outputs(request: &Value) -> Vec<(String, String)> {
     request["input"]
         .as_array()
@@ -70,10 +92,18 @@ fn tool_outputs(request: &Value) -> Vec<(String, String)> {
         .map(|item| {
             (
                 item["call_id"].as_str().unwrap_or_default().to_string(),
-                item["output"].to_string(),
+                output_text(&item["output"]),
             )
         })
         .collect()
+}
+
+/// What a command printed: the text after the output's `Output:` header.
+fn printed(output: &str) -> &str {
+    output
+        .rsplit_once("Output:\n")
+        .map_or(output, |(_, printed)| printed)
+        .trim()
 }
 
 async fn provider_request(
@@ -86,13 +116,22 @@ async fn provider_request(
         Some(format!("Bearer {PROVIDER_KEY}").as_str())
     );
     // Each request carries the outputs of the commands asked for so far: ask for the next one.
-    let answered = tool_outputs(&body).len();
+    let outputs = tool_outputs(&body);
+    let answered = outputs.len();
     state.requests.lock().unwrap().push(body);
+    // Only once Codex's shell resolves `claude` to the stand-in: otherwise the turn ends here.
+    let resolved = outputs
+        .iter()
+        .find(|(call, _)| call == "call_0")
+        .is_some_and(|(_, output)| printed(output) == state.stand_in);
+    if answered > 0 && !resolved {
+        return response(final_answer("claude is not the stand-in."));
+    }
     match state.commands.get(answered) {
         Some(command) => response(json!({
             "id":format!("tool_{answered}"),"type":"function_call","name":"exec_command",
             "call_id":format!("call_{answered}"),"status":"completed",
-            "arguments":json!({ "cmd":command, "max_output_tokens":256 }).to_string()
+            "arguments":json!({ "cmd":command, "login":false, "max_output_tokens":256 }).to_string()
         })),
         None => response(final_answer("Done.")),
     }
@@ -160,7 +199,8 @@ async fn run_case() -> Result<()> {
         "CODEX_AUTH_PATH",
         auth_path.to_string_lossy(),
     ));
-    // `claude` resolves to the stand-in by name too.
+    // The stand-in's folder first: in a shell that is no login shell, `claude` resolves to it by
+    // name too, which the turn's first command shows before the model asks for it.
     settings.push(EnvGuard::set(
         "PATH",
         format!(
@@ -172,10 +212,12 @@ async fn run_case() -> Result<()> {
 
     let state = Arc::new(Provider {
         commands: vec![
+            "command -v claude".to_string(),
             "claude -p 'Tidy the README'".to_string(),
             format!("{} --version", claude.display()),
             format!("{} --version", not_claude.display()),
         ],
+        stand_in: claude.display().to_string(),
         requests: StdMutex::new(Vec::new()),
     });
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -300,21 +342,27 @@ async fn run_case() -> Result<()> {
         .unwrap_or_default()
         .into_iter()
         .collect();
-    assert_eq!(outputs.len(), 3, "an output for each command: {outputs:?}");
-    for call in ["call_0", "call_1"] {
+    assert_eq!(
+        outputs.len(),
+        4,
+        "an output for each command; `claude` must resolve to the stand-in ({}) first: {outputs:?}",
+        state.stand_in
+    );
+    assert_eq!(printed(&outputs["call_0"]), state.stand_in);
+    for call in ["call_1", "call_2"] {
         let output = &outputs[call];
         assert!(output.contains(REFUSED), "{call}: {output}");
     }
     assert!(
         !ran.join("claude").exists(),
         "claude ran: {:?}",
-        outputs["call_0"]
+        outputs["call_1"]
     );
     // The same program under another name runs.
     assert!(
-        outputs["call_2"].contains("not-claude ran"),
+        outputs["call_3"].contains("not-claude ran"),
         "{}",
-        outputs["call_2"]
+        outputs["call_3"]
     );
     assert!(ran.join("not-claude").exists());
 

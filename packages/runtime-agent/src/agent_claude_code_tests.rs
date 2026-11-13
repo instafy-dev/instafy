@@ -122,6 +122,8 @@ struct StandIn {
     stopped: Arc<AtomicBool>,
     /// What `/runtime/register` answers.
     registered: Arc<Mutex<Value>>,
+    /// What `/lease/acquire` answers instead of a lease: a status and its body.
+    lease_refusal: Arc<Mutex<Option<(u16, String)>>>,
 }
 
 async fn controller(
@@ -137,7 +139,12 @@ async fn controller(
         "/agent/heartbeat" if stand_in.stopped.load(Ordering::SeqCst) => {
             (AxumStatusCode::CONFLICT, "job lease no longer held").into_response()
         }
-        "/lease/acquire" => Json(json!({ "leaseId": Uuid::new_v4() })).into_response(),
+        "/lease/acquire" => match stand_in.lease_refusal.lock().clone() {
+            Some((status, body)) => {
+                (AxumStatusCode::from_u16(status).unwrap(), body).into_response()
+            }
+            None => Json(json!({ "leaseId": Uuid::new_v4() })).into_response(),
+        },
         "/access_token" => Json(json!({
             "originId": Uuid::new_v4(),
             "endpoint": stand_in.origin.lock().clone(),
@@ -194,8 +201,56 @@ impl Drop for Space {
     }
 }
 
+/// The origin settings of a Desktop runtime whose space has a canonical remote: its turns refresh
+/// the folder before they run. Nothing listens at the remote.
+fn desktop_origin_with_a_remote() -> crate::config::OriginSettings {
+    crate::config::OriginSettings {
+        origin_id: Uuid::new_v4(),
+        bind_host: "127.0.0.1".to_string(),
+        bind_port: 0,
+        git_remote_url: Some("http://127.0.0.1:9/space.git".to_string()),
+        git_branch: "main".to_string(),
+        git_remote_name: "origin".to_string(),
+        git_author_name: "Instafy Origin".to_string(),
+        git_author_email: "origin@instafy.invalid".to_string(),
+        rathole_bin: "rathole".to_string(),
+        rathole_state_dir: PathBuf::from("/nonexistent"),
+        rathole_use_subcommands: false,
+        tunnel_refresh_margin: Duration::from_secs(60),
+        controller_internal_token: None,
+        skip_auth: false,
+        enable_presence_heartbeat: false,
+        presence_interval: Duration::from_secs(60),
+        jwks_url: reqwest::Url::parse("http://127.0.0.1:9/.well-known/jwks.json").unwrap(),
+        max_archive_bytes: 1024,
+        staging_root: None,
+        endpoint: None,
+        protocols: vec!["http".to_string()],
+        region: None,
+        device_id: None,
+        metadata: None,
+        mode: "desktop".to_string(),
+        tunnel_enabled: false,
+        tunnel_provider: None,
+        tunnel_hostname: None,
+        tunnel_url: None,
+        tunnel_id: None,
+        tunnel_status: None,
+        tunnel_expires_at: None,
+        tunnel_last_rotation_at: None,
+    }
+}
+
 impl Space {
     async fn new(latch: &'static AtomicBool) -> Self {
+        Self::with_origin(latch, None).await
+    }
+
+    /// A space whose runtime has `origin_settings`.
+    async fn with_origin(
+        latch: &'static AtomicBool,
+        origin_settings: Option<crate::config::OriginSettings>,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(temp.path()).unwrap();
         for (name, mode) in [
@@ -304,7 +359,7 @@ impl Space {
             strict_mode: false,
             dev_isolation_mode: true,
             display_name: None,
-            origin: None,
+            origin: origin_settings,
             codex_bin: None,
             require_codex_bin: false,
             runtime_access_token: Some("inert-test-runtime-token".into()),
@@ -561,6 +616,45 @@ impl Space {
     fn read(&self, path: &str) -> Option<String> {
         std::fs::read_to_string(self.folder.join(path)).ok()
     }
+
+    /// The stand-in answers `/runtime/register` for this runtime with an agent token that lasts a
+    /// week: a renewal task then registers again only when the lane's capability changes.
+    fn answer_registrations(&self) {
+        let mut claims = self.claims(self.registration.runtime_id, &AGENT_SCOPES, None);
+        claims.exp = chrono::Utc::now().timestamp() + 7 * 24 * 3_600;
+        *self.stand_in.registered.lock() = json!({
+            "runtime_id": self.registration.runtime_id,
+            "agent_token": self.sign(&claims),
+            "lease_url": "/agent/lease",
+            "heartbeat_url": "/agent/heartbeat",
+            "agent_token_expires_at": (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339(),
+        });
+    }
+
+    /// The `claudeCode` capability the last `/runtime/register` carried.
+    fn registered_capability(&self) -> Value {
+        self.requests_to("/runtime/register")
+            .last()
+            .expect("a registration")["capabilities"]["claudeCode"]
+            .clone()
+    }
+
+    /// The renewal task of a cycle that starts from `registered`, and what it publishes.
+    fn renewal_task(
+        &self,
+        registered: Registered,
+    ) -> (RegistrationRenewalTask, watch::Receiver<Option<Registered>>) {
+        let (sender, receiver) = watch::channel::<Option<Registered>>(None);
+        let task = RegistrationRenewalTask::spawn(
+            self.config.clone(),
+            self.client.clone(),
+            registered,
+            ShutdownSignal::new(),
+            sender,
+            Some(self.lane),
+        );
+        (task, receiver)
+    }
 }
 
 fn artifact<'a>(completion: &'a Value, kind: &str) -> Option<&'a Value> {
@@ -688,11 +782,41 @@ fn a_lane_turn_runs_on_the_persons_claude_code_and_saves_through_the_lane_filter
         }
         assert!(!content.contains("plugins/tool/.mcp.json"), "{content}");
         assert!(!content.contains("notes/prefix.md"), "{content}");
+        // A file whose name holds a key stays on this computer, and only its redacted name is
+        // sent.
+        assert!(content.contains("cache/[redacted].json"), "{content}");
+        assert!(
+            space
+                .read("cache/sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV.json")
+                .is_some()
+        );
         assert!(
             !steps
                 .iter()
                 .any(|step| step.to_string().contains("sk-ant-api03"))
         );
+        assert!(
+            !completion.to_string().contains("sk-ant-api03"),
+            "{completion:#}"
+        );
+        // Every note of the turn is shown under its reply, Details closed or not.
+        let notes: Vec<&Value> = steps
+            .iter()
+            .filter(|step| {
+                step["metadata"]["kind"]
+                    .as_str()
+                    .is_some_and(|kind| kind.starts_with("claude_code_"))
+            })
+            .collect();
+        assert!(notes.len() >= 2, "{steps:#?}");
+        for note in notes {
+            assert_eq!(note["message_type"], "status", "{note:#}");
+            assert_eq!(
+                note["metadata"]["presentation"],
+                json!({ "placement": "reply_note" }),
+                "{note:#}"
+            );
+        }
 
         // Another chat's page is as it was, and not saved; a note says so.
         assert_eq!(space.read(HELD_PAGE).as_deref(), Some(HELD_PAGE_TEXT));
@@ -804,8 +928,17 @@ fn only_this_runtimes_session_is_resumed_and_a_miss_resets_it() {
     });
 }
 
+/// Whether the step that names the turn's edit of another chat's page reached the stand-in: the
+/// turn has read that edit, so it is the turn's to put back.
+fn held_page_edit_streamed(space: &Space) -> bool {
+    space.requests_to("/agent/message").iter().any(|step| {
+        step["message_type"] == "file_change" && step["metadata"]["paths"] == json!([HELD_PAGE])
+    })
+}
+
 /// A Stop: SIGTERM, then the kill path. The turn sends no completion, and its stopped-turn report
-/// names what it changed by folder-relative paths, without Claude Code's own files.
+/// names what it changed by folder-relative paths, without Claude Code's own files. Another chat's
+/// page it changed is put back first.
 #[test]
 fn a_stopped_turn_sends_its_report_without_claude_codes_files_and_no_completion() {
     static LATCH: AtomicBool = AtomicBool::new(false);
@@ -821,8 +954,10 @@ fn a_stopped_turn_sends_its_report_without_claude_codes_files_and_no_completion(
         eventually("the turn edited README.md and started a helper", || {
             space.read("README.md").as_deref() == Some("# Demo, half renamed\n")
                 && space.pid("child").is_some()
+                && held_page_edit_streamed(&space)
         })
         .await;
+        assert_ne!(space.read(HELD_PAGE).as_deref(), Some(HELD_PAGE_TEXT));
         let child = space.pid("child").unwrap();
         // The person presses Stop: the next heartbeat hears of it.
         space.stand_in.stopped.store(true, Ordering::SeqCst);
@@ -849,16 +984,19 @@ fn a_stopped_turn_sends_its_report_without_claude_codes_files_and_no_completion(
             report["artifacts"][0]["metadata"]["provider"],
             "claude-code"
         );
-        // Nothing was saved, and what the turn wrote stays in the folder.
+        // Nothing was saved, and what the turn wrote stays in the folder, apart from another
+        // chat's page, which is as it was.
         assert!(space.origin_requests.lock().is_empty());
         assert!(space.read(".claude/settings.local.json").is_some());
         assert!(space.read("CLAUDE.local.md").is_some());
+        assert_eq!(space.read(HELD_PAGE).as_deref(), Some(HELD_PAGE_TEXT));
         eventually("the helper the turn started is gone", || !alive(child)).await;
         assert!(!LATCH.load(Ordering::SeqCst));
     });
 }
 
-/// While the runtime shuts down, a running turn reports nothing: no completion, no report.
+/// While the runtime shuts down, a running turn reports nothing: no completion, no report. It
+/// still puts back what it changed under another chat's page, on this computer (turn-1).
 #[test]
 fn a_turn_the_runtime_shutdown_ends_reports_nothing() {
     static LATCH: AtomicBool = AtomicBool::new(false);
@@ -876,10 +1014,12 @@ fn a_turn_the_runtime_shutdown_ends_reports_nothing() {
             let job = job.clone();
             async move { space.handle(job, 0).await }
         });
-        eventually("the turn edited README.md", || {
+        eventually("the turn edited README.md and another chat's page", || {
             space.read("README.md").as_deref() == Some("# Demo, half renamed\n")
+                && held_page_edit_streamed(&space)
         })
         .await;
+        assert_ne!(space.read(HELD_PAGE).as_deref(), Some(HELD_PAGE_TEXT));
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(60), running)
             .await
@@ -887,7 +1027,183 @@ fn a_turn_the_runtime_shutdown_ends_reports_nothing() {
             .unwrap();
         assert!(space.requests_to("/agent/complete").is_empty());
         assert!(space.requests_to("/agent/stopped").is_empty());
+        assert_eq!(space.read(HELD_PAGE).as_deref(), Some(HELD_PAGE_TEXT));
         assert!(!LATCH.load(Ordering::SeqCst));
+    });
+}
+
+/// When the controller refuses the pre-turn refresh the workspace lease (403), it would refuse the
+/// turn's save too: the turn ends before anything of Claude Code runs, not even the probe, with
+/// the refresh's record (3.1, step 3).
+#[test]
+fn a_turn_whose_save_the_refresh_refuses_starts_no_claude() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::with_origin(&LATCH, Some(desktop_origin_with_a_remote())).await;
+        space
+            .executor
+            .set_local_origin_sync(Some(crate::origin::LocalOriginSync {
+                origin_id: Uuid::new_v4(),
+                endpoint: space.stand_in.origin.lock().clone(),
+                read_only_refresh: None,
+                working_state: None,
+            }));
+        *space.stand_in.lease_refusal.lock() =
+            Some((403, "this job may not write the space".to_string()));
+        space.scenario("success");
+        let job = space.job();
+        space.handle(job.clone(), 0).await;
+
+        let completion = space.completion(job.id);
+        assert_eq!(completion["outcome"], "failed", "{completion:#}");
+        assert_eq!(
+            completion["error_message"],
+            "Octo can't save changes in this space right now, so it didn't start making them.",
+            "{completion:#}"
+        );
+        let refresh = artifact(&completion, "origin/refresh").expect("the refresh's record");
+        assert_eq!(refresh["metadata"]["mode"], "skipped", "{refresh:#}");
+        assert_eq!(space.requests_to("/lease/acquire").len(), 1);
+        assert!(space.calls().is_empty(), "not even a probe");
+        assert!(space.origin_requests.lock().is_empty());
+        assert_eq!(space.read("README.md").as_deref(), Some("# Demo\n"));
+    });
+}
+
+/// A Stop that reaches the turn after its probe, before `claude` starts: the last check before the
+/// spawn asks the controller, and nothing starts. The turn sends no completion, and no report,
+/// since it changed nothing (3.1, step 6).
+#[test]
+fn a_stop_before_the_spawn_starts_no_claude() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::new(&LATCH).await;
+        space.scenario("success");
+        // No heartbeat runs: only the check right before the spawn hears of the Stop.
+        space.stand_in.stopped.store(true, Ordering::SeqCst);
+        let job = space.job();
+        space.handle(job.clone(), 0).await;
+
+        assert!(!space.calls().is_empty(), "the probe ran");
+        assert!(space.print_calls().is_empty(), "claude never started");
+        assert!(
+            !space.requests_to("/agent/heartbeat").is_empty(),
+            "the check before the spawn asked"
+        );
+        assert!(space.requests_to("/agent/complete").is_empty());
+        assert!(space.requests_to("/agent/stopped").is_empty());
+        assert!(space.origin_requests.lock().is_empty());
+    });
+}
+
+/// A run that went well whose folder's `git status` cannot be read at its end saves nothing: its
+/// reply is delivered, with a note under it that its changes stayed on this computer (3.8,
+/// step 1).
+#[test]
+fn a_turn_whose_changes_cannot_be_read_saves_nothing_and_says_so() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::new(&LATCH).await;
+        space.scenario("status-unreadable");
+        let job = space.job();
+        space.handle(job.clone(), 0).await;
+
+        let completion = space.completion(job.id);
+        assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
+        assert_eq!(completion["summary"], "Renamed the project in README.md.");
+        let files = artifact(&completion, "apply/files").expect("the turn's files");
+        assert_eq!(files["files"], json!([]), "{files:#}");
+        assert!(artifact(&completion, "origin/apply").is_none());
+        assert!(space.origin_requests.lock().is_empty());
+        assert!(space.requests_to("/lease/acquire").is_empty());
+        let steps = space.requests_to("/agent/message");
+        let note = steps
+            .iter()
+            .find(|step| step["metadata"]["kind"] == "claude_code_changes_not_saved")
+            .expect("a note that the changes stayed on this computer");
+        assert_eq!(note["metadata"]["reason"], "status_unreadable");
+        assert_eq!(
+            note["metadata"]["presentation"],
+            json!({ "placement": "reply_note" })
+        );
+        assert!(
+            note["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("Claude Code's changes stayed on this computer"),
+            "{note:#}"
+        );
+        assert_eq!(
+            space.read("README.md").as_deref(),
+            Some("# Demo, renamed\n")
+        );
+    });
+}
+
+/// A save that fails after a run that went well fails nothing (D-C/D-V): the reply is delivered
+/// with a note that the changes stayed on this computer, Details has the error, redacted, and the
+/// turn's files list nothing, since nothing was saved.
+#[test]
+fn a_save_that_fails_after_a_good_run_delivers_the_reply_with_a_note() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::new(&LATCH).await;
+        space.scenario("success");
+        let folder = space.folder.display().to_string();
+        *space.stand_in.lease_refusal.lock() = Some((
+            500,
+            format!("the store under {folder} is down (sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX)"),
+        ));
+        let job = space.job();
+        space.handle(job.clone(), 60).await;
+
+        let completion = space.completion(job.id);
+        assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
+        assert_eq!(
+            completion["summary"],
+            "Renamed the project in README.md and wrote docs/notes.md."
+        );
+        assert!(failure_code(&completion).is_none(), "{completion:#}");
+        let files = artifact(&completion, "apply/files").expect("the turn's files");
+        assert_eq!(files["files"], json!([]), "{files:#}");
+        assert!(artifact(&completion, "origin/apply").is_none());
+        let error = artifact(&completion, "origin/apply-error").expect("the save's error")
+            ["metadata"]["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("500"), "{error}");
+        assert!(error.contains("[redacted]"), "{error}");
+        assert!(!error.contains("sk-ant-api03"), "{error}");
+        assert!(!error.contains(&folder), "{error}");
+        assert!(space.origin_requests.lock().is_empty());
+
+        let steps = space.requests_to("/agent/message");
+        let note = steps
+            .iter()
+            .find(|step| step["metadata"]["kind"] == "claude_code_changes_not_saved")
+            .expect("a note that the changes stayed on this computer");
+        assert_eq!(
+            note["content"],
+            "Claude Code's changes stayed on this computer and weren't saved to the space."
+        );
+        assert_eq!(note["message_type"], "status");
+        assert_eq!(note["metadata"]["reason"], "save_failed");
+        assert_eq!(
+            note["metadata"]["paths"],
+            json!(["README.md", "docs/notes.md"])
+        );
+        assert_eq!(
+            note["metadata"]["presentation"],
+            json!({ "placement": "reply_note" })
+        );
+        // The changes are in the folder on this computer.
+        assert_eq!(
+            space.read("README.md").as_deref(),
+            Some("# Demo, renamed\n")
+        );
+        assert!(space.read("docs/notes.md").is_some());
+        assert!(space.requests_to("/agent/stopped").is_empty());
     });
 }
 
@@ -947,6 +1263,22 @@ fn a_refused_turn_starts_no_claude() {
         space.handle(forged.clone(), 0).await;
         assert_eq!(space.completion(forged.id)["outcome"], "failed");
 
+        // The pre-flight: a folder with no repository, where nothing could say what a turn
+        // changed (D-A).
+        std::fs::rename(space.folder.join(".git"), space.folder.join("git-away")).unwrap();
+        let unrecorded = space.job();
+        space.handle(unrecorded.clone(), 0).await;
+        let completion = space.completion(unrecorded.id);
+        assert_eq!(failure_code(&completion), Some("preflight_failed"));
+        assert_eq!(
+            completion["error_message"].as_str().unwrap().lines().next(),
+            Some(
+                "This space's folder on this computer has no git repository, so Instafy couldn't tell what a turn changes."
+            ),
+            "{completion:#}"
+        );
+        std::fs::rename(space.folder.join("git-away"), space.folder.join(".git")).unwrap();
+
         // The pre-flight: the person's own settings at the folder's root.
         write(&space.folder, ".claude/settings.local.json", "{}");
         let configured = space.job();
@@ -977,6 +1309,36 @@ fn a_refused_turn_starts_no_claude() {
 
         assert!(space.print_calls().is_empty(), "no turn started");
         assert!(space.requests_to("/agent/secrets").is_empty());
+    });
+}
+
+/// A runtime whose process captured no grant (as here: nothing ran the capture) runs a leased lane
+/// job on nothing: the job fails as `binary_missing` before any heartbeat, secrets fetch or probe.
+#[test]
+fn a_lane_job_on_a_runtime_without_a_lane_fails_as_binary_missing() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::new(&LATCH).await;
+        space.scenario("success");
+        // The job loop of this runtime, without the test lane `Space` gives its own.
+        let executor = Arc::new(AgentExecutor::new(space.config.clone()));
+        let job = space.job();
+        RuntimeAgent::handle_job(
+            space.client.clone(),
+            executor,
+            &space.registration,
+            job.clone(),
+            60,
+            Arc::new(Mutex::new(HashSet::new())),
+        )
+        .await
+        .unwrap();
+        let completion = space.completion(job.id);
+        assert_eq!(completion["outcome"], "failed", "{completion:#}");
+        assert_eq!(failure_code(&completion), Some("binary_missing"));
+        assert!(space.requests_to("/agent/heartbeat").is_empty());
+        assert!(space.requests_to("/agent/secrets").is_empty());
+        assert!(space.calls().is_empty(), "not even a probe");
     });
 }
 
@@ -1032,35 +1394,16 @@ fn a_probe_that_changes_the_capability_registers_again() {
     static LATCH: AtomicBool = AtomicBool::new(false);
     on_a_worker_stack(async {
         let space = Space::new(&LATCH).await;
-        let registered = space.claims(space.registration.runtime_id, &AGENT_SCOPES, None);
-        let mut registered = registered;
-        registered.exp = chrono::Utc::now().timestamp() + 7 * 24 * 3_600;
-        let agent_token = space.sign(&registered);
-        *space.stand_in.registered.lock() = json!({
-            "runtime_id": space.registration.runtime_id,
-            "agent_token": agent_token,
-            "lease_url": "/agent/lease",
-            "heartbeat_url": "/agent/heartbeat",
-            "agent_token_expires_at": (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339(),
-        });
+        space.answer_registrations();
         // Registered as ready: the startup probe.
         assert!(space.lane.probe_and_publish().await.readiness.is_ready());
         let mut registration = space.registration.clone();
         registration.agent_token_expires_at =
             Some((chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339());
-        let (renewed_sender, mut renewed) = watch::channel::<Option<Registration>>(None);
-        let renewal = RegistrationRenewalTask::spawn(
-            space.config.clone(),
-            space.client.clone(),
+        let (renewal, mut renewed) = space.renewal_task(Registered {
             registration,
-            ShutdownSignal::new(),
-            renewed_sender,
-            Some(space.lane),
-        );
-        let registered_capability = |space: &Space| {
-            space.requests_to("/runtime/register").last().unwrap()["capabilities"]["claudeCode"]
-                .clone()
-        };
+            claude_code: space.lane.capability(),
+        });
 
         // A turn's probe disagrees: Claude Code was replaced by an older one.
         space.set("FAKE_CLAUDE_VERSION", "old");
@@ -1071,7 +1414,7 @@ fn a_probe_that_changes_the_capability_registers_again() {
             .expect("registered again")
             .unwrap();
         assert_eq!(
-            registered_capability(&space),
+            space.registered_capability(),
             json!({ "version": 1, "ready": false, "reason": "unsupported_version" })
         );
         assert_eq!(
@@ -1090,11 +1433,70 @@ fn a_probe_that_changes_the_capability_registers_again() {
             .await
             .expect("registered again")
             .unwrap();
-        let capability = registered_capability(&space);
+        let capability = space.registered_capability();
         assert_eq!(capability["ready"], true, "{capability}");
         assert_eq!(capability["cli"], "2.1.314");
         reprobe.abort();
         renewal.abort().await;
         assert_eq!(space.requests_to("/runtime/register").len(), 2);
+    });
+}
+
+/// A capability a probe publishes after a registration read it, and before the renewal task of
+/// that registration subscribed, registers again: the subscription counts it as seen, and nothing
+/// publishes it again (3.2). Right after a fresh registration, and after a renewal that the next
+/// cycle adopts while it restarts its origin and tunnel. A task that starts from the value the lane
+/// still publishes registers nothing.
+#[test]
+fn a_capability_published_before_the_renewal_task_starts_registers_again() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::new(&LATCH).await;
+        space.answer_registrations();
+        let not_ready = json!({ "version": 1, "ready": false, "reason": "unsupported_version" });
+
+        // A cycle registers as ready.
+        assert!(space.lane.probe_and_publish().await.readiness.is_ready());
+        let ready = space.lane.capability().expect("published");
+        let registered = Registered::register(&space.client, &space.config, Some(space.lane))
+            .await
+            .unwrap();
+        assert_eq!(registered.claude_code.as_ref(), Some(&ready));
+        assert_eq!(space.registered_capability(), ready);
+
+        // While it starts its origin and tunnel, a probe finds an older Claude Code.
+        space.set("FAKE_CLAUDE_VERSION", "old");
+        assert!(space.lane.probe_and_publish().await.capability_changed);
+        let (renewal, mut renewed) = space.renewal_task(registered);
+        tokio::time::timeout(Duration::from_secs(30), renewed.changed())
+            .await
+            .expect("registered again")
+            .unwrap();
+        assert_eq!(space.registered_capability(), not_ready);
+        let adopted = renewed.borrow_and_update().clone().expect("a renewal");
+        assert_eq!(adopted.claude_code.as_ref(), Some(&not_ready));
+        renewal.abort().await;
+
+        // The next cycle adopts that renewal; before its task starts, the person updates Claude Code.
+        space.set("FAKE_CLAUDE_VERSION", "supported");
+        assert!(space.lane.probe_and_publish().await.capability_changed);
+        let (renewal, mut renewed) = space.renewal_task(adopted);
+        tokio::time::timeout(Duration::from_secs(30), renewed.changed())
+            .await
+            .expect("registered again")
+            .unwrap();
+        assert_eq!(space.registered_capability(), ready);
+        let adopted = renewed.borrow_and_update().clone().expect("a renewal");
+        assert_eq!(adopted.claude_code.as_ref(), Some(&ready));
+        renewal.abort().await;
+
+        // Nothing changed since: the next cycle's task registers nothing.
+        let registrations = space.requests_to("/runtime/register").len();
+        assert_eq!(registrations, 3);
+        let (renewal, renewed) = space.renewal_task(adopted);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!renewed.has_changed().unwrap());
+        renewal.abort().await;
+        assert_eq!(space.requests_to("/runtime/register").len(), registrations);
     });
 }

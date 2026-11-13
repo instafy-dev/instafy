@@ -947,14 +947,9 @@ impl Live {
             .turn(&folder, prompt, None, StopPlan::AtEndOfTurn)
             .await;
         let tasks = task_event_summary(&turn.lines);
-        let started = tasks
-            .iter()
-            .any(|task| task.subtype == "task_started" && task.id && task.task_type.is_some());
-        let ended = tasks
-            .iter()
-            .any(|task| task.subtype == "task_notification" && task.id);
+        let reply = turn.reply();
         let detail = format!(
-            "task events: {}\nresults: {}; final reply mentions PONG: {}\n{}",
+            "task events: {}\nresults: {}; the last after the task_notification: {}; final reply mentions PONG: {}\n{}",
             if tasks.is_empty() {
                 "none".to_string()
             } else {
@@ -965,17 +960,14 @@ impl Live {
                     .join("; ")
             },
             turn.adapter.results(),
-            turn.reply().contains("PONG"),
+            result_after_notification(&turn.lines),
+            reply.contains("PONG"),
             turn.summary()
         );
         report.add(
             "item 5",
-            "system/task_started, task_notification and background_tasks_changed carry a task id and task_type",
-            if started && ended {
-                Verdict::Holds
-            } else {
-                Verdict::Unconfirmed
-            },
+            "system/task_started, task_notification and background_tasks_changed carry a task id and task_type, and the turn ends at the result after the subagent's",
+            background_verdict(&tasks, &turn.lines, turn.adapter.results(), &reply),
             detail,
         );
     }
@@ -1673,18 +1665,62 @@ struct TaskEvent {
     id: bool,
     task_type: Option<String>,
     status: Option<String>,
+    /// A `background_tasks_changed` event's own keys, and its list as the adapter reads it.
+    keys: Vec<String>,
+    list: Option<TaskList>,
+}
+
+/// The list of a `background_tasks_changed` event: the shape the adapter guesses (3.6).
+struct TaskList {
+    /// The key that holds it.
+    key: String,
+    /// Each entry's keys.
+    entries: Vec<Vec<String>>,
+    /// The entries with no id the adapter reads.
+    without_id: usize,
 }
 
 impl TaskEvent {
     fn describe(&self) -> String {
-        format!(
+        let mut described = format!(
             "{} (task id: {}, task_type: {}, status: {})",
             self.subtype,
             self.id,
             self.task_type.as_deref().unwrap_or("none"),
             self.status.as_deref().unwrap_or("none")
-        )
+        );
+        if self.subtype == "background_tasks_changed" {
+            match &self.list {
+                Some(list) => described.push_str(&format!(
+                    " list under {}: {} entries, {} with no id the adapter reads; entry keys: {}",
+                    list.key,
+                    list.entries.len(),
+                    list.without_id,
+                    list.entries
+                        .iter()
+                        .map(|keys| format!("[{}]", keys.join(", ")))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )),
+                None => described.push_str(&format!(
+                    " no list the adapter reads; event keys: [{}]",
+                    self.keys.join(", ")
+                )),
+            }
+        }
+        described
     }
+}
+
+/// Whether `value` has a task id the adapter reads: a string that is not blank, or a number.
+fn reads_a_task_id(value: &Value) -> bool {
+    ["task_id", "taskId", "id"]
+        .iter()
+        .any(|key| match value.get(*key) {
+            Some(Value::String(id)) => !id.trim().is_empty(),
+            Some(Value::Number(_)) => true,
+            _ => false,
+        })
 }
 
 /// The `system/task_*` and `background_tasks_changed` events, as the adapter reads them (3.6).
@@ -1700,9 +1736,7 @@ fn task_event_summary(lines: &[Value]) -> Vec<TaskEvent> {
             )
             .then(|| TaskEvent {
                 subtype: subtype.to_string(),
-                id: ["task_id", "taskId", "id"]
-                    .iter()
-                    .any(|key| line.get(*key).is_some_and(Value::is_string)),
+                id: reads_a_task_id(line),
                 task_type: ["task_type", "taskType"]
                     .iter()
                     .find_map(|key| line.get(*key).and_then(Value::as_str))
@@ -1711,9 +1745,76 @@ fn task_event_summary(lines: &[Value]) -> Vec<TaskEvent> {
                     .get("status")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                keys: line
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect())
+                    .unwrap_or_default(),
+                list: ["tasks", "background_tasks", "backgroundTasks"]
+                    .iter()
+                    .find_map(|key| Some((*key, line.get(*key)?.as_array()?)))
+                    .map(|(key, entries)| TaskList {
+                        key: key.to_string(),
+                        entries: entries
+                            .iter()
+                            .map(|entry| {
+                                entry
+                                    .as_object()
+                                    .map(|object| object.keys().cloned().collect())
+                                    .unwrap_or_default()
+                            })
+                            .collect(),
+                        without_id: entries
+                            .iter()
+                            .filter(|entry| !reads_a_task_id(entry))
+                            .count(),
+                    }),
             })
         })
         .collect()
+}
+
+/// Whether the latest top-level `result` came after the first `task_notification`: the reply is
+/// not the interim one of a result printed while the background task still ran.
+fn result_after_notification(lines: &[Value]) -> bool {
+    let notified = lines.iter().position(|line| {
+        line.get("type").and_then(Value::as_str) == Some("system")
+            && line.get("subtype").and_then(Value::as_str) == Some("task_notification")
+    });
+    let replied = lines.iter().rposition(|line| {
+        line.get("type").and_then(Value::as_str) == Some("result")
+            && line
+                .get("parent_tool_use_id")
+                .is_none_or(|parent| parent.is_null())
+    });
+    matches!((notified, replied), (Some(notified), Some(replied)) if replied > notified)
+}
+
+/// Item 5's verdict (3.6). It holds only when a `task_started` carried a task id and type, a
+/// `task_notification` a task id, every `background_tasks_changed` a list whose entries all carry
+/// an id the adapter reads, and the turn's reply came from a result after the notification: at
+/// least two results, the later one with the subagent's PONG.
+fn background_verdict(
+    tasks: &[TaskEvent],
+    lines: &[Value],
+    results: usize,
+    reply: &str,
+) -> Verdict {
+    let started = tasks
+        .iter()
+        .any(|task| task.subtype == "task_started" && task.id && task.task_type.is_some());
+    let ended = tasks
+        .iter()
+        .any(|task| task.subtype == "task_notification" && task.id);
+    let lists_read = tasks
+        .iter()
+        .filter(|task| task.subtype == "background_tasks_changed")
+        .all(|task| task.list.as_ref().is_some_and(|list| list.without_id == 0));
+    let replied_after = results >= 2 && reply.contains("PONG") && result_after_notification(lines);
+    if started && ended && lists_read && replied_after {
+        Verdict::Holds
+    } else {
+        Verdict::Unconfirmed
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1878,6 +1979,71 @@ fn the_suite_reads_the_stream_shapes_the_lane_expects() {
         tasks
             .iter()
             .any(|task| task.subtype == "task_notification" && task.id)
+    );
+}
+
+/// Item 5 holds only on what the end-of-turn rule reads, and only when the turn's reply is the
+/// result after the subagent's: an interim result, a list whose entries the adapter cannot tell
+/// apart, or a list under another key leaves it unconfirmed, with the shapes in its details.
+#[test]
+fn item_5_holds_only_when_the_reply_follows_the_task_and_every_list_is_read() {
+    let lines = fixture_lines("result-subagent");
+    let verdict = |lines: &[Value], results: usize, reply: &str| {
+        background_verdict(&task_event_summary(lines), lines, results, reply)
+    };
+    assert_eq!(verdict(&lines, 2, "PONG"), Verdict::Holds);
+    // The turn ended at the interim result, or its reply is not the subagent's answer.
+    assert_eq!(verdict(&lines, 1, "PONG"), Verdict::Unconfirmed);
+    assert_eq!(
+        verdict(&lines, 2, "A helper is looking."),
+        Verdict::Unconfirmed
+    );
+    let notification = lines
+        .iter()
+        .position(|line| line["subtype"] == "task_notification")
+        .expect("a task_notification");
+    let mut late = lines.clone();
+    let moved = late.remove(notification);
+    late.push(moved);
+    assert!(!result_after_notification(&late));
+    assert_eq!(verdict(&late, 2, "PONG"), Verdict::Unconfirmed);
+
+    // A list the adapter reads, and one whose entry it cannot tell apart.
+    let listed = |list: Value| {
+        let mut listed = lines.clone();
+        listed.insert(notification, list);
+        listed
+    };
+    let read = listed(serde_json::json!({
+        "type": "system", "subtype": "background_tasks_changed",
+        "tasks": [{"task_id": "agent_1", "task_type": "local_agent"}],
+    }));
+    assert_eq!(verdict(&read, 2, "PONG"), Verdict::Holds);
+    let unread = listed(serde_json::json!({
+        "type": "system", "subtype": "background_tasks_changed",
+        "tasks": [{"agent_id": "agent_1", "task_type": "local_agent"}],
+    }));
+    assert_eq!(verdict(&unread, 2, "PONG"), Verdict::Unconfirmed);
+    let described: Vec<String> = task_event_summary(&unread)
+        .iter()
+        .map(TaskEvent::describe)
+        .collect();
+    assert!(
+        described
+            .iter()
+            .any(|event| event.contains("1 with no id") && event.contains("[agent_id, task_type]")),
+        "{described:?}"
+    );
+    let elsewhere = listed(serde_json::json!({
+        "type": "system", "subtype": "background_tasks_changed",
+        "running": [{"task_id": "agent_1"}],
+    }));
+    assert_eq!(verdict(&elsewhere, 2, "PONG"), Verdict::Unconfirmed);
+    assert!(
+        task_event_summary(&elsewhere)
+            .iter()
+            .map(TaskEvent::describe)
+            .any(|event| event.contains("no list the adapter reads") && event.contains("running")),
     );
 }
 

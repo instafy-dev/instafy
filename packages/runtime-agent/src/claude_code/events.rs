@@ -18,7 +18,7 @@
 //! | `Edit`, `Write`, `NotebookEdit` | `item.completed` `file_change` with paths relative to the folder |
 //! | `WebSearch` | `item.completed` `web_search` `{query}` |
 //! | `TodoWrite`, or `TaskCreate` and `TaskUpdate` | `item.updated` `todo_list` with the whole list |
-//! | any other tool | `item.started`, `item.completed` `mcp_tool_call` `{server: "claude-code", tool}` |
+//! | any other tool | `item.started`, `item.completed` `mcp_tool_call` `{server: "claude-code", tool, engine: "claude-code"}` |
 //! | events of Claude Code's subagents (`parent_tool_use_id`) | the same mapping, but never a draft |
 //! | thinking | ignored, and not logged |
 //! | top-level `result` | none: the reply, success and usage; 3.6 says when it ends the turn |
@@ -35,10 +35,13 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use super::job::ENGINE;
 use super::{FailureCode, LaunchGrant};
 use crate::jobs::JobMessage;
 
-/// The tool server a lane turn's tool steps name (`mcp_tool_call`, 3.7).
+/// The tool server a lane turn's tool steps name (`mcp_tool_call`, 3.7). Those steps also carry
+/// `engine: "claude-code"`, which no Codex item does: a step's label comes from the lane's own
+/// table only with that mark, so a Codex turn's MCP server of the same name keeps its own label.
 pub const TOOL_SERVER: &str = "claude-code";
 /// What a step shows for a path outside the space's folder (3.7).
 pub const OUTSIDE_THIS_SPACE: &str = "outside this space";
@@ -57,6 +60,15 @@ pub const BACKGROUND_COMMAND_TASK: &str = "local_bash";
 pub const AMBIENT_TASK: &str = "ambient";
 /// The `provider` of a lane turn's conversation state and artifacts (2.6).
 pub const PROVIDER: &str = "claude-code";
+/// Where Studio shows a note of the turn, such as its changes staying on this computer: under the
+/// reply, once the turn is done, whether Details is open or not. A status step carries it as
+/// `presentation.placement`, which the controller keeps with the step's other metadata.
+pub const REPLY_NOTE_PLACEMENT: &str = "reply_note";
+
+/// The `presentation` of a status step that is a note of the turn ([`REPLY_NOTE_PLACEMENT`]).
+pub fn reply_note() -> Value {
+    json!({ "placement": REPLY_NOTE_PLACEMENT })
+}
 
 const COMMAND_OUTPUT_TRUNCATED: &str = "[command output truncated; keeping tail]\n";
 /// A text block stops drafting here; the draft itself stops growing at 128 KiB.
@@ -482,16 +494,25 @@ fn is_the_folder(reported: &Path, folder: &Path) -> bool {
 
 /// The live background tasks of a turn, from `system/task_started`, `task_notification` and
 /// `background_tasks_changed` (3.6). Ambient tasks are left out.
+///
+/// Only an event that says a task ended (or is ambient) removes it. A list that leaves a task out,
+/// a notification with no status that says it ended, and a listed task with no id this reads keep
+/// the turn open: ending a turn too early stops a background subagent mid-work and saves its
+/// half-done edits, while a turn kept open ends when `claude` exits once its work is done.
 #[derive(Clone, Debug, Default)]
 pub struct BackgroundTasks {
     /// Each live task's id and its `task_type`, when it said.
     live: BTreeMap<String, Option<String>>,
+    /// The live tasks, background commands left out, that the latest `background_tasks_changed`
+    /// listed with no id this reads: they keep the turn open until a list no longer has them.
+    unidentified: usize,
 }
 
 const TASK_ID_KEYS: [&str; 3] = ["task_id", "taskId", "id"];
 /// A line's `type` is its own (`system`), so a task's type is read from these only.
 const TASK_TYPE_KEYS: [&str; 2] = ["task_type", "taskType"];
-const TASK_RUNNING_STATUSES: [&str; 4] = ["running", "pending", "started", "in_progress"];
+/// A listed task is no line of its own, so its `type` may be its task type.
+const ENTRY_TYPE_KEYS: [&str; 3] = ["task_type", "taskType", "type"];
 
 impl BackgroundTasks {
     pub fn observe(&mut self, line: &Value) {
@@ -504,56 +525,70 @@ impl BackgroundTasks {
                     self.live.remove(&id);
                     return;
                 }
-                if self.live.len() < MAX_LIVE_TASKS || self.live.contains_key(&id) {
-                    self.live.insert(id, task_type(line, &TASK_TYPE_KEYS));
-                }
+                self.insert(id, task_type(line, &TASK_TYPE_KEYS));
             }
             Some("task_notification") => {
-                // A notification says a task ended (`completed`, `failed`, `stopped`); one that
-                // says it still runs changes nothing.
-                let Some(id) = id_field(line, &TASK_ID_KEYS) else {
-                    return;
-                };
-                let running = str_field(line, "status")
-                    .is_some_and(|status| TASK_RUNNING_STATUSES.contains(&status));
-                if !running {
+                // A notification that says the task ended (`completed`, `failed`, `stopped`)
+                // removes it. Any other status, or none, says nothing this can rely on.
+                if has_ended(line)
+                    && let Some(id) = id_field(line, &TASK_ID_KEYS)
+                {
                     self.live.remove(&id);
                 }
             }
             Some("background_tasks_changed") => {
-                // The whole list of tasks that run now, when the event carries one.
-                const ENTRY_TYPE_KEYS: [&str; 3] = ["task_type", "taskType", "type"];
+                // The tasks that run now, when the event carries a list. Its shape is a guess, so
+                // the list only adds what it names and removes what it says ended.
                 let Some(tasks) = ["tasks", "background_tasks", "backgroundTasks"]
                     .iter()
                     .find_map(|key| line.get(*key).and_then(Value::as_array))
                 else {
                     return;
                 };
-                self.live = tasks
-                    .iter()
-                    .filter(|task| !is_ambient(task, &ENTRY_TYPE_KEYS) && !has_ended(task))
-                    .filter_map(|task| {
-                        Some((
-                            id_field(task, &TASK_ID_KEYS)?,
-                            task_type(task, &ENTRY_TYPE_KEYS),
-                        ))
-                    })
-                    .take(MAX_LIVE_TASKS)
-                    .collect();
+                let mut unidentified = 0;
+                for task in tasks {
+                    let gone = is_ambient(task, &ENTRY_TYPE_KEYS) || has_ended(task);
+                    let kind = task_type(task, &ENTRY_TYPE_KEYS);
+                    match id_field(task, &TASK_ID_KEYS) {
+                        Some(id) if gone => {
+                            self.live.remove(&id);
+                        }
+                        Some(id) => {
+                            // A listed task that does not say its type keeps the type it started
+                            // with.
+                            let kind = kind.or_else(|| self.live.get(&id).cloned().flatten());
+                            self.insert(id, kind);
+                        }
+                        None if !gone && kind.as_deref() != Some(BACKGROUND_COMMAND_TASK) => {
+                            unidentified += 1;
+                        }
+                        None => {}
+                    }
+                }
+                self.unidentified = unidentified;
             }
             _ => {}
         }
     }
 
-    /// Whether a top-level `result` must not end the turn yet: a live task is something other
-    /// than a background command or Monitor watch, such as a background subagent or workflow. A
-    /// task that did not say its type counts as such.
-    pub fn keeps_the_turn_open(&self) -> bool {
-        self.live
-            .values()
-            .any(|kind| kind.as_deref() != Some(BACKGROUND_COMMAND_TASK))
+    fn insert(&mut self, id: String, kind: Option<String>) {
+        if self.live.len() < MAX_LIVE_TASKS || self.live.contains_key(&id) {
+            self.live.insert(id, kind);
+        }
     }
 
+    /// Whether a top-level `result` must not end the turn yet: a live task is something other
+    /// than a background command or Monitor watch, such as a background subagent or workflow. A
+    /// task that did not say its type counts as such, and so does a listed task with no id.
+    pub fn keeps_the_turn_open(&self) -> bool {
+        self.unidentified > 0
+            || self
+                .live
+                .values()
+                .any(|kind| kind.as_deref() != Some(BACKGROUND_COMMAND_TASK))
+    }
+
+    /// The live tasks it knows by their id.
     pub fn live(&self) -> usize {
         self.live.len()
     }
@@ -1273,6 +1308,7 @@ impl EventAdapter {
                     "server": TOOL_SERVER,
                     "tool": name,
                     "status": "in_progress",
+                    "engine": ENGINE,
                 }
             })),
             _ => None,
@@ -1403,6 +1439,7 @@ impl EventAdapter {
                     "server": TOOL_SERVER,
                     "tool": tool.name,
                     "status": status,
+                    "engine": ENGINE,
                 }
             })),
         };
@@ -1501,6 +1538,7 @@ impl EventAdapter {
                 "kind": "claude_code_permission_denials",
                 "count": count,
                 "tools": tools,
+                "presentation": reply_note(),
             })),
         })
     }
@@ -2098,7 +2136,8 @@ mod tests {
         // A task that does not say its type counts as one that keeps the turn open.
         tasks.observe(&task("task_started", "w1", json!({})));
         assert!(tasks.keeps_the_turn_open());
-        // The whole list replaces what was live.
+        // A list adds what it names and removes what it says ended or is ambient; a live task it
+        // leaves out stays live.
         tasks.observe(&json!({
             "type": "system",
             "subtype": "background_tasks_changed",
@@ -2108,7 +2147,13 @@ mod tests {
                 {"task_id": "x", "task_type": "ambient"},
             ],
         }));
-        assert_eq!(tasks.live(), 1);
+        assert_eq!(tasks.live(), 3, "b1, w1 and b2");
+        assert!(tasks.keeps_the_turn_open(), "w1 is not in the list");
+        tasks.observe(&task(
+            "task_notification",
+            "w1",
+            json!({"status": "completed"}),
+        ));
         assert!(!tasks.keeps_the_turn_open());
         tasks.observe(&json!({
             "type": "system",
@@ -2119,6 +2164,79 @@ mod tests {
         // An event without a list changes nothing.
         tasks.observe(&json!({"type": "system", "subtype": "background_tasks_changed"}));
         assert!(tasks.keeps_the_turn_open());
+    }
+
+    /// The end-of-turn rule fails closed on a shape it does not know (3.6): a result while a
+    /// background subagent may still run never ends the turn.
+    #[test]
+    fn only_an_event_that_says_a_task_ended_lets_a_result_end_the_turn() {
+        let changed = |tasks: Value| json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks});
+
+        // A list that leaves out a live subagent, or lists only background commands.
+        let mut tasks = BackgroundTasks::default();
+        tasks.observe(&task(
+            "task_started",
+            "a1",
+            json!({"task_type": "local_agent"}),
+        ));
+        tasks.observe(&changed(json!([{"id": "bash_1", "type": "local_bash"}])));
+        tasks.observe(&changed(json!([])));
+        assert!(tasks.keeps_the_turn_open());
+        // A listed entry that does not say its type keeps the one it started with.
+        tasks.observe(&task(
+            "task_started",
+            "b1",
+            json!({"task_type": "local_bash"}),
+        ));
+        tasks.observe(&changed(json!([{"task_id": "b1"}])));
+        tasks.observe(&task(
+            "task_notification",
+            "a1",
+            json!({"status": "completed"}),
+        ));
+        assert!(!tasks.keeps_the_turn_open());
+
+        // A notification with no status, or one that does not say the task ended.
+        let mut tasks = BackgroundTasks::default();
+        tasks.observe(&task(
+            "task_started",
+            "a2",
+            json!({"task_type": "local_agent"}),
+        ));
+        for notification in [
+            json!({}),
+            json!({"status": "progress"}),
+            json!({"status": "running"}),
+            json!({"status": 3}),
+        ] {
+            tasks.observe(&task("task_notification", "a2", notification.clone()));
+            assert!(tasks.keeps_the_turn_open(), "{notification}");
+        }
+        tasks.observe(&task(
+            "task_notification",
+            "a2",
+            json!({"status": "failed"}),
+        ));
+        assert!(!tasks.keeps_the_turn_open());
+
+        // A listed task with no id this reads: the turn stays open until a list no longer has
+        // it. A background command with no id does not keep it open.
+        let mut tasks = BackgroundTasks::default();
+        tasks.observe(&changed(json!([
+            {"agent_id": "a3", "task_type": "local_agent"},
+            {"tool_use_id": "toolu_2", "type": "local_bash"},
+        ])));
+        assert_eq!(tasks.live(), 0);
+        assert!(tasks.keeps_the_turn_open());
+        tasks.observe(&changed(json!([
+            {"agent_id": "a3", "task_type": "local_agent", "status": "completed"},
+            {"tool_use_id": "toolu_2", "type": "local_bash"},
+        ])));
+        assert!(!tasks.keeps_the_turn_open());
+        tasks.observe(&changed(json!([{"agent_id": "a4"}])));
+        assert!(tasks.keeps_the_turn_open());
+        tasks.observe(&changed(json!([])));
+        assert!(!tasks.keeps_the_turn_open());
     }
 
     fn adapter() -> (tempfile::TempDir, PathBuf, EventAdapter) {
@@ -2217,7 +2335,7 @@ mod tests {
         assert_eq!(
             events,
             [
-                json!({"type": "item.started", "item": {"id": "toolu_1", "type": "mcp_tool_call", "server": "claude-code", "tool": "Read", "status": "in_progress"}})
+                json!({"type": "item.started", "item": {"id": "toolu_1", "type": "mcp_tool_call", "server": "claude-code", "tool": "Read", "status": "in_progress", "engine": "claude-code"}})
             ]
         );
         // A message's text with no tool call after it is no step.
@@ -2261,7 +2379,7 @@ mod tests {
             events,
             [
                 json!({"type": "item.completed", "item": {"id": "msg_sub:0", "type": "agent_message", "text": "Searching for usages.", "phase": "commentary"}}),
-                json!({"type": "item.started", "item": {"id": "toolu_grep", "type": "mcp_tool_call", "server": "claude-code", "tool": "Grep", "status": "in_progress"}}),
+                json!({"type": "item.started", "item": {"id": "toolu_grep", "type": "mcp_tool_call", "server": "claude-code", "tool": "Grep", "status": "in_progress", "engine": "claude-code"}}),
             ]
         );
     }
@@ -2356,9 +2474,12 @@ mod tests {
             assert_eq!(started[0]["item"]["type"], json!("mcp_tool_call"), "{name}");
             assert_eq!(started[0]["item"]["server"], json!("claude-code"));
             assert_eq!(started[0]["item"]["tool"], json!(name));
+            // The lane's mark, which no Codex item carries.
+            assert_eq!(started[0]["item"]["engine"], json!("claude-code"));
             let done = adapter.feed(&tool_result(&id, json!("ok"), false));
             assert_eq!(done[0]["type"], json!("item.completed"));
             assert_eq!(done[0]["item"]["status"], json!("completed"));
+            assert_eq!(done[0]["item"]["engine"], json!("claude-code"));
         }
         // A result for no known call, or a second result, makes nothing.
         assert!(
@@ -2729,11 +2850,15 @@ mod tests {
             step.content
                 .starts_with("Claude Code skipped 2 steps that need your OK")
         );
+        // A note of the turn: Studio shows it under the reply, Details closed or not.
         assert_eq!(
             step.metadata,
-            Some(
-                json!({"kind": "claude_code_permission_denials", "count": 2, "tools": ["Write", "Bash"]})
-            )
+            Some(json!({
+                "kind": "claude_code_permission_denials",
+                "count": 2,
+                "tools": ["Write", "Bash"],
+                "presentation": { "placement": "reply_note" },
+            }))
         );
         // The result's own list wins when it has one.
         let mut with_list = result("Done.", false);

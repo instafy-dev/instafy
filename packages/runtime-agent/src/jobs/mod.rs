@@ -21846,10 +21846,14 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                                 || server.eq_ignore_ascii_case("instafy_personal_browser")
                         });
                         // A local-engine turn's tool step is labelled from its own fixed table
-                        // (docs/Local-Engine-Turns.md 3.7).
-                        let lane_tool = (server == crate::claude_code::events::TOOL_SERVER)
-                            .then(|| activity_labels::claude_code_tool_activity(tool))
-                            .flatten();
+                        // (docs/Local-Engine-Turns.md 3.7): the step its event adapter made, which
+                        // carries the lane's mark. A Codex MCP server of the same name keeps the
+                        // label any server's tool gets.
+                        let lane_tool = (server == crate::claude_code::events::TOOL_SERVER
+                            && item.get("engine").and_then(JsonValue::as_str)
+                                == Some(crate::claude_code::job::ENGINE))
+                        .then(|| activity_labels::claude_code_tool_activity(tool))
+                        .flatten();
                         if let Some(activity) = lane_tool.or_else(|| {
                             browser_step
                                 .and_then(activity_labels::browser_step_activity)

@@ -1567,11 +1567,11 @@ pub fn mcp_tool_activity(server: &str) -> Option<JsonValue> {
 /// The tools of a local-engine turn that read or search the folder.
 const CLAUDE_CODE_LOOK_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead"];
 
-/// The label of a local-engine turn's tool step (`mcp_tool_call` with server `claude-code`,
-/// docs/Local-Engine-Turns.md 3.7), from a fixed table on the tool's name alone: a quiet label
-/// for reads and searches, the web-read label for `WebFetch`, the generic tool label for every
-/// other tool (`Agent`, `Task`, and any tool a later Claude Code adds). The tool step reads it in
-/// `extract_codex_messages`.
+/// The label of a local-engine turn's tool step (`mcp_tool_call` with server `claude-code` and
+/// the lane's `engine` mark, docs/Local-Engine-Turns.md 3.7), from a fixed table on the tool's
+/// name alone: a quiet label for reads and searches, the web-read label for `WebFetch`, the
+/// generic tool label for every other tool (`Agent`, `Task`, and any tool a later Claude Code
+/// adds). The tool step reads it in `extract_codex_messages`.
 pub fn claude_code_tool_activity(tool: &str) -> Option<JsonValue> {
     let label = if CLAUDE_CODE_LOOK_TOOLS.contains(&tool) {
         &FILE_LOOK

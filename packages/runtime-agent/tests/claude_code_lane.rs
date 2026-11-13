@@ -538,6 +538,50 @@ async fn while_not_ready_a_timed_probe_publishes_once_the_result_changes() {
     reprobes.abort();
 }
 
+/// The runtime registers, and so takes any turn, Codex's too, only once the startup probe ended:
+/// its three commands share one limit, the limit of one command, and a probe that runs out of it
+/// is `probe_failed`, which the timed re-probe corrects (3.2). A turn's probe keeps a limit for
+/// each command.
+#[tokio::test]
+async fn the_startup_probe_has_one_limit_for_its_three_commands() {
+    let machine = Machine::new();
+    let limit = Duration::from_secs(3);
+    // The limit, the last command's kill and a busy machine's slack.
+    let at_most = limit + Duration::from_secs(3);
+    let probe_failed = json!({ "version": 1, "ready": false, "reason": "probe_failed" });
+
+    // A sign-in check that never finishes.
+    machine.settings(&[("AUTH", "hang")]);
+    let lane = machine.lane().with_probe_timeout(limit);
+    let started = std::time::Instant::now();
+    let probe = lane.probe_and_publish_at_startup().await;
+    assert!(started.elapsed() < at_most, "{:?}", started.elapsed());
+    assert_eq!(probe.readiness.reason(), Some(NotReadyReason::ProbeFailed));
+    assert_eq!(lane.capability(), Some(probe_failed.clone()));
+    // A turn's probe waits out the sign-in check alone, and finds the lane ready.
+    assert!(!ready(&lane.probe().await).plan_sign_in());
+
+    // Commands that each finish within the limit, but not all three within it.
+    machine.settings(&[("PROBE_DELAY", "1")]);
+    let lane = machine.lane().with_probe_timeout(limit);
+    let started = std::time::Instant::now();
+    let probe = lane.probe_and_publish_at_startup().await;
+    assert!(started.elapsed() < at_most, "{:?}", started.elapsed());
+    assert_eq!(probe.readiness.reason(), Some(NotReadyReason::ProbeFailed));
+    assert_eq!(lane.capability(), Some(probe_failed));
+    assert!(lane.probe_and_publish().await.readiness.is_ready());
+
+    // A claude that answers in time is ready at startup.
+    machine.settings(&[]);
+    let lane = machine.lane().with_probe_timeout(limit);
+    assert!(
+        lane.probe_and_publish_at_startup()
+            .await
+            .readiness
+            .is_ready()
+    );
+}
+
 #[test]
 fn the_capture_refuses_what_others_can_write_or_the_workspace_holds() {
     let machine = Machine::new();
@@ -982,7 +1026,8 @@ fn the_capture_scrubs_the_grant_and_reports_the_capability_only_on_macos() {
         [root.join("workspace"), root.join("project")]
     );
 
-    // The capability exists only on macOS (D18), and never holds a path.
+    // The capability exists only on macOS (D18), and never holds a path. A leased lane job runs
+    // on the captured lane there, and elsewhere fails as `binary_missing`.
     let capability = claude_code::registration_capability();
     if cfg!(target_os = "macos") {
         assert_eq!(
@@ -997,9 +1042,16 @@ fn the_capture_scrubs_the_grant_and_reports_the_capability_only_on_macos() {
             }))
         );
         assert!(claude_code::lane().is_some());
+        assert!(
+            matches!(claude_code::lane_for_jobs(), Ok(lane) if std::ptr::eq(lane, captured_lane()))
+        );
     } else {
         assert_eq!(capability, None);
         assert!(claude_code::lane().is_none());
+        assert!(matches!(
+            claude_code::lane_for_jobs(),
+            Err(NotReadyReason::BinaryMissing)
+        ));
     }
 
     // A second capture keeps the first, and still scrubs.
@@ -1141,4 +1193,87 @@ fn a_personal_browser_runtime_reports_no_capability() {
     ));
     assert_eq!(claude_code::registration_capability(), None);
     assert!(claude_code::lane().is_none());
+    // A lane job leased here anyway runs nothing.
+    assert!(matches!(
+        claude_code::lane_for_jobs(),
+        Err(NotReadyReason::BinaryMissing)
+    ));
+}
+
+/// A malformed grant (a binary path that is not absolute) is no lane: where the lane is offered,
+/// the capability and a leased lane job say why; elsewhere there is no capability, and a lane job
+/// fails as `binary_missing`.
+#[test]
+fn a_malformed_grant_gives_its_reason_where_the_lane_is_offered() {
+    const TEST: &str = "a_malformed_grant_gives_its_reason_where_the_lane_is_offered";
+    if child_root().is_none() {
+        let machine = Machine::new();
+        let mut environment = launch_environment(&machine);
+        for (name, value) in &mut environment {
+            if name.as_str() == BIN_ENV {
+                *value = OsString::from("bin/claude");
+            }
+        }
+        in_child(TEST, environment);
+        return;
+    }
+
+    // SAFETY: this child process runs only this test, so no other thread uses the environment.
+    unsafe { claude_code::capture_and_scrub_launch_grant() };
+    for key in LAUNCH_GRANT_ENV_KEYS {
+        assert!(
+            std::env::var_os(key).is_none(),
+            "{key} stayed in the environment"
+        );
+    }
+    assert!(matches!(
+        claude_code::captured_launch_grant(),
+        Some(CapturedGrant::Unusable(NotReadyReason::BinaryUnsafe))
+    ));
+    assert!(claude_code::lane().is_none());
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            claude_code::registration_capability(),
+            Some(json!({ "version": 1, "ready": false, "reason": "binary_unsafe" }))
+        );
+        assert!(matches!(
+            claude_code::lane_for_jobs(),
+            Err(NotReadyReason::BinaryUnsafe)
+        ));
+    } else {
+        assert_eq!(claude_code::registration_capability(), None);
+        assert!(matches!(
+            claude_code::lane_for_jobs(),
+            Err(NotReadyReason::BinaryMissing)
+        ));
+    }
+}
+
+/// Desktop granted nothing: no capability, no lane, and a lane job leased anyway fails as
+/// `binary_missing`.
+#[test]
+fn without_a_grant_there_is_no_lane() {
+    const TEST: &str = "without_a_grant_there_is_no_lane";
+    if child_root().is_none() {
+        let machine = Machine::new();
+        let mut environment = launch_environment(&machine);
+        environment.retain(|(name, _)| !LAUNCH_GRANT_ENV_KEYS.contains(&name.as_str()));
+        in_child(TEST, environment);
+        return;
+    }
+
+    // SAFETY: this child process runs only this test, so no other thread uses the environment.
+    unsafe { claude_code::capture_and_scrub_launch_grant() };
+    assert!(matches!(
+        claude_code::captured_launch_grant(),
+        Some(CapturedGrant::Absent)
+    ));
+    assert_eq!(claude_code::registration_capability(), None);
+    assert!(claude_code::lane().is_none());
+    assert!(matches!(
+        claude_code::lane_for_jobs(),
+        Err(NotReadyReason::BinaryMissing)
+    ));
+    // The calls a probe would have made: none.
+    assert!(recorded_calls(&child_root().unwrap()).is_empty());
 }

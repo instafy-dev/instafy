@@ -15,6 +15,15 @@ const REGISTER_DELAY: Duration = Duration::from_millis(300);
 /// The controller's refusal of a deleted space's runtime.
 const SPACE_DELETED_BODY: &str = r#"{"message":"This space was deleted.","code":"space_deleted"}"#;
 
+/// A renewed registration the cycle adopts: one of a runtime without a local-engine lane, as every
+/// runtime of these tests is, so it carried no `claudeCode` capability.
+fn adopted(registration: Registration) -> Registered {
+    Registered {
+        registration,
+        claude_code: None,
+    }
+}
+
 /// A stand-in controller. It records, in order, each origin registration
 /// (when it arrives and when it is answered), each presence beat with its
 /// status, each lease and every other call, and refuses every lease with
@@ -261,7 +270,7 @@ async fn a_rejected_lease_takes_the_origin_offline_before_the_cycle_ends() {
         executor,
         ShutdownSignal::new(),
         Arc::new(Mutex::new(HashSet::new())),
-        Some(fixture.registration.clone()),
+        Some(adopted(fixture.registration.clone())),
     ))
     .await;
     assert!(outcome.is_err(), "a rejected lease is an error");
@@ -297,7 +306,7 @@ async fn a_deleted_space_ends_the_cycle_without_stopping_the_runtime() {
         executor,
         ShutdownSignal::new(),
         Arc::new(Mutex::new(HashSet::new())),
-        Some(registration),
+        Some(adopted(registration)),
     ))
     .await;
     assert!(
@@ -384,7 +393,7 @@ async fn a_renewal_keeps_the_browser_host_running() {
         executor,
         ShutdownSignal::new(),
         Arc::new(Mutex::new(HashSet::new())),
-        Some(fixture.registration.clone()),
+        Some(adopted(fixture.registration.clone())),
     ))
     .await;
     assert!(
@@ -424,7 +433,7 @@ async fn a_shutdown_stops_the_browser_host() {
         executor,
         shutdown,
         Arc::new(Mutex::new(HashSet::new())),
-        Some(fixture.registration.clone()),
+        Some(adopted(fixture.registration.clone())),
     ))
     .await;
     assert!(matches!(outcome, Ok(RegistrationOutcome::Shutdown)));
@@ -462,7 +471,7 @@ async fn a_deleted_space_kills_the_browser_host() {
         executor,
         ShutdownSignal::new(),
         Arc::new(Mutex::new(HashSet::new())),
-        Some(fixture.registration.clone()),
+        Some(adopted(fixture.registration.clone())),
     ))
     .await;
     assert!(matches!(outcome, Ok(RegistrationOutcome::SpaceDeleted)));
@@ -568,7 +577,7 @@ async fn a_shutdown_saves_the_browser_profile_before_the_runtime_stops() {
         executor,
         shutdown,
         Arc::new(Mutex::new(HashSet::new())),
-        Some(registration),
+        Some(adopted(registration)),
     ))
     .await;
     assert!(matches!(outcome, Ok(RegistrationOutcome::Shutdown)));
@@ -608,7 +617,7 @@ async fn a_deleted_space_never_saves_the_browser_profile() {
         executor,
         ShutdownSignal::new(),
         Arc::new(Mutex::new(HashSet::new())),
-        Some(fixture.registration.clone()),
+        Some(adopted(fixture.registration.clone())),
     ))
     .await;
     assert!(matches!(outcome, Ok(RegistrationOutcome::SpaceDeleted)));

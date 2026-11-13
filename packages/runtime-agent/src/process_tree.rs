@@ -24,6 +24,9 @@ pub(crate) fn prepare_child() -> Result<()> {
     Ok(())
 }
 
+/// How long `terminate_and_confirm` waits for the killed processes to be gone.
+const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
+
 pub(crate) struct ProcessTree {
     root: Pid,
     identities: HashMap<Pid, u64>,
@@ -31,6 +34,10 @@ pub(crate) struct ProcessTree {
     armed: bool,
     /// Set when this tree's cleanup cannot be confirmed.
     cleanup_unconfirmed: &'static AtomicBool,
+    confirm_within: Duration,
+    /// For tests of the unconfirmed cleanup: a process that outlives every kill.
+    #[cfg(test)]
+    survivor: bool,
 }
 
 impl ProcessTree {
@@ -48,7 +55,19 @@ impl ProcessTree {
             system,
             armed: true,
             cleanup_unconfirmed,
+            confirm_within: CONFIRM_WITHIN,
+            #[cfg(test)]
+            survivor: false,
         }
+    }
+
+    /// For tests of the unconfirmed cleanup: no SIGKILL ends some process of this tree, and the
+    /// wait for it is `confirm_within`. Nothing hermetic survives SIGKILL otherwise.
+    #[cfg(test)]
+    pub(crate) fn with_a_survivor(mut self, confirm_within: Duration) -> Self {
+        self.survivor = true;
+        self.confirm_within = confirm_within;
+        self
     }
 
     fn mark_cleanup_unconfirmed(&self) {
@@ -155,7 +174,7 @@ impl ProcessTree {
 
     pub(crate) async fn terminate_and_confirm(&mut self) -> Result<()> {
         self.stop_and_kill();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + self.confirm_within;
         loop {
             // sysinfo 0.30's macOS refresh retains the initial BSD process status. A killed,
             // unreaped child can otherwise remain "Running" until its parent reaps it.
@@ -171,6 +190,8 @@ impl ProcessTree {
                         process.status() != sysinfo::ProcessStatus::Zombie
                     })
             });
+            #[cfg(test)]
+            let alive = alive || self.survivor;
             if !alive {
                 self.armed = false;
                 return Ok(());
@@ -268,6 +289,34 @@ mod tests {
         let _ = second.wait().await;
         assert!(DROPPED.load(Ordering::Acquire));
         assert!(!CONFIRMED.load(Ordering::Acquire));
+    }
+
+    /// A process that outlives the kill: the tree says so once its wait runs out, and sets the
+    /// latch it was given and no other.
+    #[tokio::test]
+    async fn a_process_that_outlives_the_kill_sets_only_the_latch_it_was_given() {
+        static GIVEN: AtomicBool = AtomicBool::new(false);
+        static OTHER: AtomicBool = AtomicBool::new(false);
+        let mut root = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut tree = ProcessTree::new(root.id().unwrap(), &GIVEN)
+            .with_a_survivor(Duration::from_millis(100));
+        let started = tokio::time::Instant::now();
+        let result = tree.terminate_and_confirm().await;
+        let waited = started.elapsed();
+        assert!(result.is_err(), "a survivor was confirmed gone");
+        assert!(waited >= Duration::from_millis(100), "{waited:?}");
+        assert!(waited < CONFIRM_WITHIN, "{waited:?}");
+        assert!(GIVEN.load(Ordering::Acquire));
+        assert!(!OTHER.load(Ordering::Acquire));
+        // The real process was killed all the same.
+        assert!(root.wait().await.is_ok());
+        drop(tree);
+        assert!(!OTHER.load(Ordering::Acquire));
     }
 
     /// The CPU time this process has used: user, then system.

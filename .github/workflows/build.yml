@@ -1835,6 +1835,8 @@ jobs:
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration evidence_retry:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration reply_draft_stream:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration page_cards:: -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration codex_never_starts_claude:: -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test claude_code_lane --test claude_code_supervision --test claude_code_live -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test run_instructions
 
   rust-test-proxy:
