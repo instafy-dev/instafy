@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RunRecord } from "../../../types";
 import {
+  browserSessionPageIsBlank,
   browserSessionPageIsPlaceholder,
   toBrowserSessionPageTarget,
   type BrowserSessionPage,
@@ -489,8 +490,9 @@ export function useChatViewTabs(input: {
 
 /**
  * A blank tab no chat uses, to give a chat as its own: never one a turn of any
- * chat was sent for, nor one remembered for another chat. The tab on screen
- * first, so a browser that just started keeps its one tab.
+ * chat was sent for, nor one remembered for another chat, nor a tab listed
+ * with no address, which may be on its way to someone's page. The tab on
+ * screen first, so a browser that just started keeps its one tab.
  */
 export function unusedBlankBrowserTab<Page extends BrowserSessionPage>(input: {
   runs: readonly RunRecord[];
@@ -503,7 +505,7 @@ export function unusedBlankBrowserTab<Page extends BrowserSessionPage>(input: {
   }
   for (const tab of rememberedTabs.values()) used.add(tab.pageId);
   const blank = input.pages.filter((page) =>
-    browserSessionPageIsPlaceholder(page) && page.openedBy !== "agent" && !used.has(page.id));
+    browserSessionPageIsBlank(page) && page.openedBy !== "agent" && !used.has(page.id));
   return blank.find((page) => page.isActive) ?? blank[0] ?? null;
 }
 

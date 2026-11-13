@@ -43,7 +43,7 @@ import { useBrowserSessionActions } from "./useBrowserSessionActions";
 import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { observeBrowserRfbFrames } from "./browserSessionRfbFrame";
-import { browserSessionPageIsPlaceholder } from "./browserSessionPages";
+import { browserSessionPageIsBlank } from "./browserSessionPages";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import {
   BrowserHumanInputContinue,
@@ -3437,9 +3437,11 @@ export function BrowserSessionModal({
       : `${effectiveAgentControlOwner.displayName} is using the browser`
     : null;
   // A blank tab in front, with nobody on the way to a page: the stage says so
-  // in its own colours, never with the browser's white blank page.
+  // in its own colours, never with the browser's white blank page. Not a tab
+  // listed with no address: it is on its way to a page, which may have
+  // arrived already, and a cover over it took the person's first click.
   const blankPageShown = viewLive && stageShowsPage && sharedBrowserActivePage !== null &&
-    browserSessionPageIsPlaceholder(sharedBrowserActivePage) && !agentArrivalNote && !agentWhereabouts;
+    browserSessionPageIsBlank(sharedBrowserActivePage) && !agentArrivalNote && !agentWhereabouts;
   // Around a live page the stage follows the theme like the chrome above it
   // and the composer below: black under a page in light mode read as dark
   // chrome on a phone, where the page leaves bands above and below it.

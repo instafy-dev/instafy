@@ -36,15 +36,28 @@ const BROWSER_INTERACTION_PATTERN =
 const DEICTIC_CONTINUATION_PATTERN =
   /\b(this|that|there|here|current|same|it)\b/i;
 
+const BLANK_PAGE_ADDRESSES = new Set([
+  "about:blank",
+  "chrome://newtab/",
+  "chrome://new-tab-page/",
+  "edge://newtab/",
+]);
+
+/**
+ * A blank or new tab: it shows no page. Not a tab the browser lists with no
+ * address, which may be on its way to a page (see below).
+ */
+export function browserSessionPageIsBlank(page: Pick<BrowserSessionPage, "url">): boolean {
+  return BLANK_PAGE_ADDRESSES.has(page.url.trim().toLowerCase());
+}
+
+/**
+ * A tab with no page to show or name yet: a blank tab, or one the browser
+ * lists with no address. Chrome can list a tab that way for a moment while it
+ * goes to a page: the tab is still open, and still whoever's it was.
+ */
 export function browserSessionPageIsPlaceholder(page: Pick<BrowserSessionPage, "url">): boolean {
-  const normalizedUrl = page.url.trim().toLowerCase();
-  return (
-    normalizedUrl.length === 0 ||
-    normalizedUrl === "about:blank" ||
-    normalizedUrl === "chrome://newtab/" ||
-    normalizedUrl === "chrome://new-tab-page/" ||
-    normalizedUrl === "edge://newtab/"
-  );
+  return page.url.trim().length === 0 || browserSessionPageIsBlank(page);
 }
 
 function trimTrailingPunctuation(value: string): string {
