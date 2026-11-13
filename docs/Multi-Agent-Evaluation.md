@@ -291,6 +291,11 @@ See [CLI](CLI.md). The controller validates the complete plan before dispatch, s
 plan produces a visible error instead of silently omitting agents. Planning prompts receive
 the current limits; changing a setting does not expand tool, credential, or filesystem access.
 
+Only the controller puts a job in a team: the workers, the lead and their reruns are its own
+dispatches. A person's send, a runtime's job token acting for that person and a queued send
+drop any `multiAgentPlan` they carry, so none of them counts as a team's worker or lead, joins
+its plan group or names another job as its parent.
+
 Self-hosted runtimes must register themselves; a spread request cannot start more of them.
 Spread fairness yields work only to ready/running group runtimes with a recent heartbeat,
 so requested or stale slots do not strand a sibling in the queue.

@@ -401,10 +401,11 @@ fn lost_final_checkpoint_gives_up(
 /// given-up notice's kind), a question pending or answered and not yet handed
 /// back, a last worker a person's runtime stop expired (`$3` and `$4`; its
 /// expiry runs no checkpoint), and a last worker that planned again (its end
-/// never checkpoints its own group). `$5` is the one conversation to look in,
-/// or null for all. The recovery below acts on these groups and a goal's next
-/// turn waits for them (`conversation_owes_final_lead`), so the two read one
-/// definition.
+/// never checkpoints its own group). Only jobs of the group's own space count
+/// as its lead, its open work or its planned-again child: another space's job
+/// never speaks for it. `$5` is the one conversation to look in, or null for
+/// all. The recovery below acts on these groups and a goal's next turn waits
+/// for them (`conversation_owes_final_lead`), so the two read one definition.
 const GROUPS_OWED_A_FINAL_LEAD: &str = "
     select g.plan_group_id, g.trigger_job_id, g.conversation_id, g.completed_at
     from (
@@ -423,7 +424,7 @@ const GROUPS_OWED_A_FINAL_LEAD: &str = "
     join conversations c on c.id = g.conversation_id and c.project_id = g.project_id
     where not exists (
           select 1 from agent_jobs j
-          where j.plan_group_id = g.plan_group_id
+          where j.plan_group_id = g.plan_group_id and j.project_id = g.project_id
             and (j.status not in ('completed','failed','canceled','cancelled','expired')
                 or j.agent_role in ('lead_continuation','synthesis'))
       )
@@ -447,7 +448,7 @@ const GROUPS_OWED_A_FINAL_LEAD: &str = "
           and g.error_message = $3 and g.payload->>'requeuedReason' = any($4))
       and not exists (
           select 1 from agent_jobs child
-          where child.parent_job_id = g.trigger_job_id
+          where child.parent_job_id = g.trigger_job_id and child.project_id = g.project_id
             and child.plan_group_id is distinct from g.plan_group_id
       )";
 

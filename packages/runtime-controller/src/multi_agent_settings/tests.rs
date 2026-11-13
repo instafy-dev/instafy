@@ -200,14 +200,17 @@ async fn multi_agent_settings_http_enforces_membership_and_preserves_shared_limi
 
             // Direct team dispatch must enforce the authoritative limit too,
             // including the legacy role spelling and untrusted client snapshots.
+            // Only the controller's own dispatch keeps a plan role (a member's is
+            // dropped, `conversations::strip_client_plan_claims`); a member may
+            // still ask for a plan by its intent.
             settings_json(request_settings(&app, project_id, Some(&owner), Some(json!({"maxAgentsPerPlan":1}))).await?).await?;
             let db = pool.get().await?;
             let jobs_before: i64 = db.query_one("select count(*) from agent_jobs where project_id=$1", &[&project_id]).await?.get(0);
             drop(db);
-            for (intent, plan_key, role) in [
-                ("feature", Some("multiAgentPlan"), "worker"),
-                ("feature", Some("multi_agent_plan"), " worker "),
-                ("multi_agent_plan", None, ""),
+            for (token, intent, plan_key, role) in [
+                ("service-role-token", "feature", Some("multiAgentPlan"), "worker"),
+                ("service-role-token", "feature", Some("multi_agent_plan"), " worker "),
+                (owner.as_str(), "multi_agent_plan", None, ""),
             ] {
                 let mut metadata = json!({
                     "agentSelection":{"active":["poet-one","poet-two"],"mentions":["poet-one","poet-two"]},
@@ -219,7 +222,7 @@ async fn multi_agent_settings_http_enforces_membership_and_preserves_shared_limi
                 let response = dispatch_app.clone().oneshot(Request::builder()
                     .method("POST")
                     .uri("/dispatch-prompt")
-                    .header("authorization",format!("Bearer {owner}"))
+                    .header("authorization",format!("Bearer {token}"))
                     .header("content-type","application/json")
                     .body(Body::from(json!({
                         "projectId":project_id,"promptText":"Each agent writes a poem.",
