@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -13,6 +14,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
 const DEFAULT_MIGRATIONS = path.join(REPO_ROOT, "supabase", "migrations");
+const MIGRATIONS_PATH = "supabase/migrations";
+const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
+const USAGE =
+  "usage: node scripts/check-supabase-migrations.mjs [--base <commit> | --base-from-github-event]";
 const LANE_BOUNDARY = 20260000000063n;
 const MIGRATION_NAME = /^([0-9]{14})_([a-z0-9][a-z0-9_]*)\.sql$/u;
 const LEGACY_PUBLIC_MIGRATION_COUNT = 64;
@@ -296,12 +301,188 @@ function validatePublicMigrationTrack(directory = DEFAULT_MIGRATIONS) {
   return sorted;
 }
 
-function main() {
-  if (process.argv.length !== 2) {
-    throw new Error("check-supabase-migrations.mjs does not accept arguments");
+function git(repoRoot, args) {
+  return execFileSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+// The commit `base` names, which must be in this checkout.
+function resolveBaseCommit(base, repoRoot = REPO_ROOT) {
+  let commit = "";
+  try {
+    commit = git(repoRoot, ["rev-parse", "--verify", "--quiet", `${base}^{commit}`]).trim();
+  } catch (error) {
+    // With --verify --quiet, git prints nothing and exits 1 when base names no
+    // commit here, as in a shallow checkout that stops short of it. Any other
+    // failure, such as no git or no repository, is git's own to report.
+    if (error?.status !== 1) {
+      throw error;
+    }
   }
-  const migrations = validatePublicMigrationTrack();
-  console.log(`Validated ${migrations.length} public Supabase migration(s)`);
+  if (!COMMIT_ID.test(commit)) {
+    throw new Error(
+      `base commit ${base} is not in this checkout; fetch enough history to include it`,
+    );
+  }
+  return commit;
+}
+
+// The names of the files in the migration directory at `commit`.
+function migrationFileNamesAt(
+  commit,
+  { repoRoot = REPO_ROOT, migrationsPath = MIGRATIONS_PATH } = {},
+) {
+  const prefix = `${migrationsPath}/`;
+  return git(repoRoot, ["ls-tree", "-z", "--name-only", "--full-tree", commit, "--", prefix])
+    .split("\0")
+    .filter((entry) => entry.startsWith(prefix))
+    .map((entry) => entry.slice(prefix.length));
+}
+
+// Migration history is append-only: every migration a change adds must sort
+// after the newest one already at its base. The Supabase CLI refuses to apply
+// a migration older than the newest one a database has applied unless it runs
+// with --include-all, and the local stack scripts run it without, so a late
+// version stops every local database that already applied the newer one.
+// `migrations` is the checkout's track, from validatePublicMigrationTrack, and
+// `baseFileNames` the migration file names at the base.
+function checkAddedMigrationsSortLast(migrations, baseFileNames, baseLabel) {
+  const atBase = new Set(baseFileNames);
+  let newest = null;
+  for (const fileName of baseFileNames) {
+    if (!MIGRATION_NAME.test(fileName)) {
+      continue;
+    }
+    const version = migrationVersion(fileName);
+    if (newest === null || version > newest.version) {
+      newest = { fileName, version };
+    }
+  }
+  const added = migrations.filter(({ fileName }) => !atBase.has(fileName));
+  const late =
+    newest === null ? [] : added.filter(({ version }) => version <= newest.version);
+  if (late.length > 0) {
+    const one = late.length === 1;
+    throw new Error(
+      `public migration${one ? "" : "s"} ${late.map(({ fileName }) => fileName).join(", ")} ` +
+        `${one ? "is" : "are"} not newer than ${newest.fileName}, the newest migration at ` +
+        `${baseLabel}; migration history is append-only, so rename ${one ? "it" : "each"} ` +
+        `to a current UTC timestamp after ${newest.version}, with an even final digit`,
+    );
+  }
+  return { added, newest };
+}
+
+// The base a CI run compares the checkout with. A pull_request run checks out
+// github.sha, GitHub's test merge of the pull request into its base, whose
+// first parent is that base. A merge_group run checks out the group's commit,
+// built on the group's parent: main and any group queued ahead of it. Main's
+// merge queue squashes each pull request onto that parent, so a checkout two
+// commits deep holds it; a queue that rebased several commits onto it would
+// leave it out, and resolveBaseCommit then fails rather than compare with
+// anything else. Other runs, such as a push to main, have no base and get
+// null.
+function githubEventBase({ env = process.env, repoRoot = REPO_ROOT } = {}) {
+  const event = env.GITHUB_EVENT_NAME;
+  if (!event) {
+    throw new Error("--base-from-github-event reads GITHUB_EVENT_NAME, which is not set");
+  }
+  if (event === "pull_request") {
+    const parents = git(repoRoot, ["rev-list", "--parents", "--max-count=1", "HEAD"])
+      .trim()
+      .split(/\s+/u)
+      .slice(1);
+    if (parents.length !== 2) {
+      throw new Error(
+        "a pull_request run must check out GitHub's test merge commit with both of its " +
+          "parents (fetch-depth: 2), so that the base it merged into is in the checkout",
+      );
+    }
+    return { base: parents[0], label: `the pull request's base ${parents[0].slice(0, 12)}` };
+  }
+  if (event === "merge_group") {
+    let payload;
+    try {
+      payload = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8"));
+    } catch {
+      throw new Error("a merge_group run needs the event payload GITHUB_EVENT_PATH names");
+    }
+    const base = payload?.merge_group?.base_sha;
+    if (typeof base !== "string" || !COMMIT_ID.test(base)) {
+      throw new Error("the merge_group event names no base_sha");
+    }
+    return { base, label: `the merge group's parent ${base.slice(0, 12)}` };
+  }
+  return null;
+}
+
+function parseArguments(args) {
+  if (args.length === 0) {
+    return {};
+  }
+  if (args.length === 1 && args[0] === "--base-from-github-event") {
+    return { fromGithubEvent: true };
+  }
+  if (args.length === 2 && args[0] === "--base" && args[1] !== "" && !args[1].startsWith("-")) {
+    return { base: args[1] };
+  }
+  throw new Error(USAGE);
+}
+
+// With --base <commit>, the migrations the checkout adds since that commit must
+// also sort after its newest one: after `git fetch origin main`,
+// `--base origin/main` checks a branch before it merges. CI passes
+// --base-from-github-event, which compares a pull request or a merge group
+// with its base and other runs with nothing. Tests pass the options after
+// args and env.
+function main({
+  args = process.argv.slice(2),
+  env = process.env,
+  repoRoot = REPO_ROOT,
+  directory = DEFAULT_MIGRATIONS,
+  log = console.log,
+} = {}) {
+  const options = parseArguments(args);
+  const migrations = validatePublicMigrationTrack(directory);
+  let summary = `Validated ${migrations.length} public Supabase migration(s)`;
+  let compareWith = null;
+  if (options.base) {
+    compareWith = { base: options.base, label: options.base };
+  } else if (options.fromGithubEvent) {
+    compareWith = githubEventBase({ env, repoRoot });
+    if (compareWith === null) {
+      summary += `; a ${env.GITHUB_EVENT_NAME} run has no base to compare with`;
+    }
+  }
+  if (compareWith !== null) {
+    const migrationsPath = path.relative(repoRoot, directory).split(path.sep).join("/");
+    const { added, newest } = checkAddedMigrationsSortLast(
+      migrations,
+      migrationFileNamesAt(resolveBaseCommit(compareWith.base, repoRoot), {
+        repoRoot,
+        migrationsPath,
+      }),
+      compareWith.label,
+    );
+    // The public history is never empty. A base with no migration here either
+    // predates it or was listed from somewhere else, such as the top of another
+    // repository this copy sits inside, and comparing with it would pass every
+    // migration.
+    if (newest === null) {
+      throw new Error(
+        `${compareWith.label} has no public migrations in ${migrationsPath} to compare with; ` +
+          "run this from a checkout of this repository whose history includes them",
+      );
+    }
+    summary +=
+      added.length === 0
+        ? `; none added since ${compareWith.label}`
+        : `; the ${added.length} added since ${compareWith.label} sort after ${newest.fileName}`;
+  }
+  log(summary);
 }
 
 const isDirectExecution =
@@ -326,8 +507,14 @@ export {
   LEGACY_PUBLIC_MIGRATION_SET_SHA256,
   LANE_BOUNDARY,
   MIGRATION_NAME,
+  checkAddedMigrationsSortLast,
+  githubEventBase,
+  main,
+  migrationFileNamesAt,
   migrationVersion,
+  parseArguments,
   publicMigrationSetSha256,
+  resolveBaseCommit,
   topLevelMetaCommands,
   topLevelStatementKeywords,
   topLevelStatements,

@@ -70,10 +70,12 @@ const cancellationWorkflows = [
   // native chat image, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream and page card selectors, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
   // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, and MCP server, login profile and space id path suites bound below, and the local author pseudonym key
   // test in the contracts lane, and the tunnel broker test lane in the Rust tests
-  // aggregate, also bound by check-rust-ci; other commands and authority are exact.
+  // aggregate, also bound by check-rust-ci, and the contracts lane's migration ordering check
+  // against a pull request's or merge group's base, with the two-deep checkout that keeps it,
+  // bound below; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: 'aa15806453291dceabd859545f4a295ec8a7fc99ea974b4c3045ebb7d66b10de' },
+    previousHash: '1f1408eaba722884bdfeb94185b7a2ec6e82af4fc3c2770f465642ac943e8ec2' },
   // The Browser UI rendering aggregate came with the lane's split into parts;
   // reversing that split exactly (inside withoutBrowserUiJobBudget) removes it.
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
@@ -338,6 +340,14 @@ test('the migration-image cache saves only from main, and every other ref restor
   assert.equal((text.match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
 });
 
+test('the migration ordering check reads its base from the parents the contracts checkout keeps', () => {
+  // A pull request's base is the first parent of GitHub's test merge, and a
+  // merge group's base is the group commit's parent, so both need depth 2.
+  assert.match(step('javascript-contracts', 'Checkout repository'), /^          fetch-depth: 2$/mu);
+  assert.equal(step('javascript-contracts', 'Validate public migration ordering'),
+    '      - name: Validate public migration ordering\n        run: node scripts/check-supabase-migrations.mjs --base-from-github-event\n');
+});
+
 test('contract tests added after the reviewed inventory run once, in the hosted contracts step', () => {
   const contracts = buildWorkflow.slice(buildWorkflow.indexOf('\n  javascript-contracts:\n') + 1).split(/\n  [\w-]+:\n/u)[0];
   const marker = '      - name: Test public migration and self-host contracts\n';
@@ -358,7 +368,9 @@ test('the complete pre-split command inventory and working directories are uncha
   // working-directory, not just command substrings that could hide new skips.
   const original = {
     'Install dependencies': 'e77ccc60f79964794528b62d01c6c28548ed751c0da9fb1ed7f94c1ed7e8ce17',
-    'Validate public migration ordering': '7d8920702565c08045672b91f0a08a35295ef2bf65e7ea9f464fe3bc173a195e',
+    // Reviewed addition: --base-from-github-event, which also fails a pull request or merge group whose
+    // added migrations do not sort after its base's newest.
+    'Validate public migration ordering': 'c560790634f670419b1bcda7da9a1533c3b06f0174d2320ce1d5ff3497daf7a2',
     // Reviewed addition: scripts/lib/localAuthorPseudonymKeys.test.mjs.
     'Test public migration and self-host contracts': 'da14771d8c781591dff8b01f4b7723901b1c621dadda1beadc4d3fb60a1c6814',
     'Ensure Supabase Postgres image': 'fcb66564f9c4cb18b6612898669e1f23c0c21328f9f69a0771e7b3980dfaf930',
