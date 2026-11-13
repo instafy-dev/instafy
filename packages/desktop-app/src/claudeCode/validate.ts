@@ -178,3 +178,136 @@ export function validateClaudeCodeBinary(
   }
   return refuse("too_many_links");
 }
+
+/**
+ * The login-shell values that name a place on disk, and what each must be
+ * there (D26). runtime-agent checks a granted one before every turn, and
+ * refuses the whole grant when it fails.
+ */
+export const CLAUDE_CODE_SHELL_SETTING_KINDS = Object.freeze({
+  CLAUDE_CONFIG_DIR: "directory",
+  NODE_EXTRA_CA_CERTS: "file",
+} as const);
+
+export type ClaudeCodeShellSetting = keyof typeof CLAUDE_CODE_SHELL_SETTING_KINDS;
+
+export type ClaudeCodeShellSettingValidationOptions = {
+  /** The effective uid; the place and every link on the way must be owned by it or by root. */
+  uid: number;
+  /** Folders the place may not be in, as for the program. */
+  desktopOwnedPaths: readonly string[];
+  caseInsensitivePaths: boolean;
+  fs?: ClaudeCodeFileSystem;
+};
+
+function pathSteps(value: string): string[] {
+  return value.split("/").filter((step) => step.length > 0 && step !== ".");
+}
+
+/**
+ * Resolve an absolute path one component at a time, as the kernel does and
+ * runtime-agent's own walk does, and note every symlink met on the way where
+ * it physically is. Null when a component is missing or there are too many.
+ */
+function walkSymlinks(
+  files: ClaudeCodeFileSystem,
+  absolutePath: string,
+): { target: string; links: string[] } | null {
+  const pending = pathSteps(absolutePath);
+  const links: string[] = [];
+  let current = "/";
+  while (pending.length > 0) {
+    const step = pending.shift() as string;
+    if (step === "..") {
+      current = path.dirname(current);
+      continue;
+    }
+    const next = path.join(current, step);
+    let stats: ClaudeCodeFileStats;
+    let destination: string;
+    try {
+      stats = files.lstatSync(next);
+      if (!stats.isSymbolicLink()) {
+        current = next;
+        continue;
+      }
+      if (links.length >= MAX_SYMLINK_HOPS) {
+        return null;
+      }
+      destination = files.readlinkSync(next);
+    } catch {
+      return null;
+    }
+    links.push(next);
+    if (destination.startsWith("/")) {
+      current = "/";
+    }
+    pending.unshift(...pathSteps(destination));
+  }
+  return { target: current, links };
+}
+
+/**
+ * Check, without opening it, a login-shell `CLAUDE_CONFIG_DIR` (a directory)
+ * or `NODE_EXTRA_CA_CERTS` (a regular file) by runtime-agent's rule for a
+ * granted one (3.2, D26): an absolute path; every symlink on the way owned by
+ * this user or root; the place itself owned by this user or root and writable
+ * by neither its group nor anyone else; and none of them inside a folder
+ * Instafy owns. A value that fails would make every turn refuse, so Desktop
+ * neither offers nor grants it.
+ */
+export function claudeCodeShellSettingIsUsable(
+  setting: ClaudeCodeShellSetting,
+  value: unknown,
+  options: ClaudeCodeShellSettingValidationOptions,
+): boolean {
+  const files = options.fs ?? fs;
+  if (typeof value !== "string" || !value.startsWith("/") || hasControlCharacter(value)) {
+    return false;
+  }
+  const ownedPaths = options.desktopOwnedPaths
+    .filter((entry) => typeof entry === "string" && entry.startsWith("/"))
+    .flatMap((entry) => [path.resolve(entry), canonicalPath(files, entry)]);
+  const insideOwnedPath = (file: string) =>
+    ownedPaths.some((root) => isInside(file, root, options.caseInsensitivePaths));
+  const ownedByUserOrRoot = (stats: ClaudeCodeFileStats) =>
+    stats.uid === options.uid || stats.uid === 0;
+  // As given, compared component by component as runtime-agent compares it:
+  // a value that only passes through an owned folder still counts as inside.
+  const steps = pathSteps(value);
+  const firstParent = steps.indexOf("..");
+  if (insideOwnedPath(`/${(firstParent === -1 ? steps : steps.slice(0, firstParent)).join("/")}`)) {
+    return false;
+  }
+  const walk = walkSymlinks(files, value);
+  if (!walk || insideOwnedPath(walk.target)) {
+    return false;
+  }
+  try {
+    for (const link of walk.links) {
+      if (insideOwnedPath(link) || !ownedByUserOrRoot(files.lstatSync(link))) {
+        return false;
+      }
+    }
+    const stats = files.lstatSync(walk.target);
+    const rightKind =
+      CLAUDE_CODE_SHELL_SETTING_KINDS[setting] === "directory" ? stats.isDirectory() : stats.isFile();
+    return rightKind && ownedByUserOrRoot(stats) && (stats.mode & 0o022) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** The first login-shell value in `env` that Desktop can't use, in the order runtime-agent checks them. */
+export function findUnusableClaudeCodeShellSetting(
+  env: Readonly<Partial<Record<string, string>>>,
+  options: ClaudeCodeShellSettingValidationOptions,
+): ClaudeCodeShellSetting | null {
+  for (const setting of Object.keys(CLAUDE_CODE_SHELL_SETTING_KINDS) as ClaudeCodeShellSetting[]) {
+    const value = env[setting];
+    if (value !== undefined && !claudeCodeShellSettingIsUsable(setting, value, options)) {
+      return setting;
+    }
+  }
+  return null;
+}

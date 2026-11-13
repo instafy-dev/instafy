@@ -73,6 +73,7 @@ import {
 import {
   DesktopRuntimeHttpError,
   assertDesktopRuntimeResumed,
+  buildConsentChangeRestartOptions,
   buildDesktopRuntimeDrainUrl,
   buildDesktopRuntimeResumeUrl,
   buildDesktopRuntimeStopUrl,
@@ -83,6 +84,7 @@ import {
   readDesktopRuntimeActiveJobCount,
   resolveRefreshedDesktopRuntimeAccessToken,
   resolveDesktopRuntimeControllerCredentialAction,
+  resolveDesktopRuntimeLaunchGrantUserId,
   runDesktopRuntimeExitCleanup,
   type DesktopRuntimeControllerCredentialMode,
   type DesktopRuntimeControllerCredentialProvenance,
@@ -992,30 +994,40 @@ async function resolveDesktopRuntimeControllerCredentialProvenance(options: {
   };
 }
 
+/**
+ * The session the Studio window shows now, refreshed when it is about to
+ * expire. Null without a Studio window or a session; throws when the read
+ * fails or the session does not check out.
+ */
+async function readStudioWindowSession(): Promise<DesktopInstafySessionIdentity | null> {
+  const window = getStudioWindow();
+  if (!window) {
+    return null;
+  }
+  const value = await withDesktopRuntimeTimeout(
+    window.webContents.mainFrame.executeJavaScript(
+      READ_VISIBLE_SUPABASE_SESSION_SCRIPT,
+    ),
+    DESKTOP_RENDERER_SESSION_TIMEOUT_MS,
+    "Visible session refresh",
+  );
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return normalizeVisibleInstafySession(value as DesktopCodexVisibleSession);
+}
+
 async function refreshDesktopRuntimeControllerAccess(
   runtime: DesktopRuntimeRecord,
 ): Promise<void> {
   if (runtime.controllerCredentialProvenance.kind !== "ambient") {
     return;
   }
-  const window = getStudioWindow();
-  if (!window) {
-    return;
-  }
   try {
-    const value = await withDesktopRuntimeTimeout(
-      window.webContents.mainFrame.executeJavaScript(
-        READ_VISIBLE_SUPABASE_SESSION_SCRIPT,
-      ),
-      DESKTOP_RENDERER_SESSION_TIMEOUT_MS,
-      "Visible session refresh",
-    );
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
+    const visibleIdentity = await readStudioWindowSession();
+    if (!visibleIdentity) {
       return;
     }
-    const visibleIdentity = normalizeVisibleInstafySession(
-      value as DesktopCodexVisibleSession,
-    );
     const accessToken = resolveRefreshedDesktopRuntimeAccessToken(
       runtime.controllerCredentialProvenance,
       visibleIdentity,
@@ -1241,29 +1253,32 @@ async function stopReplacedDesktopRuntime(previous: DesktopRuntimeRecord): Promi
 /**
  * A consent change altered the running runtime's grant: replace it from its
  * own start options, as instafy:startDesktopRuntime would, with the grant
- * resolved again for the same bound user (4.3). The visible session that made
- * the change is that user's, so its fresh token starts the replacement.
+ * resolved again for the same bound user (4.3). The session is read again
+ * just before the start: the consent sheet, the fence and the ask can
+ * outlast a token read when the call began.
  */
 async function replaceDesktopRuntimeForConsentChange(
   previous: DesktopRuntimeRecord,
-  visibleIdentity: DesktopInstafySessionIdentity | null,
 ): Promise<"replaced" | "kept"> {
   if ((await confirmReplacingDesktopRuntime(previous, { consentChange: true })) === "keep") {
     return "kept";
   }
-  const freshAccessToken =
-    visibleIdentity && visibleIdentity.userId.toLowerCase() === previous.launchGrantUserId
-      ? visibleIdentity.accessToken
-      : null;
-  const restartOptions: DesktopRuntimeRestartOptions = {
-    ...previous.restartOptions,
-    ...(freshAccessToken ? { controllerAccessToken: freshAccessToken } : {}),
-  };
   await stopReplacedDesktopRuntime(previous);
   const launchGrants = await resolveDesktopRuntimeLaunchGrants({
     projectId: previous.projectId,
     controllerOrigin: previous.controllerUrl,
     instafyUserId: previous.launchGrantUserId,
+  });
+  const currentSession = await readStudioWindowSession().catch((error: unknown) => {
+    desktopLog("warn", "[instafy-desktop] could not read the session for a runtime replacement", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  });
+  const restartOptions = buildConsentChangeRestartOptions({
+    restartOptions: previous.restartOptions,
+    launchGrantUserId: previous.launchGrantUserId,
+    currentSession,
   });
   const handle = await startDesktopRuntime({
     ...restartOptions,
@@ -2161,7 +2176,7 @@ async function resolveDesktopExtensionHost(
   event: Electron.IpcMainInvokeEvent,
   callerUrl: string,
   request: DesktopExtensionInvokeRequest | undefined,
-): Promise<{ host: DesktopExtensionHost; visibleIdentity: DesktopInstafySessionIdentity | null }> {
+): Promise<DesktopExtensionHost> {
   let visibleSession: DesktopCodexVisibleSession | null = null;
   let visibleIdentity: DesktopInstafySessionIdentity | null = null;
   try {
@@ -2181,21 +2196,18 @@ async function resolveDesktopExtensionHost(
     runningRuntimeControllerUrl: desktopRuntime?.controllerUrl ?? null,
     isPackaged: app.isPackaged,
   });
-  return {
-    visibleIdentity,
-    host: Object.freeze({
-      session: visibleIdentity
-        ? {
-            userId: visibleIdentity.userId.toLowerCase(),
-            email: normalizeDesktopSessionEmail(visibleSession?.email),
-          }
-        : null,
-      controllerOrigin,
-      consents: desktopExtensionConsents,
-      dialogs: createDesktopExtensionDialogs(BrowserWindow.fromWebContents(event.sender)),
-      desktopOwnedPaths: resolveDesktopOwnedPaths(readConfig()),
-    }),
-  };
+  return Object.freeze({
+    session: visibleIdentity
+      ? {
+          userId: visibleIdentity.userId.toLowerCase(),
+          email: normalizeDesktopSessionEmail(visibleSession?.email),
+        }
+      : null,
+    controllerOrigin,
+    consents: desktopExtensionConsents,
+    dialogs: createDesktopExtensionDialogs(BrowserWindow.fromWebContents(event.sender)),
+    desktopOwnedPaths: resolveDesktopOwnedPaths(readConfig()),
+  });
 }
 
 const allowMultipleInstances = shouldAllowMultipleInstances();
@@ -3195,11 +3207,7 @@ app.whenReady().then(() => {
     "instafy:desktopExtensionInvoke",
     async (event, request: DesktopExtensionInvokeRequest) => {
       const callerUrl = assertAllowedCaller(event);
-      const { host, visibleIdentity } = await resolveDesktopExtensionHost(
-        event,
-        callerUrl,
-        request,
-      );
+      const host = await resolveDesktopExtensionHost(event, callerUrl, request);
       return await invokeDesktopExtensionWithLaunchGrants({
         registry: CURRENT_DESKTOP_EXTENSION_REGISTRY,
         extensionId: typeof request?.extensionId === "string" ? request.extensionId : "",
@@ -3219,9 +3227,15 @@ app.whenReady().then(() => {
               }
             : null;
         },
-        replaceRuntime: (runtime) =>
-          replaceDesktopRuntimeForConsentChange(runtime.handle, visibleIdentity),
+        replaceRuntime: (runtime) => replaceDesktopRuntimeForConsentChange(runtime.handle),
         onGrantError: logDesktopRuntimeLaunchGrantError,
+        // The change was made: Studio shows it, and the runtime as stopped
+        // when its replacement did not start.
+        onReplaceError: (error) => {
+          desktopLog("warn", "[instafy-desktop] runtime replacement after a launch grant change failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        },
       });
     },
   );
@@ -3337,9 +3351,10 @@ app.whenReady().then(() => {
       // Launch grants go only to a start bound to the visible session, for
       // that session's user (4.3). A Personal Browser runtime never offers a
       // local engine, so its starts are granted nothing.
-      const launchGrantUserId = enablePersonalBrowser
-        ? null
-        : trustedControllerBinding.boundUserId;
+      const launchGrantUserId = resolveDesktopRuntimeLaunchGrantUserId({
+        enablePersonalBrowser,
+        boundUserId: trustedControllerBinding.boundUserId,
+      });
       const launchGrants = await resolveDesktopRuntimeLaunchGrants({
         projectId: requestedProjectId,
         controllerOrigin: controllerUrl,

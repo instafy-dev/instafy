@@ -73,6 +73,18 @@ const GRANT_KEYS = [
   "INSTAFY_CLAUDE_CODE_USER_ID",
   "INSTAFY_CLAUDE_CODE_ENV_JSON",
 ];
+// Every key a method may answer with: the shape Studio parses
+// (packages/frontend/src/features/claudeCode/claudeCodeDesktop.ts).
+const STATUS_KEYS = [
+  "supported",
+  "found",
+  "path",
+  "consented",
+  "problem",
+  "candidatePath",
+  "candidateProblem",
+  "shellSetting",
+];
 
 const tempRoots = [];
 after(() => {
@@ -103,10 +115,31 @@ function makeFixture() {
   writeExecutable(claude, "#!/bin/sh\nexit 0\n");
   const otherClaude = path.join(otherBinDir, "claude");
   writeExecutable(otherClaude, "#!/bin/sh\nexit 0\n");
+  // The places the login shells name for CLAUDE_CONFIG_DIR and
+  // NODE_EXTRA_CA_CERTS (D26): only this user can change the first two.
+  const configDir = path.join(home, ".claude-work");
+  fs.mkdirSync(configDir);
+  fs.chmodSync(configDir, 0o700);
+  const caFile = path.join(home, "corp-ca.pem");
+  fs.writeFileSync(caFile, "fixture CA bundle\n");
+  fs.chmodSync(caFile, 0o644);
+  // Where a test moves the CA file; nothing is there at first.
+  const movedCaFile = path.join(home, "corp-ca-renewed.pem");
+  const sharedConfigDir = path.join(home, ".claude-shared");
+  fs.mkdirSync(sharedConfigDir);
+  fs.chmodSync(sharedConfigDir, 0o775);
 
   const envDump = path.join(root, "shell-env.txt");
   const cwdDump = path.join(root, "shell-cwd.txt");
   const sleeperPid = path.join(root, "sleeper.pid");
+  // A quiet login shell whose PATH starts at `pathDir`, with these exports.
+  const findingShell = (pathDir, exports) =>
+    [
+      "#!/bin/bash",
+      `export PATH=${JSON.stringify(`${pathDir}:/usr/bin:/bin`)}`,
+      ...Object.entries(exports).map(([key, value]) => `export ${key}=${value}`),
+      'eval "$2"',
+    ].join("\n");
   const shells = {
     // A noisy login shell that finds the program and has all five D26 values.
     found: [
@@ -119,15 +152,42 @@ function makeFixture() {
       `/usr/bin/env > ${JSON.stringify(envDump)}`,
       `pwd > ${JSON.stringify(cwdDump)}`,
       `export PATH=${JSON.stringify(`${binDir}:relative/bin:/usr/bin:/bin:/usr/bin`)}`,
-      `export CLAUDE_CONFIG_DIR=${JSON.stringify(path.join(home, ".claude-work"))}`,
+      `export CLAUDE_CONFIG_DIR=${JSON.stringify(configDir)}`,
       `export HTTPS_PROXY=${JSON.stringify(PROXY_WITH_PASSWORD)}`,
       'export HTTP_PROXY="http://proxy.corp.example:3128"',
       'export NO_PROXY="localhost,.corp.example"',
-      `export NODE_EXTRA_CA_CERTS=${JSON.stringify(path.join(home, "corp-ca.pem"))}`,
+      `export NODE_EXTRA_CA_CERTS=${JSON.stringify(caFile)}`,
       'export UNRELATED_SECRET="never-printed"',
       'eval "$2"',
       'echo "Saving session... completed."',
     ].join("\n"),
+    // The same values, with another program first on PATH.
+    foundOther: findingShell(otherBinDir, {
+      CLAUDE_CONFIG_DIR: JSON.stringify(configDir),
+      NODE_EXTRA_CA_CERTS: JSON.stringify(caFile),
+    }),
+    // A quoted tilde stays as it is: not a full path.
+    relativeConfig: findingShell(binDir, { CLAUDE_CONFIG_DIR: '"~/.claude-work"' }),
+    // A configuration folder its group can change.
+    sharedConfig: findingShell(binDir, { CLAUDE_CONFIG_DIR: JSON.stringify(sharedConfigDir) }),
+    // A CA bundle that is not there any more.
+    missingCa: findingShell(binDir, {
+      NODE_EXTRA_CA_CERTS: JSON.stringify(path.join(home, "deleted-ca.pem")),
+    }),
+    // The same program, once the person stops exporting a CA bundle.
+    configOnly: findingShell(binDir, { CLAUDE_CONFIG_DIR: JSON.stringify(configDir) }),
+    // The same program and values as `found`, the CA bundle at its new place.
+    movedCa: findingShell(binDir, {
+      CLAUDE_CONFIG_DIR: JSON.stringify(configDir),
+      HTTPS_PROXY: JSON.stringify(PROXY_WITH_PASSWORD),
+      HTTP_PROXY: '"http://proxy.corp.example:3128"',
+      NO_PROXY: '"localhost,.corp.example"',
+      NODE_EXTRA_CA_CERTS: JSON.stringify(movedCaFile),
+    }),
+    // Another program, with a configuration folder its group can change.
+    otherSharedConfig: findingShell(otherBinDir, {
+      CLAUDE_CONFIG_DIR: JSON.stringify(sharedConfigDir),
+    }),
     // `command -v` prints an alias, not a path.
     alias: [
       "#!/bin/bash",
@@ -181,8 +241,13 @@ function makeFixture() {
     root,
     home,
     binDir,
+    otherBinDir,
     claude,
     otherClaude,
+    configDir,
+    caFile,
+    movedCaFile,
+    sharedConfigDir,
     workspace,
     shells: shellPaths,
     etcShells,
@@ -192,6 +257,20 @@ function makeFixture() {
   };
 }
 
+// The module's file system, except that the usual install locations outside
+// the fixture never exist, whatever this computer has there.
+const hermeticFs = {
+  lstatSync(file) {
+    if (file === "/opt/homebrew/bin/claude" || file === "/usr/local/bin/claude") {
+      throw Object.assign(new Error(`ENOENT ${file}`), { code: "ENOENT" });
+    }
+    return fs.lstatSync(file);
+  },
+  readlinkSync: (file) => fs.readlinkSync(file),
+  realpathSync: (file) => fs.realpathSync(file),
+  accessSync: (file, mode) => fs.accessSync(file, mode),
+};
+
 function shellOptions(fixture, shell, overrides = {}) {
   return {
     shell,
@@ -199,7 +278,9 @@ function shellOptions(fixture, shell, overrides = {}) {
     user: "fixture-user",
     lang: "en_US.UTF-8",
     etcShellsPath: fixture.etcShells,
-    timeoutMs: 5_000,
+    // Detect's own limit: a loaded machine can take seconds to start a
+    // login shell, and no test here waits for it to run out.
+    timeoutMs: detection.CLAUDE_CODE_DETECT_TIMEOUT_MS,
     // Never the real ~/.local/bin, /opt/homebrew/bin or /usr/local/bin.
     lstat: () => {
       throw Object.assign(new Error("not here"), { code: "ENOENT" });
@@ -256,11 +337,12 @@ function hostFor({
 function createModule(fixture, overrides = {}) {
   return claudeCode.createClaudeCodeDesktopFeatureModule({
     platform: "darwin",
+    fs: hermeticFs,
     adminGroupId: null,
     osAccount: () => ({ username: "fixture-user", homedir: fixture.home, shell: fixture.shells.found }),
     lang: () => "en_US.UTF-8",
     etcShellsPath: fixture.etcShells,
-    detectTimeoutMs: 5_000,
+    detectTimeoutMs: detection.CLAUDE_CODE_DETECT_TIMEOUT_MS,
     now: () => NOW,
     ...overrides,
   });
@@ -269,7 +351,14 @@ function createModule(fixture, overrides = {}) {
 function setup(overrides = {}) {
   const fixture = makeFixture();
   const consents = memoryConsents();
-  const extensions = registry.createDesktopExtensionRegistry([createModule(fixture, overrides)]);
+  // The person's login shell, which a test can change between calls.
+  let loginShell = fixture.shells.found;
+  const extensions = registry.createDesktopExtensionRegistry([
+    createModule(fixture, {
+      osAccount: () => ({ username: "fixture-user", homedir: fixture.home, shell: loginShell }),
+      ...overrides,
+    }),
+  ]);
   const invoke = (method, host, payload = {}) =>
     extensions.invoke(claudeCode.CLAUDE_CODE_DESKTOP_EXTENSION_ID, method, payload, host);
   const grantFor = async (instafyUserId, controllerOrigin = CONTROLLER) => {
@@ -281,7 +370,10 @@ function setup(overrides = {}) {
     });
     return entry.grant;
   };
-  return { fixture, consents, extensions, invoke, grantFor };
+  const useShell = (name) => {
+    loginShell = fixture.shells[name];
+  };
+  return { fixture, consents, extensions, invoke, grantFor, useShell };
 }
 
 async function consentAs(context, host) {
@@ -663,6 +755,119 @@ test("a target under /opt/homebrew/bin, which only the admin group can also writ
   );
 });
 
+// runtime-agent's rule for a granted CLAUDE_CONFIG_DIR or CA file
+// (claude_code/mod.rs, check_private_location), which refuses the whole grant.
+test("a login-shell configuration folder or CA file passes only by runtime-agent's rule", () => {
+  const person = 501;
+  const admin = 80;
+  const dir = (uid = person, gid = 20, mode = 0o40700) => ({ type: "dir", uid, gid, mode });
+  const file = (uid = person, gid = 20, mode = 0o100644) => ({ type: "file", uid, gid, mode });
+  const link = (target, uid = person) => ({ link: target, uid, gid: 20, mode: 0o120755 });
+  const files = virtualFileSystem({
+    "/Library": dir(0, 0, 0o40755),
+    "/Library/corp-ca.pem": file(0, 0),
+    "/Users": dir(0, 0, 0o40755),
+    "/Users/person": dir(person, 20, 0o40755),
+    "/Users/person/.claude-work": dir(),
+    "/Users/person/corp-ca.pem": file(),
+    "/Users/person/shared-ca.pem": file(person, 20, 0o100664),
+    "/Users/person/open-config": dir(person, 20, 0o40777),
+    // The admin group may write the program's folder, never these (D26).
+    "/Users/person/admin-config": dir(person, admin, 0o40775),
+    "/Users/person/linked-config": link(".claude-work"),
+    "/Users/person/foreign-link": link(".claude-work", 502),
+    "/Users/person/loop": link("loop"),
+    "/Users/person/work": link("/Users/person"),
+    "/Users/person/space": dir(),
+    "/Users/other": dir(502, 20, 0o40755),
+    "/Users/other/ca.pem": file(502),
+  });
+  const options = { uid: person, desktopOwnedPaths: [], caseInsensitivePaths: true, fs: files };
+  const usable = (setting, value, overrides = {}) =>
+    validation.claudeCodeShellSettingIsUsable(setting, value, { ...options, ...overrides });
+
+  assert.equal(usable("CLAUDE_CONFIG_DIR", "/Users/person/.claude-work"), true);
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/Users/person/corp-ca.pem"), true);
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/Library/corp-ca.pem"), true, "root's own file");
+  // A link on the way is followed, the kernel's way, when this user or root owns it.
+  assert.equal(usable("CLAUDE_CONFIG_DIR", "/Users/person/linked-config"), true);
+  assert.equal(usable("CLAUDE_CONFIG_DIR", "/Users/person/work/.claude-work"), true);
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/Users/person/work/../person/corp-ca.pem"), true);
+
+  for (const [setting, value] of [
+    ["CLAUDE_CONFIG_DIR", "~/.claude-work"],
+    ["CLAUDE_CONFIG_DIR", ".claude-work"],
+    ["CLAUDE_CONFIG_DIR", "/Users/person/.claude-work\n"],
+    ["CLAUDE_CONFIG_DIR", "/Users/person/missing"],
+    ["CLAUDE_CONFIG_DIR", "/Users/person/corp-ca.pem"],
+    ["NODE_EXTRA_CA_CERTS", "/Users/person/.claude-work"],
+    ["NODE_EXTRA_CA_CERTS", "/Users/person/shared-ca.pem"],
+    ["CLAUDE_CONFIG_DIR", "/Users/person/open-config"],
+    ["CLAUDE_CONFIG_DIR", "/Users/person/admin-config"],
+    ["CLAUDE_CONFIG_DIR", "/Users/person/foreign-link"],
+    ["CLAUDE_CONFIG_DIR", "/Users/person/loop"],
+    ["NODE_EXTRA_CA_CERTS", "/Users/other/ca.pem"],
+  ]) {
+    assert.equal(usable(setting, value), false, `${setting}=${JSON.stringify(value)}`);
+  }
+
+  // Not in a folder Instafy owns, as given or after links; names compare ignoring case.
+  assert.equal(
+    usable("CLAUDE_CONFIG_DIR", "/Users/person/.claude-work", { desktopOwnedPaths: ["/USERS/Person"] }),
+    false,
+  );
+  assert.equal(
+    usable("CLAUDE_CONFIG_DIR", "/Users/person/linked-config", {
+      desktopOwnedPaths: ["/Users/person/.claude-work"],
+    }),
+    false,
+  );
+  // As given, a value that passes through an owned folder is inside it.
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/Users/person/space/../corp-ca.pem"), true);
+  assert.equal(
+    usable("NODE_EXTRA_CA_CERTS", "/Users/person/space/../corp-ca.pem", {
+      desktopOwnedPaths: ["/Users/person/space"],
+    }),
+    false,
+  );
+
+  // Only the two values that name a place are checked, in runtime-agent's order.
+  const find = (env) => validation.findUnusableClaudeCodeShellSetting(env, options);
+  assert.equal(find({ HTTPS_PROXY: "relative", NO_PROXY: "*" }), null);
+  assert.equal(
+    find({ CLAUDE_CONFIG_DIR: "/Users/person/.claude-work", NODE_EXTRA_CA_CERTS: "/Library/corp-ca.pem" }),
+    null,
+  );
+  assert.equal(
+    find({ NODE_EXTRA_CA_CERTS: "/Users/other/ca.pem", CLAUDE_CONFIG_DIR: "~/.claude-work" }),
+    "CLAUDE_CONFIG_DIR",
+  );
+  assert.equal(find({ NODE_EXTRA_CA_CERTS: "/Users/other/ca.pem" }), "NODE_EXTRA_CA_CERTS");
+});
+
+test("the configuration folder and CA file checks hold on a real file system", () => {
+  const fixture = makeFixture();
+  const options = {
+    uid: process.getuid(),
+    desktopOwnedPaths: [fixture.workspace],
+    caseInsensitivePaths: process.platform === "darwin",
+  };
+  const usable = (setting, value) =>
+    validation.claudeCodeShellSettingIsUsable(setting, value, options);
+  assert.equal(usable("CLAUDE_CONFIG_DIR", fixture.configDir), true);
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", fixture.caFile), true);
+  assert.equal(usable("CLAUDE_CONFIG_DIR", fixture.sharedConfigDir), false);
+  const homeLink = path.join(fixture.root, "home-link");
+  fs.symlinkSync(fixture.home, homeLink);
+  assert.equal(usable("CLAUDE_CONFIG_DIR", path.join(homeLink, ".claude-work")), true);
+  fs.chmodSync(fixture.caFile, 0o664);
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", fixture.caFile), false);
+  fs.chmodSync(fixture.caFile, 0o644);
+  const inWorkspace = path.join(fixture.workspace, ".claude");
+  fs.mkdirSync(inWorkspace, { mode: 0o700 });
+  assert.equal(usable("CLAUDE_CONFIG_DIR", inWorkspace), false);
+});
+
 // ------------------------------------------------------------- the module
 
 test("off macOS, status reports supported: false and no grant resolves", async () => {
@@ -902,7 +1107,7 @@ test("extension methods return no secrets", async () => {
   }
   for (const result of results) {
     assert.deepEqual(
-      Object.keys(result).filter((key) => !["supported", "found", "path", "consented", "problem"].includes(key)),
+      Object.keys(result).filter((key) => !STATUS_KEYS.includes(key)),
       [],
     );
   }
@@ -970,6 +1175,261 @@ test("a record from another OS account or a malformed one grants nothing", async
   assert.equal(await context.grantFor(USER_A), null);
   store.write({ ...record, osUser: "fixture-user" });
   assert.notEqual(await context.grantFor(USER_A), null);
+});
+
+const FIVE_SHELL_VALUES = (fixture) => ({
+  CLAUDE_CONFIG_DIR: fixture.configDir,
+  HTTPS_PROXY: PROXY_WITH_PASSWORD,
+  HTTP_PROXY: "http://proxy.corp.example:3128",
+  NO_PROXY: "localhost,.corp.example",
+  NODE_EXTRA_CA_CERTS: fixture.caFile,
+});
+
+test("a login-shell configuration folder or CA file Desktop can't use is named, and never consented to", async () => {
+  for (const [shell, setting] of [
+    ["relativeConfig", "CLAUDE_CONFIG_DIR"],
+    ["sharedConfig", "CLAUDE_CONFIG_DIR"],
+    ["missingCa", "NODE_EXTRA_CA_CERTS"],
+  ]) {
+    const context = setup();
+    context.useShell(shell);
+    const dialogs = fakeDialogs();
+    const host = hostFor({ consents: context.consents, dialogs });
+    const refused = {
+      supported: true,
+      found: false,
+      path: context.fixture.claude,
+      consented: false,
+      problem: "shell_setting_unusable",
+      shellSetting: setting,
+    };
+    assert.deepEqual(await context.invoke("detect", host), refused, shell);
+    assert.deepEqual(await context.invoke("status", host), refused, shell);
+    // runtime-agent would refuse every turn with it, so nobody is asked.
+    assert.deepEqual(await context.invoke("enable", host), refused, shell);
+    assert.equal(dialogs.shown.length, 0, shell);
+    assert.deepEqual(context.consents.read(), {}, shell);
+    assert.equal(await context.grantFor(USER_A), null, shell);
+  }
+
+  // Locate takes the login shell's values too, and is held to the same rule.
+  const context = setup();
+  context.useShell("sharedConfig");
+  const dialogs = fakeDialogs({ pick: context.fixture.otherClaude });
+  assert.deepEqual(await context.invoke("locate", hostFor({ consents: context.consents, dialogs })), {
+    supported: true,
+    found: false,
+    path: context.fixture.otherClaude,
+    consented: false,
+    problem: "shell_setting_unusable",
+    shellSetting: "CLAUDE_CONFIG_DIR",
+  });
+});
+
+test("a configuration folder or CA file that changes after consent shows as the problem", async () => {
+  const context = setup();
+  const host = hostFor({ consents: context.consents });
+  const { claude, caFile, configDir } = context.fixture;
+  const on = { supported: true, found: true, path: claude, consented: true };
+  assert.deepEqual(await consentAs(context, host), on);
+  const grant = await context.grantFor(USER_A);
+
+  fs.rmSync(caFile);
+  assert.deepEqual(await context.invoke("status", host), {
+    ...on,
+    found: false,
+    problem: "shell_setting_unusable",
+    shellSetting: "NODE_EXTRA_CA_CERTS",
+  });
+  // The grant stays what the person consented to; runtime-agent checks it again before each turn.
+  assert.deepEqual(await context.grantFor(USER_A), grant);
+  fs.writeFileSync(caFile, "fixture CA bundle\n");
+  fs.chmodSync(caFile, 0o644);
+  assert.deepEqual(await context.invoke("status", host), on);
+
+  fs.chmodSync(configDir, 0o770);
+  assert.deepEqual(await context.invoke("status", host), {
+    ...on,
+    found: false,
+    problem: "shell_setting_unusable",
+    shellSetting: "CLAUDE_CONFIG_DIR",
+  });
+  fs.chmodSync(configDir, 0o700);
+  assert.deepEqual(await context.invoke("status", host), on);
+});
+
+test("while the lane is on, Find and a refused Locate answer the path in use, with what they found beside it", async () => {
+  const context = setup();
+  const dialogs = fakeDialogs();
+  const host = hostFor({ consents: context.consents, dialogs });
+  const { claude, otherClaude } = context.fixture;
+  const on = { supported: true, found: true, path: claude, consented: true };
+  assert.deepEqual(await consentAs(context, host), on);
+  const binaryInUse = async () => (await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_BIN;
+
+  // Find turns up another program: turns keep the one in use, so the answer does too.
+  context.useShell("foundOther");
+  assert.deepEqual(await context.invoke("detect", host), { ...on, candidatePath: otherClaude });
+  assert.deepEqual(await context.invoke("status", host), { ...on, candidatePath: otherClaude });
+  assert.equal(await binaryInUse(), claude);
+
+  // Find turns up nothing: the program in use still works.
+  context.useShell("alias");
+  assert.deepEqual(await context.invoke("detect", host), { ...on, candidateProblem: "not_found" });
+  assert.deepEqual(await context.invoke("status", host), { ...on, candidateProblem: "not_found" });
+
+  // A pick Desktop can't use changes nothing, and shows only in its own answer.
+  const plain = path.join(context.fixture.root, "not-executable");
+  fs.writeFileSync(plain, "x");
+  fs.chmodSync(plain, 0o644);
+  dialogs.pick = plain;
+  assert.deepEqual(await context.invoke("locate", host), {
+    ...on,
+    candidatePath: plain,
+    candidateProblem: "not_executable",
+  });
+  assert.deepEqual(await context.invoke("status", host), { ...on, candidateProblem: "not_found" });
+  assert.equal(await binaryInUse(), claude);
+
+  // Another program whose login-shell values Desktop can't use: named, and not consented to.
+  context.useShell("otherSharedConfig");
+  const unusable = {
+    ...on,
+    candidatePath: otherClaude,
+    candidateProblem: "shell_setting_unusable",
+    shellSetting: "CLAUDE_CONFIG_DIR",
+  };
+  assert.deepEqual(await context.invoke("detect", host), unusable);
+  const asked = dialogs.shown.length;
+  assert.deepEqual(await context.invoke("enable", host), unusable);
+  assert.equal(dialogs.shown.length, asked);
+  assert.equal(await binaryInUse(), claude);
+
+  // Use for my messages confirms what Find turned up, through the consent dialog.
+  context.useShell("foundOther");
+  assert.deepEqual(await context.invoke("detect", host), { ...on, candidatePath: otherClaude });
+  assert.deepEqual(await context.invoke("enable", host), { ...on, path: otherClaude });
+  assert.ok(dialogs.shown[dialogs.shown.length - 1].detail.includes(`Program: ${otherClaude}`));
+  assert.equal(await binaryInUse(), otherClaude);
+});
+
+test("while the lane is on, Find offers the program in use again with login-shell values that replace recorded ones Desktop can't use", async () => {
+  const context = setup();
+  const dialogs = fakeDialogs();
+  const host = hostFor({ consents: context.consents, dialogs });
+  const { claude, otherClaude, caFile, configDir } = context.fixture;
+  const on = { supported: true, found: true, path: claude, consented: true };
+  assert.deepEqual(await consentAs(context, host), on);
+  const grantedEnv = async () =>
+    JSON.parse((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_ENV_JSON);
+
+  // The CA file goes after consent. A Find whose shell still names it reads nothing new.
+  fs.rmSync(caFile);
+  const stale = {
+    ...on,
+    found: false,
+    problem: "shell_setting_unusable",
+    shellSetting: "NODE_EXTRA_CA_CERTS",
+  };
+  assert.deepEqual(await context.invoke("detect", host), stale);
+  // New values Desktop can't use either are not offered, and nobody is asked about them.
+  context.useShell("sharedConfig");
+  assert.deepEqual(await context.invoke("detect", host), stale);
+  const asked = dialogs.shown.length;
+  assert.deepEqual(await context.invoke("enable", host), stale);
+  assert.equal(dialogs.shown.length, asked);
+
+  // The person stops exporting it and chooses Find: the program in use shows
+  // beside itself, and turns keep the recorded values until Use for my
+  // messages confirms the new ones.
+  context.useShell("configOnly");
+  const renewed = { ...stale, candidatePath: claude };
+  assert.deepEqual(await context.invoke("detect", host), renewed);
+  assert.deepEqual(await context.invoke("status", host), renewed);
+  assert.equal((await grantedEnv()).NODE_EXTRA_CA_CERTS, caFile);
+
+  // Locating the program in use keeps that find, and drops a find of another program.
+  dialogs.pick = claude;
+  assert.deepEqual(await context.invoke("locate", host), renewed);
+  context.useShell("foundOther");
+  assert.deepEqual(await context.invoke("detect", host), {
+    ...stale,
+    candidatePath: otherClaude,
+    candidateProblem: "shell_setting_unusable",
+  });
+  assert.deepEqual(await context.invoke("locate", host), stale);
+  assert.equal((await grantedEnv()).NODE_EXTRA_CA_CERTS, caFile);
+
+  // Use for my messages confirms the new values through the consent dialog.
+  context.useShell("configOnly");
+  assert.deepEqual(await context.invoke("detect", host), renewed);
+  assert.deepEqual(await context.invoke("enable", host), on);
+  assert.equal(dialogs.shown.length, asked + 1);
+  const { detail } = dialogs.shown[asked];
+  assert.ok(detail.includes(`Program: ${claude}`));
+  assert.ok(detail.includes(`CLAUDE_CONFIG_DIR=${configDir}`));
+  assert.equal(detail.includes("NODE_EXTRA_CA_CERTS"), false);
+  assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir });
+  assert.deepEqual(await context.invoke("status", host), on);
+
+  // Once the recorded values pass, a Find of the same program with other values offers nothing.
+  fs.writeFileSync(caFile, "fixture CA bundle\n");
+  fs.chmodSync(caFile, 0o644);
+  context.useShell("found");
+  assert.deepEqual(await context.invoke("detect", host), on);
+  assert.deepEqual(await context.invoke("status", host), on);
+});
+
+test("Locate without a Find reads the login shell, so the grant carries its PATH and D26 values", async () => {
+  const context = setup();
+  const { fixture } = context;
+  const dialogs = fakeDialogs({ pick: fixture.otherClaude });
+  const host = hostFor({ consents: context.consents, dialogs });
+
+  assert.equal(fs.existsSync(fixture.envDump), false);
+  assert.deepEqual(await context.invoke("locate", host), {
+    supported: true,
+    found: true,
+    path: fixture.otherClaude,
+    consented: false,
+  });
+  assert.equal(fs.existsSync(fixture.envDump), true, "the login shell ran, as for Find");
+  assert.equal((await context.invoke("enable", host)).consented, true);
+  const [dialog] = dialogs.shown;
+  assert.ok(dialog.detail.includes(`Program: ${fixture.otherClaude}`));
+  for (const [key, value] of Object.entries(FIVE_SHELL_VALUES(fixture))) {
+    assert.ok(dialog.detail.includes(`${key}=${value}`), `the dialog lists ${key}`);
+  }
+  const grant = await context.grantFor(USER_A);
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_BIN, fixture.otherClaude);
+  // The picked program, with the shell's PATH.
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_PATH, `${fixture.binDir}:/usr/bin:/bin`);
+  assert.deepEqual(JSON.parse(grant.env.INSTAFY_CLAUDE_CODE_ENV_JSON), FIVE_SHELL_VALUES(fixture));
+
+  // What the shell said stays for the next Locate, which does not run it again.
+  fs.rmSync(fixture.envDump);
+  await context.invoke("disable", host);
+  dialogs.pick = fixture.claude;
+  assert.equal((await context.invoke("locate", host)).path, fixture.claude);
+  assert.equal(fs.existsSync(fixture.envDump), false);
+  await context.invoke("enable", host);
+  assert.deepEqual(
+    JSON.parse((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_ENV_JSON),
+    FIVE_SHELL_VALUES(fixture),
+  );
+
+  // A login shell that gives no answer leaves them empty, as it does for Find.
+  const quiet = setup();
+  quiet.useShell("noMarkers");
+  const quietHost = hostFor({
+    consents: quiet.consents,
+    dialogs: fakeDialogs({ pick: quiet.fixture.claude }),
+  });
+  assert.equal((await quiet.invoke("locate", quietHost)).found, true);
+  await quiet.invoke("enable", quietHost);
+  const quietGrant = await quiet.grantFor(USER_A);
+  assert.equal(quietGrant.env.INSTAFY_CLAUDE_CODE_PATH, "");
+  assert.equal(quietGrant.env.INSTAFY_CLAUDE_CODE_ENV_JSON, "{}");
 });
 
 // ------------------------------------------------------ restarts (4.3, 4.4)
@@ -1060,6 +1520,43 @@ test("after enable, disable or locate, the runtime is replaced only when its gra
   assert.equal(harness.replaced.length, 3);
 });
 
+test("confirming a moved CA file for the program in use replaces the runtime that holds the old place", async () => {
+  const context = setup();
+  const harness = runtimeHarness(context);
+  const dialogs = fakeDialogs();
+  const host = hostFor({ consents: context.consents, dialogs });
+  const { claude, caFile, movedCaFile } = context.fixture;
+  const runtimeEnv = () =>
+    JSON.parse(harness.state.runtime.launchGrants[0].grant.env.INSTAFY_CLAUDE_CODE_ENV_JSON);
+  await harness.invoke("detect", host);
+  await harness.invoke("enable", host);
+  assert.equal(harness.replaced.length, 1);
+  assert.equal(runtimeEnv().NODE_EXTRA_CA_CERTS, caFile);
+
+  // The person moves the CA file and the export follows it. Find reads the
+  // new place, which changes no grant on its own.
+  fs.renameSync(caFile, movedCaFile);
+  context.useShell("movedCa");
+  assert.equal((await harness.invoke("detect", host)).candidatePath, claude);
+  assert.equal(harness.replaced.length, 1);
+
+  // Use for my messages grants it, so the runtime holding the old place is replaced.
+  assert.deepEqual(await harness.invoke("enable", host), {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: true,
+  });
+  assert.ok(
+    dialogs.shown[dialogs.shown.length - 1].detail.includes(`NODE_EXTRA_CA_CERTS=${movedCaFile}`),
+  );
+  assert.equal(harness.replaced.length, 2);
+  assert.deepEqual(runtimeEnv(), {
+    ...FIVE_SHELL_VALUES(context.fixture),
+    NODE_EXTRA_CA_CERTS: movedCaFile,
+  });
+});
+
 test("Keep working puts the consent store back and reports the change as not made", async () => {
   const context = setup();
   const harness = runtimeHarness(context);
@@ -1091,4 +1588,72 @@ test("Keep working puts the consent store back and reports the change as not mad
     (await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_BIN,
     context.fixture.claude,
   );
+});
+
+test("a status read during a consent change waits for it, and shows it undone when the work is kept", async () => {
+  const context = setup();
+  const extensionId = claudeCode.CLAUDE_CODE_DESKTOP_EXTENSION_ID;
+  assert.equal(context.extensions.methodIsReadOnly(extensionId, "status"), true);
+  for (const method of ["detect", "locate", "enable", "disable"]) {
+    assert.equal(context.extensions.methodIsReadOnly(extensionId, method), false, method);
+  }
+  // One runtime lock, first come first served, as main.ts's.
+  let tail = Promise.resolve();
+  const withRuntimeLock = async (operation) => {
+    const previous = tail;
+    let release;
+    tail = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
+  let decide = null;
+  const runtime = {
+    handle: "runtime-1",
+    projectId: PROJECT_ID,
+    controllerOrigin: CONTROLLER,
+    instafyUserId: USER_A,
+    launchGrants: context.extensions.launchGrantsWithoutValues(),
+  };
+  const hostA = hostFor({ consents: context.consents });
+  const invoke = (methodId) =>
+    registry.invokeDesktopExtensionWithLaunchGrants({
+      registry: context.extensions,
+      extensionId,
+      methodId,
+      payload: {},
+      host: hostA,
+      withRuntimeLock,
+      runningRuntime: () => runtime,
+      // The "still working" question, which the person has not answered yet.
+      replaceRuntime: () =>
+        new Promise((resolve) => {
+          decide = resolve;
+        }),
+    });
+
+  await invoke("detect");
+  const enabling = invoke("enable").then(
+    () => "made",
+    (error) => error.code,
+  );
+  while (!decide) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  // The record is written while the person decides.
+  assert.equal((await context.invoke("status", hostA)).consented, true);
+  const reading = invoke("status");
+  decide("kept");
+  assert.equal(await enabling, "desktop_extension_change_not_made");
+  assert.deepEqual(await reading, {
+    supported: true,
+    found: true,
+    path: context.fixture.claude,
+    consented: false,
+  });
 });

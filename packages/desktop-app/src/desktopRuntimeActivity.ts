@@ -171,6 +171,42 @@ export function desktopRuntimeExitedForDeletedSpace(
   return exit?.code === DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE;
 }
 
+/**
+ * The user a runtime start's launch grants are resolved for (4.3): the
+ * visible session's user when the start is bound to it. A Personal Browser
+ * runtime never offers a local engine, so its starts are granted nothing.
+ */
+export function resolveDesktopRuntimeLaunchGrantUserId(options: {
+  enablePersonalBrowser: boolean;
+  boundUserId: string | null;
+}): string | null {
+  return options.enablePersonalBrowser ? null : options.boundUserId;
+}
+
+/**
+ * What a consent change's replacement starts from (4.3): the replaced
+ * runtime's own options, with the token of the session the Studio window
+ * shows now when that session is the user the runtime was bound to. A token
+ * read before the consent sheet and the fence may have expired since; one
+ * from any other session never starts it. Without a usable session, the
+ * retained token stays, which a fence's 401 may just have refreshed.
+ */
+export function buildConsentChangeRestartOptions<T extends { controllerAccessToken?: string }>(
+  options: {
+    restartOptions: T;
+    launchGrantUserId: string | null;
+    currentSession: { accessToken: string; userId: string } | null;
+  },
+): T {
+  const boundUserId = options.launchGrantUserId?.trim().toLowerCase() ?? "";
+  const accessToken = options.currentSession?.accessToken.trim() ?? "";
+  const userId = options.currentSession?.userId.trim().toLowerCase() ?? "";
+  if (!boundUserId || !accessToken || userId !== boundUserId) {
+    return { ...options.restartOptions };
+  }
+  return { ...options.restartOptions, controllerAccessToken: accessToken };
+}
+
 export type DesktopRuntimeReplacementDecision = "replace" | "keep";
 
 /**

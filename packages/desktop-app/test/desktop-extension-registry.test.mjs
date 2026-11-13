@@ -90,6 +90,7 @@ test("desktop extension composition rejects duplicate registrations and unknown 
 // ------------------------------------------------ host context and consent
 
 const {
+  DesktopExtensionChangeNotMadeError,
   createDesktopExtensionConsentStore,
   desktopRuntimeLaunchGrantsEqual,
   desktopRuntimeLaunchGrantsForStart,
@@ -432,8 +433,13 @@ test("a consent change replaces the runtime only when its own grant changed; kee
   decision = "kept";
   const before = consents.read();
   await assert.rejects(invoke("disable", hostFor({ consents })), (error) => {
-    assert.equal(error.name, "DesktopExtensionChangeNotMadeError");
+    assert.ok(error instanceof DesktopExtensionChangeNotMadeError);
     assert.equal(error.code, "desktop_extension_change_not_made");
+    // Electron hands the renderer error.toString(); Studio shows what follows "Error: ".
+    assert.equal(
+      String(error),
+      "Error: Instafy is still working on this computer, so that change was not made.",
+    );
     return true;
   });
   assert.deepEqual(consents.read(), before);
@@ -475,4 +481,135 @@ test("a consent change replaces the runtime only when its own grant changed; kee
     }),
     /Unknown desktop extension "missing"/,
   );
+});
+
+test("read-only methods must be methods the extension registers", () => {
+  const withReadOnly = (readOnlyMethods) =>
+    createFixtureModule({
+      desktopExtensions: [{ id: "weather", methods: { forecast: () => 1, save: () => 2 }, readOnlyMethods }],
+    });
+  assert.throws(() => createDesktopExtensionRegistry([withReadOnly(["missing"])]), /read-only/);
+  assert.throws(() => createDesktopExtensionRegistry([withReadOnly("forecast")]), /must be an array/);
+  const registry = createDesktopExtensionRegistry([withReadOnly(["forecast"])]);
+  assert.equal(registry.methodIsReadOnly("weather", "forecast"), true);
+  assert.equal(registry.methodIsReadOnly("weather", "save"), false);
+  assert.equal(
+    createDesktopExtensionRegistry([createFixtureModule()]).methodIsReadOnly("weather", "forecast"),
+    false,
+  );
+});
+
+// One runtime lock, first come first served, as main.ts's.
+function fifoLock() {
+  let tail = Promise.resolve();
+  return async (operation) => {
+    const previous = tail;
+    let release;
+    tail = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
+}
+
+function createReadOnlyEngineModule() {
+  const module = createEngineModule();
+  return {
+    ...module,
+    desktopExtensions: [{ ...module.desktopExtensions[0], readOnlyMethods: ["read"] }],
+  };
+}
+
+test("a read-only method answers once a consent change queued before it has settled", async () => {
+  const consents = memoryConsents();
+  const registry = createDesktopExtensionRegistry([createReadOnlyEngineModule()]);
+  const withRuntimeLock = fifoLock();
+  let decide = null;
+  const runtime = {
+    handle: "runtime-1",
+    projectId: PROJECT_ID,
+    controllerOrigin: CONTROLLER,
+    instafyUserId: USER_A,
+    launchGrants: registry.launchGrantsWithoutValues(),
+  };
+  const invoke = (methodId, payload = {}) =>
+    invokeDesktopExtensionWithLaunchGrants({
+      registry,
+      extensionId: "fixture-engine",
+      methodId,
+      payload,
+      host: hostFor({ consents }),
+      withRuntimeLock,
+      runningRuntime: () => runtime,
+      replaceRuntime: () =>
+        new Promise((resolve) => {
+          decide = resolve;
+        }),
+    });
+
+  const enabling = invoke("enable", { bin: "/new/engine" }).then(
+    () => "made",
+    (error) => error.code,
+  );
+  while (!decide) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  // Written, while the person is asked whether to stop the running work.
+  assert.deepEqual(await registry.invoke("fixture-engine", "read", {}, hostFor({ consents })), {
+    bin: "/new/engine",
+  });
+  const reading = invoke("read");
+  decide("kept");
+  assert.equal(await enabling, "desktop_extension_change_not_made");
+  assert.equal(await reading, null, "the read answers with the change put back");
+});
+
+test("a replacement that fails leaves the change made, and the method answers as usual", async () => {
+  const consents = memoryConsents();
+  const registry = createDesktopExtensionRegistry([createReadOnlyEngineModule()]);
+  const failures = [];
+  const runtime = {
+    handle: "runtime-1",
+    projectId: PROJECT_ID,
+    controllerOrigin: CONTROLLER,
+    instafyUserId: USER_A,
+    launchGrants: registry.launchGrantsWithoutValues(),
+  };
+  const invoke = (methodId, replaceRuntime, payload = {}) =>
+    invokeDesktopExtensionWithLaunchGrants({
+      registry,
+      extensionId: "fixture-engine",
+      methodId,
+      payload,
+      host: hostFor({ consents }),
+      withRuntimeLock: fifoLock(),
+      runningRuntime: () => runtime,
+      replaceRuntime,
+      onReplaceError: (error) => failures.push(error.message),
+    });
+
+  // The old runtime stopped, and its replacement could not start.
+  const failing = async () => {
+    throw new Error("Controller returned HTTP 401.");
+  };
+  assert.deepEqual(await invoke("enable", failing, { bin: "/new/engine" }), { on: true });
+  assert.deepEqual(failures, ["Controller returned HTTP 401."]);
+  assert.deepEqual(await registry.invoke("fixture-engine", "read", {}, hostFor({ consents })), {
+    bin: "/new/engine",
+  });
+
+  // A later read finds the runtime's grant still differs and asks again. If
+  // the person keeps the work, the read changed nothing, so nothing is put
+  // back and nothing reports a change as not made.
+  assert.deepEqual(await invoke("read", async () => "kept"), { bin: "/new/engine" });
+  assert.deepEqual(await registry.invoke("fixture-engine", "read", {}, hostFor({ consents })), {
+    bin: "/new/engine",
+  });
+  assert.deepEqual(await invoke("read", failing), { bin: "/new/engine" });
+  assert.equal(failures.length, 2);
 });

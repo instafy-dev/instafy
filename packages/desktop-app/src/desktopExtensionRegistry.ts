@@ -89,6 +89,13 @@ export type DesktopExtensionMethod = (
 export type DesktopExtensionRegistration = Readonly<{
   id: string;
   methods: Readonly<Record<string, DesktopExtensionMethod>>;
+  /**
+   * Methods that change no consent record, such as a status read. When the
+   * module also grants runtime launch values, the shell runs them only once
+   * every consent change queued before them has settled, made or put back, so
+   * they never answer with a change the person kept from being made.
+   */
+  readOnlyMethods?: readonly string[];
   shutdown?: () => void | Promise<void>;
 }>;
 
@@ -171,6 +178,8 @@ export type DesktopExtensionRegistry = Readonly<{
   shutdownAll: () => Promise<void>;
   /** The feature module that registered an extension. */
   moduleIdForExtension: (extensionId: string) => string;
+  /** Whether an extension declared a method as one that changes no consent record. */
+  methodIsReadOnly: (extensionId: string, methodId: string) => boolean;
   moduleContributesLaunchGrants: (moduleId: string) => boolean;
   /** Every registered contribution with nothing granted: what a start that may not be granted anything passes. */
   launchGrantsWithoutValues: () => readonly DesktopRuntimeResolvedLaunchGrant[];
@@ -188,6 +197,7 @@ type ValidatedDesktopExtension = Readonly<{
   id: string;
   moduleId: string;
   methods: ReadonlyMap<string, DesktopExtensionMethod>;
+  readOnlyMethods: ReadonlySet<string>;
   shutdown?: () => void | Promise<void>;
 }>;
 
@@ -250,6 +260,24 @@ function validateDesktopExtensionRegistration(
       `Desktop extension "${registration.id}" must register at least one method.`,
     );
   }
+  const readOnlyMethods = new Set<string>();
+  if (registration.readOnlyMethods !== undefined) {
+    if (!Array.isArray(registration.readOnlyMethods)) {
+      throw new TypeError(
+        `Desktop extension "${registration.id}" readOnlyMethods must be an array.`,
+      );
+    }
+    for (const methodId of registration.readOnlyMethods) {
+      if (typeof methodId !== "string" || !methods.has(methodId)) {
+        throw new Error(
+          `Desktop extension "${registration.id}" lists ${JSON.stringify(
+            methodId,
+          )} as read-only, but registers no such method.`,
+        );
+      }
+      readOnlyMethods.add(methodId);
+    }
+  }
   if (registration.shutdown !== undefined && typeof registration.shutdown !== "function") {
     throw new TypeError(
       `Desktop extension "${registration.id}" shutdown hook must be a function.`,
@@ -260,6 +288,7 @@ function validateDesktopExtensionRegistration(
     id: registration.id,
     moduleId,
     methods,
+    readOnlyMethods,
     shutdown: registration.shutdown,
   });
 }
@@ -633,6 +662,8 @@ export function createDesktopExtensionRegistry(
       }
     },
     moduleIdForExtension: (extensionId: string) => requireExtension(extensionId).moduleId,
+    methodIsReadOnly: (extensionId: string, methodId: string) =>
+      requireExtension(extensionId).readOnlyMethods.has(methodId),
     moduleContributesLaunchGrants: (moduleId: string) =>
       launchGrants.some((grant) => grant.moduleId === moduleId),
     launchGrantsWithoutValues,
@@ -733,13 +764,17 @@ export function desktopRuntimeLaunchGrantsEqual(
   return true;
 }
 
-/** Thrown when the person kept the running work: the change is undone, not made. */
+/**
+ * Thrown when the person kept the running work: the change is undone, not
+ * made. Its name stays "Error": Electron hands a renderer only
+ * `error.toString()`, "<name>: <message>", and Studio shows what follows
+ * "Error: ". In-process code tells it apart by `code`.
+ */
 export class DesktopExtensionChangeNotMadeError extends Error {
   readonly code = "desktop_extension_change_not_made";
 
   constructor() {
     super("Instafy is still working on this computer, so that change was not made.");
-    this.name = "DesktopExtensionChangeNotMadeError";
   }
 }
 
@@ -758,6 +793,12 @@ export type DesktopExtensionRunningRuntime<T> = Readonly<{
  * and replace the runtime only when the grant changed. If the person keeps
  * the running work instead, put the module's consent records back as they
  * were before the method ran and report the change as not made.
+ *
+ * A method the extension declares read-only runs inside the runtime lock, so
+ * it answers only once every consent change queued before it has settled. A
+ * replacement that fails is not a change the person kept from being made:
+ * the change stays, the method answers as usual, and the failure goes to
+ * `onReplaceError`.
  */
 export async function invokeDesktopExtensionWithLaunchGrants<T>(options: {
   registry: DesktopExtensionRegistry;
@@ -770,24 +811,27 @@ export async function invokeDesktopExtensionWithLaunchGrants<T>(options: {
   /** Fence, ask and replace; "kept" when the person chose to keep working. */
   replaceRuntime: (runtime: DesktopExtensionRunningRuntime<T>) => Promise<"replaced" | "kept">;
   onGrantError?: (grantId: string, error: unknown) => void;
+  /**
+   * A replacement failed after nobody chose to keep the work: the old runtime
+   * is stopped, or still held fenced when it could not be stopped, and the
+   * next call that finds its grant changed tries again.
+   */
+  onReplaceError?: (error: unknown) => void;
 }): Promise<unknown> {
   const { registry, host } = options;
   const moduleId = registry.moduleIdForExtension(options.extensionId);
   const consents = host.consents;
+  const invoke = () =>
+    registry.invoke(options.extensionId, options.methodId, options.payload, host);
   if (!consents || !registry.moduleContributesLaunchGrants(moduleId)) {
-    return await registry.invoke(options.extensionId, options.methodId, options.payload, host);
+    return await invoke();
   }
-  const before = snapshotDesktopExtensionConsents(consents, moduleId);
-  const result = await registry.invoke(
-    options.extensionId,
-    options.methodId,
-    options.payload,
-    host,
-  );
-  await options.withRuntimeLock(async () => {
+  // Replace the running runtime when this module's grant for it changed;
+  // true when the person kept the running work instead.
+  const keptRunningWork = async (): Promise<boolean> => {
     const runtime = options.runningRuntime();
     if (!runtime?.instafyUserId) {
-      return;
+      return false;
     }
     const next = await registry.resolveLaunchGrants({
       projectId: runtime.projectId,
@@ -797,9 +841,28 @@ export async function invokeDesktopExtensionWithLaunchGrants<T>(options: {
       onError: options.onGrantError,
     });
     if (desktopRuntimeLaunchGrantsEqual(runtime.launchGrants, next, moduleId)) {
-      return;
+      return false;
     }
-    if ((await options.replaceRuntime(runtime)) === "kept") {
+    try {
+      return (await options.replaceRuntime(runtime)) === "kept";
+    } catch (error) {
+      options.onReplaceError?.(error);
+      return false;
+    }
+  };
+  if (registry.methodIsReadOnly(options.extensionId, options.methodId)) {
+    // It changed nothing, so there is nothing to put back if the person keeps
+    // the work a replacement would stop.
+    return await options.withRuntimeLock(async () => {
+      const result = await invoke();
+      await keptRunningWork();
+      return result;
+    });
+  }
+  const before = snapshotDesktopExtensionConsents(consents, moduleId);
+  const result = await invoke();
+  await options.withRuntimeLock(async () => {
+    if (await keptRunningWork()) {
       restoreDesktopExtensionConsents(consents, before);
       throw new DesktopExtensionChangeNotMadeError();
     }

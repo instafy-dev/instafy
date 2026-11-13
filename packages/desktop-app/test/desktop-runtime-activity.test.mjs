@@ -11,6 +11,7 @@ const {
   DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE,
   DesktopRuntimeHttpError,
   assertDesktopRuntimeResumed,
+  buildConsentChangeRestartOptions,
   buildDesktopRuntimeDrainUrl,
   buildDesktopRuntimeResumeUrl,
   buildDesktopRuntimeStopUrl,
@@ -20,6 +21,7 @@ const {
   desktopRuntimeExitedForDeletedSpace,
   readDesktopRuntimeActiveJobCount,
   resolveDesktopRuntimeControllerCredentialAction,
+  resolveDesktopRuntimeLaunchGrantUserId,
   resolveRefreshedDesktopRuntimeAccessToken,
   runDesktopRuntimeExitCleanup,
   withRefreshedDesktopRuntimeAccess,
@@ -500,4 +502,54 @@ test("an unknown job count asks too; it never replaces silently", async () => {
     "replace",
   );
   assert.deepEqual(stop.calls, ["fence", ["error", "fence"], ["ask", null]]);
+});
+
+test("a start's launch grants are for its bound user, never for a Personal Browser start", () => {
+  const userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  assert.equal(
+    resolveDesktopRuntimeLaunchGrantUserId({ enablePersonalBrowser: false, boundUserId: userId }),
+    userId,
+  );
+  assert.equal(
+    resolveDesktopRuntimeLaunchGrantUserId({ enablePersonalBrowser: true, boundUserId: userId }),
+    null,
+  );
+  assert.equal(
+    resolveDesktopRuntimeLaunchGrantUserId({ enablePersonalBrowser: false, boundUserId: null }),
+    null,
+  );
+});
+
+test("a consent change's replacement starts with its bound user's current token, else the retained one", () => {
+  const userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const otherUserId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const restartOptions = {
+    projectId: "space-1",
+    controllerUrl: "https://controller.example",
+    // What the runtime started with, or what a fence's 401 refreshed it to.
+    controllerAccessToken: "retained-token",
+  };
+  const build = (currentSession, launchGrantUserId = userId) =>
+    buildConsentChangeRestartOptions({ restartOptions, launchGrantUserId, currentSession });
+
+  assert.deepEqual(build({ accessToken: "current-token", userId: userId.toUpperCase() }), {
+    ...restartOptions,
+    controllerAccessToken: "current-token",
+  });
+  // Another user's session never starts it.
+  assert.equal(
+    build({ accessToken: "other-token", userId: otherUserId }).controllerAccessToken,
+    "retained-token",
+  );
+  // No session, or no token: the retained one.
+  assert.equal(build(null).controllerAccessToken, "retained-token");
+  assert.equal(build({ accessToken: " ", userId }).controllerAccessToken, "retained-token");
+  // A runtime bound to nobody keeps its own token.
+  assert.equal(
+    build({ accessToken: "current-token", userId }, null).controllerAccessToken,
+    "retained-token",
+  );
+  // The replaced runtime's own options are left as they were.
+  assert.equal(restartOptions.controllerAccessToken, "retained-token");
+  assert.notEqual(build(null), restartOptions);
 });
