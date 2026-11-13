@@ -316,7 +316,11 @@ export function mapRuntimeBrowserSessionPagesPayload(payload: unknown): RuntimeB
             ? null
             : null;
       const isActive = record.isActive === true;
-      if (!id || !url || !label) {
+      // A tab listed with no address is still open: Chrome can list one that
+      // way for a moment while it goes to a page. Leaving it out made the
+      // chat whose tab it was lose it for that read, open a new blank tab and
+      // show that one instead of the page that arrived.
+      if (!id || !label) {
         return null;
       }
       const openedBy = parseBrowserTabOpener(record.openedBy);

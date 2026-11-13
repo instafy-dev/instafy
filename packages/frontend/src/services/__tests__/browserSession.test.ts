@@ -184,6 +184,34 @@ describe("mapRuntimeBrowserSessionPagesPayload", () => {
     ]);
   });
 
+  // Chrome can list a tab with no address for a moment while it goes to a
+  // page. The Studio CI journey caught a chat's tab so: left out, the chat
+  // lost its tab, opened a new blank one and showed that instead.
+  it("keeps a tab the browser lists with no address", () => {
+    expect(
+      mapRuntimeBrowserSessionPagesPayload({
+        pages: [
+          { id: "page-1", url: "", host: "", label: "Browser page", title: null, loading: false, isActive: true },
+          // Still nothing without an id or a label.
+          { id: "page-2", url: "", host: "", label: "" },
+          { id: " ", url: "", host: "", label: "Browser page" },
+        ],
+      }),
+    ).toEqual([
+      {
+        id: "page-1",
+        url: "",
+        host: "",
+        label: "Browser page",
+        title: null,
+        loading: false,
+        isActive: true,
+        canGoBack: false,
+        canGoForward: false,
+      },
+    ]);
+  });
+
   it("keeps who opened a tab only when the browser says agent or person", () => {
     const base = { url: "https://example.com/", host: "example.com", label: "Example", title: null, isActive: false };
     const pages = mapRuntimeBrowserSessionPagesPayload({
