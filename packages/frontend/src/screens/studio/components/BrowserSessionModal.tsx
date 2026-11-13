@@ -126,7 +126,7 @@ import {
   type RemoteBrowserVirtualInputMessage,
 } from "./remoteBrowserInput";
 import { normalizedRemoteBrowserPoint } from "./remoteBrowserSurfaceGeometry";
-import { diag, diagChanged, diagId } from "../../../browserFlakeDiag";
+import { diag, diagChanged, diagId, diagUrlKind } from "../../../browserFlakeDiag";
 import {
   resolveSharedBrowserFallbackViewerKind,
   resolveSharedBrowserViewerForParticipant,
@@ -3479,6 +3479,7 @@ export function BrowserSessionModal({
   // arrived already, and a cover over it took the person's first click.
   const blankPageShown = viewLive && stageShowsPage && sharedBrowserActivePage !== null &&
     browserSessionPageIsBlank(sharedBrowserActivePage) && !agentArrivalNote && !agentWhereabouts;
+  diagChanged("modal:cover", { shown: blankPageShown, active: diagId("P", sharedBrowserActivePage?.id), url: diagUrlKind(sharedBrowserActivePage?.url) });
   // Around a live page the stage follows the theme like the chrome above it
   // and the composer below: black under a page in light mode read as dark
   // chrome on a phone, where the page leaves bands above and below it.
