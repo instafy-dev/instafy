@@ -2027,6 +2027,11 @@ pub(crate) async fn cancel_jobs_within_transaction(
 /// org's balance after it: a stop locks the jobs, then the questions, then
 /// the conversation; an answer locks its question, then its conversation;
 /// and a dispatch locks its conversation, then reserves the org's credit.
+/// A writer into one conversation that refunds, bills or gives back a
+/// managed-AI reserve locks the conversation with this before the balance
+/// too: a turn's completion or message, after its job and run
+/// (`crate::agent`), a refused plan's planning turn, and a dispatch's cancel
+/// of a covered Octo turn, which then holds its conversation and the root.
 /// The runs and prompts it rewrites after this are locked
 /// `for no key update` ([`persist_canceled_run_metadata`]): a message naming
 /// one, such as the runtime alert a dispatch writes once it has committed,

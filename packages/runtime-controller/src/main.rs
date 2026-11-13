@@ -102,6 +102,8 @@ mod tests;
 #[cfg(test)]
 mod tests_ai_metering_schema;
 #[cfg(test)]
+mod tests_balance_lock_order;
+#[cfg(test)]
 mod tests_browser_host;
 #[cfg(test)]
 mod tests_browser_view_lane;
