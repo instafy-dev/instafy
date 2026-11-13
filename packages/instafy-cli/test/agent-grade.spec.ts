@@ -14,6 +14,9 @@ function run(args: string[], input = "") {
   return spawnSync(process.execPath, [cliBin, ...args], {
     input,
     encoding: "utf8",
+    // Commands follow a space or profile that a binding in the working folder or above it names,
+    // so they run in an empty folder, not in this checkout.
+    cwd: mkdtempSync(path.join(tmpdir(), "instafy-agent-cwd-")),
     env: {
       ...process.env,
       HOME: mkdtempSync(path.join(tmpdir(), "instafy-agent-")),

@@ -56,7 +56,10 @@ describe("@instafy/cli UX", () => {
 
   it("exposes `instafy login` (prints JSON)", () => {
     const homeDir = makeTempDir("instafy-cli-home-");
-    const result = runCli(["login", "--json"], { homeDir });
+    // Login follows a profile that a binding in the working folder or above it names, so it runs
+    // in an empty folder, not in this checkout.
+    const cwd = makeTempDir("instafy-cli-cwd-");
+    const result = runCli(["login", "--json"], { cwd, homeDir });
     expect(result.status).toBe(0);
     const payload = JSON.parse(result.stdout || "{}") as { url?: string; configPath?: string };
     expect(payload.url).toContain("/cli/login");
