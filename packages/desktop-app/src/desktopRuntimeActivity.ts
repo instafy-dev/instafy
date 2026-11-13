@@ -171,6 +171,48 @@ export function desktopRuntimeExitedForDeletedSpace(
   return exit?.code === DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE;
 }
 
+export type DesktopRuntimeReplacementDecision = "replace" | "keep";
+
+/**
+ * Decide whether Desktop may replace its runtime. A runtime started with a
+ * launch grant, or one a consent change replaces, is fenced first and its
+ * active jobs counted. Busy, or a count that could not be read, means asking
+ * the person; keeping the work resumes the runtime. Any other replacement goes
+ * ahead as it always has, without a fence.
+ */
+export async function confirmDesktopRuntimeReplacement(options: {
+  previousHeldLaunchGrant: boolean;
+  consentChange: boolean;
+  fence: () => Promise<number>;
+  /** True when the person chose to stop the work and continue. */
+  ask: (activeJobCount: number | null) => Promise<boolean>;
+  resume: () => Promise<void>;
+  onError?: (stage: "fence" | "resume", error: unknown) => void;
+}): Promise<DesktopRuntimeReplacementDecision> {
+  if (!options.previousHeldLaunchGrant && !options.consentChange) {
+    return "replace";
+  }
+  let activeJobCount: number | null;
+  try {
+    activeJobCount = await options.fence();
+  } catch (error) {
+    options.onError?.("fence", error);
+    activeJobCount = null;
+  }
+  if (activeJobCount === 0) {
+    return "replace";
+  }
+  if (await options.ask(activeJobCount)) {
+    return "replace";
+  }
+  try {
+    await options.resume();
+  } catch (error) {
+    options.onError?.("resume", error);
+  }
+  return "keep";
+}
+
 export type DesktopQuitWaitAction = "force" | "cancel";
 
 export function canResumeDesktopRuntimeAfterFailedQuit(options: {

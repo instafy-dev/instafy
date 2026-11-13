@@ -61,12 +61,23 @@ import {
   CURRENT_DESKTOP_EXTENSION_REGISTRY,
 } from "./currentDesktopFeatureComposition";
 import {
+  desktopRuntimeLaunchGrantsEqual,
+  desktopRuntimeLaunchGrantsForStart,
+  desktopRuntimeLaunchGrantsHeld,
+  invokeDesktopExtensionWithLaunchGrants,
+  type DesktopExtensionConsentBackend,
+  type DesktopExtensionDialogs,
+  type DesktopExtensionHost,
+  type DesktopRuntimeResolvedLaunchGrant,
+} from "./desktopExtensionRegistry";
+import {
   DesktopRuntimeHttpError,
   assertDesktopRuntimeResumed,
   buildDesktopRuntimeDrainUrl,
   buildDesktopRuntimeResumeUrl,
   buildDesktopRuntimeStopUrl,
   canResumeDesktopRuntimeAfterFailedQuit,
+  confirmDesktopRuntimeReplacement,
   createDesktopQuitWaitControl,
   desktopRuntimeExitedForDeletedSpace,
   readDesktopRuntimeActiveJobCount,
@@ -75,6 +86,7 @@ import {
   runDesktopRuntimeExitCleanup,
   type DesktopRuntimeControllerCredentialMode,
   type DesktopRuntimeControllerCredentialProvenance,
+  type DesktopRuntimeReplacementDecision,
   withRefreshedDesktopRuntimeAccess,
   withDesktopRuntimeTimeout,
 } from "./desktopRuntimeActivity";
@@ -105,10 +117,13 @@ import {
   normalizeVisibleInstafySession,
   type DesktopCodexCredentialConnectRequest,
   type DesktopCodexVisibleSession,
+  type DesktopInstafySessionIdentity,
 } from "./codexCredentialBridge";
 import {
   assertDesktopControllerStartSessionBinding,
+  resolveDesktopControllerStartBoundUserId,
   resolveDesktopControllerStartCredentialProvenance,
+  resolveTrustedDesktopControllerForExtension,
   resolveTrustedDesktopControllerForStart,
 } from "./desktopControllerTrust";
 import { resolveVerifiedBundledRuntimeAgent } from "./bundledRuntimeAgent";
@@ -166,6 +181,8 @@ type DesktopExtensionInvokeRequest = {
   extensionId?: unknown;
   method?: unknown;
   payload?: unknown;
+  /** The renderer's controller; the shell's trust policy decides whether a method sees it. */
+  controllerUrl?: unknown;
 };
 
 const DEFAULT_PROD_URL = "https://prod.instafy.dev/studio";
@@ -196,6 +213,7 @@ const READ_VISIBLE_SUPABASE_SESSION_SCRIPT = `
       accessToken: typeof session.access_token === "string" ? session.access_token : "",
       userId: typeof session.user?.id === "string" ? session.user.id : "",
       expiresAt: Number(session.expires_at ?? 0),
+      email: typeof session.user?.email === "string" ? session.user.email : "",
     };
   })()
 `;
@@ -225,6 +243,7 @@ async function resolveVisibleSupabaseSession(
     userId: typeof record.userId === "string" ? record.userId : undefined,
     expiresAt:
       typeof record.expiresAt === "number" ? record.expiresAt : undefined,
+    email: typeof record.email === "string" ? record.email : undefined,
   };
 }
 
@@ -239,6 +258,11 @@ type DesktopAppConfig = {
   studioLocationConsent?: StoredStudioLocationConsent;
   /** The engine the Personal Browser's address bar searches with (an id from the skill's list). */
   personalBrowserSearchEngine?: string;
+  /**
+   * Feature modules' consent records, by module, controller origin and
+   * Instafy user. They stay in this file and are never sent anywhere.
+   */
+  desktopExtensionConsents?: unknown;
 };
 
 type DesktopLocalHardwareHostStatus = {
@@ -491,6 +515,13 @@ function writeConfig(next: DesktopAppConfig) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(next, null, 2), "utf8");
 }
+
+const desktopExtensionConsents: DesktopExtensionConsentBackend = Object.freeze({
+  read: () => readConfig().desktopExtensionConsents,
+  write: (data) => {
+    writeConfig({ ...readConfig(), desktopExtensionConsents: data });
+  },
+});
 
 // Studio's session has no permission handler by default, and Electron then
 // grants everything -- including geolocation to any page framed inside Studio.
@@ -833,9 +864,11 @@ type DesktopPersonalBrowserCredentials = {
   projectId: string;
 };
 
+// Launch grants stay out: a path that replays these options without going
+// through instafy:startDesktopRuntime must start without a grant (4.3).
 type DesktopRuntimeRestartOptions = Omit<
   StartDesktopRuntimeOptions,
-  "runtimeId" | "personalBrowser"
+  "runtimeId" | "personalBrowser" | "launchGrants"
 >;
 
 type DesktopRuntimeRecord = {
@@ -847,6 +880,14 @@ type DesktopRuntimeRecord = {
   runtimeId?: string;
   personalBrowser?: DesktopPersonalBrowserCredentials;
   restartOptions: DesktopRuntimeRestartOptions;
+  /**
+   * The user of the visible session the latest start was bound to, also in an
+   * unpackaged build whose credential stays fixed; null when it was not bound.
+   * Launch grants are resolved only for this user.
+   */
+  launchGrantUserId: string | null;
+  /** What each launch grant contribution gave this runtime when it started. */
+  launchGrants: readonly DesktopRuntimeResolvedLaunchGrant[];
 };
 
 function updateDesktopRuntimeControllerAccessToken(
@@ -912,6 +953,8 @@ async function resolveDesktopRuntimeControllerCredentialProvenance(options: {
 }): Promise<{
   controllerUrl: string;
   provenance: DesktopRuntimeControllerCredentialProvenance;
+  /** The visible session's user when the start is bound to it; null for a fixed start. */
+  boundUserId: string | null;
 }> {
   const controllerUrl = resolveTrustedDesktopControllerForStart({
     appUrl: getStartUrl(),
@@ -926,7 +969,7 @@ async function resolveDesktopRuntimeControllerCredentialProvenance(options: {
   // until a native trust configuration exists for those origins, but an
   // ambient request must still match the exact visible session before launch.
   if (options.requestedMode !== "ambient") {
-    return { controllerUrl, provenance: { kind: "fixed" } };
+    return { controllerUrl, provenance: { kind: "fixed" }, boundUserId: null };
   }
   const visibleIdentity = normalizeVisibleInstafySession(
     await resolveVisibleSupabaseSession(options.event),
@@ -938,6 +981,13 @@ async function resolveDesktopRuntimeControllerCredentialProvenance(options: {
       controllerAccessToken: options.controllerAccessToken,
       visibleSession: visibleIdentity,
       allowAmbientRefresh: app.isPackaged,
+    }),
+    // Kept even where the credential stays fixed (unpackaged builds), so a
+    // start bound to the visible session can be granted for its user (4.3).
+    boundUserId: resolveDesktopControllerStartBoundUserId({
+      credentialMode: "ambient",
+      controllerAccessToken: options.controllerAccessToken,
+      visibleSession: visibleIdentity,
     }),
   };
 }
@@ -1094,6 +1144,151 @@ async function stopAndDispositionDesktopRuntime(
       desktopRuntimeDispositionPromises.delete(runtime.handle);
     }
   }
+}
+
+function logDesktopRuntimeLaunchGrantError(grantId: string, error: unknown): void {
+  desktopLog("warn", "[instafy-desktop] runtime launch grant could not be resolved", {
+    grantId,
+    message: error instanceof Error ? error.message : String(error),
+  });
+}
+
+/**
+ * Ask each launch grant contribution for a start. Only a start bound to the
+ * visible session names a user; any other start is granted nothing, though
+ * every declared key is still stripped from it.
+ */
+function resolveDesktopRuntimeLaunchGrants(request: {
+  projectId: string;
+  controllerOrigin: string;
+  instafyUserId: string | null;
+}): Promise<readonly DesktopRuntimeResolvedLaunchGrant[]> {
+  return CURRENT_DESKTOP_EXTENSION_REGISTRY.resolveLaunchGrants({
+    ...request,
+    consents: desktopExtensionConsents,
+    onError: logDesktopRuntimeLaunchGrantError,
+  });
+}
+
+async function askToStopDesktopRuntimeWork(activeJobCount: number | null): Promise<boolean> {
+  const buttons = ["Keep working", "Stop it and continue"];
+  const result = await showDesktopQuitMessageBox(
+    activeJobCount === null
+      ? {
+          type: "warning",
+          buttons,
+          defaultId: 0,
+          cancelId: 0,
+          title: "Could not verify local agent activity",
+          message: "Instafy could not confirm whether it is still working on this computer. Stop it and continue?",
+          detail: "Keep working to protect work in progress, or stop it and continue anyway.",
+          noLink: true,
+        }
+      : {
+          type: "warning",
+          buttons,
+          defaultId: 0,
+          cancelId: 0,
+          title: "Local agent work is still running",
+          message: "Instafy is still working on this computer. Stop it and continue?",
+          detail:
+            activeJobCount === 1
+              ? "A local agent job is still running. Stopping it may interrupt the run."
+              : `${activeJobCount} local agent jobs are still running. Stopping them may interrupt the runs.`,
+          noLink: true,
+        },
+  );
+  return result.response === 1;
+}
+
+/**
+ * Before a runtime started with a launch grant is replaced, or one is
+ * replaced because a consent change altered its grant, fence it and ask the
+ * person when it is busy or its count cannot be read (4.4). Any other
+ * replacement goes ahead as before.
+ */
+async function confirmReplacingDesktopRuntime(
+  runtime: DesktopRuntimeRecord,
+  reason: { consentChange: boolean },
+): Promise<DesktopRuntimeReplacementDecision> {
+  return await confirmDesktopRuntimeReplacement({
+    previousHeldLaunchGrant: desktopRuntimeLaunchGrantsHeld(runtime.launchGrants),
+    consentChange: reason.consentChange,
+    fence: () => fenceDesktopRuntimeForDrain(runtime),
+    ask: askToStopDesktopRuntimeWork,
+    resume: () => resumeDesktopRuntimeAfterDrain(runtime),
+    onError: (stage, error) => {
+      desktopLog("warn", "[instafy-desktop] runtime replacement check failed", {
+        stage,
+        runtimeId: runtime.runtimeId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+}
+
+async function stopReplacedDesktopRuntime(previous: DesktopRuntimeRecord): Promise<void> {
+  await stopAndDispositionDesktopRuntime(previous, "desktop_runtime_replaced");
+  if (desktopRuntime?.handle === previous.handle) {
+    desktopRuntime = null;
+  }
+  revokePersonalBrowserRuntimeBinding(previous);
+  if (!previous.personalBrowser && previous.runtimeId) {
+    personalBrowserHost?.setRuntimeId(previous.projectId, null);
+  }
+}
+
+/**
+ * A consent change altered the running runtime's grant: replace it from its
+ * own start options, as instafy:startDesktopRuntime would, with the grant
+ * resolved again for the same bound user (4.3). The visible session that made
+ * the change is that user's, so its fresh token starts the replacement.
+ */
+async function replaceDesktopRuntimeForConsentChange(
+  previous: DesktopRuntimeRecord,
+  visibleIdentity: DesktopInstafySessionIdentity | null,
+): Promise<"replaced" | "kept"> {
+  if ((await confirmReplacingDesktopRuntime(previous, { consentChange: true })) === "keep") {
+    return "kept";
+  }
+  const freshAccessToken =
+    visibleIdentity && visibleIdentity.userId.toLowerCase() === previous.launchGrantUserId
+      ? visibleIdentity.accessToken
+      : null;
+  const restartOptions: DesktopRuntimeRestartOptions = {
+    ...previous.restartOptions,
+    ...(freshAccessToken ? { controllerAccessToken: freshAccessToken } : {}),
+  };
+  await stopReplacedDesktopRuntime(previous);
+  const launchGrants = await resolveDesktopRuntimeLaunchGrants({
+    projectId: previous.projectId,
+    controllerOrigin: previous.controllerUrl,
+    instafyUserId: previous.launchGrantUserId,
+  });
+  const handle = await startDesktopRuntime({
+    ...restartOptions,
+    launchGrants: desktopRuntimeLaunchGrantsForStart(launchGrants),
+  });
+  const runtimeId = handle.runtimeId;
+  if (!runtimeId) {
+    await stopDesktopRuntime(handle).catch(() => undefined);
+    throw new Error("Controller did not assign a desktop runtime id.");
+  }
+  registerDesktopRuntime(handle, {
+    projectId: previous.projectId,
+    controllerUrl: previous.controllerUrl,
+    controllerCredentialProvenance: previous.controllerCredentialProvenance,
+    logFilePath: previous.logFilePath,
+    runtimeId,
+    restartOptions,
+    launchGrantUserId: previous.launchGrantUserId,
+    launchGrants,
+  });
+  desktopLog("info", "[instafy-desktop] runtime replaced after a launch grant changed", {
+    previousRuntimeId: previous.runtimeId,
+    runtimeId,
+  });
+  return "replaced";
 }
 
 async function waitForDesktopRuntimeJobsToFinish(
@@ -1533,6 +1728,8 @@ function registerDesktopRuntime(
     runtimeId?: string;
     personalBrowser?: DesktopPersonalBrowserCredentials;
     restartOptions: DesktopRuntimeRestartOptions;
+    launchGrantUserId: string | null;
+    launchGrants: readonly DesktopRuntimeResolvedLaunchGrant[];
   },
 ): DesktopRuntimeRecord {
   const record: DesktopRuntimeRecord = { handle, ...options };
@@ -1646,9 +1843,13 @@ async function resumePersonalBrowserRuntime(projectId: string) {
   if (!personalBrowser) {
     throw new Error("Personal Browser control credentials are unavailable after resume.");
   }
+  // This start replays saved options rather than a start bound to the visible
+  // session, so it is granted nothing; the declared keys are still stripped.
+  const launchGrants = CURRENT_DESKTOP_EXTENSION_REGISTRY.launchGrantsWithoutValues();
   const handle = await startDesktopRuntime({
     ...paused.restartOptions,
     personalBrowser,
+    launchGrants: desktopRuntimeLaunchGrantsForStart(launchGrants),
   });
   const runtimeId = handle.runtimeId;
   if (!runtimeId) {
@@ -1663,6 +1864,8 @@ async function resumePersonalBrowserRuntime(projectId: string) {
     runtimeId,
     personalBrowser,
     restartOptions: paused.restartOptions,
+    launchGrantUserId: null,
+    launchGrants,
   });
   pausedPersonalBrowserRuntime = null;
 }
@@ -1866,6 +2069,133 @@ function writeSpaceManifest(folder: string, projectId: string, controllerUrl?: s
     manifest.controllerUrl = controllerUrl.trim();
   }
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+function normalizeDesktopSessionEmail(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const email = value.trim();
+  if (email.length === 0 || email.length > 320 || !email.includes("@")) {
+    return null;
+  }
+  for (let index = 0; index < email.length; index += 1) {
+    const code = email.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      return null;
+    }
+  }
+  return email;
+}
+
+/** Folders Desktop owns, which a program it is asked to run may not live in. */
+function resolveDesktopOwnedPaths(config: DesktopAppConfig): string[] {
+  const owned = new Set<string>([
+    resolveDefaultWorkspaceDir(),
+    path.join(os.homedir(), ".instafy"),
+    app.getAppPath(),
+    process.resourcesPath,
+  ]);
+  const workspaceDir = config.workspaceDir?.trim();
+  if (workspaceDir) {
+    owned.add(workspaceDir);
+  }
+  for (const folder of Object.values(config.projectWorkspaceDirs ?? {})) {
+    if (typeof folder === "string" && folder.trim()) {
+      owned.add(folder.trim());
+    }
+  }
+  const appBundle = /^(.*?\.app)(?:\/|$)/.exec(process.execPath)?.[1];
+  if (appBundle) {
+    owned.add(appBundle);
+  }
+  return [...owned].filter((entry) => typeof entry === "string" && path.isAbsolute(entry));
+}
+
+function createDesktopExtensionDialogs(window: BrowserWindow | null): DesktopExtensionDialogs {
+  const owner = () => (window && !window.isDestroyed() ? window : null);
+  return Object.freeze({
+    async showMessageBox(options) {
+      const messageBoxOptions: Electron.MessageBoxOptions = {
+        type: options.type ?? "none",
+        title: options.title,
+        message: options.message,
+        detail: options.detail,
+        buttons: [...options.buttons],
+        defaultId: options.defaultId,
+        cancelId: options.cancelId,
+        noLink: true,
+      };
+      const parent = owner();
+      const result = parent
+        ? await dialog.showMessageBox(parent, messageBoxOptions)
+        : await dialog.showMessageBox(messageBoxOptions);
+      return result.response;
+    },
+    async pickFile(options) {
+      const openDialogOptions: Electron.OpenDialogOptions = {
+        title: options.title,
+        buttonLabel: options.buttonLabel,
+        defaultPath: options.defaultPath,
+        // A chosen symlink comes back as itself, not its target, so an
+        // update that moves the target keeps working.
+        properties: ["openFile", "showHiddenFiles", "noResolveAliases"],
+      };
+      const parent = owner();
+      const result = parent
+        ? await dialog.showOpenDialog(parent, openDialogOptions)
+        : await dialog.showOpenDialog(openDialogOptions);
+      return result.canceled ? null : (result.filePaths[0] ?? null);
+    },
+  });
+}
+
+/**
+ * What a desktop extension method may know about its call (4.1): the user of
+ * the session read from the calling top-level frame, checked as a runtime
+ * start checks it; the renderer's controller only once the trust policy
+ * accepts it; Desktop's consent store; and native dialogs. A user id in the
+ * payload is never a key.
+ */
+async function resolveDesktopExtensionHost(
+  event: Electron.IpcMainInvokeEvent,
+  callerUrl: string,
+  request: DesktopExtensionInvokeRequest | undefined,
+): Promise<{ host: DesktopExtensionHost; visibleIdentity: DesktopInstafySessionIdentity | null }> {
+  let visibleSession: DesktopCodexVisibleSession | null = null;
+  let visibleIdentity: DesktopInstafySessionIdentity | null = null;
+  try {
+    // Throws for a caller that is not the top-level app frame.
+    visibleSession = await resolveVisibleSupabaseSession(event);
+    visibleIdentity = normalizeVisibleInstafySession(visibleSession);
+  } catch {
+    // Signed out, expiring or not the top-level frame: the call has no
+    // session, so nothing is keyed and nothing can be consented to.
+    visibleIdentity = null;
+  }
+  const controllerOrigin = resolveTrustedDesktopControllerForExtension({
+    appUrl: getStartUrl(),
+    callerUrl,
+    requestedControllerUrl:
+      typeof request?.controllerUrl === "string" ? request.controllerUrl : null,
+    runningRuntimeControllerUrl: desktopRuntime?.controllerUrl ?? null,
+    isPackaged: app.isPackaged,
+  });
+  return {
+    visibleIdentity,
+    host: Object.freeze({
+      session: visibleIdentity
+        ? {
+            userId: visibleIdentity.userId.toLowerCase(),
+            email: normalizeDesktopSessionEmail(visibleSession?.email),
+          }
+        : null,
+      controllerOrigin,
+      consents: desktopExtensionConsents,
+      dialogs: createDesktopExtensionDialogs(BrowserWindow.fromWebContents(event.sender)),
+      desktopOwnedPaths: resolveDesktopOwnedPaths(readConfig()),
+    }),
+  };
 }
 
 const allowMultipleInstances = shouldAllowMultipleInstances();
@@ -2864,12 +3194,35 @@ app.whenReady().then(() => {
   ipcMain.handle(
     "instafy:desktopExtensionInvoke",
     async (event, request: DesktopExtensionInvokeRequest) => {
-      assertAllowedCaller(event);
-      return await CURRENT_DESKTOP_EXTENSION_REGISTRY.invoke(
-        typeof request?.extensionId === "string" ? request.extensionId : "",
-        typeof request?.method === "string" ? request.method : "",
-        request?.payload,
+      const callerUrl = assertAllowedCaller(event);
+      const { host, visibleIdentity } = await resolveDesktopExtensionHost(
+        event,
+        callerUrl,
+        request,
       );
+      return await invokeDesktopExtensionWithLaunchGrants({
+        registry: CURRENT_DESKTOP_EXTENSION_REGISTRY,
+        extensionId: typeof request?.extensionId === "string" ? request.extensionId : "",
+        methodId: typeof request?.method === "string" ? request.method : "",
+        payload: request?.payload,
+        host,
+        withRuntimeLock: serializeDesktopRuntimeMutation,
+        runningRuntime: () => {
+          const runtime = desktopRuntime;
+          return runtime
+            ? {
+                handle: runtime,
+                projectId: runtime.projectId,
+                controllerOrigin: runtime.controllerUrl,
+                instafyUserId: runtime.launchGrantUserId,
+                launchGrants: runtime.launchGrants,
+              }
+            : null;
+        },
+        replaceRuntime: (runtime) =>
+          replaceDesktopRuntimeForConsentChange(runtime.handle, visibleIdentity),
+        onGrantError: logDesktopRuntimeLaunchGrantError,
+      });
     },
   );
 
@@ -2981,6 +3334,17 @@ app.whenReady().then(() => {
         });
       const controllerUrl = trustedControllerBinding.controllerUrl;
       const controllerCredentialProvenance = trustedControllerBinding.provenance;
+      // Launch grants go only to a start bound to the visible session, for
+      // that session's user (4.3). A Personal Browser runtime never offers a
+      // local engine, so its starts are granted nothing.
+      const launchGrantUserId = enablePersonalBrowser
+        ? null
+        : trustedControllerBinding.boundUserId;
+      const launchGrants = await resolveDesktopRuntimeLaunchGrants({
+        projectId: requestedProjectId,
+        controllerOrigin: controllerUrl,
+        instafyUserId: launchGrantUserId,
+      });
 
       if (desktopRuntime) {
         const sameProject = desktopRuntime.projectId === requestedProjectId;
@@ -2989,6 +3353,10 @@ app.whenReady().then(() => {
             desktopRuntime.personalBrowser.token === personalBrowserCredentials.token &&
             desktopRuntime.personalBrowser.projectId === personalBrowserCredentials.projectId
           : !desktopRuntime.personalBrowser;
+        const sameLaunchGrants = desktopRuntimeLaunchGrantsEqual(
+          desktopRuntime.launchGrants,
+          launchGrants,
+        );
         const controllerCredentialAction =
           resolveDesktopRuntimeControllerCredentialAction({
             currentControllerUrl: desktopRuntime.controllerUrl,
@@ -3003,6 +3371,7 @@ app.whenReady().then(() => {
         if (
           sameProject &&
           samePersonalBrowser &&
+          sameLaunchGrants &&
           controllerCredentialAction !== "replace"
         ) {
           if (controllerCredentialAction === "rotate") {
@@ -3011,6 +3380,9 @@ app.whenReady().then(() => {
               controllerAccessToken,
             );
           }
+          // The runtime now serves this start: a later consent change is
+          // resolved for the user it is bound to.
+          desktopRuntime.launchGrantUserId = launchGrantUserId;
           return {
             pid: desktopRuntime.handle.pid,
             logFilePath: desktopRuntime.logFilePath,
@@ -3020,14 +3392,14 @@ app.whenReady().then(() => {
         // One desktop runtime at a time: switching projects replaces the
         // running runtime instead of silently handing back the wrong one.
         const previous = desktopRuntime;
-        await stopAndDispositionDesktopRuntime(previous, "desktop_runtime_replaced");
-        if (desktopRuntime?.handle === previous.handle) {
-          desktopRuntime = null;
+        if (
+          (await confirmReplacingDesktopRuntime(previous, { consentChange: false })) === "keep"
+        ) {
+          throw new Error(
+            "Instafy kept the work on this computer running, so it did not start again.",
+          );
         }
-        revokePersonalBrowserRuntimeBinding(previous);
-        if (!previous.personalBrowser && previous.runtimeId) {
-          personalBrowserHost?.setRuntimeId(previous.projectId, null);
-        }
+        await stopReplacedDesktopRuntime(previous);
       }
 
       const config = readConfig();
@@ -3109,6 +3481,7 @@ app.whenReady().then(() => {
         const handle = await startDesktopRuntime({
           ...restartOptions,
           personalBrowser: personalBrowserCredentials ?? undefined,
+          launchGrants: desktopRuntimeLaunchGrantsForStart(launchGrants),
         });
         const runtimeId = handle.runtimeId;
         if (!runtimeId) {
@@ -3138,6 +3511,8 @@ app.whenReady().then(() => {
                 runtimeId,
                 personalBrowser: personalBrowserCredentials ?? undefined,
                 restartOptions,
+                launchGrantUserId,
+                launchGrants,
               },
               "desktop_runtime_start_aborted",
             );
@@ -3154,6 +3529,8 @@ app.whenReady().then(() => {
           runtimeId,
           personalBrowser: personalBrowserCredentials ?? undefined,
           restartOptions,
+          launchGrantUserId,
+          launchGrants,
         });
         return handle;
       };

@@ -47,6 +47,13 @@ export interface StartDesktopRuntimeOptions {
    * its local browser.
    */
   personalBrowser?: DesktopPersonalBrowserControl;
+  /**
+   * Values the Electron host grants this one start, such as a local engine
+   * the person turned on. Like the Personal Browser capability, they are never
+   * read from process.env or the generic env bag: every key a grant declares
+   * is removed from both on every start, granted or not.
+   */
+  launchGrants?: readonly DesktopRuntimeLaunchGrant[];
   rathole?: {
     version?: string;
     cacheDir?: string;
@@ -74,6 +81,20 @@ export interface DesktopPersonalBrowserControl {
   projectId?: string;
 }
 
+/**
+ * One launch grant. The host passes one per registered contribution on every
+ * start, with `env` only when it granted something, so the declared keys are
+ * stripped even from a start that gets nothing.
+ */
+export interface DesktopRuntimeLaunchGrant {
+  /** Every environment key this grant may set. */
+  protectedEnvKeys: readonly string[];
+  /** The granted values, set after the declared keys are removed. Declared keys only. */
+  env?: Readonly<Record<string, string>>;
+  /** The engine the runtime token request names, sent only with granted values. */
+  localEngine?: string;
+}
+
 export interface DesktopRuntimeHandle {
   pid: number;
   runtimeId?: string;
@@ -98,6 +119,12 @@ export const PERSONAL_BROWSER_CONTROL_ENV_KEYS = [
 ] as const;
 export const DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV =
   "INSTAFY_RUNTIME_PARENT_DISPOSITION";
+// A launch grant may only carry Instafy-namespaced values, and never one this
+// launcher owns itself, so no grant can stand in for the runtime's identity,
+// binary, controller, proxy or Personal Browser capability.
+const LAUNCH_GRANT_ENV_KEY_PATTERN = /^INSTAFY_[A-Z0-9_]+$/;
+const LAUNCH_GRANT_RESERVED_ENV_KEY_PREFIXES = ["INSTAFY_RUNTIME_", "INSTAFY_PERSONAL_BROWSER_"];
+const LAUNCH_GRANT_LOCAL_ENGINE_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 // Must remain below the controller's expired-drain recovery proof window.
 // Electron-owned runtimes cannot inherit or override this safety cadence.
 export const DESKTOP_PARENT_DISPOSITION_HEARTBEAT_SECONDS = 60;
@@ -237,6 +264,99 @@ export function applyLoopbackNoProxy(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
   return env;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Validate the host's launch grants and copy them. Each declared key must be
+ * Instafy-namespaced, not one this launcher owns, and declared only once; a
+ * granted value may only set a declared key. Anything else fails the start.
+ */
+export function normalizeDesktopRuntimeLaunchGrants(
+  grants: readonly DesktopRuntimeLaunchGrant[] | undefined,
+): DesktopRuntimeLaunchGrant[] {
+  if (grants === undefined) {
+    return [];
+  }
+  if (!Array.isArray(grants)) {
+    throw new Error("launchGrants must be an array");
+  }
+  const declaredKeys = new Set<string>();
+  return grants.map((grant: unknown, index) => {
+    if (!isRecord(grant) || !Array.isArray(grant.protectedEnvKeys)) {
+      throw new Error(`launchGrants[${index}] must declare its protectedEnvKeys`);
+    }
+    const protectedEnvKeys: string[] = [];
+    for (const key of grant.protectedEnvKeys as unknown[]) {
+      if (
+        typeof key !== "string" ||
+        !LAUNCH_GRANT_ENV_KEY_PATTERN.test(key) ||
+        LAUNCH_GRANT_RESERVED_ENV_KEY_PREFIXES.some((prefix) => key.startsWith(prefix))
+      ) {
+        throw new Error(
+          `launchGrants[${index}] declares an environment key that a launch grant cannot set: ${JSON.stringify(key)}`,
+        );
+      }
+      if (declaredKeys.has(key)) {
+        throw new Error(`launchGrants declare ${key} more than once`);
+      }
+      declaredKeys.add(key);
+      protectedEnvKeys.push(key);
+    }
+    if (protectedEnvKeys.length === 0) {
+      throw new Error(`launchGrants[${index}] must declare at least one environment key`);
+    }
+    let env: Record<string, string> | undefined;
+    if (grant.env !== undefined) {
+      if (!isRecord(grant.env)) {
+        throw new Error(`launchGrants[${index}].env must be an object`);
+      }
+      env = {};
+      for (const [key, value] of Object.entries(grant.env)) {
+        if (!protectedEnvKeys.includes(key)) {
+          throw new Error(`launchGrants[${index}] sets ${key}, which it does not declare`);
+        }
+        if (typeof value !== "string" || value.includes("\0")) {
+          throw new Error(`launchGrants[${index}] sets ${key} to a value that is not a string`);
+        }
+        env[key] = value;
+      }
+    }
+    if (
+      grant.localEngine !== undefined &&
+      (typeof grant.localEngine !== "string" ||
+        !LAUNCH_GRANT_LOCAL_ENGINE_PATTERN.test(grant.localEngine))
+    ) {
+      throw new Error(`launchGrants[${index}] names an invalid localEngine`);
+    }
+    return {
+      protectedEnvKeys,
+      ...(env ? { env } : {}),
+      ...(typeof grant.localEngine === "string" ? { localEngine: grant.localEngine } : {}),
+    };
+  });
+}
+
+/**
+ * The local engine a start asks the controller for: named only by a grant
+ * that actually granted values, and never two different ones.
+ */
+export function resolveDesktopRuntimeLocalEngine(
+  grants: readonly DesktopRuntimeLaunchGrant[] | undefined,
+): string | undefined {
+  const engines = new Set<string>();
+  for (const grant of normalizeDesktopRuntimeLaunchGrants(grants)) {
+    if (grant.env && grant.localEngine) {
+      engines.add(grant.localEngine);
+    }
+  }
+  if (engines.size > 1) {
+    throw new Error("launchGrants name more than one local engine");
+  }
+  return engines.values().next().value;
+}
+
 export function applyProtectedDesktopRuntimeEnv(
   env: NodeJS.ProcessEnv,
   options: {
@@ -245,13 +365,22 @@ export function applyProtectedDesktopRuntimeEnv(
     runtimeBinaryPath?: string;
     personalBrowser?: DesktopPersonalBrowserControl;
     parentDispositionsRuntimeOnShutdown?: boolean;
+    launchGrants?: readonly DesktopRuntimeLaunchGrant[];
   },
 ): NodeJS.ProcessEnv {
+  const launchGrants = normalizeDesktopRuntimeLaunchGrants(options.launchGrants);
   delete env.RUNTIME_ID;
   delete env.INSTAFY_RUNTIME_AGENT_BIN;
   delete env[DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV];
   for (const key of PERSONAL_BROWSER_CONTROL_ENV_KEYS) {
     delete env[key];
+  }
+  // Every declared key goes, whether or not this start was granted anything:
+  // only the grant below may set one.
+  for (const grant of launchGrants) {
+    for (const key of grant.protectedEnvKeys) {
+      delete env[key];
+    }
   }
 
   const runtimeId = normalizeOptionalUuid(options.runtimeId, "runtimeId");
@@ -278,6 +407,11 @@ export function applyProtectedDesktopRuntimeEnv(
       personalBrowser: options.personalBrowser,
     }),
   );
+  for (const grant of launchGrants) {
+    if (grant.env) {
+      Object.assign(env, grant.env);
+    }
+  }
   applyLoopbackNoProxy(env);
   return env;
 }
@@ -286,12 +420,14 @@ export function buildRuntimeTokenRequestBody(
   subject: string,
   runtimeId?: string,
   personalBrowser = false,
+  localEngine?: string,
 ): {
   subject: string;
   runtimeId: string | null;
   leaseId: null;
   scopes: null;
   personalBrowser?: true;
+  localEngine?: string;
 } {
   return {
     subject,
@@ -299,6 +435,7 @@ export function buildRuntimeTokenRequestBody(
     leaseId: null,
     scopes: null,
     ...(personalBrowser ? { personalBrowser: true as const } : {}),
+    ...(localEngine ? { localEngine } : {}),
   };
 }
 
@@ -687,6 +824,9 @@ export async function startDesktopRuntime(
     throw new Error("startDesktopRuntime requires a valid space ID (UUID format)");
   }
   const requestedRuntimeId = normalizeOptionalUuid(options.runtimeId, "runtimeId");
+  // Refuse a malformed grant before the controller is contacted.
+  const launchGrants = normalizeDesktopRuntimeLaunchGrants(options.launchGrants);
+  const localEngine = resolveDesktopRuntimeLocalEngine(launchGrants);
 
   const runtimeBinary = resolveRuntimeBinary(options.runtimeBinaryPath);
   const workspaceDir = path.resolve(
@@ -724,6 +864,7 @@ export async function startDesktopRuntime(
     displayName: runtimeDisplayName,
     runtimeId: requestedRuntimeId,
     personalBrowser: Boolean(options.personalBrowser),
+    localEngine,
   });
   const runtimeId = resolveAuthoritativeRuntimeId(
     requestedRuntimeId,
@@ -863,6 +1004,7 @@ export async function startDesktopRuntime(
       personalBrowser: options.personalBrowser,
       parentDispositionsRuntimeOnShutdown:
         desktopRuntimeUsesParentDisposition(options),
+      launchGrants,
     },
   );
 
@@ -1066,6 +1208,7 @@ interface OriginTokenResolutionOptions {
   displayName: string;
   runtimeId?: string;
   personalBrowser: boolean;
+  localEngine?: string;
 }
 
 interface RuntimeTokenResult {
@@ -1106,6 +1249,7 @@ async function resolveRuntimeAccessToken(
       issuedFor: options.displayName,
       runtimeId: options.runtimeId,
       personalBrowser: options.personalBrowser,
+      localEngine: options.localEngine,
     });
   }
 
@@ -1121,6 +1265,7 @@ async function fetchRuntimeAccessToken(options: {
   issuedFor: string;
   runtimeId?: string;
   personalBrowser: boolean;
+  localEngine?: string;
 }): Promise<RuntimeTokenResult> {
   const base = options.controllerUrl.replace(/\/$/, "");
   const target = `${base}/projects/${encodeURIComponent(options.projectId)}/runtime/token`;
@@ -1135,6 +1280,7 @@ async function fetchRuntimeAccessToken(options: {
         options.issuedFor,
         options.runtimeId,
         options.personalBrowser,
+        options.localEngine,
       ),
     ),
   });

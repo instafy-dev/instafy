@@ -64,6 +64,46 @@ export function resolveTrustedDesktopControllerForStart(
 }
 
 /**
+ * The controller a Desktop extension call speaks for, under the same trust
+ * policy as a runtime start. The renderer may name it; otherwise packaged
+ * Desktop uses its pinned controller, and an unpackaged build the one its
+ * running runtime was started against. Null when none is known or trusted;
+ * a controller the renderer names but the policy refuses is an error.
+ */
+export function resolveTrustedDesktopControllerForExtension(options: {
+  appUrl: string;
+  callerUrl: string;
+  requestedControllerUrl: string | null;
+  runningRuntimeControllerUrl: string | null;
+  isPackaged: boolean;
+}): string | null {
+  const resolve = (requestedControllerUrl: string) =>
+    resolveTrustedDesktopControllerForStart({
+      appUrl: options.appUrl,
+      callerUrl: options.callerUrl,
+      requestedControllerUrl,
+      isPackaged: options.isPackaged,
+      startKind: "runtime",
+      credentialMode: "ambient",
+    });
+  const requested = options.requestedControllerUrl?.trim();
+  if (requested) {
+    return resolve(requested);
+  }
+  const fallback = options.isPackaged
+    ? PINNED_DESKTOP_CONTROLLER_ORIGIN
+    : options.runningRuntimeControllerUrl?.trim();
+  if (!fallback) {
+    return null;
+  }
+  try {
+    return resolve(fallback);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Ambient starts are allowed to retain refreshable session provenance only
  * when the renderer-supplied bearer is the exact token of the currently
  * visible, validated user. Fixed credentials do not consult renderer session
@@ -83,6 +123,25 @@ export function assertDesktopControllerStartSessionBinding(options: {
   ) {
     throw new Error("The Desktop controller session changed. Sign in again and retry.");
   }
+}
+
+/**
+ * The Instafy user a runtime start is bound to: the visible session's user,
+ * when Studio asked for ambient credentials and the start's bearer is that
+ * session's own token. Unlike the credential provenance below, this holds in
+ * unpackaged builds too, where the credential itself stays fixed. A start
+ * that asked for fixed credentials is bound to nobody.
+ */
+export function resolveDesktopControllerStartBoundUserId(options: {
+  credentialMode: DesktopControllerStartCredentialMode;
+  controllerAccessToken: string;
+  visibleSession: DesktopControllerVisibleSessionIdentity | null;
+}): string | null {
+  if (options.credentialMode !== "ambient") {
+    return null;
+  }
+  assertDesktopControllerStartSessionBinding(options);
+  return options.visibleSession?.userId.trim().toLowerCase() || null;
 }
 
 export function resolveDesktopControllerStartCredentialProvenance(options: {

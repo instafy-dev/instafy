@@ -15,6 +15,7 @@ const {
   buildDesktopRuntimeResumeUrl,
   buildDesktopRuntimeStopUrl,
   canResumeDesktopRuntimeAfterFailedQuit,
+  confirmDesktopRuntimeReplacement,
   createDesktopQuitWaitControl,
   desktopRuntimeExitedForDeletedSpace,
   readDesktopRuntimeActiveJobCount,
@@ -418,4 +419,85 @@ test("a failed quit resumes only before signals and while the runtime root is al
     }),
     false,
   );
+});
+
+function replacementProbe({ activeJobCount = 0, fenceError = null, stop = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    options: {
+      fence: async () => {
+        calls.push("fence");
+        if (fenceError) {
+          throw fenceError;
+        }
+        return activeJobCount;
+      },
+      ask: async (count) => {
+        calls.push(["ask", count]);
+        return stop;
+      },
+      resume: async () => {
+        calls.push("resume");
+      },
+      onError: (stage) => calls.push(["error", stage]),
+    },
+  };
+}
+
+test("replacing a runtime without a launch grant goes ahead as before, with no fence", async () => {
+  const probe = replacementProbe({ activeJobCount: 3 });
+  assert.equal(
+    await confirmDesktopRuntimeReplacement({
+      previousHeldLaunchGrant: false,
+      consentChange: false,
+      ...probe.options,
+    }),
+    "replace",
+  );
+  assert.deepEqual(probe.calls, []);
+});
+
+test("the replace prompt appears when a granted runtime, or one a consent change replaces, is busy", async () => {
+  for (const reason of [
+    { previousHeldLaunchGrant: true, consentChange: false },
+    { previousHeldLaunchGrant: false, consentChange: true },
+    { previousHeldLaunchGrant: true, consentChange: true },
+  ]) {
+    const idle = replacementProbe({ activeJobCount: 0 });
+    assert.equal(await confirmDesktopRuntimeReplacement({ ...reason, ...idle.options }), "replace");
+    assert.deepEqual(idle.calls, ["fence"], "an idle runtime is fenced and replaced without asking");
+
+    const stop = replacementProbe({ activeJobCount: 2, stop: true });
+    assert.equal(await confirmDesktopRuntimeReplacement({ ...reason, ...stop.options }), "replace");
+    assert.deepEqual(stop.calls, ["fence", ["ask", 2]]);
+
+    const keep = replacementProbe({ activeJobCount: 1, stop: false });
+    assert.equal(await confirmDesktopRuntimeReplacement({ ...reason, ...keep.options }), "keep");
+    assert.deepEqual(keep.calls, ["fence", ["ask", 1], "resume"], "Keep working resumes the runtime");
+  }
+});
+
+test("an unknown job count asks too; it never replaces silently", async () => {
+  const keep = replacementProbe({ fenceError: new Error("controller unreachable") });
+  assert.equal(
+    await confirmDesktopRuntimeReplacement({
+      previousHeldLaunchGrant: true,
+      consentChange: false,
+      ...keep.options,
+    }),
+    "keep",
+  );
+  assert.deepEqual(keep.calls, ["fence", ["error", "fence"], ["ask", null], "resume"]);
+
+  const stop = replacementProbe({ fenceError: new Error("controller unreachable"), stop: true });
+  assert.equal(
+    await confirmDesktopRuntimeReplacement({
+      previousHeldLaunchGrant: false,
+      consentChange: true,
+      ...stop.options,
+    }),
+    "replace",
+  );
+  assert.deepEqual(stop.calls, ["fence", ["error", "fence"], ["ask", null]]);
 });
