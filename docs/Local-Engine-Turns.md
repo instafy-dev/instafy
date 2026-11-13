@@ -135,13 +135,13 @@ The other ways to mark a lane job each fail:
 - **`user_agents.provider`.** It is a per-agent setting, so it would reach automations, plans and evaluations. Unknown values also normalize to `openai` (RC/ai_agents.rs:278-291).
 
 **Migrations.** These follow supabase/MIGRATIONS.md:
-- Timestamps must be newer than every migration on `main` and end in an even digit (MIGRATIONS.md:6-8). Choose the real timestamps when writing them; the names below are examples.
+- Timestamps must be newer than every migration on `main` and end in an even digit (MIGRATIONS.md:6-8). The files below have the timestamps they landed with.
 - Each file locks only `agent_jobs` (91-104).
 - Validation runs in a migration of its own, so its scan holds SHARE UPDATE EXCLUSIVE rather than the first file's ACCESS EXCLUSIVE, as MIG/20261028140002 does for a CHECK (MIGRATIONS.md 129-134 states the same rule for foreign keys).
 - The precedents are MIG/20261028140008_agent_device_grants.sql:46-55, MIG/20261028140002 and MIG/20261025145800.
 
 ```sql
--- supabase/migrations/20261112120000_agent_jobs_engine.sql
+-- supabase/migrations/20261113113600_agent_jobs_engine.sql
 -- engine: what runs the job's turn when it is not the runtime's embedded engine.
 -- Only dispatch writes it (claude_code_lane.rs), once, when it queues the job,
 -- and never from a request body. Null: the runtime's embedded engine, as for
@@ -172,8 +172,8 @@ alter table public.agent_jobs
 ```
 
 ```sql
--- supabase/migrations/20261112120002_validate_agent_jobs_engine_check.sql
--- Checks the rows that existed before 20261112120000 against the check it added
+-- supabase/migrations/20261113113602_validate_agent_jobs_engine_check.sql
+-- Checks the rows that existed before 20261113113600 against the check it added
 -- NOT VALID. Its own file because VALIDATE CONSTRAINT scans agent_jobs under
 -- SHARE UPDATE EXCLUSIVE, which blocks no live read or write. Every earlier row
 -- has a null engine.
@@ -184,7 +184,7 @@ alter table public.agent_jobs
 ```
 
 ```sql
--- supabase/migrations/20261112120004_agent_jobs_one_active_claude_code_turn_idx.sql
+-- supabase/migrations/20261113113604_agent_jobs_one_active_claude_code_turn_idx.sql
 -- At most one Claude Code turn per person that is running or may still start,
 -- across all spaces: a running turn cannot start another through its person's
 -- own session, and two concurrent sends cannot both be admitted. A queued turn
