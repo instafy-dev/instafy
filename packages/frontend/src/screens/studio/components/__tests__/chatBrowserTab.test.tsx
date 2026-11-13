@@ -98,6 +98,15 @@ describe("a chat's own tab in Instafy's browser", () => {
     expect(unusedBlankBrowserTab({ runs: [], pages: [{ ...blank, openedBy: "agent" }] })).toBeNull();
     expect(unusedBlankBrowserTab({ runs: [MAP_RUN], pages: [LISBON] })).toBeNull();
   });
+
+  // Chrome can list a tab with no address for a moment while it goes to a
+  // page: another chat's tab, or the person's, on its way there.
+  it("never gives a chat a tab the browser lists with no address", () => {
+    const going = page("PAGE-GOING", "", { isActive: true, label: "Browser page" });
+    expect(unusedBlankBrowserTab({ runs: [], pages: [going] })).toBeNull();
+    const blank = page("PAGE-BLANK", "about:blank");
+    expect(unusedBlankBrowserTab({ runs: [], pages: [going, blank] })).toBe(blank);
+  });
 });
 
 describe("useChatBrowserTab", () => {

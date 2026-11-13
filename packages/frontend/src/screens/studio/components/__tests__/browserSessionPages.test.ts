@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  browserSessionPageIsBlank,
   browserSessionPageIsPlaceholder,
   buildNewBrowserSessionMessage,
   shouldAutoTargetBrowserSessionMessage,
@@ -27,5 +28,15 @@ describe("browserSessionPages", () => {
     expect(browserSessionPageIsPlaceholder({ url: "about:blank" })).toBe(true);
     expect(browserSessionPageIsPlaceholder({ url: "chrome://newtab/" })).toBe(true);
     expect(browserSessionPageIsPlaceholder({ url: "https://example.com/" })).toBe(false);
+  });
+
+  // A tab listed with no address shows no page to target yet, but it is no
+  // blank tab: it may be on its way to someone's page.
+  it("tells a blank tab from one the browser lists with no address", () => {
+    expect(browserSessionPageIsBlank({ url: "about:blank" })).toBe(true);
+    expect(browserSessionPageIsBlank({ url: " Chrome://NewTab/ " })).toBe(true);
+    expect(browserSessionPageIsBlank({ url: "https://example.com/" })).toBe(false);
+    expect(browserSessionPageIsBlank({ url: "" })).toBe(false);
+    expect(browserSessionPageIsPlaceholder({ url: "" })).toBe(true);
   });
 });
