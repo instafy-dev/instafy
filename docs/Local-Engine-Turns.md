@@ -1327,7 +1327,7 @@ Each phase ships on its own. Only phase 1's guard, phase 4's exec-policy rule fo
   12. That external `@~/…` imports in a project `CLAUDE.md` or `AGENTS.md` load nothing in a lane turn, as item 2 expects.
   13. Whether the macOS keychain shows a prompt naming Instafy when Claude Code, started by Desktop's runtime, reads its own sign-in.
   14. Whether a lane turn loads the person's auto memory for the folder, and whether it writes there (1.2).
-- This branch's `instafy mcp`, plugin and seeded CLAUDE.md commits (a4eb2684c, f25ac5083, ca048eab2) land first, as the owner chose on 2026-11-13. Phase 7 edits the seeded CLAUDE.md's notes (7.5) and the plugin README (7.4) that they add; the lane itself depends on none of them.
+- Tier 1, which adds `instafy mcp`, the Claude Code plugin and the seeded CLAUDE.md (instafy-dev/instafy pull request 1060; commits a4eb2684c, f25ac5083 and ca048eab2 on its branch), lands first, as the owner chose on 2026-11-13. Phase 7 edits the seeded CLAUDE.md's notes (7.5) and the plugin README (7.4) that they add; the lane itself depends on none of them.
 - Start the release prerequisite, which phase 8 records: Instafy accepts Anthropic's Commercial Terms or makes another agreement with Anthropic. Run a brand and wording review.
 
 **Phase 1: credential guard (controller; useful on its own).**
