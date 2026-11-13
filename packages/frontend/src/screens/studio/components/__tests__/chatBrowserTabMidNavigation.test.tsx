@@ -155,6 +155,11 @@ describe("a chat's tab the browser lists with no address on its way to a page", 
     expect(chatTab.tab?.id).toBe("PAGE-1");
     expect(shownIds).toEqual(["PAGE-1"]);
     expect(pages.pages).toEqual([expect.objectContaining({ id: "PAGE-1", url: "", isActive: true })]);
+    // A browser turn sent meanwhile goes to the chat's tab too.
+    let target: unknown = null;
+    await act(async () => { target = await chatTab.resolveForTurn(); });
+    expect(target).toEqual({ id: "PAGE-1", url: "", host: "", label: "Browser page" });
+    expect(openPageMock).not.toHaveBeenCalled();
 
     await read(listed(FIXTURE, "studio-browser-fixture.test"));
     expect(chatTab.tab).toMatchObject({ id: "PAGE-1", url: FIXTURE });

@@ -180,7 +180,8 @@ function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl
     const timer = setTimeout(() => setReady(true), 30);
     return () => clearTimeout(timer);
   }, [pagesActive]);
-  const host = new URL(pageUrl).host;
+  // A tab on its way to a page can be listed with no address.
+  const host = pageUrl ? new URL(pageUrl).host : "";
   const pages: BrowserSessionPage[] = ready
     ? [{ id: "PAGE1", label: host, title: pageTitle === undefined ? host : pageTitle, lastReferencedAt: 0, host,
       url: pageUrl, isActive: true, ...(pageLoading === undefined ? {} : { loading: pageLoading }) }]
@@ -330,9 +331,18 @@ describe("Shared Browser view while Octo drives", () => {
     await act(async () => { driving.listeners.connect?.(); driving.frame(); });
     await advance(100);
     expect(blank()).toBe("No page open");
+    // The Studio CI journey: on its way to a page, the tab was listed with no
+    // address for one read, and "No page open" covered the page that had
+    // arrived, so the person's click on it missed.
+    await act(async () => root.render(<Host agentHolds={false} pageUrl="" pageTitle={null} />));
+    await advance(100);
+    expect(blank()).toBeNull();
     await act(async () => root.render(<Host agentHolds={false} />));
     await advance(100);
     expect(blank()).toBeNull();
+    // One viewer throughout: the tab never left the stage.
+    expect(mocks.rfb.at(-1)).toBe(driving);
+    expect(driving.disconnect).not.toHaveBeenCalled();
   });
 
   it("drops the still when the chat changes, and says where Octo is instead", async () => {
