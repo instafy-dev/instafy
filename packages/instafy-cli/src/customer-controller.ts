@@ -4,7 +4,7 @@ import {
   resolveControllerUrl,
   type AccessTokenSource,
 } from "./config.js";
-import { fetchWithControllerAuth } from "./controller-fetch.js";
+import { fetchWithControllerAuth, refuseDotSegments } from "./controller-fetch.js";
 import { formatAuthRejectedError } from "./errors.js";
 
 export type CustomerControllerAuthOptions = {
@@ -68,7 +68,10 @@ export async function customerControllerJsonRequest<T>(
   if (baseUrl.username || baseUrl.password) {
     throw new Error("The Instafy controller URL must not contain embedded credentials.");
   }
-  const requestUrl = new URL(options.apiPath.replace(/^\/+/, ""), baseUrl);
+  const relativePath = options.apiPath.replace(/^\/+/, "");
+  // Checked on exactly what the URL below parses, before it resolves the segments and removes them.
+  refuseDotSegments(relativePath);
+  const requestUrl = new URL(relativePath, baseUrl);
   if (requestUrl.origin !== baseUrl.origin) {
     throw new Error(`${options.operation} requests must use the configured Instafy controller origin.`);
   }

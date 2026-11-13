@@ -6,7 +6,7 @@ import {
   type AccessTokenSource,
 } from "./config.js";
 import { formatAuthRejectedError } from "./errors.js";
-import { fetchWithControllerAuth } from "./controller-fetch.js";
+import { fetchWithControllerAuth, refuseDotSegments } from "./controller-fetch.js";
 import {
   resolveRuntimeBoundControllerUrl,
   resolveRuntimeControllerCredential,
@@ -167,12 +167,11 @@ function buildRequestUrl(
   if (!rawPath) {
     throw new Error("Path is required");
   }
-
   const isAbsoluteReference = /^[a-z][a-z\d+.-]*:/i.test(rawPath) || rawPath.startsWith("//");
-  const url = new URL(
-    isAbsoluteReference ? rawPath : rawPath.startsWith("/") ? rawPath : `/${rawPath}`,
-    base,
-  );
+  const input = isAbsoluteReference ? rawPath : rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+  // Checked on exactly what the URL below parses, before it resolves the segments and removes them.
+  refuseDotSegments(input);
+  const url = new URL(input, base);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("Controller API URLs must use http or https.");
   }

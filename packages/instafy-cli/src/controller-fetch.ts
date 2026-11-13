@@ -86,6 +86,39 @@ function authSnapshot(config: InstafyCliConfig): StoredAuthSessionSnapshot {
   };
 }
 
+/**
+ * Drops leading and trailing control characters and spaces, as a URL parser does first. A scan
+ * from each end, because an end-anchored pattern retries from every position of a long run of
+ * them, which takes time in the square of its length.
+ */
+function trimControlsAndSpaces(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text.charCodeAt(start) <= 0x20) start += 1;
+  while (end > start && text.charCodeAt(end - 1) <= 0x20) end -= 1;
+  return text.slice(start, end);
+}
+
+/**
+ * Refuses a controller request whose path has a "." or ".." segment, in any of the spellings a URL
+ * parser resolves. An id that is one of those passes through encodeURIComponent unchanged, and
+ * resolving the URL would then move the request, with its token, to another route. Like the
+ * parser, it first drops leading and trailing control characters and spaces and every tab and line
+ * break, and it reads a backslash as a slash. A scheme with no "//" after it, as in "http:../x", is
+ * a path relative to the base, so its path is checked too.
+ */
+export function refuseDotSegments(target: string): void {
+  const afterOrigin = trimControlsAndSpaces(target)
+    .replace(/[\t\n\r]/g, "")
+    .replace(/^[a-z][a-z\d+.-]*:(?:[\\/]{2}[^/\\?#]*)?/i, "");
+  const pathname = afterOrigin.split(/[?#]/, 1)[0] ?? "";
+  if (pathname.split(/[\\/]/).some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) {
+    throw new Error(
+      'Refusing a controller request whose path has a "." or ".." segment, which would send it to another route.',
+    );
+  }
+}
+
 export async function fetchWithControllerAuth(params: {
   url: string;
   init?: RequestInit;
@@ -94,6 +127,7 @@ export async function fetchWithControllerAuth(params: {
   profile?: string | null;
   cwd?: string | null;
 }): Promise<{ response: Response; accessToken: string }> {
+  refuseDotSegments(params.url);
   const stored = assertStoredTokenOrigin(params);
   const response = await fetch(
     params.url,

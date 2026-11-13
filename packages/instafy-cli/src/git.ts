@@ -1,3 +1,4 @@
+import { refuseDotSegments } from "./controller-fetch.js";
 import { formatAuthRejectedError } from "./errors.js";
 
 export async function mintGitAccessToken(params: {
@@ -23,6 +24,7 @@ export async function mintGitAccessToken(params: {
   }
   const url = controller.toString().replace(/\/$/, "");
   const target = `${url}/projects/${encodeURIComponent(params.projectId)}/git/access_token`;
+  refuseDotSegments(target);
 
   const scopes =
     params.scopes && params.scopes.length > 0

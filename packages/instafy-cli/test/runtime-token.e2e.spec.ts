@@ -19,7 +19,7 @@ function startMockController(token: string) {
     res.writeHead(404);
     res.end();
   });
-  server.listen(0);
+  server.listen(0, "127.0.0.1");
   return { server, projectId };
 }
 
@@ -76,7 +76,7 @@ describe("runtime token", () => {
       res.writeHead(404);
       res.end();
     });
-    server.listen(0);
+    server.listen(0, "127.0.0.1");
     await once(server, "listening");
 
     try {

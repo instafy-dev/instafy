@@ -2164,6 +2164,33 @@ mod tests {
         assert!(COLLABORATION_TEMPLATE.contains("builder"));
     }
 
+    /// What the seeded CLAUDE.md must go on saying, however the rest of its prose is reworded. Each
+    /// phrase is one of its corrections to AGENTS.md for a person's own Claude Code, together with
+    /// the words just before it, so deleting, rewording or negating a correction fails the test.
+    /// Whitespace is collapsed before matching, so rewrapping a line is not a change.
+    const CLAUDE_DOC_CORRECTIONS: &[&str] = &[
+        // The notes win where AGENTS.md, written for the runtime agent, says otherwise.
+        "These notes override `AGENTS.md` where the two differ.",
+        // No `exec`/`write_stdin` protocol: commands run in Claude's own shell, which still waits
+        // for a command before replying.
+        "You have no equivalent. Run commands with your own shell tool, and before you reply or use what a command makes, wait for it to finish.",
+        // Servers run in Claude's own shell; an Instafy preview opens only when the person asks.
+        "needs a login and a conversation. Start a server in the background with your own shell instead, and do not open an Instafy preview unless the person asks for one.",
+        // Search answers only in a job; public pages are still read with `instafy web read`.
+        "**`instafy web search`.** It answers only inside an Instafy job, which this session is not. Find links with your own search, then read the pages with `instafy web read <address>`, as `AGENTS.md` says.",
+        // Nothing under `.agents/` is loaded, so a skill is read as a file.
+        "and nothing under `.agents/` is loaded into your context automatically.",
+        "When a task touches a workspace convention, read the relevant `SKILL.md` directly before acting",
+        // AGENTS.md's Replies section is for Instafy's chat; code work names its files and commands.
+        "is written for Instafy's chat. When you work on code with the person, name the files you change and the commands you run.",
+        // The plugin is the person's to install; the signed-in CLI works from a shell.
+        "so suggest that they run these commands rather than running them yourself:",
+        "claude plugin marketplace add instafy-dev/instafy --sparse .claude-plugin claude-plugin",
+        "claude plugin install instafy@instafy",
+        "and its tools act as the signed-in person.",
+        "commands the skills name also work from your shell while the person is signed in",
+    ];
+
     #[test]
     fn diagnostics_guidance_and_claude_bridge_are_seeded() {
         let tmp = tempdir().expect("temp dir");
@@ -2192,7 +2219,22 @@ mod tests {
         assert!(DIAGNOSTICS_TEMPLATE.contains("--preview"));
         assert!(DIAGNOSTICS_TEMPLATE.contains("obtain explicit confirmation"));
         assert!(DIAGNOSTICS_TEMPLATE.contains("never bypass a traversal, symlink"));
-        assert_eq!(CLAUDE_DOC_TEMPLATE, "@AGENTS.md\n");
+        // CLAUDE.md opens with its imports, AGENTS.md first, and keeps each of its corrections.
+        let imports: Vec<&str> = CLAUDE_DOC_TEMPLATE
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .collect();
+        assert_eq!(imports, ["@AGENTS.md", "@INSTAFY.md"]);
+        let claude_doc = CLAUDE_DOC_TEMPLATE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for correction in CLAUDE_DOC_CORRECTIONS {
+            assert!(
+                claude_doc.contains(correction),
+                "CLAUDE.md no longer says: {correction}"
+            );
+        }
     }
 
     #[test]

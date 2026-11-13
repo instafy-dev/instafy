@@ -1,6 +1,6 @@
 import kleur from "kleur";
-import { findProjectManifest } from "./project-manifest.js";
 import { requestControllerApiJson } from "./api.js";
+import { resolveSpaceId } from "./space-id.js";
 
 type ConversationCommonOptions = {
   controllerUrl?: string;
@@ -183,29 +183,9 @@ function isUuid(value: string): boolean {
 }
 
 function resolveProjectId(rawProject: string | undefined): string {
-  const explicit = trimOrNull(rawProject);
-  if (explicit) {
-    return explicit;
-  }
-
-  const fromEnv =
-    trimOrNull(process.env["SPACE_ID"]) ??
-    trimOrNull(process.env["INSTAFY_SPACE_ID"]) ??
-    trimOrNull(process.env["PROJECT_ID"]) ??
-    trimOrNull(process.env["INSTAFY_PROJECT_ID"]);
-  if (fromEnv) {
-    return fromEnv;
-  }
-
-  const manifest = findProjectManifest(process.cwd()).manifest;
-  const fromManifest = trimOrNull(manifest?.spaceId);
-  if (fromManifest) {
-    return fromManifest;
-  }
-
-  throw new Error(
-    "No space configured. Pass --space, set SPACE_ID, or run `instafy space init`.",
-  );
+  return resolveSpaceId(rawProject, {
+    missing: "No space configured. Pass --space, set SPACE_ID, or run `instafy space init`.",
+  });
 }
 
 function extractConversationTitle(metadata: Record<string, unknown> | null | undefined, id: string): string {
@@ -272,7 +252,7 @@ async function fetchProjectConversations(
   }
   const response = await requestControllerApiJson<ControllerProjectConversation[]>({
     method: "GET",
-    path: `/projects/${options.project}/conversations`,
+    path: `/projects/${encodeURIComponent(options.project)}/conversations`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
     serviceToken: options.serviceToken,
@@ -289,7 +269,7 @@ async function fetchConversationMessages(
 ): Promise<ControllerConversationMessage[]> {
   const response = await requestControllerApiJson<ControllerConversationMessagesPage>({
     method: "GET",
-    path: `/conversations/${options.conversationId}/messages`,
+    path: `/conversations/${encodeURIComponent(options.conversationId)}/messages`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
     serviceToken: options.serviceToken,
@@ -307,7 +287,7 @@ async function fetchConversationTranscript(
   for (let pageNumber = 0; pageNumber < MAX_TRANSCRIPT_PAGES; pageNumber += 1) {
     const page = await requestControllerApiJson<ControllerConversationMessagesPage>({
       method: "GET",
-      path: `/conversations/${options.conversationId}/messages`,
+      path: `/conversations/${encodeURIComponent(options.conversationId)}/messages`,
       controllerUrl: options.controllerUrl,
       accessToken: options.accessToken,
       serviceToken: options.serviceToken,
@@ -547,7 +527,7 @@ export async function createConversation(options: ConversationCreateOptions): Pr
 
   const response = await requestControllerApiJson<ControllerConversationCreateResponse>({
     method: "POST",
-    path: `/projects/${projectId}/conversations/blank`,
+    path: `/projects/${encodeURIComponent(projectId)}/conversations/blank`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
     serviceToken: options.serviceToken,

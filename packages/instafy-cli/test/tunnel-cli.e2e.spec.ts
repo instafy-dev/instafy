@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import http from "node:http";
+import { once } from "node:events";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { unreachableLocalUrl } from "./loopback-servers.mjs";
 import {
   buildRatholeEnvironment,
   runTunnelCommand,
@@ -97,7 +99,9 @@ describe("instafy tunnel CLI", () => {
         }
       });
     });
-    server.listen(0);
+    server.listen(0, "127.0.0.1");
+    // Binding to an address finishes on a later tick, unlike binding every interface.
+    await once(server, "listening");
     const addr = server.address();
     if (!addr || typeof addr !== "object") throw new Error("failed to bind test server");
 
@@ -168,7 +172,9 @@ describe("instafy tunnel CLI", () => {
         }
       });
     });
-    server.listen(0);
+    server.listen(0, "127.0.0.1");
+    // Binding to an address finishes on a later tick, unlike binding every interface.
+    await once(server, "listening");
     const addr = server.address();
     if (!addr || typeof addr !== "object") throw new Error("failed to bind test server");
 
@@ -288,7 +294,9 @@ describe("instafy tunnel CLI", () => {
         }
       });
     });
-    server.listen(0);
+    server.listen(0, "127.0.0.1");
+    // Binding to an address finishes on a later tick, unlike binding every interface.
+    await once(server, "listening");
     const addr = server.address();
     if (!addr || typeof addr !== "object") throw new Error("failed to bind test server");
 
@@ -356,13 +364,17 @@ describe("instafy tunnel CLI", () => {
     process.env.RUNTIME_ACCESS_TOKEN = "runtime-machine-token";
     process.env.RUNTIME_ID = randomUUID();
     process.env.INSTAFY_CONVERSATION_ID = randomUUID();
-    process.env.CONTROLLER_BASE_URL = "http://127.0.0.1:8788";
+    // Two addresses where nothing listens: a regression must fail here, not reach a real local service.
+    const boundController = await unreachableLocalUrl();
+    let otherController = await unreachableLocalUrl();
+    while (otherController === boundController) otherController = await unreachableLocalUrl();
+    process.env.CONTROLLER_BASE_URL = boundController;
 
     try {
       await expect(
         startTunnelSession({
           project: randomUUID(),
-          controllerUrl: "http://127.0.0.1:8789",
+          controllerUrl: otherController,
           port: 4173,
           ratholeBin: makeStubRathole(),
         }),

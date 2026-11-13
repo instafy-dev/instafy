@@ -52,11 +52,12 @@ New and existing managed workspaces receive:
 
 - `.agents/skills/instafy-diagnostics/SKILL.md`, the canonical diagnosis and consent workflow;
 - `.agents/skills/instafy-diagnostics/agents/openai.yaml`, Codex-facing skill metadata;
-- `CLAUDE.md`, a small Claude Code bridge that imports `AGENTS.md` and its instructions for
-  loading the canonical `.agents` skills.
+- `CLAUDE.md`, which imports `AGENTS.md` and `INSTAFY.md` and adds Claude-specific corrections
+  where Claude Code's tools differ from the runtime agent's, among them reading `.agents` skills
+  such as this one directly, since Claude Code does not load them.
 
-Both agents therefore follow one source of truth. The workflow reads the run result first, uses a
-small runtime-event window only when needed, distinguishes observations from inference, and
+Both agents therefore follow the same diagnostics skill. The workflow reads the run result first,
+uses a small runtime-event window only when needed, distinguishes observations from inference, and
 summarizes relevant evidence instead of reproducing entire payloads.
 
 ## Consent and data minimization

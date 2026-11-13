@@ -36,7 +36,7 @@ function startMockController(projectId: string) {
       res.end(JSON.stringify({ error: "not found", body }));
     });
   });
-  server.listen(0);
+  server.listen(0, "127.0.0.1");
   return {
     server,
     revokeCalled: () => revokeCalled,

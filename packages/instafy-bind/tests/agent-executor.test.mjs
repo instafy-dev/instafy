@@ -554,6 +554,27 @@ test("a 401 re-reads the saved login once (the CLI may have refreshed it)", asyn
   }
 });
 
+test("an id of '.' or '..' is refused before any request, since encoding leaves it as it is", async () => {
+  const controller = await startMockController();
+  try {
+    const client = new ControllerClient({ controllerUrl: controller.url, token: TOKEN });
+    const refused = (error) => error.code === "policy" && /"\." or "\.\." segment/.test(error.message);
+    await assert.rejects(client.createThreadRecord({ spaceId: ".." }), refused);
+    await assert.rejects(client.messages("."), refused);
+    await assert.rejects(client.cancelJob(".."), refused);
+    // Spellings the URL parser resolves after dropping controls, spaces, tabs and line breaks.
+    for (const path of ["/conversations/x/..\u0000", "/ ../conversations", "/conversations/.\t./x", "http:../x"]) {
+      await assert.rejects(client.request("GET", path), refused, JSON.stringify(path));
+    }
+    assert.deepEqual(controller.requests, []);
+    // Anything else stays inside its one encoded segment.
+    await assert.rejects(client.messages("../projects/space_1/conversations/blank"));
+    assert.deepEqual(controller.requests.map((request) => request.path), ["/conversations/..%2Fprojects%2Fspace_1%2Fconversations%2Fblank/messages"]);
+  } finally {
+    await controller.close();
+  }
+});
+
 test("controller helpers: real run statuses and newest-first message order", () => {
   for (const status of ["success", "merged", "failed", "canceled", "expired"]) assert.ok(isTerminalStatus(status), status);
   for (const status of ["queued", "in_progress", "awaiting_approval"]) assert.ok(!isTerminalStatus(status), status);

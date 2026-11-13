@@ -4,14 +4,25 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { unreachableLocalUrl } from "./loopback-servers.mjs";
 
 const cliBin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy.js");
+// Login with no server or Studio URL probes the defaults, where a real controller and Studio may run.
+const unreachable = await unreachableLocalUrl();
 
 function run(args: string[], input = "") {
   return spawnSync(process.execPath, [cliBin, ...args], {
     input,
     encoding: "utf8",
-    env: { ...process.env, HOME: mkdtempSync(path.join(tmpdir(), "instafy-agent-")) },
+    // Commands follow a space or profile that a binding in the working folder or above it names,
+    // so they run in an empty folder, not in this checkout.
+    cwd: mkdtempSync(path.join(tmpdir(), "instafy-agent-cwd-")),
+    env: {
+      ...process.env,
+      HOME: mkdtempSync(path.join(tmpdir(), "instafy-agent-")),
+      INSTAFY_SERVER_URL: unreachable,
+      INSTAFY_STUDIO_URL: unreachable,
+    },
     timeout: 20_000,
   });
 }

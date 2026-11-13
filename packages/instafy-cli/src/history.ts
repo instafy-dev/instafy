@@ -1,6 +1,6 @@
 import { requestControllerApi } from "./api.js";
 import { conversationIdFromEnvironment } from "./conversations.js";
-import { findProjectManifest } from "./project-manifest.js";
+import { resolveSpaceId } from "./space-id.js";
 
 type HistoryCommonOptions = {
   controllerUrl?: string;
@@ -55,28 +55,9 @@ function resolveConversationId(rawConversation: string | undefined): string {
 }
 
 function resolveProjectId(rawProject: string | undefined): string {
-  const explicit = rawProject?.trim();
-  if (explicit) {
-    return explicit;
-  }
-
-  const fromEnv =
-    process.env["SPACE_ID"]?.trim() ||
-    process.env["INSTAFY_SPACE_ID"]?.trim() ||
-    process.env["PROJECT_ID"]?.trim() ||
-    process.env["INSTAFY_PROJECT_ID"]?.trim();
-  if (fromEnv) {
-    return fromEnv;
-  }
-
-  const manifest = findProjectManifest(process.cwd()).manifest;
-  if (manifest?.spaceId?.trim()) {
-    return manifest.spaceId.trim();
-  }
-
-  throw new Error(
-    "No space configured. Pass --space, set SPACE_ID, or run `instafy space init`.",
-  );
+  return resolveSpaceId(rawProject, {
+    missing: "No space configured. Pass --space, set SPACE_ID, or run `instafy space init`.",
+  });
 }
 
 function asPretty(value: boolean | undefined): boolean {
@@ -93,7 +74,7 @@ export async function historyMessages(options: HistoryMessagesOptions): Promise<
 
   await requestControllerApi({
     method: "GET",
-    path: `/conversations/${conversationId}/messages`,
+    path: `/conversations/${encodeURIComponent(conversationId)}/messages`,
     query,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
@@ -108,7 +89,7 @@ export async function historyRuns(options: HistoryRunsOptions): Promise<void> {
 
   await requestControllerApi({
     method: "GET",
-    path: `/conversations/${conversationId}/runs`,
+    path: `/conversations/${encodeURIComponent(conversationId)}/runs`,
     query: [`limit=${limit}`],
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
@@ -123,7 +104,7 @@ export async function historyConversations(options: HistoryConversationsOptions)
 
   await requestControllerApi({
     method: "GET",
-    path: `/projects/${projectId}/conversations`,
+    path: `/projects/${encodeURIComponent(projectId)}/conversations`,
     query: [`limit=${limit}`],
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,

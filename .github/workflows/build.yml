@@ -579,6 +579,15 @@ jobs:
       - name: Test CLI web search and link
         run: pnpm --filter @instafy/cli exec vitest run test/web-search.spec.ts test/web-search-eval.spec.ts test/web-compare-eval.spec.ts test/web-reference-search.spec.ts test/web-link.spec.ts
 
+      - name: Test CLI MCP server
+        run: pnpm --filter @instafy/cli exec vitest run test/mcp.spec.ts
+
+      - name: Test CLI login profiles
+        run: pnpm --filter @instafy/cli exec vitest run test/login-profile.e2e.spec.ts test/runtime-env.spec.ts
+
+      - name: Test CLI space ids in request paths
+        run: pnpm --filter @instafy/cli exec vitest run test/space-id-paths.e2e.spec.ts test/agent-settings.test.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-

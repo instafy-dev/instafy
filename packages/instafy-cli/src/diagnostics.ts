@@ -2,7 +2,7 @@ import {
   customerControllerJsonRequest,
   type CustomerControllerAuthOptions,
 } from "./customer-controller.js";
-import { findProjectManifest } from "./project-manifest.js";
+import { resolveSpaceId } from "./space-id.js";
 
 const DIAGNOSTICS_SCHEMA_VERSION = "instafy-diagnostics-v1";
 
@@ -31,21 +31,6 @@ function requireText(value: unknown, label: string): string {
   return text;
 }
 
-function resolveSpaceId(explicitSpace?: string): string {
-  const explicit = cleanText(explicitSpace);
-  if (explicit) return explicit;
-
-  for (const key of ["SPACE_ID", "INSTAFY_SPACE_ID", "PROJECT_ID", "INSTAFY_PROJECT_ID"]) {
-    const value = cleanText(process.env[key]);
-    if (value) return value;
-  }
-
-  const linked = cleanText(findProjectManifest(process.cwd()).manifest?.spaceId);
-  if (linked) return linked;
-
-  throw new Error("No space configured. Pass --space or run `instafy space init`.");
-}
-
 function requireRecord(value: unknown, label: string): JsonRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`Diagnostics response ${label} was not a JSON object.`);
@@ -60,7 +45,9 @@ function printJson(value: unknown): void {
 export async function diagnosticsRuntimeEvents(
   options: DiagnosticsRuntimeEventsOptions,
 ): Promise<void> {
-  const spaceId = resolveSpaceId(options.space);
+  const spaceId = resolveSpaceId(options.space, {
+    missing: "No space configured. Pass --space or run `instafy space init`.",
+  });
   const limit = options.limit ?? 50;
   if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
     throw new Error("--limit must be an integer between 1 and 200.");

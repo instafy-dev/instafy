@@ -33,7 +33,7 @@ function startMockController(handler: (req: CapturedRequest) => { status: number
     res.writeHead(response.status, { "content-type": "application/json" });
     res.end(JSON.stringify(response.body));
   });
-  server.listen(0);
+  server.listen(0, "127.0.0.1");
   return { server, captured };
 }
 

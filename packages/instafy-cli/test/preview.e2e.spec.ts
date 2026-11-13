@@ -10,6 +10,10 @@ import { parsePreviewPath, parsePreviewSummary, parsePreviewTitle, parseStudioOr
 import { sniffImage } from "../src/preview-thumbnail.js";
 import { launchChromium, loadPlaywright, locateBrowserEngine } from "../src/site-check.js";
 import { commandLineIsRatholeClient } from "../src/tunnel.js";
+import { reservedPreviewPorts } from "../src/local-site.js";
+import { ipv6LoopbackAvailable, listenOnIpv6LoopbackOnly, unusedLoopbackPort } from "./loopback-servers.mjs";
+
+const hasIpv6 = await ipv6LoopbackAvailable();
 
 type RequestCapture = {
   method: string;
@@ -139,15 +143,6 @@ async function startPathMentioners(configPath: string): Promise<number[]> {
 
 function workdirOf(home: string, previewId: string): string {
   return path.join(home, ".instafy", "cli-preview-workdirs", previewId);
-}
-
-async function unusedPort(): Promise<number> {
-  const server = http.createServer();
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const port = (server.address() as { port: number }).port;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return port;
 }
 
 async function startMockController(options: {
@@ -433,19 +428,13 @@ describe("instafy preview", () => {
     expect(JSON.parse(controller.captures[0]!.body)).toMatchObject({ path: "/app?x=1" });
   }, 30000);
 
-  it("says a site that answers only on [::1] is running and must bind 127.0.0.1", async () => {
+  it.skipIf(!hasIpv6)("says a site that answers only on [::1] is running and must bind 127.0.0.1", async () => {
     const projectId = randomUUID();
     const controller = await startMockController({ projectId });
     const site = http.createServer((_req, res) => res.end("ok"));
-    try {
-      site.listen({ port: 0, host: "::1", ipv6Only: true });
-      await once(site, "listening");
-    } catch {
-      // No IPv6 loopback here: nothing to test.
-      return;
-    }
+    // On a port where nothing answers on 127.0.0.1, which the CLI tries first.
+    const sitePort = await listenOnIpv6LoopbackOnly(site, { avoid: reservedPreviewPorts({}) });
     cleanups.push(() => new Promise<void>((resolve) => site.close(() => resolve())));
-    const sitePort = (site.address() as { port: number }).port;
 
     const result = await execCli(
       openArgs({ projectId, controllerUrl: controller.url, port: sitePort, rathole: "/usr/bin/false" }),
@@ -485,7 +474,7 @@ describe("instafy preview", () => {
     const projectId = randomUUID();
     const controller = await startMockController({ projectId });
     const rathole = makeStubRathole();
-    const port = await unusedPort();
+    const port = await unusedLoopbackPort({ avoid: reservedPreviewPorts({}) });
 
     const result = await execCli(openArgs({ projectId, controllerUrl: controller.url, port, rathole: rathole.file }), makeHome());
 
@@ -1159,8 +1148,12 @@ describe("instafy preview: the card's summary and picture", () => {
     const rathole = makeStubRathole();
     const home = makeHome();
     const sitePort = await startSite();
-    // The CLI runs from the package folder; make the folder of packages the space's workspace.
-    const workspace = { WORKSPACE_PROJECT_DIR: new URL("../../", import.meta.url).pathname };
+    // The CLI runs from the site's folder in a space's workspace of its own, which it writes its record of pages into.
+    const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-space-"));
+    cleanups.push(() => fs.rmSync(workspaceDir, { recursive: true, force: true }));
+    const siteDir = path.join(workspaceDir, "instafy-cli");
+    fs.mkdirSync(siteDir);
+    const workspace = { WORKSPACE_PROJECT_DIR: workspaceDir };
     const file = path.join(home, "snapshot.png");
     fs.writeFileSync(file, pngOf(640, 400));
     const args = (controllerUrl: string) => [
@@ -1169,7 +1162,7 @@ describe("instafy preview: the card's summary and picture", () => {
     ];
 
     const failing = await startMockController({ projectId, thumbnailStatus: 500 });
-    const notUp = await execCli(args(failing.url), home, workspace);
+    const notUp = await execCli(args(failing.url), home, workspace, siteDir);
     expect(notUp.code, notUp.stderr).toBe(0);
     expect(JSON.parse(notUp.stdout)).toMatchObject({ thumbnail: "failed" });
     expect(readState(home).previews[0]).toMatchObject({ siteDir: "instafy-cli" });
@@ -1177,7 +1170,7 @@ describe("instafy preview: the card's summary and picture", () => {
 
     const controller = await startMockController({ projectId });
     const before = Date.now();
-    const up = await execCli(args(controller.url), home, workspace);
+    const up = await execCli(args(controller.url), home, workspace, siteDir);
     expect(up.code, up.stderr).toBe(0);
     expect(JSON.parse(up.stdout)).toMatchObject({ thumbnail: "uploaded" });
     const entry = readState(home).previews[0]!;

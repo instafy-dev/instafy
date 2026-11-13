@@ -1,5 +1,6 @@
 import kleur from "kleur";
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
 import * as http from "node:http";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline/promises";
@@ -9,13 +10,16 @@ import {
   clearInstafyProfileConfig,
   getInstafyConfigPath,
   getInstafyProfileConfigPath,
-  resolveConfiguredControllerUrl,
-  resolveConfiguredStudioUrl,
+  readInstafyCliConfig,
+  readInstafyProfileConfig,
+  resolveActiveProfile,
   resolveUserAccessToken,
   writeInstafyCliConfig,
   writeInstafyProfileConfig,
+  type ActiveProfile,
 } from "./config.js";
 import { installGitCredentialHelper, uninstallGitCredentialHelper } from "./git-setup.js";
+import { shownPath } from "./terminal-text.js";
 
 const require = createRequire(import.meta.url);
 const cliVersion = (() => {
@@ -363,11 +367,18 @@ export async function login(options: {
   if (options.json && options.waitForBrowser) {
     throw new Error("--json cannot be combined with --wait-for-browser");
   }
-  const profile = typeof options.profile === "string" && options.profile.trim() ? options.profile.trim() : null;
+  // The session is read from and saved to one place: the profile every other command uses here,
+  // chosen by --profile, then INSTAFY_PROFILE, then the folder's `.instafy/space.json`, or else the
+  // default session. Taking one profile's server and saving to another would point the other
+  // session at this server with this token.
+  const active = resolveActiveProfile({ profile: options.profile ?? null });
+  const profile = active?.name ?? null;
+  const saved = profile ? readInstafyProfileConfig(profile) : readInstafyCliConfig();
+  const configPath = profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath();
   const explicitControllerUrl =
     normalizeUrl(options.controllerUrl ?? null) ??
     normalizeUrl(process.env["INSTAFY_SERVER_URL"] ?? null) ??
-    (isStagingCli ? null : resolveConfiguredControllerUrl({ profile }));
+    (isStagingCli ? null : normalizeUrl(saved.controllerUrl ?? null));
 
   const defaultLocalControllerUrl = "http://127.0.0.1:8788";
   const defaultHostedControllerUrl = "https://controller.instafy.dev";
@@ -383,7 +394,7 @@ export async function login(options: {
   const studioUrl =
     normalizeUrl(options.studioUrl ?? null) ??
     normalizeUrl(process.env["INSTAFY_STUDIO_URL"] ?? null) ??
-    (isStagingCli ? null : resolveConfiguredStudioUrl({ profile })) ??
+    (isStagingCli ? null : normalizeUrl(saved.studioUrl ?? null)) ??
     (await resolveDefaultStudioUrl(controllerUrl));
 
   const url = new URL("/cli/login", studioUrl);
@@ -399,7 +410,7 @@ export async function login(options: {
       JSON.stringify({
         url: url.toString(),
         profile,
-        configPath: profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath(),
+        configPath,
       }),
     );
     return;
@@ -468,6 +479,11 @@ export async function login(options: {
   if (!options.json) {
     console.log(kleur.green("Instafy CLI login"));
     console.log("");
+    const note = implicitProfileNote(active);
+    if (note) {
+      console.log(kleur.gray(note));
+      console.log("");
+    }
   }
   if (!authPayload) {
     console.log("1) Open this URL in your browser:");
@@ -644,11 +660,7 @@ export async function login(options: {
     }
     if (!options.json) {
       console.log("");
-      console.log(
-        kleur.green(
-          `Saved token to ${profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath()}`,
-        ),
-      );
+      console.log(kleur.green(`Saved token to ${configPath}`));
     }
     if (options.gitSetup !== false) {
       try {
@@ -677,8 +689,8 @@ export async function login(options: {
     console.log(
       JSON.stringify({
         ok: true,
-        profile: profile ?? null,
-        configPath: profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath(),
+        profile,
+        configPath,
         stored: !options.noStore,
         method: usedPasswordGrant ? "password" : "token",
       }),
@@ -693,10 +705,27 @@ export async function login(options: {
 }
 
 export async function logout(options?: { json?: boolean; profile?: string }): Promise<void> {
-  if (options?.profile) {
-    clearInstafyProfileConfig(options.profile, ["accessToken", "refreshToken", "supabaseUrl", "supabaseAnonKey"]);
+  // The session `instafy login` saves here: the selected profile's, or else the default one.
+  const active = resolveActiveProfile({ profile: options?.profile ?? null });
+  const profile = active?.name ?? null;
+  const configPath = profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath();
+  const saved = profile ? readInstafyProfileConfig(profile) : readInstafyCliConfig();
+  // A cloned repository's binding can name a profile that was never saved, and clearing a file that
+  // is not there would create it, which `instafy profile list` then shows. Only a file that is
+  // really absent counts as absent: when the check itself fails, logout stops with that error.
+  const present = isPresent(configPath);
+  // The readers return every field of a file they can parse and none of one they cannot, so a file
+  // that exists but reads as empty may still hold a token, and counts as a session to clear.
+  const cleared =
+    present && (Boolean(saved.accessToken || saved.refreshToken) || Object.keys(saved).length === 0);
+  if (profile) {
+    if (present) {
+      clearInstafyProfileConfig(profile, ["accessToken", "refreshToken", "supabaseUrl", "supabaseAnonKey"]);
+    }
   } else {
-    clearInstafyCliConfig(["accessToken", "refreshToken", "supabaseUrl", "supabaseAnonKey"]);
+    if (present) {
+      clearInstafyCliConfig(["accessToken", "refreshToken", "supabaseUrl", "supabaseAnonKey"]);
+    }
     try {
       uninstallGitCredentialHelper();
     } catch {
@@ -704,12 +733,58 @@ export async function logout(options?: { json?: boolean; profile?: string }): Pr
     }
   }
   if (options?.json) {
-    console.log(JSON.stringify({ ok: true }));
+    console.log(JSON.stringify({ ok: true, profile, configPath, cleared }));
     return;
   }
-  if (options?.profile) {
-    console.log(kleur.green(`Logged out (cleared saved access token for profile "${options.profile}").`));
-  } else {
-    console.log(kleur.green("Logged out (cleared saved access token)."));
+  if (!profile) {
+    console.log(
+      cleared
+        ? kleur.green("Logged out (cleared saved access token).")
+        : kleur.yellow(`No session is saved in ${configPath}; nothing was cleared.`),
+    );
+    return;
   }
+  if (cleared) {
+    console.log(kleur.green(`Logged out (cleared saved access token for profile "${profile}").`));
+  } else {
+    console.log(kleur.yellow(`No session is saved for profile "${profile}"; nothing was cleared.`));
+  }
+  const note = implicitProfileNote(active);
+  if (note) {
+    console.log(kleur.gray(note));
+    // Logging out of a profile leaves the default session, and the git credential helper that
+    // can use it, as they were; someone who did not choose the profile may expect both gone.
+    if (readInstafyCliConfig().accessToken) {
+      console.log(
+        kleur.gray(`The default session in ${getInstafyConfigPath()} is still signed in; commands use it where no profile is selected.`),
+      );
+    }
+  }
+}
+
+/** Whether a file is there; any answer but "it does not exist" is passed on. */
+function isPresent(file: string): boolean {
+  try {
+    fs.lstatSync(file);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Login and logout act on the session the profile selects, and a profile chosen by INSTAFY_PROFILE
+ * or by the folder's `.instafy/space.json` is easy to miss, so they say which one it was.
+ */
+function implicitProfileNote(active: ActiveProfile | null): string | null {
+  if (!active || active.source.kind === "flag") {
+    return null;
+  }
+  // A binding's path holds folder names a cloned repository chose, so it is escaped.
+  const selectedBy = active.source.kind === "environment" ? "INSTAFY_PROFILE" : shownPath(active.source.path);
+  return `Profile "${active.name}", selected by ${selectedBy}.`;
 }

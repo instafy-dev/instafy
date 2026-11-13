@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
+import { unreachableLocalUrl } from "./loopback-servers.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,8 +28,10 @@ describe("@instafy/cli login callback", () => {
       CONTROLLER_ACCESS_TOKEN: "",
       INSTAFY_SERVICE_TOKEN: "",
     };
+    // A controller and Studio this login must never reach.
+    const unreachable = await unreachableLocalUrl();
 
-    const child = spawn(process.execPath, [cliBin, "login", "--wait-for-browser", "--studio-url", "http://localhost:5173", "--server-url", "http://127.0.0.1:8788", "--no-git-setup"], {
+    const child = spawn(process.execPath, [cliBin, "login", "--wait-for-browser", "--studio-url", unreachable, "--server-url", unreachable, "--no-git-setup"], {
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });

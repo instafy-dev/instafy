@@ -1,7 +1,7 @@
 import kleur from "kleur";
 import { requestControllerApiJson } from "./api.js";
 import { conversationIdFromEnvironment } from "./conversations.js";
-import { findProjectManifest } from "./project-manifest.js";
+import { resolveSpaceId } from "./space-id.js";
 
 type AgentCommonOptions = {
   project?: string;
@@ -126,29 +126,9 @@ function trimOrNull(value: string | undefined | null): string | null {
 }
 
 function resolveProjectId(rawProject: string | undefined): string {
-  const explicit = trimOrNull(rawProject);
-  if (explicit) {
-    return explicit;
-  }
-
-  const fromEnv =
-    trimOrNull(process.env["SPACE_ID"]) ??
-    trimOrNull(process.env["INSTAFY_SPACE_ID"]) ??
-    trimOrNull(process.env["PROJECT_ID"]) ??
-    trimOrNull(process.env["INSTAFY_PROJECT_ID"]);
-  if (fromEnv) {
-    return fromEnv;
-  }
-
-  const manifest = findProjectManifest(process.cwd()).manifest;
-  const fromManifest = trimOrNull(manifest?.spaceId);
-  if (fromManifest) {
-    return fromManifest;
-  }
-
-  throw new Error(
-    "No space configured. Pass --space, set SPACE_ID, or run `instafy space init`.",
-  );
+  return resolveSpaceId(rawProject, {
+    missing: "No space configured. Pass --space, set SPACE_ID, or run `instafy space init`.",
+  });
 }
 
 function normalizeLimit(value: number | undefined): number {

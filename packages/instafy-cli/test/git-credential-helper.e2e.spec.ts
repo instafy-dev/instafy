@@ -1,4 +1,5 @@
 import http from "node:http";
+import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -63,7 +64,9 @@ describe("instafy git credential helper", () => {
         res.end();
       });
     });
-    server.listen(0);
+    server.listen(0, "127.0.0.1");
+    // Binding to an address finishes on a later tick, unlike binding every interface.
+    await once(server, "listening");
     const addr = server.address();
     if (!addr || typeof addr !== "object") throw new Error("failed to bind test server");
 
@@ -102,7 +105,9 @@ describe("instafy git credential helper", () => {
       res.statusCode = 500;
       res.end();
     });
-    server.listen(0);
+    server.listen(0, "127.0.0.1");
+    // Binding to an address finishes on a later tick, unlike binding every interface.
+    await once(server, "listening");
     const addr = server.address();
     if (!addr || typeof addr !== "object") throw new Error("failed to bind test server");
 
@@ -136,7 +141,9 @@ describe("instafy git credential helper", () => {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ projectId, token: "git-token-123", expiresIn: 60, scopes: ["git.read", "git.write"] }));
     });
-    server.listen(0);
+    server.listen(0, "127.0.0.1");
+    // Binding to an address finishes on a later tick, unlike binding every interface.
+    await once(server, "listening");
     const addr = server.address();
     if (!addr || typeof addr !== "object") throw new Error("failed to bind test server");
 

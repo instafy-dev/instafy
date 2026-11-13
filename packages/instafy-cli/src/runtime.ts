@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { ensureRatholeBinary } from "./rathole.js";
 import {
+  getInstafyProfileConfigPath,
   resolveActiveProfileName,
   resolveConfiguredAccessToken,
   resolveConfiguredControllerUrl,
@@ -13,7 +14,8 @@ import {
 } from "./config.js";
 import { formatAuthRejectedError } from "./errors.js";
 import { findProjectManifest, type ProjectManifest } from "./project-manifest.js";
-import { fetchWithControllerAuth } from "./controller-fetch.js";
+import { resolveSpaceId } from "./space-id.js";
+import { fetchWithControllerAuth, refuseDotSegments } from "./controller-fetch.js";
 
 export interface RuntimeStartOptions {
   project?: string;
@@ -642,6 +644,46 @@ export function buildRuntimeDockerRunArgs(params: {
   ];
 }
 
+function sameOrigin(left: string | null | undefined, right: string | null | undefined): boolean {
+  try {
+    return Boolean(left && right) && new URL(left as string).origin === new URL(right as string).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The saved session a runtime agent run as a local process re-reads when the controller refuses its
+ * token, as INSTAFY_CLI_CONFIG, or null to leave the agent's default, ~/.instafy/config.json. The
+ * agent sends the token it re-reads to its controller without checking whose it is. So it is given
+ * the saved session only when this command started it with that session's token: it minted the
+ * agent's runtime token from the controller token, which came from the saved session (`tokenSource`
+ * "config"), rather than being given a runtime token, which may be another account's. The session
+ * must also be saved for the agent's controller, and a selected profile's file is named rather than
+ * the default one. Otherwise it gets an empty file, so nothing is re-read. INSTAFY_CLI_CONFIG set by
+ * the person wins.
+ */
+export function runtimeAgentSessionFile(params: {
+  env: NodeJS.ProcessEnv;
+  profile: string | null;
+  savedControllerUrl: string | null;
+  tokenSource: AccessTokenSource;
+  /** True when the runtime token came from --runtime-token or RUNTIME_ACCESS_TOKEN, not from this command. */
+  runtimeTokenGiven: boolean;
+}): string | null {
+  if (normalizeToken(params.env["INSTAFY_CLI_CONFIG"])) {
+    return null;
+  }
+  if (
+    params.runtimeTokenGiven ||
+    params.tokenSource !== "config" ||
+    !sameOrigin(params.savedControllerUrl, params.env["CONTROLLER_BASE_URL"])
+  ) {
+    return os.devNull;
+  }
+  return params.profile ? getInstafyProfileConfigPath(params.profile) : null;
+}
+
 export async function runtimeStart(options: RuntimeStartOptions) {
   const env = { ...process.env };
   const cwd = process.cwd();
@@ -660,13 +702,12 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   }
 
   const manifestInfo = findProjectManifest(cwd);
-  const projectId =
-    options.project ?? env["SPACE_ID"] ?? manifestInfo.manifest?.spaceId ?? null;
-  if (!projectId) {
-    throw new Error(
-      "No space configured. Run `instafy space init` in this folder (recommended) or pass --space.",
-    );
-  }
+  // Saved in the runtime's state and handed to the agent, and both put it into request paths.
+  const projectId = resolveSpaceId(options.project, {
+    variables: ["SPACE_ID"],
+    cwd,
+    missing: "No space configured. Run `instafy space init` in this folder (recommended) or pass --space.",
+  });
   env["SPACE_ID"] = projectId;
   
   const supabaseAccessToken = resolveSupabaseAccessToken(options, env);
@@ -684,8 +725,9 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   );
   let controllerAccessToken = controllerAccessTokenResult.token;
   const controllerAccessTokenSource = controllerAccessTokenResult.source;
-  let runtimeAccessToken =
+  const givenRuntimeToken =
     normalizeToken(options.runtimeToken) ?? normalizeToken(env["RUNTIME_ACCESS_TOKEN"]);
+  let runtimeAccessToken = givenRuntimeToken;
   const agentKey = env["AGENT_LOGIN_KEY"] ?? env["AGENT_KEY"];
   if (!agentKey && !controllerAccessToken && !runtimeAccessToken) {
     throw new Error(
@@ -695,11 +737,12 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   if (agentKey) {
     env["AGENT_LOGIN_KEY"] = agentKey;
   }
+  const savedControllerUrl = resolveConfiguredControllerUrl({ profile, cwd });
   env["CONTROLLER_BASE_URL"] =
     options.controllerUrl ??
     env["INSTAFY_SERVER_URL"] ??
     manifestInfo.manifest?.controllerUrl ??
-    resolveConfiguredControllerUrl({ profile, cwd }) ??
+    savedControllerUrl ??
     "http://127.0.0.1:8788";
 
   if (options.codexBin) env["CODEX_BIN"] = options.codexBin;
@@ -922,6 +965,17 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     }
 
     const childEnvironment = buildRuntimeChildEnvironment(env);
+    // Only a local process can read a file under this HOME; a container cannot.
+    const sessionFile = runtimeAgentSessionFile({
+      env,
+      profile,
+      savedControllerUrl,
+      tokenSource: controllerAccessTokenSource,
+      runtimeTokenGiven: Boolean(givenRuntimeToken),
+    });
+    if (sessionFile) {
+      childEnvironment["INSTAFY_CLI_CONFIG"] = sessionFile;
+    }
     const spawnOptions: SpawnOptions = { env: childEnvironment, stdio, detached };
     const child = spawn(bin, spawnOptions);
 
@@ -1130,8 +1184,12 @@ async function sendOfflineBeat(state: RuntimeState): Promise<void> {
     ) {
       return;
     }
+    const target = `${controllerUrl.toString().replace(/\/$/, "")}/projects/${encodeURIComponent(state.projectId)}/origin/presence/beat`;
+    // A state file written before space ids were checked can hold "." or "..". The beat is best effort,
+    // so such a space only means no beat is sent.
+    refuseDotSegments(target);
     await fetch(
-      `${controllerUrl.toString().replace(/\/$/, "")}/projects/${encodeURIComponent(state.projectId)}/origin/presence/beat`,
+      target,
       {
         method: "POST",
         headers: {

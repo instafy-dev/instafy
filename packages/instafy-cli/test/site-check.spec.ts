@@ -36,6 +36,7 @@ import {
   siteUrlFor,
 } from "../src/site-check.js";
 import { reservedPreviewPorts } from "../src/local-site.js";
+import { ipv6LoopbackAvailable, listenOnIpv6LoopbackOnly, unusedLoopbackPort } from "./loopback-servers.mjs";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-site-check-"));
 const servers: http.Server[] = [];
@@ -60,15 +61,6 @@ async function serve(routes: Record<string, Route>): Promise<number> {
   await once(server, "listening");
   servers.push(server);
   return (server.address() as { port: number }).port;
-}
-
-async function freePort(): Promise<number> {
-  const s = http.createServer();
-  s.listen(0, "127.0.0.1");
-  await once(s, "listening");
-  const port = (s.address() as { port: number }).port;
-  await new Promise((r) => s.close(r));
-  return port;
 }
 
 const GOOD = `<!doctype html><html><head><title>Coffee walk</title><meta name="viewport" content="width=device-width"></head>
@@ -115,19 +107,7 @@ if (checkoutEngine) {
 // no Playwright anywhere: the trusted path points nowhere and no global folder is searched
 const NO_ENGINE = { env: { INSTAFY_SHARED_BROWSER_PLAYWRIGHT_PATH: "/definitely/not/here" }, globalRoots: [] as string[] };
 
-async function canListenOnIpv6(): Promise<boolean> {
-  const s = http.createServer();
-  try {
-    s.listen(0, "::1");
-    await once(s, "listening");
-    return true;
-  } catch {
-    return false;
-  } finally {
-    s.close();
-  }
-}
-const ipv6 = await canListenOnIpv6();
+const ipv6 = await ipv6LoopbackAvailable();
 
 async function serveOn(host: string, routes: Record<string, Route>, port = 0): Promise<number> {
   const server = http.createServer((req, res) => {
@@ -135,6 +115,12 @@ async function serveOn(host: string, routes: Record<string, Route>, port = 0): P
     res.writeHead(route?.status ?? (route ? 200 : 404), { "content-type": route?.type ?? "text/html; charset=utf-8", ...(route?.headers ?? {}) });
     res.end(route?.body ?? "not found");
   });
+  if (host === "::1" && port === 0) {
+    // On a port where nothing answers on 127.0.0.1, which the check tries first.
+    const ipv6Port = await listenOnIpv6LoopbackOnly(server, { avoid: reservedPreviewPorts({}) });
+    servers.push(server);
+    return ipv6Port;
+  }
   server.listen(port, host);
   await once(server, "listening");
   servers.push(server);
@@ -340,7 +326,7 @@ describe("preview check: pure parts", () => {
 
 describe("preview check: exits", () => {
   it("exit 2 when nothing listens on either loopback address, before looking for a browser", async () => {
-    const port = await freePort();
+    const port = await unusedLoopbackPort({ avoid: reservedPreviewPorts({}) });
     const result = await runSiteCheck({ port, outDir: path.join(tmp, "none"), ...NO_ENGINE });
     expect(result.code).toBe(CHECK_EXIT_NOT_LISTENING);
     expect(result.message).toMatch(/Nothing is answering on port \d+ at 127\.0\.0\.1 or \[::1\]/);

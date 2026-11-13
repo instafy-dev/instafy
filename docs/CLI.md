@@ -24,7 +24,7 @@ By default, `instafy login` also installs a git credential helper so `git clone`
 
 ## Profiles (multiple accounts)
 
-By default, `instafy login` stores a single token globally in `~/.instafy/config.json`.
+With no profile selected, `instafy login` stores a single token globally in `~/.instafy/config.json`.
 
 If you need different users in different folders, use named profiles:
 
@@ -46,7 +46,25 @@ instafy profile list
 instafy logout --profile work
 ```
 
-Resolution order for auth (highest → lowest priority): explicit flags/env tokens → folder `profile` → global config.
+Commands use one saved session: the profile `INSTAFY_PROFILE` names, else the one the nearest
+`.instafy/space.json` names in its `profile` field, else the global `~/.instafy/config.json`.
+(`instafy space defaults refresh` takes the folder's `profile` before `INSTAFY_PROFILE`.) A
+selected profile is used on its own, with no fallback to the global session. An explicit token
+(`--access-token`, `INSTAFY_ACCESS_TOKEN` or `SUPABASE_ACCESS_TOKEN`) takes the place of any saved
+session. `instafy login`, `instafy logout` and `instafy space init` also take `--profile`, which
+comes before both.
+
+`instafy login` and `instafy logout` act on that same session. Plain `instafy login` in a folder
+bound to `work`, or with `INSTAFY_PROFILE=work` set, saves the `work` profile, says which profile
+it saved and what selected it, and leaves `~/.instafy/config.json` alone. `instafy logout` there
+clears the `work` session; if `work` has none, it clears nothing and says so. It leaves the default
+session and the git credential helper as they are, and says when the default session is still
+signed in. Only `instafy logout` with no profile selected clears the default session and removes the
+helper.
+
+Git runs the credential helper `instafy login` installs from the repository's top folder, so `git`
+uses the session selected there, not one a subfolder's `.instafy/space.json` selects. In a
+repository bound in a subfolder, run git with `INSTAFY_PROFILE` set to choose the profile it uses.
 
 ## Core concepts
 
@@ -57,6 +75,14 @@ Most commands look for a space manifest at `.instafy/space.json` (walks up from 
 ```bash
 instafy space init
 ```
+
+A repository can commit that file, so the `conversation`, `chat`, `history`, `automations`,
+`agents`, `diagnostics` and `runtime start` commands use a space id only if it is a UUID, whether it
+comes from `--space`, an environment variable such as `SPACE_ID`, or the manifest. Anything else is
+refused before a request is sent, and the error names where the value came from. Every id the CLI
+puts into a request path is encoded, and since encoding leaves an id of `.` or `..` as it is, the
+CLI and `instafy bind` refuse a controller request whose path has such a segment. An id therefore
+cannot send a request to another route.
 
 Invite a teammate to the linked space:
 
@@ -332,7 +358,7 @@ Changing or unsetting the saved controller origin clears the saved login session
 
 The CLI supports a few ways to authenticate, depending on what you have available:
 
-- **Saved CLI token (recommended)**: run `instafy login` once (stores token in `~/.instafy/config.json`).
+- **Saved CLI token (recommended)**: run `instafy login` once (stores the token in `~/.instafy/config.json`, or in the selected profile's file; see [Profiles](#profiles-multiple-accounts)).
 - **Studio access token** (recommended): pass `--access-token` or set `INSTAFY_ACCESS_TOKEN`.
 - **Supabase session token** (convenient): pass `--supabase-access-token` / `--supabase-access-token-file` or set `SUPABASE_ACCESS_TOKEN`. The CLI will exchange this session for server + runtime/origin tokens automatically.
 - **Pre-minted runtime/origin token**: pass `--runtime-token` / `RUNTIME_ACCESS_TOKEN` (also reused for origin), or `--origin-token` / `ORIGIN_INTERNAL_TOKEN`.
@@ -1094,6 +1120,62 @@ The v1 success envelopes are:
 Diagnostic reads never submit a bug report and never attach data to an existing report. An agent
 must invoke `instafy support report` explicitly, with explicit diagnostic flags, before anything
 is uploaded to support.
+
+## Coding agents over MCP: `instafy mcp`
+
+`instafy mcp` serves your spaces' workspace state to a coding agent running on the same machine, as
+an MCP server on stdin and stdout. The agent starts it; it is not run by hand. Claude Code gets it,
+with a skill that says when to use it, from the plugin in
+[claude-plugin/instafy](../claude-plugin/instafy/README.md). Another MCP client can register the
+command itself under a name of its own; `claude mcp add` rejects the names Claude Code reserves for
+built-in servers, such as `workspace`:
+
+```bash
+claude mcp add instafy -- instafy mcp
+```
+
+Its tools read the person's teams and spaces, a space's conversations (list them, search the recent
+ones, search every message's text, read one, read around a message), the person's agents, the space's
+agent settings and the person's context notes, agent run status, runtime events and run results. Two
+of them write: `create_conversation` starts an empty conversation that everyone in the space can see,
+and `put_agent_context` replaces the note an agent keeps for a space or a conversation, creating the
+agent when its handle is new. `list_agents` also creates the person's default `@octo` the first
+time. None starts an agent run, and none reaches secrets, provider credentials, previews, tunnels or
+runtimes.
+
+Every call runs the CLI as a child process, as the signed-in person, on a session `instafy login`
+saved: the one for the profile that `INSTAFY_PROFILE` or the nearest `.instafy/space.json` selects
+(`instafy login --profile <name>` saves it), or else the default one. No tool takes a token or a
+server. `INSTAFY_ACCESS_TOKEN`, `SUPABASE_ACCESS_TOKEN`, `INSTAFY_SERVER_URL`, runtime credentials,
+`SPACE_ID` and its aliases are removed from the child's environment. A call is refused, without
+sending anything, when no session is saved for the selected profile, the saved token is not usable, or
+the saved session names no server; the refusal names the file it read and the `instafy login` command
+that fixes it. A profile name
+that is not valid is refused with where it was set. A `HOME` that is empty or not an absolute path
+is refused too, with a request to restart the agent with `HOME` set. A tool given no space uses the
+folder's bound space, which must be a space id; the write tools always name theirs. Error text never
+carries the saved credentials or a bearer token.
+
+A result is capped at about 36,000 characters and says what it left out. A list keeps whole entries:
+a cut `show_conversation` page keeps a cursor that goes on from the last message shown, while a cut
+`grep_messages` page drops its cursor. `message_context` keeps the messages nearest the one asked
+for. An entry too long for one result keeps its own text whole while its other long texts are cut
+short and, when that is not enough, its bulkiest parts are left out, each with a marker; its text is
+cut only when it alone is too long. For an agent's reply, the note names the run that `run_result`
+reads whole, text and run log included. `run_result` returns a long payload in pages by offset. When
+`message_context` or `show_conversation` prints more than 8,000,000 characters, it is read again with
+a smaller window if there is time for it, and the result says so; otherwise the result says to ask
+again with a smaller window.
+
+Up to four calls run at once, and a call the client cancels is stopped and not answered. Each call is
+stopped 60 seconds after it arrives, its wait for a turn included; `INSTAFY_MCP_CALL_TIMEOUT_MS`
+changes that. A call whose turn comes with too little of that time left is answered as not run. A
+write that ends without a definite answer, on a timeout, a dropped connection, a server error or an
+answer the command could not read, says that the change may or may not have been made; only a
+refusal reads as a plain failure. When the client closes its input, calls still waiting for a turn
+are answered as not run, and running ones get five seconds to finish. SIGINT, SIGTERM, SIGHUP,
+SIGQUIT, SIGUSR2 and SIGALRM stop every call at once. `instafy mcp --help` prints its usage to
+stderr, because stdout belongs to the protocol.
 
 ## Customer support reports
 

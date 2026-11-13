@@ -1,0 +1,17 @@
+{
+  "name": "instafy",
+  "description": "Instafy's own Claude Code plugin: work inside an Instafy space from your own Claude.",
+  "owner": {
+    "name": "Instafy",
+    "url": "https://github.com/instafy-dev/instafy"
+  },
+  "plugins": [
+    {
+      "name": "instafy",
+      "source": "./claude-plugin/instafy",
+      "description": "Read and write an Instafy space — conversations, message history, your agents' context notes and run diagnostics — as the person signed in with `instafy login`.",
+      "category": "productivity",
+      "tags": ["instafy", "workspace", "agents", "conversations"]
+    }
+  ]
+}
