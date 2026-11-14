@@ -740,11 +740,17 @@ chose it in a native picker. What the last Find or Locate… turned up shows as 
 found at …" with "Choose Use for my messages to use it instead." or why Desktop won't use that copy;
 "Find didn't turn up any other copy. Your messages keep using this one."; or, when the settings in
 use no longer pass and Find read ones that do, "Find read new settings from your login shell that
-Instafy Desktop can use with this copy. Choose Use for my messages to use them." **Use for my
-messages** then shows beside **Turn off** and confirms the new copy or settings through the consent
-dialog. A login-shell setting Desktop can't use is named, and Use for my messages refuses it without
-asking: "Your login shell sets CLAUDE_CONFIG_DIR to something Instafy Desktop can't use. It must be
-the full path of a folder that only you can change. Fix it, then choose Find." (for
+Instafy Desktop can use with this copy. Choose Use for my messages to use them." That last line
+also shows for a copy the person located because their login shell's `claude` is an alias or a
+function, as long as Find turns up no other copy (a copy in the usual install folders shows as
+"Also found at …" instead, or with why Desktop won't use it). It never shows after a Find whose
+login shell gave no answer, such as one that timed out, and once the new settings are confirmed the
+second line again reads "Find didn't turn up any other copy. Your messages keep using this one."
+**Use for my messages** shows beside **Turn off** for a new copy or new settings Desktop can use,
+and confirms them through the consent dialog. A login-shell setting Desktop can't use is named, and
+Use for my messages refuses it without asking: "Your login shell sets CLAUDE_CONFIG_DIR to
+something Instafy Desktop can't use. It must be the full path of a folder that only you can change.
+Fix it, then choose Find." (for
 `NODE_EXTRA_CA_CERTS`, "of a file"). After an action Desktop refused, such as a change the person
 kept from being made with **Keep working** while a turn ran, the row reads the status again, so it
 never shows that change as made. Its sign-in line says "Runs on your own Claude plan, under
