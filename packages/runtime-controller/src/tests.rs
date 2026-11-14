@@ -25689,17 +25689,20 @@ async fn runtime_idle_sweep_removes_stale_terminal_records() -> anyhow::Result<(
             Some(stale_offline_runtime)
         );
 
-        let personal_run_row = connection
-            .query_one(
-                "SELECT status, last_message FROM runs WHERE id = $1",
-                &[&personal_browser_run_id],
-            )
-            .await?;
-        assert_eq!(personal_run_row.get::<_, String>("status"), "failed");
+        // The run ends just after the stop commits, in a write of its own.
+        let personal_run_message = eventually("the Personal Browser run to fail", || async {
+            let row = connection
+                .query_one(
+                    "SELECT status, last_message FROM runs WHERE id = $1",
+                    &[&personal_browser_run_id],
+                )
+                .await?;
+            Ok((row.get::<_, String>("status") == "failed")
+                .then(|| row.get::<_, Option<String>>("last_message")))
+        })
+        .await?;
         assert_eq!(
-            personal_run_row
-                .get::<_, Option<String>>("last_message")
-                .as_deref(),
+            personal_run_message.as_deref(),
             Some(runtime::PERSONAL_BROWSER_DISCONNECTED_ERROR)
         );
 
@@ -27345,6 +27348,68 @@ async fn runtime_stop_fails_browser_bound_jobs_without_unpinning_them() -> anyho
     assert!(outcome
         .failed_shared_browser_jobs
         .contains(&shared_queued_job_id));
+    // The same four turns, each with its own transport, run and payload, for
+    // the write that ends their runs once the stop has committed.
+    let mut stopped_turns = outcome
+        .failed_browser_turns
+        .iter()
+        .map(|turn| (turn.job_id, turn.transport, turn.run_id))
+        .collect::<Vec<_>>();
+    stopped_turns.sort_unstable_by_key(|(job_id, _, _)| *job_id);
+    let mut expected_turns = vec![
+        (
+            personal_leased_job_id,
+            runtime::BrowserTransport::Personal,
+            Some(personal_leased_run_id),
+        ),
+        (
+            personal_queued_job_id,
+            runtime::BrowserTransport::Personal,
+            Some(personal_queued_run_id),
+        ),
+        (
+            shared_leased_job_id,
+            runtime::BrowserTransport::Shared,
+            Some(shared_leased_run_id),
+        ),
+        (
+            shared_queued_job_id,
+            runtime::BrowserTransport::Shared,
+            Some(shared_queued_run_id),
+        ),
+    ];
+    expected_turns.sort_unstable_by_key(|(job_id, _, _)| *job_id);
+    assert_eq!(stopped_turns, expected_turns);
+    transaction.commit().await?;
+
+    // The stop's own transaction fails only the browser jobs: their runs are
+    // still as they were until the write after the commit ends them.
+    for (run_id, status) in [
+        (personal_leased_run_id, "in_progress"),
+        (personal_queued_run_id, "queued"),
+        (shared_leased_run_id, "in_progress"),
+        (shared_queued_run_id, "queued"),
+    ] {
+        let unfinished: String = client
+            .query_one("SELECT status FROM runs WHERE id = $1", &[&run_id])
+            .await?
+            .get(0);
+        assert_eq!(unfinished, status, "the stop itself ended run {run_id}");
+    }
+    let transaction = client.transaction().await?;
+    for turn in &outcome.failed_browser_turns {
+        let recorded = runtime::record_failed_browser_turn_in(&transaction, turn)
+            .await
+            .map_err(|error| controller_error("end a stopped browser turn's run", error))?;
+        assert_eq!(
+            recorded,
+            runtime::RecordedBrowserTurnEnd {
+                ended_run: true,
+                refunded_org_id: None,
+            },
+            "{turn:?}"
+        );
+    }
     transaction.commit().await?;
 
     let normal_row = client
@@ -27481,6 +27546,18 @@ async fn runtime_stop_fails_browser_bound_jobs_without_unpinning_them() -> anyho
             .and_then(serde_json::Value::as_u64),
         Some(2)
     );
+    assert_eq!(
+        disconnect_event
+            .get("run_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        disconnect_event
+            .get("transport")
+            .and_then(serde_json::Value::as_str),
+        Some("desktop-personal")
+    );
     assert!(disconnect_event.get("job_ids").is_none());
     assert!(disconnect_event.get("run_ids").is_none());
 
@@ -27504,6 +27581,18 @@ async fn runtime_stop_fails_browser_bound_jobs_without_unpinning_them() -> anyho
             .get("job_count")
             .and_then(serde_json::Value::as_u64),
         Some(2)
+    );
+    assert_eq!(
+        shared_disconnect_event
+            .get("run_count")
+            .and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        shared_disconnect_event
+            .get("transport")
+            .and_then(serde_json::Value::as_str),
+        Some("shared")
     );
     assert!(shared_disconnect_event.get("job_ids").is_none());
     assert!(shared_disconnect_event.get("run_ids").is_none());
@@ -27555,6 +27644,14 @@ async fn runtime_stop_fails_browser_bound_jobs_without_unpinning_them() -> anyho
     .map_err(|error| controller_error("repeat Personal Browser stop", error))?;
     assert!(repeated.status_changed);
     assert_eq!(repeated.failed_personal_browser_jobs, vec![raced_job_id]);
+    assert_eq!(
+        repeated
+            .failed_browser_turns
+            .iter()
+            .map(|turn| (turn.job_id, turn.run_id))
+            .collect::<Vec<_>>(),
+        vec![(raced_job_id, Some(raced_run_id))]
+    );
     transaction.commit().await?;
 
     let raced_job_status: String = client
@@ -27565,6 +27662,30 @@ async fn runtime_stop_fails_browser_bound_jobs_without_unpinning_them() -> anyho
         .await?
         .get(0);
     assert_eq!(raced_job_status, "failed");
+
+    // Its run ends through the write after the repeated stop, once.
+    let transaction = client.transaction().await?;
+    for expected_end in [true, false] {
+        let recorded =
+            runtime::record_failed_browser_turn_in(&transaction, &repeated.failed_browser_turns[0])
+                .await
+                .map_err(|error| controller_error("end the raced turn's run", error))?;
+        assert_eq!(recorded.ended_run, expected_end);
+    }
+    transaction.commit().await?;
+    let raced_run = client
+        .query_one(
+            "SELECT status, last_message FROM runs WHERE id = $1",
+            &[&raced_run_id],
+        )
+        .await?;
+    assert_eq!(raced_run.get::<_, String>("status"), "failed");
+    assert_eq!(
+        raced_run
+            .get::<_, Option<String>>("last_message")
+            .as_deref(),
+        Some(runtime::PERSONAL_BROWSER_DISCONNECTED_ERROR)
+    );
 
     connection_handle.abort();
     Ok(())

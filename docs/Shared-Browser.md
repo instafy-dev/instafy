@@ -364,8 +364,11 @@ runtime spread or multi-agent plan. If a browser-bound model response still
 emits a plan action, the controller rejects it before any sibling job or runtime
 is dispatched. It never clears or retargets that binding.
 If the bound runtime stops after dispatch, both queued and leased Shared Browser
-jobs and their runs fail with a reconnect-and-retry error instead of becoming
-eligible for another runtime. The runtime also requires the UI-selected page's
+jobs fail with a reconnect-and-retry error instead of becoming eligible for
+another runtime. Their runs fail with the same error just after the stop
+commits, in a write of their own that never holds the runtime, or, if that
+write is lost, through the 10 s idle sweep from 60 s after the stop.
+The runtime also requires the UI-selected page's
 CDP `TargetID` as `browserPageId`, places it
 only in the isolated Shared MCP environment, and fails closed if that exact page
 is no longer available. It never falls back to the focused or first browser tab.

@@ -1115,13 +1115,18 @@ async fn requeue_marks_only_turns_that_were_running() -> anyhow::Result<()> {
             "a turn that never started is left as it was"
         );
 
-        let browser = turn.run(browser_run).await?;
-        assert_eq!(browser.status, "failed");
+        // The browser-bound turn's job fails with the stop, and its run just
+        // after the stop commits, in a write of its own.
+        assert_eq!(turn.job(browser_job).await?.0, "failed");
+        let browser = crate::tests::eventually("the browser turn's run to fail", || async {
+            let run = turn.run(browser_run).await?;
+            Ok((run.status == "failed").then_some(run))
+        })
+        .await?;
         assert!(
             browser.metadata.get("interruption").is_none(),
             "{browser:?}"
         );
-        assert_eq!(turn.job(browser_job).await?.0, "failed");
 
         let mut announced_runs = Vec::new();
         while let Ok(event) = events.try_recv() {

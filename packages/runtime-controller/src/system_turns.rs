@@ -61,6 +61,7 @@
 use axum::{http::StatusCode, Json};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value as JsonValue};
+use tokio_postgres::error::SqlState;
 use tokio_postgres::Transaction;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -563,6 +564,7 @@ pub(crate) async fn job_has_a_step_that_worked(
         )
         .await
         .map(|row| row.get::<_, bool>(0))
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| internal_error(format!("failed to read a turn's steps: {error}")))
 }
 
@@ -716,19 +718,24 @@ pub(crate) async fn give_back_reserve_without_reply(
 /// Gives back the reserve of a browser turn whose machine went away. A browser
 /// turn cannot move to another machine, so a stop of its machine fails it on
 /// the spot (crate::runtime stop), with no completion and no expiry sweep: it
-/// is judged as any failed turn is. A card's browser turn follows its own rule
-/// (it costs nothing unless it did something in the browser), and a turn
-/// someone sent costs nothing when it left the person nothing
-/// ([`turn_left_nothing`]). Its tokens never reached the ledger, so its
-/// reserve is all it was charged. The checks and the refund run in a
-/// savepoint, so a failure is logged and never blocks the stop. Returns the
-/// org whose credits this call changed, for a `credits.updated` once the
-/// caller commits.
+/// is judged as any failed turn is, by the write that ends its run once the
+/// stop has committed. A card's browser turn follows its own rule (it costs
+/// nothing unless it did something in the browser), and a turn someone sent
+/// costs nothing when it left the person nothing ([`turn_left_nothing`]). Its
+/// tokens never reached the ledger, so its reserve is all it was charged; the
+/// prompt it was charged for is `prompt_id`, else the payload's. The checks
+/// and the refund run in a savepoint, so a failure is logged and never keeps
+/// the run from ending, unless it may pass when tried again
+/// ([`is_transient_sql_state`]): once the run has ended nothing would give the
+/// reserve back, so such a failure is returned, and the caller rolls its whole
+/// write back and tries it again. Returns the org whose credits this call
+/// changed, for a `credits.updated` once the caller commits.
 pub(crate) async fn give_back_reserve_of_lost_browser_turn(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     job_id: &Uuid,
     run_id: Option<Uuid>,
+    prompt_id: Option<Uuid>,
     job_payload: &JsonValue,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
     transaction
@@ -739,14 +746,17 @@ pub(crate) async fn give_back_reserve_of_lost_browser_turn(
                 "failed to open lost browser turn savepoint: {error}"
             ))
         })?;
-    let outcome = async {
+    // The refund's own savepoint gives up on a failure and returns nothing
+    // (`give_back_reserve`), so each failed statement's SQLSTATE is read from
+    // where it was noted.
+    let (outcome, sql_states) = crate::errors::noting_sql_states(async {
         if system_turn_of(job_payload).is_some() {
             return give_back_reserve_without_reply(
                 transaction,
                 project_id,
                 job_id,
                 run_id,
-                None,
+                prompt_id,
                 None,
                 job_payload,
             )
@@ -760,14 +770,32 @@ pub(crate) async fn give_back_reserve_of_lost_browser_turn(
             project_id,
             job_id,
             run_id,
-            None,
+            prompt_id,
             None,
             job_payload,
             FAILED_TURN_WITHOUT_RESULT_REFUND_REASON,
         )
         .await
-    }
+    })
     .await;
+    // A turn in the chat that settles its credits and then locks the chat
+    // `for update`, as a completion bound to the chat's goal does, deadlocks
+    // with the write, which holds the chat and waits for the org's balance,
+    // and Postgres may end the write's refund to break it.
+    if let Some(sql_state) = sql_states.iter().find(|code| is_transient_sql_state(code)) {
+        warn!(
+            project_id = %project_id,
+            job_id = %job_id,
+            sql_state = sql_state.code(),
+            "could not settle the reserve of a browser turn whose machine stopped for now; \
+             the end of its run is rolled back to be written again"
+        );
+        return Err(crate::errors::service_unavailable(format!(
+            "could not settle the reserve of a browser turn whose machine stopped for now \
+             (SQLSTATE {})",
+            sql_state.code()
+        )));
+    }
     match outcome {
         Ok(refunded) => {
             transaction
@@ -802,6 +830,22 @@ pub(crate) async fn give_back_reserve_of_lost_browser_turn(
             Ok(None)
         }
     }
+}
+
+/// Whether a statement that failed with `code` failed because of another
+/// transaction or a limit on its wait, so that it may pass when its
+/// transaction runs again: Postgres ended it as one side of a deadlock
+/// (40P01) or of a serialization conflict (40001), it gave up waiting for a
+/// lock (55P03, `lock_timeout`), or it was canceled (57014, as
+/// `statement_timeout` cancels it).
+fn is_transient_sql_state(code: &SqlState) -> bool {
+    [
+        SqlState::T_R_DEADLOCK_DETECTED,
+        SqlState::T_R_SERIALIZATION_FAILURE,
+        SqlState::LOCK_NOT_AVAILABLE,
+        SqlState::QUERY_CANCELED,
+    ]
+    .contains(code)
 }
 
 /// Gives a managed-AI turn's reserve and daily prompt slot back, once, with
@@ -1002,6 +1046,24 @@ mod tests {
                 }}})),
                 Some(SystemTurn::BrowserCard),
                 "{routed}"
+            );
+        }
+    }
+
+    /// The give-back of a stopped browser turn's reserve fails its whole write,
+    /// to be tried again, only for a failure that may pass then: a deadlock, a
+    /// serialization conflict, a lock it gave up on and a canceled statement.
+    /// Any other failure would fail again, so the run ends with the reserve
+    /// standing.
+    #[test]
+    fn only_a_lost_race_or_a_timeout_is_worth_another_try() {
+        for code in ["40P01", "40001", "55P03", "57014"] {
+            assert!(is_transient_sql_state(&SqlState::from_code(code)), "{code}");
+        }
+        for code in ["23505", "23514", "P0001", "42P01", "25P02"] {
+            assert!(
+                !is_transient_sql_state(&SqlState::from_code(code)),
+                "{code}"
             );
         }
     }

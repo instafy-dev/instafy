@@ -605,7 +605,10 @@ async fn an_expired_turn_that_left_nothing_gives_its_reserve_back() -> anyhow::R
 /// stopped."), without a completion and without the expiry sweep. That is a
 /// failure like any other: a card's browser turn gets its reserve back unless
 /// it did something in the browser, and a turn the person sent gets it back
-/// when it left the person nothing. Before, either kept its reserve.
+/// when it left the person nothing. Before, either kept its reserve. The
+/// stop itself gives nothing back: the reserve comes back with the end of the
+/// turn's run, written once the stop has committed, and a second write gives
+/// nothing back twice.
 #[tokio::test]
 async fn a_browser_turn_whose_machine_stopped_costs_nothing_when_it_left_nothing(
 ) -> anyhow::Result<()> {
@@ -688,12 +691,42 @@ async fn a_browser_turn_whose_machine_stopped_costs_nothing_when_it_left_nothing
             vec![fixture.job_id],
             "{case}"
         );
+        let refunded = |rows: &[(String, i32, Option<String>)]| {
+            reasons(rows)
+                .iter()
+                .any(|(reason, _)| *reason == "managed_ai_refund")
+        };
+        assert!(
+            !refunded(&ledger_rows(&fixture.pool, &fixture.project_id).await?),
+            "{case}: the stop itself gives nothing back"
+        );
+        assert_eq!(
+            credit_balance(&fixture.pool, &fixture.org_id).await?,
+            fixture.reserved_balance,
+            "{case}"
+        );
+        assert_eq!(
+            outcome
+                .failed_browser_turns
+                .iter()
+                .map(|turn| (turn.job_id, turn.run_id, turn.prompt_id))
+                .collect::<Vec<_>>(),
+            vec![(
+                fixture.job_id,
+                Some(fixture.run_id),
+                Some(fixture.prompt_id)
+            )],
+            "{case}"
+        );
+        let turn = &outcome.failed_browser_turns[0];
+        let recorded = crate::runtime::record_failed_browser_turn(&fixture.state, turn)
+            .await
+            .map_err(|error| controller_error("end the stopped turn's run", error))?;
+        assert!(recorded.ended_run, "{case}");
         if opened_a_page {
-            assert!(outcome.refunded_org_ids.is_empty(), "{case}");
+            assert_eq!(recorded.refunded_org_id, None, "{case}");
             assert!(
-                !reasons(&ledger_rows(&fixture.pool, &fixture.project_id).await?)
-                    .iter()
-                    .any(|(reason, _)| *reason == "managed_ai_refund"),
+                !refunded(&ledger_rows(&fixture.pool, &fixture.project_id).await?),
                 "{case}: a turn that opened a page keeps its reserve"
             );
             assert_eq!(
@@ -702,7 +735,27 @@ async fn a_browser_turn_whose_machine_stopped_costs_nothing_when_it_left_nothing
                 "{case}"
             );
         } else {
-            assert_eq!(outcome.refunded_org_ids, vec![fixture.org_id], "{case}");
+            assert_eq!(recorded.refunded_org_id, Some(fixture.org_id), "{case}");
+            assert_given_back_for(
+                &fixture,
+                if card {
+                    BROWSER_CARD_WITHOUT_PAGE_REFUND_REASON
+                } else {
+                    FAILED_TURN_WITHOUT_RESULT_REFUND_REASON
+                },
+            )
+            .await?;
+        }
+        // Written again, it ends nothing and gives nothing back twice.
+        let again = crate::runtime::record_failed_browser_turn(&fixture.state, turn)
+            .await
+            .map_err(|error| controller_error("end the stopped turn's run again", error))?;
+        assert_eq!(
+            again,
+            crate::runtime::RecordedBrowserTurnEnd::default(),
+            "{case}"
+        );
+        if !opened_a_page {
             assert_given_back_for(
                 &fixture,
                 if card {
@@ -716,6 +769,718 @@ async fn a_browser_turn_whose_machine_stopped_costs_nothing_when_it_left_nothing
         fixture.cleanup().await?;
     }
     Ok(())
+}
+
+/// Two writers of a stopped browser turn's end at once, the stop's own and
+/// the idle sweep's repair (on this controller or another), give its reserve
+/// back once: the second waits for the run's row while the first holds it,
+/// then finds the run ended and writes nothing. Its run ends once, with one
+/// `run.completed` and one `credits.updated` for the org.
+#[tokio::test]
+async fn a_stopped_browser_turns_reserve_comes_back_once_across_two_writers() -> anyhow::Result<()>
+{
+    let Some(fixture) = seed_reserved_managed_ai_prompt("lost-browser-two-writers").await? else {
+        eprintln!("skipping lost browser turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let runtime_id = Uuid::new_v4();
+    let mut connection = fixture.pool.get().await?;
+    connection
+        .execute(
+            "insert into runtimes (
+                 id, project_id, provider, status, endpoint_url, task_ref,
+                 idle_ttl_seconds, last_seen_at
+             ) values ($1, $2, 'desktop', 'ready', 'http://example', 'browser-task',
+                       600, now())",
+            &[&runtime_id, &fixture.project_id],
+        )
+        .await?;
+    let chat = connection
+        .query_one(
+            "update agent_jobs
+                set status = 'leased', lease_attempts = 1,
+                    target_runtime_id = $2, leased_by_runtime_id = $2,
+                    leased_at = now(), lease_expires_at = now() + interval '10 minutes',
+                    payload = jsonb_set(payload, '{metadata,browserTransport}', '\"shared\"', true)
+              where id = $1
+             returning conversation_id",
+            &[&fixture.job_id, &runtime_id],
+        )
+        .await?
+        .get::<_, Option<Uuid>>(0)
+        .expect("the dispatched turn's chat");
+    let transaction = connection.transaction().await?;
+    let runtime = crate::runtime::fetch_runtime_for_update(&transaction, &runtime_id)
+        .await
+        .map_err(|error| controller_error("fetch the browser's machine", error))?;
+    let outcome = crate::runtime::perform_runtime_stop(
+        &transaction,
+        &runtime,
+        crate::runtime::StopOptions {
+            source: "test",
+            reason: Some("idle_stop".to_string()),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: None,
+        },
+    )
+    .await
+    .map_err(|error| controller_error("stop the browser's machine", error))?;
+    transaction.commit().await?;
+    let turn = outcome.failed_browser_turns[0].clone();
+    // A `credits.updated` reaches this node's broadcast only for a space an
+    // open event stream watches.
+    let _watch = fixture.state.events.watch_project(fixture.project_id);
+    let mut events = fixture.state.events.subscribe();
+
+    // Both start while another transaction holds the chat, so each is under
+    // way before either commits.
+    let holder = connection.transaction().await?;
+    holder
+        .query_one(
+            "select id from conversations where id = $1 for update",
+            &[&chat],
+        )
+        .await?;
+    let writers = [0, 1].map(|_| {
+        let state = fixture.state.clone();
+        let turn = turn.clone();
+        crate::tests::spawn_aborting(async move {
+            crate::runtime::finish_failed_browser_turn(&state, &turn).await
+        })
+    });
+    crate::tests::eventually("both writers to wait", || async {
+        let waiting: i64 = crate::tests::sql_one(
+            &fixture.pool,
+            "select count(*) from pg_stat_activity
+              where datname = current_database() and wait_event_type = 'Lock'",
+            &[],
+        )
+        .await?;
+        Ok((waiting >= 2).then_some(()))
+    })
+    .await?;
+    holder.commit().await?;
+    drop(connection);
+    for writer in writers {
+        tokio::time::timeout(std::time::Duration::from_secs(10), writer).await??;
+    }
+    let (status, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+    assert_eq!(status, "failed");
+    assert_given_back_for(&fixture, FAILED_TURN_WITHOUT_RESULT_REFUND_REASON).await?;
+
+    // Past the interval in which the org's signals are folded into one.
+    tokio::time::sleep(crate::state::CREDITS_UPDATED_INTERVAL + std::time::Duration::from_secs(1))
+        .await;
+    let (mut run_ends, mut credit_updates, mut published) = (0, 0, Vec::new());
+    while let Ok(event) = events.try_recv() {
+        published.push((event.kind.clone(), event.project_id));
+        match event.kind.as_str() {
+            "run.completed" if event.run_id == Some(fixture.run_id) => {
+                assert_eq!(event.data["finalStatus"], json!("failed"));
+                assert_eq!(
+                    event.data["failureCode"],
+                    json!("shared_browser_disconnected")
+                );
+                run_ends += 1;
+            }
+            crate::credits::CREDITS_UPDATED_EVENT
+                if event.project_id == Some(fixture.project_id) =>
+            {
+                credit_updates += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!((run_ends, credit_updates), (1, 1), "{published:?}");
+    fixture.cleanup().await
+}
+
+/// The end of a stopped browser turn never deadlocks with another turn in its
+/// chat that settles its credits before it writes into the chat, as a failing
+/// completion or an evaluation's first message does: that turn holds the
+/// org's credit balance, then bumps the chat, while the write holds the chat
+/// and waits for the balance. The write locks the chat only `for key share`,
+/// which a bump never waits for, so both commit and the reserve comes back
+/// once. Before, the write's `for no key update` made the bump wait on it:
+/// Postgres ended one of the two as a deadlock, and when that was the write's
+/// give-back, the run ended with its reserve kept, and nothing gave it back.
+#[tokio::test]
+async fn a_stopped_browser_turns_end_never_deadlocks_with_a_turn_settling_credits_in_its_chat(
+) -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("lost-browser-credit-order").await? else {
+        eprintln!("skipping lost browser turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let outcome: anyhow::Result<()> = async {
+        let runtime_id = Uuid::new_v4();
+        let mut connection = fixture.pool.get().await?;
+        connection
+            .execute(
+                "insert into runtimes (
+                     id, project_id, provider, status, endpoint_url, task_ref,
+                     idle_ttl_seconds, last_seen_at
+                 ) values ($1, $2, 'desktop', 'ready', 'http://example', 'browser-task',
+                           600, now())",
+                &[&runtime_id, &fixture.project_id],
+            )
+            .await?;
+        let chat = connection
+            .query_one(
+                "update agent_jobs
+                    set status = 'leased', lease_attempts = 1,
+                        target_runtime_id = $2, leased_by_runtime_id = $2,
+                        leased_at = now(), lease_expires_at = now() + interval '10 minutes',
+                        payload = jsonb_set(payload, '{metadata,browserTransport}', '\"shared\"', true)
+                  where id = $1
+                 returning conversation_id",
+                &[&fixture.job_id, &runtime_id],
+            )
+            .await?
+            .get::<_, Option<Uuid>>(0)
+            .expect("the dispatched turn's chat");
+        let transaction = connection.transaction().await?;
+        let runtime = crate::runtime::fetch_runtime_for_update(&transaction, &runtime_id)
+            .await
+            .map_err(|error| controller_error("fetch the browser's machine", error))?;
+        let stopped = crate::runtime::perform_runtime_stop(
+            &transaction,
+            &runtime,
+            crate::runtime::StopOptions {
+                source: "test",
+                reason: Some("idle_stop".to_string()),
+                skip_if_active_jobs: false,
+                require_idle_timeout: false,
+                allow_cleanup_pending_release: false,
+                expected_identity: None,
+            },
+        )
+        .await
+        .map_err(|error| controller_error("stop the browser's machine", error))?;
+        transaction.commit().await?;
+        drop(connection);
+        let turn = stopped.failed_browser_turns[0].clone();
+
+        // Another turn in the chat settles its credits: it holds the org's
+        // balance.
+        let mut other_connection = fixture.pool.get().await?;
+        let other = other_connection.transaction().await?;
+        let other_pid: i32 = other
+            .query_one("select pg_backend_pid()", &[])
+            .await?
+            .get(0);
+        other
+            .query_one(
+                "select balance from org_credit_balances where org_id = $1 for update",
+                &[&fixture.org_id],
+            )
+            .await?;
+
+        // The write takes the chat and ends the run, then waits for the
+        // balance to give the reserve back.
+        let writer = {
+            let state = fixture.state.clone();
+            crate::tests::spawn_aborting(async move {
+                crate::runtime::record_failed_browser_turn(&state, &turn)
+                    .await
+                    .map_err(|error| controller_error("end the stopped turn's run", error))
+            })
+        };
+        crate::tests::eventually("the write to wait for the org's balance", || async {
+            let waiting: i64 = crate::tests::sql_one(
+                &fixture.pool,
+                "select count(*) from pg_stat_activity where $1 = any(pg_blocking_pids(pid))",
+                &[&other_pid],
+            )
+            .await?;
+            Ok((waiting >= 1).then_some(()))
+        })
+        .await?;
+
+        // That turn then writes into the chat, which bumps it, and commits
+        // without waiting on the write.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            other.execute(
+                "update conversations set updated_at = now() where id = $1",
+                &[&chat],
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("the other turn's bump waited on the write"))??;
+        other.commit().await?;
+        drop(other_connection);
+
+        let recorded = tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+            .await
+            .map_err(|_| anyhow::anyhow!("the write never got the org's balance"))???;
+        // Checked without a panic, so the space is deleted below either way.
+        let expected = crate::runtime::RecordedBrowserTurnEnd {
+            ended_run: true,
+            refunded_org_id: Some(fixture.org_id),
+        };
+        anyhow::ensure!(
+            recorded == expected,
+            "the write ended the run and gave the reserve back: {recorded:?}, \
+             ledger {:?}",
+            ledger_rows(&fixture.pool, &fixture.project_id).await?
+        );
+        let (status, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+        anyhow::ensure!(status == "failed", "the run is {status}");
+        assert_given_back_for(&fixture, FAILED_TURN_WITHOUT_RESULT_REFUND_REASON).await
+    }
+    .await;
+    fixture.cleanup().await?;
+    outcome
+}
+
+/// Leases the fixture's turn to a desktop of its space as a Shared Browser
+/// turn, then stops the desktop: the stop fails the turn's job and commits,
+/// and nothing has ended the turn's run yet. Returns the turn as the stop
+/// hands it to the write that ends its run, and the turn's chat.
+async fn stopped_browser_turn(
+    fixture: &ReservedManagedAiPrompt,
+) -> anyhow::Result<(crate::runtime::FailedBrowserTurn, Uuid)> {
+    let runtime_id = Uuid::new_v4();
+    let mut connection = fixture.pool.get().await?;
+    connection
+        .execute(
+            "insert into runtimes (
+                 id, project_id, provider, status, endpoint_url, task_ref,
+                 idle_ttl_seconds, last_seen_at
+             ) values ($1, $2, 'desktop', 'ready', 'http://example', 'browser-task',
+                       600, now())",
+            &[&runtime_id, &fixture.project_id],
+        )
+        .await?;
+    let chat = connection
+        .query_one(
+            "update agent_jobs
+                set status = 'leased', lease_attempts = 1,
+                    target_runtime_id = $2, leased_by_runtime_id = $2,
+                    leased_at = now(), lease_expires_at = now() + interval '10 minutes',
+                    payload = jsonb_set(payload, '{metadata,browserTransport}', '\"shared\"', true)
+              where id = $1
+             returning conversation_id",
+            &[&fixture.job_id, &runtime_id],
+        )
+        .await?
+        .get::<_, Option<Uuid>>(0)
+        .context("the dispatched turn's chat")?;
+    let transaction = connection.transaction().await?;
+    let runtime = crate::runtime::fetch_runtime_for_update(&transaction, &runtime_id)
+        .await
+        .map_err(|error| controller_error("fetch the browser's machine", error))?;
+    let stopped = crate::runtime::perform_runtime_stop(
+        &transaction,
+        &runtime,
+        crate::runtime::StopOptions {
+            source: "test",
+            reason: Some("idle_stop".to_string()),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: None,
+        },
+    )
+    .await
+    .map_err(|error| controller_error("stop the browser's machine", error))?;
+    transaction.commit().await?;
+    let [turn] = <[_; 1]>::try_from(stopped.failed_browser_turns)
+        .map_err(|turns| anyhow::anyhow!("the stop failed {} browser turns", turns.len()))?;
+    Ok((turn, chat))
+}
+
+/// How many ends of `run`, a stopped Shared Browser turn's run, were published
+/// so far, each checked as its write publishes it, and how many
+/// `credits.updated` the space got. An org's signals are folded into one per
+/// interval, so a caller that counts those waits the interval out first.
+fn published_ends_and_credit_updates(
+    events: &mut tokio::sync::broadcast::Receiver<crate::state::ControllerEvent>,
+    project_id: Uuid,
+    run_id: Uuid,
+) -> (usize, usize) {
+    let (mut ends, mut credit_updates) = (0, 0);
+    while let Ok(event) = events.try_recv() {
+        if event.kind == "run.completed" && event.run_id == Some(run_id) {
+            assert_eq!(event.data["finalStatus"], json!("failed"), "{}", event.data);
+            assert_eq!(
+                event.data["failureCode"],
+                json!("shared_browser_disconnected"),
+                "{}",
+                event.data
+            );
+            ends += 1;
+        } else if event.kind == crate::credits::CREDITS_UPDATED_EVENT
+            && event.project_id == Some(project_id)
+        {
+            credit_updates += 1;
+        }
+    }
+    (ends, credit_updates)
+}
+
+/// How many notifications of the failure of `run` there are.
+async fn failed_run_notifications(pool: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
+    crate::tests::sql_one(
+        pool,
+        "select count(*) from notification_events where producer_key = $1",
+        &[&format!("run.failed:{run_id}")],
+    )
+    .await
+}
+
+/// A completion bound to its chat's goal settles its turn's credits, then
+/// locks the chat `for update` (`conversation_goals`), so it still deadlocks
+/// with the end of a stopped browser turn in that chat, which holds the chat
+/// and waits for the org's balance to give the turn's reserve back. The write
+/// waited first, so Postgres ends the write's refund to break the deadlock.
+/// That failure may pass when tried again, so it fails the whole write: the
+/// completion gets the chat while the run is still as the stop left it, with
+/// nothing notified or published, and the write's next try ends the run and
+/// gives the reserve back, once. Before, the refund's savepoint gave up on the
+/// deadlock: the run ended with its reserve kept, and nothing gave it back.
+#[tokio::test]
+async fn a_stopped_browser_turns_end_that_deadlocks_with_a_goal_bound_completion_is_written_again(
+) -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("lost-browser-goal-deadlock").await? else {
+        eprintln!("skipping lost browser turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        let (turn, chat) = stopped_browser_turn(&fixture).await?;
+        let (left_by_the_stop, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+        // A `credits.updated` reaches this node's broadcast only for a space
+        // an open event stream watches.
+        let _watch = fixture.state.events.watch_project(fixture.project_id);
+        let mut events = fixture.state.events.subscribe();
+
+        // The completion settles its turn's credits: its refund holds the
+        // org's balance, as every write to the ledger does.
+        let mut completion_connection = fixture.pool.get().await?;
+        let completion = completion_connection.transaction().await?;
+        let completion_pid: i32 = completion
+            .query_one("select pg_backend_pid()", &[])
+            .await?
+            .get(0);
+        completion
+            .query_one(
+                "select balance from org_credit_balances where org_id = $1 for update",
+                &[&fixture.org_id],
+            )
+            .await?;
+
+        // The write takes the chat and ends the run, then waits for the
+        // balance to give the reserve back.
+        let writer = {
+            let state = fixture.state.clone();
+            let turn = turn.clone();
+            crate::tests::spawn_aborting(async move {
+                crate::runtime::finish_failed_browser_turn(&state, &turn).await
+            })
+        };
+        crate::tests::eventually("the write to wait for the org's balance", || async {
+            let waiting: i64 = crate::tests::sql_one(
+                &fixture.pool,
+                "select count(*) from pg_stat_activity where $1 = any(pg_blocking_pids(pid))",
+                &[&completion_pid],
+            )
+            .await?;
+            Ok((waiting >= 1).then_some(()))
+        })
+        .await?;
+        // Each side looks for a deadlock once, `deadlock_timeout` after it
+        // began to wait, and the first to find one loses it. The completion
+        // begins a quarter of that after the write, so the write looks first
+        // and finds the completion already waiting.
+        let deadlock_timeout_ms: i64 = crate::tests::sql_one(
+            &fixture.pool,
+            "select setting::bigint from pg_settings where name = 'deadlock_timeout'",
+            &[],
+        )
+        .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            u64::try_from(deadlock_timeout_ms / 4).unwrap_or_default(),
+        ))
+        .await;
+
+        // The completion then locks the chat for its goal, which waits on the
+        // write: a deadlock. The write loses it and rolls back whole, so the
+        // completion gets the chat with the run as the stop left it.
+        let left = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            completion
+                .query_one(
+                    "select id from conversations where id = $1 for update",
+                    &[&chat],
+                )
+                .await?;
+            completion
+                .query_one("select status from runs where id = $1", &[&fixture.run_id])
+                .await
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("the completion never got the chat"))?
+        .context("the completion lost the deadlock, which the write should have")?
+        .get::<_, String>(0);
+        anyhow::ensure!(
+            left == left_by_the_stop,
+            "the write's first try ended the run ({left}), ledger {:?}",
+            ledger_rows(&fixture.pool, &fixture.project_id).await?
+        );
+        assert_eq!(
+            failed_run_notifications(&fixture.pool, fixture.run_id).await?,
+            0
+        );
+        assert_eq!(
+            published_ends_and_credit_updates(&mut events, fixture.project_id, fixture.run_id),
+            (0, 0),
+            "nothing is published of a write that rolled back"
+        );
+        completion.commit().await?;
+        drop(completion_connection);
+
+        // The write's next try ends the run and gives the reserve back, once.
+        tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+            .await
+            .map_err(|_| anyhow::anyhow!("the write kept trying"))??;
+        let (status, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+        assert_eq!(status, "failed");
+        assert_given_back_for(&fixture, FAILED_TURN_WITHOUT_RESULT_REFUND_REASON).await?;
+        assert_eq!(
+            failed_run_notifications(&fixture.pool, fixture.run_id).await?,
+            1
+        );
+        tokio::time::sleep(
+            crate::state::CREDITS_UPDATED_INTERVAL + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            published_ends_and_credit_updates(&mut events, fixture.project_id, fixture.run_id),
+            (1, 1)
+        );
+        // Written again, it ends nothing and gives nothing back twice.
+        assert_eq!(
+            crate::runtime::record_failed_browser_turn(&fixture.state, &turn)
+                .await
+                .map_err(|error| controller_error("end the stopped turn's run again", error))?,
+            crate::runtime::RecordedBrowserTurnEnd::default()
+        );
+        assert_given_back_for(&fixture, FAILED_TURN_WITHOUT_RESULT_REFUND_REASON).await
+    }))
+    .await;
+    let cleanup = fixture.cleanup().await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A give-back that fails for a reason that would fail again (here the ledger
+/// refuses the refund row) is logged, and never keeps the run from ending: the
+/// write ends the run on its first try, notified once and published once, and
+/// the reserve stands, with no `credits.updated`. Written again, the write
+/// ends nothing and gives nothing back.
+#[tokio::test]
+async fn a_stopped_browser_turns_end_whose_give_back_fails_for_good_still_ends_its_run(
+) -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("lost-browser-refund-refused").await?
+    else {
+        eprintln!("skipping lost browser turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let refusal = format!("refuse_refund_{}", Uuid::new_v4().simple());
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        let (turn, _) = stopped_browser_turn(&fixture).await?;
+        // The ledger refuses the refund of the turn's reserve, as a check
+        // would: no lost race, no timeout.
+        fixture
+            .pool
+            .get()
+            .await?
+            .batch_execute(&format!(
+                "create function {refusal}() returns trigger language plpgsql as $$
+                 begin
+                     if new.idempotency_key = 'managed-ai-refund:{prompt}' then
+                         raise exception 'refund refused (injected)' using errcode = '23514';
+                     end if;
+                     return new;
+                 end $$;
+                 create trigger {refusal} before insert on org_credit_ledger
+                     for each row execute function {refusal}();",
+                prompt = fixture.prompt_id,
+            ))
+            .await?;
+        let _watch = fixture.state.events.watch_project(fixture.project_id);
+        let mut events = fixture.state.events.subscribe();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::runtime::finish_failed_browser_turn(&fixture.state, &turn),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("the write kept trying"))?;
+        let (status, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+        assert_eq!(status, "failed");
+        let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+        assert!(
+            !reasons(&rows)
+                .iter()
+                .any(|(reason, _)| *reason == "managed_ai_refund"),
+            "the reserve stands: {rows:?}"
+        );
+        assert_eq!(
+            credit_balance(&fixture.pool, &fixture.org_id).await?,
+            fixture.reserved_balance
+        );
+        assert_eq!(
+            failed_run_notifications(&fixture.pool, fixture.run_id).await?,
+            1
+        );
+        tokio::time::sleep(
+            crate::state::CREDITS_UPDATED_INTERVAL + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            published_ends_and_credit_updates(&mut events, fixture.project_id, fixture.run_id),
+            (1, 0)
+        );
+        assert_eq!(
+            crate::runtime::record_failed_browser_turn(&fixture.state, &turn)
+                .await
+                .map_err(|error| controller_error("end the stopped turn's run again", error))?,
+            crate::runtime::RecordedBrowserTurnEnd::default()
+        );
+        anyhow::Ok(())
+    }))
+    .await;
+    let dropped = async {
+        fixture
+            .pool
+            .get()
+            .await?
+            .batch_execute(&format!(
+                "drop trigger if exists {refusal} on org_credit_ledger;
+                 drop function if exists {refusal}();"
+            ))
+            .await?;
+        anyhow::Ok(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    match outcome {
+        Ok(result) => result.and(dropped).and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A give-back that gives up waiting for a lock (`lock_timeout`), or whose
+/// wait is canceled (`statement_timeout`), here for the turn's prompt, which
+/// another transaction holds, fails the whole write: every try rolls back, so
+/// the run stays as the stop left it, nothing is notified or published, and
+/// the reserve stands. Once the prompt is free and the stop's grace has
+/// passed, the idle sweep ends the run and gives the reserve back, once.
+#[tokio::test]
+async fn a_stopped_browser_turns_end_whose_give_back_times_out_is_left_to_the_sweep(
+) -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("lost-browser-refund-timeout").await?
+    else {
+        eprintln!("skipping lost browser turn billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        let (turn, _) = stopped_browser_turn(&fixture).await?;
+        let (left_by_the_stop, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+
+        // Another transaction holds the turn's prompt, whose daily slot the
+        // give-back clears (`persist_prompt_ai_access_metadata`).
+        let mut holder_connection = fixture.pool.get().await?;
+        let holder = holder_connection.transaction().await?;
+        holder
+            .query_one(
+                "select id from prompts where id = $1 for update",
+                &[&fixture.prompt_id],
+            )
+            .await?;
+        for limit in ["lock_timeout=200ms", "statement_timeout=200ms"] {
+            let mut config: tokio_postgres::Config = std::env::var("TEST_DATABASE_URL")?.parse()?;
+            config.options(&format!("-c {limit}"));
+            let pool = bb8::Pool::builder()
+                .max_size(2)
+                .build(PostgresConnectionManager::new(
+                    config,
+                    crate::config::database_tls(),
+                ))
+                .await?;
+            let impatient = build_test_state(pool, fixture.config.clone());
+            let _watch = impatient.events.watch_project(fixture.project_id);
+            let mut events = impatient.events.subscribe();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::runtime::finish_failed_browser_turn(&impatient, &turn),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("{limit}: the write kept trying"))?;
+            let (status, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+            assert_eq!(status, left_by_the_stop, "{limit}: every try rolled back");
+            let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+            assert!(
+                !reasons(&rows)
+                    .iter()
+                    .any(|(reason, _)| *reason == "managed_ai_refund"),
+                "{limit}: {rows:?}"
+            );
+            assert_eq!(
+                failed_run_notifications(&fixture.pool, fixture.run_id).await?,
+                0,
+                "{limit}"
+            );
+            assert_eq!(
+                published_ends_and_credit_updates(&mut events, fixture.project_id, fixture.run_id),
+                (0, 0),
+                "{limit}"
+            );
+        }
+        holder.commit().await?;
+        drop(holder_connection);
+
+        let _watch = fixture.state.events.watch_project(fixture.project_id);
+        let mut events = fixture.state.events.subscribe();
+        crate::tests::sql(
+            &fixture.pool,
+            "update agent_jobs set completed_at = now() - interval '61 seconds' where id = $1",
+            &[&fixture.job_id],
+        )
+        .await?;
+        fixture
+            .state
+            .runtime_activity
+            .mark_active(fixture.project_id, Some(600), Some(Utc::now()))
+            .await;
+        crate::runtime::sweep_idle_activity(&fixture.state).await?;
+        let (status, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+        assert_eq!(status, "failed");
+        assert_given_back_for(&fixture, FAILED_TURN_WITHOUT_RESULT_REFUND_REASON).await?;
+        assert_eq!(
+            failed_run_notifications(&fixture.pool, fixture.run_id).await?,
+            1
+        );
+        tokio::time::sleep(
+            crate::state::CREDITS_UPDATED_INTERVAL + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            published_ends_and_credit_updates(&mut events, fixture.project_id, fixture.run_id),
+            (1, 1)
+        );
+        anyhow::Ok(())
+    }))
+    .await;
+    let cleanup = fixture.cleanup().await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 /// An automatic retry that fails too costs nothing, although its model ran

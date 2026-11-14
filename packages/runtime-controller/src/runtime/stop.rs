@@ -130,9 +130,11 @@ pub(crate) struct StopOutcome {
     pub(crate) failed_personal_browser_jobs: Vec<Uuid>,
     pub(crate) failed_shared_browser_jobs: Vec<Uuid>,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
-    /// Orgs that a browser turn this stop failed gave a managed-AI reserve
-    /// back to, each owed a `credits.updated` once the stop commits.
-    pub(crate) refunded_org_ids: Vec<Uuid>,
+    /// The Personal and Shared Browser turns this stop failed, whose run's
+    /// end, and the give-back of a managed-AI reserve such a turn left
+    /// nothing for, are written once the stop commits
+    /// ([`record_failed_browser_turn`]).
+    pub(crate) failed_browser_turns: Vec<FailedBrowserTurn>,
     /// The local-engine turns this stop failed, whose run, Home row and
     /// failure message are written once the stop commits
     /// ([`record_failed_claude_code_turn`]).
@@ -151,7 +153,7 @@ impl StopOutcome {
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
             job_input_state_updates: Vec::new(),
-            refunded_org_ids: Vec::new(),
+            failed_browser_turns: Vec::new(),
             failed_claude_code_turns: Vec::new(),
             skip_reason: Some(reason.into()),
             released_runtime_lease_id: None,
@@ -168,7 +170,9 @@ impl StopOutcome {
 /// ([`record_failed_claude_code_turn`]), so the stop never waits on a chat
 /// while it holds its runtime. If that write never commits, the idle sweep
 /// writes them later, while local-engine turns are on for anyone
-/// (`sweeps::repair_stopped_claude_code_turns`).
+/// (`sweeps::repair_stopped_claude_code_turns`). A Personal or Shared Browser
+/// turn's run ends the same way, after the stop, through a write of its own
+/// ([`FailedBrowserTurn`]).
 #[derive(Clone, Debug)]
 pub(crate) struct FailedClaudeCodeTurn {
     pub(crate) job_id: Uuid,
@@ -196,6 +200,115 @@ impl FailedClaudeCodeTurn {
                 .get::<_, tokio_postgres::types::Json<JsonValue>>("payload")
                 .0,
         }
+    }
+}
+
+/// The browser a Personal or Shared Browser turn runs in. Either ties the
+/// turn to its runtime: Personal to a device-local profile, Shared to the
+/// exact page and browser process the person sees.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BrowserTransport {
+    Personal,
+    Shared,
+}
+
+impl BrowserTransport {
+    const ALL: [Self; 2] = [Self::Personal, Self::Shared];
+
+    /// Its jobs' `browserTransport`, as [`BROWSER_TRANSPORT_SQL`] reads it.
+    fn transport(self) -> &'static str {
+        match self {
+            Self::Personal => "desktop-personal",
+            Self::Shared => "shared",
+        }
+    }
+
+    /// What the person reads when a stop of its runtime ends such a turn:
+    /// its job's error and its run's last message.
+    pub(crate) fn sentence(self) -> &'static str {
+        match self {
+            Self::Personal => PERSONAL_BROWSER_DISCONNECTED_ERROR,
+            Self::Shared => SHARED_BROWSER_DISCONNECTED_ERROR,
+        }
+    }
+
+    /// The kind of the runtime event the stop records for such turns, and
+    /// the `failureCode` of each one's `run.completed`.
+    pub(crate) fn failure_code(self) -> &'static str {
+        match self {
+            Self::Personal => "personal_browser_disconnected",
+            Self::Shared => "shared_browser_disconnected",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Personal => "Personal Browser",
+            Self::Shared => "Shared Browser",
+        }
+    }
+
+    /// The transport whose [`Self::sentence`] a stop failed a job with.
+    fn of_sentence(sentence: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|transport| transport.sentence() == sentence)
+    }
+}
+
+/// A Personal or Shared Browser turn a stop of its runtime failed with
+/// [`BrowserTransport::sentence`]: it never moves to another runtime. The
+/// stop's own transaction fails only its job. Its run's end locks its
+/// conversation's row (through the deferred notification trigger on `runs`,
+/// at the commit), and a dispatch into that chat holds that row while it
+/// waits for this runtime's, so the run's end is written once the stop has
+/// committed ([`record_failed_browser_turn`]), in a transaction that holds no
+/// runtime, with the give-back of a managed-AI reserve the turn left nothing
+/// for: the stop's own transaction never locks a chat, or its org's credit
+/// balance, while it holds its runtime. (A steer into the turn locks its job
+/// before its chat, `send_intents`, so a stop can still wait on a chat through
+/// a steer it waits for.) It writes no failure message and no Home row. If
+/// that write never commits, the idle sweep writes it later
+/// (`sweeps::repair_stopped_browser_turns`).
+#[derive(Clone, Debug)]
+pub(crate) struct FailedBrowserTurn {
+    pub(crate) job_id: Uuid,
+    pub(crate) project_id: Uuid,
+    pub(crate) run_id: Option<Uuid>,
+    pub(crate) conversation_id: Option<Uuid>,
+    pub(crate) session_id: Option<Uuid>,
+    pub(crate) prompt_id: Option<Uuid>,
+    /// The job's payload: whose turn it was, and whether it ran on Instafy AI.
+    pub(crate) payload: JsonValue,
+    pub(crate) transport: BrowserTransport,
+}
+
+impl FailedBrowserTurn {
+    /// The turn of a job's row, which carries `id, project_id, run_id,
+    /// conversation_id, session_id, prompt_id, payload`, that a stop failed as
+    /// `transport`.
+    fn from_job_row(row: &tokio_postgres::Row, transport: BrowserTransport) -> Self {
+        Self {
+            job_id: row.get("id"),
+            project_id: row.get("project_id"),
+            run_id: row.get("run_id"),
+            conversation_id: row.get("conversation_id"),
+            session_id: row.get("session_id"),
+            prompt_id: row.get("prompt_id"),
+            payload: row
+                .get::<_, tokio_postgres::types::Json<JsonValue>>("payload")
+                .0,
+            transport,
+        }
+    }
+
+    /// The turn of a failed job's row that also carries its `error_message`,
+    /// the sentence a stop failed it with, which says which browser it ran in
+    /// (`sweeps::repair_stopped_browser_turns`).
+    pub(super) fn of_stopped_job_row(row: &tokio_postgres::Row) -> Option<Self> {
+        let transport =
+            BrowserTransport::of_sentence(row.get::<_, Option<&str>>("error_message")?)?;
+        Some(Self::from_job_row(row, transport))
     }
 }
 
@@ -237,15 +350,38 @@ pub(crate) const SHARED_BROWSER_DISCONNECTED_ERROR: &str =
 const UNAVAILABLE_RUNTIME_INPUT_REJECTION: &str =
     "runtime stopped before active-turn input acknowledgement";
 
+/// A job's browser transport as a runtime stop reads it: its payload's
+/// `metadata.browserTransport`, or else `metadata.browser_transport`, trimmed
+/// and lowercased with `_` read as `-` (`desktop_personal` is
+/// `desktop-personal`), and '' for a job without one. Its `payload` is
+/// `agent_jobs.payload`: a query reads it where no other table in scope has a
+/// `payload` column. The partial index the idle sweep's repair of stopped
+/// browser turns reads repeats it word for word
+/// ([`stopped_browser_turn_predicate`]), since the planner uses such an index
+/// only for a query that does.
+pub(crate) const BROWSER_TRANSPORT_SQL: &str = "lower(replace(btrim(coalesce(
+                 payload #>> '{metadata,browserTransport}',
+                 payload #>> '{metadata,browser_transport}',
+                 ''
+               )), '_', '-'))";
+
+/// The predicate of `agent_jobs_stopped_browser_turn_recovery_idx`, word for
+/// word: the failed jobs of either browser, whatever failed them. The idle
+/// sweep's repair (`sweeps::repair_stopped_browser_turns`) reads its turns
+/// with it, and a test holds the migration that creates the index to it.
+pub(super) fn stopped_browser_turn_predicate() -> String {
+    format!("status = 'failed' and {BROWSER_TRANSPORT_SQL} in ('desktop-personal', 'shared')")
+}
+
 #[derive(Debug, Default)]
 pub(super) struct UnavailableRuntimeJobDisposition {
     pub(super) requeued_jobs: Vec<Uuid>,
     pub(super) failed_personal_browser_jobs: Vec<Uuid>,
     pub(super) failed_shared_browser_jobs: Vec<Uuid>,
     pub(super) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
-    /// Orgs a failed browser turn gave its reserve back to
-    /// (crate::system_turns::give_back_reserve_of_lost_browser_turn).
-    pub(super) refunded_org_ids: Vec<Uuid>,
+    /// The browser turns the stop failed
+    /// ([`fail_browser_jobs_for_unavailable_runtime`]), Personal first.
+    pub(super) failed_browser_turns: Vec<FailedBrowserTurn>,
     /// The local-engine turns the stop failed
     /// ([`fail_claude_code_jobs_for_unavailable_runtime`]).
     pub(super) failed_claude_code_turns: Vec<FailedClaudeCodeTurn>,
@@ -550,18 +686,16 @@ async fn runtime_has_active_hosted_jobs(
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {
     transaction
         .query_one(
-            "select exists(
-                select 1
-                from agent_jobs
-                where leased_by_runtime_id = $1
-                  and status = 'leased'
-                  and (lease_expires_at is null or lease_expires_at > now())
-                  and lower(replace(btrim(coalesce(
-                        payload #>> '{metadata,browserTransport}',
-                        payload #>> '{metadata,browser_transport}',
-                        ''
-                      )), '_', '-')) <> 'desktop-personal'
-            )",
+            &format!(
+                "select exists(
+                    select 1
+                    from agent_jobs
+                    where leased_by_runtime_id = $1
+                      and status = 'leased'
+                      and (lease_expires_at is null or lease_expires_at > now())
+                      and {BROWSER_TRANSPORT_SQL} <> 'desktop-personal'
+                )"
+            ),
             &[runtime_id],
         )
         .await
@@ -573,12 +707,13 @@ async fn runtime_has_active_hosted_jobs(
 /// out (`stop_runtime(.., "agent_shutdown")`).
 const AGENT_SHUTDOWN_STOP_REASON: &str = "agent_shutdown";
 
-/// What a quarantine did: the job input updates to publish, and the reason of
-/// an earlier stop that had already quarantined the lease, which this stop
-/// keeps (see [`quarantine_runtime_for_provider_release`]).
+/// What a quarantine did: the job input updates to publish, the browser and
+/// local-engine turns it failed, whose ends are written once it commits, and
+/// the reason of an earlier stop that had already quarantined the lease,
+/// which this stop keeps (see [`quarantine_runtime_for_provider_release`]).
 struct Quarantine {
     job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
-    refunded_org_ids: Vec<Uuid>,
+    failed_browser_turns: Vec<FailedBrowserTurn>,
     failed_claude_code_turns: Vec<FailedClaudeCodeTurn>,
     earlier_stop_reason: Option<String>,
 }
@@ -737,7 +872,7 @@ async fn quarantine_runtime_for_provider_release(
 
     Ok(Quarantine {
         job_input_state_updates: job_disposition.job_input_state_updates,
-        refunded_org_ids: job_disposition.refunded_org_ids,
+        failed_browser_turns: job_disposition.failed_browser_turns,
         failed_claude_code_turns: job_disposition.failed_claude_code_turns,
         earlier_stop_reason,
     })
@@ -936,7 +1071,7 @@ async fn stop_after_flush(
         publish_after_stop(
             state,
             &quarantine.job_input_state_updates,
-            &quarantine.refunded_org_ids,
+            &quarantine.failed_browser_turns,
             &quarantine.failed_claude_code_turns,
         );
         drop(connection);
@@ -1004,7 +1139,7 @@ async fn stop_after_flush(
         publish_after_stop(
             state,
             &outcome.job_input_state_updates,
-            &outcome.refunded_org_ids,
+            &outcome.failed_browser_turns,
             &outcome.failed_claude_code_turns,
         );
         return Ok((runtime_snapshot, outcome));
@@ -1020,7 +1155,7 @@ async fn stop_after_flush(
         publish_after_stop(
             state,
             &outcome.job_input_state_updates,
-            &outcome.refunded_org_ids,
+            &outcome.failed_browser_turns,
             &outcome.failed_claude_code_turns,
         );
     } else {
@@ -1408,7 +1543,7 @@ pub(crate) async fn runtime_stop(
             publish_after_stop(
                 &state,
                 &quarantine.job_input_state_updates,
-                &quarantine.refunded_org_ids,
+                &quarantine.failed_browser_turns,
                 &quarantine.failed_claude_code_turns,
             );
             drop(connection);
@@ -1496,7 +1631,7 @@ pub(crate) async fn runtime_stop(
             publish_after_stop(
                 &state,
                 &outcome.job_input_state_updates,
-                &outcome.refunded_org_ids,
+                &outcome.failed_browser_turns,
                 &outcome.failed_claude_code_turns,
             );
             // `revoke_tunnels_for_scope` acquires its own pool connection.
@@ -1513,7 +1648,7 @@ pub(crate) async fn runtime_stop(
             publish_after_stop(
                 &state,
                 &outcome.job_input_state_updates,
-                &outcome.refunded_org_ids,
+                &outcome.failed_browser_turns,
                 &outcome.failed_claude_code_turns,
             );
             drop(connection);
@@ -1687,7 +1822,7 @@ pub(crate) async fn stop_runtime_for_project(
             publish_after_stop(
                 state,
                 &quarantine.job_input_state_updates,
-                &quarantine.refunded_org_ids,
+                &quarantine.failed_browser_turns,
                 &quarantine.failed_claude_code_turns,
             );
             drop(connection);
@@ -1748,7 +1883,7 @@ pub(crate) async fn stop_runtime_for_project(
             publish_after_stop(
                 state,
                 &outcome.job_input_state_updates,
-                &outcome.refunded_org_ids,
+                &outcome.failed_browser_turns,
                 &outcome.failed_claude_code_turns,
             );
             // Tunnel revocation below acquires a fresh pool connection.
@@ -1762,7 +1897,7 @@ pub(crate) async fn stop_runtime_for_project(
             publish_after_stop(
                 state,
                 &outcome.job_input_state_updates,
-                &outcome.refunded_org_ids,
+                &outcome.failed_browser_turns,
                 &outcome.failed_claude_code_turns,
             );
             drop(connection);
@@ -2085,7 +2220,7 @@ pub(crate) async fn runtime_remove(
                 publish_after_stop(
                     &state,
                     &quarantine.job_input_state_updates,
-                    &quarantine.refunded_org_ids,
+                    &quarantine.failed_browser_turns,
                     &quarantine.failed_claude_code_turns,
                 );
                 drop(connection);
@@ -2160,7 +2295,7 @@ pub(crate) async fn runtime_remove(
                 publish_after_stop(
                     &state,
                     &outcome.job_input_state_updates,
-                    &outcome.refunded_org_ids,
+                    &outcome.failed_browser_turns,
                     &outcome.failed_claude_code_turns,
                 );
                 // Runtime preferences and tunnel revocation may perform nested
@@ -2222,7 +2357,7 @@ pub(crate) async fn runtime_remove(
         publish_after_stop(
             &state,
             &outcome.job_input_state_updates,
-            &outcome.refunded_org_ids,
+            &outcome.failed_browser_turns,
             &outcome.failed_claude_code_turns,
         );
         drop(connection);
@@ -2392,23 +2527,29 @@ pub(crate) async fn runtime_idle_reaper(
 }
 
 /// What a stop publishes once its transaction commits: the inputs it
-/// rejected, a `credits.updated` for each org a browser turn it failed gave a
-/// reserve back to, and each local-engine turn it failed: its run's end, Home
-/// row and failure message are written first, on connections of their own,
-/// then published ([`finish_failed_claude_code_turn`]).
+/// rejected; each browser turn it failed, whose run's end and reserve
+/// give-back are written first, on connections of their own, then published
+/// with a `credits.updated` for an org that got a reserve back
+/// ([`finish_failed_browser_turn`]); and each local-engine turn it failed: its
+/// run's end, Home row and failure message are written first, on connections
+/// of their own, then published ([`finish_failed_claude_code_turn`]).
 fn publish_after_stop(
     state: &AppState,
     job_input_state_updates: &[crate::send_intents::JobInputStateUpdate],
-    refunded_org_ids: &[Uuid],
+    failed_browser_turns: &[FailedBrowserTurn],
     failed_claude_code_turns: &[FailedClaudeCodeTurn],
 ) {
     crate::send_intents::publish_job_input_state_updates(state, job_input_state_updates);
-    for org_id in refunded_org_ids {
-        crate::credits::spawn_credits_updated(
-            state,
-            *org_id,
-            crate::credits::CREDITS_UPDATED_LEDGER,
-        );
+    if !failed_browser_turns.is_empty() {
+        // Some callers hold their stop's connection until this returns: the
+        // writes wait for a pool slot of their own.
+        let state = state.clone();
+        let turns = failed_browser_turns.to_vec();
+        tokio::spawn(async move {
+            for turn in &turns {
+                finish_failed_browser_turn(&state, turn).await;
+            }
+        });
     }
     if !failed_claude_code_turns.is_empty() {
         // Some callers hold their stop's connection until this returns: the
@@ -2720,119 +2861,275 @@ async fn fail_claude_code_jobs_for_unavailable_runtime(
         .collect())
 }
 
+/// Writes and publishes what a stop leaves of a browser turn it failed
+/// ([`write_and_publish_failed_browser_turn`]), trying again on an error as
+/// often, and after as long, as for a local-engine turn
+/// ([`FAILED_CLAUDE_CODE_TURN_WRITE_ATTEMPTS`]). After its last failed try it
+/// publishes nothing, so no Studio shows an end that a reload would not: the
+/// idle sweep writes the turn's end later and publishes it then
+/// (`sweeps::repair_stopped_browser_turns`).
+pub(crate) async fn finish_failed_browser_turn(state: &AppState, turn: &FailedBrowserTurn) {
+    let mut attempt = 1;
+    loop {
+        match write_and_publish_failed_browser_turn(state, turn).await {
+            Ok(_) => return,
+            Err((status, Json(error))) => {
+                warn!(
+                    job_id = %turn.job_id,
+                    run_id = ?turn.run_id,
+                    session_id = ?turn.session_id,
+                    attempt,
+                    status = status.as_u16(),
+                    error = %error.message,
+                    "failed to record the end of a browser turn a runtime stop failed"
+                );
+                if attempt >= FAILED_CLAUDE_CODE_TURN_WRITE_ATTEMPTS {
+                    warn!(
+                        job_id = %turn.job_id,
+                        "left the end of a browser turn a runtime stop failed to the idle sweep"
+                    );
+                    return;
+                }
+                tokio::time::sleep(FAILED_CLAUDE_CODE_TURN_WRITE_BACKOFF * attempt).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// One try at what a stop leaves of a browser turn it failed: writes it
+/// ([`record_failed_browser_turn`]), then publishes what that write did: the
+/// run's end, as `run.completed` with the turn's sentence and its
+/// transport's `failureCode`, and a `credits.updated` for the org it gave the
+/// turn's reserve back to. Nothing is published unless the write committed,
+/// and a write that finds the turn's run already ended publishes nothing
+/// again. Returns whether it ended the run.
+pub(super) async fn write_and_publish_failed_browser_turn(
+    state: &AppState,
+    turn: &FailedBrowserTurn,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let RecordedBrowserTurnEnd {
+        ended_run,
+        refunded_org_id,
+    } = record_failed_browser_turn(state, turn).await?;
+    if let (true, Some(run_id)) = (ended_run, turn.run_id) {
+        super::sweeps::publish_failed_run(
+            state,
+            turn.project_id,
+            run_id,
+            turn.job_id,
+            turn.conversation_id,
+            "failed",
+            turn.transport.sentence(),
+            turn.transport.failure_code(),
+        )
+        .await;
+    }
+    if let Some(org_id) = refunded_org_id {
+        crate::credits::spawn_credits_updated(
+            state,
+            org_id,
+            crate::credits::CREDITS_UPDATED_LEDGER,
+        );
+    }
+    Ok(ended_run)
+}
+
+/// What [`record_failed_browser_turn`] wrote, which is what is published.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct RecordedBrowserTurnEnd {
+    /// Whether it ended the turn's run.
+    pub(crate) ended_run: bool,
+    /// The org it gave the turn's managed-AI reserve back to.
+    pub(crate) refunded_org_id: Option<Uuid>,
+}
+
+/// Writes what a stop leaves of a browser turn it failed
+/// ([`FailedBrowserTurn`]), once the stop has committed, in a short
+/// transaction of its own that holds no runtime
+/// ([`record_failed_browser_turn_in`]). Returns what it wrote, to publish.
+pub(crate) async fn record_failed_browser_turn(
+    state: &AppState,
+    turn: &FailedBrowserTurn,
+) -> Result<RecordedBrowserTurnEnd, (StatusCode, Json<ApiError>)> {
+    if turn.run_id.is_none() {
+        return Ok(RecordedBrowserTurnEnd::default());
+    }
+    let label = turn.transport.label();
+    let mut connection = state.pool.get().await.map_err(|error| {
+        internal_error(format!(
+            "failed to get a connection for a stopped {label} turn: {error}"
+        ))
+    })?;
+    let transaction = connection.transaction().await.map_err(|error| {
+        internal_error(format!(
+            "failed to start the end of a stopped {label} turn: {error}"
+        ))
+    })?;
+    let recorded = record_failed_browser_turn_in(&transaction, turn).await?;
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!(
+            "failed to commit the end of a stopped {label} turn: {error}"
+        ))
+    })?;
+    Ok(recorded)
+}
+
+/// [`record_failed_browser_turn`] in `transaction`, which holds no runtime,
+/// nor anything else a dispatch takes before a chat: while the turn's run is
+/// still unfinished, it fails the run with the turn's sentence, then gives
+/// back the turn's managed-AI reserve when it left the person nothing, as for
+/// any failed turn (crate::system_turns::give_back_reserve_of_lost_browser_turn).
+/// It records no message and no Home row.
+///
+/// The run's end is the write's receipt. Only the service role writes runs,
+/// and once its job has failed nothing else ends a browser turn's run but a
+/// space's delete, which cancels it: a run that is no longer unfinished says
+/// its end is written, so a write tried again, or a second writer (the idle
+/// sweep's repair, on this controller or another), writes and gives back
+/// nothing twice. The run ends only while the turn's own job is the browser
+/// job a stop failed in that run, so no other turn ends it. The ledger also
+/// keeps the give-back once (`managed-ai-refund:{prompt}`).
+pub(crate) async fn record_failed_browser_turn_in(
+    transaction: &Transaction<'_>,
+    turn: &FailedBrowserTurn,
+) -> Result<RecordedBrowserTurnEnd, (StatusCode, Json<ApiError>)> {
+    let Some(run_id) = turn.run_id else {
+        return Ok(RecordedBrowserTurnEnd::default());
+    };
+    let label = turn.transport.label();
+    // The conversation's row first, held to the commit: the run's end locks
+    // it too, through its notification at the commit, and this write takes it
+    // before the run's row and the org's credit balance, as a dispatch into
+    // the chat takes it before the balance. Only `for key share`, the lock
+    // that notification takes, since this write never changes the
+    // conversation: it still waits for a dispatch's `for update`, but a turn
+    // in the chat that settles its credits and then writes into the chat (a
+    // failing completion, an evaluation's first message) never waits on it,
+    // so the two never deadlock over the balance. (A goal-bound completion
+    // then also locks the chat `for update`, which waits on this lock, so that
+    // one still can, as it can with a dispatch.) A second writer takes the
+    // same lock, then waits for the run's row until the first has committed,
+    // and finds the run ended. A conversation deleted since the stop is not
+    // there to lock, and took the turn's run and job with it, so nothing below
+    // matches: the write ends nothing, and fails nothing.
+    if let Some(conversation_id) = turn.conversation_id {
+        transaction
+            .query_opt(
+                "select id from conversations where id = $1 for key share",
+                &[&conversation_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to lock a stopped {label} turn's conversation: {error}"
+                ))
+            })?;
+    }
+    let sentence = turn.transport.sentence();
+    let ended = transaction
+        .execute(
+            "update runs
+             set status = 'failed',
+                 progress = greatest(progress, 100),
+                 progress_stage = null,
+                 last_message = $2,
+                 updated_at = now()
+             where id = $1
+               and status in ('queued', 'in_progress', 'awaiting_approval')
+               and exists (
+                   select 1 from agent_jobs
+                    where agent_jobs.id = $3
+                      and agent_jobs.project_id = $4
+                      and agent_jobs.run_id = $1
+                      and agent_jobs.status = 'failed'
+                      and agent_jobs.error_message = $2
+               )",
+            &[&run_id, &sentence, &turn.job_id, &turn.project_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to fail the run of a stopped {label} turn: {error}"
+            ))
+        })?;
+    if ended == 0 {
+        return Ok(RecordedBrowserTurnEnd::default());
+    }
+    // A failed browser turn is judged as any failed turn: it costs nothing
+    // when it left the person nothing, and a card's browser turn follows its
+    // own rule (crate::system_turns). A failed give-back is logged and the run
+    // ends anyway, unless a retry may pass (a deadlock): then this write fails.
+    let refunded_org_id = crate::system_turns::give_back_reserve_of_lost_browser_turn(
+        transaction,
+        &turn.project_id,
+        &turn.job_id,
+        Some(run_id),
+        turn.prompt_id,
+        &turn.payload,
+    )
+    .await?;
+    Ok(RecordedBrowserTurnEnd {
+        ended_run: true,
+        refunded_org_id,
+    })
+}
+
+/// Fails the turns of `transport` leased by or queued for `runtime` with its
+/// sentence ([`BrowserTransport::sentence`]). Such a turn never moves to
+/// another runtime, so its job keeps its exact target, for diagnostics. Only
+/// the job fails here, in the stop's transaction, which holds the runtime's
+/// row; the run's end and the reserve are written once the stop has committed
+/// ([`FailedBrowserTurn`]).
 async fn fail_browser_jobs_for_unavailable_runtime(
     transaction: &Transaction<'_>,
     runtime: &RuntimeDetails,
-    browser_transport: &str,
-    error_message: &str,
-    browser_label: &str,
-) -> Result<FailedBrowserJobs, (StatusCode, Json<ApiError>)> {
+    transport: BrowserTransport,
+) -> Result<Vec<FailedBrowserTurn>, (StatusCode, Json<ApiError>)> {
     let failed_rows = transaction
         .query(
-            "update agent_jobs
-             set status = 'failed',
-                 outcome = 'failed',
-                 summary = $3,
-                 error_message = $3,
-                 leased_by_runtime_id = null,
-                 lease_expires_at = null,
-                 active_input_ready_runtime_id = null,
-                 active_input_ready_expires_at = null,
-                 active_input_ready_turn_id = null,
-                 heartbeat_at = null,
-                 completed_at = now(),
-                 updated_at = now()
-             where project_id = $2
-               and (
-                 (leased_by_runtime_id = $1 and status = 'leased')
-                 or (target_runtime_id = $1 and status = 'queued')
-               )
-               and lower(replace(btrim(coalesce(
-                     payload #>> '{metadata,browserTransport}',
-                   payload #>> '{metadata,browser_transport}',
-                   ''
-                  )), '_', '-')) = $4
-             returning id, run_id, payload",
+            &format!(
+                "update agent_jobs
+                 set status = 'failed',
+                     outcome = 'failed',
+                     summary = $3,
+                     error_message = $3,
+                     leased_by_runtime_id = null,
+                     lease_expires_at = null,
+                     active_input_ready_runtime_id = null,
+                     active_input_ready_expires_at = null,
+                     active_input_ready_turn_id = null,
+                     heartbeat_at = null,
+                     completed_at = now(),
+                     updated_at = now()
+                 where project_id = $2
+                   and (
+                     (leased_by_runtime_id = $1 and status = 'leased')
+                     or (target_runtime_id = $1 and status = 'queued')
+                   )
+                   and {BROWSER_TRANSPORT_SQL} = $4
+                 returning id, project_id, run_id, conversation_id, session_id, prompt_id,
+                           payload"
+            ),
             &[
                 &runtime.id,
                 &runtime.project_id,
-                &error_message,
-                &browser_transport,
+                &transport.sentence(),
+                &transport.transport(),
             ],
         )
         .await
         .map_err(|error| {
             internal_error(format!(
-                "failed to fail {browser_label} jobs for unavailable runtime: {error}"
+                "failed to fail {} jobs for unavailable runtime: {error}",
+                transport.label()
             ))
         })?;
 
-    let failed_jobs: Vec<Uuid> = failed_rows
+    Ok(failed_rows
         .iter()
-        .map(|row| row.get::<_, Uuid>("id"))
-        .collect();
-    let mut failed_runs: Vec<Uuid> = failed_rows
-        .iter()
-        .filter_map(|row| row.get::<_, Option<Uuid>>("run_id"))
-        .collect();
-    failed_runs.sort_unstable();
-    failed_runs.dedup();
-
-    if !failed_runs.is_empty() {
-        transaction
-            .execute(
-                "update runs
-                 set status = 'failed',
-                     progress = greatest(progress, 100),
-                     progress_stage = null,
-                     last_message = $2,
-                     updated_at = now()
-                 where id = any($1::uuid[])
-                   and status in ('queued', 'in_progress', 'awaiting_approval')",
-                &[&failed_runs, &error_message],
-            )
-            .await
-            .map_err(|error| {
-                internal_error(format!(
-                    "failed to fail runs for disconnected {browser_label}: {error}"
-                ))
-            })?;
-    }
-
-    // A failed browser turn is judged as any failed turn: it costs nothing
-    // when it left the person nothing, and a card's browser turn follows its
-    // own rule (crate::system_turns).
-    let mut refunded_org_ids = Vec::new();
-    for row in &failed_rows {
-        let payload = row
-            .get::<_, tokio_postgres::types::Json<JsonValue>>("payload")
-            .0;
-        if let Some(org_id) = crate::system_turns::give_back_reserve_of_lost_browser_turn(
-            transaction,
-            &runtime.project_id,
-            &row.get::<_, Uuid>("id"),
-            row.get::<_, Option<Uuid>>("run_id"),
-            &payload,
-        )
-        .await?
-        {
-            refunded_org_ids.push(org_id);
-        }
-    }
-
-    Ok(FailedBrowserJobs {
-        jobs: failed_jobs,
-        runs: failed_runs,
-        refunded_org_ids,
-    })
-}
-
-/// The browser turns a stop failed, their runs, and the orgs whose reserve
-/// they gave back.
-struct FailedBrowserJobs {
-    jobs: Vec<Uuid>,
-    runs: Vec<Uuid>,
-    refunded_org_ids: Vec<Uuid>,
+        .map(|row| FailedBrowserTurn::from_job_row(row, transport))
+        .collect())
 }
 
 pub(super) async fn resolve_jobs_for_unavailable_runtime(
@@ -2844,33 +3141,21 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
     // tied to a device-local profile, while Shared is tied to the exact page
     // and browser process visible to the user. Fail both transports closed and
     // leave their exact target recorded for diagnostics.
-    let FailedBrowserJobs {
-        jobs: failed_personal_browser_jobs,
-        runs: failed_personal_browser_runs,
-        mut refunded_org_ids,
-    } = fail_browser_jobs_for_unavailable_runtime(
-        transaction,
-        runtime,
-        "desktop-personal",
-        PERSONAL_BROWSER_DISCONNECTED_ERROR,
-        "Personal Browser",
-    )
-    .await?;
-    let FailedBrowserJobs {
-        jobs: failed_shared_browser_jobs,
-        runs: failed_shared_browser_runs,
-        refunded_org_ids: shared_refunded_org_ids,
-    } = fail_browser_jobs_for_unavailable_runtime(
-        transaction,
-        runtime,
-        "shared",
-        SHARED_BROWSER_DISCONNECTED_ERROR,
-        "Shared Browser",
-    )
-    .await?;
-    refunded_org_ids.extend(shared_refunded_org_ids);
-    refunded_org_ids.sort_unstable();
-    refunded_org_ids.dedup();
+    let mut failed_browser_turns = Vec::new();
+    for transport in BrowserTransport::ALL {
+        failed_browser_turns.extend(
+            fail_browser_jobs_for_unavailable_runtime(transaction, runtime, transport).await?,
+        );
+    }
+    let failed_browser_jobs = |transport: BrowserTransport| {
+        failed_browser_turns
+            .iter()
+            .filter(|turn| turn.transport == transport)
+            .map(|turn| turn.job_id)
+            .collect::<Vec<_>>()
+    };
+    let failed_personal_browser_jobs = failed_browser_jobs(BrowserTransport::Personal);
+    let failed_shared_browser_jobs = failed_browser_jobs(BrowserTransport::Shared);
     // A local-engine turn runs once, on its person's own computer: it fails
     // here, and the requeue below never touches it.
     let failed_claude_code_turns =
@@ -2878,33 +3163,31 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
 
     let requeued_rows = transaction
         .query(
-            "update agent_jobs
-             set status = 'queued',
-                 leased_by_runtime_id = null,
-                 lease_expires_at = null,
-                 leased_at = null,
-                 active_input_ready_runtime_id = null,
-                 active_input_ready_expires_at = null,
-                 active_input_ready_turn_id = null,
-                 heartbeat_at = null,
-                 target_runtime_id = null,
-                 payload = payload || jsonb_build_object(
-                     'requeuedAt', to_jsonb(now()),
-                     'requeuedReason', $3::text
-                 ),
-                 updated_at = now()
-             where project_id = $2
-               and (
-                 (leased_by_runtime_id = $1 and status = 'leased')
-                 or (target_runtime_id = $1 and status = 'queued')
-               )
-               and lower(replace(btrim(coalesce(
-                     payload #>> '{metadata,browserTransport}',
-                   payload #>> '{metadata,browser_transport}',
-                   ''
-                  )), '_', '-')) not in ('desktop-personal', 'shared')
-               and engine is null
-             returning id",
+            &format!(
+                "update agent_jobs
+                 set status = 'queued',
+                     leased_by_runtime_id = null,
+                     lease_expires_at = null,
+                     leased_at = null,
+                     active_input_ready_runtime_id = null,
+                     active_input_ready_expires_at = null,
+                     active_input_ready_turn_id = null,
+                     heartbeat_at = null,
+                     target_runtime_id = null,
+                     payload = payload || jsonb_build_object(
+                         'requeuedAt', to_jsonb(now()),
+                         'requeuedReason', $3::text
+                     ),
+                     updated_at = now()
+                 where project_id = $2
+                   and (
+                     (leased_by_runtime_id = $1 and status = 'leased')
+                     or (target_runtime_id = $1 and status = 'queued')
+                   )
+                   and {BROWSER_TRANSPORT_SQL} not in ('desktop-personal', 'shared')
+                   and engine is null
+                 returning id"
+            ),
             &[&runtime.id, &runtime.project_id, &requeue_reason],
         )
         .await
@@ -2942,33 +3225,30 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
         );
     }
 
-    if !failed_personal_browser_jobs.is_empty() {
+    for (transport, job_ids) in [
+        (BrowserTransport::Personal, &failed_personal_browser_jobs),
+        (BrowserTransport::Shared, &failed_shared_browser_jobs),
+    ] {
+        if job_ids.is_empty() {
+            continue;
+        }
+        let mut run_ids = failed_browser_turns
+            .iter()
+            .filter(|turn| turn.transport == transport)
+            .filter_map(|turn| turn.run_id)
+            .collect::<Vec<_>>();
+        run_ids.sort_unstable();
+        run_ids.dedup();
         record_runtime_event(
             transaction,
             &runtime.id,
             &runtime.project_id,
-            "personal_browser_disconnected",
+            transport.failure_code(),
             json!({
-                "transport": "desktop-personal",
-                "error": PERSONAL_BROWSER_DISCONNECTED_ERROR,
-                "job_ids": failed_personal_browser_jobs,
-                "run_ids": failed_personal_browser_runs,
-            }),
-        )
-        .await?;
-    }
-
-    if !failed_shared_browser_jobs.is_empty() {
-        record_runtime_event(
-            transaction,
-            &runtime.id,
-            &runtime.project_id,
-            "shared_browser_disconnected",
-            json!({
-                "transport": "shared",
-                "error": SHARED_BROWSER_DISCONNECTED_ERROR,
-                "job_ids": failed_shared_browser_jobs,
-                "run_ids": failed_shared_browser_runs,
+                "transport": transport.transport(),
+                "error": transport.sentence(),
+                "job_ids": job_ids,
+                "run_ids": run_ids,
             }),
         )
         .await?;
@@ -2979,7 +3259,7 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
         failed_personal_browser_jobs,
         failed_shared_browser_jobs,
         job_input_state_updates,
-        refunded_org_ids,
+        failed_browser_turns,
         failed_claude_code_turns,
     })
 }
@@ -3028,7 +3308,7 @@ pub(crate) async fn perform_runtime_stop(
     let failed_personal_browser_jobs = job_disposition.failed_personal_browser_jobs;
     let failed_shared_browser_jobs = job_disposition.failed_shared_browser_jobs;
     let job_input_state_updates = job_disposition.job_input_state_updates;
-    let refunded_org_ids = job_disposition.refunded_org_ids;
+    let failed_browser_turns = job_disposition.failed_browser_turns;
     let failed_claude_code_turns = job_disposition.failed_claude_code_turns;
 
     if should_skip_stop_for_terminal_runtime(runtime) {
@@ -3049,7 +3329,7 @@ pub(crate) async fn perform_runtime_stop(
             failed_personal_browser_jobs,
             failed_shared_browser_jobs,
             job_input_state_updates,
-            refunded_org_ids,
+            failed_browser_turns,
             failed_claude_code_turns,
             skip_reason: Some("already_stopped".to_string()),
             released_runtime_lease_id: None,
@@ -3191,7 +3471,7 @@ pub(crate) async fn perform_runtime_stop(
         failed_personal_browser_jobs,
         failed_shared_browser_jobs,
         job_input_state_updates,
-        refunded_org_ids,
+        failed_browser_turns,
         failed_claude_code_turns,
         skip_reason: None,
         released_runtime_lease_id,
@@ -3368,6 +3648,56 @@ mod tests {
             }
             assert!(lower.ends_with("then try again."), "{sentence:?}");
         }
+    }
+
+    /// The idle sweep's repair of stopped browser turns can read
+    /// `agent_jobs_stopped_browser_turn_recovery_idx` only while its query
+    /// repeats the index's predicate word for word; otherwise it scans every
+    /// failed job, every 10 s. The migration that creates the index reads a
+    /// job's transport exactly as every stop query does
+    /// ([`super::BROWSER_TRANSPORT_SQL`]).
+    #[test]
+    fn the_stopped_browser_turn_index_reads_the_transport_word_for_word() {
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../supabase/migrations/\
+             20261114112320_agent_jobs_stopped_browser_turn_recovery_idx.sql",
+        );
+        let migration = std::fs::read_to_string(&path).expect("the browser turn index migration");
+        let statements = migration
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            words(&statements),
+            words(&format!(
+                "set local lock_timeout = '5s';
+                 create index agent_jobs_stopped_browser_turn_recovery_idx
+                   on public.agent_jobs (completed_at, id)
+                   where {};",
+                super::stopped_browser_turn_predicate()
+            )),
+            "{}",
+            path.display()
+        );
+        assert_eq!(
+            words(&super::stopped_browser_turn_predicate()),
+            words(&format!(
+                "status = 'failed' and {} in ('desktop-personal', 'shared')",
+                super::BROWSER_TRANSPORT_SQL
+            ))
+        );
+        for transport in super::BrowserTransport::ALL {
+            assert_eq!(
+                super::BrowserTransport::of_sentence(transport.sentence()),
+                Some(transport)
+            );
+        }
+        assert_eq!(
+            super::BrowserTransport::of_sentence("Something else."),
+            None
+        );
     }
 
     fn runtime_details(status: &str, active_lease_id: Option<Uuid>) -> RuntimeDetails {
@@ -3593,7 +3923,7 @@ mod tests {
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
             job_input_state_updates: Vec::new(),
-            refunded_org_ids: Vec::new(),
+            failed_browser_turns: Vec::new(),
             failed_claude_code_turns: Vec::new(),
             skip_reason: Some("active_jobs".to_string()),
             released_runtime_lease_id: None,
@@ -3672,7 +4002,7 @@ mod tests {
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
             job_input_state_updates: Vec::new(),
-            refunded_org_ids: Vec::new(),
+            failed_browser_turns: Vec::new(),
             failed_claude_code_turns: Vec::new(),
             skip_reason: None,
             released_runtime_lease_id: None,
@@ -4198,6 +4528,10 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "stop_browser_turn_tests.rs"]
+mod browser_turn_tests;
+
 #[derive(Deserialize)]
 pub(crate) struct RuntimeOfflineBody {
     pub runtime_id: String,
@@ -4279,7 +4613,7 @@ pub(crate) async fn runtime_mark_offline(
     publish_after_stop(
         &state,
         &job_disposition.job_input_state_updates,
-        &job_disposition.refunded_org_ids,
+        &job_disposition.failed_browser_turns,
         &job_disposition.failed_claude_code_turns,
     );
 

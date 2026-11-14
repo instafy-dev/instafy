@@ -1501,6 +1501,7 @@ pub(crate) async fn load_credit_ledger_reference_by_idempotency_key(
             &[org_id, project_id, &trimmed_key],
         )
         .await
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| {
             internal_error(format!(
                 "failed to load credit ledger reference for idempotency key {trimmed_key}: {error}"
@@ -1734,6 +1735,7 @@ pub(crate) async fn merge_credit_ledger_metadata_by_idempotency_key(
             &[org_id, project_id, &trimmed_key, &PgJson(metadata_patch)],
         )
         .await
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| {
             internal_error(format!(
                 "failed to merge credit ledger metadata for idempotency key {trimmed_key}: {error}"
@@ -2132,6 +2134,7 @@ pub(crate) async fn process_credit_refill(
                 &[org_id, project_id, &key],
             )
             .await
+            .inspect_err(crate::errors::note_sql_state)
             .map_err(|error| internal_error(format!("failed to check refill idempotency: {error}")))?;
         if existing.is_some() {
             metadata_map.insert("deduped".to_string(), JsonValue::Bool(true));
@@ -2189,6 +2192,7 @@ pub(crate) async fn process_credit_refill(
         }
         Ok(_) => {}
         Err(error) => {
+            crate::errors::note_sql_state(&error);
             return Err(internal_error(format!("failed to refill credits: {error}")));
         }
     }
@@ -2201,6 +2205,7 @@ pub(crate) async fn process_credit_refill(
                 &[org_id, &limit],
             )
             .await
+            .inspect_err(crate::errors::note_sql_state)
             .map_err(|error| internal_error(format!("failed to update credit limit: {error}")))?;
     }
 
@@ -2469,6 +2474,7 @@ where
             &[org_id],
         )
         .await
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| internal_error(format!("failed to load credit balance: {error}")))?;
 
     let (balance, credit_limit) = balance_row
@@ -2486,6 +2492,7 @@ where
             &[org_id],
         )
         .await
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| internal_error(format!("failed to load last burn entry: {error}")))?
         .map(|row| row.get::<_, DateTime<Utc>>("created_at"));
 
@@ -2495,6 +2502,7 @@ where
             &[org_id],
         )
         .await
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| internal_error(format!("failed to load last refill entry: {error}")))?
         .map(|row| row.get::<_, DateTime<Utc>>("created_at"));
 
