@@ -198,7 +198,20 @@ function applyCorsHeaders(request: http.IncomingMessage, response: http.ServerRe
   }
 }
 
+/**
+ * The code printed beside the login URL. The Studio page shows the same code
+ * (packages/frontend/src/screens/CliLoginPage.tsx) and sends the sign-in only
+ * when the person presses Connect, so they can tell their own request from a
+ * link someone else made. It is the state's first 8 characters, uppercased, as
+ * XXXX-XXXX.
+ */
+export function cliLoginConfirmationCode(state: string): string {
+  const head = state.slice(0, 8).toUpperCase();
+  return `${head.slice(0, 4)}-${head.slice(4)}`;
+}
+
 async function startCliLoginCallbackServer(): Promise<CliLoginCallbackServer> {
+  // The Studio page accepts only this shape: 32 lowercase hex characters.
   const state = randomBytes(16).toString("hex");
   let resolved = false;
   let resolveToken: ((token: CliLoginPayload) => void) | null = null;
@@ -471,6 +484,10 @@ export async function login(options: {
       callbackServer = await startCliLoginCallbackServer();
       url.searchParams.set("cliCallbackUrl", callbackServer.callbackUrl);
       url.searchParams.set("cliState", callbackServer.state);
+      // Tells the page this CLI prints the confirmation code. The page offers
+      // Connect only then, and an older CLI, which prints none, gets the token
+      // to copy.
+      url.searchParams.set("cliCode", "1");
     } catch {
       callbackServer = null;
     }
@@ -488,9 +505,14 @@ export async function login(options: {
   if (!authPayload) {
     console.log("1) Open this URL in your browser:");
     console.log(kleur.cyan(url.toString()));
+    if (callbackServer) {
+      console.log(`Confirmation code: ${kleur.bold(cliLoginConfirmationCode(callbackServer.state))}`);
+    }
     console.log("");
     if (callbackServer) {
-      console.log("2) Sign in — this terminal should continue automatically.");
+      console.log(
+        "2) Sign in, check that the page shows this code, and press Connect. This terminal then continues on its own.",
+      );
       console.log(kleur.gray("If it doesn't, copy the token shown on that page and paste it here."));
     } else {
       console.log("2) After you sign in, copy the token shown on that page.");

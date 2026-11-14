@@ -16,7 +16,9 @@ The CLI needs a user access token for most space actions. The easiest way is:
 instafy login
 ```
 
-This prints a Studio URL where you can sign in. After you finish logging in, the Studio page will send the token back to the CLI automatically (no copy/paste). If that callback fails, you can still copy the token from the page and paste it into the terminal.
+This prints a Studio URL and a confirmation code. Open the URL in a web browser, sign in, and check that the page shows the same code. Then press **Connect the CLI** and the page sends the sign-in to the CLI (no copy/paste). The page never sends it by itself; press Connect only when the codes match. If the callback fails, you can still copy the token from the page and paste it into the terminal.
+
+An older CLI prints no code, so the page offers it only the token to copy; update the CLI to connect without copying. Inside Instafy Desktop, the mobile app or a frame, the page sends nothing and shows no token. A session without an account (an anonymous sign-in) is refused: create an account, then run `instafy login` again.
 
 If you haven't configured a server/studio yet, `instafy login` will use `http://localhost:5173` only when it can reach it (and a local controller is selected); otherwise it will use `https://instafy.dev` with `https://controller.instafy.dev`.
 
