@@ -1,22 +1,48 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   LEGACY_PUBLIC_MIGRATION_COUNT,
   LANE_BOUNDARY,
+  checkAddedMigrationsSortLast,
+  githubEventBase,
+  main,
+  migrationFileNamesAt,
+  parseArguments,
+  resolveBaseCommit,
   topLevelMetaCommands,
   topLevelStatementKeywords,
   topLevelStatements,
   validatePublicMigrationTrack,
 } from "./check-supabase-migrations.mjs";
+
+// git looks for its repository in GIT_DIR and its relatives before the working
+// directory, and it sets them for `git rebase --exec` commands and for hooks.
+// Without them, the fixtures below, and the script run against them, use the
+// repository their working directory is in.
+for (const name of [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+]) {
+  delete process.env[name];
+}
+
+const SCRIPT = fileURLToPath(new URL("./check-supabase-migrations.mjs", import.meta.url));
 
 function fixture() {
   return mkdtempSync(path.join(os.tmpdir(), "instafy-public-migrations-"));
@@ -25,6 +51,67 @@ function fixture() {
 function migration(directory, name) {
   writeFileSync(path.join(directory, name), `-- ${name}\nselect 1;\n`);
 }
+
+function names(migrations) {
+  return migrations.map(({ fileName }) => fileName);
+}
+
+// A git repository of its own with a supabase/migrations directory. Its git
+// commands read no user or system configuration.
+function repository(t) {
+  const directory = fixture();
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const env = {
+    PATH: process.env.PATH,
+    HOME: directory,
+    LANG: "C",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ],
+      { cwd: directory, encoding: "utf8", env },
+    ).trim();
+  const migrations = path.join(directory, "supabase", "migrations");
+  mkdirSync(migrations, { recursive: true });
+  git("init", "-q", "-b", "main");
+  const commit = (...files) => {
+    for (const file of files) {
+      migration(migrations, file);
+    }
+    git("add", "--all");
+    git("commit", "-q", "-m", files.join(" "));
+    return git("rev-parse", "HEAD");
+  };
+  return { commit, directory, git, migrations };
+}
+
+// A branch adds `branchMigration` while main lands 20260000000070 first, and
+// HEAD is the test merge GitHub builds for a pull request: a merge commit
+// whose first parent is the base, main.
+function testMerge(t, branchMigration) {
+  const repo = repository(t);
+  const start = repo.commit("20260000000064_first.sql", "20260000000066_second.sql");
+  repo.git("checkout", "-q", "-b", "branch", start);
+  repo.commit(branchMigration);
+  repo.git("checkout", "-q", "main");
+  const base = repo.commit("20260000000070_landed_first.sql");
+  repo.git("merge", "-q", "--no-ff", "--no-edit", "branch");
+  return { ...repo, base };
+}
+
+const PULL_REQUEST = { GITHUB_EVENT_NAME: "pull_request" };
 
 test("the checked-in pre-split migration history matches its immutable baseline", () => {
   const legacyMigrations = validatePublicMigrationTrack().filter(
@@ -311,5 +398,280 @@ test("each top-level statement keeps its words, and its strings whole", () => {
       ],
       ["select", "2"],
     ],
+  );
+});
+
+test("a migration a change adds must sort after the newest one at its base", (t) => {
+  const directory = fixture();
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const base = ["20260000000064_first.sql", "20260000000068_third.sql"];
+  for (const name of base) {
+    migration(directory, name);
+  }
+  const check = () =>
+    checkAddedMigrationsSortLast(validatePublicMigrationTrack(directory), base, "main");
+  assert.deepEqual(check(), { added: [], newest: { fileName: base[1], version: 20260000000068n } });
+
+  migration(directory, "20260000000070_next.sql");
+  assert.deepEqual(names(check().added), ["20260000000070_next.sql"]);
+
+  migration(directory, "20260000000066_late.sql");
+  assert.throws(
+    check,
+    /public migration 20260000000066_late\.sql is not newer than 20260000000068_third\.sql, the newest migration at main; migration history is append-only, so rename it to a current UTC timestamp after 20260000000068, with an even final digit$/u,
+  );
+  migration(directory, "20260000000062_later.sql");
+  assert.throws(
+    check,
+    /public migrations 20260000000062_later\.sql, 20260000000066_late\.sql are not newer than 20260000000068_third\.sql.* rename each to/u,
+  );
+});
+
+test("a migration renamed at its base's newest version is not newer, and an empty base takes any", (t) => {
+  const directory = fixture();
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  migration(directory, "20260000000064_first.sql");
+  migration(directory, "20260000000066_renamed.sql");
+  const track = validatePublicMigrationTrack(directory);
+  assert.throws(
+    () =>
+      checkAddedMigrationsSortLast(track, ["20260000000064_first.sql", "20260000000066_second.sql"], "main"),
+    /public migration 20260000000066_renamed\.sql is not newer than 20260000000066_second\.sql/u,
+  );
+  assert.deepEqual(checkAddedMigrationsSortLast(track, [], "main"), { added: track, newest: null });
+  // A base entry that is not a migration file name sets no newest version.
+  assert.deepEqual(
+    names(checkAddedMigrationsSortLast(track, ["README.md", "20260000000064_first.sql"], "main").added),
+    ["20260000000066_renamed.sql"],
+  );
+});
+
+test("a pull request's test merge is compared with its first parent, the base it merged into", (t) => {
+  const late = testMerge(t, "20260000000068_late.sql");
+  const event = githubEventBase({ env: PULL_REQUEST, repoRoot: late.directory });
+  assert.equal(event.base, late.base);
+  assert.equal(event.label, `the pull request's base ${late.base.slice(0, 12)}`);
+  const atBase = migrationFileNamesAt(resolveBaseCommit(event.base, late.directory), {
+    repoRoot: late.directory,
+  });
+  assert.deepEqual(atBase, [
+    "20260000000064_first.sql",
+    "20260000000066_second.sql",
+    "20260000000070_landed_first.sql",
+  ]);
+  assert.throws(
+    () => checkAddedMigrationsSortLast(validatePublicMigrationTrack(late.migrations), atBase, event.label),
+    /public migration 20260000000068_late\.sql is not newer than 20260000000070_landed_first\.sql, the newest migration at the pull request's base /u,
+  );
+
+  const renamed = testMerge(t, "20260000000072_renamed.sql");
+  const renamedEvent = githubEventBase({ env: PULL_REQUEST, repoRoot: renamed.directory });
+  assert.deepEqual(
+    names(
+      checkAddedMigrationsSortLast(
+        validatePublicMigrationTrack(renamed.migrations),
+        migrationFileNamesAt(renamedEvent.base, { repoRoot: renamed.directory }),
+        renamedEvent.label,
+      ).added,
+    ),
+    ["20260000000072_renamed.sql"],
+  );
+});
+
+test("a checkout two commits deep holds the base of a test merge, and one commit deep fails", (t) => {
+  const repo = testMerge(t, "20260000000072_branch.sql");
+  for (const depth of [2, 1]) {
+    const clone = fixture();
+    t.after(() => rmSync(clone, { force: true, recursive: true }));
+    repo.git("clone", "-q", `--depth=${depth}`, `file://${repo.directory}`, clone);
+    if (depth === 2) {
+      const event = githubEventBase({ env: PULL_REQUEST, repoRoot: clone });
+      assert.equal(event.base, repo.base);
+      assert.deepEqual(migrationFileNamesAt(resolveBaseCommit(event.base, clone), { repoRoot: clone }), [
+        "20260000000064_first.sql",
+        "20260000000066_second.sql",
+        "20260000000070_landed_first.sql",
+      ]);
+    } else {
+      assert.throws(
+        () => githubEventBase({ env: PULL_REQUEST, repoRoot: clone }),
+        /must check out GitHub's test merge commit with both of its parents \(fetch-depth: 2\)/u,
+      );
+      assert.throws(() => resolveBaseCommit(repo.base, clone), /is not in this checkout/u);
+    }
+  }
+});
+
+test("a base git cannot look up for another reason fails with git's own error", (t) => {
+  const directory = realpathSync(fixture());
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  const plain = path.join(directory, "plain");
+  mkdirSync(plain);
+  // Stop git's search for a repository at the fixture, wherever the temporary
+  // directory is.
+  const ceiling = process.env.GIT_CEILING_DIRECTORIES;
+  process.env.GIT_CEILING_DIRECTORIES = directory;
+  t.after(() => {
+    if (ceiling === undefined) {
+      delete process.env.GIT_CEILING_DIRECTORIES;
+    } else {
+      process.env.GIT_CEILING_DIRECTORIES = ceiling;
+    }
+  });
+  // git words its error in the developer's language, so check how it failed.
+  assert.throws(
+    () => resolveBaseCommit("HEAD", plain),
+    (error) =>
+      error.status === 128 &&
+      error.message.startsWith("Command failed: git rev-parse --verify --quiet HEAD^{commit}"),
+  );
+});
+
+test("a merge group is compared with the parent its event names", (t) => {
+  const repo = repository(t);
+  const parent = repo.commit("20260000000064_first.sql", "20260000000068_queued_ahead.sql");
+  repo.commit("20260000000066_late.sql");
+  const eventPath = path.join(fixture(), "event.json");
+  t.after(() => rmSync(path.dirname(eventPath), { force: true, recursive: true }));
+  const mergeGroup = (payload) => {
+    writeFileSync(eventPath, JSON.stringify(payload));
+    return githubEventBase({
+      env: { GITHUB_EVENT_NAME: "merge_group", GITHUB_EVENT_PATH: eventPath },
+      repoRoot: repo.directory,
+    });
+  };
+  const event = mergeGroup({ merge_group: { base_sha: parent } });
+  assert.deepEqual(event, { base: parent, label: `the merge group's parent ${parent.slice(0, 12)}` });
+  assert.throws(
+    () =>
+      checkAddedMigrationsSortLast(
+        validatePublicMigrationTrack(repo.migrations),
+        migrationFileNamesAt(resolveBaseCommit(event.base, repo.directory), { repoRoot: repo.directory }),
+        event.label,
+      ),
+    /public migration 20260000000066_late\.sql is not newer than 20260000000068_queued_ahead\.sql, the newest migration at the merge group's parent /u,
+  );
+  const absent = mergeGroup({ merge_group: { base_sha: "0".repeat(40) } });
+  assert.throws(() => resolveBaseCommit(absent.base, repo.directory), /is not in this checkout/u);
+  assert.throws(() => mergeGroup({ merge_group: {} }), /names no base_sha/u);
+  assert.throws(() => mergeGroup({ merge_group: { base_sha: "main" } }), /names no base_sha/u);
+  assert.throws(
+    () => githubEventBase({ env: { GITHUB_EVENT_NAME: "merge_group" }, repoRoot: repo.directory }),
+    /needs the event payload GITHUB_EVENT_PATH names/u,
+  );
+});
+
+test("other runs have no base, and the flag needs GitHub's event name and a test merge", (t) => {
+  const repo = repository(t);
+  repo.commit("20260000000064_first.sql");
+  for (const name of ["push", "workflow_dispatch"]) {
+    assert.equal(githubEventBase({ env: { GITHUB_EVENT_NAME: name }, repoRoot: repo.directory }), null);
+  }
+  assert.throws(() => githubEventBase({ env: {}, repoRoot: repo.directory }), /GITHUB_EVENT_NAME/u);
+  // Neither a root commit nor an ordinary commit with one parent is a test
+  // merge, whose first parent is the base.
+  for (const next of [null, "20260000000066_second.sql"]) {
+    if (next) {
+      repo.commit(next);
+    }
+    assert.throws(
+      () => githubEventBase({ env: PULL_REQUEST, repoRoot: repo.directory }),
+      /must check out GitHub's test merge commit/u,
+      String(next),
+    );
+  }
+});
+
+test("the command takes --base <commit> or --base-from-github-event, and nothing else", () => {
+  assert.deepEqual(parseArguments([]), {});
+  assert.deepEqual(parseArguments(["--base", "origin/main"]), { base: "origin/main" });
+  assert.deepEqual(parseArguments(["--base-from-github-event"]), { fromGithubEvent: true });
+  for (const args of [
+    ["--base"],
+    ["--base", ""],
+    ["--base", "--base-from-github-event"],
+    ["--base-from-github-event", "--base", "main"],
+    ["main"],
+  ]) {
+    assert.throws(() => parseArguments(args), /^Error: usage: /u, JSON.stringify(args));
+  }
+  const run = (args, env = process.env) =>
+    spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8", env });
+  const bad = run(["--base"]);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /^Public migration validation failed: usage: /u);
+  const push = run(["--base-from-github-event"], { ...process.env, GITHUB_EVENT_NAME: "push" });
+  assert.equal(push.status, 0, push.stderr);
+  assert.match(
+    push.stdout,
+    /^Validated \d+ public Supabase migration\(s\); a push run has no base to compare with$/mu,
+  );
+  const head = run(["--base", "HEAD"]);
+  assert.equal(head.status, 0, head.stderr);
+  assert.match(
+    head.stdout,
+    /^Validated \d+ public Supabase migration\(s\); (?:none added since HEAD|the \d+ added since HEAD sort after \S+)$/mu,
+  );
+});
+
+test("the command compares a pull request's test merge with its base from end to end", (t) => {
+  const run = (repo, args, env) => {
+    const lines = [];
+    main({ args, env, repoRoot: repo.directory, directory: repo.migrations, log: (line) => lines.push(line) });
+    return lines;
+  };
+  const late = testMerge(t, "20260000000068_late.sql");
+  for (const [args, env] of [
+    [["--base-from-github-event"], PULL_REQUEST],
+    [["--base", "HEAD^1"], {}],
+  ]) {
+    assert.throws(
+      () => run(late, args, env),
+      /public migration 20260000000068_late\.sql is not newer than 20260000000070_landed_first\.sql/u,
+      JSON.stringify(args),
+    );
+  }
+  assert.deepEqual(run(late, ["--base-from-github-event"], { GITHUB_EVENT_NAME: "push" }), [
+    "Validated 4 public Supabase migration(s); a push run has no base to compare with",
+  ]);
+  assert.deepEqual(run(late, [], PULL_REQUEST), ["Validated 4 public Supabase migration(s)"]);
+
+  const next = testMerge(t, "20260000000072_next.sql");
+  assert.deepEqual(run(next, ["--base-from-github-event"], PULL_REQUEST), [
+    `Validated 4 public Supabase migration(s); the 1 added since the pull request's base ${next.base.slice(0, 12)} sort after 20260000000070_landed_first.sql`,
+  ]);
+  assert.deepEqual(run(next, ["--base", next.base], {}), [
+    `Validated 4 public Supabase migration(s); the 1 added since ${next.base} sort after 20260000000070_landed_first.sql`,
+  ]);
+  assert.deepEqual(run(next, ["--base", "HEAD"], {}), [
+    "Validated 4 public Supabase migration(s); none added since HEAD",
+  ]);
+});
+
+test("a base with no migrations to compare with fails rather than passing every migration", (t) => {
+  const run = (repoRoot, directory, args) =>
+    main({ args, env: {}, repoRoot, directory, log: () => {} });
+  // A base from before the history began.
+  const repo = repository(t);
+  writeFileSync(path.join(repo.directory, "README.md"), "fixture\n");
+  repo.git("add", "README.md");
+  repo.git("commit", "-q", "-m", "README.md");
+  repo.commit("20260000000064_first.sql");
+  assert.throws(
+    () => run(repo.directory, repo.migrations, ["--base", "HEAD^1"]),
+    /^Error: HEAD\^1 has no public migrations in supabase\/migrations to compare with; run this from a checkout of this repository whose history includes them$/u,
+  );
+  // A copy inside another repository, whose own top level has no migrations:
+  // git lists the base from that top level.
+  const outer = repository(t);
+  const copy = path.join(outer.directory, "vendor", "core");
+  const copied = path.join(copy, "supabase", "migrations");
+  mkdirSync(copied, { recursive: true });
+  migration(copied, "20260000000064_first.sql");
+  outer.git("add", "--all");
+  outer.git("commit", "-q", "-m", "vendor/core");
+  assert.throws(
+    () => run(copy, copied, ["--base", "HEAD"]),
+    /^Error: HEAD has no public migrations in supabase\/migrations to compare with; /u,
   );
 });
