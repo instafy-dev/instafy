@@ -4746,11 +4746,12 @@ async fn a_lane_turn_takes_no_input_secrets_proxy_token_or_plan() -> anyhow::Res
 }
 
 /// Only the computer that leased a lane turn ends it or posts to it
-/// (docs/Local-Engine-Turns.md 2.4, 2.6). Neither a token with no runtime,
-/// which any member with write access can mint for the agent routes, nor
-/// another runtime's of the space, a teammate's computer or the person's own
-/// other one, completes, fails or posts to the turn, queued or leased: each
-/// is answered as a job it cannot find, and writes no reply, usage row,
+/// (docs/Local-Engine-Turns.md 2.4, 2.6), as for every job. Neither a token
+/// with no runtime, which any member with write access can mint for the agent
+/// routes, nor another runtime's of the space, a teammate's computer or the
+/// person's own other one, completes, fails or posts to the turn, queued or
+/// leased: the token with no runtime is refused outright, another runtime is
+/// answered as for a job it cannot find, and none writes a reply, usage row,
 /// failure, conversation state or run change. The turn's own computer still
 /// posts its steps and ends it.
 #[tokio::test]
@@ -4835,10 +4836,18 @@ async fn only_the_computer_that_leased_a_lane_turn_ends_it_or_posts_to_it() -> a
                     lane.lease_one(lane.desktop, job).await?;
                 }
                 let before = snapshot().await?;
-                for (who, token) in [
-                    ("no runtime", &no_runtime),
-                    ("a teammate's computer", &teammates_computer),
-                    ("the person's other computer", &own_other_computer),
+                for (who, token, refusal) in [
+                    ("no runtime", &no_runtime, StatusCode::UNAUTHORIZED),
+                    (
+                        "a teammate's computer",
+                        &teammates_computer,
+                        StatusCode::NOT_FOUND,
+                    ),
+                    (
+                        "the person's other computer",
+                        &own_other_computer,
+                        StatusCode::NOT_FOUND,
+                    ),
                 ] {
                     for (path, body) in &forged {
                         let (status, response) = lane
@@ -4846,8 +4855,7 @@ async fn only_the_computer_that_leased_a_lane_turn_ends_it_or_posts_to_it() -> a
                             .call("POST", *path, Some(token.as_str()), Some(body.clone()))
                             .await?;
                         assert_eq!(
-                            status,
-                            StatusCode::NOT_FOUND,
+                            status, refusal,
                             "{who}, {path}, leased {leased}: {response}"
                         );
                     }

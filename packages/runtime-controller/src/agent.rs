@@ -2285,46 +2285,26 @@ pub(crate) async fn agent_heartbeat(
 /// deterministic winner: cancellation first makes this SELECT return no row;
 /// message delivery first commits before cancellation can update the job.
 ///
-/// Only the runtime that leased a local-engine turn posts to it: a token with
-/// no runtime never does (crate::claude_code_lane).
-fn agent_message_job_select_sql(runtime_scoped: bool) -> &'static str {
-    if runtime_scoped {
-        "select run_id,
-                prompt_id,
-                session_id,
-                conversation_id,
-                payload,
-                created_at,
-                leased_at,
-                lease_attempts,
-                leased_by_runtime_id,
-                engine
-         from agent_jobs
-         where id = $1
-           and project_id = $2
-           and status = 'leased'
-           and coalesce(leased_by_runtime_id, $3::uuid) = $3
-           and (engine is null or leased_by_runtime_id = $3)
-         for update"
-    } else {
-        "select run_id,
-                prompt_id,
-                session_id,
-                conversation_id,
-                payload,
-                created_at,
-                leased_at,
-                lease_attempts,
-                leased_by_runtime_id,
-                engine
-         from agent_jobs
-         where id = $1
-           and project_id = $2
-           and status = 'leased'
-           and engine is null
-         for update"
-    }
-}
+/// Only the runtime that leased a job posts to it, while the job is leased
+/// ($3, the token's runtime): never another runtime of the space, and never
+/// a runtime whose lease of the job ended (docs/Self-Hosted-Runtime-Security.md).
+/// A token that names no runtime is refused before this runs.
+const AGENT_MESSAGE_JOB_SELECT_SQL: &str = "select run_id,
+        prompt_id,
+        session_id,
+        conversation_id,
+        payload,
+        created_at,
+        leased_at,
+        lease_attempts,
+        leased_by_runtime_id,
+        engine
+ from agent_jobs
+ where id = $1
+   and project_id = $2
+   and status = 'leased'
+   and leased_by_runtime_id = $3
+ for update";
 
 #[instrument(skip(state, headers, payload))]
 pub(crate) async fn agent_message(
@@ -2334,11 +2314,14 @@ pub(crate) async fn agent_message(
 ) -> Result<Json<AgentMessageResponseBody>, (StatusCode, Json<ApiError>)> {
     let token = extract_agent_token(&headers)?;
     let claims = verify_agent_token_with_scopes(&state.config, token, &["agent.message"])?;
-    let TokenContext {
-        project_id,
-        runtime_id: token_runtime_id,
-        ..
-    } = claims;
+    // Only the runtime that leased a job posts to it, whatever STRICT_MODE
+    // says, so a token that names no runtime posts nowhere. Refused here, not
+    // in verify_agent_token_with_scopes: /runtime/stop takes that function's
+    // 401 as its cue to try a person's session instead.
+    let runtime_uuid = claims
+        .runtime_id
+        .ok_or_else(|| unauthorized("agent token missing runtime scope"))?;
+    let project_id = claims.project_id;
 
     let AgentMessagePayload {
         job_id,
@@ -2355,14 +2338,6 @@ pub(crate) async fn agent_message(
     let job_uuid =
         Uuid::from_str(&job_id).map_err(|_| bad_request("job_id must be a valid UUID"))?;
 
-    let runtime_scope = if state.config.strict_mode {
-        Some(token_runtime_id.ok_or_else(|| {
-            unauthorized("agent token missing runtime scope while strict mode is enabled")
-        })?)
-    } else {
-        token_runtime_id
-    };
-
     let mut connection = state
         .pool
         .get()
@@ -2373,35 +2348,16 @@ pub(crate) async fn agent_message(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    if let Some(runtime_uuid) = runtime_scope.as_ref() {
-        ensure_agent_token_matches_runtime_lease_for_job(
-            &state,
-            &transaction,
-            &claims,
-            runtime_uuid,
-        )
+    ensure_agent_token_matches_runtime_lease_for_job(&state, &transaction, &claims, &runtime_uuid)
         .await?;
-    }
 
-    let row = match runtime_scope {
-        Some(runtime_uuid) => {
-            transaction
-                .query_opt(
-                    agent_message_job_select_sql(true),
-                    &[&job_uuid, &project_id, &runtime_uuid],
-                )
-                .await
-        }
-        None => {
-            transaction
-                .query_opt(
-                    agent_message_job_select_sql(false),
-                    &[&job_uuid, &project_id],
-                )
-                .await
-        }
-    }
-    .map_err(|error| internal_error(format!("failed to load agent job: {error}")))?;
+    let row = transaction
+        .query_opt(
+            AGENT_MESSAGE_JOB_SELECT_SQL,
+            &[&job_uuid, &project_id, &runtime_uuid],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load agent job: {error}")))?;
 
     let row = match row {
         Some(row) => row,
@@ -2532,13 +2488,12 @@ pub(crate) async fn agent_message(
         metadata_value,
     )
     .await?;
-    let multi_agent_plan_receipt_fence = claims
-        .runtime_id
-        .filter(|id| Some(*id) == row.get::<_, Option<Uuid>>("leased_by_runtime_id"))
-        .map(|_| crate::multi_agent_plan::PlanningReceiptFence {
-            claims,
-            lease_attempt: row.get("lease_attempts"),
-        });
+    // The job matched only as leased by the token's own runtime, so a plan
+    // it posts always settles its parent behind that runtime's lease attempt.
+    let multi_agent_plan_receipt_fence = Some(crate::multi_agent_plan::PlanningReceiptFence {
+        claims,
+        lease_attempt: row.get("lease_attempts"),
+    });
     let multi_agent_plan_message_id = message_row.id;
     let multi_agent_plan_metadata = message_row.metadata.clone();
     let multi_agent_plan_content = message_row.content.clone();
@@ -3297,6 +3252,95 @@ async fn refund_managed_ai_reserve_on_failed_completion(
     Ok(Some(org_id))
 }
 
+/// Ends a job with its runtime's outcome. Only the runtime that leased the
+/// job ends it, while the job is leased ($8, the token's runtime): never
+/// another runtime of the space, and never a job back in the queue, which
+/// ends through its next lease, a stop, a cancel or the sweeps
+/// (docs/Self-Hosted-Runtime-Security.md). There is no lease-expiry check:
+/// a runtime still ends its job after the lease lapsed, as long as nothing
+/// requeued the job, as a plan worker refused a renewal for want of a worker
+/// slot does.
+const AGENT_COMPLETE_JOB_UPDATE_SQL: &str = "update agent_jobs
+ set status = $3,
+     outcome = $4,
+     summary = $5,
+     error_message = $6,
+     artifacts = coalesce($7::jsonb, '[]'::jsonb),
+     completed_at = now(),
+     lease_expires_at = null,
+     active_input_ready_runtime_id = null,
+     active_input_ready_expires_at = null,
+     active_input_ready_turn_id = null,
+     heartbeat_at = now()
+ where id = $1
+   and project_id = $2
+   and status = 'leased'
+   and leased_by_runtime_id = $8
+ returning id,
+           project_id,
+           run_id,
+           conversation_id,
+           leased_by_runtime_id,
+           payload,
+           created_at,
+           leased_at,
+           completed_at,
+           lease_attempts,
+           grant_ids,
+           engine";
+
+/// Logs a completion that matched no job its runtime holds, with the job's
+/// status now. One back in the queue after a lease (`queued`, with
+/// `lease_attempts` above zero, leased by nobody) is most often a turn that
+/// finished after the idle release requeued its job under its still-running
+/// runtime: that result is lost, and the job runs again.
+async fn warn_completion_matched_no_lease(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: &Uuid,
+    job_id: &Uuid,
+    runtime_id: &Uuid,
+) {
+    let job = transaction
+        .query_opt(
+            "select status, lease_attempts, leased_by_runtime_id
+             from agent_jobs
+             where id = $1 and project_id = $2",
+            &[job_id, project_id],
+        )
+        .await;
+    match job {
+        Ok(Some(job)) => {
+            let job_status: String = job.get("status");
+            let lease_attempts: i32 = job.get("lease_attempts");
+            let leased_by: Option<Uuid> = job.get("leased_by_runtime_id");
+            warn!(
+                project_id = %project_id,
+                job_id = %job_id,
+                runtime_id = %runtime_id,
+                job_status = %job_status,
+                lease_attempts,
+                leased_by_this_runtime = leased_by == Some(*runtime_id),
+                leased_by_a_runtime = leased_by.is_some(),
+                "agent completion matched no job its runtime holds"
+            );
+        }
+        Ok(None) => warn!(
+            project_id = %project_id,
+            job_id = %job_id,
+            runtime_id = %runtime_id,
+            job_status = "missing",
+            "agent completion matched no job its runtime holds"
+        ),
+        Err(error) => warn!(
+            project_id = %project_id,
+            job_id = %job_id,
+            runtime_id = %runtime_id,
+            %error,
+            "agent completion matched no job its runtime holds, and the job could not be read"
+        ),
+    }
+}
+
 #[instrument(skip(state, headers, payload))]
 pub(crate) async fn agent_complete(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -3305,11 +3349,14 @@ pub(crate) async fn agent_complete(
 ) -> Result<Json<AgentCompleteResponseBody>, (StatusCode, Json<ApiError>)> {
     let token = extract_agent_token(&headers)?;
     let claims = verify_agent_token_with_scopes(&state.config, token, &["agent.complete"])?;
-    let TokenContext {
-        project_id,
-        runtime_id: token_runtime_id,
-        ..
-    } = claims;
+    // Only the runtime that leased a job ends it, whatever STRICT_MODE says,
+    // so a token that names no runtime ends nothing. Refused here, not in
+    // verify_agent_token_with_scopes: /runtime/stop takes that function's 401
+    // as its cue to try a person's session instead.
+    let runtime_uuid = claims
+        .runtime_id
+        .ok_or_else(|| unauthorized("agent token missing runtime scope"))?;
+    let project_id = claims.project_id;
 
     let AgentCompletePayload {
         job_id,
@@ -3341,13 +3388,6 @@ pub(crate) async fn agent_complete(
         _ => unreachable!(),
     };
     let final_status_string = run_status.to_string();
-    let runtime_scope = if state.config.strict_mode {
-        Some(token_runtime_id.ok_or_else(|| {
-            unauthorized("agent token missing runtime scope while strict mode is enabled")
-        })?)
-    } else {
-        token_runtime_id
-    };
 
     let mut connection = state
         .pool
@@ -3359,16 +3399,14 @@ pub(crate) async fn agent_complete(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    if let Some(runtime_uuid) = runtime_scope.as_ref() {
-        ensure_agent_token_matches_runtime_lease_for_use(
-            &state,
-            &transaction,
-            &claims,
-            runtime_uuid,
-            AgentTokenUse::Completion,
-        )
-        .await?;
-    }
+    ensure_agent_token_matches_runtime_lease_for_use(
+        &state,
+        &transaction,
+        &claims,
+        &runtime_uuid,
+        AgentTokenUse::Completion,
+    )
+    .await?;
 
     let artifacts_value =
         sanitize_json_for_postgres(artifacts.unwrap_or_else(|| JsonValue::Array(Vec::new())));
@@ -3426,112 +3464,31 @@ pub(crate) async fn agent_complete(
     // answers what the job update below would refuse anyway.
     ensure_project_not_deleted(&transaction, &project_id, false, StatusCode::GONE).await?;
 
-    let row = match runtime_scope {
-        Some(runtime_uuid) => {
-            transaction
-                .query_opt(
-                    "update agent_jobs
-                     set status = $3,
-                         outcome = $4,
-                         summary = $5,
-                         error_message = $6,
-                         artifacts = coalesce($7::jsonb, '[]'::jsonb),
-                         completed_at = now(),
-                         lease_expires_at = null,
-                         active_input_ready_runtime_id = null,
-                         active_input_ready_expires_at = null,
-                         active_input_ready_turn_id = null,
-                         heartbeat_at = now()
-                     where id = $1
-                       and project_id = $2
-                       and status in ('leased','queued')
-                       and coalesce(leased_by_runtime_id, $8::uuid) = $8
-                       -- A local-engine turn ends only by the runtime that
-                       -- leased it: one still queued ends through the sweeps,
-                       -- a stop of its runtime or a cancel, never by another
-                       -- runtime of the space (crate::claude_code_lane).
-                       and (engine is null or leased_by_runtime_id = $8)
-                     returning id,
-                               project_id,
-                               run_id,
-                               conversation_id,
-                               leased_by_runtime_id,
-	                               payload,
-	                               created_at,
-	                               leased_at,
-                               completed_at,
-	                               lease_attempts,
-                               grant_ids,
-                               engine",
-                    &[
-                        &job_uuid,
-                        &project_id,
-                        &job_status,
-                        &outcome_lower,
-                        &summary_ref,
-                        &error_ref,
-                        &artifacts_json,
-                        &runtime_uuid,
-                    ],
-                )
-                .await
-        }
-        None => {
-            transaction
-                .query_opt(
-                    "update agent_jobs
-                     set status = $3,
-                         outcome = $4,
-                         summary = $5,
-                         error_message = $6,
-                         artifacts = coalesce($7::jsonb, '[]'::jsonb),
-                         completed_at = now(),
-                         lease_expires_at = null,
-                         active_input_ready_runtime_id = null,
-                         active_input_ready_expires_at = null,
-                         active_input_ready_turn_id = null,
-                         heartbeat_at = now()
-                     where id = $1 and project_id = $2 and status in ('leased','queued')
-                       -- A token with no runtime never ends a local-engine
-                       -- turn, which only its leasing runtime ends.
-                       and engine is null
-                     returning id,
-                               project_id,
-                               run_id,
-                               conversation_id,
-                               leased_by_runtime_id,
-	                               payload,
-	                               created_at,
-	                               leased_at,
-                               completed_at,
-	                               lease_attempts,
-                               grant_ids,
-                               engine",
-                    &[
-                        &job_uuid,
-                        &project_id,
-                        &job_status,
-                        &outcome_lower,
-                        &summary_ref,
-                        &error_ref,
-                        &artifacts_json,
-                    ],
-                )
-                .await
-        }
-    }
-    .map_err(|error| internal_error(format!("failed to complete job: {error}")))?;
+    let row = transaction
+        .query_opt(
+            AGENT_COMPLETE_JOB_UPDATE_SQL,
+            &[
+                &job_uuid,
+                &project_id,
+                &job_status,
+                &outcome_lower,
+                &summary_ref,
+                &error_ref,
+                &artifacts_json,
+                &runtime_uuid,
+            ],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to complete job: {error}")))?;
 
-    let row = match row {
-        Some(row) => row,
-        None => {
-            if state.config.strict_mode {
-                return Err(forbidden(
-                    "job must be leased by the same runtime that completes it while strict mode is enabled",
-                ));
-            }
-            return Err(not_found("agent job not found or already completed"));
+    let Some(row) = row else {
+        warn_completion_matched_no_lease(&transaction, &project_id, &job_uuid, &runtime_uuid).await;
+        if state.config.strict_mode {
+            return Err(forbidden(
+                "job must be leased by the same runtime that completes it while strict mode is enabled",
+            ));
         }
+        return Err(not_found("agent job not found or already completed"));
     };
     // A local-engine turn (crate::claude_code_lane): its completion keeps only
     // what the lane writes, and bills nothing.
@@ -7034,6 +6991,10 @@ fn extract_multi_agent_plan_details(value: &JsonValue) -> Option<&JsonValue> {
 mod deleted_space_fence_tests;
 
 #[cfg(test)]
+#[path = "agent/leasing_runtime_tests.rs"]
+mod leasing_runtime_tests;
+
+#[cfg(test)]
 #[path = "agent_proxy_token_tests.rs"]
 mod proxy_token_tests;
 
@@ -7485,36 +7446,61 @@ mod tests {
         assert!(preamble.contains("Never use NO_RESPONSE for an error"));
     }
 
+    /// The predicates of `sql`'s `where` clause in order, whitespace
+    /// collapsed: everything between `where` and the `for update` or
+    /// `returning` that ends it, split on `and`.
+    fn where_predicates(sql: &str) -> Vec<String> {
+        let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clause = sql.split(" where ").nth(1).expect("a where clause");
+        let clause = clause.split(" for update").next().unwrap_or(clause);
+        let clause = clause.split(" returning ").next().unwrap_or(clause);
+        clause.split(" and ").map(str::to_string).collect()
+    }
+
     #[test]
     fn agent_message_delivery_locks_the_exact_live_job_row() {
-        for runtime_scoped in [false, true] {
-            let sql = agent_message_job_select_sql(runtime_scoped).to_ascii_lowercase();
-            for fence in [
-                "from agent_jobs",
-                "where id = $1",
+        let sql = AGENT_MESSAGE_JOB_SELECT_SQL.to_ascii_lowercase();
+        assert!(sql.contains("from agent_jobs"));
+        assert_eq!(
+            sql.matches("for update").count(),
+            1,
+            "job row must be locked exactly once"
+        );
+        // Only the runtime that leased the job posts to it, while it is
+        // leased: no coalesce lets a job no runtime holds match, and no
+        // engine case gives local-engine turns a rule of their own.
+        assert_eq!(
+            where_predicates(&sql),
+            [
+                "id = $1",
                 "project_id = $2",
                 "status = 'leased'",
-                "for update",
-            ] {
-                assert!(
-                    sql.contains(fence),
-                    "missing message-delivery fence: {fence}"
-                );
-            }
-            assert_eq!(
-                sql.matches("for update").count(),
-                1,
-                "job row must be locked exactly once"
-            );
-        }
-        assert!(agent_message_job_select_sql(true)
-            .contains("coalesce(leased_by_runtime_id, $3::uuid) = $3"));
-        assert!(!agent_message_job_select_sql(false).contains("$3"));
-        // A local-engine turn takes messages only from the runtime that
-        // leased it, never through a token with no runtime.
-        assert!(agent_message_job_select_sql(true)
-            .contains("and (engine is null or leased_by_runtime_id = $3)"));
-        assert!(agent_message_job_select_sql(false).contains("and engine is null"));
+                "leased_by_runtime_id = $3",
+            ]
+        );
+        assert!(!sql.contains("coalesce"));
+    }
+
+    #[test]
+    fn agent_completion_ends_only_a_job_its_own_runtime_holds() {
+        let sql = AGENT_COMPLETE_JOB_UPDATE_SQL.to_ascii_lowercase();
+        assert!(sql.starts_with("update agent_jobs"));
+        // Only the runtime that leased the job ends it, while it is leased:
+        // never a queued job, never through a coalesce that lets a job no
+        // runtime holds match, and with no check of the lease's expiry, so a
+        // lapsed lease that nothing requeued still ends.
+        assert_eq!(
+            where_predicates(&sql),
+            [
+                "id = $1",
+                "project_id = $2",
+                "status = 'leased'",
+                "leased_by_runtime_id = $8",
+            ]
+        );
+        assert!(!sql.contains("coalesce(leased_by_runtime_id"));
+        assert!(!sql.contains("'queued'"));
+        assert!(!sql.contains("lease_expires_at >"));
     }
 
     #[test]

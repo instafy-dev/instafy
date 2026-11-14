@@ -8,8 +8,8 @@ use crate::config::{AppConfig, PgPool};
 use crate::credits::ManagedAiRefundOutcome;
 use crate::dispatch::{self, DispatchPromptRequest};
 use crate::tests::{
-    build_app_config, build_test_state, ensure_test_user, setup_origin_test_pool,
-    test_origin_private_key, test_origin_public_key,
+    build_app_config, build_test_state, ensure_test_user, lease_job_to_space_runtime,
+    setup_origin_test_pool, test_origin_private_key, test_origin_public_key,
 };
 use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
 use crate::{agent, AppState};
@@ -371,25 +371,17 @@ pub(crate) async fn daily_prompts_used(pool: &PgPool, user_id: &Uuid) -> anyhow:
     Ok(count)
 }
 
-fn mint_agent_token(config: &AppConfig, project_id: &Uuid, scope: &str) -> anyhow::Result<String> {
-    let minted = mint_scoped_token(
-        config,
-        ScopedTokenRequest {
-            audience: project_id.to_string(),
-            subject: "agent:managed-ai-refund-test".to_string(),
-            project_id: project_id.to_string(),
-            origin_id: None,
-            runtime_id: None,
-            protocol: None,
-            scopes: vec![scope.to_string()],
-            lease_id: None,
-            run_id: None,
-            prefer_runtime: None,
-            ttl_seconds: Some(300),
-        },
+/// Leases the fixture's job to its space's runtime, as the runtime that
+/// leased a job is the only one that posts to it or ends it, and gives that
+/// runtime's agent token.
+async fn lease_to_space_runtime(fixture: &ReservedManagedAiPrompt) -> anyhow::Result<String> {
+    lease_job_to_space_runtime(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.project_id,
+        &fixture.job_id,
     )
-    .map_err(|error| controller_error("mint agent token", error))?;
-    Ok(minted.token)
+    .await
 }
 
 /// Leases the fixture's job and builds its `/agent/complete` request.
@@ -397,16 +389,7 @@ pub(crate) async fn agent_complete_request(
     fixture: &ReservedManagedAiPrompt,
     body: serde_json::Value,
 ) -> anyhow::Result<Request<Body>> {
-    {
-        let connection = fixture.pool.get().await?;
-        connection
-            .execute(
-                "update agent_jobs set status = 'leased' where id = $1",
-                &[&fixture.job_id],
-            )
-            .await?;
-    }
-    let token = mint_agent_token(&fixture.config, &fixture.project_id, "agent.complete")?;
+    let token = lease_to_space_runtime(fixture).await?;
     Ok(Request::builder()
         .method("POST")
         .uri("/agent/complete")
@@ -421,16 +404,7 @@ pub(crate) async fn post_agent_message(
     fixture: &ReservedManagedAiPrompt,
     body: serde_json::Value,
 ) -> anyhow::Result<StatusCode> {
-    {
-        let connection = fixture.pool.get().await?;
-        connection
-            .execute(
-                "update agent_jobs set status = 'leased' where id = $1",
-                &[&fixture.job_id],
-            )
-            .await?;
-    }
-    let token = mint_agent_token(&fixture.config, &fixture.project_id, "agent.message")?;
+    let token = lease_to_space_runtime(fixture).await?;
     let request = Request::builder()
         .method("POST")
         .uri("/agent/message")
@@ -1207,5 +1181,169 @@ async fn managed_ai_refund_is_idempotent_across_sinks() -> anyhow::Result<()> {
             .count(),
         1
     );
-    Ok(())
+    fixture.cleanup().await
+}
+
+/// `token` posts `body` to the agent route `path`; the answer's status.
+async fn post_as(
+    fixture: &ReservedManagedAiPrompt,
+    token: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> anyhow::Result<StatusCode> {
+    let response = agent::router()
+        .with_state(fixture.state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    Ok(response.status())
+}
+
+/// Only the runtime that leased a job ends it, so a completion from anywhere
+/// else neither gives a managed turn's reserve back nor bills its usage: a
+/// token that names no runtime is refused outright, another runtime of the
+/// space finds no job, and the ledger, the balance, the prompt's managed-AI
+/// mark, the daily prompt slot and the run stay as they were. The leasing
+/// runtime's own failed completion then gives the reserve back.
+#[tokio::test]
+async fn a_completion_from_another_runtime_refunds_and_bills_nothing() -> anyhow::Result<()> {
+    use futures_util::FutureExt;
+
+    let Some(fixture) = seed_reserved_managed_ai_prompt("refused-completion").await? else {
+        eprintln!("skipping refused completion billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    // The fixture's org goes however the body ends, a failed assertion
+    // included: its space holds a ready runtime, which a later test's sweep
+    // would otherwise meet.
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let leasing = lease_to_space_runtime(&fixture).await?;
+        let other_runtime = Uuid::new_v4();
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into runtimes (
+                     id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
+                     capabilities
+                 ) values ($1, $2, 'instafy-cloud', 'ready', 600, now(),
+                           '{\"agent\": true, \"origin\": true}'::jsonb)",
+                &[&other_runtime, &fixture.project_id],
+            )
+            .await?;
+        let other = crate::auth::issue_agent_token(
+            &fixture.config,
+            &fixture.project_id,
+            &other_runtime,
+            None,
+            None,
+        )
+        .map_err(|error| controller_error("another runtime's agent token", error))?
+        .token;
+        let no_runtime = mint_scoped_token(
+            &fixture.config,
+            ScopedTokenRequest {
+                audience: fixture.project_id.to_string(),
+                subject: fixture.other_user_id.to_string(),
+                project_id: fixture.project_id.to_string(),
+                origin_id: None,
+                runtime_id: None,
+                protocol: None,
+                scopes: vec!["agent.complete".to_string()],
+                lease_id: None,
+                run_id: None,
+                prefer_runtime: None,
+                ttl_seconds: Some(300),
+            },
+        )
+        .map_err(|error| controller_error("a token with no runtime", error))?
+        .token;
+
+        // A refusal before any model answered gives the reserve back; 3,000
+        // output tokens would cost two credits against the one-credit reserve.
+        let refund = json!({
+            "job_id": fixture.job_id,
+            "outcome": "failed",
+            "error_message": PROXY_401_ERROR,
+            "artifacts": [],
+        });
+        let usage = json!({
+            "job_id": fixture.job_id,
+            "outcome": "succeeded",
+            "summary": "Someone else's answer.",
+            "artifacts": [{
+                "kind": "codex/run-log",
+                "events": [{ "type": "turn.completed", "usage": {
+                    "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 3000
+                } }],
+            }],
+        });
+        let billing = || async {
+            anyhow::Ok((
+                ledger_rows(&fixture.pool, &fixture.project_id).await?,
+                credit_balance(&fixture.pool, &fixture.org_id).await?,
+                prompt_metadata(&fixture.pool, &fixture.prompt_id).await?["managedAiUsed"].clone(),
+                daily_prompts_used(&fixture.pool, &fixture.owner_user_id).await?,
+                run_row(&fixture.pool, &fixture.run_id).await?,
+            ))
+        };
+        let before = billing().await?;
+        for (who, token, refusal) in [
+            ("no runtime", &no_runtime, StatusCode::UNAUTHORIZED),
+            ("another runtime", &other, StatusCode::NOT_FOUND),
+        ] {
+            for body in [&refund, &usage] {
+                assert_eq!(
+                    post_as(&fixture, token, "/agent/complete", body).await?,
+                    refusal,
+                    "{who}: {body}"
+                );
+            }
+        }
+        assert_eq!(
+            billing().await?,
+            before,
+            "a refused completion bills nothing"
+        );
+
+        assert_eq!(
+            post_as(&fixture, &leasing, "/agent/complete", &refund).await?,
+            StatusCode::OK
+        );
+        let rows = ledger_rows(&fixture.pool, &fixture.project_id).await?;
+        assert_eq!(
+            rows.iter()
+                .filter(|(reason, _, _)| reason == "managed_ai_refund")
+                .map(|(_, delta, _)| *delta)
+                .collect::<Vec<_>>(),
+            vec![fixture.burn_amount],
+            "the leasing runtime's refusal gives the reserve back, got {rows:?}"
+        );
+        assert_eq!(
+            credit_balance(&fixture.pool, &fixture.org_id).await?,
+            fixture.reserved_balance + fixture.burn_amount
+        );
+        anyhow::Ok(())
+    })
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.cleanup().await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => {
+            if let Err(error) = cleanup {
+                eprintln!(
+                    "[runtime-controller tests] fixture cleanup failed after a panic: {error:#}"
+                );
+            }
+            std::panic::resume_unwind(panic)
+        }
+    }
 }

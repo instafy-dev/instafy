@@ -377,7 +377,7 @@ These rules change `lease_next_agent_job` (RC/agent.rs:4816-5376), `agent_lease`
 
 In `agent_complete` (RC/agent.rs:3244), for a job whose `engine` is set:
 
-- **Only the runtime that leased it.** Only the runtime that leased a lane job can complete it or post messages to it. The completion and message routes match a lane job only when the caller's runtime is its `leased_by_runtime_id`, and a token that names no runtime, which a write member can mint while `STRICT_MODE` is off, never matches one: the answer is the existing 404, and nothing is written. A queued lane job therefore ends only through the sweeps, a stop of its runtime or a cancel. Other jobs keep their existing rules.
+- **Only the runtime that leased it.** Only the runtime that leased a lane job can complete it or post messages to it. This is now every job's rule ([Self-hosted runtime security](Self-Hosted-Runtime-Security.md)), and lane jobs have no rule of their own: the completion and message routes refuse a token that names no runtime, which a write member can mint, with 401 whatever `STRICT_MODE` says, and match a job only while it is `leased` and its `leased_by_runtime_id` is the caller's runtime. Another runtime gets the existing 404 (403 with `STRICT_MODE` on), and nothing is written. A queued lane job therefore ends only through the sweeps, a stop of its runtime or a cancel.
 - **Provider.** Stored as `claude-code` whatever the runtime reports (3693). A job without an engine that reports `claude-code` stores no provider id, and the controller logs it.
 - **Conversation state (3697-3704).** Only the lane shapes are kept:
   - `{"provider": "claude-code", "version": 1, "sessionId": "<uuid>", "runtimeId": "<uuid>"}`;
@@ -1106,7 +1106,7 @@ Rules:
   - A stamped reply whose header is hidden, such as a quiet reply in a chat of one or the same speaker again, shows the line on its own, and the read-only run trace keeps a stamped reply's header and line at every width.
   - A failed turn shows no such line, since its failure sentence already names Claude Code.
 - **Details** show the model (from `init`) and the token counts, never a cost. Message stats, Copy stats and the run trace's usage badges show the model too, and count as the controller's usage row does (2.6): input is every input token, cache writes and reads included, and cached is the cache reads.
-- **Teammates** get run status from the live event stream while the turn runs, because an event that names another person's private runtime is reduced to that (RC/events.rs:623-644; docs/Self-Hosted-Runtime-Security.md:70-76). They also get the streaming reply draft: `run.reply_draft` names no runtime, so that reduction does not apply to it, as for a Codex turn on a person's own computer on `main`. Adding the runtime to the draft event would hide Codex drafts from teammates as well, so it stays as it is. The draft's text is the reply's, which they see anyway. The steps and the reply carry `leaseMetrics.leasedByRuntimeId`, so they reach teammates only through the message history (RC/conversations.rs:3073-3228), with the failure and its metadata, and Studio chooses the teammate wording by viewer.
+- **Teammates** get run status from the live event stream while the turn runs, because an event that names another person's private runtime is reduced to that (RC/events.rs:623-644; docs/Self-Hosted-Runtime-Security.md:92-98). They also get the streaming reply draft: `run.reply_draft` names no runtime, so that reduction does not apply to it, as for a Codex turn on a person's own computer on `main`. Adding the runtime to the draft event would hide Codex drafts from teammates as well, so it stays as it is. The draft's text is the reply's, which they see anyway. The steps and the reply carry `leaseMetrics.leasedByRuntimeId`, so they reach teammates only through the message history (RC/conversations.rs:3073-3228), with the failure and its metadata, and Studio chooses the teammate wording by viewer.
   - They can press Stop.
   - Steer is refused.
   - Their messages never reach the session.
@@ -1304,7 +1304,7 @@ No suite needs a Claude login, and public CI holds no Anthropic secret (AGENTS.m
   - The busy-to-queue fallback refuses a claim.
   - A claim in a chat that device grants name for someone else gets 409 `claude_code_conversation_granted`, and nothing is recorded.
 - **Completion.**
-  - Only the computer that leased a lane turn ends it or posts to it: a token a write member mints with no runtime, a teammate's computer and the person's other computer each get 404, while the job is queued and while it is leased, and nothing is written (2.6).
+  - Only the computer that leased a lane turn ends it or posts to it: a token a write member mints with no runtime gets 401, and a teammate's computer and the person's other computer each get 404, while the job is queued and while it is leased, and nothing is written (2.6).
   - The steps the runtime sends as notes keep `details.presentation` exactly as sent, for the author and for a teammate (3.7).
   - The provider is forced to `claude-code`.
   - A forged `codex/run-log` bills nothing, and the usage row is `billed: false`.

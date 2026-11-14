@@ -168,6 +168,14 @@ while holding that lock to order drafts before completion or cancellation. Old c
 do not have the route cause draft delivery to stop without interrupting the job. Draft traffic
 does not wake idle lease polls.
 
+The durable steps and reply (`POST /agent/message`) and the job's end (`POST /agent/complete`)
+come only from the runtime that leased the job, for every job and whatever `STRICT_MODE` says: a
+token that names no runtime is refused with 401, and the job must be `leased` by the token's own
+runtime, so another runtime, or any runtime once the job is back in the queue, gets 404 (403 in
+strict mode) and writes nothing. Neither checks the lease's expiry, so a runtime whose lease
+lapsed while nothing requeued the job still ends it
+([Self-hosted runtime security](Self-Hosted-Runtime-Security.md)).
+
 ## Conversation goals
 
 A conversation goal is persisted in `conversations.metadata.instafyGoal`. Studio
@@ -354,9 +362,11 @@ any user id goes into it.
 - The job holds no credential, device grant or plan role, is leased once and only within a minute
   of the send, by that runtime alone, and gets no proxy token, model-facing controller token,
   project secret or history. That runtime leases it before any other job pinned to it. Only that
-  runtime can complete it or post its steps: a token that names no runtime, or another runtime's,
-  never can, so a queued one ends only by the sweeps, a stop of its runtime or a cancel. It costs
-  no credits. Nobody can steer it; any member with write access may stop it.
+  runtime can complete it or post its steps, as only the runtime that leased any job can, while
+  the job is leased ([Self-hosted runtime security](Self-Hosted-Runtime-Security.md)): a token
+  that names no runtime, or another runtime's, never can, so a queued one ends only by the sweeps,
+  a stop of its runtime or a cancel. It costs no credits. Nobody can steer it; any member with
+  write access may stop it.
 - A runtime stop fails such a job in its own transaction. The turn's run, its Home row and its
   failure message are written just after the stop commits, in a short transaction that locks the
   turn's chat and no runtime, and a step of the 10 s idle sweep writes them for a turn whose own

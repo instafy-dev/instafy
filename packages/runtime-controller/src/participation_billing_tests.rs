@@ -259,12 +259,6 @@ async fn assert_ambient_telemetry_for_access_mode(
         )
         .await?
         .get("id");
-    connection
-        .execute(
-            "update agent_jobs set status = 'leased' where id = $1",
-            &[&job_id],
-        )
-        .await?;
     let initial_metadata = connection
         .query_one("select metadata from prompts where id = $1", &[&prompt_id])
         .await?
@@ -290,7 +284,7 @@ async fn assert_ambient_telemetry_for_access_mode(
     let _watch = state.events.watch_project(project_id);
     let mut credit_events = state.events.subscribe();
 
-    let token = mint_agent_message_token(&config, &project_id)?;
+    let token = lease_job_to_space_runtime(&pool, &config, &project_id, &job_id).await?;
     for (message_type, content) in [
         (
             "token_usage",
