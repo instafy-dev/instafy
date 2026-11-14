@@ -1177,12 +1177,15 @@ fn a_preflight_failure_names_the_folder_only_relative_to_itself() {
         );
         let message = completion["error_message"].as_str().unwrap();
         assert!(
-            message.starts_with("git couldn't list this space's files")
-                && message.contains("missing"),
+            message.starts_with("git couldn't list this space's files"),
             "{message}"
         );
+        // Whether git names the broken gitdir depends on its version: macOS's git prints the
+        // absolute path, which is redacted to `missing`; newer ones print only `.git`. Either way
+        // no absolute path reaches the message.
         assert!(
-            !message.contains(&space.root.display().to_string()),
+            !message.contains(&space.root.display().to_string())
+                && !message.contains(&missing.display().to_string()),
             "{message}"
         );
         assert!(space.print_calls().is_empty(), "no turn started");
