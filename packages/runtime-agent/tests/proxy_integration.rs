@@ -41,6 +41,9 @@ mod browser_hand_back;
 #[path = "proxy_integration/client_timezone.rs"]
 mod client_timezone;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "support/code_mode_host.rs"]
+mod code_mode_host_support;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "proxy_integration/evidence_retry.rs"]
 mod evidence_retry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -688,10 +691,10 @@ fn write_inert_chatgpt_login(dir: &Path) -> Result<PathBuf> {
 }
 
 /// Code-mode-only models run every tool in `codex-code-mode-host`, which runtime-agent looks for
-/// beside its own executable: in these tests the test binary, in `target/<profile>/deps`. Links
-/// the host that `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host`
-/// left in `target/<profile>`, as proxy_retry_budget does, and fails naming that command when it
-/// is missing.
+/// beside its own executable: in these tests the test binary. Links the host that
+/// `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` left in the
+/// Cargo profile directory above it (support/code_mode_host.rs), as proxy_retry_budget does, and
+/// fails naming that command when it is missing.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn stage_code_mode_host() -> Result<()> {
     static STAGED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -701,12 +704,12 @@ fn stage_code_mode_host() -> Result<()> {
                 let executable = std::env::current_exe()?;
                 let deps = executable.parent().context("test binary directory")?;
                 let name = runtime_agent::code_mode_host::EXECUTABLE_NAME;
-                let built = deps.parent().context("Cargo profile directory")?.join(name);
-                anyhow::ensure!(
-                    built.is_file(),
-                    "a code-mode model needs {name} in {}; build it with `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` (see DEV_SETUP.md)",
-                    deps.parent().unwrap_or(deps).display()
-                );
+                let built = code_mode_host_support::built_code_mode_host(deps, name).with_context(|| {
+                    format!(
+                        "a code-mode model needs {name} in the Cargo profile directory above {}; build it with `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` (see DEV_SETUP.md)",
+                        deps.display()
+                    )
+                })?;
                 let staged = deps.join(name);
                 // Replace any earlier copy so a rebuilt host is the one under test.
                 let _ = fs::remove_file(&staged);

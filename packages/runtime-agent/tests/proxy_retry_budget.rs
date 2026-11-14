@@ -19,6 +19,9 @@ use runtime_agent::task_usage::{TaskUsage, UsagePhase};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[path = "support/code_mode_host.rs"]
+mod code_mode_host_support;
+
 const CHILD_MARKER: &str = "INSTAFY_PROXY_RETRY_TEST_CHILD";
 const API_KEY: &str = "inert-local-retry-test-key";
 const FINAL_TEXT: &str = "LOCAL_RETRY_OK";
@@ -849,10 +852,11 @@ fn test_model() -> String {
 }
 
 /// Code-mode-only models, including the default gpt-6-luna, run every tool in
-/// `codex-code-mode-host`, which runtime-agent looks for beside its own executable. A test
-/// binary lives in `target/<profile>/deps`, so link the host that
-/// `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` left in
-/// `target/<profile>`. Without it, a code-mode-only model fails every scenario here, loudly.
+/// `codex-code-mode-host`, which runtime-agent looks for beside its own executable, here the test
+/// binary. Link the host that
+/// `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` left in the
+/// Cargo profile directory above it (support/code_mode_host.rs). Without it, a code-mode-only
+/// model fails every scenario here, loudly.
 fn stage_code_mode_host_beside_test_binary() -> Result<()> {
     static STAGED: OnceLock<Result<(), String>> = OnceLock::new();
     STAGED
@@ -863,16 +867,12 @@ fn stage_code_mode_host_beside_test_binary() -> Result<()> {
                 let deps = test_binary
                     .parent()
                     .context("test binary has no directory")?;
-                let Some(built) = deps
-                    .parent()
-                    .map(|profile| profile.join(name))
-                    .filter(|built| built.is_file())
-                else {
+                let Some(built) = code_mode_host_support::built_code_mode_host(deps, name) else {
                     let model = test_model();
                     if runtime_agent::code_mode_host::bundled_model_is_code_mode_only(&model)? {
                         bail!(
-                            "{model} runs its tools only through {name}, which is not built in {}; build it with `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` (see DEV_SETUP.md) or set {TEST_MODEL_ENV}=gpt-5.5",
-                            deps.parent().unwrap_or(deps).display()
+                            "{model} runs its tools only through {name}, which is not built in the Cargo profile directory above {}; build it with `cargo build --features code-mode-host -p runtime-agent -p codex-code-mode-host` (see DEV_SETUP.md) or set {TEST_MODEL_ENV}=gpt-5.5",
+                            deps.display()
                         );
                     }
                     return Ok(());

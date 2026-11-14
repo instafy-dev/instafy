@@ -33,6 +33,9 @@ use runtime_agent::jobs::routing_check::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[path = "support/code_mode_host.rs"]
+mod code_mode_host_support;
+
 /// This binary's own tests, as `cargo test` runs them.
 const TESTS: &[(&str, fn() -> Result<()>)] = &[
     ("routing_check_offline", offline),
@@ -574,8 +577,8 @@ fn expected_answer(case: &Case) -> Value {
 }
 
 /// Code-mode-only models (gpt-6-luna among them) start no turn without `codex-code-mode-host`
-/// beside the runtime's executable, here this binary in `target/<profile>/deps`. Links the host
-/// that the build command in DEV_SETUP.md leaves in `target/<profile>`.
+/// beside the runtime's executable, here this binary. Links the host that the build command in
+/// DEV_SETUP.md leaves in the Cargo profile directory above it (support/code_mode_host.rs).
 fn stage_code_mode_host(model: &str) -> Result<()> {
     if !runtime_agent::code_mode_host::bundled_model_is_code_mode_only(model)? {
         return Ok(());
@@ -583,15 +586,12 @@ fn stage_code_mode_host(model: &str) -> Result<()> {
     let name = runtime_agent::code_mode_host::EXECUTABLE_NAME;
     let executable = std::env::current_exe()?;
     let deps = executable.parent().context("this binary's directory")?;
-    let built = deps
-        .parent()
-        .context("the Cargo profile directory")?
-        .join(name);
-    ensure!(
-        built.is_file(),
-        "{model} runs only with {name}, which is not built in {}: build it with `cargo build --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host` (DEV_SETUP.md), or pass --model gpt-5.5",
-        deps.parent().unwrap_or(deps).display()
-    );
+    let built = code_mode_host_support::built_code_mode_host(deps, name).with_context(|| {
+        format!(
+            "{model} runs only with {name}, which is not built in the Cargo profile directory above {}: build it with `cargo build --manifest-path packages/runtime-agent/Cargo.toml --features code-mode-host -p runtime-agent -p codex-code-mode-host` (DEV_SETUP.md), or pass --model gpt-5.5",
+            deps.display()
+        )
+    })?;
     let staged = deps.join(name);
     // Replace an earlier copy, so a rebuilt host is the one used.
     let _ = fs::remove_file(&staged);
