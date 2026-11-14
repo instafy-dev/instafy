@@ -434,6 +434,7 @@ fn browser_job(project_id: Uuid, transport: &str, hands_back: bool) -> LeaseJob 
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     }
 }
 

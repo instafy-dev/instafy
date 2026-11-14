@@ -1222,13 +1222,17 @@ fn strip_reserved_controller_notice_claims(value: &mut JsonValue) -> bool {
     };
     let source_is_controller = normalized(map.get("source")).as_deref() == Some("controller");
     // Only the controller writes these, so a recorded message never claims
-    // one: a runtime alert, a run's cancellation, or the line an Undo leaves
+    // one: a runtime alert, a run's cancellation, the line an Undo leaves
     // (`change_undone.rs`), which marks a change undone in every Studio and
-    // reaches later turns.
+    // reaches later turns, or the failure message of a local-engine turn a
+    // runtime stop failed (`runtime::record_failed_claude_code_turn`).
     let reserved_kind = normalized(map.get("kind")).is_some_and(|value| {
         matches!(
             value.as_str(),
-            "runtime_alert" | "run_cancellation" | crate::change_undone::CHANGE_UNDONE_KIND
+            "runtime_alert"
+                | "run_cancellation"
+                | crate::change_undone::CHANGE_UNDONE_KIND
+                | crate::claude_code_lane::MACHINE_STOPPED
         )
     });
     let reserved_message_type =
@@ -1309,6 +1313,11 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     crate::user_input_requests::routing::strip_claims(&mut metadata);
     // Only a runtime's step carries an activity label (crate::chat_activity).
     crate::chat_activity::strip_activity_claims(&mut metadata);
+    // Only dispatch stamps a turn as run on its person's own Claude Code, and
+    // only the controller writes its failure code; a recorded message never
+    // carries the claim either (crate::claude_code_lane). Not even the
+    // service role records them.
+    crate::claude_code_lane::strip_client_marks(&mut metadata);
     if trusted_service_role {
         return metadata;
     }
@@ -2926,7 +2935,11 @@ pub(crate) async fn post_conversation_message(
     }
 
     let expected_lane_idle = body.expected_lane_idle.unwrap_or(false);
-    let queued_message = if expected_lane_idle {
+    // Read here, since dispatch takes the claim: a send that claims its
+    // person's own Claude Code is never queued behind a busy chat
+    // (crate::claude_code_lane).
+    let claimed = crate::claude_code_lane::carries_claim(body.metadata.as_ref());
+    let queued_message = if expected_lane_idle && !claimed {
         Some(serde_json::to_value(&body).map_err(|error| {
             internal_error(format!(
                 "failed to preserve interactive message for lane admission: {error}"
@@ -2971,6 +2984,7 @@ pub(crate) async fn post_conversation_message(
             Ok(response) => response,
             Err((StatusCode::CONFLICT, Json(api_error)))
                 if expected_lane_idle
+                    && !claimed
                     && api_error.code.as_deref() == Some("dispatch_lane_busy") =>
             {
                 // The composer observed an idle lane, but another linearized
@@ -4403,6 +4417,11 @@ fn build_conversation_message_metadata(request: &DispatchPromptNormalized) -> Js
     }
     map.insert("prompt_metadata".to_string(), prompt_metadata);
     crate::job_trigger::stamp_message(&mut map, request.trigger.as_ref());
+    // A turn its person's own Claude Code runs: the controller's stamps, where
+    // clients read a message's AI access (crate::claude_code_lane).
+    if request.claude_code_lane.is_some() {
+        crate::claude_code_lane::stamp(&mut map);
+    }
     // Prompt metadata is otherwise nested for the runtime. Persist the validated
     // human identities at the same canonical message key as record-only sends.
     if let Some(mentions) = request.metadata.get("mentionedUserIds") {

@@ -1,4 +1,5 @@
 import { useCallback, useRef } from "react";
+import { usesTurnEngine } from "../../../conversations/runFailurePresentation";
 import { didSendFailForPromptSentFromThisPage } from "../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../types";
 import { isBrowserNoticePrompt, readBrowserHandBackOf } from "./browserHandBack";
@@ -216,6 +217,25 @@ export function stoppedRequestOf(
 }
 
 /**
+ * Whether the Stop ended a turn-engine turn: a turn it names was started by a
+ * prompt that claimed an engine or that the controller stamped as one, or the
+ * request it would carry on is one. Continue goes out as an automatic send,
+ * which never carries an engine, so it would run the person's words on
+ * another engine (docs/Local-Engine-Turns.md 5.6).
+ */
+function stopEndedTurnEngineTurn(
+  messages: readonly ChatMessage[],
+  notice: ChatMessage,
+  carried: { handBack: ChatMessage | null; request: ChatMessage | null },
+): boolean {
+  if (usesTurnEngine(notice.metadata)) return true;
+  const prompts = readChatRunStopNotice(notice).runIds.map((run) => promptOfRun(messages, run));
+  return [...prompts, carried.handBack, carried.request].some(
+    (message) => message !== null && usesTurnEngine(message.metadata),
+  );
+}
+
+/**
  * Whether `entry` is a press of Continue under `stop` that never went out
  * (the controller refused it): it took nothing on from the Stop.
  */
@@ -266,6 +286,8 @@ export function useChatRunStopContinuation(options: Options) {
     const carried = stoppedRequestOf(state.messages, message, { handBackSendable: Boolean(state.resendHandBack) });
     // It carries on a request in that person's name, so only for them.
     if (!carried || carried.by !== state.viewerUserId) return false;
+    // A turn-engine turn is not carried on: nothing sends it again by itself.
+    if (stopEndedTurnEngineTurn(state.messages, message, carried)) return false;
     // The person undid what a turn of the stopped request changed (any of
     // them: Continue carries the whole request on): carrying it on would put
     // back what they took back.

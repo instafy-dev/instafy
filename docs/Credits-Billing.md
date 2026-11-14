@@ -485,6 +485,25 @@ turn, and a hand-back that carries some is refused. Words someone sends into any
 while it runs (a steer) make it theirs: the steer marks the job `steeredByPerson`, and from then on
 it is charged as a turn they sent.
 
+### Local-engine turns
+
+A local-engine turn, one message whose sender had their own Claude Code carry it out on their own
+computer ([Local-engine turns](Local-Engine-Turns.md)), costs no credits, whether it succeeds,
+fails or is stopped. Instafy AI and the Instafy proxy take no part in it: it runs on the sender's
+own Claude Code sign-in, under Anthropic's current terms, and that sign-in may bill their Claude
+plan or their own API or cloud account. So dispatch takes no reserve and no daily prompt slot and
+writes no `ai_usage_jobs` row, the turn adds no ledger row (the Credits panel's log shows none),
+and its completion reconciles nothing: it drops any `codex/run-log` artifact the job sends, so no
+usage it reports can be billed.
+
+The usage such a turn shows is Claude Code's own report, in Details only: "Claude Code reported:
+input N, cached M, output K", with the model it ran (a `claude_code_turn_usage` row marked
+`billed: false`). Input counts every input token Claude Code reported, its cache writes and reads
+included, as a Codex turn's input includes its cached tokens, and cached counts the cache reads;
+a message's stats count them the same way and name the model. It counts tokens and never shows a
+cost: the runtime drops Claude Code's own cost estimate, which is an API price, not what a Claude
+plan costs.
+
 ### What one turn is billed for
 
 A turn is billed once, from the tokens of its first attempt: the `turn.completed` usage at the end

@@ -67,13 +67,13 @@ function route(key, github, enabled = '') {
 const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget, provider_mcp and read-reference selectors, the
   // code-mode host build, per-model proxy_retry_budget runs, inert native compaction,
-  // native chat image, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream and page card selectors, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
+  // native chat image, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the hermetic local-engine turn targets, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
   // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, and MCP server, login profile and space id path suites bound below, and the local author pseudonym key
   // test in the contracts lane, and the tunnel broker test lane in the Rust tests
   // aggregate, also bound by check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: 'aa15806453291dceabd859545f4a295ec8a7fc99ea974b4c3045ebb7d66b10de' },
+    previousHash: 'a4529ff27cb5df063f975a82c0f846f0c9efe464ae1801b1ddeaa60c45f637ad' },
   // The Browser UI rendering aggregate came with the lane's split into parts;
   // reversing that split exactly (inside withoutBrowserUiJobBudget) removes it.
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),

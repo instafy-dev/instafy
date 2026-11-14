@@ -10070,6 +10070,7 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "base64 0.21.7",
+ "caseless",
  "chrono",
  "codex-apply-patch",
  "codex-arg0",

@@ -12,7 +12,15 @@ import {
 } from "react";
 import { Check, NavArrowDown, NavArrowRight } from "iconoir-react";
 import { Button } from "../../../components/Button";
-import type { RunFailurePresentation } from "../../../conversations/runFailurePresentation";
+import {
+  hasFailedRunMetadata,
+  readControllerStampedTurnEngine,
+  usesTurnEngine,
+  type RunFailurePresentation,
+  type TurnEngineTurnOwner,
+} from "../../../conversations/runFailurePresentation";
+import { useOptionalRuntimeState } from "../../../runtime/RuntimeStateProvider";
+import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
 import type { ChatMessage } from "../types";
 import { TurnActivityLine } from "./TurnActivityLine";
 import type { ScheduledRunFailureAutoRetry } from "./useRunFailureAutoRetry";
@@ -52,6 +60,27 @@ export type RunFailureRetryContextValue = {
    * failures whose cause is a missing credential (kind === "needs_ai").
    */
   onConnectAi?: () => void;
+  /**
+   * Who sent the turn-engine turn a message belongs to (its failure, or its
+   * reply), as far as the chat can tell; null when it cannot. A failed
+   * turn's card words it for its sender or for everyone else, and only its
+   * sender gets {@link resendWithTurnEngine} (docs/Local-Engine-Turns.md
+   * 5.5-5.7).
+   */
+  turnEngineOwnerOf?: (message: Pick<ChatMessage, "id" | "timestamp" | "metadata">) => TurnEngineTurnOwner | null;
+  /**
+   * Puts a failed turn-engine turn's message back in the composer, with that
+   * engine chosen for the next message, for its sender to send again. It
+   * never sends anything itself.
+   */
+  resendWithTurnEngine?: (failureMessage: ChatMessage) => void;
+  /**
+   * True when a failure belongs to a turn-engine turn by its own metadata or
+   * by its prompt's, whether or not this Studio knows the engine and whether
+   * or not the controller stamped the failure. Its card offers no Try again:
+   * nothing sends such a turn again from it (docs/Local-Engine-Turns.md 5.6).
+   */
+  isTurnEngineTurn?: (failureMessage: ChatMessage) => boolean;
 };
 
 const RunFailureRetryContext = createContext<RunFailureRetryContextValue | null>(null);
@@ -78,6 +107,51 @@ function readAiAccessMode(message: ChatMessage): string {
   }
   const mode = (metadata as Record<string, unknown>)["aiAccessMode"];
   return typeof mode === "string" ? mode.trim().toLowerCase() : "";
+}
+
+/**
+ * The status entry of the runtime that ran a turn, as the turn's final
+ * message names it (`runtimePreference`, which the controller copies from
+ * the job), when the viewer has that entry.
+ */
+function runtimeEntryOfTurn(
+  message: ChatMessage,
+  runtimeStatuses: readonly ControllerRuntimeStatusEntry[] | null | undefined,
+): ControllerRuntimeStatusEntry | null {
+  const metadata = message.metadata;
+  const preference =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>)["runtimePreference"]
+      : null;
+  const runtimeId =
+    preference && typeof preference === "object" && !Array.isArray(preference)
+      ? (preference as Record<string, unknown>)["runtimeId"]
+      : null;
+  if (typeof runtimeId !== "string" || !runtimeId.trim() || !runtimeStatuses) {
+    return null;
+  }
+  return runtimeStatuses.find((entry) => entry.runtimeId === runtimeId.trim()) ?? null;
+}
+
+/**
+ * The plain-text line under the header of a turn-engine turn's reply ("Ran on
+ * Sam's own Claude Code, on their computer"), or null. Only the controller's
+ * own stamp on the message shows it: a client's claim never does
+ * (docs/Local-Engine-Turns.md 5.7). A failed turn has no reply: its failure
+ * sentence names the engine itself.
+ */
+export function useTurnEngineSpeakerLine(
+  message: Pick<ChatMessage, "id" | "timestamp" | "metadata"> | null,
+): string | null {
+  const retryContext = useRunFailureRetry();
+  if (!message || hasFailedRunMetadata(message.metadata)) {
+    return null;
+  }
+  const stamped = readControllerStampedTurnEngine(message.metadata);
+  if (!stamped) {
+    return null;
+  }
+  return stamped.presentation.describeSpeaker(retryContext?.turnEngineOwnerOf?.(message) ?? null);
 }
 
 /** Where focus goes once a pressed control leaves the card's actions row. */
@@ -221,6 +295,31 @@ export function RunFailureMessageBody({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = useId();
   const retryContext = useRunFailureRetry();
+  const runtimeStatuses = useOptionalRuntimeState()?.runtimeStatuses ?? null;
+  // A failed turn of a turn engine (docs/Local-Engine-Turns.md 5.5, 5.6): its
+  // sender reads its engine's sentence for the code, with what the runtime
+  // that ran it says; everyone else reads only that it couldn't finish on
+  // the sender's computer, also when the chat cannot tell who sent it. It is
+  // never sent again from here: no Try again for anyone, only its sender's
+  // way back to the composer with the engine chosen.
+  const turnEngine = presentation.turnEngine ?? null;
+  const turnEngineOwner = turnEngine ? retryContext?.turnEngineOwnerOf?.(message) ?? null : null;
+  const turnEngineSender = turnEngineOwner?.isViewer === true;
+  const friendlyText = turnEngine
+    ? turnEngineSender
+      ? turnEngine.authorText(runtimeEntryOfTurn(message, runtimeStatuses))
+      : turnEngine.teammateText(turnEngineOwner?.name ?? null)
+    : presentation.friendlyText;
+  const resendWithTurnEngine =
+    turnEngine && turnEngineSender ? retryContext?.resendWithTurnEngine ?? null : null;
+  // Nothing sends a turn-engine turn again from its card, also one this
+  // Studio does not word as its engine's (an engine it was not built with,
+  // or a failure without the controller's stamp): the failure, or its
+  // prompt, says it ran on another engine than the runtime's own.
+  const turnEngineTurn =
+    turnEngine !== null ||
+    usesTurnEngine(message.metadata) ||
+    (retryContext?.isTurnEngineTurn?.(message) ?? false);
   const retryPending = retryContext !== null && retryContext.pendingRetryKey === message.id;
   const otherRetryInFlight =
     retryContext !== null && retryContext.pendingRetryKey !== null && !retryPending;
@@ -256,10 +355,15 @@ export function RunFailureMessageBody({
   // reads "Retried".
   const quiet = autoRetrying || scheduledAutoRetry !== null;
   // Details opens what the sentence above it leaves out: the raw text, unless
-  // it is that same sentence, and the turn's steps.
-  const detailsText = sameSentence(presentation.rawText, presentation.friendlyText) ? null : presentation.rawText;
+  // it is that same sentence, and the turn's steps. A turn engine's failure
+  // keeps its raw text for its sender: it is about their own sign-in, plan or
+  // computer, and everyone else reads only that it couldn't finish (5.5).
+  const detailsText =
+    (turnEngine && !turnEngineSender) || sameSentence(presentation.rawText, friendlyText)
+      ? null
+      : presentation.rawText;
   const hasDetails = Boolean(detailsText?.trim()) || Boolean(steps);
-  const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit;
+  const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit && !turnEngineTurn;
   const showRetry = showManualControls && (retryPending || (!superseded && !withdrawn));
   const showRetried = showManualControls && superseded && !retryPending;
 
@@ -399,8 +503,19 @@ export function RunFailureMessageBody({
         </div>
       ) : (
         <div className="min-w-0 space-y-1.5">
-          <p className="whitespace-pre-wrap break-words text-sm">{presentation.friendlyText}</p>
+          <p className="whitespace-pre-wrap break-words text-sm">{friendlyText}</p>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            {turnEngine && resendWithTurnEngine ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                radius="xl"
+                data-testid="run-failure-turn-engine-resend"
+                onPress={() => resendWithTurnEngine(message)}
+              >
+                {turnEngine.resendLabel}
+              </Button>
+            ) : null}
             {needsAi && onConnectAi ? (
               <Button
                 variant="primary"

@@ -23,9 +23,8 @@ use uuid::Uuid;
 use crate::codex::{CodexClient, CodexConfig, CodexExecutionError, CodexRunOptions};
 use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{PERSISTENT_HELPER_BASE_ENV_KEYS, is_model_child_excluded_env_key};
+use crate::process_tree;
 use crate::task_usage::{TaskUsage, UsagePhase};
-
-mod process_tree;
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
@@ -360,7 +359,10 @@ pub async fn run_with_program(
     let mut child = command
         .spawn()
         .context("failed to start isolated tool worker")?;
-    let mut tree = process_tree::ProcessTree::new(child.id().context("worker has no process id")?);
+    let mut tree = process_tree::ProcessTree::new(
+        child.id().context("worker has no process id")?,
+        &CLEANUP_UNCONFIRMED,
+    );
     let stderr = child
         .stderr
         .take()
@@ -477,9 +479,10 @@ pub async fn run_with_program(
         .unwrap_or_default();
     if cleanup.is_err() || !matches!(reaped, Ok(Ok(_))) {
         mark_cleanup_unconfirmed();
+        // The tree's only failure is descendants that outlived termination.
         let cleanup_message = cleanup
             .err()
-            .map(|error| error.to_string())
+            .map(|_| "isolated worker descendants survived termination".to_string())
             .unwrap_or_else(|| "isolated worker could not be reaped".into());
         let (usage_artifact, codex_error_info, prior_error) = match &result {
             Ok(output) => (output.usage_artifact.clone(), None, None),

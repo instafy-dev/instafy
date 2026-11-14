@@ -22,6 +22,8 @@ export type DesktopCodexVisibleSession = {
   accessToken?: string;
   userId?: string;
   expiresAt?: number;
+  /** The account's email, for naming it in a native dialog. Never an identity check. */
+  email?: string;
 };
 
 export type DesktopInstafySessionIdentity = {

@@ -26,8 +26,9 @@
 //!   four teams started at once on an upstream that takes two requests per 30 s: the re-run landed
 //!   in a window the other teams' lanes had used up (run r11-pacing).
 //! - Not a team's lane or follow-on agent (its group retries it), not a terminal command, not a
-//!   turn bound to a person's own or a shared browser, which a stop does not move either, and not
-//!   a job holding device grants (`device_grants.rs`), which no lease hands out again.
+//!   turn bound to a person's own or a shared browser, which a stop does not move either, not
+//!   a job holding device grants (`device_grants.rs`), which no lease hands out again, and not
+//!   a local-engine turn (`claude_code_lane.rs`), which nothing runs a second time.
 //!
 //! The hold is the stated wait plus a jitter fixed per job, as for lanes, and never ends before
 //! the cooldown the pacing (`upstream_pacing`) holds the job's upstream in, which the attempt's
@@ -69,6 +70,8 @@ pub(crate) struct EndedTurn<'a> {
     pub(crate) acted: bool,
     /// Its job holds device grants.
     pub(crate) holds_grants: bool,
+    /// Its job runs on its person's own engine (`agent_jobs.engine`).
+    pub(crate) local_engine: bool,
 }
 
 /// How many times the job already went back to the queue after a short rate limit. A record
@@ -87,6 +90,7 @@ pub(crate) fn retry_wait(turn: &EndedTurn<'_>) -> Option<Duration> {
     if turn.status != "failed"
         || turn.acted
         || turn.holds_grants
+        || turn.local_engine
         || reruns_so_far(turn.payload) >= MAX_RERUNS
     {
         return None;
@@ -159,6 +163,7 @@ pub(crate) async fn maybe_requeue(
         .query_one(
             "select aj.status, aj.intent, aj.agent_role,
                     aj.grant_ids is not null as holds_grants,
+                    aj.engine is not null as local_engine,
                     exists (
                         select 1 from conversation_messages m
                         where m.project_id = aj.project_id
@@ -192,6 +197,7 @@ pub(crate) async fn maybe_requeue(
         agent_role: agent_role.as_deref(),
         acted: row.get::<_, bool>("used_a_tool") || row.get::<_, bool>("started_a_job") || replied,
         holds_grants: row.get("holds_grants"),
+        local_engine: row.get("local_engine"),
     };
     let Some(wait) = retry_wait(&turn) else {
         return Ok(None);
@@ -310,6 +316,7 @@ mod tests {
             agent_role: None,
             acted: false,
             holds_grants: false,
+            local_engine: false,
         }
     }
 
@@ -408,6 +415,14 @@ mod tests {
         let mut granted = turn(&payload, RATE_LIMITED);
         granted.holds_grants = true;
         assert_eq!(retry_wait(&granted), None, "a job holding device grants");
+
+        let mut local_engine = turn(&payload, RATE_LIMITED);
+        local_engine.local_engine = true;
+        assert_eq!(
+            retry_wait(&local_engine),
+            None,
+            "a local-engine turn, which nothing runs a second time"
+        );
 
         for transport in ["desktop-personal", "shared", "desktop_personal"] {
             let browser = json!({"metadata": {"browserTransport": transport}});

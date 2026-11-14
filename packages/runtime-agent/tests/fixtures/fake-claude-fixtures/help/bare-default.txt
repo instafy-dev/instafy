@@ -1,0 +1,35 @@
+Usage: claude [options] [command] [prompt]
+
+A stand-in for the Claude Code help text, written for runtime-agent's tests. It keeps the
+shape the lane reads: options at two spaces, wrapped descriptions in a column of their own.
+
+Arguments:
+  prompt                                  Your prompt
+
+Options:
+  --add-dir <directories...>              Additional directories to allow tool
+                                          access to
+  --bare                                  Minimal mode, the default in print
+                                          mode: skip hooks, plugins, MCP servers
+                                          and CLAUDE.md discovery
+  -h, --help                              Display help for command
+  --include-partial-messages              Include partial message chunks as they
+                                          arrive (only with --print and
+                                          --output-format=stream-json)
+  --mcp-config <configs...>               Load MCP servers from JSON files or
+                                          strings
+  --output-format <format>                Output format (only with --print):
+                                          "text", "json" or "stream-json"
+  --permission-mode <mode>                Permission mode for the session
+  --permission-prompts <mode>             What to do with a permission prompt
+                                          that nobody can answer
+  -p, --print                             Print the response and exit
+  -r, --resume [value]                    Resume a conversation by session ID
+  --setting-sources <sources>             Comma-separated setting sources to
+                                          load (user, project, local)
+  --strict-mcp-config                     Only use MCP servers from --mcp-config
+  --verbose                               Override the verbose mode setting
+  -v, --version                           Output the version number
+
+Commands:
+  auth                                    Manage authentication

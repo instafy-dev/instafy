@@ -44,7 +44,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Personal Browser desktop architecture and security boundary: `docs/Personal-Browser.md`
 - Local tab sharing, human control and independent Explore: `docs/Local-Browser-Sharing.md`
 - Private self-hosted ownership and future Team runtime boundary: `docs/Self-Hosted-Runtime-Security.md`
-- Local-engine turns, one @octo turn that a person's own Claude Code carries out on their own computer (a design, built in phases and off until its last): [Local-engine turns](Local-Engine-Turns.md)
+- Local-engine turns, one @octo turn that a person's own Claude Code carries out on their own computer (the design and what was built; off until its last phase turns it on): [Local-engine turns](Local-Engine-Turns.md)
 - Space bootstrap template (seeded into new workspaces): `packages/runtime-agent/assets/instafy/INSTAFY.md`
 
 ## Debugging Entry Points

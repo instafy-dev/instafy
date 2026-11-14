@@ -399,12 +399,17 @@ async fn record_job_end_inner(
 ) -> anyhow::Result<()> {
     let mut connection = pool.get().await?;
     let transaction = connection.transaction().await?;
+    // A local-engine turn (`engine`, crate::claude_code_lane) runs on its
+    // person's own Claude Code, on no Instafy upstream: its end teaches
+    // nothing. Without this its missing credential would count it as the
+    // platform's, and a Claude plan limit that reads like a rate limit would
+    // hold the space's plan agents.
     let Some(job) = transaction
         .query_opt(
             &format!(
                 "select {key} as upstream_key, aj.project_id, aj.status, aj.error_message,
                         {PLAN_AGENT_SQL} as plan_agent
-                 from agent_jobs aj where aj.id = $1",
+                 from agent_jobs aj where aj.id = $1 and aj.engine is null",
                 key = upstream_key_sql("aj"),
             ),
             &[&job_id],

@@ -115,10 +115,20 @@ export function resolveAgentWaitingActivityCopy(input: {
   workspaceStarting: boolean;
   queued: boolean;
   runtimeLimit?: AgentWaitingRuntimeLimit | null;
+  /**
+   * The turn runs on a turn engine, which words its start itself
+   * (turnEngineStartingLine). Such a turn never waits on a cloud runtime, so
+   * this line also stands in for the runtime-busy notice.
+   */
+  turnEngineStartingLine?: string | null;
 }): { label: string; ariaLabel: string; isRuntimeBusyNotice?: true } {
   const names = input.displayNames.filter((name) => name.trim().length > 0);
   const multiple = names.length > 1;
   const subject = names.join(", ") || "Octo";
+
+  if (input.turnEngineStartingLine) {
+    return { label: input.turnEngineStartingLine, ariaLabel: `${subject}: ${input.turnEngineStartingLine}` };
+  }
 
   // The runtime slot wall must out-rank every generic waiting phrase: a
   // message queued behind runtime_limit_reached will not send until the

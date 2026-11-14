@@ -410,6 +410,7 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
     let registration = registration_for_live(Uuid::new_v4());
 
@@ -804,6 +805,7 @@ async fn run_stopped_as_leased(first: FirstModelCall) -> Result<()> {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
     let mut registration = registration_for_live(Uuid::new_v4());
     registration.heartbeat_url = controller_url.join("/agent/heartbeat")?;

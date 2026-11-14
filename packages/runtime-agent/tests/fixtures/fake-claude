@@ -1,0 +1,250 @@
+#!/bin/sh
+# A stand-in for Claude Code's `claude` command, for runtime-agent's local-engine tests
+# (docs/Local-Engine-Turns.md, section 8). It reads no credential and contacts nothing.
+#
+# The lane starts `claude` with a cleared environment, so tests start this script through a
+# wrapper they write, which sets these variables and execs it:
+#   FAKE_CLAUDE_RECORD_DIR  each call records its argv, stdin, environment and cwd in a new
+#                           call-N folder here: argv (NUL-separated), stdin, env (`env` output)
+#                           and cwd (`pwd -P`), then an empty `done`. Unset: nothing is recorded.
+#   FAKE_CLAUDE_FIXTURES    the fixture folder (default: fake-claude-fixtures beside this script)
+#   FAKE_CLAUDE_VERSION     the `--version` answer: version/<name>.txt (default: supported)
+#   FAKE_CLAUDE_HELP        the `--help` answer: help/<name>.txt (default: full)
+#   FAKE_CLAUDE_AUTH        the `auth status` answer: auth/<name>.json (default: claude-ai)
+#   FAKE_CLAUDE_PROBE_DELAY seconds each of those three answers waits first (default: none)
+#   FAKE_CLAUDE_SCENARIO    the `--print` run: scenarios/<name>.jsonl (default: record-only,
+#                           which only records the call)
+#   FAKE_CLAUDE_SESSION     the session id a scenario prints for @SESSION@ (default: a fixed UUID)
+#
+# A fixture <name>.<ext> may have a <name>.exit beside it, holding the exit status (default 0).
+# Two names are behaviours instead of files, for any of the three answers: `hang` sleeps past
+# every probe limit, and `flood` prints more than the probe's output cap.
+#
+# A `--print` scenario prints its lines as they are, once @CWD@ (the working folder, as
+# `pwd -P` prints it), @HOME@ and @SESSION@ are filled in. A line that starts with `#!` is a
+# step instead:
+#   #!sleep S                 pause for S seconds
+#   #!stderr TEXT             print TEXT on stderr
+#   #!write PATH TEXT         write TEXT and a newline to PATH, below the working folder
+#   #!garbage N               print N lines that are not JSON
+#   #!long-line BYTES         print one line of BYTES characters
+#   #!heartbeat S             print a status event every S seconds, until stopped
+#   #!hang                    print nothing more, until stopped
+#   #!sleeper NAME            start `sleep 300` in the background
+#   #!setsid-grandchild NAME  start a shell that starts `sleep 300` in a session of its own,
+#                             and waits for it
+#   #!daemon NAME             start a shell that starts `sleep 300` in a session of its own and
+#                             exits 0.4 s later, leaving it to launchd or init (a double fork)
+#   #!on-term CODE            exit with CODE on SIGTERM (by default 143, as Claude Code does)
+#   #!ignore-term             ignore SIGTERM
+#   #!exit CODE               exit with CODE
+# What NAME starts writes its pid to NAME.pid in the call's record folder. On SIGTERM the fake
+# stops only its own pause and exits: what it started in the background is the runtime's to
+# stop.
+set -u
+
+fixtures="${FAKE_CLAUDE_FIXTURES:-$(/usr/bin/dirname "$0")/fake-claude-fixtures}"
+call=''
+
+fail() {
+  printf 'fake-claude: %s\n' "$1" >&2
+  exit 2
+}
+
+record_call() {
+  record_dir="${FAKE_CLAUDE_RECORD_DIR:-}"
+  [ -n "$record_dir" ] || return 0
+  [ -d "$record_dir" ] || fail "no record folder $record_dir"
+  n=0
+  while ! /bin/mkdir "$record_dir/call-$n" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 1000 ] || fail "too many recorded calls"
+  done
+  call="$record_dir/call-$n"
+  : >"$call/argv"
+  if [ "$#" -gt 0 ]; then
+    printf '%s\0' "$@" >"$call/argv"
+  fi
+  /usr/bin/env >"$call/env"
+  pwd -P >"$call/cwd"
+  /bin/cat >"$call/stdin"
+  : >"$call/done"
+}
+
+respond() {
+  kind="$1"
+  name="$2"
+  extension="$3"
+  if [ -n "${FAKE_CLAUDE_PROBE_DELAY:-}" ]; then
+    /bin/sleep "$FAKE_CLAUDE_PROBE_DELAY" </dev/null >/dev/null 2>&1
+  fi
+  case "$name" in
+    hang) exec /bin/sleep 60 ;;
+    flood) /usr/bin/yes 'fake claude output' | /usr/bin/head -c 400000; exit 0 ;;
+  esac
+  file="$fixtures/$kind/$name.$extension"
+  [ -f "$file" ] || fail "no $kind fixture named $name"
+  /bin/cat "$file"
+  if [ -f "$fixtures/$kind/$name.exit" ]; then
+    exit "$(/bin/cat "$fixtures/$kind/$name.exit")"
+  fi
+  exit 0
+}
+
+# --- The `--print` runs of a turn ---------------------------------------------------------
+
+term_code=143
+pause_pid=''
+
+on_term() {
+  if [ -n "$pause_pid" ]; then
+    kill "$pause_pid" 2>/dev/null
+  fi
+  exit "$term_code"
+}
+
+# A pause SIGTERM can end: a trap runs while the shell waits, not while a command runs.
+pause_for() {
+  /bin/sleep "$1" </dev/null >/dev/null 2>&1 &
+  pause_pid=$!
+  wait "$pause_pid"
+  pause_pid=''
+}
+
+record_pid() {
+  [ -n "$call" ] || return 0
+  printf '%s\n' "$2" >"$call/$1.pid"
+}
+
+# Starts "$@" in the background, in a session of its own: with setsid where it exists (Linux),
+# else through Perl (macOS).
+start_in_new_session() {
+  if [ -x /usr/bin/setsid ]; then
+    /usr/bin/setsid "$@" </dev/null >/dev/null 2>&1 &
+  else
+    /usr/bin/perl -MPOSIX -e 'POSIX::setsid() >= 0 or die "setsid failed\n"; exec @ARGV or die "exec failed\n"' "$@" </dev/null >/dev/null 2>&1 &
+  fi
+}
+
+sed_escape() {
+  printf '%s' "$1" | /usr/bin/sed -e 's/[\\|&]/\\&/g'
+}
+
+# Prints a scenario line with its placeholders filled in.
+expand() {
+  case "$1" in
+    *@*)
+      printf '%s\n' "$1" | /usr/bin/sed \
+        -e "s|@CWD@|$cwd_sed|g" -e "s|@HOME@|$home_sed|g" -e "s|@SESSION@|$session_sed|g"
+      ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+step() {
+  name=${1%% *}
+  rest=''
+  case "$1" in
+    *' '*) rest=${1#* } ;;
+  esac
+  case "$name" in
+    sleep) pause_for "$rest" ;;
+    stderr) expand "$rest" >&2 ;;
+    write)
+      path=${rest%% *}
+      /bin/mkdir -p "$(/usr/bin/dirname "$path")"
+      expand "${rest#* }" >"$path"
+      ;;
+    garbage)
+      i=0
+      while [ "$i" -lt "$rest" ]; do
+        printf 'not a stream-json line %s\n' "$i"
+        i=$((i + 1))
+      done
+      ;;
+    long-line)
+      /usr/bin/head -c "$rest" /dev/zero | /usr/bin/tr '\000' 'a'
+      printf '\n'
+      ;;
+    heartbeat)
+      while :; do
+        printf '%s\n' '{"type":"system","subtype":"status","status":"working"}'
+        pause_for "$rest"
+      done
+      ;;
+    hang)
+      # Short pauses: one a SIGTERM leaves behind, between its start and `pause_pid`, ends soon.
+      while :; do
+        pause_for 1
+      done
+      ;;
+    sleeper)
+      /bin/sleep 300 </dev/null >/dev/null 2>&1 &
+      record_pid "$rest" "$!"
+      ;;
+    setsid-grandchild)
+      (
+        start_in_new_session /bin/sleep 300
+        record_pid "$rest" "$!"
+        wait
+      ) </dev/null >/dev/null 2>&1 &
+      ;;
+    daemon)
+      (
+        start_in_new_session /bin/sleep 300
+        record_pid "$rest" "$!"
+        /bin/sleep 0.4
+      ) </dev/null >/dev/null 2>&1 &
+      ;;
+    on-term)
+      term_code=$rest
+      trap on_term TERM
+      ;;
+    ignore-term) trap '' TERM ;;
+    exit) exit "$rest" ;;
+    *) fail "unknown scenario step $name" ;;
+  esac
+}
+
+run_print_scenario() {
+  [ "$1" = record-only ] && exit 0
+  file="$fixtures/scenarios/$1.jsonl"
+  [ -f "$file" ] || fail "no --print scenario named $1"
+  cwd_sed=$(sed_escape "$(pwd -P)")
+  home_sed=$(sed_escape "${HOME:-}")
+  session_sed=$(sed_escape "${FAKE_CLAUDE_SESSION:-5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50}")
+  trap on_term TERM
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '#!'*) step "${line#??}" ;;
+      '') ;;
+      *) expand "$line" ;;
+    esac
+  done <"$file"
+  exit 0
+}
+
+record_call "$@"
+
+case "${1:-}" in
+  --version)
+    [ "$#" -eq 1 ] || fail "--version takes no other argument"
+    respond version "${FAKE_CLAUDE_VERSION:-supported}" txt
+    ;;
+  --help)
+    [ "$#" -eq 1 ] || fail "--help takes no other argument"
+    respond help "${FAKE_CLAUDE_HELP:-full}" txt
+    ;;
+  auth)
+    [ "$#" -eq 2 ] && [ "$2" = status ] || fail "the only auth command is auth status"
+    respond auth "${FAKE_CLAUDE_AUTH:-claude-ai}" json
+    ;;
+  --print)
+    # Like `claude -p`, read the prompt to its end first (recording read it already).
+    [ -n "${FAKE_CLAUDE_RECORD_DIR:-}" ] || /bin/cat >/dev/null
+    run_print_scenario "${FAKE_CLAUDE_SCENARIO:-record-only}"
+    ;;
+  *)
+    fail "unexpected arguments"
+    ;;
+esac

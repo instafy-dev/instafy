@@ -215,6 +215,12 @@ pub struct LeaseJob {
     /// The token the granted turn's broker alone makes its device calls with.
     #[serde(default)]
     pub grant_token: Option<GrantToken>,
+    /// What runs the job's turn when it is not the embedded engine (the controller's
+    /// `agent_jobs.engine`): `"claude-code"` for a local-engine turn, which the person's own
+    /// Claude Code on this computer carries out (`claude_code`, docs/Local-Engine-Turns.md). Absent
+    /// for every other job. A value this runtime does not know never runs as anything else.
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 impl LeaseJob {

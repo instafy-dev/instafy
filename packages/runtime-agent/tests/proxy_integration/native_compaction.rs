@@ -527,6 +527,7 @@ fn job(project_id: Uuid, conversation_id: Uuid, previous: Option<Value>) -> Leas
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     }
 }
 

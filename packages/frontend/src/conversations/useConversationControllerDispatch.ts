@@ -3,8 +3,10 @@ import {
   CONTROLLER_RUNTIME_IDLE_TTL_SECONDS_DEFAULT,
   controllerClient,
 } from "../sdk/instafy";
+import { readTurnEngineClaim } from "../features/frontendFeatureModule";
 import { runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { getDefaultRuntimeMetadata } from "../runtime/utils/webdevRuntime";
+import { ControllerApiError } from "../services/runtimeController/core";
 import { isUUID } from "../utils/uuid";
 import { mapControllerMessageToChat } from "./conversationMessageUtils";
 import { createConversationTaskQueue } from "./conversationTaskQueue";
@@ -22,12 +24,31 @@ import type {
   SubmitConversationRuntimeOverride,
   UseConversationSubmitFlowArgs,
 } from "./conversationSubmitTypes";
+import { turnEnginePresentation } from "./runFailurePresentation";
+import type { TurnEngineSendRefusal } from "./turnEngineSendRefusal";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
 export interface ConversationDispatchResult {
   ok: boolean;
   errorMessage?: string;
+  turnEngineRefusal?: TurnEngineSendRefusal;
+}
+
+/** The refusal of a send that claimed a turn engine, as that engine words it, or null. */
+export function readTurnEngineSendRefusal(
+  metadata: Record<string, unknown> | null,
+  error: unknown,
+): TurnEngineSendRefusal | null {
+  if (!(error instanceof ControllerApiError) || !error.code) {
+    return null;
+  }
+  const engineId = readTurnEngineClaim(metadata);
+  const sentence = turnEnginePresentation(engineId)?.describeSendRefusal({
+    code: error.code,
+    details: error.details,
+  });
+  return engineId && sentence ? { engineId, code: error.code, sentence } : null;
 }
 const {
   createBlank: createBlankControllerConversation,
@@ -426,7 +447,15 @@ export function useConversationControllerDispatch({
           jobIds: resolveIds(response.jobIds, response.jobId),
         };
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        // A send that claimed a turn engine shows its engine's sentence for
+        // the refusal, never the controller's raw text, which can name the
+        // plumbing (docs/Local-Engine-Turns.md 5.5).
+        const turnEngineRefusal = readTurnEngineSendRefusal(metadata, error);
+        const message = turnEngineRefusal
+          ? turnEngineRefusal.sentence
+          : error instanceof Error
+            ? error.message
+            : String(error);
         const conversationState =
           conversations.find((entry) => entry.localId === conversationId) ?? null;
         const latestMessage =
@@ -449,7 +478,9 @@ export function useConversationControllerDispatch({
             },
           ]);
         }
-        return { ok: false, errorMessage: message };
+        return turnEngineRefusal
+          ? { ok: false, errorMessage: message, turnEngineRefusal }
+          : { ok: false, errorMessage: message };
       }
     },
     [

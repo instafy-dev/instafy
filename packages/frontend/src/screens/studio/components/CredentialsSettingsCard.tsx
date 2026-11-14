@@ -61,6 +61,17 @@ import { CredentialsConnectionChoices } from "./CredentialsConnectionChoices";
 import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
 import { isExpiredCredentialProxyError } from "./proxyError";
 import { canChooseManagedAi, describeManagedAiUnavailable } from "./managedAiAllowance";
+import { APPLICATION_FRONTEND_FEATURES } from "../../../features/applicationFrontendFeatureComposition";
+import type { FetchRuntimeStatusParams } from "../../../services/runtimeController/runtimes";
+
+function fetchTurnEngineRuntimeStatus(params: FetchRuntimeStatusParams) {
+  return controllerClient.runtimes.fetchStatus(params);
+}
+
+async function resolveTurnEngineControllerUrl(): Promise<string | null> {
+  const requestContext = await controllerClient.core.resolveRequestContext(null);
+  return requestContext.baseUrl.trim() || null;
+}
 
 const {
   create: createMyAgent,
@@ -1696,6 +1707,17 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                 })}
               </ul>
           ) : null}
+            {runtimeControllerEnabled && user
+              ? APPLICATION_FRONTEND_FEATURES.turnEngines.map((engine) =>
+                  engine.YourAiRow ? (
+                    <engine.YourAiRow
+                      key={engine.id}
+                      fetchRuntimeStatus={fetchTurnEngineRuntimeStatus}
+                      resolveControllerUrl={resolveTurnEngineControllerUrl}
+                    />
+                  ) : null,
+                )
+              : null}
             {runtimeControllerEnabled && user ? (
               <section className="pt-4 space-y-3" aria-labelledby="credentials-connect-account-title">
                 <div className="px-1">

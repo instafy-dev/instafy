@@ -51,6 +51,9 @@ mod browser_turn_prompt_tests;
 mod cannot_save_tests;
 mod card_text;
 mod chat_attachments;
+mod claude_code_turn;
+#[cfg(test)]
+mod claude_code_turn_tests;
 #[cfg(test)]
 mod granted_turn_tests;
 pub(crate) use chat_attachments::TurnAttachments;
@@ -207,6 +210,19 @@ pub struct JobProcessor {
     /// [`preview_pictures`]). Set by the agent loop; without it no picture is
     /// taken again at a turn's end.
     picture_sender: Mutex<Option<Arc<dyn preview_pictures::PictureSender>>>,
+    /// The runtime's shutdown signal, set by the agent loop: a local-engine turn running when it
+    /// fires reports nothing (docs/Local-Engine-Turns.md 3.6).
+    shutdown: Mutex<Option<crate::agent::ShutdownSignal>>,
+    /// The lane a test's local-engine turns run on, and their limits, in place of this process's
+    /// captured grant and the standard limits.
+    claude_code_test_lane: Mutex<Option<ClaudeCodeTestLane>>,
+}
+
+/// A test's lane for local-engine turns ([`JobProcessor::claude_code_lane`]).
+#[derive(Clone)]
+struct ClaudeCodeTestLane {
+    lane: &'static crate::claude_code::Lane,
+    limits: crate::claude_code::supervise::TurnLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,6 +375,70 @@ pub struct JobProgress {
     pub sender: JobMessageSender,
     pub status: Arc<AtomicBool>,
     pub reply_draft: Option<ReplyDraftSender>,
+}
+
+/// What a turn's run has streamed to its chat ([`stream_turn_event`]): the run's events so far, how
+/// many of the steps they make were sent, and whether the chat still takes them.
+struct StepStream {
+    sender: JobMessageSender,
+    status: Arc<AtomicBool>,
+    events: Vec<JsonValue>,
+    streamed_count: usize,
+    active: bool,
+}
+
+impl StepStream {
+    fn of(progress: &JobProgress) -> Self {
+        Self {
+            sender: progress.sender.clone(),
+            status: progress.status.clone(),
+            events: Vec::new(),
+            streamed_count: 0,
+            active: true,
+        }
+    }
+
+    /// Every step reached the chat: it still took them at the end of the run.
+    fn all_streamed(&self) -> bool {
+        self.active && self.status.load(Ordering::SeqCst)
+    }
+}
+
+/// The streaming handler both kinds of turn share: a Codex run and its retry, and a local-engine
+/// turn's `claude` (docs/Local-Engine-Turns.md 3.7). One event of the run goes to the reply
+/// draft, and the steps the run's events make so far (`steps_of`) that were not sent yet go to the
+/// chat. A chat that no longer takes them stops the streaming for the rest of the run.
+fn stream_turn_event(
+    event: &JsonValue,
+    reply_draft: Option<&mut reply_draft::ReplyDraftStream>,
+    steps: Option<&mut StepStream>,
+    steps_of: &(dyn Fn(&[JsonValue]) -> Vec<JobMessage> + Sync),
+    runtime_id: &Uuid,
+    job_id: Uuid,
+) {
+    if let Some(draft) = reply_draft {
+        draft.observe(event);
+    }
+    let Some(ctx) = steps else {
+        return;
+    };
+    ctx.events.push(event.clone());
+    if !ctx.active {
+        return;
+    }
+    let messages = with_runtime_metadata_vec(steps_of(&ctx.events), runtime_id);
+    for message in messages.iter().skip(ctx.streamed_count) {
+        if ctx.sender.send(message.clone()).is_err() {
+            warn!(
+                job_id = %job_id,
+                "job progress receiver dropped; disabling streaming for remaining events"
+            );
+            ctx.active = false;
+            ctx.status.store(false, Ordering::SeqCst);
+            break;
+        }
+    }
+    ctx.streamed_count = messages.len();
 }
 
 static CODEX_EXECUTION_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
@@ -5890,7 +5970,49 @@ impl JobProcessor {
             isolated_apply: AsyncMutex::new(()),
             provider_mcp_program: None,
             picture_sender: Mutex::new(None),
+            shutdown: Mutex::new(None),
+            claude_code_test_lane: Mutex::new(None),
         }
+    }
+
+    /// The runtime's shutdown signal, which a local-engine turn watches: while it is set the turn
+    /// reports nothing (docs/Local-Engine-Turns.md 3.6).
+    pub fn set_shutdown_signal(&self, shutdown: crate::agent::ShutdownSignal) {
+        *self.shutdown.lock() = Some(shutdown);
+    }
+
+    fn shutdown_signal(&self) -> crate::agent::ShutdownSignal {
+        self.shutdown.lock().clone().unwrap_or_default()
+    }
+
+    /// The lane a leased local-engine job runs on: this process's captured grant (or why there is
+    /// none), unless a test gave its own.
+    pub(crate) fn claude_code_lane(
+        &self,
+    ) -> std::result::Result<&'static crate::claude_code::Lane, crate::claude_code::NotReadyReason>
+    {
+        match self.claude_code_test_lane.lock().as_ref() {
+            Some(test) => Ok(test.lane),
+            None => crate::claude_code::lane_for_jobs(),
+        }
+    }
+
+    /// The limits of a local-engine turn: the standard ones, unless a test gave its own.
+    fn claude_code_turn_limits(&self) -> crate::claude_code::supervise::TurnLimits {
+        match self.claude_code_test_lane.lock().as_ref() {
+            Some(test) => test.limits.clone(),
+            None => crate::claude_code::supervise::TurnLimits::standard(),
+        }
+    }
+
+    /// Runs this processor's local-engine turns on `lane` with `limits`, as a test's own.
+    #[cfg(test)]
+    pub(crate) fn use_claude_code_lane(
+        &self,
+        lane: &'static crate::claude_code::Lane,
+        limits: crate::claude_code::supervise::TurnLimits,
+    ) {
+        *self.claude_code_test_lane.lock() = Some(ClaudeCodeTestLane { lane, limits });
     }
 
     /// Sends the new picture of an open preview a turn changed with `sender`
@@ -7277,20 +7399,43 @@ impl JobProcessor {
         let turn_start = stopped_turn::TurnStart::default();
         let left_thread = LeftThread::default();
         // Keep the large execution state off the caller's async frame. Admission rejection
-        // above must be cheap even on the standard two-megabyte thread stack.
-        let result = Box::pin(self.run_apply_job_observed(
-            registration,
-            job,
-            commit_to_workspace,
-            progress,
-            cancel_signal,
-            active_turn_input,
-            &task_usage,
-            &turn_files,
-            &turn_start,
-            &left_thread,
-        ))
-        .await;
+        // above must be cheap even on the standard two-megabyte thread stack. A local-engine
+        // turn runs on the person's own Claude Code (docs/Local-Engine-Turns.md 3.1, step 4); an
+        // engine this runtime does not know never runs as anything else.
+        let result = match job.engine.as_deref() {
+            None => {
+                Box::pin(self.run_apply_job_observed(
+                    registration,
+                    job,
+                    commit_to_workspace,
+                    progress,
+                    cancel_signal,
+                    active_turn_input,
+                    &task_usage,
+                    &turn_files,
+                    &turn_start,
+                    &left_thread,
+                ))
+                .await
+            }
+            Some(crate::claude_code::job::ENGINE) => {
+                // Nothing can deliver words into a running `claude -p` (2.8).
+                drop(active_turn_input);
+                Box::pin(self.run_claude_code_turn(
+                    registration,
+                    job,
+                    commit_to_workspace,
+                    progress,
+                    cancel_signal,
+                    &turn_start,
+                ))
+                .await
+            }
+            Some(engine) => Err(anyhow!(
+                "this runtime does not run turns on the {} engine",
+                crate::claude_code::events::redact_tokens(engine)
+            )),
+        };
         let result = turn_continuation::attach_turn_records(result, &turn_files);
         // A turn that lost its lease keeps what it already changed in its
         // folder: the changes go with the error, for the job loop's report.
@@ -7323,6 +7468,14 @@ impl JobProcessor {
         turn_start: &stopped_turn::TurnStart,
         left_thread: &LeftThread,
     ) -> Result<JobExecution> {
+        // A local-engine turn never reaches the embedded engine: not its proxy environment, its
+        // controller token, its routing step or its Codex client (docs/Local-Engine-Turns.md 3.1).
+        if let Some(engine) = job.engine.as_deref() {
+            bail!(
+                "a turn on the {} engine never runs on the embedded engine",
+                crate::claude_code::events::redact_tokens(engine)
+            );
+        }
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
 
         let proxy_source = if job.proxy.is_some() {
@@ -8316,14 +8469,6 @@ impl JobProcessor {
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
 
-        struct StreamingContext {
-            sender: JobMessageSender,
-            status: Arc<AtomicBool>,
-            events: Vec<JsonValue>,
-            streamed_count: usize,
-            active: bool,
-        }
-
         let drafts_reply = drafts_reply_for_job(job, final_output_schema);
         // A browser turn's draft ends before its finding lines, which no person reads.
         let draft_ends_at_finding_lines = job
@@ -8342,13 +8487,7 @@ impl JobProcessor {
                 )
             });
 
-        let mut streaming_context = progress_sender.as_ref().map(|progress| StreamingContext {
-            sender: progress.sender.clone(),
-            status: progress.status.clone(),
-            events: Vec::new(),
-            streamed_count: 0,
-            active: true,
-        });
+        let mut streaming_context = progress_sender.as_ref().map(StepStream::of);
 
         let job_id = job.id;
         let runtime_id_for_messages = registration.runtime_id;
@@ -8365,30 +8504,14 @@ impl JobProcessor {
             };
             let output_result = if streaming_context.is_some() {
                 let mut event_handler = |event: &JsonValue| -> Result<()> {
-                    if let Some(draft) = reply_draft.as_mut() {
-                        draft.observe(event);
-                    }
-                    if let Some(ctx) = streaming_context.as_mut() {
-                        ctx.events.push(event.clone());
-                        if ctx.active {
-                            let messages = with_runtime_metadata_vec(
-                                extract_codex_messages(&ctx.events),
-                                &runtime_id_for_messages,
-                            );
-                            for message in messages.iter().skip(ctx.streamed_count) {
-                                if ctx.sender.send(message.clone()).is_err() {
-                                    warn!(
-                                        job_id = %job_id,
-                                        "job progress receiver dropped; disabling streaming for remaining events"
-                                    );
-                                    ctx.active = false;
-                                    ctx.status.store(false, Ordering::SeqCst);
-                                    break;
-                                }
-                            }
-                            ctx.streamed_count = messages.len();
-                        }
-                    }
+                    stream_turn_event(
+                        event,
+                        reply_draft.as_mut(),
+                        streaming_context.as_mut(),
+                        &extract_codex_messages,
+                        &runtime_id_for_messages,
+                        job_id,
+                    );
                     Ok(())
                 };
                 codex
@@ -9248,11 +9371,7 @@ impl JobProcessor {
             let native_retry_prompt =
                 without_project_preferences(&retry_prompt, &project_id, &retry_preferences)?;
             let retry_output_result = if let Some(progress) = progress_sender.as_ref() {
-                let retry_sender = progress.sender.clone();
-                let retry_status = progress.status.clone();
-                let mut retry_stream_events: Vec<JsonValue> = Vec::new();
-                let mut retry_streamed_count = 0usize;
-                let mut retry_stream_active = true;
+                let mut retry_steps = StepStream::of(progress);
                 let mut retry_draft = progress
                     .reply_draft
                     .clone()
@@ -9272,28 +9391,14 @@ impl JobProcessor {
                         )
                     });
                 let mut retry_event_handler = |event: &JsonValue| -> Result<()> {
-                    if let Some(draft) = retry_draft.as_mut() {
-                        draft.observe(event);
-                    }
-                    retry_stream_events.push(event.clone());
-                    if retry_stream_active {
-                        let messages = with_runtime_metadata_vec(
-                            extract_codex_attempt_messages(&retry_stream_events, 2),
-                            &registration.runtime_id,
-                        );
-                        for message in messages.iter().skip(retry_streamed_count) {
-                            if retry_sender.send(message.clone()).is_err() {
-                                warn!(
-                                    job_id = %job_id,
-                                    "job progress receiver dropped; disabling streaming for remaining retry events"
-                                );
-                                retry_stream_active = false;
-                                retry_status.store(false, Ordering::SeqCst);
-                                break;
-                            }
-                        }
-                        retry_streamed_count = messages.len();
-                    }
+                    stream_turn_event(
+                        event,
+                        retry_draft.as_mut(),
+                        Some(&mut retry_steps),
+                        &|events| extract_codex_attempt_messages(events, 2),
+                        &registration.runtime_id,
+                        job_id,
+                    );
                     Ok(())
                 };
                 let result = codex
@@ -9305,7 +9410,7 @@ impl JobProcessor {
                     .await;
                 let events = match &result {
                     Ok(output) => &output.events,
-                    Err(_) => &retry_stream_events,
+                    Err(_) => &retry_steps.events,
                 };
                 let steps = space_pages::TurnSteps::of_events(&workspace_dir, events);
                 (result, steps)
@@ -21740,10 +21845,20 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             server.eq_ignore_ascii_case("instafy_shared_browser")
                                 || server.eq_ignore_ascii_case("instafy_personal_browser")
                         });
-                        if let Some(activity) = browser_step
-                            .and_then(activity_labels::browser_step_activity)
-                            .or_else(|| activity_labels::mcp_tool_activity(server))
-                        {
+                        // A local-engine turn's tool step is labelled from its own fixed table
+                        // (docs/Local-Engine-Turns.md 3.7): the step its event adapter made, which
+                        // carries the lane's mark. A Codex MCP server of the same name keeps the
+                        // label any server's tool gets.
+                        let lane_tool = (server == crate::claude_code::events::TOOL_SERVER
+                            && item.get("engine").and_then(JsonValue::as_str)
+                                == Some(crate::claude_code::job::ENGINE))
+                        .then(|| activity_labels::claude_code_tool_activity(tool))
+                        .flatten();
+                        if let Some(activity) = lane_tool.or_else(|| {
+                            browser_step
+                                .and_then(activity_labels::browser_step_activity)
+                                .or_else(|| activity_labels::mcp_tool_activity(server))
+                        }) {
                             metadata["activity"] = activity;
                         }
                         push_message(
@@ -22491,6 +22606,7 @@ mod tests {
             lease_attempts: 1,
             grants: Vec::new(),
             grant_token: None,
+            engine: None,
         }
     }
 

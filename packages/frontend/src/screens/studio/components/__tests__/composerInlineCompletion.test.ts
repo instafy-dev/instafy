@@ -25,6 +25,7 @@ describe("composerInlineCompletion", () => {
         onboardingInputLocked: false,
         sendingAttachment: false,
         inlineCompletionEnabled: true,
+        turnEnginePending: false,
       }),
     ).toBe(true);
 
@@ -38,6 +39,7 @@ describe("composerInlineCompletion", () => {
         onboardingInputLocked: false,
         sendingAttachment: false,
         inlineCompletionEnabled: true,
+        turnEnginePending: false,
       }),
     ).toBe(false);
   });
@@ -68,9 +70,28 @@ describe("composerInlineCompletion", () => {
       hasImageAttachments: false,
       onboardingInputLocked: false,
       sendingAttachment: false,
+      turnEnginePending: false,
     };
     expect(shouldRequestComposerInlineCompletion({ ...eligible, inlineCompletionEnabled: false })).toBe(false);
     expect(shouldRequestComposerInlineCompletion({ ...eligible, inlineCompletionEnabled: true })).toBe(true);
+  });
+
+  // docs/Local-Engine-Turns.md 5.2, 7.2: while an engine is chosen for the
+  // next message, the draft is what that engine gets, and nothing Instafy
+  // runs for that turn sends it to a model, also for a person who opted in.
+  it("asks for nothing while an engine is chosen for the next message", () => {
+    const eligible = {
+      projectId: "project-1",
+      inputValue: "fix the failing login te",
+      anyAgentsEnabled: true,
+      credentialsReady: true,
+      hasImageAttachments: false,
+      onboardingInputLocked: false,
+      sendingAttachment: false,
+      inlineCompletionEnabled: true,
+    };
+    expect(shouldRequestComposerInlineCompletion({ ...eligible, turnEnginePending: false })).toBe(true);
+    expect(shouldRequestComposerInlineCompletion({ ...eligible, turnEnginePending: true })).toBe(false);
   });
 
   it("reads the opt-in from storage and defaults to off", () => {

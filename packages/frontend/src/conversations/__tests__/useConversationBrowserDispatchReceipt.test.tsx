@@ -42,8 +42,8 @@ function Harness({ conversation, onReady }: { conversation: ConversationState; o
     currentUserId: "user-1", preferredRuntimeId: null, runtimeStatuses: [], effectiveRuntimeId: null,
     effectiveRuntimeSource: "auto", showStatus: vi.fn(), createConversation: vi.fn(), selectConversation: vi.fn(),
     markConversationRead: vi.fn(), setConversationDraft: vi.fn(), setConversationControllerId: vi.fn(),
-    setConversationTitle: vi.fn(), setConversationGoal: vi.fn(), appendMessages, updateMessage: vi.fn(),
-    linkRunToConversation: vi.fn(),
+    setConversationTitle: vi.fn(), setConversationGoal: vi.fn(), appendMessages, removeUnsentMessage: vi.fn(),
+    updateMessage: vi.fn(), linkRunToConversation: vi.fn(),
   });
   onReady(flow);
   return null;

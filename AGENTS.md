@@ -16,7 +16,17 @@ release signing and deployment configuration do not belong here.
 - The controller is the authority for workspace access, credentials, leases and policy.
   Runtimes and browser clients should receive only the minimum scoped data they need.
 - All model traffic goes through the configured Instafy proxy. Do not call model providers
-  directly from the browser or runtime agent.
+  directly from the browser or runtime agent. The one exception is a local-engine turn
+  ([docs/Local-Engine-Turns.md](docs/Local-Engine-Turns.md)): for one turn that a person starts
+  from their own message and chooses Claude Code for, runtime-agent on that person's own
+  computer starts their own signed-in, unmodified `claude`, and only that program's own
+  traffic leaves, under the sign-in the person made in it, for Anthropic or for the cloud
+  provider or gateway that sign-in uses. Instafy never reads, stores, refreshes, forwards or
+  proxies that sign-in, sets no `ANTHROPIC_*` or `CLAUDE_*` variable for it but the person's
+  own `CLAUDE_CONFIG_DIR`, gives it no Instafy token or project secret, sends it nothing but the
+  person's own message, and sends no other model traffic around the proxy. Claude Code's own
+  permission settings, not runtime-agent's folder containment, bound what its tools do. Do not
+  widen this exception.
 
 ## Security invariants
 
@@ -28,6 +38,13 @@ release signing and deployment configuration do not belong here.
   in server-side tooling and test fixtures.
 - Keep credential refresh and source material controller-owned. Renderers and runtime agents
   must not receive refresh tokens or raw credential-storage files.
+- Never accept, store, refresh, forward or deliver a Claude sign-in. The controller refuses
+  Claude sign-in material in credentials and project secrets (`claude_material.rs`): `sk-ant-`
+  values other than Claude API and Admin API keys, `claudeAiOauth` bodies and the secret name
+  `CLAUDE_CODE_OAUTH_TOKEN`; do not add a path around that refusal. A local-engine turn
+  starts only from its person's own message to their own computer, runs once in the
+  foreground, and never from an automation, plan, resend, queue, goal wake-up or hand-back:
+  keep every dispatch path behind `claude_code_lane::check_sender` and `claude_code_lane::admit`.
 - Constrain filesystem operations to the active project root, reject traversal and symlink
   escapes, and preserve the existing permission checks.
 - Treat public pull requests as untrusted. Public CI must use hosted runners and must not

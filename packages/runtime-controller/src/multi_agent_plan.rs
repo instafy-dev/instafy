@@ -140,7 +140,10 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
             })?;
             crate::multi_agent_settings::load(&transaction, &project_id).await?
         };
-    let plan = ensure_parent_job_allows_multi_agent_plan(job_payload)
+    // What runs the parent's turn is its job's column, never its payload: a
+    // local-engine turn authors no plan (crate::claude_code_lane).
+    let parent_engine = load_parent_job_engine(state, job_id).await?;
+    let plan = ensure_parent_job_allows_multi_agent_plan(job_payload, parent_engine.as_deref())
         .and_then(|_| parse_skill_multi_agent_plan(plan_value))
         .and_then(|mut plan| {
             apply_plan_capacity(&mut plan, settings)?;
@@ -313,9 +316,18 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
     Ok(true)
 }
 
+/// Whether the parent job may author a team's plan: not a browser-bound job,
+/// and not a local-engine turn (`engine`, the job's `agent_jobs.engine`),
+/// which starts no turn whose words Instafy wrote. A local-engine parent is
+/// refused with a 403, so nothing settles it as a refused plan: the turn
+/// goes on, and no worker starts.
 fn ensure_parent_job_allows_multi_agent_plan(
     job_payload: &JsonValue,
+    engine: Option<&str>,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if engine.is_some() {
+        return Err(crate::claude_code_lane::plans_nothing());
+    }
     let browser_bound = job_payload
         .get("metadata")
         .and_then(JsonValue::as_object)
@@ -2518,6 +2530,24 @@ async fn load_parent_runtime_provider(
         .map(|row| row.get::<_, String>("provider"))
 }
 
+/// The parent job's `agent_jobs.engine`. A lookup that fails refuses the
+/// plan rather than taking the parent for a Codex turn.
+async fn load_parent_job_engine(
+    state: &AppState,
+    job_id: Uuid,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    let connection = state.pool.get().await.map_err(|error| {
+        internal_error(format!("failed to load the plan's parent job: {error}"))
+    })?;
+    let row = connection
+        .query_opt("select engine from agent_jobs where id = $1", &[&job_id])
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to load the plan's parent job: {error}"))
+        })?;
+    Ok(row.and_then(|row| row.get::<_, Option<String>>("engine")))
+}
+
 async fn load_parent_job_leased_runtime_id(state: &AppState, job_id: Uuid) -> Option<Uuid> {
     let connection = state.pool.get().await.ok()?;
     connection
@@ -3479,16 +3509,35 @@ mod tests {
             json!({ "metadata": { "browserTransport": "shared" } }),
             json!({ "metadata": { "browser_transport": "desktop_personal" } }),
         ] {
-            let (status, Json(error)) = ensure_parent_job_allows_multi_agent_plan(&payload)
+            let (status, Json(error)) = ensure_parent_job_allows_multi_agent_plan(&payload, None)
                 .expect_err("browser-bound parent must fail closed");
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(error.message.contains("Browser-bound jobs"));
         }
 
-        ensure_parent_job_allows_multi_agent_plan(&json!({
-            "metadata": { "browserTransport": "none" }
-        }))
+        ensure_parent_job_allows_multi_agent_plan(
+            &json!({
+                "metadata": { "browserTransport": "none" }
+            }),
+            None,
+        )
         .expect("generic jobs retain multi-agent planning");
+    }
+
+    /// A local-engine turn, read from its job's column, authors no plan,
+    /// whatever its payload says; the refusal settles nothing.
+    #[test]
+    fn a_local_engine_parent_cannot_execute_a_multi_agent_plan() {
+        let (status, Json(error)) = ensure_parent_job_allows_multi_agent_plan(
+            &json!({ "metadata": { "browserTransport": "none" } }),
+            Some(crate::claude_code_lane::ENGINE),
+        )
+        .expect_err("a local-engine parent must fail closed");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.code.as_deref(),
+            Some(crate::claude_code_lane::TURN_STARTS_NO_TURNS)
+        );
     }
 
     #[test]

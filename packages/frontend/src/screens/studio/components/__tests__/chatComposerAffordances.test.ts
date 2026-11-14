@@ -113,6 +113,17 @@ describe("resolveChatComposerAffordances", () => {
     ).toBe(false);
   });
 
+  it("ignores the AI connection and credits while a turn engine is chosen for the message", () => {
+    const gated = { inputValue: "Fix the failing login test", inputRequiresAi: true, credentialsReady: false, outOfCredits: true };
+    expect(resolveAffordances(gated).sendButtonDisabled).toBe(true);
+    const chosen = resolveAffordances({ ...gated, turnEnginePending: true });
+    expect(chosen.sendButtonDisabled).toBe(false);
+    expect(chosen.sendButtonVariant).toBe("primary");
+    // Everything else still holds Send.
+    expect(resolveAffordances({ ...gated, turnEnginePending: true, submissionPending: true }).sendButtonDisabled).toBe(true);
+    expect(resolveAffordances({ ...gated, turnEnginePending: true, sharedBrowserSendBlocked: true }).sendButtonDisabled).toBe(true);
+  });
+
   it("disables Send while participation and submit preflight are in flight", () => {
     expect(resolveAffordances({ submissionPending: true }).sendButtonDisabled).toBe(true);
   });

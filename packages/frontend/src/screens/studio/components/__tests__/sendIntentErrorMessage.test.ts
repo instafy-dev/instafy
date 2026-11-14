@@ -3,6 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
+// Registers the application's turn engines, as the application does when it
+// builds its feature composition at startup (features/turnEngineRegistry.ts).
+import "../../../../features/applicationFrontendFeatureComposition";
 
 import { describeSendIntentError } from "../sendIntentErrorMessage";
 
@@ -35,6 +38,14 @@ describe("describeSendIntentError", () => {
     const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
     expect(chatPanel).toContain(
       'showStatus(describeSendIntentError(error.code, error.message), "warning", 5500);',
+    );
+  });
+});
+
+describe("describeSendIntentError for a turn-engine turn", () => {
+  it("words a refused Steer into a Claude Code turn as its engine does", () => {
+    expect(describeSendIntentError("claude_code_turn_takes_no_input", "claude_code_turn_takes_no_input")).toBe(
+      "This Claude Code turn can't take more words while it runs. Queue your message instead.",
     );
   });
 });

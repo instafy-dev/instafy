@@ -23,6 +23,35 @@ describe("resolveChatInputRequiresAi", () => {
     expect(resolvePromptAgentTargets).not.toHaveBeenCalled();
   });
 
+  it("never gates a draft for a chosen turn engine on Instafy's AI", () => {
+    const resolvePromptAgentTargets = vi.fn(() => ({
+      targetHandles: ["octo"],
+      explicitMentionedHandles: ["octo"],
+    }));
+    for (const hasImageAttachments of [false, true]) {
+      expect(
+        resolveChatInputRequiresAi({
+          activeConversationMessages: [],
+          inputValue: "@octo add a hello line to hello-lane.txt",
+          hasImageAttachments,
+          resolvePromptAgentTargets,
+          turnEngineChosen: true,
+        }),
+      ).toBe(false);
+    }
+    expect(resolvePromptAgentTargets).not.toHaveBeenCalled();
+    // The same draft without a chosen engine is gated as before.
+    expect(
+      resolveChatInputRequiresAi({
+        activeConversationMessages: [],
+        inputValue: "@octo add a hello line to hello-lane.txt",
+        hasImageAttachments: false,
+        resolvePromptAgentTargets,
+        turnEngineChosen: false,
+      }),
+    ).toBe(true);
+  });
+
   it("still gates an image-only assistant request", () => {
     expect(
       resolveChatInputRequiresAi({

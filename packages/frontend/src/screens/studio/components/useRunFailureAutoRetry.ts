@@ -11,6 +11,7 @@ import {
   resolveRunFailurePresentation,
   resolveRunFailureRetrySource,
   runFailureOriginKey,
+  usesTurnEngine,
 } from "../../../conversations/runFailurePresentation";
 import {
   claimAutoRetryForPromptSentFromThisPage,
@@ -133,6 +134,8 @@ function hasUserMessageAfter(messages: ChatMessage[], failureId: string): boolea
  *   now ({@link isRunFailureRecentForAutoRetry}), checked when the countdown
  *   starts and again when it ends. A failure without a timestamp stays
  *   manual.
+ * - Never a turn-engine turn: its failure and its prompt name the engine
+ *   (docs/Local-Engine-Turns.md 5.6), and only its sender sends it again.
  * - A prompt that was itself a retry, carried attachments or a reply
  *   context, or went to more than one agent (or whose other run succeeded)
  *   stays manual (see {@link resolveRunFailureAutoRetryDelayMs} and
@@ -336,6 +339,11 @@ export function useRunFailureAutoRetry({
     }
     const presentation = resolveFailedRunPresentation(candidate);
     if (!presentation) {
+      return;
+    }
+    if (presentation.turnEngine || usesTurnEngine(candidate.metadata)) {
+      // A turn-engine turn is one turn its sender started: nothing sends it
+      // again by itself (docs/Local-Engine-Turns.md 5.6).
       return;
     }
     if (!isRunFailureRecentForAutoRetry(candidate)) {

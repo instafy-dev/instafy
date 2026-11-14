@@ -236,6 +236,8 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
     cleanup_terminal_runtime_records(state, &mut tick).await?;
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
+    fail_claude_code_turns_whose_lease_expired(state, &mut tick).await?;
+    repair_stopped_claude_code_turns(state, &mut tick).await?;
     fail_jobs_that_can_no_longer_start(state, &mut tick).await?;
     // Last: each of its stops may wait out a provider release.
     stop_runtimes_of_deleted_projects(state, &mut tick).await?;
@@ -1080,8 +1082,11 @@ pub(super) struct FailedQueuedJobs {
 /// tagged `kind`, so whoever sent the work sees why it never started. The
 /// message also names the reason a stop requeued the job, if one did
 /// (`interruptionReason`). `rows` must also carry `session_id` and
-/// `prompt_id`. Publish the result with [`publish_failed_queued_jobs`] once
-/// the transaction commits.
+/// `prompt_id`, and `engine` wherever they may hold a local-engine turn: its
+/// message also carries `aiAccessMode: "claude-code"` and `kind` as its
+/// `claudeCodeFailure`, which its author's Studio words
+/// (crate::claude_code_lane::stamp_failure). Publish the result with
+/// [`publish_failed_queued_jobs`] once the transaction commits.
 pub(super) async fn settle_failed_queued_jobs_with_message(
     transaction: &mut tokio_postgres::Transaction<'_>,
     rows: &[tokio_postgres::Row],
@@ -1122,6 +1127,15 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
         {
             metadata["interruptionReason"] =
                 json!(super::run_interruptions::interruption_reason_token(reason));
+        }
+        // A row without the column is not a local-engine turn's.
+        let local_engine = row
+            .try_get::<_, Option<String>>("engine")
+            .ok()
+            .flatten()
+            .is_some();
+        if let (true, Some(map)) = (local_engine, metadata.as_object_mut()) {
+            crate::claude_code_lane::stamp_failure(map, kind);
         }
         let recorded = crate::conversations::record_controller_assistant_message(
             transaction,
@@ -1221,7 +1235,7 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn publish_failed_run(
+pub(super) async fn publish_failed_run(
     state: &AppState,
     project_id: Uuid,
     run_id: Uuid,
@@ -1409,6 +1423,9 @@ async fn load_platform_jobs_stranded_on_private_runtimes(
                  where aj.status = 'queued'
                    and aj.credential_id is null
                    and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
+                   -- A local-engine turn has no credential but is not
+                   -- Instafy AI: its own computer leases it.
+                   and aj.engine is null
                    and aj.created_at < now() - ($1::bigint * interval '1 second')
              )
              select pj.id,
@@ -1492,6 +1509,7 @@ async fn fail_stranded_platform_jobs(
                and aj.status = 'queued'
                and aj.credential_id is null
                and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
+               and aj.engine is null
              returning aj.id, aj.project_id, aj.run_id, aj.conversation_id, aj.session_id,
                        aj.prompt_id, aj.payload, aj.error_message, aj.lease_attempts,
                        aj.grant_ids",
@@ -1528,9 +1546,10 @@ const START_BY_PASSED_MESSAGE: &str = "This turn did not run: it had to start by
 const RUN_ONCE_INTERRUPTED_CODE: &str = "run_once_interrupted";
 const RUN_ONCE_INTERRUPTED_MESSAGE: &str = "This turn stopped and will not run again: it may run only once, and its runtime stopped while it ran. Send it again if you still want it.";
 
-/// Fails the queued jobs holding device grants that the lease will never hand
-/// out (`device_grants.rs`): one a lease of which ended, as
-/// `run_once_interrupted`, and one past its minute to start, as
+/// Fails the queued jobs that run only once, holding device grants or running
+/// on their person's own engine, that the lease will never hand out
+/// (`device_grants::run_once_job_cannot_start`): one a lease of which ended,
+/// as `run_once_interrupted`, and one past its minute to start, as
 /// `start_by_passed`. Their open provider requests are canceled with them. A
 /// tick with nothing to fail runs one update, on the tick's connection.
 async fn fail_jobs_that_can_no_longer_start(
@@ -1556,10 +1575,10 @@ async fn fail_jobs_that_can_no_longer_start(
                  active_input_ready_turn_id = null,
                  updated_at = now()
              where status = 'queued' and ",
-                crate::device_grants::granted_job_cannot_start!("$3"),
+                crate::device_grants::run_once_job_cannot_start!("$3"),
                 "
              returning id, project_id, run_id, conversation_id, session_id, prompt_id,
-                       payload, error_message, lease_attempts, grant_ids"
+                       payload, error_message, lease_attempts, grant_ids, engine"
             ),
             &[
                 &RUN_ONCE_INTERRUPTED_MESSAGE,
@@ -1610,6 +1629,173 @@ async fn fail_jobs_that_can_no_longer_start(
     tick.release();
     for failed in failed {
         publish_failed_queued_jobs(state, failed).await;
+    }
+    Ok(())
+}
+
+/// Fails every leased local-engine turn (crate::claude_code_lane) whose lease
+/// has expired, whatever its space's activity, as `run_once_interrupted`: its
+/// computer stopped renewing it (it slept, or its Instafy stopped), the
+/// heartbeat refuses to renew it now, and nothing runs it again. The idle
+/// release requeues an expired lease only in a space this process holds as
+/// idle, and the run-once sweep fails such a requeued turn the same way. Its
+/// failure message carries what its author's Studio words it by. A tick with
+/// nothing to fail runs one statement, on the tick's connection.
+async fn fail_claude_code_turns_whose_lease_expired(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let mut transaction = tick
+        .client("failed to acquire connection for expired local-engine turns")
+        .await?
+        .transaction()
+        .await
+        .context("failed to start failing expired local-engine turns")?;
+    // Locks the jobs in id order, as the idle release and a space delete lock
+    // theirs, so it cannot deadlock with either.
+    let rows = transaction
+        .query(
+            "with expired as (
+                 select id from agent_jobs
+                  where status = 'leased'
+                    and engine is not null
+                    and (lease_expires_at is null or lease_expires_at <= statement_timestamp())
+                  order by id
+                  for update
+             )
+             update agent_jobs jobs
+             set status = 'failed',
+                 outcome = 'failed',
+                 error_message = $1,
+                 completed_at = now(),
+                 lease_expires_at = null,
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
+                 updated_at = now()
+             from expired
+             where jobs.id = expired.id
+             returning jobs.id, jobs.project_id, jobs.run_id, jobs.conversation_id,
+                       jobs.session_id, jobs.prompt_id, jobs.payload, jobs.error_message,
+                       jobs.lease_attempts, jobs.grant_ids, jobs.engine",
+            &[&RUN_ONCE_INTERRUPTED_MESSAGE],
+        )
+        .await
+        .context("failed to fail expired local-engine turns")?;
+    if rows.is_empty() {
+        transaction
+            .rollback()
+            .await
+            .context("failed to close an empty failing of expired local-engine turns")?;
+        return Ok(());
+    }
+    let failed = settle_failed_queued_jobs_with_message(
+        &mut transaction,
+        &rows,
+        "interrupted local-engine",
+        RUN_ONCE_INTERRUPTED_CODE,
+        "failed",
+        RUN_ONCE_INTERRUPTED_MESSAGE,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit failing expired local-engine turns")?;
+    // Publishing reads runs and credits on connections of its own.
+    tick.release();
+    for (project_id, job_id, _, _) in &failed.jobs {
+        info!(
+            %job_id,
+            %project_id,
+            "failed a local-engine turn whose lease expired; it runs only once"
+        );
+    }
+    publish_failed_queued_jobs(state, failed).await;
+    Ok(())
+}
+
+/// How long [`repair_stopped_claude_code_turns`] leaves a turn to the write
+/// its stop started (`stop::finish_failed_claude_code_turn`): longer than
+/// that write's tries can take, three waits of up to 10 s for a pool
+/// connection and the backoff between them.
+const STOPPED_CLAUDE_CODE_TURN_REPAIR_GRACE_SECONDS: i64 = 60;
+/// A turn a stop failed longer ago than this is no longer repaired.
+const STOPPED_CLAUDE_CODE_TURN_REPAIR_MAX_AGE_SECONDS: i64 = 24 * 60 * 60;
+/// The most turns one tick repairs, the oldest first.
+const STOPPED_CLAUDE_CODE_TURN_REPAIRS_PER_TICK: i64 = 32;
+
+/// Writes the end of each local-engine turn (crate::claude_code_lane) a
+/// runtime stop failed whose own write never committed. A stop fails only the
+/// turn's job, and once it commits a task of its own writes the run's
+/// failure, its Home row and its failure message
+/// (`stop::record_failed_claude_code_turn`). If the controller exits before
+/// that write commits, or the database refuses every try, nothing else would
+/// end the run: Home would list it as live work for good, its turn row would
+/// keep running, and Stop refuses its job, which is no longer queued or
+/// leased. A turn past the grace whose run is still unfinished is written
+/// here, one try per tick, and published once its write commits; a write
+/// that finds the turn's message already there records nothing twice.
+///
+/// Off while local-engine turns are on for nobody: then no such turn starts,
+/// and a deployment that never had one runs no query for it. The query reads
+/// `agent_jobs_stopped_claude_code_turn_recovery_idx`, which holds only failed
+/// engine jobs. A tick with nothing to repair runs one query, on the tick's
+/// connection.
+async fn repair_stopped_claude_code_turns(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    if !state.config.claude_code_lane.0.on() {
+        return Ok(());
+    }
+    let rows = tick
+        .client("failed to acquire connection for stopped local-engine turns")
+        .await?
+        .query(
+            "select j.id, j.project_id, j.run_id, j.conversation_id, j.session_id,
+                    j.prompt_id, j.payload
+               from agent_jobs j
+               join runs r on r.id = j.run_id
+              where j.engine is not null
+                and j.status = 'failed'
+                and j.error_message = $1
+                and j.completed_at < now() - ($2::bigint * interval '1 second')
+                and j.completed_at > now() - ($3::bigint * interval '1 second')
+                and r.status in ('queued', 'in_progress', 'awaiting_approval')
+              order by j.completed_at, j.id
+              limit $4",
+            &[
+                &crate::claude_code_lane::MACHINE_STOPPED_MESSAGE,
+                &STOPPED_CLAUDE_CODE_TURN_REPAIR_GRACE_SECONDS,
+                &STOPPED_CLAUDE_CODE_TURN_REPAIR_MAX_AGE_SECONDS,
+                &STOPPED_CLAUDE_CODE_TURN_REPAIRS_PER_TICK,
+            ],
+        )
+        .await
+        .context("failed to load stopped local-engine turns")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // Each write, and the publish after it, takes connections of its own.
+    tick.release();
+    for row in &rows {
+        let turn = super::stop::FailedClaudeCodeTurn::from_job_row(row);
+        match super::stop::write_and_publish_failed_claude_code_turn(state, &turn).await {
+            Ok(true) => info!(
+                job_id = %turn.job_id,
+                project_id = %turn.project_id,
+                "wrote the end of a local-engine turn a runtime stop failed, which its stop never wrote"
+            ),
+            Ok(false) => {}
+            // The turn stays a candidate, and the next tick tries it again.
+            Err((status, Json(error))) => warn!(
+                job_id = %turn.job_id,
+                status = status.as_u16(),
+                error = %error.message,
+                "failed to write the end of a local-engine turn a runtime stop failed"
+            ),
+        }
     }
     Ok(())
 }
@@ -3526,6 +3712,16 @@ mod tests {
         ));
     }
 
+    /// A local-engine turn these sweeps fail carries the sweep's code as its
+    /// `claudeCodeFailure` (crate::claude_code_lane::stamp_failure), which
+    /// Studio words from runtime-contracts' list of stop and sweep codes.
+    #[test]
+    fn the_run_once_codes_are_the_lanes_shared_ones() {
+        use runtime_contracts::claude_code_lane::{RUN_ONCE_INTERRUPTED, START_BY_PASSED};
+        assert_eq!(super::START_BY_PASSED_CODE, START_BY_PASSED);
+        assert_eq!(super::RUN_ONCE_INTERRUPTED_CODE, RUN_ONCE_INTERRUPTED);
+    }
+
     #[tokio::test]
     async fn stale_runtime_selector_excludes_removed_rows() -> anyhow::Result<()> {
         let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
@@ -3827,6 +4023,83 @@ mod tests {
                 fixture.reserved_balance,
                 "the reserve is kept for the hosted runtime's turn"
             );
+            Ok(())
+        }
+        .await;
+        let cleanup = fixture.cleanup().await;
+        test_result?;
+        cleanup
+    }
+
+    /// A local-engine turn (crate::claude_code_lane) has no credential, but it
+    /// is not Instafy AI: neither stranded-platform query takes it, so it is
+    /// never failed with the managed-AI refusal while it waits for its
+    /// person's own computer, however long it has been queued.
+    #[tokio::test]
+    async fn a_lane_turn_is_never_a_stranded_platform_job() -> anyhow::Result<()> {
+        use crate::tests_managed_ai_refund::seed_reserved_managed_ai_prompt;
+        use serde_json::json;
+        use tokio_postgres::types::Json as PgJson;
+
+        let Some(fixture) = seed_reserved_managed_ai_prompt("lane-turn-not-stranded").await? else {
+            eprintln!("skipping stranded lane turn test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let test_result: anyhow::Result<()> = async {
+            let desktop = Uuid::new_v4();
+            let mut connection = fixture.pool.get().await?;
+            let mut capabilities = json!({
+                "agent": true,
+                "claudeCode": { "version": 1, "ready": true },
+            });
+            crate::runtime::set_self_hosted_access_attestation(
+                capabilities.as_object_mut().expect("capabilities object"),
+                fixture.owner_user_id,
+            );
+            connection
+                .execute(
+                    "insert into runtimes (
+                         id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
+                         capabilities
+                     ) values ($1, $2, 'self-hosted', 'ready', 600, now(), $3)",
+                    &[&desktop, &fixture.project_id, &PgJson(capabilities)],
+                )
+                .await?;
+            let lane_turn = Uuid::new_v4();
+            connection
+                .execute(
+                    "insert into agent_jobs (
+                         id, project_id, intent, status, payload, target_runtime_id, engine,
+                         trigger_received_at
+                     ) values ($1, $2, 'feature', 'queued', $3, $4, 'claude-code', now())",
+                    &[
+                        &lane_turn,
+                        &fixture.project_id,
+                        &PgJson(json!({ "user_id": fixture.owner_user_id.to_string() })),
+                        &desktop,
+                    ],
+                )
+                .await?;
+            age_project_jobs_past_the_stranded_job_grace(&fixture.pool, fixture.project_id).await?;
+
+            let stranded =
+                super::load_platform_jobs_stranded_on_private_runtimes(&fixture.state, &connection)
+                    .await?;
+            assert!(
+                stranded.iter().all(|(job_id, _)| *job_id != lane_turn),
+                "{stranded:?}"
+            );
+            assert!(
+                super::fail_stranded_platform_jobs(&mut connection, &[(lane_turn, Some(desktop))])
+                    .await?
+                    .is_none(),
+                "the failing step leaves it too"
+            );
+            let status: String = connection
+                .query_one("select status from agent_jobs where id = $1", &[&lane_turn])
+                .await?
+                .get(0);
+            assert_eq!(status, "queued");
             Ok(())
         }
         .await;

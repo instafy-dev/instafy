@@ -237,6 +237,13 @@ pub(crate) struct AgentJob {
     /// a grant it may use.
     #[serde(skip_serializing_if = "Option::is_none")]
     grant_token: Option<String>,
+    /// What runs the job's turn when it is not the runtime's embedded engine
+    /// (`agent_jobs.engine`): `"claude-code"` for a turn its person's own
+    /// Claude Code runs (crate::claude_code_lane). Absent for every other job,
+    /// so their lease is unchanged; a runtime that does not know the field
+    /// never leases such a job, since it never advertises the capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) engine: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1171,36 +1178,47 @@ pub(crate) async fn agent_lease(
                     extract_multi_agent_group_id_from_job_payload(&job.payload);
                 let (agent_handle, agent_display_name, agent_description) =
                     extract_agent_prompt_identity_from_job_payload(&job.payload);
+                // A local-engine turn's traffic goes from its person's own
+                // Claude Code under their own sign-in, never through the
+                // Instafy proxy: it gets no envelope (crate::claude_code_lane).
+                let local_engine = job.engine.is_some();
                 // Every job token names this lease attempt. A platform job's
                 // record keeps its hash, so metering accepts only the token
                 // minted here for this attempt.
-                job.proxy = issue_proxy_envelope(
-                    &state.config,
-                    &project_id,
-                    &runtime_id,
-                    job.run_id.as_ref(),
-                    job.credential_id.as_ref(),
-                    Some(ProxyJobBinding {
-                        job_id: job.id,
-                        lease_attempt: job.lease_attempts,
-                        native_web_search: crate::credentials::credential_allows_native_web_search(
-                            &transaction,
-                            job.credential_id.as_ref(),
-                        )
-                        .await?,
-                    }),
-                    agent_handle.as_deref(),
-                    agent_display_name.as_deref(),
-                    agent_description.as_deref(),
-                );
+                job.proxy = if local_engine {
+                    None
+                } else {
+                    issue_proxy_envelope(
+                        &state.config,
+                        &project_id,
+                        &runtime_id,
+                        job.run_id.as_ref(),
+                        job.credential_id.as_ref(),
+                        Some(ProxyJobBinding {
+                            job_id: job.id,
+                            lease_attempt: job.lease_attempts,
+                            native_web_search:
+                                crate::credentials::credential_allows_native_web_search(
+                                    &transaction,
+                                    job.credential_id.as_ref(),
+                                )
+                                .await?,
+                        }),
+                        agent_handle.as_deref(),
+                        agent_display_name.as_deref(),
+                        agent_description.as_deref(),
+                    )
+                };
                 // Bind only a platform job, by the predicate dispatch writes
                 // its record by (no credential, an intent that needs AI). BYO
                 // and terminal leases skip the write and never touch the
-                // metering table.
+                // metering table, and so does a local-engine turn, which has
+                // no credential and no record.
                 let platform_job = job.credential_id.is_none()
                     && crate::dispatch::dispatch_requires_ai_access(
                         job.intent.as_deref().unwrap_or_default(),
-                    );
+                    )
+                    && !local_engine;
                 if let Some(proxy) = job.proxy.as_ref().filter(|_| platform_job) {
                     crate::ai_metering::job_record::bind_job_token(
                         &transaction,
@@ -1211,6 +1229,12 @@ pub(crate) async fn agent_lease(
                     .await?;
                 }
                 jobs.push(job);
+                // A local-engine turn is never batched: it has no plan group,
+                // so no continuation could match it, and this holds whatever
+                // those rules become.
+                if local_engine {
+                    break;
+                }
                 if jobs.len() == 1 {
                     if is_runtime_spread_job {
                         break;
@@ -1326,9 +1350,12 @@ pub(crate) async fn agent_lease(
         }
 
         // Which chat made each of the space's pages, as of this lease: the
-        // runtime holds another chat's page for the turn from it.
+        // runtime holds another chat's page for the turn from it. A
+        // local-engine turn gets no pages, as it gets no attachment URLs
+        // below: its lease adds nothing to its payload.
         let mut leased: Vec<crate::previews::LeasedPages<'_>> = jobs
             .iter_mut()
+            .filter(|job| job.engine.is_none())
             .map(|job| crate::previews::LeasedPages {
                 project_id: job.project_id,
                 payload: &mut job.payload,
@@ -1350,6 +1377,7 @@ pub(crate) async fn agent_lease(
             );
             let mut leased: Vec<crate::chat_attachments::LeasedPayload<'_>> = jobs
                 .iter_mut()
+                .filter(|job| job.engine.is_none())
                 .map(|job| crate::chat_attachments::LeasedPayload {
                     job_id: job.id,
                     project_id: job.project_id,
@@ -1441,8 +1469,9 @@ struct LeasingRuntime {
 ///   [`runtime::RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS`], so
 ///   [`runtime::touch_runtime_last_seen`] would not write it;
 /// - no queued job of the project can be this runtime's. The lease query takes
-///   only the project's queued jobs, but no job holding device grants that
-///   can no longer start (`device_grants.rs`), and of those only one that
+///   only the project's queued jobs, but no job that runs once (one holding
+///   device grants, or a local-engine turn) and can no longer start
+///   (`device_grants::run_once_job_cannot_start`), and of those only one that
 ///   targets this runtime, targets none, or carries runtime routing metadata
 ///   (a spread job may run on a runtime it does not target). This read counts
 ///   every such job, whatever the lease query's other filters would say about
@@ -1480,7 +1509,7 @@ async fn idle_lease_poll_finds_no_work(
                         where aj.project_id = r.project_id
                           and aj.status = 'queued'
                           and not ",
-                crate::device_grants::granted_job_cannot_start!("$4"),
+                crate::device_grants::run_once_job_cannot_start!("$4"),
                 "
                           and (
                               aj.target_runtime_id is null
@@ -1883,14 +1912,24 @@ fn attach_controller_tokens(
         // prevents the runtime from falling back to the model-facing token.
         let separate_workspace_token =
             supports_workspace_token && job_requires_internal_workspace_token(job, runtime_id);
-        if let Some(token) = mint_job_controller_token(
-            config,
-            runtime_id,
-            runtime_lease_id,
-            runtime_generation,
-            job,
-            separate_workspace_token,
-        ) {
+        // A local-engine turn gets no model-facing controller token, so no
+        // `prompt.execute`, `fs.write` or Git token: nothing it runs can start
+        // turns or automations in its person's name (crate::claude_code_lane).
+        // It keeps the internal workspace token below, which its end-of-turn
+        // save needs and the runtime never exports.
+        let model_facing_token = if job.engine.is_some() {
+            None
+        } else {
+            mint_job_controller_token(
+                config,
+                runtime_id,
+                runtime_lease_id,
+                runtime_generation,
+                job,
+                separate_workspace_token,
+            )
+        };
+        if let Some(token) = model_facing_token {
             let MintedAccessToken {
                 token,
                 expires_at,
@@ -2196,6 +2235,10 @@ pub(crate) async fn agent_heartbeat(
                and ($5::bool
                     or coalesce(agent_role, payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker'
                     or lease_expires_at > statement_timestamp())
+               -- A local-engine turn runs once: a lease of it that lapsed
+               -- (a computer that slept) is never renewed, and the sweep
+               -- fails it (crate::claude_code_lane).
+               and (engine is null or lease_expires_at > statement_timestamp())
              returning lease_expires_at",
             &[
                 &job_uuid,
@@ -2241,6 +2284,9 @@ pub(crate) async fn agent_heartbeat(
 /// transaction commit. A concurrent human-answer cancellation then has one
 /// deterministic winner: cancellation first makes this SELECT return no row;
 /// message delivery first commits before cancellation can update the job.
+///
+/// Only the runtime that leased a local-engine turn posts to it: a token with
+/// no runtime never does (crate::claude_code_lane).
 fn agent_message_job_select_sql(runtime_scoped: bool) -> &'static str {
     if runtime_scoped {
         "select run_id,
@@ -2251,12 +2297,14 @@ fn agent_message_job_select_sql(runtime_scoped: bool) -> &'static str {
                 created_at,
                 leased_at,
                 lease_attempts,
-                leased_by_runtime_id
+                leased_by_runtime_id,
+                engine
          from agent_jobs
          where id = $1
            and project_id = $2
            and status = 'leased'
            and coalesce(leased_by_runtime_id, $3::uuid) = $3
+           and (engine is null or leased_by_runtime_id = $3)
          for update"
     } else {
         "select run_id,
@@ -2267,11 +2315,13 @@ fn agent_message_job_select_sql(runtime_scoped: bool) -> &'static str {
                 created_at,
                 leased_at,
                 lease_attempts,
-                leased_by_runtime_id
+                leased_by_runtime_id,
+                engine
          from agent_jobs
          where id = $1
            and project_id = $2
            and status = 'leased'
+           and engine is null
          for update"
     }
 }
@@ -2415,6 +2465,13 @@ pub(crate) async fn agent_message(
         Some(&lease_metrics),
     );
     let metadata_value = sanitize_json_for_postgres(metadata_value);
+    // A local-engine turn starts nothing after it: no team's plan, no
+    // question that waits for an answer and no browser card or hand-back,
+    // each of which would start a turn whose words Instafy wrote
+    // (crate::claude_code_lane). Refused before anything is written.
+    if row.get::<_, Option<String>>("engine").is_some() {
+        crate::claude_code_lane::refuse_message_that_starts_a_turn(&metadata_value)?;
+    }
 
     let mut deferred_credit_org_id: Option<Uuid> = None;
     // CONTROLLER EVALUATION: marked runs arbitrate their own participation.
@@ -3333,6 +3390,10 @@ pub(crate) async fn agent_complete(
     let error_ref = error_message.as_deref();
     let artifacts_count = artifacts_value.as_array().map(|arr| arr.len());
 
+    // Only a team's planning job has a receipt, and a local-engine turn never
+    // plans: its provider and conversation state are kept as any other
+    // job's, so one that names Claude Code is dropped
+    // (crate::claude_code_lane::completion_provider).
     if let Some(receipt) = planning_receipts::store(
         &state,
         &transaction,
@@ -3341,7 +3402,7 @@ pub(crate) async fn agent_complete(
         &artifacts_value,
         stored_artifacts.as_ref(),
         task_usage_receipt.as_ref(),
-        &proxy_metadata,
+        &crate::claude_code_lane::without_lane_claims(&proxy_metadata),
     )
     .await?
     {
@@ -3385,6 +3446,11 @@ pub(crate) async fn agent_complete(
                        and project_id = $2
                        and status in ('leased','queued')
                        and coalesce(leased_by_runtime_id, $8::uuid) = $8
+                       -- A local-engine turn ends only by the runtime that
+                       -- leased it: one still queued ends through the sweeps,
+                       -- a stop of its runtime or a cancel, never by another
+                       -- runtime of the space (crate::claude_code_lane).
+                       and (engine is null or leased_by_runtime_id = $8)
                      returning id,
                                project_id,
                                run_id,
@@ -3395,7 +3461,8 @@ pub(crate) async fn agent_complete(
 	                               leased_at,
                                completed_at,
 	                               lease_attempts,
-                               grant_ids",
+                               grant_ids,
+                               engine",
                     &[
                         &job_uuid,
                         &project_id,
@@ -3425,6 +3492,9 @@ pub(crate) async fn agent_complete(
                          active_input_ready_turn_id = null,
                          heartbeat_at = now()
                      where id = $1 and project_id = $2 and status in ('leased','queued')
+                       -- A token with no runtime never ends a local-engine
+                       -- turn, which only its leasing runtime ends.
+                       and engine is null
                      returning id,
                                project_id,
                                run_id,
@@ -3435,7 +3505,8 @@ pub(crate) async fn agent_complete(
 	                               leased_at,
                                completed_at,
 	                               lease_attempts,
-                               grant_ids",
+                               grant_ids,
+                               engine",
                     &[
                         &job_uuid,
                         &project_id,
@@ -3462,6 +3533,27 @@ pub(crate) async fn agent_complete(
             return Err(not_found("agent job not found or already completed"));
         }
     };
+    // A local-engine turn (crate::claude_code_lane): its completion keeps only
+    // what the lane writes, and bills nothing.
+    let lane = row.get::<_, Option<String>>("engine").is_some();
+    let mut artifacts_value = artifacts_value;
+    let mut artifacts_count = artifacts_count;
+    // A Codex run log is the only artifact billing reads, and no lane turn
+    // writes one: one on a lane job is forged, and is not kept.
+    if lane && crate::claude_code_lane::drop_codex_run_logs(&mut artifacts_value) {
+        warn!(job_id = %job_uuid, "dropped a Codex run log from a Claude Code turn's completion");
+        let kept = cap_artifacts_payload(&artifacts_value);
+        transaction
+            .execute(
+                "update agent_jobs set artifacts = $2::jsonb where id = $1",
+                &[&job_uuid, &PgJson(kept.as_ref())],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to store the turn's artifacts: {error}"))
+            })?;
+        artifacts_count = artifacts_value.as_array().map(|arr| arr.len());
+    }
 
     // Completion and human steering serialize on the agent_jobs row. Any
     // unacknowledged command is rejected in the same transaction. A command
@@ -3690,18 +3782,31 @@ pub(crate) async fn agent_complete(
         }
     }
 
-    let provider_value = extract_provider_from_metadata(&proxy_metadata);
+    // A local-engine turn's provider is `claude-code` whatever its runtime
+    // reports, and no other job's is (crate::claude_code_lane).
+    let provider_value = crate::claude_code_lane::completion_provider(
+        &job_uuid,
+        lane,
+        extract_provider_from_metadata(&proxy_metadata),
+    );
     let credit_snapshot_value = extract_credit_snapshot(&proxy_metadata);
     let suggested_replies = extract_ui_suggested_replies(&proxy_metadata);
 
     if let Some(run_uuid) = run_id {
         // A granted turn's provider thread is never resumed (dispatch.rs), so
-        // none is kept for it.
+        // none is kept for it. A local-engine turn keeps only a lane-shaped
+        // state, on the runtime that ran it, and no other job keeps one that
+        // names the lane: each engine resumes only its own.
         let granted = row
             .get::<_, Option<Vec<Uuid>>>("grant_ids")
             .is_some_and(|grant_ids| !grant_ids.is_empty());
-        let conversation_state =
-            extract_provider_conversation_state(&proxy_metadata).filter(|_| !granted);
+        let conversation_state = crate::claude_code_lane::completion_conversation_state(
+            &job_uuid,
+            lane,
+            extract_provider_conversation_state(&proxy_metadata),
+            leased_runtime_id,
+        )
+        .filter(|_| !granted);
         if let Err(error) = persist_run_completion_metadata(
             &transaction,
             &run_uuid,
@@ -3769,7 +3874,41 @@ pub(crate) async fn agent_complete(
             crate::conversations::is_internal_conversation(&transaction, &conversation_uuid).await?
         };
 
-        if let Some(usage) = extract_turn_usage_from_artifacts(&artifacts_value) {
+        // A local-engine turn costs no Instafy credits: no usage is
+        // reconciled whatever its artifacts hold. What Claude Code reported
+        // it used is shown in Details, never billed and with no cost.
+        if lane {
+            if let Some(reported) = crate::claude_code_lane::reported_usage(&artifacts_value) {
+                let usage_metadata = attach_lease_metrics_to_metadata(
+                    merge_runtime_preference_from_job_payload(
+                        build_agent_update_metadata(
+                            &job_uuid,
+                            Some("token_usage"),
+                            Some(reported.details()),
+                        ),
+                        &job_payload,
+                    ),
+                    Some(&lease_metrics),
+                );
+                let usage_metadata = sanitize_json_for_postgres(usage_metadata);
+                // As the Codex usage row: written with the reply, which bumps
+                // the conversation, and never a Home reply.
+                let message_row = insert_agent_conversation_message(
+                    &transaction,
+                    &project_id,
+                    &conversation_uuid,
+                    run_session_id,
+                    run_prompt_id,
+                    run_id,
+                    reported.content(),
+                    usage_metadata,
+                    internal_conversation,
+                    false,
+                )
+                .await?;
+                token_usage_message = Some(message_row);
+            }
+        } else if let Some(usage) = extract_turn_usage_from_artifacts(&artifacts_value) {
             // Billed once the reply is visible (CompletionSettlement), unless
             // the turn costs nothing (above).
             if costs_nothing.is_none() {
@@ -3868,6 +4007,17 @@ pub(crate) async fn agent_complete(
                 Some(&lease_metrics),
             );
             let mut message_metadata = sanitize_json_for_postgres(message_metadata);
+            // A local-engine turn's failure carries the runtime's failure code
+            // beside its `aiAccessMode`, when the code is one Studio words
+            // (crate::claude_code_lane::RUNTIME_FAILURE_CODES).
+            if lane && outcome_lower == "failed" {
+                if let (Some(code), Some(map)) = (
+                    crate::claude_code_lane::reported_failure_code(&artifacts_value),
+                    message_metadata.as_object_mut(),
+                ) {
+                    crate::claude_code_lane::stamp_failure(map, code);
+                }
+            }
             // The turn's steps go with its reply, so its done line reads the
             // same after a reload whose page of history starts mid-turn.
             if let Some(turn_steps) =
@@ -4752,12 +4902,18 @@ pub(crate) async fn enqueue_agent_job_record(
         run_id,
         prompt_id,
         provider_conversation_state,
-    );
+    )?;
     let (parent_job_id, plan_group_id, agent_role) =
         extract_job_hierarchy_from_payload(&payload_json);
     let payload_param = PgJson(&payload_json);
     let status = "queued";
     let trigger = request.trigger.as_ref();
+    // What runs the job's turn when it is not the runtime's embedded engine:
+    // only an admitted lane turn's, from dispatch's admission
+    // (crate::claude_code_lane), never from a request body.
+    let engine = request
+        .claude_code_lane
+        .map(|_| crate::claude_code_lane::ENGINE);
 
     let row = transaction
         .query_opt(
@@ -4777,11 +4933,12 @@ pub(crate) async fn enqueue_agent_job_record(
                  plan_group_id,
                  agent_role,
                  trigger_received_at,
-                 grant_ids
+                 grant_ids,
+                 engine
              ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11,
                  (select parent.id from agent_jobs parent
                   where parent.id = $12 and parent.project_id = $1),
-                 $13, $14, coalesce($15, now()), nullif($16::uuid[], '{}'))
+                 $13, $14, coalesce($15, now()), nullif($16::uuid[], '{}'), $17)
              returning id",
             &[
                 &project.id,
@@ -4800,10 +4957,20 @@ pub(crate) async fn enqueue_agent_job_record(
                 &agent_role,
                 &trigger.and_then(|trigger| trigger.received_at),
                 &request.grant_ids,
+                &engine,
             ],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to enqueue agent job: {error}")))?;
+        .map_err(|error| {
+            // Two lane turns of one person admitted at once: the second insert
+            // waits for the first and fails on the one-active-turn index. By
+            // the time dispatch sees the error its SQLSTATE is gone, so it is
+            // answered here as the gate's own G8 refusal.
+            if crate::claude_code_lane::is_second_active_turn(&error) {
+                return crate::claude_code_lane::turn_active(false);
+            }
+            internal_error(format!("failed to enqueue agent job: {error}"))
+        })?;
 
     let job_id = row.map(|record| record.get::<_, Uuid>("id"));
     if let Some(job_id) = job_id {
@@ -4854,6 +5021,7 @@ pub(crate) async fn lease_next_agent_job(
                        aj.conversation_id,
                        aj.priority,
                        aj.created_at,
+                       aj.engine,
                        aj.payload #>> '{user_id}' as job_user_id,
                        lower(replace(coalesce(
                            aj.payload #>> '{metadata,runtimeRouting,strategy}',
@@ -4897,13 +5065,37 @@ pub(crate) async fn lease_next_agent_job(
                   -- A job holding device grants is leased once, only within
                   -- its minute to start, and only by a runtime that says it
                   -- runs such a job as a granted turn (`device_grants.rs`).
-                  and not ", crate::device_grants::granted_job_cannot_start!("$14"), "
+                  -- A local-engine turn is leased once too, within the same
+                  -- minute (`claude_code_lane.rs`).
+                  and not ", crate::device_grants::run_once_job_cannot_start!("$14"), "
                   and (
                         aj.grant_ids is null
                         or exists (
                             select 1 from runtimes granted_runtime
                              where granted_runtime.id = $2
                                and granted_runtime.capabilities -> 'grantedTurns' = 'true'::jsonb
+                        )
+                  )
+                  -- A local-engine turn runs only on the runtime it was
+                  -- admitted on: its exact pin, a private runtime the
+                  -- controller attested as its person's own, with the
+                  -- `claudeCode` capability registration attested as ready.
+                  -- A hosted runtime has no owner filter below, so this is
+                  -- what keeps it out.
+                  and (
+                        aj.engine is null
+                        or (
+                            aj.target_runtime_id = $2
+                            and exists (
+                                select 1 from runtimes lane_runtime
+                                 where lane_runtime.id = $2
+                                   and lane_runtime.project_id = $1
+                                   and lane_runtime.capabilities #>> '{_instafySelfHostedAccess,mode}' = 'private'
+                                   and lane_runtime.capabilities #>> '{_instafySelfHostedAccess,ownerUserId}'
+                                       = aj.payload #>> '{user_id}'
+                                   and lane_runtime.capabilities #> '{claudeCode,version}' = '1'::jsonb
+                                   and lane_runtime.capabilities #> '{claudeCode,ready}' = 'true'::jsonb
+                            )
                         )
                   )
                   and ($11::bool or coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker')
@@ -4927,6 +5119,9 @@ pub(crate) async fn lease_next_agent_job(
                         $10::bool
                         and aj.credential_id is null
                         and lower(btrim(coalesce(aj.intent, ''))) <> 'terminal_command'
+                        -- A local-engine turn has no credential and is not
+                        -- Instafy AI: it runs on its person's own runtime.
+                        and aj.engine is null
                   )
                   -- A turn put back in the queue after a short provider
                   -- rate limit waits out its hold first
@@ -5117,8 +5312,15 @@ pub(crate) async fn lease_next_agent_job(
                               )
                         )
                       )
+                -- A local-engine turn first, whatever its priority and age:
+                -- its admission found its computer idle, and a job another
+                -- dispatch queued for that computer as it was admitted must
+                -- not use up the turn's minute to start
+                -- (`claude_code_lane::admit`, G7). Only its own computer
+                -- leases it, so no other runtime's order changes.
                 order by
                   case when target_runtime_id = $2 then 0 else 1 end,
+                  (engine is not null) desc,
                   priority asc,
                   created_at asc
                 limit 1
@@ -5172,6 +5374,10 @@ pub(crate) async fn lease_next_agent_job(
     let conversation_id: Option<Uuid> = row.get("conversation_id");
     let run_id: Option<Uuid> = row.get("run_id");
     let credential_id: Option<Uuid> = row.try_get("credential_id").unwrap_or(None);
+    // A local-engine turn (crate::claude_code_lane): its person's own Claude
+    // Code runs their recorded message alone, so its lease adds nothing to
+    // the payload dispatch built.
+    let engine: Option<String> = row.get("engine");
     let mut payload: JsonValue = row.get("payload");
     // A granted turn's grants, and when its person asked (job_trigger.rs).
     let grant_ids: Vec<Uuid> = row
@@ -5231,7 +5437,9 @@ pub(crate) async fn lease_next_agent_job(
         .await;
     }
 
-    if let Some(conversation_uuid) = conversation_id {
+    // No conversation history, hand-back keys or skill openers for a
+    // local-engine turn: Claude Code's own session is its only continuity.
+    if let Some(conversation_uuid) = conversation_id.filter(|_| engine.is_none()) {
         let agent_scope_id = payload
             .get("metadata")
             .and_then(JsonValue::as_object)
@@ -5370,6 +5578,7 @@ pub(crate) async fn lease_next_agent_job(
         workspace_token_scopes: None,
         grants,
         grant_token: None,
+        engine,
     };
 
     Ok(Some(job))
@@ -6245,18 +6454,29 @@ fn build_agent_evaluation_preamble(metadata: &JsonValue) -> String {
     build_ambient_evaluation_preamble(metadata)
 }
 
-fn build_agent_job_payload(
+pub(crate) fn build_agent_job_payload(
     project: &ProjectRecord,
     context: &RequestContext,
     request: &DispatchPromptNormalized,
     run_id: &Uuid,
     prompt_id: &Uuid,
     provider_conversation_state: Option<&JsonValue>,
-) -> JsonValue {
+) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
+    // A turn its person's own Claude Code runs (crate::claude_code_lane)
+    // carries their recorded message alone, no client metadata but the keys
+    // the lane allows, and no bootstrap. The gate never admits an evaluation,
+    // so a lane payload that would carry its marker is a bug, not a turn.
+    let lane = request.claude_code_lane.is_some();
+    if lane && crate::group_participation::metadata_marks_agent_evaluation(&request.metadata) {
+        return Err(internal_error(
+            "a Claude Code turn cannot carry an agent evaluation",
+        ));
+    }
     let mut map = JsonMap::new();
     let bootstrap = request
         .metadata
         .as_object()
+        .filter(|_| !lane)
         .and_then(|metadata| metadata.get("bootstrap"))
         .cloned();
     map.insert("version".to_string(), JsonValue::String("1.0".into()));
@@ -6295,9 +6515,16 @@ fn build_agent_job_payload(
         "intent".to_string(),
         JsonValue::String(request.intent.clone()),
     );
+    // A lane turn names the lane's one workspace mode, never one a client's
+    // metadata chose.
+    let workspace_mode = if lane {
+        crate::claude_code_lane::WORKSPACE_MODE
+    } else {
+        request.workspace_mode.as_str()
+    };
     map.insert(
         "executionMode".to_string(),
-        JsonValue::String(request.workspace_mode.clone()),
+        JsonValue::String(workspace_mode.to_string()),
     );
     // Controller-marked evaluations get their participation instruction inside
     // the delivered turn itself. The persisted conversation message keeps the
@@ -6316,10 +6543,15 @@ fn build_agent_job_payload(
         "prompt_text".to_string(),
         JsonValue::String(delivered_prompt_text),
     );
-    if let Some(plan_seed) = request.plan_seed.as_ref() {
+    if let Some(plan_seed) = request.plan_seed.as_ref().filter(|_| !lane) {
         map.insert("plan_seed".to_string(), plan_seed.clone());
     }
-    if let Some(metadata) = request.metadata.as_object() {
+    if lane {
+        map.insert(
+            "metadata".to_string(),
+            JsonValue::Object(crate::claude_code_lane::payload_metadata(&request.metadata)),
+        );
+    } else if let Some(metadata) = request.metadata.as_object() {
         map.insert("metadata".to_string(), JsonValue::Object(metadata.clone()));
     } else {
         map.insert("metadata".to_string(), request.metadata.clone());
@@ -6330,7 +6562,7 @@ fn build_agent_job_payload(
     if let Some(state) = provider_conversation_state {
         map.insert("provider_conversation_state".to_string(), state.clone());
     }
-    if let Some(tool_limits) = request.tool_limits.as_ref() {
+    if let Some(tool_limits) = request.tool_limits.as_ref().filter(|_| !lane) {
         map.insert("tool_limits".to_string(), tool_limits.clone());
     }
     if let Some(write_intent) = request
@@ -6341,7 +6573,7 @@ fn build_agent_job_payload(
     {
         map.insert("writeIntent".to_string(), write_intent);
     }
-    if let Some(repo) = request.repo.as_ref() {
+    if let Some(repo) = request.repo.as_ref().filter(|_| !lane) {
         let mut repo_map = JsonMap::new();
         if let Some(owner) = repo.owner.as_ref() {
             repo_map.insert("owner".to_string(), JsonValue::String(owner.clone()));
@@ -6357,16 +6589,18 @@ fn build_agent_job_payload(
         }
     }
 
-    JsonValue::Object(map)
+    Ok(JsonValue::Object(map))
 }
 
 // Ensure every agent message keeps the runtime selection metadata that dispatch attached to the job,
 // so downstream consumers (UI, history, tests) can see which runtime handled the response.
 /// Copy the run's AI access decision (`aiAccessMode`: "managed" for Instafy
-/// AI, "byoc" for the person's own credential) from the job onto its final
-/// message. The Studio words a provider limit on Instafy's account differently
-/// from one on the person's own.
-fn stamp_ai_access_mode_from_job_payload(
+/// AI, "byoc" for the person's own credential, "claude-code" for a turn its
+/// person's own Claude Code ran) from the job onto its final message. The
+/// Studio words a provider limit on Instafy's account differently from one on
+/// the person's own. A lane turn's message also gets the controller's
+/// `claudeCode` stamp and `managedAiUsed: false` (crate::claude_code_lane).
+pub(crate) fn stamp_ai_access_mode_from_job_payload(
     metadata: JsonValue,
     job_payload: &JsonValue,
 ) -> JsonValue {
@@ -6374,8 +6608,16 @@ fn stamp_ai_access_mode_from_job_payload(
         .get("metadata")
         .and_then(|metadata| metadata.get("aiAccessMode"))
         .and_then(JsonValue::as_str)
-        .filter(|mode| matches!(*mode, "managed" | "byoc"));
+        .filter(|mode| {
+            matches!(*mode, "managed" | "byoc") || *mode == crate::claude_code_lane::AI_ACCESS_MODE
+        });
     match (metadata, mode) {
+        (JsonValue::Object(mut map), Some(mode))
+            if mode == crate::claude_code_lane::AI_ACCESS_MODE =>
+        {
+            crate::claude_code_lane::stamp(&mut map);
+            JsonValue::Object(map)
+        }
         (JsonValue::Object(mut map), Some(mode)) => {
             map.insert(
                 "aiAccessMode".to_string(),
@@ -7268,6 +7510,11 @@ mod tests {
         assert!(agent_message_job_select_sql(true)
             .contains("coalesce(leased_by_runtime_id, $3::uuid) = $3"));
         assert!(!agent_message_job_select_sql(false).contains("$3"));
+        // A local-engine turn takes messages only from the runtime that
+        // leased it, never through a token with no runtime.
+        assert!(agent_message_job_select_sql(true)
+            .contains("and (engine is null or leased_by_runtime_id = $3)"));
+        assert!(agent_message_job_select_sql(false).contains("and engine is null"));
     }
 
     #[test]
@@ -8415,6 +8662,7 @@ mod tests {
             workspace_token_scopes: None,
             grants: Vec::new(),
             grant_token: None,
+            engine: None,
         };
 
         assert_eq!(
@@ -8533,6 +8781,7 @@ mod tests {
             workspace_token_scopes: None,
             grants: Vec::new(),
             grant_token: None,
+            engine: None,
         };
 
         assert_eq!(extract_controller_subject_user_id(&job), Some(user_id));
@@ -8583,6 +8832,7 @@ mod tests {
             workspace_token_scopes: None,
             grants: Vec::new(),
             grant_token: None,
+            engine: None,
         };
 
         assert_eq!(extract_controller_subject_user_id(&job), None);
@@ -8645,6 +8895,7 @@ mod tests {
             workspace_token_scopes: None,
             grants: Vec::new(),
             grant_token: None,
+            engine: None,
         };
 
         let mut legacy_jobs = vec![build_job()];
@@ -8989,6 +9240,7 @@ mod tests {
             workspace_token_scopes: None,
             grants: Vec::new(),
             grant_token: None,
+            engine: None,
         }];
 
         attach_controller_tokens(

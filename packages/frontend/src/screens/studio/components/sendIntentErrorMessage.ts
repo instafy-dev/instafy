@@ -1,7 +1,11 @@
+import { describeTurnEngineSteerRefusal } from "../../../conversations/runFailurePresentation";
+
 /**
  * Composer status text for a refused Steer or Queue send intent. Unknown codes
  * fall back to the controller's own message, so an older client still shows
- * something readable when a newer controller adds a refusal.
+ * something readable when a newer controller adds a refusal. A turn engine
+ * words the refusal of a Steer into one of its turns (docs/Local-Engine-Turns.md
+ * 5.5).
  */
 export function describeSendIntentError(code: string | null, fallback: string): string {
   switch (code) {
@@ -18,6 +22,6 @@ export function describeSendIntentError(code: string | null, fallback: string): 
     case "send_intent_idempotency_conflict":
       return "This message conflicts with an earlier send attempt. Edit it slightly and try again.";
     default:
-      return fallback;
+      return (code ? describeTurnEngineSteerRefusal(code) : null) ?? fallback;
   }
 }

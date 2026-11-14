@@ -30,6 +30,8 @@ mod bug_reports;
 mod change_undone;
 mod chat_activity;
 mod chat_attachments;
+mod claude_code_lane;
+mod claude_material;
 mod config;
 mod connection_limit;
 mod conversation_goals;
@@ -111,6 +113,8 @@ mod tests_change_undone;
 mod tests_chat_attachment_lease;
 #[cfg(test)]
 mod tests_chat_attachment_policies;
+#[cfg(test)]
+mod tests_claude_code_lane;
 #[cfg(test)]
 mod tests_completion_reply_first;
 #[cfg(test)]

@@ -53,4 +53,42 @@ describe("chatSendQueueStorage", () => {
 
     expect(readChatSendQueue(key)).toEqual([item]);
   });
+
+  it("never stores or restores a turn-engine claim, nor the runtime it pinned", () => {
+    const key = createChatSendQueueKey("project-1", "conversation-claimed");
+    const claimed: QueuedChatSendItem = {
+      id: "queued-claimed",
+      message: "Fix the failing login test",
+      editorState: null,
+      createdAt: 1_786_000_000_000,
+      targetAgentHandles: ["octo"],
+      browserPageTarget: null,
+      browserLaunchMode: null,
+      metadata: { turnEngine: "claude-code", agentSelection: { active: ["octo"], mentions: ["octo"] } },
+      runtimeOverride: { runtimeId: "desktop-runtime", runtimeDisplayName: null, preferRuntime: false },
+    };
+
+    writeChatSendQueue(key, [claimed]);
+    const stored = window.localStorage.getItem(key) ?? "";
+    expect(stored).not.toContain("turnEngine");
+    expect(stored).not.toContain("desktop-runtime");
+    expect(readChatSendQueue(key)).toEqual([
+      {
+        id: "queued-claimed",
+        message: "Fix the failing login test",
+        editorState: null,
+        createdAt: 1_786_000_000_000,
+        targetAgentHandles: ["octo"],
+        browserPageTarget: null,
+        browserLaunchMode: null,
+        metadata: { agentSelection: { active: ["octo"], mentions: ["octo"] } },
+      },
+    ]);
+
+    // An entry another build wrote with a claim loses it on the way in.
+    window.localStorage.setItem(key, JSON.stringify([{ ...claimed, metadata: { turnEngine: "claude-code" } }]));
+    const [restored] = readChatSendQueue(key);
+    expect(restored?.metadata).toEqual({});
+    expect(restored).not.toHaveProperty("runtimeOverride");
+  });
 });

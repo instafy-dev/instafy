@@ -107,6 +107,8 @@ pub fn deletion_allowed(path: &str) -> bool {
 
 /// File names that hold credentials. Matched on the last path segment,
 /// ignoring ASCII case because macOS folders are case-insensitive.
+/// `.credentials.json` is the name of Claude Code's sign-in file, and Instafy
+/// never stores a Claude sign-in (docs/Local-Engine-Turns.md, section 6).
 pub fn is_secret_path(path: &str) -> bool {
     let name = path
         .trim_end_matches('/')
@@ -125,7 +127,10 @@ pub fn is_secret_path(path: &str) -> bool {
         || name.starts_with("id_rsa")
         || name.starts_with("id_ed25519")
         || name.starts_with("id_ecdsa")
-        || matches!(name.as_str(), ".npmrc" | ".pypirc" | ".netrc")
+        || matches!(
+            name.as_str(),
+            ".npmrc" | ".pypirc" | ".netrc" | ".credentials.json"
+        )
 }
 
 /// Chat images the web app used to write into the workspace root, and the
@@ -194,6 +199,9 @@ mod tests {
             ".npmrc",
             "sub/.pypirc",
             ".netrc",
+            ".credentials.json",
+            ".claude/.credentials.json",
+            "home/.Claude/.Credentials.JSON",
         ] {
             assert_eq!(
                 unpublishable_reason(path),
@@ -211,8 +219,27 @@ mod tests {
             "README.md",
             "src/pem.rs",
             "keyboard.key.json",
+            "credentials.json",
+            "config/.credentials.json.example",
+            "docs/.credentials.json.md",
         ] {
             assert_eq!(unpublishable_reason(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_claude_code_sign_in_file_is_never_published_or_restored_but_may_be_deleted() {
+        for path in [".credentials.json", ".claude/.credentials.json"] {
+            assert!(is_secret_path(path), "{path}");
+            assert!(is_unpublishable(path), "{path}");
+            assert_eq!(
+                restore_refusal(path, false, "100644", Some(64)),
+                Some(RejectReason::Secret),
+                "{path}"
+            );
+            // A space that already holds one can still remove it.
+            assert!(deletion_allowed(path), "{path}");
+            assert_eq!(restore_refusal(path, true, "000000", None), None, "{path}");
         }
     }
 

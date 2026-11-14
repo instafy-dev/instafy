@@ -305,9 +305,17 @@ fn normalize_schedule_kind(raw: &str) -> Result<String, (StatusCode, Json<ApiErr
     }
 }
 
+/// An automation's prompt metadata, as create and update store it. It never
+/// carries a claim to run on its person's own Claude Code: an automation is
+/// not a message its person typed (crate::claude_code_lane), and its runs
+/// would only be refused.
 fn normalize_metadata(raw: Option<JsonValue>) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
     match raw {
-        Some(JsonValue::Object(map)) => Ok(JsonValue::Object(map)),
+        Some(JsonValue::Object(map)) => {
+            let metadata = JsonValue::Object(map);
+            crate::claude_code_lane::refuse_claim_outside_a_send(Some(&metadata), "automation")?;
+            Ok(metadata)
+        }
         Some(_) => Err(bad_request("metadata must be a JSON object")),
         None => Ok(json!({})),
     }
@@ -1016,6 +1024,7 @@ async fn execute_automation_once(
             allow_internal_review: record.mode == MODE_SPACE_REVIEW,
             trigger: None,
             grant_ids: Vec::new(),
+            claude_code_lane: None,
         },
     )
     .await;

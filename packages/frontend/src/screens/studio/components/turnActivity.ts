@@ -1351,6 +1351,11 @@ export type SummarizeTurnActivityOptions = {
   approvals?: readonly SessionBrowserApproval[];
   /** Non-step messages Details lists between the steps (notes, plan updates). */
   updates?: readonly ChatMessage[];
+  /**
+   * The line until the turn's first step when a turn engine runs it
+   * (turnEngineStartingLine), in place of {@link STARTING_LINE}.
+   */
+  startingLine?: string | null;
 };
 
 /**
@@ -1470,12 +1475,13 @@ export function summarizeTurnActivity(
   }
 
   const stepCount = steps.length;
+  const startingLine = options.startingLine || STARTING_LINE;
   let live: string | null = null;
   let summary: string | null = null;
   if (phase === "starting") {
     // A turn Instafy tries again by itself starts as any turn does: one
     // "Starting…", never a "Trying again…" of its own.
-    live = STARTING_LINE;
+    live = startingLine;
   } else if (phase === "stale") {
     live = "Status unavailable";
   } else if (phase === "running") {
@@ -1493,7 +1499,7 @@ export function summarizeTurnActivity(
       // From the send until the turn's first step the line says one thing,
       // however long that takes: the model reasoning, or the runtime retrying
       // its request, is still the turn starting.
-      live = STARTING_LINE;
+      live = startingLine;
     } else if (status && status.index > newestOtherIndex && status.activity.live) {
       live = `${fillHost(status.activity.live, status.activity.host)}…`;
     } else if (runningStep) {

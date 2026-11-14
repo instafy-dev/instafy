@@ -32,12 +32,18 @@ import {
   truncate,
 } from "./chatContentHelpers";
 import {
+  readControllerStampedTurnEngine,
   resolveRetryingStatusPresentation,
   resolveRunFailurePresentation,
 } from "../../../conversations/runFailurePresentation";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { agentJobThreadAcknowledgementIds, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
-import { RunFailureMessageBody, takeFoldedRetryFocus, useRunFailureAutoRetryActive } from "./RunFailureNotice";
+import {
+  RunFailureMessageBody,
+  takeFoldedRetryFocus,
+  useRunFailureAutoRetryActive,
+  useTurnEngineSpeakerLine,
+} from "./RunFailureNotice";
 import { ChatRunStopActions } from "./ChatRunStopNotice";
 import { isCompactionStatusText } from "./assistantStatusHeuristics";
 import type { AgentThreadBranchParticipant, AgentThreadBranchRow } from "./agentThreadBranchRows";
@@ -61,6 +67,7 @@ import { TurnBrowserApprovalRow, type TurnBrowserApproval } from "./turnBrowserA
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
 const NO_EARLIER_ATTEMPTS: EarlierAttemptDetails[] = [];
+const NO_REPLY_NOTES: ChatMessage[] = [];
 const TRY_ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth", "Ninth", "Tenth"];
 const TRY_COUNTS = ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 
@@ -85,6 +92,25 @@ function normalizeAgentHandle(value: unknown): string | null {
   }
   const trimmed = value.trim().replace(/^@+/, "").trim().toLowerCase();
   return trimmed ? `@${trimmed}` : null;
+}
+
+/**
+ * The message of this turn that carries a turn engine's controller stamp:
+ * its reply or failure, which the controller stamps from the job, or another
+ * of its messages. Null for every other turn.
+ */
+function turnEngineStampedMessage(
+  row: ChatMessage,
+  finalSummaryMessage: ChatMessage | null,
+): ChatMessage | null {
+  const metadata = isRecord(row.metadata) ? row.metadata : null;
+  const threadMessages = Array.isArray(metadata?.threadMessages) ? metadata.threadMessages : [];
+  for (const candidate of [finalSummaryMessage, ...threadMessages]) {
+    if (isRecord(candidate) && readControllerStampedTurnEngine(candidate.metadata) !== null) {
+      return candidate as unknown as ChatMessage;
+    }
+  }
+  return null;
 }
 
 function formatHiddenUpdateLabel(count: number, noun: string): string {
@@ -266,6 +292,12 @@ export type AgentJobThreadPreviewLayoutProps = {
   detailsOpen: boolean;
   /** Cards stay in the turn's default view: they ask the person for something or show what it made. */
   cards: ChatMessage[];
+  /**
+   * The notes its runtime placed under the reply (`presentation.placement:
+   * "reply_note"`), such as changes that stayed on the computer: plain lines
+   * under the reply and its files once the turn is done, Details open or not.
+   */
+  replyNotes?: ChatMessage[];
   isThreadUnresolved: boolean;
   canCancelTerminalRun: boolean;
   cancelPending: boolean;
@@ -320,6 +352,7 @@ export function AgentJobThreadPreviewLayout({
   browserApproval = null,
   detailsOpen,
   cards,
+  replyNotes = NO_REPLY_NOTES,
   isThreadUnresolved,
   expandedUpdateIds,
   finalSummaryMessage,
@@ -358,6 +391,14 @@ export function AgentJobThreadPreviewLayout({
   const headerIdentityVisible = showHeaderIdentity && showHeaderAvatar;
   const threadOwnerHandle = normalizeAgentHandle(agentMetadata?.handle);
   const ownerBadge = showHeaderIdentity ? threadOwnerHandle : null;
+  // The reply stays the agent's; a turn that ran on a turn engine says so in
+  // one plain line under the header, from the controller's stamp alone
+  // (docs/Local-Engine-Turns.md 5.7).
+  const speakerLineMessage = useMemo(
+    () => turnEngineStampedMessage(message, finalSummaryMessage),
+    [finalSummaryMessage, message],
+  );
+  const turnEngineSpeakerLine = useTurnEngineSpeakerLine(speakerLineMessage);
   const terminalStatusMarker = resolveTerminalStatusMarker(finalSpineTone, isCompleted);
   const finalSummaryContent = finalSummaryMessage?.content.trim() ?? "";
   const formattedFinalSummaryContent =
@@ -587,6 +628,9 @@ export function AgentJobThreadPreviewLayout({
     top: showThreadPreviewHeader ? threadPreviewRailStyle.top : "0px",
   } as CSSProperties;
 
+  // The turn's notes under its reply: once it is done, Details open or not,
+  // and not while Instafy tries a failed turn again by itself.
+  const shownReplyNotes = isCompleted && !quietRetry ? replyNotes : NO_REPLY_NOTES;
   const isEmptySettledTurn =
     !isRunning &&
     !isThreadUnresolved &&
@@ -597,7 +641,8 @@ export function AgentJobThreadPreviewLayout({
     replyDraft === null &&
     cards.length === 0 &&
     (!latestFiles || latestFiles.length === 0) &&
-    branchThreads.length === 0;
+    branchThreads.length === 0 &&
+    shownReplyNotes.length === 0;
   if (isEmptySettledTurn) {
     return null;
   }
@@ -897,6 +942,15 @@ export function AgentJobThreadPreviewLayout({
           </div>
         ) : null}
 
+        {turnEngineSpeakerLine ? (
+          // Words, not a badge or a logo: whose own engine ran this turn.
+          <div className="relative min-w-0 pb-0.5">
+            <Text as="p" variant="caption" tone="muted" className="break-words" data-testid="turn-engine-speaker-line">
+              {turnEngineSpeakerLine}
+            </Text>
+          </div>
+        ) : null}
+
         {showActivityLine ? (
           <div className="relative py-1">
             {renderThreadPreviewNotch()}
@@ -1007,6 +1061,24 @@ export function AgentJobThreadPreviewLayout({
                 madeSite={madeSite}
               />
             </div>
+          </div>
+        ) : null}
+        {shownReplyNotes.length > 0 ? (
+          // What the turn's runtime says about the turn itself, such as
+          // changes that stayed on the computer: plain words under the reply.
+          <div className="relative min-w-0 space-y-1 pt-1" data-testid="turn-reply-notes">
+            {shownReplyNotes.map((note) => (
+              <Text
+                key={note.id}
+                as="p"
+                variant="caption"
+                tone="secondary"
+                className="whitespace-pre-wrap break-words"
+                data-testid="turn-reply-note"
+              >
+                {note.content.trim()}
+              </Text>
+            ))}
           </div>
         ) : null}
         {/* The end cap marks a settled turn. Keyed to isRunning it came and

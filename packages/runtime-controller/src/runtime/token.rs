@@ -7,7 +7,8 @@ use serde_json::Value as JsonValue;
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::auth::authenticate_request;
+use crate::auth::{authenticate_request, require_user_session, RequestContext};
+use crate::config::ClaudeCodeLaneUsers;
 #[cfg(test)]
 use crate::ensure_scoped_claims_allow_requested_scopes;
 use crate::tokens::{
@@ -53,6 +54,13 @@ pub(crate) const RUNTIME_TOKEN_TELEMETRY_SCOPE: &str = "telemetry.write";
 pub(crate) const RUNTIME_TOKEN_GIT_MINT_SCOPE: &str = "git.token.mint";
 pub(crate) const RUNTIME_TOKEN_WORKSPACE_LEASE_READ_SCOPE: &str = "workspace.lease.read";
 pub(crate) const PERSONAL_BROWSER_RUNTIME_SCOPE: &str = "personal_browser.control";
+/// Lets a self-hosted runtime's registration attest its `claudeCode`
+/// capability, which local-engine turns need (docs/Local-Engine-Turns.md
+/// 2.10). Only a person's own session gets it, by asking with
+/// `localEngine: "claude-code"` while `CLAUDE_CODE_LANE_USER_IDS` covers them
+/// ([`local_engine_scope`]); it cannot be requested without that flag, and
+/// registration renewal carries it forward.
+pub(crate) const CLAUDE_CODE_TURNS_SCOPE: &str = "claude_code.turns";
 pub(crate) const RUNTIME_TOKEN_GENERATION_CAPABILITY: &str = "_instafyRuntimeTokenGeneration";
 /// Scopes that a user or service caller may request from the public runtime
 /// token endpoint. Agent-only capabilities such as `agent.secrets` and
@@ -73,6 +81,7 @@ const RUNTIME_TOKEN_ALLOWED_SCOPES: &[&str] = &[
     RUNTIME_TOKEN_GIT_MINT_SCOPE,
     RUNTIME_TOKEN_WORKSPACE_LEASE_READ_SCOPE,
     PERSONAL_BROWSER_RUNTIME_SCOPE,
+    CLAUDE_CODE_TURNS_SCOPE,
 ];
 
 const DEFAULT_RUNTIME_TOKEN_TTL_SECONDS: i64 = 3600;
@@ -100,12 +109,54 @@ pub(crate) fn default_runtime_token_scopes() -> Vec<String> {
         .collect()
 }
 
+/// What a runtime-token request's `localEngine` gets
+/// (docs/Local-Engine-Turns.md 2.10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalEngineScope {
+    /// No `localEngine: "claude-code"`: [`CLAUDE_CODE_TURNS_SCOPE`] may not be
+    /// requested.
+    Unrequested,
+    /// `localEngine: "claude-code"` from a caller that may not have the scope:
+    /// anything but a person's own session, or a person the switch does not
+    /// cover. The scope is left out, and asking for it by name is refused.
+    Withheld,
+    /// `localEngine: "claude-code"` from a person's own session that the
+    /// switch covers: the scope is added.
+    Granted,
+}
+
+/// Whether a runtime token minted for `subject` carries
+/// [`CLAUDE_CODE_TURNS_SCOPE`]: only for `localEngine: "claude-code"`, only
+/// for a person's own session ([`require_user_session`]) that is the token's
+/// subject, and only while `CLAUDE_CODE_LANE_USER_IDS` covers that person.
+/// The service role may name any subject, so it never gets the scope, even
+/// for a subject the switch covers. Another `localEngine` value asks for
+/// nothing.
+fn local_engine_scope(
+    local_engine: Option<&str>,
+    context: &RequestContext,
+    subject: &str,
+    lane: &ClaudeCodeLaneUsers,
+) -> LocalEngineScope {
+    if local_engine != Some(crate::claude_code_lane::ENGINE) {
+        return LocalEngineScope::Unrequested;
+    }
+    match require_user_session(context) {
+        Ok(person) if subject.trim() == person.to_string() && lane.allow(person) => {
+            LocalEngineScope::Granted
+        }
+        _ => LocalEngineScope::Withheld,
+    }
+}
+
 /// Normalize, deduplicate and allowlist a caller-requested runtime-token scope
 /// set. The personal browser control scope may only be granted with an
-/// explicit `personalBrowser=true`.
+/// explicit `personalBrowser=true`, and the local-engine scope only with
+/// `localEngine: "claude-code"`, to a caller [`local_engine_scope`] grants it.
 fn normalize_runtime_token_scopes(
     requested: Option<Vec<String>>,
     personal_browser: bool,
+    local_engine: LocalEngineScope,
 ) -> Result<Vec<String>, (StatusCode, Json<ApiError>)> {
     let mut scopes = match requested {
         Some(list) if list.is_empty() => return Err(bad_request("scopes must not be empty")),
@@ -137,7 +188,28 @@ fn normalize_runtime_token_scopes(
             "personal_browser.control requires personalBrowser=true",
         ));
     }
+    if scopes.iter().any(|scope| scope == CLAUDE_CODE_TURNS_SCOPE) {
+        match local_engine {
+            LocalEngineScope::Unrequested => {
+                return Err(bad_request(
+                    "claude_code.turns requires localEngine=claude-code",
+                ));
+            }
+            LocalEngineScope::Withheld => {
+                return Err(forbidden(
+                    "claude_code.turns is issued only to a person's own session \
+                     that local-engine turns are on for",
+                ));
+            }
+            LocalEngineScope::Granted => {}
+        }
+    }
     add_personal_browser_scope(&mut scopes, personal_browser);
+    if local_engine == LocalEngineScope::Granted
+        && !scopes.iter().any(|scope| scope == CLAUDE_CODE_TURNS_SCOPE)
+    {
+        scopes.push(CLAUDE_CODE_TURNS_SCOPE.to_string());
+    }
     scopes.sort();
     Ok(scopes)
 }
@@ -361,6 +433,11 @@ pub(crate) struct RuntimeTokenRequest {
     pub(crate) subject: Option<String>,
     #[serde(default, rename = "personalBrowser", alias = "personal_browser")]
     pub(crate) personal_browser: bool,
+    /// The local engine the runtime may run turns on: `"claude-code"` asks
+    /// for [`CLAUDE_CODE_TURNS_SCOPE`] (docs/Local-Engine-Turns.md 2.10).
+    /// Desktop sends it only for a person who consented.
+    #[serde(default, rename = "localEngine", alias = "local_engine")]
+    pub(crate) local_engine: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -431,7 +508,13 @@ pub(super) async fn mint_runtime_access_token(
         )
     };
 
-    let scopes = normalize_runtime_token_scopes(body.scopes, body.personal_browser)?;
+    let local_engine = local_engine_scope(
+        body.local_engine.as_deref(),
+        &context,
+        &subject,
+        &state.config.claude_code_lane,
+    );
+    let scopes = normalize_runtime_token_scopes(body.scopes, body.personal_browser, local_engine)?;
     // A human/service mint is the authoritative self-hosted generation
     // rotation boundary. Registration renewals preserve this value. Identity is
     // recognised by the required baseline agent scopes only; the additive
@@ -675,15 +758,22 @@ mod tests {
 
     #[test]
     fn runtime_token_scope_allowlist_rejects_unknown_or_implicit_personal_scope() {
-        assert!(normalize_runtime_token_scopes(Some(Vec::new()), false).is_err());
-        assert!(normalize_runtime_token_scopes(Some(vec!["   ".to_string()]), false).is_err());
+        let unrequested = LocalEngineScope::Unrequested;
+        assert!(normalize_runtime_token_scopes(Some(Vec::new()), false, unrequested).is_err());
         assert!(
-            normalize_runtime_token_scopes(Some(vec!["admin.everything".to_string()]), false)
+            normalize_runtime_token_scopes(Some(vec!["   ".to_string()]), false, unrequested)
                 .is_err()
         );
         assert!(normalize_runtime_token_scopes(
+            Some(vec!["admin.everything".to_string()]),
+            false,
+            unrequested
+        )
+        .is_err());
+        assert!(normalize_runtime_token_scopes(
             Some(vec![PERSONAL_BROWSER_RUNTIME_SCOPE.to_string()]),
-            false
+            false,
+            unrequested
         )
         .is_err());
 
@@ -693,15 +783,177 @@ mod tests {
                 "origin.presence".to_string(),
             ]),
             false,
+            unrequested,
         )
         .unwrap();
         assert_eq!(scopes, vec!["origin.presence"]);
 
-        let default_scopes = normalize_runtime_token_scopes(None, false).unwrap();
+        let default_scopes = normalize_runtime_token_scopes(None, false, unrequested).unwrap();
         assert!(default_scopes.iter().any(|scope| scope == "git.read"));
         assert!(default_scopes.iter().any(|scope| scope == "git.write"));
         assert!(!RUNTIME_TOKEN_REQUIRED_SCOPES.contains(&"git.read"));
         assert!(!RUNTIME_TOKEN_REQUIRED_SCOPES.contains(&"git.write"));
+    }
+
+    fn person_session(person: Uuid) -> crate::auth::RequestContext {
+        crate::auth::RequestContext {
+            user_id: Some(person),
+            is_service_role: false,
+            scoped_claims: None,
+        }
+    }
+
+    /// The local-engine scope goes only to a person's own session, for
+    /// `localEngine: "claude-code"`, while the switch covers them: never to
+    /// the service role, even when it names a covered subject, nor to a
+    /// scoped token (docs/Local-Engine-Turns.md 2.10).
+    #[test]
+    fn local_engine_scope_needs_the_flag_the_switch_and_a_persons_own_session() {
+        use crate::config::DeviceGrantUsers;
+        let person = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let subject = person.to_string();
+        let covered = ClaudeCodeLaneUsers(DeviceGrantUsers::Only(vec![person]));
+        let engine = Some("claude-code");
+
+        assert_eq!(
+            local_engine_scope(engine, &person_session(person), &subject, &covered),
+            LocalEngineScope::Granted
+        );
+        assert_eq!(
+            local_engine_scope(
+                engine,
+                &person_session(person),
+                &subject,
+                &ClaudeCodeLaneUsers(DeviceGrantUsers::Everyone)
+            ),
+            LocalEngineScope::Granted
+        );
+
+        // No flag, or a value that names no engine the controller knows.
+        for local_engine in [None, Some(""), Some("codex"), Some("Claude-Code")] {
+            assert_eq!(
+                local_engine_scope(local_engine, &person_session(person), &subject, &covered),
+                LocalEngineScope::Unrequested,
+                "{local_engine:?}"
+            );
+        }
+
+        // The switch does not cover the person.
+        for lane in [
+            ClaudeCodeLaneUsers::default(),
+            ClaudeCodeLaneUsers(DeviceGrantUsers::Only(vec![other])),
+        ] {
+            assert_eq!(
+                local_engine_scope(engine, &person_session(person), &subject, &lane),
+                LocalEngineScope::Withheld,
+                "{lane:?}"
+            );
+        }
+
+        // The service role, with or without a user id of its own, naming a
+        // subject the switch covers.
+        for user_id in [None, Some(person)] {
+            let service = crate::auth::RequestContext {
+                user_id,
+                is_service_role: true,
+                scoped_claims: None,
+            };
+            assert_eq!(
+                local_engine_scope(
+                    engine,
+                    &service,
+                    &subject,
+                    &ClaudeCodeLaneUsers(DeviceGrantUsers::Everyone)
+                ),
+                LocalEngineScope::Withheld,
+                "{user_id:?}"
+            );
+        }
+
+        // A scoped token whose subject the switch covers.
+        let mut scoped = scoped_context(&["agent.lease"]);
+        scoped.user_id = Some(person);
+        assert_eq!(
+            local_engine_scope(engine, &scoped, &subject, &covered),
+            LocalEngineScope::Withheld
+        );
+
+        // A subject that is not the session's own person.
+        assert_eq!(
+            local_engine_scope(
+                engine,
+                &person_session(person),
+                &other.to_string(),
+                &ClaudeCodeLaneUsers(DeviceGrantUsers::Everyone)
+            ),
+            LocalEngineScope::Withheld
+        );
+    }
+
+    /// `claude_code.turns` joins the allowlist, is added once only when
+    /// granted, and cannot be requested by name without its flag or by a
+    /// caller that may not have it.
+    #[test]
+    fn claude_code_turns_scope_is_added_only_when_granted() {
+        assert!(RUNTIME_TOKEN_ALLOWED_SCOPES.contains(&CLAUDE_CODE_TURNS_SCOPE));
+        assert!(!default_runtime_token_scopes()
+            .iter()
+            .any(|scope| scope == CLAUDE_CODE_TURNS_SCOPE));
+
+        let granted =
+            normalize_runtime_token_scopes(None, false, LocalEngineScope::Granted).unwrap();
+        let mut expected = default_runtime_token_scopes();
+        expected.push(CLAUDE_CODE_TURNS_SCOPE.to_string());
+        expected.sort();
+        assert_eq!(granted, expected);
+
+        for withheld in [LocalEngineScope::Unrequested, LocalEngineScope::Withheld] {
+            let scopes = normalize_runtime_token_scopes(None, false, withheld).unwrap();
+            assert!(
+                !scopes.iter().any(|scope| scope == CLAUDE_CODE_TURNS_SCOPE),
+                "{withheld:?}"
+            );
+            assert!(normalize_runtime_token_scopes(None, true, withheld)
+                .unwrap()
+                .iter()
+                .all(|scope| scope != CLAUDE_CODE_TURNS_SCOPE));
+        }
+
+        // Named in the request: once, in either letter case, only when
+        // granted.
+        let named = vec![
+            "origin.presence".to_string(),
+            " claude_code.turns ".to_string(),
+            "CLAUDE_CODE.TURNS".to_string(),
+        ];
+        assert_eq!(
+            normalize_runtime_token_scopes(Some(named.clone()), false, LocalEngineScope::Granted)
+                .unwrap(),
+            vec![CLAUDE_CODE_TURNS_SCOPE, "origin.presence"]
+        );
+        let (status, error) = normalize_runtime_token_scopes(
+            Some(named.clone()),
+            false,
+            LocalEngineScope::Unrequested,
+        )
+        .unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.0.message,
+            "claude_code.turns requires localEngine=claude-code"
+        );
+        let (status, _) =
+            normalize_runtime_token_scopes(Some(named), false, LocalEngineScope::Withheld)
+                .unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // With the Personal Browser scope, each keeps its own flag.
+        let both = normalize_runtime_token_scopes(None, true, LocalEngineScope::Granted).unwrap();
+        assert!(both
+            .iter()
+            .any(|scope| scope == PERSONAL_BROWSER_RUNTIME_SCOPE));
+        assert!(both.iter().any(|scope| scope == CLAUDE_CODE_TURNS_SCOPE));
     }
 
     #[test]

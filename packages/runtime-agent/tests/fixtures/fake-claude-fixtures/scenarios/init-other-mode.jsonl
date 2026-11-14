@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"@CWD@","session_id":"@SESSION@","tools":["Bash","Read","Edit","Write","Agent"],"mcp_servers":[],"model":"claude-sonnet-4-5","permissionMode":"bypassPermissions","apiKeySource":"none","claude_code_version":"2.1.314","uuid":"0b8f1a2c-3d4e-4f50-8a6b-7c8d9e0f1a2b"}
+#!hang

@@ -6,14 +6,19 @@ Instafy Studio is a chat-first filesystem UI backed by the runtime controller. T
 - **Frontend**: React + Vite + Zustand + Monaco.
 - **Runtime controller**: orchestrates runs, credits, and workspace filesystem access.
 - **Runtime agent**: applies prompts and file edits inside a workspace.
-- **AI proxy**: all model traffic must flow through the proxy (`PROXY_BASE_URL`).
+- **AI proxy**: all model traffic must flow through the proxy (`PROXY_BASE_URL`), except a local-engine turn's own traffic, which goes from the person's own signed-in `claude` on their own computer to Anthropic, or to the cloud provider or gateway that sign-in uses ([Local-engine turns](Local-Engine-Turns.md)).
 
 ## Build-Time Feature Composition
 
 The public frontend is the complete default application. Optional product
 integrations are selected at build time through
-`INSTAFY_FRONTEND_FEATURE_MANIFEST`; the default manifest contains only the
-public-core feature module.
+`INSTAFY_FRONTEND_FEATURE_MANIFEST`; the default manifest contains the
+public-core feature module and the module for
+[local-engine turns](Local-Engine-Turns.md), turns that run the person's own
+Claude Code. That module offers such a turn only inside Instafy Desktop on
+macOS, to a person `CLAUDE_CODE_LANE_USER_IDS` covers, and words such turns
+wherever they show. The hosted web app's manifest does not list it yet
+([Hosted web release](Web-Release.md)).
 
 Feature modules contribute typed assistants, capabilities, routes, native
 extensions, runtime families, and background Studio runtime bridges. The
@@ -237,12 +242,14 @@ never from a request body (`agent_jobs.trigger_received_at`).
   automatic retry or its local fallback queue's drain, says nothing.
 - A queued message is received when it was queued; Send now, when it is pressed. Any other job
   is received when it is queued.
-- Where device grants are on for its sender, a user message also keeps its kind as
-  `metadata.trigger`, over any value a client wrote; anywhere else, and for a send with no kind,
-  it keeps no such key. Device grants are on for the users `DEVICE_GRANTS_USER_IDS` lists
+- Where device grants or local-engine turns are on for its sender, a user message also keeps its
+  kind as `metadata.trigger`, over any value a client wrote; anywhere else, and for a send with no
+  kind, it keeps no such key. Device grants are on for the users `DEVICE_GRANTS_USER_IDS` lists
   (comma-separated ids), for everyone with `*`, and for nobody when it is unset or empty. Any
   other value logs an error and means nobody, so the switch never keeps the controller from
-  starting.
+  starting. Local-engine turns are on for the users `CLAUDE_CODE_LANE_USER_IDS` lists, which is
+  parsed exactly like `DEVICE_GRANTS_USER_IDS`: unset or empty means nobody, `*` means everyone,
+  and any other value that is not a list of user ids logs an error and means nobody.
 
 ## Device Grants
 
@@ -329,6 +336,43 @@ anyone else nothing below happens, and its routes answer them 404.
   acts on no device's stop. To roll back past this release, empty it first and wait more than
   120 s, so that the sweep fails the queued granted jobs and the targeted requests' windows close,
   then roll back.
+
+## Local-Engine Turns
+
+A local-engine turn is one @octo turn whose sender chose, in Instafy Desktop, to have their own
+signed-in `claude` on their own computer carry it out: the turn runs their own, unmodified Claude
+Code, under the sign-in they made in it ([Local-engine turns](Local-Engine-Turns.md)). It exists
+only for the users `CLAUDE_CODE_LANE_USER_IDS` lists (above), which is empty by default; the
+[README](../README.md#ai-providers) states the condition from Anthropic's terms that comes before
+any user id goes into it.
+
+- Dispatch admits it only from its person's own session, for a plain message to their own @octo,
+  on their own ready private runtime that carries the attested `claudeCode` capability (in v1 only
+  Desktop on macOS asks for it; the controller cannot verify which client did), with no other
+  local-engine turn of theirs running or waiting, and stamps the job `engine = 'claude-code'`.
+  Nothing Instafy sends by itself, queues, resends or delegates is admitted.
+- The job holds no credential, device grant or plan role, is leased once and only within a minute
+  of the send, by that runtime alone, and gets no proxy token, model-facing controller token,
+  project secret or history. That runtime leases it before any other job pinned to it. Only that
+  runtime can complete it or post its steps: a token that names no runtime, or another runtime's,
+  never can, so a queued one ends only by the sweeps, a stop of its runtime or a cancel. It costs
+  no credits. Nobody can steer it; any member with write access may stop it.
+- A runtime stop fails such a job in its own transaction. The turn's run, its Home row and its
+  failure message are written just after the stop commits, in a short transaction that locks the
+  turn's chat and no runtime, and a step of the 10 s idle sweep writes them for a turn whose own
+  write never committed. That step runs only while `CLAUDE_CODE_LANE_USER_IDS` names someone.
+- Apply the migrations that add `agent_jobs.engine` before deploying the controller that reads
+  them. Keep `CLAUDE_CODE_LANE_USER_IDS` empty until the previous controller pool is retired and
+  no load balancer still sends it requests: an older controller would unpin and requeue such a
+  job. To roll back, empty it first, then wait until no job with `engine = 'claude-code'` is
+  queued or leased: queued ones start or fail within about 70 s, and a running turn keeps its
+  lease until it ends, at most 3000 s after its one-minute start window. Stopping the runtime that
+  runs one fails it at once. Then roll back. With the switch empty, the sweep step above no longer
+  runs, so the run of a stopped turn whose own write was lost stays unfinished. The older
+  controller stores the `claudeCode` capability a runtime reports about itself as it is,
+  unattested, and it stays until that runtime registers again with a current controller: when this
+  release is deployed again, keep `CLAUDE_CODE_LANE_USER_IDS` empty until every runtime has
+  registered again with the current controller.
 
 ## Canonical Workspace Modes
 There are two supported canonical filesystem modes:
@@ -476,7 +520,12 @@ Runtimes can be provisioned with different runtime-agent container images (for e
 - Hetzner templates can also consume dynamic runtime env data via `{{RUNTIME_ENV_FLAGS}}` (shell `-e KEY='value'` segment) or `{{RUNTIME_ENV_EXPORTS}}` (`export KEY='value'` lines). This includes controller lease/origin env plus `metadata.env` overrides such as `INSTAFY_ENABLE_BROWSER_SESSION=1`.
 
 ## AI Proxy
-All automation must route through the proxy. Do not call OpenAI/Anthropic directly.
+All automation must route through the proxy. Do not call OpenAI/Anthropic directly. A
+local-engine turn is the one exception, and it is not automation: for one turn its person
+starts, runtime-agent on their own computer starts their own signed-in `claude`, which talks,
+under their own sign-in, to Anthropic or to the cloud provider or gateway that sign-in uses.
+Nothing Instafy runs for that turn calls a model, and the turn holds no proxy token
+([Local-engine turns](Local-Engine-Turns.md)).
 
 A job's proxy token is short-lived (30 minutes by default), but its lifetime does not end
 the job. Before its next model request approaches expiry, runtime-agent renews it through

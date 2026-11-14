@@ -11,7 +11,10 @@ import type {
 import { extractAgentIdentityFromMetadata, resolveObservedAgentIdentity } from "./chatAssistantIdentity";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
+import { Text } from "../../../components/Text";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
+import { useTurnEngineSpeakerLine } from "./RunFailureNotice";
+import type { ChatMessage } from "../types";
 import "./ChatIdentityLayout.css";
 
 function resolveAvatarSeed(
@@ -72,8 +75,14 @@ export function AssistantSpeakerIdentityLabel({
   const shownName = getBuiltInAssistantDisplayName(normalizedHandle) ?? normalizedHandle;
   const avatarSeed = resolveAvatarSeed(normalizedHandle, agentIdentity);
   const timestampInfo = formatSpeakerTimestamp(timestamp);
+  // A reply a turn engine ran stays this agent's, with one plain line under
+  // its header, from the controller's stamp on the message alone
+  // (docs/Local-Engine-Turns.md 5.7). A turn's row carries its own.
+  const turnEngineSpeakerLine = useTurnEngineSpeakerLine(
+    metadata ? { id: "", timestamp: timestamp ?? 0, metadata } : null,
+  );
 
-  return (
+  const label = (
     <div
       className="inline-flex max-w-full items-center gap-2 text-xs text-slate-500 dark:text-slate-400"
       data-agent-handle={normalizedHandle}
@@ -116,4 +125,31 @@ export function AssistantSpeakerIdentityLabel({
       {statusMarker ? <SpeakerStatusMarkerLabel marker={statusMarker} /> : null}
     </div>
   );
+  if (!turnEngineSpeakerLine) {
+    return label;
+  }
+  return (
+    <div className="flex min-w-0 max-w-full flex-col items-start">
+      {label}
+      <TurnEngineSpeakerLineText line={turnEngineSpeakerLine} />
+    </div>
+  );
+}
+
+function TurnEngineSpeakerLineText({ line }: { line: string }) {
+  return (
+    <Text as="p" variant="caption" tone="muted" className="max-w-full break-words" data-testid="turn-engine-speaker-line">
+      {line}
+    </Text>
+  );
+}
+
+/**
+ * A turn engine's line for a reply whose header the chat does not show (a
+ * quiet reply in a chat of one, or the same speaker again): the line still
+ * says whose own engine ran the turn (docs/Local-Engine-Turns.md 5.7).
+ */
+export function TurnEngineSpeakerLine({ message }: { message: Pick<ChatMessage, "id" | "timestamp" | "metadata"> }) {
+  const line = useTurnEngineSpeakerLine(message);
+  return line ? <TurnEngineSpeakerLineText line={line} /> : null;
 }

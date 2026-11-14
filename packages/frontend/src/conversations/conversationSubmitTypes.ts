@@ -75,6 +75,8 @@ export interface UseConversationSubmitFlowArgs {
   setConversationTitle: (conversationId: string, title: string) => void;
   setConversationGoal: (conversationId: string, goal: ConversationGoal | null, expectedGoal?: ConversationGoal | null) => void;
   appendMessages: (conversationId: string, messages: ChatMessage[]) => void;
+  /** Takes the person's own message the controller refused to take, which it never recorded, out of the chat. */
+  removeUnsentMessage: (conversationId: string, clientMessageId: string) => void;
   updateMessage: (
     conversationId: string,
     messageId: string,

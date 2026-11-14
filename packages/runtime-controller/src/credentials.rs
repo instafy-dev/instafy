@@ -20,6 +20,7 @@ use crate::ai_agents;
 use crate::auth::{
     authenticate_request, bearer_token, issue_proxy_envelope, require_user_session, RequestContext,
 };
+use crate::claude_material::{claude_credential_refused, json_contains_claude_material};
 use crate::credential_keys::CredentialKeyRing;
 use crate::model_defaults::{
     default_chatgpt_model_id, default_model_for_provider, floor_own_ai_model_for_provider,
@@ -232,6 +233,12 @@ pub(crate) async fn insert_user_credential(
     label: Option<String>,
     make_default: Option<bool>,
 ) -> Result<CreatedCredential, (StatusCode, Json<ApiError>)> {
+    // The one sink for stored model credentials, the Codex upload and device
+    // login alike: a Claude sign-in is refused before anything is sealed.
+    if json_contains_claude_material(&auth_json) {
+        return Err(claude_credential_refused());
+    }
+
     let keys = state
         .config
         .credential_keys
@@ -2046,6 +2053,13 @@ async fn create_my_codex_credential(
     let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
+    // Refused before classification, which would otherwise answer a Claude
+    // sign-in with its own 400, or store a Claude token found where a Codex
+    // one belongs and later send it to OpenAI's refresh endpoint.
+    if json_contains_claude_material(&body.auth_json) {
+        return Err(claude_credential_refused());
+    }
+
     let auth_object = body
         .auth_json
         .as_object()
@@ -3062,6 +3076,10 @@ fn augment_metadata_with_provider(
     JsonValue::Object(map)
 }
 
+/// Every lease, refresh and probe of a stored credential opens it here. A row
+/// stored before the credential guard can hold a Claude sign-in; it is refused
+/// here, before any refresh, so it is never leased to the proxy, refreshed or
+/// probed.
 fn decode_authoritative_credential_payload(
     keys: &CredentialKeyRing,
     nonce_b64: &str,
@@ -3070,8 +3088,13 @@ fn decode_authoritative_credential_payload(
     let plaintext = keys.open(nonce_b64, ciphertext_b64).map_err(|error| {
         internal_error(format!("failed to decrypt credential payload: {error}"))
     })?;
-    serde_json::from_slice(&plaintext)
-        .map_err(|error| internal_error(format!("credential payload is not valid JSON: {error}")))
+    let payload: JsonValue = serde_json::from_slice(&plaintext).map_err(|error| {
+        internal_error(format!("credential payload is not valid JSON: {error}"))
+    })?;
+    if json_contains_claude_material(&payload) {
+        return Err(claude_credential_refused());
+    }
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -4349,6 +4372,10 @@ mod session_identity_tests {
 #[cfg(test)]
 #[path = "credentials_reserved_id_tests.rs"]
 pub(crate) mod reserved_id_tests;
+
+#[cfg(test)]
+#[path = "credentials_claude_material_tests.rs"]
+pub(crate) mod claude_material_tests;
 
 #[cfg(test)]
 #[path = "credentials_managed_ai_allowance_tests.rs"]

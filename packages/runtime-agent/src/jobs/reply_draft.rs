@@ -10,7 +10,10 @@
 //!   answers have other schemas and never reach this reader.
 //! - Structured output reveals only its top-level summary. Report/write turns may
 //!   also draft natural prose explicitly marked final_answer by the provider.
-//! - Commentary, planning contracts and internal worker messages never draft.
+//! - Commentary, planning contracts and internal worker messages never draft. A
+//!   local-engine turn learns that a text was commentary only once a tool call
+//!   follows it in the same message, so it drafts the text and then clears the
+//!   draft with a `draft.reset` event (`claude_code::events`).
 //! - A summary that could still become the `NO_RESPONSE` decline sentinel is
 //!   held back until it can no longer be one.
 //! - A draft is never persisted. The controller publishes it to the
@@ -18,6 +21,8 @@
 
 use serde_json::Value as JsonValue;
 use tokio::sync::watch;
+
+use crate::claude_code::events::DRAFT_RESET_EVENT;
 
 /// The longest draft sent. A longer reply stops growing at this size until
 /// the completed message replaces it.
@@ -74,9 +79,12 @@ impl ReplyDraftStream {
     }
 
     pub(super) fn observe(&mut self, event: &JsonValue) {
+        // Another attempt, or, in a local-engine turn, a text the draft showed that turned out
+        // to be commentary: a text block a tool call followed in the same message
+        // (`claude_code::events`). Codex never sends that reset.
         if matches!(
             event.get("type").and_then(JsonValue::as_str),
-            Some("stream.retry" | "turn.failed")
+            Some("stream.retry" | "turn.failed" | DRAFT_RESET_EVENT)
         ) {
             self.restart();
             self.item_id = None;
@@ -751,6 +759,163 @@ mod tests {
             receiver.borrow().text,
             "`README.md` now explains the change."
         );
+    }
+
+    #[test]
+    fn a_draft_reset_clears_the_draft_and_starts_a_segment() {
+        let (sender, receiver) = watch::channel(ReplyDraft::default());
+        let mut stream = ReplyDraftStream::start(sender, true, false);
+        let segment = receiver.borrow().segment;
+        let drafted = |text: &str| json!({"type": "item.updated", "item": {"id": "msg_1:0", "type": "agent_message", "text": text, "phase": "final_answer"}});
+        stream.observe(&drafted("I'll read the README"));
+        assert_eq!(receiver.borrow().text, "I'll read the README");
+        // The text was commentary: a tool call followed it in the same message.
+        stream.observe(&json!({"type": "item.completed", "item": {"id": "msg_1:0", "type": "agent_message", "text": "I'll read the README", "phase": "commentary"}}));
+        assert_eq!(receiver.borrow().text, "I'll read the README");
+        stream.observe(&json!({ "type": DRAFT_RESET_EVENT }));
+        assert_eq!(
+            *receiver.borrow(),
+            ReplyDraft {
+                segment: segment + 1,
+                text: String::new(),
+            }
+        );
+        // The same item drafting again starts from its own text, not after the cleared one.
+        stream.observe(&drafted("Done."));
+        assert_eq!(receiver.borrow().text, "Done.");
+        assert_eq!(receiver.borrow().segment, segment + 1);
+    }
+
+    /// A local-engine turn's events (docs/Local-Engine-Turns.md 3.7), from the fake `claude`'s
+    /// success scenario, read as a turn reads them: the steps `extract_codex_messages` makes of
+    /// them, and the drafts the reply stream shows.
+    #[test]
+    fn a_local_engine_turns_events_make_its_steps_and_drafts() {
+        use crate::claude_code::events::EventAdapter;
+        let temp = tempfile::tempdir().unwrap();
+        let folder = std::fs::canonicalize(temp.path()).unwrap();
+        let folder_text = folder.to_str().unwrap();
+        let home = "/home/person";
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fake-claude-fixtures/scenarios/success.jsonl");
+        let scenario = std::fs::read_to_string(&fixture).unwrap();
+        let mut adapter = EventAdapter::new(&folder, Some(std::path::Path::new(home)));
+        let (sender, receiver) = watch::channel(ReplyDraft::default());
+        let mut stream = ReplyDraftStream::start(sender, true, false);
+        let first = receiver.borrow().segment;
+        let mut events = Vec::new();
+        let mut drafts: Vec<ReplyDraft> = Vec::new();
+        for line in scenario.lines().filter(|line| !line.starts_with("#!")) {
+            let line = line
+                .replace("@CWD@", folder_text)
+                .replace("@HOME@", home)
+                .replace("@SESSION@", "5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50");
+            let value: JsonValue = serde_json::from_str(&line).unwrap();
+            for event in adapter.feed(&value) {
+                stream.observe(&event);
+                let draft = receiver.borrow().clone();
+                if drafts.last() != Some(&draft) {
+                    drafts.push(draft);
+                }
+                events.push(event);
+            }
+        }
+        // The commentary drafted until a tool call followed it in its message, then the draft
+        // cleared; the subagent's words never drafted, nor did thinking; the reply drafted with
+        // its paths made relative.
+        let draft = |segment: u64, text: &str| ReplyDraft {
+            segment,
+            text: text.to_string(),
+        };
+        assert_eq!(
+            drafts,
+            [
+                draft(first, "I'll read "),
+                draft(first, "I'll read the README first."),
+                draft(first + 1, ""),
+                draft(first + 1, "Renamed the project in "),
+                draft(
+                    first + 1,
+                    "Renamed the project in README.md and wrote docs/notes.md."
+                ),
+            ]
+        );
+
+        let messages = super::super::extract_codex_messages(&events);
+        let steps: Vec<(&str, &str)> = messages
+            .iter()
+            .map(|message| {
+                (
+                    message.message_type.as_deref().unwrap_or_default(),
+                    message.content.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("status", "I'll read the README first."),
+                ("mcp_tool_call", "Tool call started: claude-code/Read"),
+                ("mcp_tool_call", "Tool call completed: claude-code/Read"),
+                ("command_execution", "npm test"),
+                ("command_execution", "npm test"),
+                ("file_change", "Applied file changes: README.md"),
+                ("file_change", "Applied file changes: docs/notes.md"),
+                ("command_execution", "tail -f server.log"),
+                ("command_execution", "tail -f server.log"),
+                ("web_search", "Web search completed: \"vitest config\""),
+                ("todo_list", "Plan update: 1/2 steps complete"),
+                ("todo_list", "Plan update: 0/1 steps complete"),
+                ("todo_list", "Plan update: 0/2 steps complete"),
+                ("todo_list", "Plan update: 1/2 steps complete"),
+                ("status", "Let me ask a helper to find the other uses."),
+                ("mcp_tool_call", "Tool call started: claude-code/Agent"),
+                ("status", "Searching for uses."),
+                ("mcp_tool_call", "Tool call started: claude-code/Grep"),
+                ("mcp_tool_call", "Tool call completed: claude-code/Grep"),
+                ("mcp_tool_call", "Tool call completed: claude-code/Agent"),
+                ("mcp_tool_call", "Tool call started: claude-code/Task"),
+                ("mcp_tool_call", "Tool call completed: claude-code/Task"),
+                ("mcp_tool_call", "Tool call started: claude-code/WebFetch"),
+                ("mcp_tool_call", "Tool call completed: claude-code/WebFetch"),
+            ]
+        );
+        let metadata = |index: usize| messages[index].metadata.clone().unwrap();
+        assert_eq!(
+            metadata(4)["aggregatedOutput"],
+            json!("3 tests passed in test with key [redacted] read from ~/.npmrc")
+        );
+        assert_eq!(metadata(4)["status"], json!("completed"));
+        // A Monitor watch is a command step.
+        assert_eq!(metadata(7)["kind"], json!("codex_command_execution"));
+        // The plan step carries the whole list the task tools built, each time either ran.
+        assert_eq!(
+            metadata(13)["items"],
+            json!([
+                {"text": "Check the links", "completed": true},
+                {"text": "Update the docs", "completed": false},
+            ])
+        );
+        assert_eq!(metadata(15)["tool"], json!("Agent"));
+        assert_eq!(metadata(20)["tool"], json!("Task"));
+
+        // Steps, their stored events and drafts name neither the folder nor the home folder,
+        // and carry no token.
+        let everything = serde_json::to_string(&json!({
+            "events": events,
+            "steps": messages.iter().map(|message| json!({"content": message.content, "metadata": message.metadata})).collect::<Vec<_>>(),
+            "drafts": drafts.iter().map(|draft| draft.text.clone()).collect::<Vec<_>>(),
+            "runLog": adapter.run_log().events(),
+        }))
+        .unwrap();
+        for leak in [folder_text, home, "sk-ant-", "Private thoughts"] {
+            assert!(!everything.contains(leak), "{leak} leaked");
+        }
+        assert_eq!(
+            adapter.reply(),
+            Some("Renamed the project in README.md and wrote docs/notes.md.")
+        );
+        assert!(adapter.succeeded());
     }
 
     #[test]

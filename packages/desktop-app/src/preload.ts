@@ -19,6 +19,11 @@ export type DesktopExtensionInvokeOptions = {
   extensionId: string;
   method: string;
   payload?: unknown;
+  /**
+   * The controller the page speaks to. The shell's trust policy decides
+   * whether a method sees it; without it, the shell uses its own default.
+   */
+  controllerUrl?: string;
 };
 
 export type DesktopCodexAuthJsonStatus = {

@@ -1,4 +1,5 @@
 import { isReplyDraftMessage } from "../../../conversations/replyDrafts";
+import { showsTurnEngineSpeakerLine } from "../../../conversations/runFailurePresentation";
 import { useEffect, useMemo, type JSX, type MouseEvent as ReactMouseEvent } from "react";
 import type { ChatMessage } from "../types";
 import { isCurrentUserChatMessage } from "./chatMessageDetailHelpers";
@@ -29,6 +30,7 @@ import {
 import { isBrowserNoticePrompt, isUnsentBrowserNoticePrompt } from "./browserHandBack";
 import {
   AssistantSpeakerIdentityLabel,
+  TurnEngineSpeakerLine,
   type SpeakerStatusMarker,
 } from "./AssistantSpeakerIdentityPill";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
@@ -587,8 +589,24 @@ export function ConversationMessageRows({
             statusMarker={threadTerminalStatusMarker}
           />
         ) : null;
+        // A reply a turn engine ran says so in one line under its header
+        // (docs/Local-Engine-Turns.md 5.7). Where the header is not shown (a
+        // quiet reply in a chat of one, the same speaker again) the line still
+        // is, on its own. A turn's row shows its own.
+        const turnEngineSpeakerLine =
+          message.role === "assistant" &&
+          inlineSpeakerIdentity === null &&
+          !isAgentJobThreadMessage &&
+          !isReplyDraft &&
+          showsTurnEngineSpeakerLine(messageMetadata) ? (
+            <TurnEngineSpeakerLine message={message} />
+          ) : null;
         const speakerIdentity =
-          message.role === "user" ? humanSpeakerIdentity : usesAssistantAvatarRail ? null : inlineSpeakerIdentity;
+          message.role === "user"
+            ? humanSpeakerIdentity
+            : usesAssistantAvatarRail
+              ? turnEngineSpeakerLine
+              : inlineSpeakerIdentity ?? turnEngineSpeakerLine;
         const narrowSpeakerIdentity = usesAssistantAvatarRail ? inlineSpeakerIdentity : null;
         const speakerMarker: ChatSpeakerMarker =
           showSpeakerIdentity

@@ -8,6 +8,13 @@ license = "AGPL-3.0-only"
 name = "runtime-controller"
 path = "src/main.rs"
 
+# The credential guard's read-only census (docs/Local-Engine-Turns.md, section
+# 6). `cargo test` runs its tests, which need no database or network.
+[[example]]
+name = "claude-material-census"
+path = "examples/claude-material-census.rs"
+test = true
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.7", features = ["json", "http1", "ws"] }

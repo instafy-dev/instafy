@@ -1,0 +1,10 @@
+{"type":"system","subtype":"init","cwd":"@CWD@","session_id":"@SESSION@","tools":["Bash","Read","Edit","Write","Agent"],"mcp_servers":[],"model":"claude-sonnet-4-5","permissionMode":"acceptEdits","apiKeySource":"none","claude_code_version":"2.1.314","uuid":"0b8f1a2c-3d4e-4f50-8a6b-7c8d9e0f1a2b"}
+#!sleeper devserver
+{"type":"system","subtype":"task_started","task_id":"bash_1","tool_use_id":"toolu_dev","description":"npm run dev","task_type":"local_bash","uuid":"3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b","session_id":"@SESSION@"}
+{"type":"system","subtype":"task_started","task_id":"watch_1","tool_use_id":"toolu_watch","description":"Watch the server log","task_type":"local_bash","uuid":"4f5a6b7c-8d9e-4f0a-9b1c-2d3e4f5a6b7c","session_id":"@SESSION@"}
+{"type":"system","subtype":"task_started","task_id":"ambient_1","description":"An ambient check","task_type":"ambient","uuid":"5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d","session_id":"@SESSION@"}
+{"type":"assistant","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"The dev server is running."}]},"parent_tool_use_id":null,"session_id":"@SESSION@"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":900,"num_turns":1,"result":"The dev server is running.","session_id":"@SESSION@","total_cost_usd":0.01,"usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20},"permission_denials":[]}
+{"type":"assistant","message":{"id":"msg_02","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Late words nobody reads."}]},"parent_tool_use_id":null,"session_id":"@SESSION@"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":900,"num_turns":1,"result":"Late words nobody reads.","session_id":"@SESSION@","total_cost_usd":0.01,"usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20},"permission_denials":[]}
+#!hang

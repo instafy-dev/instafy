@@ -148,6 +148,39 @@ describe("ChatPanelOverlays", () => {
       .map((label) => [label.textContent, label.nextElementSibling?.textContent]));
     expect(values).toMatchObject({ Input: "120", Cached: "30", Output: "10", Prompt: "900", "Window used": "8%" });
     expect(document.body.textContent).toContain("Stateless replay");
+    // A usage that names no model shows none.
+    expect(document.querySelector('[data-testid="message-stats-model"]')).toBeNull();
+  });
+
+  // docs/Local-Engine-Turns.md 5.7: a Claude Code turn's Details show the
+  // model it ran and the token counts, never a cost.
+  it("names the model a turn's usage names, beside its counts", async () => {
+    await act(async () => {
+      root.render(
+        <ChatMessageMenuOverlay
+          messageMenu={{ kind: "message", messageId: "assistant-1", x: 20, y: 20, maxHeight: 180, view: "token_usage" }}
+          selectedMessageTokenUsage={{
+            inputTokens: 1000,
+            cachedInputTokens: 850,
+            outputTokens: 40,
+            context: null,
+            model: "claude-test-model",
+          }}
+          onClose={vi.fn()}
+          onShowActionsView={vi.fn()}
+          onShowTokenUsageView={vi.fn()}
+          onCopySelectedMessage={vi.fn()}
+          onCopyConversation={vi.fn()}
+          onCopyTokenUsage={vi.fn()}
+        />,
+      );
+    });
+
+    expect(document.querySelector('[data-testid="message-stats-model"]')?.textContent).toBe("Modelclaude-test-model");
+    const values = Object.fromEntries(Array.from(document.querySelectorAll("dt"))
+      .map((label) => [label.textContent, label.nextElementSibling?.textContent]));
+    expect(values).toMatchObject({ Input: (1000).toLocaleString(), Cached: "850", Output: "40" });
+    expect(document.body.textContent).not.toMatch(/cost|\$/i);
   });
 
   it("shows selected-text actions only when message text is selected", async () => {

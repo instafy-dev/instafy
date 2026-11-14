@@ -88,6 +88,76 @@ export interface ControllerRuntimeStatusEntry {
    * controllers and runtimes, and when the runtime has none.
    */
   skillPacks?: ControllerRuntimeSkillPack[] | null;
+  /**
+   * Whether this computer's own Claude Code can take a local-engine turn
+   * (docs/Local-Engine-Turns.md 2.10). The controller sends it only to the
+   * runtime's owner and only while the lane covers them; Studio keeps it only
+   * beside `claudeCodeLane` and in the exact known shape. Absent otherwise.
+   */
+  claudeCode?: ControllerRuntimeClaudeCode | null;
+}
+
+/** Why a runtime's Claude Code cannot take a turn, as the runtime attests it. */
+export type ControllerRuntimeClaudeCodeNotReadyReason =
+  | "binary_missing"
+  | "binary_unsafe"
+  | "probe_failed"
+  | "unsupported_version"
+  | "bare_default";
+
+const CLAUDE_CODE_NOT_READY_REASONS: ReadonlySet<string> = new Set<ControllerRuntimeClaudeCodeNotReadyReason>([
+  "binary_missing",
+  "binary_unsafe",
+  "probe_failed",
+  "unsupported_version",
+  "bare_default",
+]);
+
+/** A runtime's attested Claude Code capability, as its status entry carries it. */
+export interface ControllerRuntimeClaudeCode {
+  ready: boolean;
+  /** Set only while not ready, and only to a reason this client knows. */
+  reason: ControllerRuntimeClaudeCodeNotReadyReason | null;
+  /** The probed Claude Code version, such as "2.1.314". */
+  cli: string | null;
+  /** Whether that version is at most the one Instafy verified; null when unsaid. */
+  verified: boolean | null;
+  /** True only when the probe found a Claude plan sign-in. */
+  planSignIn: boolean;
+}
+
+const CLAUDE_CODE_CLI_VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,64})?$/;
+
+/**
+ * `claudeCode` of a status entry, in the shape the controller attests (2.10),
+ * or null. Another version or a `ready` that is not a boolean reads as no
+ * capability, so a malformed or newer shape never offers a turn this client
+ * cannot check. Other fields are kept only when well-formed, and keys this
+ * client does not know (a path, say) are dropped.
+ */
+export function mapControllerRuntimeClaudeCode(value: unknown): ControllerRuntimeClaudeCode | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.version !== undefined && record.version !== 1) {
+    return null;
+  }
+  if (typeof record.ready !== "boolean") {
+    return null;
+  }
+  const cli = typeof record.cli === "string" && CLAUDE_CODE_CLI_VERSION.test(record.cli) ? record.cli : null;
+  const reason =
+    !record.ready && typeof record.reason === "string" && CLAUDE_CODE_NOT_READY_REASONS.has(record.reason)
+      ? (record.reason as ControllerRuntimeClaudeCodeNotReadyReason)
+      : null;
+  return {
+    ready: record.ready,
+    reason,
+    cli,
+    verified: typeof record.verified === "boolean" ? record.verified : null,
+    planSignIn: record.planSignIn === true,
+  };
 }
 
 /** A skill pack installed with a runtime, as its status entry names it. */
@@ -143,6 +213,11 @@ export interface FetchRuntimeStatusResult {
   preferredRuntimeId: string | null;
   /** Absent or null from controllers older than the field. */
   sharedBrowserHostPolicy?: SharedBrowserHostPolicy | null;
+  /**
+   * True when the local-engine lane covers this viewer (docs/Local-Engine-Turns.md
+   * 2.10). Absent otherwise, and from controllers older than the field.
+   */
+  claudeCodeLane?: true;
 }
 
 export function mapControllerSharedBrowserHost(
@@ -207,9 +282,11 @@ export async function fetchRuntimeStatus(
       runtimes?: ControllerRuntimeStatusEntry[];
       preferredRuntimeId?: string | null;
       sharedBrowserHostPolicy?: unknown;
+      claudeCodeLane?: unknown;
     };
 
     const sharedBrowserHostPolicy = mapSharedBrowserHostPolicy(payload.sharedBrowserHostPolicy);
+    const claudeCodeLane = payload.claudeCodeLane === true;
     const runtimes = Array.isArray(payload.runtimes)
       ? payload.runtimes
           .map((entry) => {
@@ -220,6 +297,7 @@ export async function fetchRuntimeStatus(
               runtimeImage?: unknown;
               sharedBrowserHost?: unknown;
               skillPacks?: unknown;
+              claudeCode?: unknown;
             };
             const runtimeImage =
               typeof record.runtimeImage === "string" && record.runtimeImage.trim().length > 0
@@ -235,6 +313,11 @@ export async function fetchRuntimeStatus(
               sharedBrowserHost: sharedBrowserHostPolicy === "covered"
                 ? mapControllerSharedBrowserHost(record.sharedBrowserHost) ?? undefined
                 : undefined,
+              // Only beside the lane flag, as the controller sends them
+              // together: a capability without it offers nothing.
+              claudeCode: claudeCodeLane
+                ? mapControllerRuntimeClaudeCode(record.claudeCode) ?? undefined
+                : undefined,
             } as ControllerRuntimeStatusEntry;
           })
           .filter((entry): entry is ControllerRuntimeStatusEntry => Boolean(entry))
@@ -244,6 +327,7 @@ export async function fetchRuntimeStatus(
       runtimes,
       preferredRuntimeId: payload.preferredRuntimeId ?? null,
       sharedBrowserHostPolicy,
+      ...(claudeCodeLane ? { claudeCodeLane: true as const } : {}),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

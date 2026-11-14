@@ -839,6 +839,30 @@ loses only work that never reached the remote:
   `gitSyncStatus: "partial"`, and the turn's reply ends with one
   `Not saved: <paths> (kept at <ref>)` sentence per group. `instafy git sync`
   prints the same lines and exits 1.
+- A local-engine turn ([Local-engine turns](Local-Engine-Turns.md)) runs on
+  its sender's own computer and saves through the same checkpoint, only when
+  Claude Code finished it without an error: what changed in the folder's
+  `git status` during the turn, minus paths that are never published. Its
+  save also leaves out every path with a `.claude` segment, every
+  `CLAUDE.local.md` and the `.mcp.json` at the folder's root (names compared
+  as a Mac's folder compares them, ignoring letter case, beyond ASCII too),
+  Claude Code's own files, which once saved would carry hooks or MCP servers
+  onto teammates' computers, and every changed file whose name or content
+  holds what looks like a Claude key or token (`sk-ant-` in any letter case,
+  with no letter or digit just before it, followed by at least 20 letters,
+  digits, `_` or `-`; a bare mention of the prefix still saves) or whose
+  content could not be read to check. Those files stay in the folder, and a
+  note of the turn names each one, a key in a name replaced, under the reply
+  instead of in it, for example
+  `Not saved: .claude/settings.json (Claude Code's own files stay on this computer)`.
+  A stopped turn's report leaves the same files out, and only these turns'
+  saves apply this filter. A turn that failed saves nothing and leaves its
+  changes in the folder. When the save of a finished turn fails, nothing is
+  failed: its reply still shows, with the note "Claude Code's changes stayed
+  on this computer and weren't saved to the space." under it, and its files
+  card lists nothing. A folder with neither `.instafy/.git` nor a `.git` of
+  its own takes no such turn: nothing there could say what a turn changed,
+  so the turn ends before Claude Code starts.
 - A save publishes by merging: the checkout's commits reach `main` unchanged,
   as a fast-forward or under one merge commit on the current tip. Files that
   `main` changed too keep `main`'s copy, and the agent's copy goes to a

@@ -83,6 +83,12 @@ fn main() -> anyhow::Result<()> {
         return runtime.block_on(local_browser::run_mcp_stdio());
     }
     personal_browser::capture_and_scrub_process_capability()?;
+    // The local-engine lane's launch grant (`INSTAFY_CLAUDE_CODE_*`) and the launch environment
+    // its `claude` process gets, captured before any thread, the skill-pack export,
+    // `arg0_dispatch`, the credential scrub or the skill-pack shims can change that environment.
+    // A bad value leaves the lane not ready; it never stops startup.
+    // SAFETY: no other thread exists yet.
+    unsafe { runtime_agent::claude_code::capture_and_scrub_launch_grant() };
     // Skill packs ship once with the runtime; the small launchers in each space, and model shells,
     // find them through INSTAFY_SKILL_PACKS_DIR.
     // SAFETY: no other thread exists yet.

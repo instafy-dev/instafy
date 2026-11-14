@@ -276,6 +276,97 @@ describe("desktop runtime identity and Personal Browser capabilities", () => {
     expect(child.kill).not.toHaveBeenCalled();
   });
 
+  it("keeps signalling a runtime group whose root has already exited", async () => {
+    // The runtime-agent crash case: the root is gone, but anything it started
+    // in its group, a local engine included, must still be stopped and proven
+    // gone before the controller is told.
+    vi.useFakeTimers();
+    const groupSignals: NodeJS.Signals[] = [];
+    let groupAlive = true;
+    const child: DesktopRuntimeChildStopTarget = {
+      pid: 4747,
+      exitCode: 1,
+      signalCode: null,
+      kill: vi.fn(() => true),
+    };
+    const stopping = stopDesktopRuntimeChildWithEscalation(child, Promise.resolve(), {
+      killProcessTree: true,
+      platform: "darwin",
+      sigintGraceMs: 10,
+      sigtermGraceMs: 10,
+      sigkillGraceMs: 10,
+      isProcessGroupAlive: () => groupAlive,
+      signalProcessGroup(_pid, signal) {
+        groupSignals.push(signal);
+        if (signal === "SIGKILL") {
+          groupAlive = false;
+        }
+      },
+    });
+
+    expect(groupSignals).toEqual(["SIGINT"]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(groupSignals).toEqual(["SIGINT", "SIGTERM"]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(groupSignals).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(stopping).resolves.toBeUndefined();
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "stops a real runtime group whose root already exited until its stubborn descendant is gone",
+    async () => {
+      const descendantScript =
+        "process.on('SIGINT', () => {}); process.on('SIGTERM', () => {}); process.stdout.write('ready'); setInterval(() => {}, 1000);";
+      const rootScript = [
+        'const { spawn } = require("node:child_process");',
+        `const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: ["ignore", "pipe", "ignore"] });`,
+        'child.stdout.once("data", () => process.stdout.write(String(child.pid) + "\\n", () => process.exit(0)));',
+      ].join("\n");
+      const root = spawn(process.execPath, ["-e", rootScript], {
+        detached: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const exited = once(root, "exit");
+      const chunks: Buffer[] = [];
+      root.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
+      await exited;
+      const descendantPid = Number(Buffer.concat(chunks).toString("utf8").trim());
+      expect(Number.isSafeInteger(descendantPid) && descendantPid > 0).toBe(true);
+      expect(root.exitCode).toBe(0);
+      // The root is gone; its group is not.
+      expect(() => process.kill(-root.pid!, 0)).not.toThrow();
+
+      try {
+        await stopDesktopRuntimeChildWithEscalation(root, exited, {
+          killProcessTree: true,
+          sigintGraceMs: 100,
+          sigtermGraceMs: 100,
+          sigkillGraceMs: 2_000,
+        });
+        const deadline = Date.now() + 2_000;
+        let descendantAlive = true;
+        while (descendantAlive && Date.now() < deadline) {
+          try {
+            process.kill(descendantPid, 0);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          } catch {
+            descendantAlive = false;
+          }
+        }
+        expect(descendantAlive).toBe(false);
+      } finally {
+        try {
+          process.kill(-root.pid!, "SIGKILL");
+        } catch {
+          // The process group should already be gone.
+        }
+      }
+    },
+    10_000,
+  );
+
   it("uses taskkill tree termination on Windows", async () => {
     const terminatedPids: number[] = [];
     const child: DesktopRuntimeChildStopTarget = {

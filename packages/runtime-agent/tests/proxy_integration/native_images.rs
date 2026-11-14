@@ -351,6 +351,7 @@ fn job(project_id: Uuid, conversation_id: Uuid, payload: Value) -> LeaseJob {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     }
 }
 

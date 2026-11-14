@@ -1,5 +1,7 @@
 import {
   coerceControllerRuntimeIdleTtlSeconds,
+  ControllerApiError,
+  readControllerApiError,
   readControllerError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
@@ -1065,12 +1067,12 @@ export async function sendControllerConversationMessage(
   );
 
   if (!response.ok) {
-    const message = await readControllerError(
-      response,
-      "conversation message failed",
-      requestContext,
+    // The refusal keeps its status, code and details beside the same text,
+    // so a caller can tell one refusal from another, such as a turn-engine
+    // send the controller did not admit (docs/Local-Engine-Turns.md 5.5).
+    throw new ControllerApiError(
+      await readControllerApiError(response, "conversation message failed", requestContext),
     );
-    throw new Error(message);
   }
 
   const data = (await response.json()) as DispatchControllerPromptResponse;

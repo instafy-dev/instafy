@@ -1,4 +1,8 @@
 import type { SubmitConversationRuntimeOverride } from "../../../conversations/useConversation";
+import {
+  carriesTurnEngineClaim,
+  withoutTurnEngineClaim,
+} from "../../../features/frontendFeatureModule";
 import type { BrowserSessionPageTarget } from "./browserSessionPages";
 
 const CHAT_SEND_QUEUE_STORAGE_PREFIX = "instafy.chat.sendQueue.v1";
@@ -21,6 +25,20 @@ export type EditingQueuedChatItem = {
   originalQueueOrder?: string[];
   restoreOnly?: boolean;
 };
+
+/**
+ * A turn-engine claim is for one message the person sends now, never one that
+ * waits in a queue: a queued item keeps its text but loses any claim, and the
+ * runtime that claim's routing pinned it to.
+ */
+export function withoutQueuedTurnEngineClaim(item: QueuedChatSendItem): QueuedChatSendItem {
+  if (!carriesTurnEngineClaim(item.metadata)) {
+    return item;
+  }
+  const { runtimeOverride: _claimedRuntime, ...rest } = item;
+  void _claimedRuntime;
+  return { ...rest, metadata: withoutTurnEngineClaim(item.metadata ?? null) };
+}
 
 // Keep the edited item beside its surviving neighbours. A new message added
 // during the edit must not move ahead of it just because it was temporarily
@@ -133,7 +151,7 @@ export function readChatSendQueue(key: string): QueuedChatSendItem[] {
         if (!id || !message.trim()) {
           return null;
         }
-        return {
+        return withoutQueuedTurnEngineClaim({
           id,
           message,
           editorState,
@@ -143,7 +161,7 @@ export function readChatSendQueue(key: string): QueuedChatSendItem[] {
           browserLaunchMode,
           metadata,
           ...(runtimeOverride ? { runtimeOverride } : {}),
-        };
+        });
       })
       .filter((entry): entry is QueuedChatSendItem => Boolean(entry));
   } catch {
@@ -160,7 +178,7 @@ export function writeChatSendQueue(key: string, items: QueuedChatSendItem[]) {
       window.localStorage.removeItem(key);
       return;
     }
-    window.localStorage.setItem(key, JSON.stringify(items));
+    window.localStorage.setItem(key, JSON.stringify(items.map(withoutQueuedTurnEngineClaim)));
   } catch {
     // ignore storage failures
   }

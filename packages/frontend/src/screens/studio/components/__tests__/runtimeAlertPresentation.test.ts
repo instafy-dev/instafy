@@ -112,6 +112,39 @@ describe("resolveAgentWaitingActivityCopy", () => {
       resolveAgentWaitingActivityCopy({ displayNames: ["Octo", "Reviewer"], workspaceStarting: true, queued: false }),
     ).toEqual({ label: "Starting…", ariaLabel: "Octo, Reviewer are starting" });
   });
+
+  // docs/Local-Engine-Turns.md 5.7: a turn a turn engine runs words its own
+  // start, for whoever views it (newestTurnEngineStartingLine). It runs on
+  // its sender's computer, so a cloud runtime's slot wall is never what it
+  // waits on.
+  it("says a turn engine's own words for its turn, also over the runtime slot wall", () => {
+    const startingLine = "Starting Claude Code on this computer…";
+    expect(
+      resolveAgentWaitingActivityCopy({
+        displayNames: ["Octo"],
+        workspaceStarting: false,
+        queued: true,
+        turnEngineStartingLine: startingLine,
+      }),
+    ).toEqual({ label: startingLine, ariaLabel: `Octo: ${startingLine}` });
+    expect(
+      resolveAgentWaitingActivityCopy({
+        displayNames: ["Octo"],
+        workspaceStarting: true,
+        queued: true,
+        runtimeLimit: { limitReached: true, blockerProjectLabel: "My other app", blockerRuntimeLabel: null },
+        turnEngineStartingLine: startingLine,
+      }).label,
+    ).toBe(startingLine);
+    expect(
+      resolveAgentWaitingActivityCopy({
+        displayNames: ["Octo"],
+        workspaceStarting: false,
+        queued: false,
+        turnEngineStartingLine: null,
+      }).label,
+    ).toBe("Starting…");
+  });
 });
 
 describe("resolveAgentWaitingActivityCopy runtime slot wall", () => {

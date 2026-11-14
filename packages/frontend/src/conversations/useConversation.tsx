@@ -25,6 +25,7 @@ import {
   type ConversationGroupParticipationPreflightResult,
 } from "./groupParticipation";
 import { hasNonRecoverableErrorForRun } from "./conversationGoals";
+import { messageUsesTurnEngine } from "../features/frontendFeatureModule";
 export type { SubmitConversationOptions, SubmitConversationRuntimeOverride } from "./useConversationSubmitFlow";
 
 const { updateMetadata: updateControllerConversationMetadata } = controllerClient.conversations;
@@ -83,6 +84,7 @@ export function useConversation(): UseConversationResult {
     removeConversationAgentHandle,
     appendMessages,
     replaceMessages,
+    removeUnsentMessage,
     updateMessage,
     markConversationRead,
     setConversationControllerId,
@@ -148,6 +150,7 @@ export function useConversation(): UseConversationResult {
     setConversationTitle,
     setConversationGoal,
     appendMessages,
+    removeUnsentMessage,
     updateMessage,
     linkRunToConversation,
   });
@@ -179,8 +182,16 @@ export function useConversation(): UseConversationResult {
       }
       return;
     }
+    // A turn-engine turn's message never seeds a title: titles are asked of a
+    // model, and nothing Instafy runs for such a turn calls one. Also an
+    // engine this Studio was not built with.
     const latestUserMessage = messages
-      .filter((message) => message.role === "user" && message.content.trim().length > 0)
+      .filter(
+        (message) =>
+          message.role === "user" &&
+          message.content.trim().length > 0 &&
+          !messageUsesTurnEngine(message.metadata),
+      )
       .at(-1);
     const seed = latestUserMessage?.content.trim() ?? "";
     if (!seed) {

@@ -684,6 +684,21 @@ describe("summarizeTurnActivity", () => {
     expect(summarize([command(ADD_POINT), retrying], "running").live).toBe("Trying again…");
   });
 
+  // docs/Local-Engine-Turns.md 5.7: a turn a turn engine runs words its own
+  // start, until its first step, and only that.
+  it("says a turn engine's own words until the first step, and follows the steps after", () => {
+    const startingLine = "Starting Claude Code on this computer…";
+    const withEngine = (messages: ChatMessage[], phase: TurnActivityPhase, viewerCanAnswer = false) =>
+      summarizeTurnActivity(messages, { jobId: JOB, phase, viewerCanAnswer, startingLine });
+    expect(withEngine([], "starting").live).toBe(startingLine);
+    expect(withEngine([note("**Reading the repo**", "reasoning")], "running").live).toBe(startingLine);
+    expect(withEngine([], "running", true).live).toBe("Waiting for you");
+    expect(withEngine([command(ADD_POINT)], "running").live).toBe("Thinking…");
+    expect(withEngine([command(ADD_POINT)], "completed").live).toBeNull();
+    // Without an engine's words, the line is as it was.
+    expect(summarizeTurnActivity([], { jobId: JOB, phase: "starting", startingLine: null }).live).toBe("Starting…");
+  });
+
   it("shows a runtime status the runtime labelled while it is the newest thing", () => {
     const saving = note("Syncing workspace changes…", "status", {
       v: 1,

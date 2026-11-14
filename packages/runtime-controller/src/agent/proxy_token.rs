@@ -41,7 +41,7 @@ pub(super) async fn renew(
     .await?;
     let row = transaction
         .query_opt(
-            "select project_id, run_id, credential_id, payload, lease_expires_at, intent
+            "select project_id, run_id, credential_id, payload, lease_expires_at, intent, engine
          from agent_jobs
          where id = $1 and project_id = $2 and status = 'leased'
            and leased_by_runtime_id = $3 and lease_attempts = $4
@@ -56,6 +56,12 @@ pub(super) async fn renew(
         .await
         .map_err(|error| internal_error(format!("failed to validate proxy job lease: {error}")))?
         .ok_or_else(inactive_lease)?;
+    // A local-engine turn's traffic never goes through the Instafy proxy: it
+    // was leased with no envelope, and none is minted for it here
+    // (crate::claude_code_lane).
+    if row.get::<_, Option<String>>("engine").is_some() {
+        return Err(crate::claude_code_lane::has_no_proxy());
+    }
     // Use the database clock *after* acquiring the row: transaction/statement
     // start time could admit a lease that expired while this request waited.
     let now: DateTime<Utc> = transaction

@@ -40,6 +40,18 @@ type TextSecurityStyle = CSSProperties & {
   WebkitTextSecurity?: string;
 };
 
+/** What the space's Secrets say about a secret the credential guard refuses (docs/Local-Engine-Turns.md 6). */
+export const REFUSED_SECRET_NOTICE = "Instafy no longer stores Claude sign-ins; remove it";
+
+/**
+ * Whether the controller marks this secret `refused`: its name is reserved
+ * or its value is a Claude sign-in, so it is never delivered. Such a secret
+ * stays listed, with a notice to remove it, instead of quietly not working.
+ */
+function isRefusedSecret(secret: ControllerProjectSecret): boolean {
+  return secret.refused === true;
+}
+
 function normalizeAgentHandle(handle: string): string {
   return handle.trim().replace(/^@/, "").toLowerCase();
 }
@@ -721,6 +733,16 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
                         <Text variant="captionSmall" tone="muted" className="mt-0.5 break-words">
                           Agents: {assignedAgentsLabel(secret)}
                         </Text>
+                        {isRefusedSecret(secret) ? (
+                          <Text
+                            variant="caption"
+                            tone="warning"
+                            className="mt-1 break-words"
+                            data-testid={`project-secret-refused-${secret.id}`}
+                          >
+                            {REFUSED_SECRET_NOTICE}
+                          </Text>
+                        ) : null}
                       </div>
                       <div className="flex max-w-full flex-wrap items-center gap-2">
                         <Button

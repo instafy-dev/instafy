@@ -253,6 +253,7 @@ async fn run_case() -> Result<()> {
         lease_attempts: 1,
         grants: Vec::new(),
         grant_token: None,
+        engine: None,
     };
     let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
     tokio::time::timeout(
