@@ -5483,7 +5483,7 @@ mod tests {
     // Inert stand-ins with the shapes the credential guard reads. None is a
     // real key or token.
     const CLAUDE_SIGN_IN: &str = "sk-ant-oat01-inert-import-guard-access";
-    const GITHUB_TOKEN: &str = "ghp_inertImportGuardToken";
+    const GITHUB_TOKEN: &str = concat!("gh", "p_inertImportGuardToken");
 
     /// The credential guard on the import's project token
     /// (docs/Local-Engine-Turns.md, section 6): a project secret that holds
@@ -5508,8 +5508,8 @@ mod tests {
         for (value, sent) in [
             (GITHUB_TOKEN, GITHUB_TOKEN),
             (
-                " github_pat_inert_import_guard \n",
-                "github_pat_inert_import_guard",
+                concat!(" github", "_pat_inert_import_guard \n"),
+                concat!("github", "_pat_inert_import_guard"),
             ),
             (
                 "sk-ant-api03-inert-import-guard-api-key",

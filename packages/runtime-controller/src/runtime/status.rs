@@ -2082,10 +2082,10 @@ mod tests {
                 "version": 1,
                 "ready": true,
                 "reason": "bare_default",
-                "cli": "/Users/someone/.local/bin/claude",
+                "cli": "/home/someone/.local/bin/claude",
                 "verified": "true",
                 "planSignIn": "yes",
-                "path": "/Users/someone/.local/bin/claude",
+                "path": "/home/someone/.local/bin/claude",
             })),
             Some(json!({
                 "ready": true,

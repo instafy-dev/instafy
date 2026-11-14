@@ -57,7 +57,7 @@ describe("mapControllerRuntimeClaudeCode", () => {
       cli: "latest; rm -rf",
       verified: "yes",
       planSignIn: "true",
-      path: "/Users/someone/.local/bin/claude",
+      path: "/home/someone/.local/bin/claude",
     });
     expect(mapped).toEqual({ ready: false, reason: null, cli: null, verified: null, planSignIn: false });
     expect(mapped).not.toHaveProperty("path");

@@ -882,13 +882,13 @@ mod tests {
     #[tokio::test]
     async fn stderr_keeps_its_tail_from_its_first_whole_line() {
         let lines: Vec<u8> = (0..4_000u32)
-            .flat_map(|n| format!("line {n:05} at /Users/person/x\n").into_bytes())
+            .flat_map(|n| format!("line {n:05} at /home/person/x\n").into_bytes())
             .collect();
         let tail = tail_of(&lines[..], 16 * 1024).await;
         assert!(tail.len() <= 16 * 1024 && tail.len() > 16 * 1024 - 64);
         assert!(lines.ends_with(&tail));
         assert!(tail.starts_with(b"line "), "a whole line first");
-        assert!(tail.ends_with(b"line 03999 at /Users/person/x\n"));
+        assert!(tail.ends_with(b"line 03999 at /home/person/x\n"));
         // Nothing cut, nothing left out.
         assert_eq!(tail_of(&b"short\nlines"[..], 16).await, b"short\nlines");
         // A cut line keeps only its words after the cut one; with no break at all, nothing.
@@ -909,7 +909,7 @@ mod tests {
         let (mut writer, reader) = tokio::io::duplex(64 * 1024);
         writer
             .write_all(
-                b"Starting\nTypeError: undefined is not a function\n    at /Users/person/.local/share/claude/cli.js:12:34\n",
+                b"Starting\nTypeError: undefined is not a function\n    at /home/person/.local/share/claude/cli.js:12:34\n",
             )
             .await
             .unwrap();
@@ -1016,7 +1016,7 @@ mod tests {
         command
             .args([
                 "-c",
-                "cat >/dev/null; printf 'TypeError: x\\n    at (/Users/person/a.js:1:2)\\n    at (/Users/per' >&2; exit 1",
+                "cat >/dev/null; printf 'TypeError: x\\n    at (/home/person/a.js:1:2)\\n    at (/home/per' >&2; exit 1",
             ])
             .current_dir(folder.path())
             .stdin(std::process::Stdio::piped())
@@ -1026,7 +1026,7 @@ mod tests {
         let stop = JobCancelSignal::new();
         let shutdown = ShutdownSignal::new();
         let mut adapter =
-            EventAdapter::new(folder.path(), Some(std::path::Path::new("/Users/person")));
+            EventAdapter::new(folder.path(), Some(std::path::Path::new("/home/person")));
         let outcome = supervise(
             command,
             TurnSpec {
@@ -1041,7 +1041,7 @@ mod tests {
         )
         .await;
         assert!(
-            outcome.stderr.contains("at (~/a.js:1:2)") && !outcome.stderr.contains("/Users/per"),
+            outcome.stderr.contains("at (~/a.js:1:2)") && !outcome.stderr.contains("/home/per"),
             "{}",
             outcome.stderr
         );
@@ -1049,7 +1049,7 @@ mod tests {
             panic!("{:?}", outcome.end);
         };
         assert!(
-            failure.message.contains("~/a.js") && !failure.message.contains("/Users/per"),
+            failure.message.contains("~/a.js") && !failure.message.contains("/home/per"),
             "{failure:?}"
         );
     }

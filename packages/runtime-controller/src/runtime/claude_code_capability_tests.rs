@@ -43,7 +43,7 @@ fn ready_report() -> JsonValue {
         "verified": true,
         "planSignIn": true,
         "partialMessages": true,
-        "path": "/Users/someone/.local/bin/claude",
+        "path": "/home/someone/.local/bin/claude",
     })
 }
 
@@ -478,7 +478,7 @@ async fn registration_keeps_claude_code_only_for_its_persons_lane_scoped_runtime
                         "cli": "2.1.200",
                         "verified": true,
                         "planSignIn": false,
-                        "binary": "/Users/someone/.local/bin/claude",
+                        "binary": "/home/someone/.local/bin/claude",
                     }),
                 )
                 .await?;

@@ -3,6 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
+// Registers the application's turn engines, as the application does when it
+// builds its feature composition at startup (features/turnEngineRegistry.ts).
+import "../../../../features/applicationFrontendFeatureComposition";
 
 import { describeSendIntentError } from "../sendIntentErrorMessage";
 

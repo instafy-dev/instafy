@@ -16,7 +16,7 @@ const CONTROLLER_URL = "https://controller.example.test";
 const PROJECT_ID = "11111111-2222-4333-8444-555555555555";
 const RUNTIME_ID = "99999999-8888-4777-8666-555555555555";
 const CLAUDE = "/opt/homebrew/bin/claude";
-const NATIVE_CLAUDE = "/Users/sam/.local/bin/claude";
+const NATIVE_CLAUDE = "/home/sam/.local/bin/claude";
 const NOT_MADE =
   "Error invoking remote method 'instafy:desktopExtensionInvoke': DesktopExtensionChangeNotMadeError: Instafy is still working on this computer, so that change was not made.";
 

@@ -1645,8 +1645,8 @@ mod tests {
             "planSignIn": true,
             "partialMessages": true,
             "reason": "binary_missing",
-            "path": "/Users/someone/.local/bin/claude",
-            "env": { "CLAUDE_CONFIG_DIR": "/Users/someone/.claude" },
+            "path": "/home/someone/.local/bin/claude",
+            "env": { "CLAUDE_CONFIG_DIR": "/home/someone/.claude" },
         });
         let reported = json!({
             "agent": true,

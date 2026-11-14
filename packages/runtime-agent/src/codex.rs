@@ -9001,8 +9001,8 @@ mod tests {
         &["CLAUDE", "-p", "hi"],
         &["/opt/homebrew/bin/claude", "-p", "hi"],
         &["/usr/local/bin/claude"],
-        &["/Users/person/.local/bin/claude", "--print"],
-        &["/Users/person/.local/bin/ClAuDe"],
+        &["/home/person/.local/bin/claude", "--print"],
+        &["/home/person/.local/bin/ClAuDe"],
     ];
 
     /// Commands that only name it, or start another program.

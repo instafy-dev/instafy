@@ -1,4 +1,3 @@
-import { APPLICATION_FRONTEND_FEATURES } from "../features/applicationFrontendFeatureComposition";
 import {
   carriesTurnEngineClaim,
   messageUsesTurnEngine,
@@ -7,6 +6,7 @@ import {
   type TurnEngineFailureInput,
   type TurnEngineTurnOwner,
 } from "../features/frontendFeatureModule";
+import { registeredTurnEngines } from "../features/turnEngineRegistry";
 import { isPersonRuntimeStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
 import { resolveProxyUpstreamErrorGuidance } from "../screens/studio/components/proxyError";
 import type { ChatMessage } from "../screens/studio/types";
@@ -78,7 +78,7 @@ export type TurnEngineRunFailure = {
 
 /** The ids of the turn engines this Studio was built with. */
 export function turnEngineIds(): string[] {
-  return APPLICATION_FRONTEND_FEATURES.turnEngines.map((engine) => engine.id);
+  return registeredTurnEngines().map((engine) => engine.id);
 }
 
 /** The presentation of the turn engine with this id, or null. */
@@ -89,7 +89,7 @@ export function turnEnginePresentation(
     return null;
   }
   return (
-    APPLICATION_FRONTEND_FEATURES.turnEngines.find((engine) => engine.id === engineId)?.presentation ??
+    registeredTurnEngines().find((engine) => engine.id === engineId)?.presentation ??
     null
   );
 }
@@ -224,7 +224,7 @@ export function newestTurnEngineStartingLine(chat: {
 
 /** The sentence for a refused Steer into a turn-engine turn, or null when no engine words `code`. */
 export function describeTurnEngineSteerRefusal(code: string): string | null {
-  for (const engine of APPLICATION_FRONTEND_FEATURES.turnEngines) {
+  for (const engine of registeredTurnEngines()) {
     const sentence = engine.presentation?.describeSteerRefusal(code) ?? null;
     if (sentence) {
       return sentence;

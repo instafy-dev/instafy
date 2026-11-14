@@ -762,9 +762,9 @@ test("a target under /opt/homebrew/bin, which only the admin group can also writ
       gid: admin,
       mode: 0o100755,
     },
-    "/Users": dir(0, 0, 0o40755),
-    "/Users/other": dir(502, 20, 0o40755),
-    "/Users/other/claude": { type: "file", uid: 502, gid: 20, mode: 0o100755 },
+    "/home": dir(0, 0, 0o40755),
+    "/home/other": dir(502, 20, 0o40755),
+    "/home/other/claude": { type: "file", uid: 502, gid: 20, mode: 0o100755 },
   });
   const options = {
     uid: person,
@@ -786,7 +786,7 @@ test("a target under /opt/homebrew/bin, which only the admin group can also writ
     "writable_by_others",
   );
   assert.equal(
-    validation.validateClaudeCodeBinary("/Users/other/claude", options).problem,
+    validation.validateClaudeCodeBinary("/home/other/claude", options).problem,
     "foreign_owner",
   );
   // Folder names compare ignoring case, as macOS folders do.
@@ -810,67 +810,67 @@ test("a login-shell configuration folder or CA file passes only by runtime-agent
   const files = virtualFileSystem({
     "/Library": dir(0, 0, 0o40755),
     "/Library/corp-ca.pem": file(0, 0),
-    "/Users": dir(0, 0, 0o40755),
-    "/Users/person": dir(person, 20, 0o40755),
-    "/Users/person/.claude-work": dir(),
-    "/Users/person/corp-ca.pem": file(),
-    "/Users/person/shared-ca.pem": file(person, 20, 0o100664),
-    "/Users/person/open-config": dir(person, 20, 0o40777),
+    "/home": dir(0, 0, 0o40755),
+    "/home/person": dir(person, 20, 0o40755),
+    "/home/person/.claude-work": dir(),
+    "/home/person/corp-ca.pem": file(),
+    "/home/person/shared-ca.pem": file(person, 20, 0o100664),
+    "/home/person/open-config": dir(person, 20, 0o40777),
     // The admin group may write the program's folder, never these (D26).
-    "/Users/person/admin-config": dir(person, admin, 0o40775),
-    "/Users/person/linked-config": link(".claude-work"),
-    "/Users/person/foreign-link": link(".claude-work", 502),
-    "/Users/person/loop": link("loop"),
-    "/Users/person/work": link("/Users/person"),
-    "/Users/person/space": dir(),
-    "/Users/other": dir(502, 20, 0o40755),
-    "/Users/other/ca.pem": file(502),
+    "/home/person/admin-config": dir(person, admin, 0o40775),
+    "/home/person/linked-config": link(".claude-work"),
+    "/home/person/foreign-link": link(".claude-work", 502),
+    "/home/person/loop": link("loop"),
+    "/home/person/work": link("/home/person"),
+    "/home/person/space": dir(),
+    "/home/other": dir(502, 20, 0o40755),
+    "/home/other/ca.pem": file(502),
   });
   const options = { uid: person, desktopOwnedPaths: [], caseInsensitivePaths: true, fs: files };
   const usable = (setting, value, overrides = {}) =>
     validation.claudeCodeShellSettingIsUsable(setting, value, { ...options, ...overrides });
 
-  assert.equal(usable("CLAUDE_CONFIG_DIR", "/Users/person/.claude-work"), true);
-  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/Users/person/corp-ca.pem"), true);
+  assert.equal(usable("CLAUDE_CONFIG_DIR", "/home/person/.claude-work"), true);
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/home/person/corp-ca.pem"), true);
   assert.equal(usable("NODE_EXTRA_CA_CERTS", "/Library/corp-ca.pem"), true, "root's own file");
   // A link on the way is followed, the kernel's way, when this user or root owns it.
-  assert.equal(usable("CLAUDE_CONFIG_DIR", "/Users/person/linked-config"), true);
-  assert.equal(usable("CLAUDE_CONFIG_DIR", "/Users/person/work/.claude-work"), true);
-  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/Users/person/work/../person/corp-ca.pem"), true);
+  assert.equal(usable("CLAUDE_CONFIG_DIR", "/home/person/linked-config"), true);
+  assert.equal(usable("CLAUDE_CONFIG_DIR", "/home/person/work/.claude-work"), true);
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/home/person/work/../person/corp-ca.pem"), true);
 
   for (const [setting, value] of [
     ["CLAUDE_CONFIG_DIR", "~/.claude-work"],
     ["CLAUDE_CONFIG_DIR", ".claude-work"],
-    ["CLAUDE_CONFIG_DIR", "/Users/person/.claude-work\n"],
-    ["CLAUDE_CONFIG_DIR", "/Users/person/missing"],
-    ["CLAUDE_CONFIG_DIR", "/Users/person/corp-ca.pem"],
-    ["NODE_EXTRA_CA_CERTS", "/Users/person/.claude-work"],
-    ["NODE_EXTRA_CA_CERTS", "/Users/person/shared-ca.pem"],
-    ["CLAUDE_CONFIG_DIR", "/Users/person/open-config"],
-    ["CLAUDE_CONFIG_DIR", "/Users/person/admin-config"],
-    ["CLAUDE_CONFIG_DIR", "/Users/person/foreign-link"],
-    ["CLAUDE_CONFIG_DIR", "/Users/person/loop"],
-    ["NODE_EXTRA_CA_CERTS", "/Users/other/ca.pem"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/.claude-work\n"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/missing"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/corp-ca.pem"],
+    ["NODE_EXTRA_CA_CERTS", "/home/person/.claude-work"],
+    ["NODE_EXTRA_CA_CERTS", "/home/person/shared-ca.pem"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/open-config"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/admin-config"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/foreign-link"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/loop"],
+    ["NODE_EXTRA_CA_CERTS", "/home/other/ca.pem"],
   ]) {
     assert.equal(usable(setting, value), false, `${setting}=${JSON.stringify(value)}`);
   }
 
   // Not in a folder Instafy owns, as given or after links; names compare ignoring case.
   assert.equal(
-    usable("CLAUDE_CONFIG_DIR", "/Users/person/.claude-work", { desktopOwnedPaths: ["/USERS/Person"] }),
+    usable("CLAUDE_CONFIG_DIR", "/home/person/.claude-work", { desktopOwnedPaths: ["/HOME/Person"] }),
     false,
   );
   assert.equal(
-    usable("CLAUDE_CONFIG_DIR", "/Users/person/linked-config", {
-      desktopOwnedPaths: ["/Users/person/.claude-work"],
+    usable("CLAUDE_CONFIG_DIR", "/home/person/linked-config", {
+      desktopOwnedPaths: ["/home/person/.claude-work"],
     }),
     false,
   );
   // As given, a value that passes through an owned folder is inside it.
-  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/Users/person/space/../corp-ca.pem"), true);
+  assert.equal(usable("NODE_EXTRA_CA_CERTS", "/home/person/space/../corp-ca.pem"), true);
   assert.equal(
-    usable("NODE_EXTRA_CA_CERTS", "/Users/person/space/../corp-ca.pem", {
-      desktopOwnedPaths: ["/Users/person/space"],
+    usable("NODE_EXTRA_CA_CERTS", "/home/person/space/../corp-ca.pem", {
+      desktopOwnedPaths: ["/home/person/space"],
     }),
     false,
   );
@@ -879,14 +879,14 @@ test("a login-shell configuration folder or CA file passes only by runtime-agent
   const find = (env) => validation.findUnusableClaudeCodeShellSetting(env, options);
   assert.equal(find({ HTTPS_PROXY: "relative", NO_PROXY: "*" }), null);
   assert.equal(
-    find({ CLAUDE_CONFIG_DIR: "/Users/person/.claude-work", NODE_EXTRA_CA_CERTS: "/Library/corp-ca.pem" }),
+    find({ CLAUDE_CONFIG_DIR: "/home/person/.claude-work", NODE_EXTRA_CA_CERTS: "/Library/corp-ca.pem" }),
     null,
   );
   assert.equal(
-    find({ NODE_EXTRA_CA_CERTS: "/Users/other/ca.pem", CLAUDE_CONFIG_DIR: "~/.claude-work" }),
+    find({ NODE_EXTRA_CA_CERTS: "/home/other/ca.pem", CLAUDE_CONFIG_DIR: "~/.claude-work" }),
     "CLAUDE_CONFIG_DIR",
   );
-  assert.equal(find({ NODE_EXTRA_CA_CERTS: "/Users/other/ca.pem" }), "NODE_EXTRA_CA_CERTS");
+  assert.equal(find({ NODE_EXTRA_CA_CERTS: "/home/other/ca.pem" }), "NODE_EXTRA_CA_CERTS");
 });
 
 test("the configuration folder and CA file checks hold on a real file system", () => {

@@ -2042,7 +2042,7 @@ mod tests {
 
     fn snapshot() -> LaunchEnvSnapshot {
         LaunchEnvSnapshot::from_lookup(|key| match key {
-            "HOME" => Some("/Users/person".into()),
+            "HOME" => Some("/home/person".into()),
             "PATH" => Some("/usr/bin:/bin".into()),
             _ => None,
         })
@@ -2131,7 +2131,7 @@ mod tests {
             env_json: Some(
                 r#"{
                     "NODE_EXTRA_CA_CERTS": "/etc/ssl/corporate.pem",
-                    "CLAUDE_CONFIG_DIR": "/Users/person/.claude-work",
+                    "CLAUDE_CONFIG_DIR": "/home/person/.claude-work",
                     "HTTPS_PROXY": "http://proxy.example:3128",
                     "HTTP_PROXY": null,
                     "NO_PROXY": "",
@@ -2159,7 +2159,7 @@ mod tests {
             [
                 (
                     "CLAUDE_CONFIG_DIR",
-                    OsString::from("/Users/person/.claude-work")
+                    OsString::from("/home/person/.claude-work")
                 ),
                 ("HTTPS_PROXY", OsString::from("http://proxy.example:3128")),
                 (
@@ -2190,14 +2190,14 @@ mod tests {
             plan_sign_in: true,
             help: HelpFacts::read(""),
             launch: CheckedLaunch {
-                program: PathBuf::from("/Users/person/.local/share/claude/versions/2.1.400"),
-                granted_dir: PathBuf::from("/Users/person/.local/bin"),
+                program: PathBuf::from("/home/person/.local/share/claude/versions/2.1.400"),
+                granted_dir: PathBuf::from("/home/person/.local/bin"),
                 identity: BinaryIdentity {
-                    canonical: PathBuf::from("/Users/person/.local/share/claude/versions/2.1.400"),
+                    canonical: PathBuf::from("/home/person/.local/share/claude/versions/2.1.400"),
                     size: 1,
                     modified: None,
                 },
-                granted_env: vec![(CONFIG_DIR_KEY, OsString::from("/Users/person/.claude"))],
+                granted_env: vec![(CONFIG_DIR_KEY, OsString::from("/home/person/.claude"))],
             },
         });
         let capability = ready.capability();

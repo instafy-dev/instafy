@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+// Registers the application's turn engines, as the application does when it
+// builds its feature composition at startup (features/turnEngineRegistry.ts).
+import "../../features/applicationFrontendFeatureComposition";
 import type { ChatMessage } from "../../screens/studio/types";
 import type { ControllerRuntimeStatusEntry } from "../../services/runtimeController/runtimes";
 import {

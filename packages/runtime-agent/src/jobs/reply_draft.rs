@@ -795,7 +795,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let folder = std::fs::canonicalize(temp.path()).unwrap();
         let folder_text = folder.to_str().unwrap();
-        let home = "/Users/person";
+        let home = "/home/person";
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/fake-claude-fixtures/scenarios/success.jsonl");
         let scenario = std::fs::read_to_string(&fixture).unwrap();

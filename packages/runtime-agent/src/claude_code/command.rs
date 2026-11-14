@@ -315,7 +315,7 @@ mod tests {
         let tmp = folder(&root.join("tmp"), 0o700);
         let snapshot = LaunchEnvSnapshot::from_lookup(|key| {
             let value = match key {
-                "HOME" => "/Users/person".to_string(),
+                "HOME" => "/home/person".to_string(),
                 "USER" => "person".to_string(),
                 "TMPDIR" => tmp.display().to_string(),
                 "LANG" => "en_US.UTF-8".to_string(),
@@ -364,7 +364,7 @@ mod tests {
         };
         let expected_path = format!("{}:/usr/bin:/bin", bin.display());
         let expected: Vec<(OsString, OsString)> = [
-            ("HOME", "/Users/person"),
+            ("HOME", "/home/person"),
             ("USER", "person"),
             ("LANG", "en_US.UTF-8"),
             ("TMPDIR", tmp.to_str().unwrap()),

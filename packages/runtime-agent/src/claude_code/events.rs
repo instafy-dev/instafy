@@ -1916,8 +1916,8 @@ impl RunLog {
 mod tests {
     use super::*;
 
-    const FOLDER: &str = "/Users/person/Instafy/space";
-    const HOME: &str = "/Users/person";
+    const FOLDER: &str = "/home/person/Instafy/space";
+    const HOME: &str = "/home/person";
 
     fn redactor() -> Redactor {
         Redactor::new(Path::new(FOLDER), Some(Path::new(HOME)))
@@ -1946,46 +1946,46 @@ mod tests {
         let redactor = redactor();
         for (text, redacted) in [
             (
-                "edited /Users/person/Instafy/space/src/a.ts",
+                "edited /home/person/Instafy/space/src/a.ts",
                 "edited src/a.ts",
             ),
-            ("cd /Users/person/Instafy/space && ls", "cd . && ls"),
-            ("in /Users/person/Instafy/space, then", "in ., then"),
-            ("in /Users/person/Instafy/space.", "in .."),
-            ("/Users/person/Instafy/space/ is it", "./ is it"),
-            ("/Users/person/Instafy/space/.git", ".git"),
-            ("/Users/person/Instafy/space-2/x", "~/Instafy/space-2/x"),
-            ("/Users/person/Instafy/space.bak", "~/Instafy/space.bak"),
-            ("read /Users/person/.npmrc", "read ~/.npmrc"),
-            ("home is /Users/person", "home is ~"),
-            ("/Users/personal/x", "/Users/personal/x"),
-            ("/Users/other/x", "/Users/other/x"),
+            ("cd /home/person/Instafy/space && ls", "cd . && ls"),
+            ("in /home/person/Instafy/space, then", "in ., then"),
+            ("in /home/person/Instafy/space.", "in .."),
+            ("/home/person/Instafy/space/ is it", "./ is it"),
+            ("/home/person/Instafy/space/.git", ".git"),
+            ("/home/person/Instafy/space-2/x", "~/Instafy/space-2/x"),
+            ("/home/person/Instafy/space.bak", "~/Instafy/space.bak"),
+            ("read /home/person/.npmrc", "read ~/.npmrc"),
+            ("home is /home/person", "home is ~"),
+            ("/home/personal/x", "/home/personal/x"),
+            ("/home/other/x", "/home/other/x"),
             (
-                "token sk-ant-api03-abc in /Users/person/.config",
+                "token sk-ant-api03-abc in /home/person/.config",
                 "token [redacted] in ~/.config",
             ),
         ] {
             assert_eq!(redactor.text(text), redacted, "{text}");
         }
-        let mut value = json!({"a": ["/Users/person/x", {"b": "sk-ant-x"}], "n": 3});
+        let mut value = json!({"a": ["/home/person/x", {"b": "sk-ant-x"}], "n": 3});
         redactor.json(&mut value);
         assert_eq!(value, json!({"a": ["~/x", {"b": "[redacted]"}], "n": 3}));
         // A bound cuts after redaction, so a cut never leaves a part of a path or token.
-        assert_eq!(redactor.bounded("x /Users/person/y", 12), "x ~/y");
+        assert_eq!(redactor.bounded("x /home/person/y", 12), "x ~/y");
         assert_eq!(redactor.bounded("x sk-ant-abcdef", 4), "x [r…");
-        assert_eq!(bounded("x /Users/person/y", 12), "x /Users/per…");
+        assert_eq!(bounded("x /home/person/y", 12), "x /home/pers…");
     }
 
     #[test]
     fn a_draft_holds_back_an_end_that_could_grow_into_a_named_path() {
         let redactor = redactor();
         for (text, draft) in [
-            ("Edited /Users/pers", "Edited "),
-            ("Edited /Users/person/Instafy/sp", "Edited "),
-            ("Edited /Users/person/Instafy/space", "Edited "),
-            ("Edited /Users/person/Instafy/space/", "Edited "),
-            ("Edited /Users/person/Instafy/space/sr", "Edited sr"),
-            ("Edited /Users/person/Desk", "Edited ~/Desk"),
+            ("Edited /home/pers", "Edited "),
+            ("Edited /home/person/Instafy/sp", "Edited "),
+            ("Edited /home/person/Instafy/space", "Edited "),
+            ("Edited /home/person/Instafy/space/", "Edited "),
+            ("Edited /home/person/Instafy/space/sr", "Edited sr"),
+            ("Edited /home/person/Desk", "Edited ~/Desk"),
             ("A path /", "A path /"),
             ("The tests", "The tests"),
             ("key sk-ant-a", "key [redacted]"),
@@ -1998,17 +1998,17 @@ mod tests {
     fn step_paths_are_relative_or_outside_this_space() {
         let redactor = redactor();
         for (raw, path) in [
-            ("/Users/person/Instafy/space/src/a.ts", "src/a.ts"),
-            ("/Users/person/Instafy/space", "."),
+            ("/home/person/Instafy/space/src/a.ts", "src/a.ts"),
+            ("/home/person/Instafy/space", "."),
             ("src/./b.ts", "src/b.ts"),
             ("src/../c.ts", "c.ts"),
             ("../outside.ts", OUTSIDE_THIS_SPACE),
             (
-                "/Users/person/Instafy/space/../other/a.ts",
+                "/home/person/Instafy/space/../other/a.ts",
                 OUTSIDE_THIS_SPACE,
             ),
             ("/etc/hosts", OUTSIDE_THIS_SPACE),
-            ("/Users/person/.claude/settings.json", OUTSIDE_THIS_SPACE),
+            ("/home/person/.claude/settings.json", OUTSIDE_THIS_SPACE),
             ("~/notes.md", OUTSIDE_THIS_SPACE),
             ("", OUTSIDE_THIS_SPACE),
             ("keys/sk-ant-abc.txt", "keys/[redacted].txt"),
@@ -2915,11 +2915,11 @@ mod tests {
     #[test]
     fn unparsed_lines_are_counted_redacted_and_logged() {
         let (_temp, _folder, mut adapter) = adapter();
-        adapter.note_unparsed(b"Error at /Users/person/.local/bin/claude sk-ant-oat01-x");
+        adapter.note_unparsed(b"Error at /home/person/.local/bin/claude sk-ant-oat01-x");
         assert_eq!(adapter.unparsed_lines(), 1);
         let log = serde_json::to_string(&adapter.run_log().events()).unwrap();
         assert!(log.contains("~/.local/bin/claude") && log.contains("[redacted]"));
-        assert!(!log.contains("/Users/person") && !log.contains("sk-ant-oat"));
+        assert!(!log.contains("/home/person") && !log.contains("sk-ant-oat"));
         let failure = adapter.classify_failure(&exit(1));
         assert!(
             failure.message.contains("~/.local/bin/claude [redacted]"),

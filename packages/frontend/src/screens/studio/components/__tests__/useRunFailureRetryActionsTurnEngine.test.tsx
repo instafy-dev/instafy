@@ -3,6 +3,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// Registers the application's turn engines, as the application does when it
+// builds its feature composition at startup (features/turnEngineRegistry.ts).
+import "../../../../features/applicationFrontendFeatureComposition";
 import {
   forgetPromptsSentFromThisPageForTests,
   recordRunsStartedByPromptSentFromThisPage,

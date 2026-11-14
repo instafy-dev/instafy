@@ -50,7 +50,7 @@ describe("parseClaudeCodeDesktopStatus", () => {
         found: true,
         path: "/opt/homebrew/bin/claude",
         consented: true,
-        candidatePath: "/Users/sam/.local/bin/claude",
+        candidatePath: "/home/sam/.local/bin/claude",
         candidateProblem: "shell_setting_unusable",
         shellSetting: "NODE_EXTRA_CA_CERTS",
       }),
@@ -59,7 +59,7 @@ describe("parseClaudeCodeDesktopStatus", () => {
       found: true,
       path: "/opt/homebrew/bin/claude",
       consented: true,
-      candidatePath: "/Users/sam/.local/bin/claude",
+      candidatePath: "/home/sam/.local/bin/claude",
       candidateProblem: "shell_setting_unusable",
       shellSetting: "NODE_EXTRA_CA_CERTS",
     });
