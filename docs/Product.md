@@ -58,14 +58,12 @@ own opt-in transport.
 Run-thread tabs use their displayed message count and wait for their parent chat's initial
 history. Explicit chat-history retries start a new timing attempt after a failed navigation.
 
-The compact run-activity rail reads oldest to newest from left to right. A trailing spinner
-marks a pending run without a running activity status; once activity arrives, the newest
-event carries the live ring. New circles begin appearing immediately, without a delay based
-on the number of earlier events. In a multi-event rail, removing the spinner keeps existing
-circles in place; long histories roll older events into the leading overflow chip.
-The current-activity caption aligns with the first circle and sits directly below the rail.
-The caption stays compact on wide screens; long captions truncate within a readable width
-and expose the full status on hover. The rail and captions contain no cancellation controls.
+A turn shows one plain-language activity line above the reply: the current step while it runs
+("Looking up places…", "Thinking…" between steps) and what the turn did once it ends ("Looked up
+14 places, read 6 pages, built the map"). The line truncates, with its full text as its title, and
+once the turn has a step it opens Details, which holds each command and its output, tool calls,
+Octo's notes, reasoning titles and plan updates. The line and Details contain no cancellation
+controls. See [Chat activity line](Chat-Activity.md).
 
 A writable chat has one square Stop icon in the composer while jobs are live, including thinking
 before any command runs. With an empty draft it replaces the primary send/voice action; with text
