@@ -361,6 +361,14 @@ any user id goes into it.
   failure message are written just after the stop commits, in a short transaction that locks the
   turn's chat and no runtime, and a step of the 10 s idle sweep writes them for a turn whose own
   write never committed. That step runs only while `CLAUDE_CODE_LANE_USER_IDS` names someone.
+- A stop treats a Personal or Shared Browser turn, which cannot move to another runtime either,
+  the same way: its transaction fails only the job, and the turn's run, with the give-back of a
+  managed-AI reserve the turn left nothing for, ends just after the commit, under the chat's lock
+  and no runtime's, so the stop's own transaction never locks a chat while it holds its runtime.
+  It writes no Home row and no failure message. Its sweep step always runs, from 60 s to 24 h
+  after the stop, 32 a tick, and reads `agent_jobs_stopped_browser_turn_recovery_idx`
+  (`20261114112320_agent_jobs_stopped_browser_turn_recovery_idx.sql`): apply that migration
+  before deploying the controller that reads it, or the step scans every failed job each tick.
 - Apply the migrations that add `agent_jobs.engine` before deploying the controller that reads
   them. Keep `CLAUDE_CODE_LANE_USER_IDS` empty until the previous controller pool is retired and
   no load balancer still sends it requests: an older controller would unpin and requeue such a

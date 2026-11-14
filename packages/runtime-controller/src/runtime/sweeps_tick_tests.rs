@@ -153,6 +153,7 @@ struct Spaces {
     stranded: Uuid,
     undeliverable: Uuid,
     stopped_turn: Uuid,
+    stopped_browser_turn: Uuid,
     deleted: Uuid,
 }
 
@@ -170,6 +171,7 @@ impl Spaces {
             stranded: Uuid::new_v4(),
             undeliverable: Uuid::new_v4(),
             stopped_turn: Uuid::new_v4(),
+            stopped_browser_turn: Uuid::new_v4(),
             deleted: Uuid::new_v4(),
         }
     }
@@ -187,6 +189,7 @@ impl Spaces {
             self.stranded,
             self.undeliverable,
             self.stopped_turn,
+            self.stopped_browser_turn,
             self.deleted,
         ]
     }
@@ -208,6 +211,7 @@ struct Seeded {
     undeliverable_job: Uuid,
     undeliverable_run: Uuid,
     stopped_turn_run: Uuid,
+    stopped_browser_turn_run: Uuid,
     deleted_runtime: Uuid,
 }
 
@@ -578,6 +582,56 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         )
         .await?;
 
+    // A Shared Browser turn a runtime stop failed two minutes ago, whose
+    // run's end the stop's own write never wrote.
+    let stopped_browser_turn_conversation = Uuid::new_v4();
+    client
+        .execute(
+            "insert into conversations (id, project_id, metadata, visibility)
+             values ($1, $2, '{}'::jsonb, 'public')",
+            &[
+                &stopped_browser_turn_conversation,
+                &spaces.stopped_browser_turn,
+            ],
+        )
+        .await?;
+    let stopped_browser_turn_run = Uuid::new_v4();
+    client
+        .execute(
+            "insert into runs (id, project_id, conversation_id, run_type, status, progress)
+             values ($1, $2, $3, 'prompt', 'in_progress', 40)",
+            &[
+                &stopped_browser_turn_run,
+                &spaces.stopped_browser_turn,
+                &stopped_browser_turn_conversation,
+            ],
+        )
+        .await?;
+    let stopped_browser_turn_job = insert_job(
+        client,
+        spaces.stopped_browser_turn,
+        "failed",
+        "feature",
+        Some(stopped_browser_turn_run),
+        None,
+        json!({ "metadata": { "browserTransport": "shared" } }),
+        5 * 60,
+    )
+    .await?;
+    client
+        .execute(
+            "update agent_jobs
+                set conversation_id = $2, outcome = 'failed', error_message = $3,
+                    completed_at = now() - interval '2 minutes'
+              where id = $1",
+            &[
+                &stopped_browser_turn_job,
+                &stopped_browser_turn_conversation,
+                &crate::runtime::SHARED_BROWSER_DISCONNECTED_ERROR,
+            ],
+        )
+        .await?;
+
     // A hosted runtime still up in a space deleted five minutes ago.
     let deleted_runtime = insert_runtime(
         client,
@@ -613,6 +667,7 @@ async fn seed(client: &tokio_postgres::Client, spaces: &Spaces) -> anyhow::Resul
         undeliverable_job,
         undeliverable_run,
         stopped_turn_run,
+        stopped_browser_turn_run,
         deleted_runtime,
     })
 }
@@ -819,6 +874,17 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             ("failed".to_string(), 1),
             "the stopped turn's repair did not write its end"
         );
+        let stopped_browser_turn: String = client
+            .query_one(
+                "select status from runs where id = $1",
+                &[&seeded.stopped_browser_turn_run],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            stopped_browser_turn, "failed",
+            "the stopped browser turn's repair did not end its run"
+        );
 
         // Each failed run is published with the run it read on a connection
         // of its own.
@@ -835,6 +901,7 @@ async fn a_sweep_tick_on_a_pool_of_one_acts_on_every_step_with_work() -> anyhow:
             seeded.stranded_run,
             seeded.undeliverable_run,
             seeded.stopped_turn_run,
+            seeded.stopped_browser_turn_run,
         ] {
             assert_eq!(
                 published.get(&run_id),
