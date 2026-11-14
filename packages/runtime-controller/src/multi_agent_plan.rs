@@ -935,10 +935,35 @@ async fn checkpoint_plan_group(
         .iter()
         .all(|worker| is_terminal_job_status(worker.status.as_str()));
 
+    // A plan that lost a job when the AI connection it was sent with was
+    // deleted wakes no lead at all ([`plan_group_lost_a_credential`]).
+    let lost_a_credential =
+        plan_group_lost_a_credential(&transaction, project_id, conversation_id, group_id).await?;
+    // The goal it was sent for is blocked as that job settles
+    // (`runtime::sweeps::settle_jobs_whose_credential_was_removed`), and here
+    // too, for a job whose run something else ended first.
+    let blocked_goal = match plan_meta
+        .get("parentJobId")
+        .and_then(JsonValue::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+    {
+        Some(parent_job_id) if lost_a_credential => {
+            crate::conversation_goals::state::block_plan_goal(
+                &transaction,
+                conversation_id,
+                parent_job_id,
+                crate::conversation_goals::state::TEAM_CREDENTIAL_REMOVED_SUMMARY,
+            )
+            .await?
+        }
+        _ => None,
+    };
     // The early lead may still be acting on its earlier snapshot. Its terminal
     // callback (or recovery sweep) will read the group again. Do not let the
     // final lead overtake it and then publish an older answer last.
-    let dispatched = if all_terminal && !snapshot.has_active_early_checkpoint {
+    let dispatched = if lost_a_credential {
+        false
+    } else if all_terminal && !snapshot.has_active_early_checkpoint {
         dispatch_lead_checkpoint(
             state,
             project_id,
@@ -988,6 +1013,9 @@ async fn checkpoint_plan_group(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to release checkpoint lock: {error}")))?;
+    if let Some(conversation) = blocked_goal {
+        crate::conversation_goals::state::publish_update(state, &conversation);
+    }
     Ok(dispatched)
 }
 
@@ -1060,6 +1088,50 @@ async fn plan_group_lead_is_closed(
         .await
         .map(|row| row.get(0))
         .map_err(|error| internal_error(format!("failed to inspect a closed plan lead: {error}")))
+}
+
+/// Whether a job of the plan failed when the AI connection it was sent with
+/// was deleted (`agent_jobs_fail_on_credential_removal`). Such a plan wakes no
+/// lead, early or final. The lead's continuation is a service-role dispatch,
+/// which resolves its person's credentials again and, with that connection
+/// gone, would run on the platform lane with no managed-AI gate or reserve.
+async fn plan_group_lost_a_credential(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project_id: Uuid,
+    conversation_id: Uuid,
+    group_id: &str,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    // The column ships in a migration that may land after this controller.
+    let migrated = crate::runtime::credential_removed_at_exists(transaction)
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to look up agent_jobs.credential_removed_at: {error}"
+            ))
+        })?;
+    if !migrated {
+        return Ok(false);
+    }
+    transaction
+        .query_one(
+            "select exists(select 1 from agent_jobs
+          where project_id = $1 and conversation_id = $2
+            and (plan_group_id = $4 or payload #>> '{metadata,multiAgentPlan,groupId}' = $3)
+            and credential_removed_at is not null)",
+            &[
+                &project_id,
+                &conversation_id,
+                &group_id,
+                &Uuid::from_str(group_id).ok(),
+            ],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to look up a plan job whose credential was removed: {error}"
+            ))
+        })
 }
 
 /// Cancellation is terminal too: canceling the last running lane must still

@@ -342,6 +342,73 @@ pub(crate) async fn pause_for_user_stop(
         .map(Some)
 }
 
+/// What a goal says once a team plan sent for it can no longer go on.
+pub(crate) const TEAM_CREDENTIAL_REMOVED_SUMMARY: &str = "The AI connection a team agent was sent with was removed, so the goal stopped here. Connect an AI and resume the goal.";
+
+/// Blocks the goal of the team plan whose planner is `parent_job_id`, for a
+/// plan that will wake no lead: one of its jobs failed when the AI connection
+/// it was sent with was removed (`multi_agent_plan::plan_group_lost_a_credential`).
+/// A plan's workers and early lead are never bound to its goal, and only its
+/// final lead takes on the planner's binding, so nothing in the plan would
+/// move the goal on, and it would stay active. Only an active goal of the
+/// planner's revision and person is blocked.
+///
+/// The conversation is locked `for no key update`, the lock its own updates
+/// take, which still waits for [`load_bound_goal`] and every other goal write.
+/// The step that settles jobs whose credential was removed already holds it:
+/// it has just written their failures into the conversation. A stronger lock
+/// would also wait for every transaction that inserted a row referencing the
+/// conversation, so a teammate writing its message (that insert, then the
+/// same update) would deadlock with that step.
+pub(crate) async fn block_plan_goal(
+    transaction: &Transaction<'_>,
+    conversation_id: Uuid,
+    parent_job_id: Uuid,
+    reason: &str,
+) -> StateResult<Option<ConversationRecord>> {
+    let row = transaction
+        .query_opt(
+            "select c.metadata, p.user_id, j.payload
+             from agent_jobs j
+             join prompts p on p.id = j.prompt_id and p.project_id = j.project_id
+             join conversations c on c.id = j.conversation_id and c.project_id = j.project_id
+             where j.id = $1 and c.id = $2
+             for no key update of c",
+            &[&parent_job_id, &conversation_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load a team's goal: {error}")))?;
+    let Some(row) = row else { return Ok(None) };
+    let Some((revision, owner)) = binding(&row.get::<_, PgJson<Value>>("payload").0) else {
+        return Ok(None);
+    };
+    let metadata: Value = row
+        .get::<_, Option<Value>>("metadata")
+        .unwrap_or_else(|| json!({}));
+    if row.get::<_, Option<Uuid>>("user_id") != Some(owner)
+        || uuid_at(&metadata, "/_goalController/revision") != Some(revision)
+        || uuid_at(&metadata, "/_goalController/ownerUserId").is_some_and(|id| id != owner)
+    {
+        return Ok(None);
+    }
+    let now = Utc::now().to_rfc3339();
+    let Some(mut goal) = metadata
+        .get("instafyGoal")
+        .or_else(|| metadata.get("instafy_goal"))
+        .and_then(|goal| normalize_goal(goal, &now))
+        .filter(|goal| goal.status == GoalStatus::Active)
+    else {
+        return Ok(None);
+    };
+    goal.status = GoalStatus::Blocked;
+    goal.progress_summary = Some(reason.into());
+    goal.updated_at = now;
+    goal.updated_by = Some(owner.to_string());
+    persist_goal(transaction, conversation_id, metadata, Some(&goal))
+        .await
+        .map(Some)
+}
+
 pub(crate) fn publish_update(state: &AppState, conversation: &ConversationRecord) {
     crate::publish_controller_event_with_conversation(
         &state.events,

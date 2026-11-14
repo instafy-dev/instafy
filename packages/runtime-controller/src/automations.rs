@@ -999,7 +999,6 @@ async fn execute_automation_once(
             priority: 100,
             runtime_type: None,
             idle_ttl_seconds: None,
-            project_type_hint: None,
             execution_mode,
             workspace_mode,
             runtime_id,

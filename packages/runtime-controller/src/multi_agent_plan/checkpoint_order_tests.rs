@@ -284,7 +284,9 @@ async fn final_checkpoint_waits_for_early_lead_and_recovers_every_terminal_hando
 /// its trigger. It leaves alone a group still settling, one too old to revive,
 /// a deleted space, a stopped group, one whose lead managed AI refused, one
 /// that already has a lead, one whose last worker a person's runtime stop
-/// expired, and one whose last worker planned again; another space's jobs
+/// expired, one whose last worker planned again, and one that lost a worker to
+/// a deleted AI connection, which owes no lead and tells the person nothing
+/// even once the conversation moved on; another space's jobs
 /// carrying the group's ids are neither its lead nor its plan. When the conversation
 /// moved on, or a refused lead has been retried long enough, the person is
 /// told once instead, and nothing starts that lead afterwards; a lead refused
@@ -334,6 +336,8 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
         "sibling",
         "two_lost",
         "turn_started",
+        "lost_credential",
+        "lost_credential_moved_on",
         "goal_recovered",
         "goal_given_up",
         "goal_moved_on",
@@ -580,6 +584,20 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                         &[&space.project_id,&conversation,&(ended_ago-60),
                           &PgJson(json!({"metadata":{"agent":{"handle":"scribe"}}}))]).await?;
                 }
+                "lost_credential" | "lost_credential_moved_on" => {
+                    // The first worker failed when the AI connection it was sent with was deleted,
+                    // as `agent_jobs_fail_on_credential_removal` fails it: its plan wakes no lead,
+                    // so no lead is owed, and no notice says one could not start, even after the
+                    // person wrote in the conversation.
+                    connection.execute("update agent_jobs set status='failed',outcome='failed',error_message=$2,
+                        credential_removed_at=completed_at where id=$1",
+                        &[&first,&crate::runtime::CREDENTIAL_REMOVED_MESSAGE]).await?;
+                    if base == "lost_credential_moved_on" {
+                        connection.execute("insert into conversation_messages(id,conversation_id,project_id,role,content,metadata,created_by)
+                            values(gen_random_uuid(),$1,$2,'user','Connect my AI again.','{}',$3)",
+                            &[&conversation,&space.project_id,&space.owner_user_id]).await?;
+                    }
+                }
                 "failing" | "given_up" => {
                     // A Personal Browser runtime refuses any other job: the lead pinned to it never starts.
                     let pinned = Uuid::new_v4();
@@ -616,7 +634,8 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 }
             };
             let owes = || owes_in(conversation);
-            assert_eq!(owes().await?, !matches!(base, "too_old" | "deleted" | "stopped" | "refused" | "led" | "person_stopped"),
+            assert_eq!(owes().await?, !matches!(base, "too_old" | "deleted" | "stopped" | "refused" | "led" | "person_stopped"
+                    | "lost_credential" | "lost_credential_moved_on"),
                 "{case}: owed before the sweep");
             if let Some(other) = other_conversation {
                 assert!(owes_in(other).await?, "{case}: the other conversation's team is owed its lead");
