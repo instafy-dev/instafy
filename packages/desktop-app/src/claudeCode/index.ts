@@ -67,8 +67,10 @@ export type ClaudeCodeDesktopStatus = Readonly<{
    * While the lane is on: another program Find or Locate turned up, or the
    * program in use itself (equal to `path`, with no `candidateProblem`) when
    * Find read login-shell values for it that Desktop can use in place of
-   * recorded ones it no longer can. The path and values in use stay until
-   * Use for my messages confirms this one.
+   * recorded ones it no longer can. Such a Find turned up that program or,
+   * as for an alias, no program at all; one that turned up another copy, in
+   * the usual folders too, shows that copy instead. The path and values in
+   * use stay until Use for my messages confirms this one.
    */
   candidatePath?: string;
   /** While the lane is on: why Desktop won't use `candidatePath`, or that Find found nothing. */
@@ -83,8 +85,21 @@ export type ClaudeCodeDesktopStatus = Readonly<{
 type OsAccount = Readonly<{ username: string; homedir: string; shell: string | null }>;
 
 type Candidate = Readonly<{
-  /** Null when Find found nothing. */
+  /** Null when Find found no program, though its login shell may have answered. */
   binaryPath: string | null;
+  pathEntries: readonly string[];
+  env: ClaudeCodeLoginShellEnv;
+  /**
+   * Whether `pathEntries` and `env` are a login shell's answer. A shell that
+   * gave none leaves them empty, which says nothing about the person's
+   * settings, so such a find never stands for new values.
+   */
+  shellAnswered: boolean;
+}>;
+
+/** What Use for my messages records: a program, with the PATH entries and values it runs with. */
+type Choice = Readonly<{
+  binaryPath: string;
   pathEntries: readonly string[];
   env: ClaudeCodeLoginShellEnv;
 }>;
@@ -217,24 +232,57 @@ export function createClaudeCodeDesktopFeatureModule(
   // program, or nothing found, always shows. The program in use shows only
   // when Find read login-shell values for it that Desktop can use while the
   // recorded ones it no longer can (D26): Use for my messages then confirms
-  // those through the consent dialog, as it would another program.
+  // those through the consent dialog, as it would another program. A Find
+  // that turned up no program, as for an alias, but whose login shell
+  // answered read values for the program in use all the same. A shell that
+  // gave no answer read none, so its find never stands for new values.
   const checkBesideInUse = (
     host: DesktopExtensionHostContext,
     record: ClaudeCodeConsentRecord,
     inUse: Check,
     candidate: Candidate,
   ): Check | null => {
-    if (candidate.binaryPath !== record.binaryPath) {
+    const valuesOnly = candidate.binaryPath === null && candidate.shellAnswered;
+    if (candidate.binaryPath !== record.binaryPath && !valuesOnly) {
       return check(host, candidate.binaryPath, candidate.env);
     }
+    // A find of no program that renews nothing still shows that it found none.
+    const nothingNew: Check | null = valuesOnly ? { problem: "not_found" } : null;
     if (
+      !candidate.shellAnswered ||
       inUse.problem !== "shell_setting_unusable" ||
       CLAUDE_CODE_LOGIN_SHELL_ENV_KEYS.every((key) => candidate.env[key] === record.env[key])
     ) {
+      return nothingNew;
+    }
+    const renewed = check(host, record.binaryPath, candidate.env);
+    return renewed.problem ? nothingNew : renewed;
+  };
+
+  // What Use for my messages confirms. With no record, what the last Find or
+  // Locate turned up. While the lane is on, another program they turned up,
+  // or new login-shell values for the program in use when the answer offers
+  // them; otherwise the record as it is, so nothing the answer did not offer
+  // is ever confirmed in its place.
+  const confirmable = (
+    host: DesktopExtensionHostContext,
+    record: ClaudeCodeConsentRecord | null,
+    candidate: Candidate | undefined,
+  ): Choice | null => {
+    const found = candidate?.binaryPath ?? null;
+    if (candidate && found && found !== record?.binaryPath) {
+      return { binaryPath: found, pathEntries: candidate.pathEntries, env: candidate.env };
+    }
+    if (!record) {
       return null;
     }
-    const renewed = check(host, candidate.binaryPath, candidate.env);
-    return renewed.problem ? null : renewed;
+    if (candidate) {
+      const renewed = checkBesideInUse(host, record, check(host, record.binaryPath, record.env), candidate);
+      if (renewed && !renewed.problem) {
+        return { binaryPath: record.binaryPath, pathEntries: candidate.pathEntries, env: candidate.env };
+      }
+    }
+    return record;
   };
 
   // While the lane is on, the path in use, and beside it what the last Find
@@ -267,7 +315,11 @@ export function createClaudeCodeDesktopFeatureModule(
     }
     const inUse = check(host, record.binaryPath, record.env);
     const otherCheck = candidate ? checkBesideInUse(host, record, inUse, candidate) : null;
-    const other = otherCheck ? candidate : null;
+    // New values from a find of no program show as the program in use.
+    const otherPath =
+      candidate && otherCheck
+        ? candidate.binaryPath ?? (otherCheck.problem ? null : record.binaryPath)
+        : null;
     const shellSetting = inUse.shellSetting ?? otherCheck?.shellSetting;
     return Object.freeze({
       supported: true,
@@ -275,7 +327,7 @@ export function createClaudeCodeDesktopFeatureModule(
       path: record.binaryPath,
       consented: true,
       ...(inUse.problem ? { problem: inUse.problem } : {}),
-      ...(other?.binaryPath ? { candidatePath: other.binaryPath } : {}),
+      ...(otherPath ? { candidatePath: otherPath } : {}),
       ...(otherCheck?.problem ? { candidateProblem: otherCheck.problem } : {}),
       ...(shellSetting ? { shellSetting } : {}),
     });
@@ -305,6 +357,7 @@ export function createClaudeCodeDesktopFeatureModule(
                 binaryPath: detection.binaryPath,
                 pathEntries: detection.pathEntries,
                 env: detection.env,
+                shellAnswered: detection.shellAnswered,
               }),
             );
             return answer(host);
@@ -325,17 +378,23 @@ export function createClaudeCodeDesktopFeatureModule(
             const picked = check(host, chosen, {});
             if (picked.problem) {
               // A pick Desktop can't use changes nothing; only this answer shows it.
-              return answer(host, { binaryPath: chosen, pathEntries: [], env: {} });
+              return answer(host, { binaryPath: chosen, pathEntries: [], env: {}, shellAnswered: false });
             }
             const record = readRecord(host);
+            const previous = candidates.get(account.key);
             if (record) {
               // A new path for a lane already on: the grant changes, so the
               // shell replaces the runtime that holds the old one. Use for my
               // messages now confirms this path, not an older find. Picking
-              // the program in use keeps a find of that same program, whose
+              // the program in use keeps a find of that same program, or of
+              // no program whose login shell answered, either of whose
               // login-shell values may be what the record needs (D26).
               account.store.write({ ...record, binaryPath: chosen });
-              if (chosen !== record.binaryPath || candidates.get(account.key)?.binaryPath !== chosen) {
+              const keepsFind =
+                chosen === record.binaryPath &&
+                previous !== undefined &&
+                (previous.binaryPath === chosen || (previous.binaryPath === null && previous.shellAnswered));
+              if (!keepsFind) {
                 candidates.delete(account.key);
               }
               return answer(host);
@@ -343,7 +402,6 @@ export function createClaudeCodeDesktopFeatureModule(
             // The picked program comes with the login shell's PATH and D26
             // values, as a found one does. Without a Find in this session,
             // read them now; a shell that fails leaves them empty, as for Find.
-            const previous = candidates.get(account.key);
             const shell =
               previous ??
               (await runClaudeCodeLoginShell(loginShellOptions()).catch(() => null));
@@ -353,6 +411,7 @@ export function createClaudeCodeDesktopFeatureModule(
                 binaryPath: chosen,
                 pathEntries: shell?.pathEntries ?? Object.freeze([]),
                 env: shell?.env ?? Object.freeze({}),
+                shellAnswered: previous ? previous.shellAnswered : shell !== null,
               }),
             );
             return answer(host);
@@ -367,14 +426,8 @@ export function createClaudeCodeDesktopFeatureModule(
             if (!email) {
               throw new Error("Instafy couldn't read this account's email. Sign in again, then try again.");
             }
-            const record = readRecord(host);
-            const candidate = candidates.get(account.key);
-            const chosen: Candidate | null = candidate?.binaryPath
-              ? candidate
-              : record
-                ? { binaryPath: record.binaryPath, pathEntries: record.pathEntries, env: record.env }
-                : null;
-            if (!chosen?.binaryPath) {
+            const chosen = confirmable(host, readRecord(host), candidates.get(account.key));
+            if (!chosen) {
               throw new Error("Find the claude program on this computer first.");
             }
             // Nobody is asked about a program, or a login-shell value, that

@@ -140,6 +140,16 @@ function makeFixture() {
       ...Object.entries(exports).map(([key, value]) => `export ${key}=${value}`),
       'eval "$2"',
     ].join("\n");
+  // A quiet login shell where `command -v` prints an alias, not a path, with these exports.
+  const aliasShell = (pathValue, exports) =>
+    [
+      "#!/bin/bash",
+      `export PATH=${JSON.stringify(pathValue)}`,
+      ...Object.entries(exports).map(([key, value]) => `export ${key}=${value}`),
+      "shopt -s expand_aliases",
+      "alias claude='~/.claude/local/claude'",
+      'eval "$2"',
+    ].join("\n");
   const shells = {
     // A noisy login shell that finds the program and has all five D26 values.
     found: [
@@ -204,6 +214,19 @@ function makeFixture() {
       'claude() { echo "never run"; }',
       'eval "$2"',
     ].join("\n"),
+    // An alias, with the two values that name a place (D26).
+    aliasValues: aliasShell("/usr/bin:/bin", {
+      CLAUDE_CONFIG_DIR: JSON.stringify(configDir),
+      NODE_EXTRA_CA_CERTS: JSON.stringify(caFile),
+    }),
+    // The same alias once the person stops exporting a CA bundle, with a folder added to PATH.
+    aliasConfigOnly: aliasShell("/opt/corp-tools/bin:/usr/bin:/bin", {
+      CLAUDE_CONFIG_DIR: JSON.stringify(configDir),
+    }),
+    // The same alias, with a configuration folder its group can change.
+    aliasSharedConfig: aliasShell("/usr/bin:/bin", {
+      CLAUDE_CONFIG_DIR: JSON.stringify(sharedConfigDir),
+    }),
     // A shell that ignores its command: no markers at all.
     noMarkers: ["#!/bin/bash", 'echo "this shell ignores -c"', "exit 0"].join("\n"),
     // Hangs past the timeout, with a background job in its group.
@@ -381,6 +404,21 @@ async function consentAs(context, host) {
   return await context.invoke("enable", host);
 }
 
+// A consent record as Use for my messages writes it, for a test whose login
+// shells need not answer.
+function writeConsentRecord(context, record) {
+  registry
+    .createDesktopExtensionConsentStore(context.consents, {
+      moduleId: claudeCode.CLAUDE_CODE_DESKTOP_FEATURE_MODULE_ID,
+      controllerOrigin: CONTROLLER,
+      userId: USER_A,
+    })
+    .write({ consentedAt: NOW.toISOString(), osUser: "fixture-user", ...record });
+}
+
+// The consent dialog's whole text: the design's, then what it lists (4.2).
+const consentDetail = (...listed) => [consent.CLAUDE_CODE_CONSENT_TEXT, ...listed].join("\n\n");
+
 // ---------------------------------------------------------------- detection
 
 test("detection reads the program, PATH and the five D26 values between this run's markers", async () => {
@@ -390,6 +428,7 @@ test("detection reads the program, PATH and the five D26 values between this run
     const found = await detection.detectClaudeCode(shellOptions(fixture, fixture.shells.found));
     assert.equal(found.binaryPath, fixture.claude);
     assert.equal(found.source, "login_shell");
+    assert.equal(found.shellAnswered, true);
     // Absolute entries only, in order, without duplicates.
     assert.deepEqual(found.pathEntries, [fixture.binDir, "/usr/bin", "/bin"]);
     assert.deepEqual(found.env, {
@@ -436,6 +475,9 @@ test("an alias or a shell function is not a path, and missing markers count as n
     const result = await detection.detectClaudeCode(shellOptions(fixture, shell));
     assert.equal(result.binaryPath, null);
     assert.equal(result.source, null);
+    // It answered, naming no program, so its PATH and values count.
+    assert.equal(result.shellAnswered, true);
+    assert.deepEqual(result.pathEntries, ["/usr/bin", "/bin"]);
   }
 
   assert.equal(
@@ -455,6 +497,8 @@ test("an alias or a shell function is not a path, and missing markers count as n
   );
   assert.equal(fallback.binaryPath, path.join(fixture.home, ".local", "bin", "claude"));
   assert.equal(fallback.source, "candidate");
+  // Its empty PATH and values are not the shell's: it gave no answer.
+  assert.equal(fallback.shellAnswered, false);
   assert.deepEqual(fallback.pathEntries, []);
   assert.deepEqual(fallback.env, {});
 });
@@ -1372,12 +1416,208 @@ test("while the lane is on, Find offers the program in use again with login-shel
   assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir });
   assert.deepEqual(await context.invoke("status", host), on);
 
-  // Once the recorded values pass, a Find of the same program with other values offers nothing.
+  // Once the recorded values pass, a Find of the same program with other
+  // values offers nothing, and Use for my messages confirms the record as it is.
   fs.writeFileSync(caFile, "fixture CA bundle\n");
   fs.chmodSync(caFile, 0o644);
   context.useShell("found");
   assert.deepEqual(await context.invoke("detect", host), on);
   assert.deepEqual(await context.invoke("status", host), on);
+  assert.deepEqual(await context.invoke("enable", host), on);
+  assert.equal(dialogs.shown.length, asked + 2);
+  assert.equal(
+    dialogs.shown[asked + 1].detail,
+    consentDetail(`Program: ${claude}`, `From your login shell:\nCLAUDE_CONFIG_DIR=${configDir}`),
+  );
+  assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir });
+});
+
+test("while the lane is on, a Find whose login shell gave no answer offers no new values, and Use for my messages keeps the recorded ones", async () => {
+  // Short, so the shell that hangs runs out quickly. No shell here has to
+  // answer: the record is written as Use for my messages writes it.
+  const context = setup({ detectTimeoutMs: 1_000 });
+  const { fixture } = context;
+  // Where the native installer puts claude, the first place Find looks when
+  // the login shell gives no answer.
+  const localBin = path.join(fixture.home, ".local", "bin");
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.chmodSync(path.join(fixture.home, ".local"), 0o755);
+  fs.chmodSync(localBin, 0o755);
+  const localClaude = path.join(localBin, "claude");
+  writeExecutable(localClaude, "#!/bin/sh\nexit 0\n");
+  writeConsentRecord(context, {
+    binaryPath: localClaude,
+    pathEntries: [localBin, "/usr/bin", "/bin"],
+    env: { CLAUDE_CONFIG_DIR: fixture.configDir, NODE_EXTRA_CA_CERTS: fixture.caFile },
+  });
+  const dialogs = fakeDialogs();
+  const host = hostFor({ consents: context.consents, dialogs });
+  const on = { supported: true, found: true, path: localClaude, consented: true };
+  const grant = await context.grantFor(USER_A);
+
+  // Such a Find turns up the program in use with no PATH and no values. It
+  // shows nothing beside it, and confirming again asks about the recorded
+  // values, never the empty ones.
+  context.useShell("noMarkers");
+  assert.deepEqual(await context.invoke("detect", host), on);
+  assert.deepEqual(await context.invoke("enable", host), on);
+  assert.equal(dialogs.shown.length, 1);
+  assert.ok(dialogs.shown[0].detail.includes(`NODE_EXTRA_CA_CERTS=${fixture.caFile}`));
+  assert.deepEqual(await context.grantFor(USER_A), grant);
+
+  // The CA file goes. That Find read nothing, so it offers nothing in its place.
+  fs.rmSync(fixture.caFile);
+  const stale = {
+    ...on,
+    found: false,
+    problem: "shell_setting_unusable",
+    shellSetting: "NODE_EXTRA_CA_CERTS",
+  };
+  assert.deepEqual(await context.invoke("status", host), stale);
+  // Nor does a Find whose shell prints no markers, runs past its time limit,
+  // prints past the output cap or is not in /etc/shells, and Use for my
+  // messages asks about none of them.
+  for (const shell of ["noMarkers", "slow", "chatty", "unlisted"]) {
+    context.useShell(shell);
+    assert.deepEqual(await context.invoke("detect", host), stale, shell);
+    assert.deepEqual(await context.invoke("enable", host), stale, shell);
+  }
+  assert.equal(dialogs.shown.length, 1);
+  assert.deepEqual(await context.grantFor(USER_A), grant);
+});
+
+test("while the lane is on, a Find whose login shell names no program, as for an alias, offers its new values for the program in use", async () => {
+  const context = setup();
+  const { claude, configDir, caFile } = context.fixture;
+  const dialogs = fakeDialogs({ pick: claude });
+  const host = hostFor({ consents: context.consents, dialogs });
+  const on = { supported: true, found: true, path: claude, consented: true };
+  const grantedEnv = async () =>
+    JSON.parse((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_ENV_JSON);
+
+  // Find can't follow an alias, so the person located the program. Locate
+  // read the login shell, and Use for my messages recorded its values.
+  context.useShell("aliasValues");
+  assert.deepEqual(await context.invoke("locate", host), { ...on, consented: false });
+  assert.deepEqual(await context.invoke("enable", host), on);
+  assert.equal((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_PATH, "/usr/bin:/bin");
+  assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir, NODE_EXTRA_CA_CERTS: caFile });
+
+  // The CA file goes. A Find whose shell still names it, names a folder
+  // Desktop can't use either, or gives no answer, found no other program and
+  // offers nothing, and Use for my messages asks about none of them.
+  fs.rmSync(caFile);
+  const stale = {
+    ...on,
+    found: false,
+    problem: "shell_setting_unusable",
+    shellSetting: "NODE_EXTRA_CA_CERTS",
+  };
+  for (const shell of ["aliasValues", "aliasSharedConfig", "noMarkers"]) {
+    context.useShell(shell);
+    const nothingNew = { ...stale, candidateProblem: "not_found" };
+    assert.deepEqual(await context.invoke("detect", host), nothingNew, shell);
+    assert.deepEqual(await context.invoke("enable", host), nothingNew, shell);
+  }
+  assert.equal(dialogs.shown.length, 1);
+  // Locating the program in use drops the last of those finds, which read nothing.
+  assert.deepEqual(await context.invoke("locate", host), stale);
+
+  // The person stops exporting it and chooses Find. Still no program, but
+  // values that pass with the one in use, which shows beside itself.
+  context.useShell("aliasConfigOnly");
+  const renewed = { ...stale, candidatePath: claude };
+  assert.deepEqual(await context.invoke("detect", host), renewed);
+  assert.deepEqual(await context.invoke("status", host), renewed);
+  // Locating the program in use keeps that find, and turns keep the recorded values.
+  assert.deepEqual(await context.invoke("locate", host), renewed);
+  assert.equal((await grantedEnv()).NODE_EXTRA_CA_CERTS, caFile);
+
+  // Use for my messages confirms the program in use with that Find's PATH
+  // and values, through the consent dialog, which lists the program and the
+  // values as for any consent; the PATH entries go only into the record. The
+  // find stays, and with the recorded values passing it shows only that it
+  // found no other program.
+  const confirmed = { ...on, candidateProblem: "not_found" };
+  const listed = consentDetail(
+    `Program: ${claude}`,
+    `From your login shell:\nCLAUDE_CONFIG_DIR=${configDir}`,
+  );
+  assert.deepEqual(await context.invoke("enable", host), confirmed);
+  assert.equal(dialogs.shown.length, 2);
+  assert.equal(dialogs.shown[1].detail, listed);
+  const grant = await context.grantFor(USER_A);
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_BIN, claude);
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_PATH, "/opt/corp-tools/bin:/usr/bin:/bin");
+  assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir });
+  assert.deepEqual(await context.invoke("status", host), confirmed);
+
+  // While the recorded values pass, a Find of no program with other values
+  // that pass offers nothing, and Use for my messages confirms the record as it is.
+  fs.writeFileSync(caFile, "fixture CA bundle\n");
+  fs.chmodSync(caFile, 0o644);
+  context.useShell("aliasValues");
+  assert.deepEqual(await context.invoke("detect", host), confirmed);
+  assert.deepEqual(await context.invoke("enable", host), confirmed);
+  assert.equal(dialogs.shown.length, 3);
+  assert.equal(dialogs.shown[2].detail, listed);
+  assert.deepEqual(await context.grantFor(USER_A), grant);
+});
+
+test("while the lane is on, a Find whose login shell names no program shows a copy it turns up in a usual folder, not new values for the program in use", async () => {
+  const context = setup();
+  const { fixture } = context;
+  const { claude, configDir, caFile } = fixture;
+  const dialogs = fakeDialogs({ pick: claude });
+  const host = hostFor({ consents: context.consents, dialogs });
+  const on = { supported: true, found: true, path: claude, consented: true };
+  // Find can't follow the login shell's alias, so the person located the
+  // program, and Use for my messages recorded the values Locate read. Then
+  // the CA file goes.
+  context.useShell("aliasValues");
+  await context.invoke("locate", host);
+  assert.deepEqual(await context.invoke("enable", host), on);
+  const grant = await context.grantFor(USER_A);
+  fs.rmSync(caFile);
+  const stale = {
+    ...on,
+    found: false,
+    problem: "shell_setting_unusable",
+    shellSetting: "NODE_EXTRA_CA_CERTS",
+  };
+
+  // The shell's alias names no program, so Find looks in the usual folders,
+  // where an earlier install left a link whose target is gone. Find shows
+  // that copy with its problem, though the shell's new values pass with the
+  // program in use, and Use for my messages asks nothing.
+  const localBin = path.join(fixture.home, ".local", "bin");
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.chmodSync(path.join(fixture.home, ".local"), 0o755);
+  fs.chmodSync(localBin, 0o755);
+  const localClaude = path.join(localBin, "claude");
+  fs.symlinkSync(path.join(fixture.home, ".local", "share", "claude", "versions", "1.0.0"), localClaude);
+  context.useShell("aliasConfigOnly");
+  const gone = { ...stale, candidatePath: localClaude, candidateProblem: "missing" };
+  assert.deepEqual(await context.invoke("detect", host), gone);
+  assert.deepEqual(await context.invoke("enable", host), gone);
+  assert.equal(dialogs.shown.length, 1);
+  assert.deepEqual(await context.grantFor(USER_A), grant);
+
+  // A copy there that Desktop can use shows as another program with the new
+  // values, and Use for my messages switches to it.
+  fs.rmSync(localClaude);
+  writeExecutable(localClaude, "#!/bin/sh\nexit 0\n");
+  assert.deepEqual(await context.invoke("detect", host), { ...stale, candidatePath: localClaude });
+  assert.deepEqual(await context.invoke("enable", host), { ...on, path: localClaude });
+  assert.equal(dialogs.shown.length, 2);
+  assert.equal(
+    dialogs.shown[1].detail,
+    consentDetail(`Program: ${localClaude}`, `From your login shell:\nCLAUDE_CONFIG_DIR=${configDir}`),
+  );
+  const switched = await context.grantFor(USER_A);
+  assert.equal(switched.env.INSTAFY_CLAUDE_CODE_BIN, localClaude);
+  assert.equal(switched.env.INSTAFY_CLAUDE_CODE_PATH, "/opt/corp-tools/bin:/usr/bin:/bin");
+  assert.deepEqual(JSON.parse(switched.env.INSTAFY_CLAUDE_CODE_ENV_JSON), { CLAUDE_CONFIG_DIR: configDir });
 });
 
 test("Locate without a Find reads the login shell, so the grant carries its PATH and D26 values", async () => {
@@ -1588,6 +1828,86 @@ test("Keep working puts the consent store back and reports the change as not mad
     (await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_BIN,
     context.fixture.claude,
   );
+});
+
+test("a Locate whose login shell gave no answer offers no new values for a record Keep working puts back", async () => {
+  const context = setup();
+  const { claude, binDir, caFile } = context.fixture;
+  // From an earlier Desktop session, so nothing was found in this one.
+  writeConsentRecord(context, {
+    binaryPath: claude,
+    pathEntries: [binDir, "/usr/bin", "/bin"],
+    env: { NODE_EXTRA_CA_CERTS: caFile },
+  });
+  const host = hostFor({ consents: context.consents, dialogs: fakeDialogs({ pick: claude }) });
+  const on = { supported: true, found: true, path: claude, consented: true };
+  const stale = {
+    ...on,
+    found: false,
+    problem: "shell_setting_unusable",
+    shellSetting: "NODE_EXTRA_CA_CERTS",
+  };
+  const runtime = {
+    handle: "runtime-1",
+    projectId: PROJECT_ID,
+    controllerOrigin: CONTROLLER,
+    instafyUserId: USER_A,
+    launchGrants: await context.extensions.resolveLaunchGrants({
+      projectId: PROJECT_ID,
+      controllerOrigin: CONTROLLER,
+      instafyUserId: USER_A,
+      consents: context.consents,
+    }),
+  };
+  // Turn off, held at the "still working" question while `during` runs,
+  // then answered with Keep working, which puts the record back.
+  const duringKeptTurnOff = async (during) => {
+    let decide = null;
+    const turningOff = registry
+      .invokeDesktopExtensionWithLaunchGrants({
+        registry: context.extensions,
+        extensionId: claudeCode.CLAUDE_CODE_DESKTOP_EXTENSION_ID,
+        methodId: "disable",
+        payload: {},
+        host,
+        withRuntimeLock: async (operation) => await operation(),
+        runningRuntime: () => runtime,
+        replaceRuntime: () =>
+          new Promise((resolve) => {
+            decide = resolve;
+          }),
+      })
+      .then(
+        () => "made",
+        (error) => error.code,
+      );
+    while (!decide) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await during();
+    decide("kept");
+    assert.equal(await turningOff, "desktop_extension_change_not_made");
+  };
+  context.useShell("noMarkers");
+
+  // Meanwhile Locate finds no record, so it reads the login shell, which
+  // gives no answer. Put back beside it, the record offers nothing new.
+  await duringKeptTurnOff(async () => {
+    assert.equal((await context.invoke("locate", host)).consented, false);
+  });
+  assert.deepEqual(await context.invoke("status", host), on);
+  fs.rmSync(caFile);
+  assert.deepEqual(await context.invoke("status", host), stale);
+
+  // Nor when Locate takes what a Find whose login shell gave no answer read.
+  fs.writeFileSync(caFile, "fixture CA bundle\n");
+  fs.chmodSync(caFile, 0o644);
+  await duringKeptTurnOff(async () => {
+    assert.equal((await context.invoke("detect", host)).consented, false);
+    assert.equal((await context.invoke("locate", host)).consented, false);
+  });
+  fs.rmSync(caFile);
+  assert.deepEqual(await context.invoke("status", host), stale);
 });
 
 test("a status read during a consent change waits for it, and shows it undone when the work is kept", async () => {

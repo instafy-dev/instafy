@@ -25,6 +25,12 @@ export type ClaudeCodeLoginShellReport = Readonly<{
 export type ClaudeCodeDetection = Readonly<{
   binaryPath: string | null;
   source: "login_shell" | "candidate" | null;
+  /**
+   * Whether the login shell gave a complete answer, even one that named no
+   * program, so `pathEntries` and `env` are what it read. Otherwise they are
+   * empty, which says nothing about the person's settings.
+   */
+  shellAnswered: boolean;
   pathEntries: readonly string[];
   env: ClaudeCodeLoginShellEnv;
 }>;
@@ -303,7 +309,7 @@ export async function detectClaudeCode(
 ): Promise<ClaudeCodeDetection> {
   const report = await runClaudeCodeLoginShell(options).catch(() => null);
   if (report?.binaryPath) {
-    return Object.freeze({ ...report, source: "login_shell" as const });
+    return Object.freeze({ ...report, source: "login_shell" as const, shellAnswered: true });
   }
   const lstat = options.lstat ?? fs.lstatSync;
   let candidate: string | null = null;
@@ -321,6 +327,7 @@ export async function detectClaudeCode(
   return Object.freeze({
     binaryPath: candidate,
     source: candidate ? ("candidate" as const) : null,
+    shellAnswered: report !== null,
     pathEntries: report?.pathEntries ?? Object.freeze([]),
     env: report?.env ?? Object.freeze({}),
   });
