@@ -2513,7 +2513,12 @@ pub(crate) struct RecordedClaudeCodeTurnEnd {
 /// records none. The message is the write's receipt: a turn whose message is
 /// already there is left as it is, so a write tried again, or a second writer
 /// (the idle sweep's repair, on this controller or another), records nothing
-/// twice. Returns what it wrote, to publish.
+/// twice. Only the controller's own message counts: one nobody wrote, of the
+/// turn's run, with the controller's `claudeCode` stamp, which no recorded
+/// message keeps (`claude_code_lane::strip_client_marks`). A message a member
+/// or the service role records with the turn's `jobId` and kind never stands
+/// in for it, so it cannot keep the turn's run unfinished. Returns what it
+/// wrote, to publish.
 pub(crate) async fn record_failed_claude_code_turn(
     state: &AppState,
     turn: &FailedClaudeCodeTurn,
@@ -2557,13 +2562,17 @@ pub(crate) async fn record_failed_claude_code_turn(
                      select 1 from conversation_messages
                       where conversation_id = $1
                         and role = 'assistant'
+                        and created_by is null
+                        and run_id is not distinct from $4
                         and metadata ->> 'jobId' = $2
                         and metadata ->> 'kind' = $3
+                        and metadata -> 'claudeCode' is not null
                  )",
                 &[
                     &conversation_id,
                     &turn.job_id.to_string(),
                     &crate::claude_code_lane::MACHINE_STOPPED,
+                    &turn.run_id,
                 ],
             )
             .await

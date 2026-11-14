@@ -1222,13 +1222,17 @@ fn strip_reserved_controller_notice_claims(value: &mut JsonValue) -> bool {
     };
     let source_is_controller = normalized(map.get("source")).as_deref() == Some("controller");
     // Only the controller writes these, so a recorded message never claims
-    // one: a runtime alert, a run's cancellation, or the line an Undo leaves
+    // one: a runtime alert, a run's cancellation, the line an Undo leaves
     // (`change_undone.rs`), which marks a change undone in every Studio and
-    // reaches later turns.
+    // reaches later turns, or the failure message of a local-engine turn a
+    // runtime stop failed (`runtime::record_failed_claude_code_turn`).
     let reserved_kind = normalized(map.get("kind")).is_some_and(|value| {
         matches!(
             value.as_str(),
-            "runtime_alert" | "run_cancellation" | crate::change_undone::CHANGE_UNDONE_KIND
+            "runtime_alert"
+                | "run_cancellation"
+                | crate::change_undone::CHANGE_UNDONE_KIND
+                | crate::claude_code_lane::MACHINE_STOPPED
         )
     });
     let reserved_message_type =

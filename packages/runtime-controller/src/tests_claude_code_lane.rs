@@ -1037,6 +1037,63 @@ impl Lane {
         assert_eq!(sender_told, 1, "{what}: its sender was not told");
         Ok(())
     }
+
+    /// A member and the service role each record an assistant message in
+    /// `chat` that claims to be the end of the lane turn `job`, as a runtime
+    /// stop writes it: the stop's words and kind, and the turn's `jobId`,
+    /// which every step of the turn shows everyone in the chat. Neither is the
+    /// controller's own: the member's keeps no such kind, and the service
+    /// role's keeps it with no lane stamp and no run.
+    async fn record_claims_of_a_stopped_turns_end(
+        &self,
+        chat: Uuid,
+        job: Uuid,
+    ) -> anyhow::Result<()> {
+        let claim = json!({ "jobId": job, "kind": claude_code_lane::MACHINE_STOPPED });
+        let member = self.space().member;
+        for (token, author) in [
+            (self.token(member), Some(member)),
+            (SERVICE_ROLE.to_string(), None),
+        ] {
+            let (status, recorded) = self
+                .harness
+                .call(
+                    "POST",
+                    format!("/conversations/{chat}/messages/record"),
+                    Some(&token),
+                    Some(json!({
+                        "role": "assistant",
+                        "content": claude_code_lane::MACHINE_STOPPED_MESSAGE,
+                        "metadata": claim,
+                    })),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "record: {status} {recorded}");
+            let id = Uuid::parse_str(recorded["id"].as_str().unwrap_or_default())?;
+            let row = self
+                .pool()
+                .get()
+                .await?
+                .query_one(
+                    "select created_by, run_id, metadata from conversation_messages
+                      where id = $1 and role = 'assistant'",
+                    &[&id],
+                )
+                .await?;
+            let (created_by, run_id, metadata): (Option<Uuid>, Option<Uuid>, JsonValue) =
+                (row.get(0), row.get(1), row.get(2));
+            assert_eq!(created_by, author, "{metadata}");
+            assert_eq!(run_id, None, "{metadata}");
+            assert_eq!(metadata["jobId"], json!(job), "{metadata}");
+            assert!(metadata.get("claudeCode").is_none(), "{metadata}");
+            let kind = match author {
+                Some(_) => None,
+                None => Some(&claim["kind"]),
+            };
+            assert_eq!(metadata.get("kind"), kind, "{metadata}");
+        }
+        Ok(())
+    }
 }
 
 /// What has been published for a lane turn a runtime stop failed, in order:
@@ -4182,6 +4239,216 @@ async fn the_idle_sweep_leaves_a_stopped_lane_turn_with_the_lane_off_or_too_old(
             lane.sweep_while_active().await?;
             assert_eq!(lane.run_status(run).await?, "failed");
             assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Anyone who can write a chat can record an assistant message in it, and
+/// every step of a lane turn shows them its `jobId`. A message recorded as the
+/// end of a lane turn a runtime stop failed never stands in for the stop's own
+/// ([`Lane::record_claims_of_a_stopped_turns_end`]): when the computer's
+/// Instafy stops on its way out, the stop still fails the turn's run, writes
+/// its stamped failure message once and publishes it and the run's end, and
+/// everyone in the chat hears of the failure once (docs/Local-Engine-Turns.md
+/// 2.9).
+#[tokio::test]
+async fn a_recorded_claim_of_a_stopped_lane_turns_end_never_stands_in_for_it() -> anyhow::Result<()>
+{
+    with_lane(
+        "lane-stop-claimed-end",
+        |_, _| {},
+        |lane| async move {
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            lane.record_claims_of_a_stopped_turns_end(chat, job).await?;
+            let mut events = lane.harness.state.events.subscribe();
+            let (status, body) = lane
+                .agent_call(
+                    lane.desktop,
+                    "/runtime/stop",
+                    json!({ "runtime_id": lane.desktop, "reason": "agent_shutdown" }),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let mut published = Vec::new();
+            eventually("the stopped turn's end to be published", || {
+                published.extend(stopped_turn_events(&mut events, chat, run));
+                let both = published.len() >= 2;
+                async move { Ok(both.then_some(())) }
+            })
+            .await?;
+            assert_eq!(
+                published
+                    .iter()
+                    .map(|(kind, _)| kind.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["conversation.message_created", "run.completed"],
+                "{published:?}"
+            );
+            assert_eq!(published[0].1["createdBy"], JsonValue::Null);
+            assert_eq!(published[0].1["runId"], json!(run));
+            assert_lane_failure(
+                &published[0].1["metadata"],
+                claude_code_lane::MACHINE_STOPPED,
+                "the published message",
+            );
+            assert_eq!(published[1].1["finalStatus"], json!("failed"));
+            assert_eq!(
+                published[1].1["failureCode"],
+                json!(claude_code_lane::MACHINE_STOPPED)
+            );
+            assert_eq!(lane.job(job).await?.status, "failed");
+            assert_eq!(lane.run_status(run).await?, "failed");
+            assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
+            let (content, metadata) = lane.failure_message(run).await?;
+            assert_eq!(content, claude_code_lane::MACHINE_STOPPED_MESSAGE);
+            assert_eq!(metadata["jobId"], json!(job));
+            assert_lane_failure(&metadata, claude_code_lane::MACHINE_STOPPED, "the stop's");
+            lane.assert_failure_notified_once(chat, run, "a stop after a claim")
+                .await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// The same for the idle sweep: a lane turn whose stop never wrote its end
+/// gets it from the sweep, whatever message was recorded as that end first.
+#[tokio::test]
+async fn a_recorded_claim_of_a_stopped_lane_turns_end_never_stops_the_sweep_writing_it(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-stop-repair-claimed-end",
+        |_, _| {},
+        |lane| async move {
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            lane.record_claims_of_a_stopped_turns_end(chat, job).await?;
+            // The stop commits, and its own write never runs.
+            let (_, turns) = lane.stop_runtime_only(lane.desktop).await?;
+            assert_eq!(
+                turns.iter().map(|turn| turn.job_id).collect::<Vec<_>>(),
+                vec![job]
+            );
+            let mut events = lane.harness.state.events.subscribe();
+
+            lane.stopped_ago(job, 61).await?;
+            lane.sweep_while_active().await?;
+            assert_eq!(lane.run_status(run).await?, "failed");
+            assert_eq!(lane.stopped_turn_rows(run).await?, (1, 1));
+            let (content, metadata) = lane.failure_message(run).await?;
+            assert_eq!(content, claude_code_lane::MACHINE_STOPPED_MESSAGE);
+            assert_eq!(metadata["jobId"], json!(job));
+            assert_lane_failure(
+                &metadata,
+                claude_code_lane::MACHINE_STOPPED,
+                "the sweep's write",
+            );
+            let published = stopped_turn_events(&mut events, chat, run);
+            assert_eq!(
+                published
+                    .iter()
+                    .map(|(kind, _)| kind.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["conversation.message_created", "run.completed"],
+                "{published:?}"
+            );
+            assert_eq!(published[0].1["createdBy"], JsonValue::Null);
+            assert_eq!(published[1].1["finalStatus"], json!("failed"));
+            assert_eq!(
+                published[1].1["failureCode"],
+                json!(claude_code_lane::MACHINE_STOPPED)
+            );
+            lane.assert_failure_notified_once(chat, run, "the sweep after a claim")
+                .await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// What says a stopped lane turn's end is already written is the controller's
+/// own failure message alone: one nobody wrote, of the turn's run, with the
+/// controller's lane stamp. A message with the turn's `jobId` and the stop's
+/// kind that lacks any one of the three is not it, wherever it came from, and
+/// the write still ends the run and records the message. Written again, it
+/// records nothing twice.
+#[tokio::test]
+async fn only_the_controllers_own_message_is_a_stopped_lane_turns_end() -> anyhow::Result<()> {
+    with_lane(
+        "lane-stop-receipt",
+        |_, _| {},
+        |lane| async move {
+            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let run = lane.job(job).await?.run_id.expect("run");
+            let (_, turns) = lane.stop_runtime_only(lane.desktop).await?;
+            let mut stamped = json!({
+                "source": "controller",
+                "kind": claude_code_lane::MACHINE_STOPPED,
+                "outcome": "failed",
+                "messageType": "error",
+                "jobId": job,
+                "runId": run,
+            });
+            claude_code_lane::stamp_failure(
+                stamped.as_object_mut().expect("metadata"),
+                claude_code_lane::MACHINE_STOPPED,
+            );
+            let unstamped = without(stamped.clone(), &["claudeCode"]);
+            for (author, of_run, metadata) in [
+                (Some(lane.space().member), Some(run), &stamped),
+                (None, Some(run), &unstamped),
+                (None, None, &stamped),
+            ] {
+                sql(
+                    lane.pool(),
+                    "insert into conversation_messages (
+                         id, conversation_id, project_id, run_id, role, content, metadata,
+                         created_by
+                     ) values ($1, $2, $3, $4, 'assistant', $5, $6, $7)",
+                    &[
+                        &Uuid::new_v4(),
+                        &chat,
+                        &lane.space().project_id,
+                        &of_run,
+                        &claude_code_lane::MACHINE_STOPPED_MESSAGE,
+                        &PgJson(metadata),
+                        &author,
+                    ],
+                )
+                .await?;
+            }
+
+            let recorded = lane.record_stopped_turn(&turns[0]).await?;
+            assert!(recorded.ended_run, "it ended the run: {recorded:?}");
+            let message = recorded.message.expect("a failure message");
+            assert_eq!(message.created_by, None);
+            assert_eq!(message.run_id, Some(run));
+            assert_lane_failure(
+                &message.metadata,
+                claude_code_lane::MACHINE_STOPPED,
+                "the turn's end",
+            );
+            assert_eq!(lane.run_status(run).await?, "failed");
+
+            // Written again, it records nothing twice.
+            let again = lane.record_stopped_turn(&turns[0]).await?;
+            assert!(again.message.is_none() && !again.ended_run, "{again:?}");
+            let own: i64 = sql_one(
+                lane.pool(),
+                "select count(*) from conversation_messages
+                  where conversation_id = $1 and created_by is null and run_id = $2
+                    and metadata ->> 'jobId' = $3 and metadata ? 'claudeCode'",
+                &[&chat, &run, &job.to_string()],
+            )
+            .await?;
+            assert_eq!(own, 1, "the controller's own failure messages");
             Ok(())
         },
     )
