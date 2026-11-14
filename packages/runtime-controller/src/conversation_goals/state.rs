@@ -123,6 +123,14 @@ struct BoundGoal {
 
 /// Callers already hold the source job lock. Lock only its owning conversation
 /// here, in that order, so metadata edits and late runtime updates serialize.
+///
+/// The conversation is locked `for no key update`, the lock its own updates
+/// take, which still waits for every other goal write. A job's completion and
+/// its runtime's goal update come here after writing their message into the
+/// conversation, and writing a message updates the conversation. A stronger
+/// lock would also wait for every transaction that inserted a row referencing
+/// the conversation, so a teammate writing its message (that insert, then the
+/// same update) would deadlock with them.
 async fn load_bound_goal(
     transaction: &Transaction<'_>,
     job_id: Uuid,
@@ -143,7 +151,7 @@ async fn load_bound_goal(
          join prompts p on p.id = j.prompt_id and p.project_id = j.project_id
          join conversations c on c.id = j.conversation_id and c.project_id = j.project_id
          where j.id = $1 and c.id = $2
-         for update of c",
+         for no key update of c",
             &[&job_id, &conversation_id],
         )
         .await
@@ -309,6 +317,10 @@ pub(crate) async fn settle_job(
 
 /// The Stop endpoint already authorized the human and locked its exact target
 /// jobs. Pause the goal even if those jobs just finished and a wakeup is pending.
+///
+/// The conversation is locked `for no key update`, as in [`load_bound_goal`]:
+/// a Stop that canceled jobs has just written its notice into the
+/// conversation.
 pub(crate) async fn pause_for_user_stop(
     transaction: &Transaction<'_>,
     conversation_id: Uuid,
@@ -316,7 +328,7 @@ pub(crate) async fn pause_for_user_stop(
 ) -> StateResult<Option<ConversationRecord>> {
     let row = transaction
         .query_one(
-            "select metadata from conversations where id = $1 for update",
+            "select metadata from conversations where id = $1 for no key update",
             &[&conversation_id],
         )
         .await
