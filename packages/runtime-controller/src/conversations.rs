@@ -2027,6 +2027,50 @@ pub(crate) async fn cancel_jobs_within_transaction(
     .await
 }
 
+/// Locks `conversation_ids` and their roots for a transaction that is about to
+/// write into several of them, threads before roots and each in id order.
+///
+/// A message written into a thread updates the thread, then its root
+/// ([`record_controller_assistant_message`]). A transaction writing into one
+/// conversation after another would otherwise hold a root it bumped for one
+/// thread when it reaches another thread of that root, whose own writer holds
+/// that thread and waits for the root, and Postgres would end one of the two
+/// as a deadlock. Locked this way, the transaction waits for a thread only
+/// while its root is still free. The rows are locked `for no key update`, as
+/// the updates that follow lock them, so a message insert's key-share lock on
+/// its conversation still goes in. A conversation that is gone is skipped.
+///
+/// The transaction locks its jobs and their questions before this and an
+/// org's balance after it: a stop locks the jobs, then the questions, then
+/// the conversation; an answer locks its question, then its conversation;
+/// and a dispatch locks its conversation, then reserves the org's credit.
+/// The runs and prompts it rewrites after this are locked
+/// `for no key update` ([`persist_canceled_run_metadata`]): a message naming
+/// one, such as the runtime alert a dispatch writes once it has committed,
+/// holds a key-share lock on it while it waits for the conversation.
+pub(crate) async fn lock_conversations_for_writes(
+    client: &impl tokio_postgres::GenericClient,
+    conversation_ids: &[Uuid],
+) -> Result<(), tokio_postgres::Error> {
+    if conversation_ids.is_empty() {
+        return Ok(());
+    }
+    client
+        .query(
+            "select c.id
+             from conversations c
+             where c.id = any($1)
+                or c.id in (
+                    select root_conversation_id from conversations where id = any($1)
+                )
+             order by c.id = coalesce(c.root_conversation_id, c.id), c.id
+             for no key update of c",
+            &[&conversation_ids],
+        )
+        .await?;
+    Ok(())
+}
+
 /// Cancels `jobs` of `conversation_id` ([`cancel_jobs_and_runs`]) and records
 /// the stop in the conversation, with `notice` or one built from `reason`.
 ///
@@ -2784,6 +2828,11 @@ pub(crate) fn build_interruption_notice(
     InterruptionNotice { content, metadata }
 }
 
+/// Records in each of `run_ids`' metadata why it was canceled. The runs are
+/// locked `for no key update`, as only their metadata changes: a message
+/// naming a run takes a key-share lock on it before it updates its
+/// conversation, and a cancel that holds that conversation
+/// ([`lock_conversations_for_writes`]) must not wait for the message.
 pub(crate) async fn persist_canceled_run_metadata(
     transaction: &tokio_postgres::Transaction<'_>,
     run_ids: &[Uuid],
@@ -2792,7 +2841,7 @@ pub(crate) async fn persist_canceled_run_metadata(
     for run_id in run_ids {
         let row = transaction
             .query_opt(
-                "select metadata from runs where id = $1 for update",
+                "select metadata from runs where id = $1 for no key update",
                 &[run_id],
             )
             .await

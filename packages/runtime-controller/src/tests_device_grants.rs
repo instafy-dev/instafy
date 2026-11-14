@@ -255,6 +255,98 @@ impl Harness {
         .await
     }
 
+    /// A turn of `agent`, the owner's, in `conversation`, holding a grant of
+    /// `DEVICE_ID` that names the conversation, written directly. A leased
+    /// turn gets a live lease.
+    async fn turn_holding_a_grant(
+        &self,
+        agent: Uuid,
+        conversation: Uuid,
+        status: &str,
+    ) -> anyhow::Result<Uuid> {
+        let space = &self.space;
+        let grant = Uuid::new_v4();
+        sql(
+            &self.pool,
+            "insert into agent_device_grants (
+                 id, project_id, user_id, agent_id, provider_id, device_id, tool_ids,
+                 conversation_id
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &grant,
+                &space.project_id,
+                &space.owner,
+                &agent,
+                &PROVIDER_ID,
+                &DEVICE_ID,
+                &vec![TOOL_READ.to_string()],
+                &conversation,
+            ],
+        )
+        .await?;
+        let job = Uuid::new_v4();
+        sql(
+            &self.pool,
+            "insert into agent_jobs (
+                 id, project_id, conversation_id, status, intent, payload, grant_ids,
+                 lease_expires_at
+             ) values ($1, $2, $3, $4, 'feature', $5, $6,
+                       case when $4 = 'leased' then now() + interval '1 minute' end)",
+            &[
+                &job,
+                &space.project_id,
+                &conversation,
+                &status,
+                &PgJson(json!({ "user_id": space.owner, "conversation_id": conversation })),
+                &vec![grant],
+            ],
+        )
+        .await?;
+        Ok(job)
+    }
+
+    /// The owner's heartbeat stopping `DEVICE_ID`, as a future of its own.
+    fn device_stop(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<(StatusCode, JsonValue)>> + Send + 'static
+    {
+        let app = self.app.clone();
+        let authorization = format!("Bearer {}", self.token(self.space.owner));
+        let path = format!(
+            "/projects/{}/provider-devices/heartbeat",
+            self.space.project_id
+        );
+        async move {
+            crate::tests::call_router(
+                &app,
+                Some(&authorization),
+                "POST",
+                path,
+                Some(json!({
+                    "providerId": PROVIDER_ID,
+                    "deviceId": DEVICE_ID,
+                    "status": "stopped",
+                })),
+            )
+            .await
+        }
+    }
+
+    /// A thread of the log, written directly.
+    async fn log_thread(&self, thread: Uuid) -> anyhow::Result<()> {
+        let space = &self.space;
+        sql(
+            &self.pool,
+            "insert into conversations (
+                 id, project_id, created_by, metadata, visibility,
+                 parent_conversation_id, root_conversation_id, thread_kind
+             ) values ($1, $2, $3, '{}'::jsonb, 'public', $4, $4, 'thread')",
+            &[&thread, &space.project_id, &space.owner, &space.log],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// `job`'s status and error message.
     async fn job_error(&self, job: Uuid) -> anyhow::Result<(String, Option<String>)> {
         let row = self
@@ -2598,5 +2690,276 @@ async fn a_granted_turn_reads_what_its_device_reports_as_data() -> anyhow::Resul
         }
         Ok(())
     })
+    .await
+}
+
+/// How long a device's stop, or the writer beside it, may take to finish once
+/// nothing holds it.
+const STOP_FINISHES_WITHIN: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// A device's stop writes a notice into each conversation where one of its
+/// turns was canceled, and a notice in a thread also updates the thread's
+/// root. Two threads of the log each have a turn holding a grant of the
+/// device, and a teammate writing into each is held between the thread and
+/// the root, as writing a message into a thread takes them. The stop takes
+/// its first thread once that teammate is done, then waits for the second
+/// without holding the root, so both teammates and the stop finish.
+#[tokio::test]
+async fn a_device_stop_and_teammates_writing_into_its_threads_all_finish() -> anyhow::Result<()> {
+    with_space(
+        "device-grants-stop-beside-thread-writers",
+        true,
+        |harness| async move {
+            let space = &harness.space;
+            harness.register_device().await?;
+            let threads = [Uuid::new_v4(), Uuid::new_v4()];
+            let mut turns = Vec::new();
+            for (agent, thread) in [space.owner_agent, Uuid::new_v4()].into_iter().zip(threads) {
+                harness.log_thread(thread).await?;
+                turns.push(
+                    harness
+                        .turn_holding_a_grant(agent, thread, "queued")
+                        .await?,
+                );
+            }
+
+            let (status, body) = crate::tests_lock_waits::beside_thread_writers(
+                &harness.pool,
+                space.project_id,
+                space.log,
+                threads,
+                harness.device_stop(),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "the device's stop: {body}");
+            for job in turns {
+                assert_eq!(harness.job_status(job).await?, "canceled");
+            }
+            for thread in threads {
+                let notices: i64 = sql_one(
+                    &harness.pool,
+                    "select count(*) from conversation_messages
+                      where conversation_id = $1 and metadata ->> 'kind' = 'run_cancellation'",
+                    &[&thread],
+                )
+                .await?;
+                assert_eq!(notices, 1, "the stop's notice in {thread}");
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A plan's lead turn holds a grant of the device, and the plan dispatches a
+/// worker into the lead's conversation as the device stops. The dispatch
+/// locks the conversation, then inserts the worker with the lead as its
+/// parent, which takes a key-share lock on the lead's row. The stop locks
+/// the lead before the conversation, so its lock on the lead must leave
+/// that key free, or each would wait for the other.
+#[tokio::test]
+async fn a_device_stop_and_a_worker_dispatched_under_its_turn_both_finish() -> anyhow::Result<()> {
+    with_space(
+        "device-grants-stop-beside-worker",
+        true,
+        |harness| async move {
+            use crate::tests_lock_waits::{own_connection, seen_waited_for, would_wait};
+
+            let space = &harness.space;
+            harness.register_device().await?;
+            let lead = harness
+                .turn_holding_a_grant(space.owner_agent, space.log, "leased")
+                .await?;
+
+            // The dispatch locks the conversation first.
+            let (mut dispatching, dispatch_driver, dispatch_pid) = own_connection().await?;
+            let dispatch = dispatching.transaction().await?;
+            dispatch
+                .query_one(
+                    "select id from conversations where id = $1 for update",
+                    &[&space.log],
+                )
+                .await?;
+
+            let stopping = crate::tests::spawn_aborting(harness.device_stop());
+            anyhow::ensure!(
+                seen_waited_for(&harness.pool, &stopping, dispatch_pid).await?,
+                "the stop never waited for the dispatch's conversation"
+            );
+            let lead_key_held =
+                would_wait(&harness.pool, "agent_jobs", "id", lead, "key share").await?;
+
+            // Then it inserts the worker under the lead, as
+            // `enqueue_agent_job_record` does.
+            let worker = Uuid::new_v4();
+            let dispatched = async {
+                dispatch
+                    .execute(
+                        "insert into agent_jobs (
+                             id, project_id, conversation_id, status, payload, parent_job_id
+                         ) values ($1, $2, $3, 'queued', '{}', $4)",
+                        &[&worker, &space.project_id, &space.log, &lead],
+                    )
+                    .await?;
+                dispatch.commit().await?;
+                anyhow::Ok(())
+            };
+            let dispatched = tokio::time::timeout(STOP_FINISHES_WITHIN, dispatched).await?;
+            drop(dispatching);
+            let _ = dispatch_driver.await;
+            let stopped = tokio::time::timeout(STOP_FINISHES_WITHIN, stopping).await?;
+
+            assert!(
+                !lead_key_held,
+                "the stop locks the lead against a worker inserted under it"
+            );
+            dispatched?;
+            let (status, body) = stopped??;
+            assert_eq!(status, StatusCode::OK, "the device's stop: {body}");
+            assert_eq!(harness.job_status(lead).await?, "canceled");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A worker turn holding a grant of the device asked the person a question,
+/// and the person answers it as the device stops. The answer locks its
+/// question, then writes into its conversation, a thread of the log, and the
+/// log. Canceling the worker expires the question, so the stop takes the
+/// question before any conversation: here it would otherwise have written
+/// its notice into another thread of the log first, and hold the log while
+/// it waits for the question.
+#[tokio::test]
+async fn a_device_stop_and_an_answer_to_its_turns_question_both_finish() -> anyhow::Result<()> {
+    with_space(
+        "device-grants-stop-beside-answer",
+        true,
+        |harness| async move {
+            use crate::tests_lock_waits::{own_connection, seen_waited_for, would_wait};
+
+            let space = &harness.space;
+            harness.register_device().await?;
+            // The stop writes into the conversations of its turns in id order.
+            let mut threads = [Uuid::new_v4(), Uuid::new_v4()];
+            threads.sort();
+            for thread in threads {
+                harness.log_thread(thread).await?;
+            }
+            let first = harness
+                .turn_holding_a_grant(space.owner_agent, threads[0], "queued")
+                .await?;
+            let worker = harness
+                .turn_holding_a_grant(Uuid::new_v4(), threads[1], "leased")
+                .await?;
+            let question = Uuid::new_v4();
+            sql(
+                &harness.pool,
+                "insert into agent_user_input_requests (
+                     id, requested_user_id, project_id, conversation_id, job_id,
+                     lease_attempt, group_id, agent_handle, questions, continuation_note
+                 ) values ($1, $2, $3, $4, $5, 0, $6, 'scribe', '[]', 'Go on with the answer.')",
+                &[
+                    &question,
+                    &space.owner,
+                    &space.project_id,
+                    &threads[1],
+                    &worker,
+                    &Uuid::new_v4(),
+                ],
+            )
+            .await?;
+
+            // The answer locks the question first.
+            let (mut answering, answer_driver, answer_pid) = own_connection().await?;
+            let answer = answering.transaction().await?;
+            answer
+                .query_one(
+                    "select status from agent_user_input_requests where id = $1 for update",
+                    &[&question],
+                )
+                .await?;
+
+            let stopping = crate::tests::spawn_aborting(harness.device_stop());
+            anyhow::ensure!(
+                seen_waited_for(&harness.pool, &stopping, answer_pid).await?,
+                "the stop never waited for the answer's question"
+            );
+            let log_held =
+                would_wait(&harness.pool, "conversations", "id", space.log, "share").await?;
+
+            // Then it records the answer, marks the question answered and
+            // updates the thread and the log, the statements of
+            // `answer_request` in its order.
+            let answered = async {
+                let message = Uuid::new_v4();
+                answer
+                    .execute(
+                        "insert into conversation_messages (
+                             id, project_id, conversation_id, role, content, metadata,
+                             created_by
+                         ) values ($1, $2, $3, 'user', 'Blue.', $4, $5)",
+                        &[
+                            &message,
+                            &space.project_id,
+                            &threads[1],
+                            &PgJson(json!({ "userInputRequestId": question })),
+                            &space.owner,
+                        ],
+                    )
+                    .await?;
+                answer
+                    .execute(
+                        "update agent_user_input_requests
+                         set status = 'answered', answers = '{}', answered_by = $3,
+                             answer_message_id = $2, answered_at = now(), updated_at = now()
+                         where id = $1",
+                        &[&question, &message, &space.owner],
+                    )
+                    .await?;
+                answer
+                    .execute(
+                        "update conversations
+                         set updated_at = now(), last_message_id = $2, last_message_at = now()
+                         where id = $1",
+                        &[&threads[1], &message],
+                    )
+                    .await?;
+                answer
+                    .execute(
+                        "update conversations set updated_at = now() where id = $1",
+                        &[&space.log],
+                    )
+                    .await?;
+                answer.commit().await?;
+                anyhow::Ok(())
+            };
+            let answered = tokio::time::timeout(STOP_FINISHES_WITHIN, answered).await?;
+            drop(answering);
+            let _ = answer_driver.await;
+            let stopped = tokio::time::timeout(STOP_FINISHES_WITHIN, stopping).await?;
+
+            assert!(
+                !log_held,
+                "the stop waits for the question while it holds the threads' root"
+            );
+            answered?;
+            let (status, body) = stopped??;
+            assert_eq!(status, StatusCode::OK, "the device's stop: {body}");
+            assert_eq!(harness.job_status(first).await?, "canceled");
+            assert_eq!(harness.job_status(worker).await?, "canceled");
+            let question_status: String = sql_one(
+                &harness.pool,
+                "select status from agent_user_input_requests where id = $1",
+                &[&question],
+            )
+            .await?;
+            assert_eq!(
+                question_status, "expired",
+                "the stopped worker is never resumed"
+            );
+            Ok(())
+        },
+    )
     .await
 }
