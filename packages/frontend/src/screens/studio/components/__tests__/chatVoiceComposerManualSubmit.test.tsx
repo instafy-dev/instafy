@@ -9,8 +9,10 @@ import { useChatVoiceComposerController } from "../useChatVoiceComposerControlle
 // an override. ChatPanel sets `manualSubmitOnly` while an engine is chosen for
 // the next message (docs/Local-Engine-Turns.md 5.2), because such a send never
 // carries the choice: the words then stay in the composer for the person's own
-// Send, which the engine routes or blocks. The capture itself is faked here;
-// every hook it needs returns stable functions, as the real ones do.
+// Send, which the engine routes or blocks. A dictated turn that was held once
+// never sends itself later, whatever then happens to the choice. The capture
+// itself is faked here; every hook it needs returns stable functions, as the
+// real ones do.
 
 const TRANSCRIPT = "fix the failing login test";
 
@@ -177,21 +179,37 @@ describe("a dictated turn into an empty composer", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function dictate(manualSubmitOnly: boolean) {
-    const render = () => root.render(<Harness manualSubmitOnly={manualSubmitOnly} />);
-    await act(async () => render());
+  async function render(manualSubmitOnly: boolean) {
+    await act(async () => root.render(<Harness manualSubmitOnly={manualSubmitOnly} />));
+  }
+
+  async function settle() {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+
+  // `manualSubmitOnly` as it stands when the mic is pressed, and optionally
+  // a different value while it listens and when the words are heard.
+  async function dictate(
+    manualSubmitOnly: boolean,
+    {
+      whileListening = manualSubmitOnly,
+      whenHeard = whileListening,
+    }: { whileListening?: boolean; whenHeard?: boolean } = {},
+  ) {
+    await render(manualSubmitOnly);
     // Press and hold the mic, then let go.
     await act(async () => controller?.handleChatVoiceTap());
-    await act(async () => render());
+    await render(manualSubmitOnly);
     expect(controller?.voiceInputListening).toBe(true);
+    await render(whileListening);
     await act(async () => controller?.handleChatVoiceTap());
     // The capture ends with the words heard.
     voice.state.listening = false;
     voice.state.completedTranscript = TRANSCRIPT;
-    await act(async () => render());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    await render(whenHeard);
+    await settle();
   }
 
   it("goes out by itself as usual when nothing holds it for the composer", async () => {
@@ -207,5 +225,41 @@ describe("a dictated turn into an empty composer", () => {
     expect(invokeSubmitMessage).not.toHaveBeenCalled();
     expect(onInputChange).toHaveBeenLastCalledWith("conversation-1", TRANSCRIPT, null);
     expect(latestInputValueRef.current).toBe(TRANSCRIPT);
+  });
+
+  describe("when the composer starts holding sends after the mic was pressed", () => {
+    it("keeps the words for the person's own Send after the hold ends without a Send", async () => {
+      // An engine is chosen while it listens, and still is when the words land.
+      await dictate(false, { whileListening: true });
+      expect(invokeSubmitMessage).not.toHaveBeenCalled();
+      expect(latestInputValueRef.current).toBe(TRANSCRIPT);
+      // The choice is then dropped ("Don't use Claude Code") or lost with its
+      // offer, and nobody presses Send.
+      await render(false);
+      await settle();
+      expect(invokeSubmitMessage).not.toHaveBeenCalled();
+      expect(onInputChange).toHaveBeenLastCalledWith("conversation-1", TRANSCRIPT, null);
+      expect(latestInputValueRef.current).toBe(TRANSCRIPT);
+    });
+
+    it("never sends the words again by itself once the person's own Send has used the choice", async () => {
+      await dictate(false, { whileListening: true });
+      expect(invokeSubmitMessage).not.toHaveBeenCalled();
+      // The person's Send takes the words to the chosen engine through the
+      // panel's own submit, not this hook's: it clears the composer and uses
+      // up the choice. A Stash clears both the same way.
+      latestInputValueRef.current = "";
+      await render(false);
+      await settle();
+      expect(invokeSubmitMessage).not.toHaveBeenCalled();
+    });
+
+    it("keeps the words for the person's own Send when the hold ends before they land", async () => {
+      // An engine is chosen and then dropped again while it listens.
+      await dictate(false, { whileListening: true, whenHeard: false });
+      expect(invokeSubmitMessage).not.toHaveBeenCalled();
+      expect(onInputChange).toHaveBeenLastCalledWith("conversation-1", TRANSCRIPT, null);
+      expect(latestInputValueRef.current).toBe(TRANSCRIPT);
+    });
   });
 });
