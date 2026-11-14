@@ -8,16 +8,22 @@
 //!   root holds no `.claude` entry and no `.mcp.json`, tracked or not: Claude Code reads the
 //!   folder, not git's index. The failure names each path, relative to the folder.
 //! - **`unsafe_import`.** Every tracked `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`, those at
-//!   the root whether tracked or not, and every file they import, followed with a bound: no `@`
-//!   import outside code spans and code blocks is absolute, starts with `~`, resolves outside the
-//!   folder after following links, or resolves to an existing file git does not track. Such a
-//!   file exists only on this computer (a `.env`), and its import would put it in front of a turn
-//!   whose reply everyone in the space reads. A memory file that is itself a link is an import of
-//!   its target. A file's imports are resolved both from the path that brought it in, as written,
-//!   and from its own place once links are followed: Claude Code may read either way. The root
-//!   `AGENTS.md` and `INSTAFY.md` Instafy seeds may be untracked (D-B): the Desktop scaffold
-//!   commits them only into `.instafy/.git`, so a folder whose repository is the person's own
-//!   `.git` leaves them out. Every other rule holds for them, and every rule for what they import.
+//!   the root whether tracked or not, and every file they import, followed with a bound: no path
+//!   a word after an `@` could import, anywhere in the file (code included), is in the home folder
+//!   (`~/`), is absolute below an entry the filesystem's root holds, leads out of the folder to
+//!   anything but a folder above it, resolves outside the folder after following links, or
+//!   resolves to an existing file git does not track. Such a file exists only on this computer (a
+//!   `.env`), and its import would put it in front of a turn whose reply everyone in the space
+//!   reads. Of the paths imports name outside the folder, only the root's own entries are looked
+//!   up: an absolute path whose first name the root does not hold, such as a path alias
+//!   (`@/components/ui/button`), names nothing, and so does a folder above the folder (`@..`). A
+//!   memory file that is itself a link is an import of its target. A file's imports are resolved
+//!   both from the path that brought it in, as written, and from its own place once links are
+//!   followed: Claude Code may read either way. Each file is read once, however many paths reach
+//!   it. The root `AGENTS.md` and `INSTAFY.md` Instafy seeds may be untracked (D-B): the Desktop
+//!   scaffold commits them only into `.instafy/.git`, so a folder whose repository is the
+//!   person's own `.git` leaves them out. Every other rule holds for them, and every rule for
+//!   what they import.
 //! - **`unsafe_link`.** No tracked symbolic link resolves outside the folder.
 //!
 //! Its git commands read `.instafy/.git`, the repository the origin saves to, with the folder as
@@ -31,42 +37,64 @@
 //! and a root `.mcp.jſon` (a long s) as `.mcp.json`. The root's own entries are also looked up
 //! through the folder, which opens a name as Claude Code will.
 //!
-//! A memory file's `@` imports are read every way Claude Code may read them (`imports_in`): line
-//! by line outside fences and code spans, and as CommonMark parses the file. That reading has a
-//! budget for each byte of the file: a file built so that its words start inside one another,
-//! whose reading would grow with the square of its size, is refused as `preflight_failed`
-//! instead of read in part.
+//! A memory file's `@` imports are not read as Markdown (D-L): one linear pass over its text
+//! finds every path Claude Code could import from it, and more (`imports_in`). Every `@` starts a
+//! word, wherever it is, and the word and each of its parts that ends at ASCII punctuation is a
+//! candidate, as written, with its HTML comments removed, and with the escaped brackets of a
+//! link's text read as brackets. That reading has a budget for each byte of the file, a word runs
+//! for a bounded number of characters, and one pre-flight resolves a bounded number of
+//! candidates: a file built to cost more, or with a longer word, is refused as
+//! `preflight_failed`, never read in part.
+//!
+//! The whole pre-flight has a deadline ([`PREFLIGHT_WITHIN`]): a folder it cannot check by then is
+//! refused as `preflight_failed`. Once it ends, by its deadline or because a Stop dropped it, work
+//! left on its blocking thread stops at its next file.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use tokio::process::Command;
+use unicode_normalization::UnicodeNormalization;
 
 use super::FailureCode;
 use super::events::{LaneFailure, redact_tokens};
 use super::saves::{name_key, same_name};
 
+/// How long the whole pre-flight may run: its git command and its reading of the folder.
+const PREFLIGHT_WITHIN: Duration = Duration::from_secs(60);
+/// The refusal of a pre-flight that ran past [`PREFLIGHT_WITHIN`].
+const TOOK_TOO_LONG: &str = "Instafy took too long to check this space's folder.";
 /// How long one git command of the pre-flight may run.
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How many imports deep the import check follows, as Claude Code follows them.
 const MAX_IMPORT_DEPTH: usize = 5;
-/// How many files the import check reads at most.
+/// How many memory files the import check follows at most, counting a file once for each path
+/// that reaches it.
 const MAX_IMPORTED_FILES: usize = 512;
+/// How many import candidates one pre-flight resolves at most: each memory file's, once for each
+/// path that reaches it. Each is resolved from up to two places.
+const MAX_IMPORT_CANDIDATES: usize = 20_000;
 /// The largest memory file the import check reads. A larger one cannot be checked.
 const MAX_MEMORY_FILE_BYTES: u64 = 1024 * 1024;
+/// The most characters a word after an `@` may run for. A file with a longer one is refused,
+/// never read in part: Claude Code resolves `..` as written before it opens a path, so a word of
+/// any length can name a short path (`@aaaa…/../.env`).
+const MAX_WORD_CHARS: usize = 4096;
 /// What reading a memory file's `@` words may cost for each byte of the file: one for each
-/// character scanned after an `@` that starts a word, and one for each byte of each reading of
-/// it ([`word_readings`]). A file whose words do not overlap costs less than 16: it is read three
-/// ways, and each way scans a word at most twice and gives at most three readings of it. Words
-/// that each start inside the one before cost up to the square of their stretch of text, so a
-/// file of them is refused instead of read (preflight-1).
+/// character a word reading scans, and one for each byte of each candidate it gives
+/// ([`imports_in`]). An ordinary file costs a few for each byte. A word cut at punctuation in many
+/// places costs up to the square of its length, and so do words that each start inside the one
+/// before: a file built of them is refused instead of read.
 const READING_COST_PER_BYTE: usize = 16;
 /// What reading a memory file's `@` words may cost beyond [`READING_COST_PER_BYTE`], so a short
-/// file's few words that overlap are read.
-const READING_COST_ALLOWANCE: usize = 64 * 1024;
+/// file's few long words are read: in a line of minified JSON, each `@` starts a word that runs
+/// to the line's end, so a line of a thousand characters can cost over a million.
+const READING_COST_ALLOWANCE: usize = 4 * 1024 * 1024;
 /// How many paths a failure names before it counts the rest.
 const MAX_NAMED_PATHS: usize = 50;
 
@@ -80,12 +108,6 @@ const SEEDED_ROOT_FILES: [&str; 2] = ["AGENTS.md", "INSTAFY.md"];
 const OUTSIDE_THE_FOLDER: &str = "a file outside this space";
 /// The refusal of a folder with no repository (D-A).
 const NO_REPOSITORY: &str = "This space's folder on this computer has no git repository, so Instafy couldn't tell what a turn changes.";
-/// Punctuation a word's end may hold that is not part of the path it names, emphasis and
-/// strikethrough delimiters included: `~~@~/x~~` is a struck-through `@~/x` to a Markdown lexer
-/// that pairs those tildes, where the CommonMark parser leaves them as text.
-const TRAILING_PUNCTUATION: [char; 15] = [
-    '.', ',', ';', ':', '!', '?', ')', ']', '}', '>', '"', '\'', '*', '_', '~',
-];
 
 /// Which repository the pre-flight reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +151,88 @@ struct Folder {
     /// The tracked paths, and the same by [`name_key`], for the import check.
     tracked_paths: HashSet<String>,
     tracked_by_key: HashMap<String, Vec<String>>,
+    /// The root files Instafy seeds, as the root holds them (D-B).
+    seeded: SeededRootFiles,
+}
+
+impl Folder {
+    /// What the checks know of the folder at `root`, whose tracked files are `entries`.
+    fn read(root: &Path, entries: Vec<Entry>) -> Result<Self, LaneFailure> {
+        let canonical = std::fs::canonicalize(root).map_err(|error| {
+            failed(format!(
+                "Instafy couldn't read this space's folder: {error}"
+            ))
+        })?;
+        let mut tracked_paths = HashSet::new();
+        let mut tracked_by_key: HashMap<String, Vec<String>> = HashMap::new();
+        for entry in &entries {
+            tracked_paths.insert(entry.path.clone());
+            tracked_by_key
+                .entry(name_key(&entry.path))
+                .or_default()
+                .push(entry.path.clone());
+        }
+        let mut folder = Self {
+            root: root.to_path_buf(),
+            canonical,
+            entries,
+            root_names: root_names(root)?,
+            tracked_paths,
+            tracked_by_key,
+            seeded: SeededRootFiles::default(),
+        };
+        folder.seeded = SeededRootFiles::of(&folder);
+        Ok(folder)
+    }
+}
+
+/// The root `AGENTS.md` and `INSTAFY.md` Instafy seeds (D-B), found once per pre-flight: each
+/// regular file, never a link, that the folder's root holds under one of those names.
+#[derive(Default)]
+struct SeededRootFiles {
+    paths: Vec<PathBuf>,
+    /// Their devices and inodes.
+    ids: HashSet<(u64, u64)>,
+}
+
+impl SeededRootFiles {
+    fn of(folder: &Folder) -> Self {
+        let mut seeded = Self::default();
+        for name in SEEDED_ROOT_FILES {
+            for entry in root_entries_named(folder, name) {
+                let at_root = folder.root.join(&entry);
+                let Ok(metadata) = std::fs::symlink_metadata(&at_root) else {
+                    continue;
+                };
+                if metadata.file_type().is_file() {
+                    seeded.ids.extend(file_id(&metadata));
+                    seeded.paths.push(at_root);
+                }
+            }
+        }
+        seeded
+    }
+
+    /// Whether the file at `resolved` (canonical) is one of them.
+    fn hold(&self, resolved: &Path) -> bool {
+        self.paths.iter().any(|path| path == resolved)
+            || std::fs::metadata(resolved)
+                .ok()
+                .and_then(|metadata| file_id(&metadata))
+                .is_some_and(|id| self.ids.contains(&id))
+    }
+}
+
+/// A file's device and inode.
+#[cfg(unix)]
+fn file_id(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(_: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 fn failed(message: impl Into<String>) -> LaneFailure {
@@ -148,8 +252,23 @@ fn named(paths: &BTreeSet<String>) -> String {
 }
 
 /// Runs the pre-flight on `folder`. `Ok` when Claude Code may start there; otherwise the failure,
-/// with its code and the paths it refused.
+/// with its code and the paths it refused. One that runs past [`PREFLIGHT_WITHIN`] is refused as
+/// `preflight_failed`. Dropping it ends it too: a Stop ends the turn while it runs.
 pub async fn check(folder: &Path) -> Result<(), LaneFailure> {
+    check_within(folder, PREFLIGHT_WITHIN).await
+}
+
+/// [`check`], refused once it has run for `within`.
+async fn check_within(folder: &Path, within: Duration) -> Result<(), LaneFailure> {
+    // However this ends, work it left on its blocking thread stops at its next file. Its git
+    // command is killed when dropped.
+    let abandoned = Abandoned::default();
+    tokio::time::timeout(within, check_now(folder, abandoned.flag()))
+        .await
+        .unwrap_or_else(|_| Err(failed(TOOK_TOO_LONG)))
+}
+
+async fn check_now(folder: &Path, abandoned: Arc<AtomicBool>) -> Result<(), LaneFailure> {
     // Without a repository nothing records what a turn changes: no turn could save or say what
     // it changed (D-A).
     let Some(repository) = Repository::of(folder) else {
@@ -157,7 +276,7 @@ pub async fn check(folder: &Path) -> Result<(), LaneFailure> {
     };
     let entries = tracked_files(folder, repository).await?;
     let folder = folder.to_path_buf();
-    tokio::task::spawn_blocking(move || check_folder(&folder, entries))
+    tokio::task::spawn_blocking(move || check_folder(&folder, entries, &abandoned))
         .await
         .map_err(|error| {
             failed(format!(
@@ -166,33 +285,42 @@ pub async fn check(folder: &Path) -> Result<(), LaneFailure> {
         })?
 }
 
-fn check_folder(root: &Path, entries: Vec<Entry>) -> Result<(), LaneFailure> {
-    let canonical = std::fs::canonicalize(root).map_err(|error| {
-        failed(format!(
-            "Instafy couldn't read this space's folder: {error}"
-        ))
-    })?;
-    let mut tracked_paths = HashSet::new();
-    let mut tracked_by_key: HashMap<String, Vec<String>> = HashMap::new();
-    for entry in &entries {
-        tracked_paths.insert(entry.path.clone());
-        tracked_by_key
-            .entry(name_key(&entry.path))
-            .or_default()
-            .push(entry.path.clone());
+/// Set once the pre-flight that holds it has ended, however it ended (its deadline, or a Stop
+/// that dropped it): its blocking work reads it before each file, and stops.
+#[derive(Default)]
+struct Abandoned(Arc<AtomicBool>);
+
+impl Abandoned {
+    fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
     }
-    let folder = Folder {
-        root: root.to_path_buf(),
-        canonical,
-        entries,
-        root_names: root_names(root)?,
-        tracked_paths,
-        tracked_by_key,
-    };
+}
+
+impl Drop for Abandoned {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// `Err` once the pre-flight this work is for has ended ([`Abandoned`]); nothing reads that error.
+fn still_wanted(abandoned: &AtomicBool) -> Result<(), LaneFailure> {
+    if abandoned.load(Ordering::Relaxed) {
+        return Err(failed("Instafy stopped checking this space's folder."));
+    }
+    Ok(())
+}
+
+fn check_folder(
+    root: &Path,
+    entries: Vec<Entry>,
+    abandoned: &AtomicBool,
+) -> Result<(), LaneFailure> {
+    still_wanted(abandoned)?;
+    let folder = Folder::read(root, entries)?;
     check_project_config(&folder)?;
     // Links first: the import check then reads no tracked file through a link that leads out.
-    check_links(&folder)?;
-    check_imports(&folder)?;
+    check_links(&folder, abandoned)?;
+    check_imports(&folder, abandoned)?;
     Ok(())
 }
 
@@ -408,9 +536,10 @@ fn files_below(root: &Path, name: &str) -> Vec<String> {
 }
 
 /// `unsafe_link`: a tracked symbolic link that resolves outside the folder.
-fn check_links(folder: &Folder) -> Result<(), LaneFailure> {
+fn check_links(folder: &Folder, abandoned: &AtomicBool) -> Result<(), LaneFailure> {
     let mut refused = BTreeSet::new();
     for entry in folder.entries.iter().filter(|entry| entry.symlink) {
+        still_wanted(abandoned)?;
         let link = folder.root.join(&entry.path);
         let Ok(metadata) = std::fs::symlink_metadata(&link) else {
             // Not in the folder now: nothing resolves through it.
@@ -472,8 +601,10 @@ fn lexically_inside(root: &Path, path: &Path) -> Option<PathBuf> {
     Some(inside)
 }
 
-/// Whether the file at `canonical` (resolved, inside the folder) is one git tracks: its path, or
-/// a tracked path a Mac's folder reads as the same name ([`name_key`]) that is the same file.
+/// Whether the file at `canonical` (resolved, inside the folder, a regular file) is one git
+/// tracks: its path, or a tracked path a Mac's folder reads as the same name ([`name_key`]) whose
+/// own folder entry is that file. A tracked link to it is not: the link is tracked, the file it
+/// points at is not.
 fn is_tracked(folder: &Folder, canonical: &Path) -> bool {
     let Ok(relative) = canonical.strip_prefix(&folder.canonical) else {
         return false;
@@ -487,8 +618,8 @@ fn is_tracked(folder: &Folder, canonical: &Path) -> bool {
         .get(&name_key(&relative))
         .is_some_and(|candidates| {
             candidates.iter().any(|candidate| {
-                std::fs::canonicalize(folder.root.join(candidate))
-                    .is_ok_and(|resolved| same_file(&resolved, canonical))
+                std::fs::symlink_metadata(folder.root.join(candidate))
+                    .is_ok_and(|entry| same_entry(&entry, canonical))
             })
         })
 }
@@ -497,43 +628,45 @@ fn is_tracked(folder: &Folder, canonical: &Path) -> bool {
 /// Instafy seeds (D-B): the regular file, never a link, that the folder's root holds under that
 /// name. The name an import was written with never decides it.
 fn is_seeded_root_file(folder: &Folder, resolved: &Path) -> bool {
-    SEEDED_ROOT_FILES.iter().any(|seeded| {
-        root_entries_named(folder, seeded).iter().any(|name| {
-            let at_root = folder.root.join(name);
-            std::fs::symlink_metadata(&at_root).is_ok_and(|metadata| metadata.file_type().is_file())
-                && same_file(&at_root, resolved)
-        })
-    })
+    folder.seeded.hold(resolved)
 }
 
-fn same_file(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) {
-            return left.dev() == right.dev() && left.ino() == right.ino();
-        }
-    }
-    false
-}
-
-/// What may not load: an import a memory file brings in, or the target of a memory file that is
-/// a link.
+/// What may not load: an import a memory file brings in (a candidate of its `word`th word), or
+/// the target of a memory file that is a link.
 enum UnsafeImport {
-    Import { file: String, import: String },
-    Link { file: String, target: String },
+    Import {
+        file: String,
+        word: usize,
+        import: String,
+    },
+    Link {
+        file: String,
+        target: String,
+    },
 }
 
-impl UnsafeImport {
-    fn shown(&self) -> String {
-        match self {
-            Self::Import { file, import } => format!("{file} brings in @{import}"),
-            Self::Link { file, target } => format!("{file} links to {target}"),
+/// What a refusal names: each link, and for each word of a file, the longest candidate of it that
+/// may not load. The shorter ones are its parts, and say no more.
+fn shown(refused: Vec<UnsafeImport>) -> BTreeSet<String> {
+    let mut shown = BTreeSet::new();
+    let mut longest: BTreeMap<(String, usize), String> = BTreeMap::new();
+    for unsafe_import in refused {
+        match unsafe_import {
+            UnsafeImport::Import { file, word, import } => {
+                let kept = longest.entry((file, word)).or_default();
+                if import.len() > kept.len() {
+                    *kept = import;
+                }
+            }
+            UnsafeImport::Link { file, target } => {
+                shown.insert(format!("{file} links to {target}"));
+            }
         }
     }
+    for ((file, _), import) in longest {
+        shown.insert(format!("{file} brings in @{import}"));
+    }
+    shown
 }
 
 /// A memory file the import check reads, by two folder-relative paths: the one it was reached
@@ -586,7 +719,9 @@ fn memory_file_target(folder: &Folder, path: &str) -> MemoryTarget {
 }
 
 /// `unsafe_import`: the memory files and what they import, followed recursively with a bound.
-fn check_imports(folder: &Folder) -> Result<(), LaneFailure> {
+/// Each file is read once, however many paths reach it, and its imports are resolved from each
+/// of those paths. `Ok` holds how many files it read.
+fn check_imports(folder: &Folder, abandoned: &AtomicBool) -> Result<usize, LaneFailure> {
     let is_memory_file = |path: &str| {
         MEMORY_FILES
             .iter()
@@ -603,9 +738,10 @@ fn check_imports(folder: &Folder) -> Result<(), LaneFailure> {
     }
     let mut refused: Vec<UnsafeImport> = Vec::new();
     let mut queue: VecDeque<MemoryFile> = VecDeque::new();
-    // The paths files were reached by, as written: each is read once.
+    // The paths files were reached by, as written: each is followed once.
     let mut queued: HashSet<String> = HashSet::new();
     for path in starts {
+        still_wanted(abandoned)?;
         if !queued.insert(path.clone()) {
             continue;
         }
@@ -621,34 +757,38 @@ fn check_imports(folder: &Folder) -> Result<(), LaneFailure> {
             }),
         }
     }
-    let mut read = 0usize;
+    // What each file imports, by its own path with every link followed: a file reached by
+    // several paths (links, or names a Mac's folder reads as the same) is read once.
+    let mut read: HashMap<String, Rc<Vec<Candidate>>> = HashMap::new();
+    let mut files_read = 0usize;
+    let mut followed = 0usize;
+    let mut resolved = 0usize;
     while let Some(file) = queue.pop_front() {
-        read += 1;
-        if read > MAX_IMPORTED_FILES {
+        still_wanted(abandoned)?;
+        followed += 1;
+        if followed > MAX_IMPORTED_FILES {
             return Err(failed(
                 "This space's CLAUDE.md and AGENTS.md files bring in too many files for Instafy to check.",
             ));
         }
-        let absolute = folder.canonical.join(&file.canonical);
-        let Ok(metadata) = std::fs::metadata(&absolute) else {
-            continue;
+        let imports = match read.get(&file.canonical) {
+            Some(imports) => Rc::clone(imports),
+            None => {
+                let Some(imports) = read_imports(folder, &file)? else {
+                    continue;
+                };
+                files_read += 1;
+                let imports = Rc::new(imports);
+                read.insert(file.canonical.clone(), Rc::clone(&imports));
+                imports
+            }
         };
-        if !metadata.is_file() {
-            continue;
+        resolved += imports.len();
+        if resolved > MAX_IMPORT_CANDIDATES {
+            return Err(failed(
+                "This space's CLAUDE.md and AGENTS.md files have too many @ imports for Instafy to check what they bring in.",
+            ));
         }
-        if metadata.len() > MAX_MEMORY_FILE_BYTES {
-            return Err(failed(format!(
-                "{} is too large for Instafy to check what it brings in.",
-                redact_tokens(&file.lexical)
-            )));
-        }
-        let text = std::fs::read(&absolute).map_err(|error| {
-            failed(format!(
-                "Instafy couldn't read {}: {error}",
-                redact_tokens(&file.lexical)
-            ))
-        })?;
-        let text = String::from_utf8_lossy(&text);
         // From the path that brought the file in, as written, and from its own place: whichever
         // Claude Code uses, both must be safe.
         let mut bases = vec![parent_of(&file.lexical)];
@@ -656,20 +796,13 @@ fn check_imports(folder: &Folder) -> Result<(), LaneFailure> {
         if own != bases[0] {
             bases.push(own);
         }
-        // Words built to start inside one another would take minutes and gigabytes to read
-        // every way: the file is refused, never read in part.
-        let Some(imports) = imports_in(&text) else {
-            return Err(failed(format!(
-                "{} has too many @ imports for Instafy to check what it brings in.",
-                redact_tokens(&file.lexical)
-            )));
-        };
-        for import in imports {
+        for import in imports.iter() {
             for base in &bases {
-                match resolve_import(folder, base, &import) {
+                match resolve_import(folder, base, &import.path) {
                     ImportTarget::Unsafe => refused.push(UnsafeImport::Import {
                         file: file.lexical.clone(),
-                        import: import.clone(),
+                        word: import.word,
+                        import: import.path.clone(),
                     }),
                     ImportTarget::Nothing => {}
                     ImportTarget::File { lexical, canonical } => {
@@ -686,16 +819,52 @@ fn check_imports(folder: &Folder) -> Result<(), LaneFailure> {
         }
     }
     if refused.is_empty() {
-        return Ok(());
+        return Ok(files_read);
     }
-    let shown: BTreeSet<String> = refused.iter().map(UnsafeImport::shown).collect();
     Err(LaneFailure::new(
         FailureCode::UnsafeImport,
         format!(
             "These imports bring in files that aren't part of the space: {}.",
-            named(&shown)
+            named(&shown(refused))
         ),
     ))
+}
+
+/// What the memory file `file` may import ([`imports_in`]), read at its own path: `None` when no
+/// regular file is there now.
+fn read_imports(folder: &Folder, file: &MemoryFile) -> Result<Option<Vec<Candidate>>, LaneFailure> {
+    let absolute = folder.canonical.join(&file.canonical);
+    let Ok(metadata) = std::fs::metadata(&absolute) else {
+        return Ok(None);
+    };
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    if metadata.len() > MAX_MEMORY_FILE_BYTES {
+        return Err(failed(format!(
+            "{} is too large for Instafy to check what it brings in.",
+            redact_tokens(&file.lexical)
+        )));
+    }
+    let text = std::fs::read(&absolute).map_err(|error| {
+        failed(format!(
+            "Instafy couldn't read {}: {error}",
+            redact_tokens(&file.lexical)
+        ))
+    })?;
+    // A file built to take minutes and gigabytes to read is refused, never read in part, and so is
+    // one with a word longer than the check reads.
+    match imports_in(&String::from_utf8_lossy(&text)) {
+        Ok(imports) => Ok(Some(imports)),
+        Err(Unread::Costly) => Err(failed(format!(
+            "{} has too many @ imports for Instafy to check what it brings in.",
+            redact_tokens(&file.lexical)
+        ))),
+        Err(Unread::LongWord) => Err(failed(format!(
+            "{} has an @ import too long for Instafy to check what it brings in.",
+            redact_tokens(&file.lexical)
+        ))),
+    }
 }
 
 fn parent_of(path: &str) -> &Path {
@@ -703,7 +872,8 @@ fn parent_of(path: &str) -> &Path {
 }
 
 enum ImportTarget {
-    /// Absolute, from the home folder, outside the folder, or a file git does not track.
+    /// From the home folder, absolute below an entry the filesystem's root holds, out of the
+    /// folder to anything but a folder above it, or a file git does not track.
     Unsafe,
     /// Nothing loads: the path names no file.
     Nothing,
@@ -714,15 +884,21 @@ enum ImportTarget {
 
 /// Where an `@` import of a memory file in the folder-relative `base` folder leads.
 fn resolve_import(folder: &Folder, base: &Path, import: &str) -> ImportTarget {
-    if import.starts_with('~') {
+    // Claude Code reads `~` as the home folder only before `/`. Any other `~…`, such as the
+    // version range of `zod@~3.22.4`, is a path like any other.
+    if import.starts_with("~/") {
         return ImportTarget::Unsafe;
     }
     let written = Path::new(import);
     if written.is_absolute() || written.has_root() {
-        return ImportTarget::Unsafe;
+        return absolute_import(written);
     }
     let joined = folder.root.join(base).join(written);
     let Some(lexical) = lexically_inside(&folder.root, &joined) else {
+        // Out of the folder, only a folder above it is known to load nothing.
+        if leads_to_a_folder_above(base, written) {
+            return ImportTarget::Nothing;
+        }
         return ImportTarget::Unsafe;
     };
     // Read as written first, as a path is resolved, then with its links followed. A path that
@@ -751,6 +927,75 @@ fn resolve_import(folder: &Folder, base: &Path, import: &str) -> ImportTarget {
     }
 }
 
+/// What the absolute import `written` loads, looked up no further than the filesystem's root:
+/// nothing when it names the root, or when the root holds no entry by its first name, as for a
+/// path alias such as `@/components/ui/button`. Anything else may be a file outside the folder.
+fn absolute_import(written: &Path) -> ImportTarget {
+    // As Claude Code resolves it: `.` and `..` read as written, and `..` at the root stays there.
+    let mut names: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in written.components() {
+        match component {
+            Component::Normal(name) => names.push(name),
+            Component::ParentDir => {
+                names.pop();
+            }
+            Component::RootDir | Component::CurDir => {}
+            Component::Prefix(_) => return ImportTarget::Unsafe,
+        }
+    }
+    let Some(first) = names.first() else {
+        return ImportTarget::Nothing;
+    };
+    let Some(first) = first.to_str() else {
+        return ImportTarget::Unsafe;
+    };
+    for name in spellings(first) {
+        match std::fs::symlink_metadata(Path::new("/").join(name)) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::InvalidInput
+                        | std::io::ErrorKind::InvalidFilename
+                ) => {}
+            _ => return ImportTarget::Unsafe,
+        }
+    }
+    ImportTarget::Nothing
+}
+
+/// The spellings of a name an import was written with that Claude Code may open: as written, and
+/// in the NFC form it gives every path it resolves, which a folder that compares names exactly
+/// holds apart.
+fn spellings(name: &str) -> Vec<String> {
+    let nfc: String = name.nfc().collect();
+    if nfc == name {
+        vec![nfc]
+    } else {
+        vec![name.to_string(), nfc]
+    }
+}
+
+/// Whether `import`, read from the folder-relative `base` folder with `.` and `..` read as written,
+/// as Claude Code resolves it, names a folder above the folder (`@..`), which loads nothing.
+fn leads_to_a_folder_above(base: &Path, import: &Path) -> bool {
+    // How deep inside the folder it is, how far above it it has climbed, and how deep below there
+    // it has gone again.
+    let (mut inside, mut above, mut below) = (base.components().count(), 0usize, 0usize);
+    for component in import.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if below > 0 => below -= 1,
+            Component::ParentDir if inside > 0 => inside -= 1,
+            Component::ParentDir => above += 1,
+            Component::Normal(_) if above > 0 => below += 1,
+            Component::Normal(_) => inside += 1,
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    above > 0 && below == 0
+}
+
 /// JavaScript's white space (`\s`) outside U+2000 to U+200A. It holds U+FEFF, and not U+0085.
 const JS_SPACES: [char; 14] = [
     '\t', '\n', '\u{b}', '\u{c}', '\r', ' ', '\u{a0}', '\u{1680}', '\u{2028}', '\u{2029}',
@@ -762,42 +1007,89 @@ fn is_js_space(character: char) -> bool {
     JS_SPACES.contains(&character) || ('\u{2000}'..='\u{200a}').contains(&character)
 }
 
-/// White space as either JavaScript or Rust reads it: a word may start after it.
-fn is_any_space(character: char) -> bool {
-    character.is_whitespace() || is_js_space(character)
+/// A path a memory file's `@` word could import, and the word it is a candidate of: the first in
+/// the file that gives it, counted from 0.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Candidate {
+    pub(crate) path: String,
+    pub(crate) word: usize,
 }
 
-/// The `@` imports of a memory file, read every way Claude Code may read them, so none slips past
-/// (each listed once):
-/// - line by line, outside fenced code blocks and code spans: a word that starts with `@` at the
-///   start of a line or after white space;
-/// - as CommonMark parses the file, with and without GitHub's tables, strikethrough and task
-///   lists: a word that starts with `@` outside code, at the start of a text, after white space,
-///   or right after a character a backslash escaped (Claude Code's lexer makes the escape a token
-///   of its own, so the text after it starts a new one).
+/// Why [`imports_in`] did not read a memory file. It is refused, never read in part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unread {
+    /// Reading it would cost more than its budget ([`READING_COST_PER_BYTE`]), as only a file
+    /// built to cost that does.
+    Costly,
+    /// A word after one of its `@`s runs for more than [`MAX_WORD_CHARS`] characters.
+    LongWord,
+}
+
+/// The paths a memory file's `@` words could import: every path Claude Code could import from it,
+/// and more (D-L). The text is read once, as text, never as Markdown, so code spans, code blocks,
+/// HTML and comments are read too:
+/// - A carriage return, alone or before a line feed, is a line feed, as Claude Code reads it.
+/// - Every `@` starts a word, whatever comes before it: in Claude Code's reading a word starts at
+///   a Markdown token's start too, and a token can start anywhere.
+/// - A word runs to white space as JavaScript reads it, or to a backslash that escapes no space,
+///   for at most [`MAX_WORD_CHARS`] characters. An escaped space (`\ `) is a space of the word.
+/// - Its candidates are the word, and each part of it from its start up to an ASCII punctuation
+///   character, without it and with it: a Markdown token can end there, and Claude Code cuts a
+///   path at its first `#`.
+/// - A word that stops at `\[` or `\]` is read again past them, as brackets: in a link's text,
+///   Claude Code's Markdown reads them as `[` and `]` before it reads the words.
+/// - So are the candidates of the word with its HTML comments removed, as Claude Code reads an
+///   HTML block that opens with one ([`Closing`]).
 ///
-/// A lone carriage return ends a line, as it does for CommonMark. Each word counts in every
-/// reading [`word_readings`] gives it, with and without punctuation at its end.
-///
-/// `None` when reading the file's words would cost more than its budget
-/// ([`READING_COST_PER_BYTE`]), as only words built to start inside one another do.
-pub(crate) fn imports_in(text: &str) -> Option<Vec<String>> {
+/// Each candidate counts once, in the order first found.
+pub(crate) fn imports_in(text: &str) -> Result<Vec<Candidate>, Unread> {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut imports = Imports::of(&text);
-    line_imports(&text, &mut imports)?;
-    let extensions =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    for options in [Options::empty(), extensions] {
-        commonmark_imports(&text, options, &mut imports)?;
+    let comments = Comments::of(&text);
+    // The line of the `@` read last, from the bytes counted so far.
+    let (mut line, mut counted) = (0usize, 0usize);
+    for (at, _) in text.match_indices('@') {
+        let start = at + 1;
+        let (word, stop) = read_word(&text, start, None, false, &mut imports)?;
+        imports.next_word();
+        candidates(&word, &mut imports)?;
+        if text[stop..].starts_with("\\[") || text[stop..].starts_with("\\]") {
+            let (in_a_link, _) = read_word(&text, start, None, true, &mut imports)?;
+            candidates(&in_a_link, &mut imports)?;
+        }
+        let Some(comments) = comments.as_ref() else {
+            continue;
+        };
+        // Removing comments changes a word only when one opens where it was read, or right
+        // after the backslash it stopped at.
+        let reach = &text.as_bytes()[start..(stop + 5).min(text.len())];
+        if !reach.windows(4).any(|bytes| bytes == b"<!--") {
+            continue;
+        }
+        line += newlines(&text.as_bytes()[counted..at]);
+        counted = at;
+        for closing in [Closing::OnLine(line), Closing::Anywhere] {
+            let removing = Some((comments, closing));
+            let (removed, _) = read_word(&text, start, removing, false, &mut imports)?;
+            if removed != word {
+                candidates(&removed, &mut imports)?;
+            }
+        }
     }
-    Some(imports.found)
+    Ok(imports.found)
 }
 
-/// What [`imports_in`] reads a memory file's `@` words into: the imports found, each once in the
-/// order first found, and what reading the rest of the file may still cost.
+fn newlines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|byte| **byte == b'\n').count()
+}
+
+/// What [`imports_in`] reads a memory file's `@` words into: the candidates found, each once in
+/// the order first found, the word being read, and what reading the rest of the file may still
+/// cost.
 struct Imports {
-    found: Vec<String>,
+    found: Vec<Candidate>,
     seen: HashSet<String>,
+    words: usize,
     budget: usize,
 }
 
@@ -807,6 +1099,7 @@ impl Imports {
         Self {
             found: Vec::new(),
             seen: HashSet::new(),
+            words: 0,
             budget: text
                 .len()
                 .saturating_mul(READING_COST_PER_BYTE)
@@ -814,345 +1107,459 @@ impl Imports {
         }
     }
 
-    /// Spends `cost` of the budget: `None`, with nothing left, once it is spent.
-    fn spend(&mut self, cost: usize) -> Option<()> {
+    /// Spends `cost` of the budget: [`Unread::Costly`], with nothing left, once it is spent.
+    fn spend(&mut self, cost: usize) -> Result<(), Unread> {
         match self.budget.checked_sub(cost) {
             Some(left) => {
                 self.budget = left;
-                Some(())
+                Ok(())
             }
             None => {
                 self.budget = 0;
-                None
+                Err(Unread::Costly)
             }
         }
     }
 
-    fn push(&mut self, import: String) {
-        if !self.seen.contains(&import) {
-            self.seen.insert(import.clone());
-            self.found.push(import);
+    /// The candidates found from now on are another word's.
+    fn next_word(&mut self) {
+        self.words += 1;
+    }
+
+    fn push(&mut self, path: String) {
+        if !self.seen.contains(&path) {
+            self.seen.insert(path.clone());
+            self.found.push(Candidate {
+                path,
+                word: self.words - 1,
+            });
         }
     }
 }
 
-/// The `@` words of `text` read line by line, outside fenced code blocks and code spans.
-fn line_imports(text: &str, imports: &mut Imports) -> Option<()> {
-    let mut fence: Option<(char, usize)> = None;
-    for line in text.lines() {
-        // A fence is indented by three spaces at most; a deeper one is a code line's text.
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        let trimmed = if indent <= 3 { &line[indent..] } else { "" };
-        let fence_run = |marker: char| trimmed.chars().take_while(|ch| *ch == marker).count();
-        match fence {
-            Some((marker, length)) => {
-                if fence_run(marker) >= length
-                    && trimmed[fence_run(marker) * marker.len_utf8()..]
-                        .trim()
-                        .is_empty()
-                {
-                    fence = None;
-                }
-                continue;
-            }
-            None => {
-                let ticks = fence_run('`');
-                let tildes = fence_run('~');
-                if ticks >= 3 {
-                    fence = Some(('`', ticks));
-                    continue;
-                }
-                if tildes >= 3 {
-                    fence = Some(('~', tildes));
-                    continue;
-                }
-            }
-        }
-        let outside_code: Vec<char> = without_code_spans(line).chars().collect();
-        words_in(&outside_code, &[], imports)?;
-    }
-    Some(())
+/// Where the HTML comments of a memory file may close: each `-->`, by its byte and its line.
+struct Comments {
+    closes: Vec<(usize, usize)>,
 }
 
-/// The `@` words of the text of `text` as CommonMark parses it with `options`, outside code spans
-/// and code blocks. Texts that follow one another are read as one, as Claude Code's lexer joins
-/// them (the parser splits a text at a delimiter it then leaves as text, such as the `~` of
-/// `@~/x` within strikethrough), and a word may also start where each of them begins.
-fn commonmark_imports(text: &str, options: Options, imports: &mut Imports) -> Option<()> {
-    let mut code_blocks = 0usize;
-    let mut run: Vec<char> = Vec::new();
-    let mut starts: Vec<usize> = Vec::new();
-    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
-        match event {
-            Event::Text(part) if code_blocks == 0 => {
-                starts.push(run.len());
-                // A text that starts with a character a backslash escaped: the escape is a token
-                // of its own, so a word may also start right after that character.
-                if range.start > 0 && text.as_bytes()[range.start - 1] == b'\\' {
-                    starts.push(run.len() + 1);
-                }
-                run.extend(part.chars());
-                continue;
-            }
-            Event::Start(Tag::CodeBlock(_)) => code_blocks += 1,
-            Event::End(TagEnd::CodeBlock) => code_blocks = code_blocks.saturating_sub(1),
-            _ => {}
+impl Comments {
+    /// `None` when `text` opens no comment.
+    fn of(text: &str) -> Option<Self> {
+        if !text.contains("<!--") {
+            return None;
         }
-        words_in(&run, &starts, imports)?;
-        run.clear();
-        starts.clear();
+        let (mut line, mut counted) = (0usize, 0usize);
+        let closes = text
+            .match_indices("-->")
+            .map(|(at, _)| {
+                line += newlines(&text.as_bytes()[counted..at]);
+                counted = at;
+                (at, line)
+            })
+            .collect();
+        Some(Self { closes })
     }
-    words_in(&run, &starts, imports)
-}
 
-/// The `@` words of `run`, a stretch of text in which a word starts at its start, after white
-/// space, and at each of `starts` (in order). A word ends at white space as JavaScript reads it,
-/// which is Claude Code's reading (U+FEFF ends a word), and at white space as either reads it. A
-/// word that only Rust's white space starts (after U+0085, where Claude Code's pattern starts
-/// none) ends only the second way: read on to JavaScript's white space, each such word would run
-/// past the next, which no reading of words does.
-fn words_in(run: &[char], starts: &[usize], imports: &mut Imports) -> Option<()> {
-    for (index, character) in run.iter().enumerate() {
-        if *character != '@' {
-            continue;
-        }
-        let after_space =
-            index == 0 || is_js_space(run[index - 1]) || starts.binary_search(&index).is_ok();
-        let after_rust_space = index > 0 && run[index - 1].is_whitespace();
-        let ends: &[fn(char) -> bool] = if after_space {
-            &[is_js_space, is_any_space]
-        } else if after_rust_space {
-            &[is_any_space]
-        } else {
-            continue;
-        };
-        for word in word_readings(&run[index + 1..], ends, imports)? {
-            let stripped = word.trim_end_matches(TRAILING_PUNCTUATION);
-            if !stripped.is_empty() && stripped != word {
-                imports.push(stripped.to_string());
-            }
-            imports.push(word);
+    /// The byte right after the comment that opens at `open` (its `<!--`), when it closes as
+    /// `closing` says: at the first `-->` after its opening, as Claude Code's
+    /// `/<!--[\s\S]*?-->/g` removes it.
+    fn end_of(&self, open: usize, closing: Closing) -> Option<usize> {
+        let first = self.closes.partition_point(|(at, _)| *at < open + 4);
+        let (at, line) = *self.closes.get(first)?;
+        match closing {
+            Closing::OnLine(opened_on) if line != opened_on => None,
+            _ => Some(at + 3),
         }
     }
-    Some(())
 }
 
-/// The readings of the word after an `@`, each up to white space as one of `ends` reads it, with
-/// an escaped space (`\ `) read as a space: as written, and cut at the first backslash that
-/// escapes no space, where Claude Code's pattern ends a path. Empty readings are left out. Each
-/// character scanned and each byte of a reading is spent from the budget of `imports`: `None`
-/// once it is spent.
-fn word_readings(
-    rest: &[char],
-    ends: &[fn(char) -> bool],
+/// Where a comment removed from a word must close. Claude Code removes the comments of an HTML
+/// block that opens with one, and such a block ends with the line its first comment closes on: a
+/// comment that opens after that one closes on that line or stays (`OnLine`, the line of the
+/// word's `@`). `Anywhere` reads the comments of a word as removed from the whole text.
+#[derive(Clone, Copy)]
+enum Closing {
+    OnLine(usize),
+    Anywhere,
+}
+
+/// The word after an `@`, from byte `start` of `text`: up to white space as JavaScript reads it,
+/// or to a backslash that escapes no space, with an escaped space kept as written. In a link's
+/// text (`in_a_link`), a backslash also escapes a `[` or `]`, read as the bracket. With
+/// `removing`, each HTML comment in the word is removed while comments close as it says; from the
+/// first that does not, the rest is read as written. The word, and the byte the reading stopped
+/// at. Each character read and each comment removed is spent from the budget of `imports`, and a
+/// word of more than [`MAX_WORD_CHARS`] characters is refused.
+fn read_word(
+    text: &str,
+    start: usize,
+    mut removing: Option<(&Comments, Closing)>,
+    in_a_link: bool,
     imports: &mut Imports,
-) -> Option<Vec<String>> {
-    let mut readings: Vec<String> = Vec::new();
-    for ends_word in ends {
-        let mut word = String::new();
-        let mut cut: Option<usize> = None;
-        let mut next = 0;
-        while next < rest.len() {
-            imports.spend(1)?;
-            let character = rest[next];
-            if character == '\\' && rest.get(next + 1) == Some(&' ') {
-                word.push(' ');
-                next += 2;
-                continue;
-            }
-            if ends_word(character) {
-                break;
-            }
-            if character == '\\' && cut.is_none() {
-                cut = Some(word.len());
-            }
-            word.push(character);
-            next += 1;
+) -> Result<(String, usize), Unread> {
+    let mut word = String::new();
+    let mut at = start;
+    let mut length = 0usize;
+    loop {
+        at = past_comments(text, at, &mut removing, imports)?;
+        let Some(character) = text[at..].chars().next() else {
+            break;
+        };
+        imports.spend(1)?;
+        if is_js_space(character) {
+            break;
         }
-        let cut = cut.map(|at| word[..at].to_string());
-        for reading in [Some(word), cut].into_iter().flatten() {
-            if !reading.is_empty() && !readings.contains(&reading) {
-                imports.spend(reading.len())?;
-                readings.push(reading);
+        // What the word takes here, and where its reading goes on.
+        let (taken, next) = if character == '\\' {
+            let next = past_comments(text, at + 1, &mut removing, imports)?;
+            match text[next..].chars().next() {
+                Some(' ') => ("\\ ", next + 1),
+                Some('[' | ']') if in_a_link => (&text[next..=next], next + 1),
+                _ => break,
             }
+        } else {
+            let next = at + character.len_utf8();
+            (&text[at..next], next)
+        };
+        length += taken.chars().count();
+        if length > MAX_WORD_CHARS {
+            return Err(Unread::LongWord);
         }
+        word.push_str(taken);
+        at = next;
     }
-    Some(readings)
+    Ok((word, at))
 }
 
-/// `line` with its code spans (text between two runs of the same number of backticks) blanked.
-fn without_code_spans(line: &str) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len());
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] != '`' {
-            out.push(chars[index]);
-            index += 1;
-            continue;
+/// `at`, moved past each HTML comment that opens there and is removed ([`read_word`]).
+fn past_comments(
+    text: &str,
+    mut at: usize,
+    removing: &mut Option<(&Comments, Closing)>,
+    imports: &mut Imports,
+) -> Result<usize, Unread> {
+    while let Some((comments, closing)) = *removing {
+        if !text[at..].starts_with("<!--") {
+            break;
         }
-        let run = chars[index..].iter().take_while(|ch| **ch == '`').count();
-        // The closing run of the same length, if any.
-        let mut search = index + run;
-        let mut close = None;
-        while search < chars.len() {
-            if chars[search] == '`' {
-                let other = chars[search..].iter().take_while(|ch| **ch == '`').count();
-                if other == run {
-                    close = Some(search);
-                    break;
-                }
-                search += other;
-            } else {
-                search += 1;
+        match comments.end_of(at, closing) {
+            Some(end) => {
+                imports.spend(1)?;
+                at = end;
             }
-        }
-        match close {
-            Some(close) => {
-                out.push(' ');
-                index = close + run;
-            }
-            None => {
-                // An unclosed run is plain text.
-                for _ in 0..run {
-                    out.push('`');
-                }
-                index += run;
-            }
+            // A comment that does not close stays, and so does every one after it.
+            None => *removing = None,
         }
     }
-    out
+    Ok(at)
+}
+
+/// The candidates of `word` ([`imports_in`]): the word, and each part of it from its start up to
+/// an ASCII punctuation character, without it and with it, each with its escaped spaces read as
+/// spaces. Each byte of each is spent from the budget of `imports`.
+fn candidates(word: &str, imports: &mut Imports) -> Result<(), Unread> {
+    let mut ends: Vec<usize> = Vec::new();
+    for (index, character) in word.char_indices() {
+        if character.is_ascii_punctuation() {
+            ends.extend([index, index + 1]);
+        }
+    }
+    ends.push(word.len());
+    ends.dedup();
+    for end in ends {
+        if end == 0 {
+            continue;
+        }
+        let candidate = &word[..end];
+        imports.spend(candidate.len())?;
+        imports.push(candidate.replace("\\ ", " "));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The paths `text` could import ([`imports_in`]), read within its budget.
+    fn paths(text: &str) -> Vec<String> {
+        imports_in(text)
+            .expect("read within its budget")
+            .into_iter()
+            .map(|candidate| candidate.path)
+            .collect()
+    }
+
+    /// Every `@` starts a word, wherever it is: code spans, code blocks and HTML are read too
+    /// (D-L). A word ends at white space, and each part of it up to an ASCII punctuation
+    /// character is a candidate too.
     #[test]
-    fn imports_are_read_outside_code_only() {
+    fn every_at_starts_a_word_wherever_it_is() {
         let text = "@AGENTS.md\n\
                     See @docs/style.md, then @~/notes.md.\n\
                     Mail me at someone@example.com or @ nothing.\n\
-                    Inline `@/etc/passwd` is code, but @/etc/hosts is not.\n\
+                    Inline `@/etc/passwd` is code, and @/etc/hosts is not.\n\
                     ```\n@~/in-a-block.md\n```\n\
-                    ~~~~md\n@../still-a-block\n~~~\n@../still-in-the-longer-block\n~~~~\n\
+                    ~~~~md\n@../in-a-tilde-block\n~~~~\n\
                     @My\\ Notes.md\n";
-        let imports = imports_in(text).unwrap();
+        let found = paths(text);
+        for path in [
+            "AGENTS.md",
+            "docs/style.md",
+            "~/notes.md",
+            "example.com",
+            "/etc/passwd",
+            "/etc/hosts",
+            "~/in-a-block.md",
+            "../in-a-tilde-block",
+            "My Notes.md",
+            // Parts of words, up to punctuation.
+            "AGENTS",
+            "docs",
+            "docs/",
+            "docs/style.md,",
+            "~",
+            "~/notes.md.",
+            "My",
+        ] {
+            assert!(found.iter().any(|found| found == path), "{path}: {found:?}");
+        }
+        // No candidate runs past white space, or is empty; a word runs to white space, a code
+        // span's closing backtick included.
+        assert!(
+            found
+                .iter()
+                .all(|path| !path.is_empty() && !path.contains('\n') && path != "nothing"),
+            "{found:?}"
+        );
+        assert!(found.contains(&"/etc/passwd`".to_string()), "{found:?}");
+        // Each counts once, in the order first found, with the word it is of.
+        let candidate = |path: &str, word: usize| Candidate {
+            path: path.to_string(),
+            word,
+        };
         assert_eq!(
-            imports,
+            imports_in("@a.md and @a.md, @b\n").unwrap(),
             [
-                "AGENTS.md",
-                "docs/style.md",
-                "docs/style.md,",
-                "~/notes.md",
-                "~/notes.md.",
-                "/etc/hosts",
-                "My Notes.md",
+                candidate("a", 0),
+                candidate("a.", 0),
+                candidate("a.md", 0),
+                candidate("a.md,", 1),
+                candidate("b", 2),
             ]
         );
-        assert_eq!(without_code_spans("a ``b ` c`` d `e"), "a   d `e");
     }
 
-    /// Text CommonMark reads as text, which a reading of fences and backtick pairs alone would
-    /// take for code or skip (preflight-1): each import is found.
+    /// Each form of an import that a review found Claude Code reads and a reading of the text as
+    /// Markdown did not (preflight-1, preflight-list-item-codespans,
+    /// preflight-paragraph-interrupt-differences, preflight-escape-does-not-end-word), or that a
+    /// reading of the raw text missed (superset-link-text-escaped-brackets): each is found.
     #[test]
-    fn imports_that_only_commonmark_reads_as_text_are_found() {
+    fn every_form_the_reviews_found_is_read() {
         for (text, import) in [
-            // Escaped backticks open no code span.
+            // Claude Code's Markdown reads `\[` and `\]` in a link's text as `[` and `]` before it
+            // reads its words, and resolves `x]/..` as written.
+            (
+                "Read [@x\\]/../.env](https://example.invalid) first.\n",
+                "x]/../.env",
+            ),
+            ("[see @x\\[\\]/../.env](u)\n", "x[]/../.env"),
+            ("[a]: u\n\n[@x\\]/../.env][a]\n", "x]/../.env"),
+            ("[@a\\]\\]\\[b](u)\n", "a]][b"),
+            ("[x @y\\]\\ z](u)\n", "y] z"),
+            // A list item's code spans are the item's text to Claude Code.
+            (
+                "- Never run `cat @.env | less` in a shared terminal.\n",
+                ".env",
+            ),
+            ("1. Use `` @~/.ssh/id_rsa `` here\n", "~/.ssh/id_rsa"),
+            ("> - First `see @.env here` item\n\n- Second\n", ".env"),
+            // A fence on a last line with no line end after it opens no block for Claude Code.
+            ("Read this first.\n```text @.env", ".env"),
+            ("Read this first.\n~~~ @.env", ".env"),
+            // An HTML block that interrupts a paragraph is inline HTML to Claude Code.
+            ("Read the notes.\n <div>@.env\n", ".env"),
+            ("Read the notes.\n <div>**x**@.env\n", ".env"),
+            // An HTML comment block, as Claude Code reads it with its comments removed.
+            ("<!-- c -->@.env\n", ".env"),
+            ("<!-- a -->@.e<!-- b -->nv\n", ".env"),
+            ("<!-- a -->@My\\<!-- b --> Notes.md\n", "My Notes.md"),
+            // An escape is a token of its own: the word ends before it.
+            ("**Note**@.env\\#\n", ".env"),
+            ("<b>@.env\\@\n", ".env"),
+            ("\\*@.env\\$ more\n", ".env"),
+            ("[see](u)@.env\\=\n", ".env"),
+            // Claude Code cuts a path at its first `#`.
+            ("See @.env#x here.\n", ".env"),
+            // Escaped backticks open no code span; backticks in an attribute are the tag's.
             ("Read \\` @~/.ssh/id_rsa \\` first.\n", "~/.ssh/id_rsa"),
-            // Backticks inside an HTML tag's attribute are the tag's.
             ("See <b title=\"`\"> @~/x <i title=\"`\"> here.\n", "~/x"),
-            // A backtick fence's info string holds no backtick: this is no fence.
             ("```js`\n@~/x\n", "~/x"),
-            // A fence in a list item ends with the item.
             ("- item\n  ```\n  code\n@~/x\n", "~/x"),
+            // Code is read too (D-L).
+            ("`@~/x`\n", "~/x"),
+            ("``a ` @~/x``\n", "~/x"),
+            ("```\n@~/x\n```\n", "~/x"),
+            ("~~~\n@~/x\n~~~\n", "~/x"),
             // A lone carriage return ends a line.
             ("```\rcode\r```\r@~/x\r", "~/x"),
-            // A text that follows emphasis, or an escaped character, starts a word.
+            // Emphasis, strikethrough and escapes start and end tokens anywhere.
             ("**Note**@~/x\n", "~/x"),
             ("\\*@~/x\n", "~/x"),
-            // Strikethrough, as GitHub's Markdown reads it, whether or not CommonMark pairs
-            // the tildes.
             ("~~@.env~~\n", ".env"),
             ("~~@~/x~~\n", "~/x"),
-            // U+FEFF is white space to Claude Code's pattern.
+            // White space is JavaScript's: U+FEFF ends a word.
             ("See\u{feff}@~/x\n", "~/x"),
-            // A lone backslash ends a path for Claude Code's pattern.
-            ("See @.env\\x here.\n", ".env"),
-            // A word ends at U+FEFF too.
             ("See @.env\u{feff}x here.\n", ".env"),
+            // A backslash that escapes no space ends a word.
+            ("See @.env\\x here.\n", ".env"),
         ] {
-            let imports = imports_in(text).unwrap();
+            let found = paths(text);
             assert!(
-                imports.iter().any(|found| found == import),
-                "{text:?}: {imports:?}"
+                found.iter().any(|found| found == import),
+                "{text:?}: {found:?}"
             );
         }
-        // Code stays code, whichever way it is read.
-        for text in [
-            "`@~/x`\n",
-            "``a ` @~/x``\n",
-            "```\n@~/x\n```\n",
-            "~~~\n@~/x\n~~~\n",
-        ] {
-            let imports = imports_in(text).unwrap();
-            assert!(
-                !imports.iter().any(|found| found == "~/x"),
-                "{text:?}: {imports:?}"
-            );
-        }
-        // A backslash that escapes no space: the path is read as written and up to it.
-        let imports = imports_in("@docs\\notes.md\n").unwrap();
+        // A word runs as Claude Code's pattern runs it: through U+0085, which JavaScript reads as
+        // no white space, and never past a backslash that escapes no space.
+        let found = paths("x\u{85}@.env\u{85}y\n");
+        assert!(found.contains(&".env\u{85}y".to_string()), "{found:?}");
+        let found = paths("@docs\\notes.md\n");
+        assert!(found == ["docs"], "{found:?}");
+        // A comment that does not close on its line stays in the HTML block it opens; removed
+        // from the whole text, it goes.
+        let found = paths("<!-- a -->@.e<!-- b\n-->nv\n");
         assert!(
-            imports.contains(&"docs\\notes.md".to_string()),
-            "{imports:?}"
+            found.contains(&".e<!--".to_string()) && found.contains(&".env".to_string()),
+            "{found:?}"
         );
-        assert!(imports.contains(&"docs".to_string()), "{imports:?}");
+        // In that block, a comment that closes on its line goes, and the first that does not
+        // stays, with the rest of the word: `.env<!--` is the path Claude Code reads.
+        let found = paths("<!-- a -->@.e<!-- x -->nv<!-- y\n-->z\n");
+        assert!(
+            found.contains(&".env<!--".to_string()) && found.contains(&".envz".to_string()),
+            "{found:?}"
+        );
     }
 
-    /// Words that each start inside the one before, after an escaped character, an unmatched
-    /// `[` or an entity, are refused at once: reading every one of them every way would take a
-    /// file as large as the check reads minutes and gigabytes (preflight-1). A word that only
-    /// U+0085 starts ends at the next U+0085, so a file of those is read, and so is an ordinary
-    /// file as large, to its end.
+    /// A file built to cost more than its budget is refused at once, never read in part: words
+    /// cut at punctuation in many places, words that each start inside the one before, or that
+    /// run across comments (preflight-1, D-L), each within the length a word may run for. Text
+    /// where no word starts costs nothing, however a Markdown parser would take it
+    /// (preflight-parser-cost-unbudgeted), and an ordinary file as large as the check reads is
+    /// read to its end.
     #[test]
-    fn words_that_start_inside_one_another_are_refused_at_once() {
+    fn a_file_too_costly_to_read_is_refused_at_once() {
         let size = MAX_MEMORY_FILE_BYTES as usize;
-        // Generous for a debug build on a slow machine; reading them all took hours.
+        // Generous for a debug build on a slow machine.
         let bound = Duration::from_secs(20);
-        for unit in ["\\@", "[@", "&amp;@"] {
-            let text = unit.repeat(size / unit.len());
+        for unit in [
+            "@",
+            "[@",
+            "&amp;@",
+            "@a\u{85}",
+            "@<!---->",
+            "@x<!-- -->",
+            "@a\\[",
+            "[@x\\]",
+            "@\\]",
+        ] {
+            // Lines of words shorter than MAX_WORD_CHARS.
+            let line = format!("{}\n", unit.repeat(4000 / unit.chars().count()));
+            let text = line.repeat(size / line.len());
             let started = std::time::Instant::now();
-            assert_eq!(imports_in(&text), None, "{unit:?}");
+            assert_eq!(imports_in(&text), Err(Unread::Costly), "{unit:?}");
             assert!(
                 started.elapsed() < bound,
                 "{unit:?}: {:?}",
                 started.elapsed()
             );
         }
+        for text in [
+            format!("</{}", "<!--".repeat((size - 2) / 4)),
+            "*a_ ".repeat(size / 4),
+            // Each word ends where it starts.
+            "\\@".repeat(size / 2),
+        ] {
+            let started = std::time::Instant::now();
+            assert_eq!(imports_in(&text), Ok(Vec::new()));
+            assert!(started.elapsed() < bound, "{:?}", started.elapsed());
+        }
 
-        // The first word starts the line and reads on as Claude Code's pattern reads it; each
-        // word after a U+0085 ends at the next one.
-        let text = "@a\u{85}".repeat(size / "@a\u{85}".len());
-        let started = std::time::Instant::now();
-        let imports = imports_in(&text).unwrap();
-        assert!(started.elapsed() < bound, "{:?}", started.elapsed());
-        assert_eq!(imports.len(), 2);
-        assert!(imports[0] == text[1..] && imports[1] == "a");
-        let imports = imports_in("x\u{85}@.env\u{85}y @a\u{85}b\n").unwrap();
-        assert_eq!(imports, [".env", "a\u{85}b", "a"]);
-
-        // An ordinary file as large as the check reads is read to its end.
         let line = "See @docs/a.md, then @b.md.\n";
         let mut text = line.repeat(size / line.len() - 1);
         text.push_str("Last, @c.md\n");
         assert!(text.len() <= size);
         let started = std::time::Instant::now();
-        let imports = imports_in(&text).unwrap();
+        let found = paths(&text);
         assert!(started.elapsed() < bound, "{:?}", started.elapsed());
         assert_eq!(
-            imports,
-            ["docs/a.md", "docs/a.md,", "b.md", "b.md.", "c.md"]
+            found,
+            [
+                "docs",
+                "docs/",
+                "docs/a",
+                "docs/a.",
+                "docs/a.md",
+                "docs/a.md,",
+                "b",
+                "b.",
+                "b.md",
+                "b.md.",
+                "c",
+                "c.",
+                "c.md"
+            ]
+        );
+    }
+
+    /// A word longer than MAX_WORD_CHARS refuses its file, never read in part
+    /// (superset-word-cap-truncates): Claude Code resolves `..` as written, so the end of a long
+    /// word can bring it back to a short path. A word of MAX_WORD_CHARS characters is read whole.
+    #[test]
+    fn a_word_longer_than_the_check_reads_is_refused() {
+        let long = "a".repeat(MAX_WORD_CHARS);
+        let half = "a".repeat(MAX_WORD_CHARS / 2);
+        for text in [
+            format!("@{long}/../.env\n"),
+            format!("@{long}\\ x\n"),
+            // Longer once a link's escaped bracket is read, or once a comment is removed.
+            format!("[@{}\\]/../.env](u)\n", &long[1..]),
+            format!("<!-- a -->@{half}<!-- b -->{half}/../.env\n"),
+        ] {
+            assert_eq!(imports_in(&text), Err(Unread::LongWord), "{}", text.len());
+        }
+        // At once, whatever follows.
+        let text = format!("@{}", "a.".repeat((MAX_MEMORY_FILE_BYTES as usize - 1) / 2));
+        let started = std::time::Instant::now();
+        assert_eq!(imports_in(&text), Err(Unread::LongWord));
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let found = paths(&format!("See @{long} here, and @{long}"));
+        assert_eq!(found, [long]);
+    }
+
+    /// A short file whose few long lines are dense with `@`s and punctuation, as minified JSON in a
+    /// code block is, is read within its budget (budget-allowance-refuses-dense-benign-lines): each
+    /// `@` there starts a word that runs to the line's end.
+    #[test]
+    fn a_short_file_of_minified_lines_is_read() {
+        let dependencies: Vec<String> = (0..16)
+            .map(|n| format!("\"@scope-{n}/package-{n}\":\"^{n}.2.3\""))
+            .collect();
+        let text = format!(
+            "# Project\n\nUse pnpm.\n\n```json\n{{\"name\":\"app\",\"dependencies\":{{{}}}}}\n```\n",
+            dependencies.join(",")
+        );
+        assert!(text.len() < 1024, "{}", text.len());
+        let found = paths(&text);
+        assert!(
+            found.contains(&"scope-0/package-0".to_string()),
+            "{found:?}"
         );
     }
 
@@ -1369,23 +1776,206 @@ mod tests {
         git(space.path(), &["add", "AGENTS.md"]);
         assert_eq!(code_of(space.path()).await, Some(FailureCode::UnsafeImport));
 
-        // An import inside code, or of a file that is not there, loads nothing.
+        // An import of a file that is not there, or of a folder, loads nothing.
         let space = seeded_space();
         write(
             space.path(),
             "AGENTS.md",
-            "`@~/.ssh/config`\n```\n@/etc/hosts\n```\n@docs/missing.md\n",
+            "@docs/missing.md, @docs/ and @docs\n",
         );
         git(space.path(), &["add", "AGENTS.md"]);
         assert_eq!(code_of(space.path()).await, None);
+
+        // One inside code is read too, unlike Claude Code's reading (D-L).
+        for text in ["`@~/.ssh/config`\n", "```\n@/etc/hosts\n```\n"] {
+            let space = seeded_space();
+            write(space.path(), "AGENTS.md", text);
+            git(space.path(), &["add", "AGENTS.md"]);
+            assert_eq!(
+                code_of(space.path()).await,
+                Some(FailureCode::UnsafeImport),
+                "{text:?}"
+            );
+        }
     }
 
-    /// Each way of writing an import that only CommonMark, or Claude Code's own pattern, reads as
-    /// one is refused end to end when it brings in an untracked `.env` (preflight-1).
+    /// A path alias names no file: an absolute import whose first name the filesystem's root does
+    /// not hold loads nothing, in code or not, beside an untracked `.env`
+    /// (false-refusals-absolute-home-outside-anywhere). One below an entry the root holds may be a
+    /// file outside the folder, and is refused without being looked up further, `..` read as
+    /// written first.
     #[cfg(unix)]
     #[tokio::test]
-    async fn an_import_hidden_from_a_line_reading_is_still_refused() {
+    async fn an_absolute_import_below_no_entry_of_the_root_names_nothing() {
         for text in [
+            "```tsx\nimport { Button } from \"@/components/ui/button\"\n```\n",
+            "Use the `@/` alias, as in `@/hooks/use-toast`.\n",
+            "\"paths\": { \"@/*\": [\"./src/*\"] }\n",
+            "const utils = require('@/utils')\n",
+            "See @/ and @/./components/../hooks.\n",
+        ] {
+            let space = seeded_space();
+            write(space.path(), ".env", "SECRET=1\n");
+            write(space.path(), "AGENTS.md", text);
+            git(space.path(), &["add", "AGENTS.md"]);
+            assert_eq!(code_of(space.path()).await, None, "{text:?}");
+        }
+        for (text, named) in [
+            ("```sh\ncurl -d @/etc/hosts\n```\n", "@/etc/hosts"),
+            ("See @/../etc/hosts\n", "@/../etc/hosts"),
+            (
+                "See @/components/../etc/hosts\n",
+                "@/components/../etc/hosts",
+            ),
+        ] {
+            let space = seeded_space();
+            write(space.path(), "AGENTS.md", text);
+            git(space.path(), &["add", "AGENTS.md"]);
+            let failure = check(space.path()).await.unwrap_err();
+            assert_eq!(
+                failure.code,
+                Some(FailureCode::UnsafeImport),
+                "{text:?}: {failure:?}"
+            );
+            assert!(
+                failure
+                    .message
+                    .ends_with(&format!(": AGENTS.md brings in {named}.")),
+                "{failure:?}"
+            );
+        }
+    }
+
+    /// Claude Code reads `~` as the home folder only before `/`: a version range after `@~`, in
+    /// code or not, is a path like any other, which names nothing here
+    /// (false-refusals-absolute-home-outside-anywhere). A `~/` path is still refused.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_a_tilde_before_a_slash_is_the_home_folder() {
+        let space = seeded_space();
+        write(space.path(), ".env", "SECRET=1\n");
+        write(
+            space.path(),
+            "AGENTS.md",
+            "`pnpm add zod@~3.22.4`, then `npm i lodash@~4.17.21` and @~ alone.\n",
+        );
+        git(space.path(), &["add", "AGENTS.md"]);
+        assert_eq!(code_of(space.path()).await, None);
+        // A path like any other: an untracked file of that name may not load.
+        write(space.path(), "~3.22.4", "x");
+        let failure = check(space.path()).await.unwrap_err();
+        assert_eq!(failure.code, Some(FailureCode::UnsafeImport), "{failure:?}");
+        assert!(
+            failure.message.ends_with(": AGENTS.md brings in @~3.22.4."),
+            "{failure:?}"
+        );
+
+        let space = seeded_space();
+        write(space.path(), "AGENTS.md", "Notes live in `@~/notes.md`\n");
+        git(space.path(), &["add", "AGENTS.md"]);
+        let failure = check(space.path()).await.unwrap_err();
+        assert_eq!(failure.code, Some(FailureCode::UnsafeImport), "{failure:?}");
+        assert!(
+            failure
+                .message
+                .ends_with(": AGENTS.md brings in @~/notes.md`."),
+            "{failure:?}"
+        );
+    }
+
+    /// Claude Code opens every path it resolves in its NFC form, so the root is asked for a name
+    /// in that form too: a folder that compares names exactly holds the two apart.
+    #[test]
+    fn a_name_is_looked_up_as_written_and_as_claude_code_opens_it() {
+        assert_eq!(spellings("components"), ["components"]);
+        assert_eq!(spellings("caf\u{e9}"), ["caf\u{e9}"]);
+        assert_eq!(spellings("cafe\u{301}"), ["cafe\u{301}", "caf\u{e9}"]);
+    }
+
+    /// A path out of the folder is read as Claude Code resolves it, `..` as written: it names a
+    /// folder above the folder only when nothing below where it climbed to is left.
+    #[test]
+    fn a_folder_above_is_read_with_dot_dot_as_written() {
+        for (base, import, above) in [
+            ("", "..", true),
+            ("", "../..", true),
+            ("", "./../.", true),
+            ("docs", "../..", true),
+            ("", "../x/..", true),
+            ("docs", "../../x/../..", true),
+            ("", "../x", false),
+            ("", "../x/../y", false),
+            ("", "../../x/.", false),
+            // Inside the folder.
+            ("docs", "..", false),
+            ("", "x/..", false),
+        ] {
+            assert_eq!(
+                leads_to_a_folder_above(Path::new(base), Path::new(import)),
+                above,
+                "{base:?} {import:?}"
+            );
+        }
+    }
+
+    /// `..` out of the folder names a folder above it, which loads nothing, in code or not
+    /// (false-refusals-absolute-home-outside-anywhere). A path that climbs out and, `..` read as
+    /// written, names anything below where it climbed to is still refused, without being looked
+    /// up.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_above_the_folder_loads_nothing() {
+        let space = seeded_space();
+        write(space.path(), ".env", "SECRET=1\n");
+        write(
+            space.path(),
+            "AGENTS.md",
+            "Read @docs/style.md. Imports look like @... here, or @.. and @../.. too.\n",
+        );
+        write(space.path(), "docs/style.md", "Up: `@../..` and @../../\n");
+        git(space.path(), &["add", "AGENTS.md", "docs/style.md"]);
+        assert_eq!(code_of(space.path()).await, None);
+
+        for (text, named) in [
+            ("```sh\ncat @../README.md\n```\n", "@../README.md"),
+            ("See @../../.. and @../x/../y here.\n", "@../x/../y"),
+        ] {
+            let space = seeded_space();
+            write(space.path(), "AGENTS.md", text);
+            git(space.path(), &["add", "AGENTS.md"]);
+            let failure = check(space.path()).await.unwrap_err();
+            assert_eq!(
+                failure.code,
+                Some(FailureCode::UnsafeImport),
+                "{text:?}: {failure:?}"
+            );
+            assert!(
+                failure
+                    .message
+                    .ends_with(&format!(": AGENTS.md brings in {named}.")),
+                "{failure:?}"
+            );
+        }
+    }
+
+    /// Each way of writing an import a review found is refused end to end when it brings in an
+    /// untracked `.env`, and the refusal names the longest path of the word that may not load
+    /// (preflight-1, preflight-list-item-codespans, preflight-paragraph-interrupt-differences,
+    /// preflight-escape-does-not-end-word).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_way_of_writing_an_import_is_refused_end_to_end() {
+        for text in [
+            "# Rules\n\n- Never run `cat @.env | less` in a shared terminal.\n",
+            "1. Use `` @.env `` here\n",
+            "Read this first.\n```text @.env",
+            "Read the notes.\n <div>@.env\n",
+            "<!-- c -->@.env\n",
+            "<!-- a -->@.e<!-- b -->nv\n",
+            "**Note**@.env\\#\n",
+            "<b>@.env\\@\n",
+            "See @.env#x here.\n",
+            "Never `@.env`.\n",
             "Read \\` @.env \\` first.\n",
             "See <b title=\"`\"> @.env <i title=\"`\"> here.\n",
             "```js`\n@.env\n",
@@ -1400,29 +1990,70 @@ mod tests {
             let space = seeded_space();
             write(space.path(), "AGENTS.md", text);
             git(space.path(), &["add", "AGENTS.md"]);
+            assert_eq!(code_of(space.path()).await, None, "no .env: {text:?}");
             write(space.path(), ".env", "SECRET=1\n");
+            let failure = check(space.path()).await.unwrap_err();
             assert_eq!(
-                code_of(space.path()).await,
+                failure.code,
                 Some(FailureCode::UnsafeImport),
-                "{text:?}"
+                "{text:?}: {failure:?}"
+            );
+            assert!(
+                failure.message.ends_with(": AGENTS.md brings in @.env."),
+                "{text:?}: {failure:?}"
             );
         }
-        // In a code span it loads nothing.
+        // A home folder import is named by its whole path, not by each part of it.
         let space = seeded_space();
-        write(space.path(), "AGENTS.md", "Never `@.env`.\n");
+        write(
+            space.path(),
+            "AGENTS.md",
+            "1. Use `` @~/.ssh/id_rsa `` here\n",
+        );
         git(space.path(), &["add", "AGENTS.md"]);
+        let failure = check(space.path()).await.unwrap_err();
+        assert_eq!(failure.code, Some(FailureCode::UnsafeImport));
+        assert!(
+            failure
+                .message
+                .ends_with(": AGENTS.md brings in @~/.ssh/id_rsa."),
+            "{failure:?}"
+        );
+
+        // A link's text, whose escaped brackets Claude Code reads as brackets
+        // (superset-link-text-escaped-brackets): named by the path it reads.
+        let space = seeded_space();
+        write(
+            space.path(),
+            "AGENTS.md",
+            "Read [@x\\]/../.env](https://example.invalid) first.\n",
+        );
+        git(space.path(), &["add", "AGENTS.md"]);
+        assert_eq!(code_of(space.path()).await, None, "no .env");
         write(space.path(), ".env", "SECRET=1\n");
-        assert_eq!(code_of(space.path()).await, None);
+        let failure = check(space.path()).await.unwrap_err();
+        assert_eq!(failure.code, Some(FailureCode::UnsafeImport), "{failure:?}");
+        assert!(
+            failure
+                .message
+                .ends_with(": AGENTS.md brings in @x]/../.env."),
+            "{failure:?}"
+        );
     }
 
-    /// A tracked memory file whose words start inside one another is refused as
-    /// `preflight_failed` at once, by its name, wherever it is (preflight-1). An ordinary memory
-    /// file as large as the check reads is read to its end.
+    /// A tracked memory file built to cost more than its budget is refused as `preflight_failed`
+    /// at once, by its name, wherever it is (preflight-1), and so is one with a word longer than
+    /// the check reads (superset-word-cap-truncates). An ordinary memory file as large as the
+    /// check reads is read to its end.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_memory_file_too_costly_to_read_is_refused() {
         let space = seeded_space();
-        write(space.path(), "docs/CLAUDE.md", &"\\@".repeat(300_000));
+        write(
+            space.path(),
+            "docs/CLAUDE.md",
+            &format!("{}\n", "@".repeat(4000)).repeat(75),
+        );
         git(space.path(), &["add", "docs/CLAUDE.md"]);
         let started = std::time::Instant::now();
         let failure = check(space.path()).await.unwrap_err();
@@ -1440,6 +2071,28 @@ mod tests {
             failure
                 .message
                 .contains("docs/CLAUDE.md has too many @ imports for Instafy to check"),
+            "{failure:?}"
+        );
+
+        // A word whose end brings it back to the untracked .env, read in part, would pass.
+        let space = seeded_space();
+        write(space.path(), ".env", "SECRET=1\n");
+        write(
+            space.path(),
+            "AGENTS.md",
+            &format!("See @{}/../.env\n", "a".repeat(MAX_WORD_CHARS)),
+        );
+        git(space.path(), &["add", "AGENTS.md"]);
+        let failure = check(space.path()).await.unwrap_err();
+        assert_eq!(
+            failure.code,
+            Some(FailureCode::PreflightFailed),
+            "{failure:?}"
+        );
+        assert!(
+            failure
+                .message
+                .contains("AGENTS.md has an @ import too long for Instafy to check"),
             "{failure:?}"
         );
 
@@ -1744,5 +2397,274 @@ mod tests {
         // Whatever it holds.
         write(folder, "app/.claude/agents/x.md", "x");
         assert_eq!(code_of(folder).await, Some(FailureCode::PreflightFailed));
+    }
+
+    /// The memory files Instafy seeds, as they are now and as every earlier version was, pass
+    /// in a space whose repository tracks them and in one whose repository is the person's own
+    /// (D-B), beside an untracked `.env`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_memory_files_instafy_seeds_pass() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let assets = manifest.join("assets/instafy");
+        let mut versions: Vec<(&str, PathBuf)> = ["CLAUDE.md", "AGENTS.md", "INSTAFY.md"]
+            .into_iter()
+            .map(|name| (name, assets.join(name)))
+            .collect();
+        for entry in std::fs::read_dir(manifest.join("src/jobs/legacy")).unwrap() {
+            let path = entry.unwrap().path();
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let name = if file.starts_with("claude-doc-") {
+                "CLAUDE.md"
+            } else if file.starts_with("agents-doc-") {
+                "AGENTS.md"
+            } else if file.starts_with("instafy-doc-") {
+                "INSTAFY.md"
+            } else {
+                continue;
+            };
+            versions.push((name, path));
+        }
+        assert!(versions.len() > 20, "{versions:?}");
+        for tracked in [true, false] {
+            let space = own_repository();
+            write(space.path(), ".env", "SECRET=1\n");
+            for (name, path) in &versions {
+                std::fs::copy(path, space.path().join(name)).unwrap();
+                if tracked {
+                    git(space.path(), &["add", name]);
+                }
+                assert_eq!(
+                    code_of(space.path()).await,
+                    None,
+                    "{path:?}, tracked: {tracked}"
+                );
+            }
+        }
+    }
+
+    /// A memory file reached by several paths, through a link or by names a Mac's folder reads
+    /// as the same, is read once, and what it imports is still resolved from each of those paths
+    /// (preflight-parser-cost-unbudgeted).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_memory_file_reached_by_several_paths_is_read_once() {
+        let space = seeded_space();
+        write(
+            space.path(),
+            "AGENTS.md",
+            "@notes/slow.md @notes/SLOW.md @notes/Slow.md @alias.md\n",
+        );
+        write(space.path(), "notes/slow.md", "See @sibling.md\n");
+        write(space.path(), "notes/sibling.md", "Sibling.\n");
+        link(space.path(), "alias.md", "notes/slow.md");
+        git(space.path(), &["add", "AGENTS.md", "notes", "alias.md"]);
+        let folder = Folder::read(
+            space.path(),
+            tracked_files(space.path(), Repository::Folder)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        // CLAUDE.md, AGENTS.md, notes/slow.md and notes/sibling.md, each once.
+        assert_eq!(check_imports(&folder, &AtomicBool::new(false)).unwrap(), 4);
+
+        // Through alias.md, notes/slow.md's `@sibling.md` is the root's, which git does not
+        // track.
+        write(space.path(), "sibling.md", "Untracked.\n");
+        let folder = Folder::read(
+            space.path(),
+            tracked_files(space.path(), Repository::Folder)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let failure = check_imports(&folder, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(failure.code, Some(FailureCode::UnsafeImport), "{failure:?}");
+        assert!(
+            failure.message.contains("alias.md brings in @sibling.md"),
+            "{failure:?}"
+        );
+    }
+
+    /// One pre-flight resolves a bounded number of candidates: memory files that give more are
+    /// refused as `preflight_failed`, though each is within its own reading budget.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn memory_files_with_too_many_candidates_are_refused() {
+        // Five candidates a word: d0, d0/, d0/a0, d0/a0. and d0/a0.md.
+        let words =
+            |count: usize| -> String { (0..count).map(|n| format!("@d{n}/a{n}.md ")).collect() };
+        let space = seeded_space();
+        write(space.path(), "AGENTS.md", &words(3_000));
+        git(space.path(), &["add", "AGENTS.md"]);
+        assert_eq!(code_of(space.path()).await, None);
+        write(
+            space.path(),
+            "AGENTS.md",
+            &words(MAX_IMPORT_CANDIDATES / 5 + 1),
+        );
+        git(space.path(), &["add", "AGENTS.md"]);
+        let failure = check(space.path()).await.unwrap_err();
+        assert_eq!(
+            failure.code,
+            Some(FailureCode::PreflightFailed),
+            "{failure:?}"
+        );
+        assert!(
+            failure.message.contains("have too many @ imports"),
+            "{failure:?}"
+        );
+    }
+
+    /// The root files Instafy seeds are found once per pre-flight, not again for each import of
+    /// an untracked file: a root of thousands of entries and a memory file of a thousand such
+    /// imports is refused in moments (preflight-seeded-root-rescan).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_seeded_root_files_are_found_once_per_preflight() {
+        let space = own_repository();
+        write(space.path(), "INSTAFY.md", "# Instafy\n");
+        // They sort before the seeded files' names.
+        for n in 0..6_000 {
+            std::fs::write(space.path().join(format!(".a{n:05}")), "").unwrap();
+        }
+        let imports: String = (0..1_000)
+            .map(|n| format!("@a{n:05}/../.git/HEAD\n"))
+            .collect();
+        write(space.path(), "AGENTS.md", &imports);
+        let started = std::time::Instant::now();
+        let failure = check(space.path()).await.unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(failure.code, Some(FailureCode::UnsafeImport), "{failure:?}");
+        assert!(
+            failure
+                .message
+                .contains("AGENTS.md brings in @a00000/../.git/HEAD"),
+            "{failure:?}"
+        );
+        // Generous for a debug build on a slow machine; finding them for each import took 27 s.
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+    }
+
+    /// A tracked path counts for an untracked file only when its own folder entry is that file,
+    /// never when it is a link to it (preflight-tracked-fallback-follows-link). On a
+    /// case-sensitive folder, a teammate's tracked link `Credentials.json` to the person's
+    /// untracked `credentials.json` is read as that same name; here the link's name is made to
+    /// read as the file's, which a Mac's own folder never does.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tracked_link_never_makes_the_file_it_points_at_tracked() {
+        let space = seeded_space();
+        write(space.path(), "credentials.json", "{}");
+        link(space.path(), "credentials-link", "credentials.json");
+        std::fs::hard_link(
+            space.path().join("credentials.json"),
+            space.path().join("credentials-name"),
+        )
+        .unwrap();
+        git(
+            space.path(),
+            &["add", "credentials-link", "credentials-name"],
+        );
+        let mut folder = Folder::read(
+            space.path(),
+            tracked_files(space.path(), Repository::Folder)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let file = folder.canonical.join("credentials.json");
+        let key = name_key("credentials.json");
+        folder
+            .tracked_by_key
+            .insert(key.clone(), vec!["credentials-link".to_string()]);
+        assert!(!is_tracked(&folder, &file));
+        assert!(matches!(
+            resolve_import(&folder, Path::new(""), "credentials.json"),
+            ImportTarget::Unsafe
+        ));
+        // Another name of the same folder entry, as the index may spell it, does count.
+        folder
+            .tracked_by_key
+            .insert(key, vec!["credentials-name".to_string()]);
+        assert!(is_tracked(&folder, &file));
+    }
+
+    #[cfg(unix)]
+    fn named_pipe(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo {path:?}");
+    }
+
+    /// A pre-flight that runs past its deadline is refused as `preflight_failed`, and its git
+    /// command is stopped: here git waits to open an index that is a named pipe, which no one
+    /// writes (preflight-parser-cost-unbudgeted).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_preflight_past_its_deadline_is_refused() {
+        assert_eq!(PREFLIGHT_WITHIN, Duration::from_secs(60));
+        let space = seeded_space();
+        let index = space.path().join(".git/index");
+        std::fs::remove_file(&index).unwrap();
+        named_pipe(&index);
+        let started = std::time::Instant::now();
+        let failure = check_within(space.path(), Duration::from_millis(500))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failure.code,
+            Some(FailureCode::PreflightFailed),
+            "{failure:?}"
+        );
+        assert_eq!(failure.message, TOOK_TOO_LONG);
+        // Well before git's own limit of 30 seconds.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Once the pre-flight has ended (its deadline, or a Stop that dropped it), the work it left
+    /// on its blocking thread stops at its next file (preflight-parser-cost-unbudgeted).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_abandoned_preflight_stops_at_its_next_file() {
+        let space = seeded_space();
+        write(space.path(), "docs/style.md", "See @../.env\n");
+        git(space.path(), &["add", "docs/style.md"]);
+        write(space.path(), ".env", "SECRET=1\n");
+        let entries = tracked_files(space.path(), Repository::Folder)
+            .await
+            .unwrap();
+        let failure =
+            check_folder(space.path(), entries.clone(), &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(failure.code, Some(FailureCode::UnsafeImport), "{failure:?}");
+        let failure =
+            check_folder(space.path(), entries.clone(), &AtomicBool::new(true)).unwrap_err();
+        assert_eq!(
+            failure.code,
+            Some(FailureCode::PreflightFailed),
+            "{failure:?}"
+        );
+
+        // The flag is set once what holds it is dropped.
+        let folder = Folder::read(space.path(), entries).unwrap();
+        let abandoned = Abandoned::default();
+        let flag = abandoned.flag();
+        let failure = check_imports(&folder, &flag).unwrap_err();
+        assert_eq!(failure.code, Some(FailureCode::UnsafeImport), "{failure:?}");
+        drop(abandoned);
+        let failure = check_imports(&folder, &flag).unwrap_err();
+        assert_eq!(
+            failure.code,
+            Some(FailureCode::PreflightFailed),
+            "{failure:?}"
+        );
+        assert!(failure.message.contains("stopped"), "{failure:?}");
     }
 }

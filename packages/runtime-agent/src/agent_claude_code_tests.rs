@@ -1096,6 +1096,99 @@ fn a_stop_before_the_spawn_starts_no_claude() {
     });
 }
 
+/// A Stop while the pre-flight runs ends the turn at once, as a Stop before the spawn does: no
+/// completion, no report, nothing of Claude Code, and the job's locks are released, so the next
+/// turn runs (3.9, preflight-parser-cost-unbudgeted). Here the pre-flight's git waits to open an
+/// index that is a named pipe, which no one writes.
+#[test]
+fn a_stop_during_the_preflight_ends_the_turn_and_the_next_one_runs() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Arc::new(Space::new(&LATCH).await);
+        space.scenario("success");
+        let index = space.folder.join(".git/index");
+        let kept = space.folder.join(".git/index.kept");
+        std::fs::rename(&index, &kept).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&index)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let job = space.job();
+        let running = tokio::spawn({
+            let space = space.clone();
+            let job = job.clone();
+            async move { space.handle(job, 60).await }
+        });
+        // The turn checks the workspace token after its first lease check, then readies the
+        // folder and starts the pre-flight.
+        eventually("the turn verified its workspace token", || {
+            !space.requests_to("/.well-known/jwks.json").is_empty()
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        space.stand_in.stopped.store(true, Ordering::SeqCst);
+        // The heartbeat hears of the Stop within about a second; git would wait 30 seconds.
+        tokio::time::timeout(Duration::from_secs(15), running)
+            .await
+            .expect("the turn ended at the Stop")
+            .unwrap();
+        assert!(space.requests_to("/agent/complete").is_empty());
+        assert!(space.requests_to("/agent/stopped").is_empty());
+        assert!(space.calls().is_empty(), "not even a probe");
+
+        std::fs::remove_file(&index).unwrap();
+        std::fs::rename(&kept, &index).unwrap();
+        space.stand_in.stopped.store(false, Ordering::SeqCst);
+        let next = space.job();
+        tokio::time::timeout(Duration::from_secs(120), space.handle(next.clone(), 0))
+            .await
+            .expect("the next turn ran");
+        let completion = space.completion(next.id);
+        assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
+        assert!(!LATCH.load(Ordering::SeqCst));
+    });
+}
+
+/// The pre-flight's text names no absolute path: git's own words about a broken repository go
+/// through the turn's redactor, as every string the lane sends does (3.6,
+/// preflight-git-error-names-os-user).
+#[test]
+fn a_preflight_failure_names_the_folder_only_relative_to_itself() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::new(&LATCH).await;
+        space.scenario("success");
+        std::fs::rename(space.folder.join(".git"), space.folder.join("git-away")).unwrap();
+        let missing = space.folder.join("missing");
+        write(
+            &space.folder,
+            ".git",
+            &format!("gitdir: {}\n", missing.display()),
+        );
+        let job = space.job();
+        space.handle(job.clone(), 0).await;
+
+        let completion = space.completion(job.id);
+        assert_eq!(
+            failure_code(&completion),
+            Some("preflight_failed"),
+            "{completion:#}"
+        );
+        let message = completion["error_message"].as_str().unwrap();
+        assert!(
+            message.starts_with("git couldn't list this space's files")
+                && message.contains("missing"),
+            "{message}"
+        );
+        assert!(
+            !message.contains(&space.root.display().to_string()),
+            "{message}"
+        );
+        assert!(space.print_calls().is_empty(), "no turn started");
+    });
+}
+
 /// A run that went well whose folder's `git status` cannot be read at its end saves nothing: its
 /// reply is delivered, with a note under it that its changes stayed on this computer (3.8,
 /// step 1).

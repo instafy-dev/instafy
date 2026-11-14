@@ -706,9 +706,12 @@ pub async fn supervise(
         // A process left behind may hold stderr open: what was read by then is kept.
         let _ = reader.join_within(STDERR_WITHIN).await;
     }
+    // Its end may be cut inside a path: a reader stopped between two parts of a write, or a
+    // writer killed in the middle of a line. An end that could be part of the folder's or the
+    // home folder's path is left out, as a draft's is, so no part of either is shown.
     let stderr = adapter
         .redactor()
-        .text(String::from_utf8_lossy(&stderr_tail.bytes()).trim());
+        .draft(String::from_utf8_lossy(&stderr_tail.bytes()).trim());
     adapter.note_ignored(ignored);
 
     let (reason, term_sent) = match stopping {
@@ -999,5 +1002,55 @@ mod tests {
             outcome.end
         );
         assert!(outcome.stderr.contains("TypeError: the turn broke"));
+    }
+
+    /// stderr whose end is cut inside the home folder's path, as when its writer was killed in
+    /// the middle of a line, shows no part of that path: the end is left out, and the rest is
+    /// redacted (stderr-tail-end-cut-path).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stderr_cut_inside_a_path_shows_no_part_of_it() {
+        static LATCH: AtomicBool = AtomicBool::new(false);
+        let folder = tempfile::tempdir().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "cat >/dev/null; printf 'TypeError: x\\n    at (/Users/person/a.js:1:2)\\n    at (/Users/per' >&2; exit 1",
+            ])
+            .current_dir(folder.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let stop = JobCancelSignal::new();
+        let shutdown = ShutdownSignal::new();
+        let mut adapter =
+            EventAdapter::new(folder.path(), Some(std::path::Path::new("/Users/person")));
+        let outcome = supervise(
+            command,
+            TurnSpec {
+                prompt: "Fix the test\n",
+                resumed: false,
+                stop: &stop,
+                shutdown: &shutdown,
+            },
+            &TurnLimits::standard().with_cleanup_latch(&LATCH),
+            &mut adapter,
+            &mut |_| {},
+        )
+        .await;
+        assert!(
+            outcome.stderr.contains("at (~/a.js:1:2)") && !outcome.stderr.contains("/Users/per"),
+            "{}",
+            outcome.stderr
+        );
+        let TurnEnd::Failed(failure) = &outcome.end else {
+            panic!("{:?}", outcome.end);
+        };
+        assert!(
+            failure.message.contains("~/a.js") && !failure.message.contains("/Users/per"),
+            "{failure:?}"
+        );
     }
 }

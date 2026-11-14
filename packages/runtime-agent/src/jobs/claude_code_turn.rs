@@ -7,7 +7,7 @@
 //!    controller token to fall back on.
 //! 3. The folder: made if missing, brought up to date, its scaffold, the controller's pages. A
 //!    pre-turn refresh that refuses saves ends the turn before anything starts.
-//! 4. The pre-flight of 3.9 (`claude_code::preflight`).
+//! 4. The pre-flight of 3.9 (`claude_code::preflight`), which a Stop ends.
 //! 5. The starting point: the folder's `git status` (without one the turn ends here), the record a
 //!    Stop reports from, and the pages of other chats the turn holds.
 //! 6. The per-turn probe, which decides; then whether the lease still holds, as the last step
@@ -31,7 +31,7 @@
 
 use super::*;
 use crate::claude_code::command::{McpConfigFile, turn_command};
-use crate::claude_code::events::{EventAdapter, LaneFailure, PROVIDER};
+use crate::claude_code::events::{EventAdapter, LaneFailure, PROVIDER, Redactor};
 use crate::claude_code::events::{redact_tokens, reply_note};
 use crate::claude_code::job::{LaneJob, failure_artifacts, not_ready_failure, resume_session};
 use crate::claude_code::saves::{KeptOff, kept_off_all, kept_off_sentence};
@@ -189,10 +189,23 @@ impl JobProcessor {
         learn::ensure_project_memory_scaffold_in(&folder, self.scaffold_scope());
         space_pages::take_the_controllers_pages(&folder, &job.payload);
 
-        // 4. The pre-flight: no project configuration, unsafe import or link (3.9).
-        crate::claude_code::preflight::check(&folder)
-            .await
-            .map_err(|failure| lane_error(failure, Vec::new()))?;
+        // 4. The pre-flight: no project configuration, unsafe import or link (3.9). It refuses a
+        // folder it cannot check within its own deadline, and a Stop ends it as a Stop ends the
+        // rest of the turn: no completion, and the job's locks are released. What it says goes
+        // through the turn's redactor, as every string the lane sends does (3.6): git's own words
+        // can name the folder or the home folder.
+        let stop = cancel_signal.clone().unwrap_or_default();
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => bail!("job lease lost while the folder was checked"),
+            checked = crate::claude_code::preflight::check(&folder) => {
+                checked.map_err(|mut failure| {
+                    failure.message = Redactor::new(&folder, lane.grant().snapshot().home())
+                        .text(&failure.message);
+                    lane_error(failure, Vec::new())
+                })?;
+            }
+        }
 
         // 5. Where the turn starts from. Without the folder's status nothing could say what the
         // turn changed, so it never starts.
@@ -254,7 +267,6 @@ impl JobProcessor {
         let mut events: Vec<JsonValue> = Vec::new();
         let runtime_id = registration.runtime_id;
         let job_id = job.id;
-        let stop = cancel_signal.clone().unwrap_or_default();
         let shutdown = self.shutdown_signal();
         let limits = self.claude_code_turn_limits();
         tracing::info!(
