@@ -85,6 +85,20 @@ function createProps(
   };
 }
 
+function pendingDeviceSession(
+  overrides: Partial<NonNullable<CredentialsConnectModalProps["deviceAuthSession"]>> = {},
+): NonNullable<CredentialsConnectModalProps["deviceAuthSession"]> {
+  return {
+    sessionId: "session-1",
+    verificationUrl: "https://auth.openai.com/codex/device",
+    userCode: "ABCD-EFGH",
+    expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    pollIntervalSeconds: 5,
+    status: "pending",
+    ...overrides,
+  };
+}
+
 describe("CredentialsConnectModal", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -532,7 +546,7 @@ describe("CredentialsConnectModal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a readable, expiring code and trusted OpenAI host", async () => {
+  it("lays out device login as two steps, one status row and one quiet line", async () => {
     await act(async () => {
       root.render(
         <CredentialsConnectModal
@@ -540,26 +554,151 @@ describe("CredentialsConnectModal", () => {
             canUseDesktopConnect: false,
             connectModalStep: "codex",
             deviceAuthProvider: "codex",
-            deviceAuthSession: {
-              sessionId: "session-1",
-              verificationUrl: "https://auth.openai.com/codex/device",
-              userCode: "ABCD-EFGH",
-              expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
-              pollIntervalSeconds: 5,
-              status: "pending",
-            },
+            deviceAuthSession: pendingDeviceSession(),
           })}
         />,
       );
     });
 
+    const card = document.querySelector('[data-testid="credentials-codex-device-login"]');
+    expect(card?.textContent).toContain("Approve Instafy on OpenAI's site. This finishes by itself.");
+    const steps = Array.from(card?.querySelectorAll("ol > li") ?? []);
+    expect(steps).toHaveLength(2);
+    expect(steps[0]?.textContent).toContain("Open this page, in any browser");
+    expect(steps[1]?.textContent).toContain("Enter this code there");
+    // The page as people type it into any browser, and the code.
+    expect(
+      document.querySelector('[data-testid="credentials-codex-device-login-url"]')?.textContent,
+    ).toBe("auth.openai.com/codex/device");
+    expect(document.querySelector('[data-testid="credentials-codex-device-code"]')?.textContent).toBe(
+      "ABCD-EFGH",
+    );
+    // One filled action, named for the host it opens.
+    expect(
+      document.querySelector<HTMLButtonElement>('button[aria-label="Open auth.openai.com"]')?.textContent,
+    ).toContain("Open");
+    expect(document.querySelector('[role="status"]')?.textContent).toBe("Waiting for approval…");
+    // The countdown updates every second; it sits next to the live announcement, not inside it.
+    expect(card?.textContent).toMatch(/\d+:\d{2} left/);
+    expect(document.querySelector('[role="status"]')?.textContent).not.toContain("left");
+    expect(card?.textContent).toContain(
+      "Use this code only on auth.openai.com. OpenAI may email you its own sign-in code first.",
+    );
+    expect(card?.textContent).not.toContain("—");
+    expect(document.querySelectorAll('[role="alert"]')).toHaveLength(0);
+  });
+
+  it("copies the link and the code, and selects the text when copying is blocked", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    try {
+      await act(async () => {
+        root.render(
+          <CredentialsConnectModal
+            {...createProps({
+              canUseDesktopConnect: false,
+              connectModalStep: "codex",
+              deviceAuthProvider: "codex",
+              deviceAuthSession: pendingDeviceSession({ sessionId: "session-copy" }),
+            })}
+          />,
+        );
+      });
+      const copyLink = document.querySelector<HTMLButtonElement>('button[aria-label="Copy login link"]');
+      const copyCode = document.querySelector<HTMLButtonElement>('button[aria-label="Copy device code"]');
+      expect(copyLink?.textContent).toBe("Copy");
+
+      await act(async () => copyLink?.click());
+      expect(writeText).toHaveBeenCalledWith("https://auth.openai.com/codex/device");
+      expect(copyLink?.textContent).toBe("Copied");
+      expect(copyCode?.textContent).toBe("Copy");
+
+      // An embedded browser refuses the clipboard write: the text is selected
+      // for a keyboard copy or a long press, with no error block.
+      writeText.mockRejectedValueOnce(new Error("Clipboard write blocked"));
+      await act(async () => copyLink?.click());
+      expect(copyLink?.textContent).toBe("Selected");
+      expect(window.getSelection()?.toString()).toBe("auth.openai.com/codex/device");
+      expect(document.querySelectorAll('[role="alert"]')).toHaveLength(0);
+      expect(document.body.textContent).toContain("Copying is blocked here, so the text is selected.");
+
+      writeText.mockRejectedValueOnce(new Error("Clipboard write blocked"));
+      await act(async () => copyCode?.click());
+      expect(copyCode?.textContent).toBe("Selected");
+      expect(copyLink?.textContent).toBe("Copy");
+      expect(window.getSelection()?.toString()).toBe("ABCD-EFGH");
+      for (const testId of ["credentials-codex-device-code", "credentials-codex-device-login-url"]) {
+        expect(document.querySelector(`[data-testid="${testId}"]`)?.className).toContain("select-all");
+      }
+    } finally {
+      Reflect.deleteProperty(navigator, "clipboard");
+      window.getSelection()?.removeAllRanges();
+    }
+  });
+
+  it("keeps a non-https login link out of the card and the clipboard", async () => {
+    await act(async () => {
+      root.render(
+        <CredentialsConnectModal
+          {...createProps({
+            canUseDesktopConnect: false,
+            connectModalStep: "codex",
+            deviceAuthProvider: "codex",
+            deviceAuthSession: pendingDeviceSession({
+              sessionId: "session-http",
+              verificationUrl: "http://auth.openai.com/codex/device",
+            }),
+          })}
+        />,
+      );
+    });
+
+    expect(document.querySelector('button[aria-label="Copy login link"]')).toBeNull();
+    expect(
+      document.querySelector('[data-testid="credentials-codex-device-login-url"]')?.textContent,
+    ).toBe("auth.openai.com");
+    expect(document.querySelector('button[aria-label="Open auth.openai.com"]')).toBeInstanceOf(
+      HTMLButtonElement,
+    );
     expect(document.body.textContent).toContain("ABCD-EFGH");
-    expect(document.body.textContent).toContain("Open auth.openai.com");
-    expect(document.body.textContent).toContain("Code expires in");
-    expect(document.querySelector('[role="status"]')?.textContent).toBe("Waiting for login…");
-    // The countdown updates every second; it must not be inside the live announcement.
-    expect(document.querySelector('[role="status"]')?.textContent).not.toContain("expires");
-    expect(document.body.textContent).toContain("never ask you to paste your ChatGPT password");
+  });
+
+  it("shows only the failure and its actions once a device login fails", async () => {
+    const onBeginDeviceAuth = vi.fn();
+    const onCancelDeviceAuthSession = vi.fn();
+    await act(async () => {
+      root.render(
+        <CredentialsConnectModal
+          {...createProps({
+            canUseDesktopConnect: false,
+            connectModalStep: "codex",
+            deviceAuthProvider: "codex",
+            deviceAuthSession: pendingDeviceSession({
+              sessionId: "session-expired",
+              status: "failed",
+              error: "The code expired. Get a new one to try again.",
+            }),
+            onBeginDeviceAuth,
+            onCancelDeviceAuthSession,
+          })}
+        />,
+      );
+    });
+
+    expect(Array.from(document.querySelectorAll('[role="alert"]')).map((node) => node.textContent)).toEqual([
+      "The code expired. Get a new one to try again.",
+    ]);
+    // A dead code is not offered for copying.
+    expect(document.body.textContent).not.toContain("ABCD-EFGH");
+    expect(document.querySelector('button[aria-label="Copy device code"]')).toBeNull();
+    const button = (label: string) =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+        (candidate) => candidate.textContent?.trim() === label,
+      );
+    await act(async () => button("Try again")?.click());
+    expect(onBeginDeviceAuth).toHaveBeenCalledWith("codex");
+    await act(async () => button("Back")?.click());
+    expect(onCancelDeviceAuthSession).toHaveBeenCalledTimes(1);
   });
 
   it("offers no code when ChatGPT device-code login is off", async () => {
@@ -607,8 +746,9 @@ describe("CredentialsConnectModal", () => {
       expect(notice?.textContent).toContain("Settings, then Security");
       expect(document.body.textContent).not.toContain("ABCD-EFGH");
       expect(document.querySelector('button[aria-label="Copy device code"]')).toBeNull();
-      expect(document.body.textContent).not.toContain("Open auth.openai.com");
-      expect(document.body.textContent).not.toContain("Code expires in");
+      expect(document.querySelector('button[aria-label="Open auth.openai.com"]')).toBeNull();
+      expect(document.querySelector('[data-testid="credentials-codex-device-login-url"]')).toBeNull();
+      expect(document.body.textContent).not.toMatch(/\d+:\d{2} left/);
       // The raw refusal is not repeated above the card.
       expect(document.body.textContent).not.toContain("generate a new code");
       expect(document.querySelectorAll('[role="alert"]')).toHaveLength(1);
@@ -673,8 +813,8 @@ describe("CredentialsConnectModal", () => {
       );
     });
 
-    expect(document.body.textContent).toContain("Login complete — checking the connection…");
-    expect(document.body.textContent).not.toContain("Waiting for login");
+    expect(document.body.textContent).toContain("Approved. Checking the connection…");
+    expect(document.body.textContent).not.toContain("Waiting for approval");
     expect(document.body.textContent).not.toContain("Try again");
     expect(document.querySelector<HTMLButtonElement>('button[aria-label="Back"]')?.disabled).toBe(true);
     expect(document.querySelector<HTMLButtonElement>('button[aria-label="Close"]')?.disabled).toBe(true);
