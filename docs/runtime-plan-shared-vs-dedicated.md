@@ -35,11 +35,57 @@ Every provider implementation must preserve these invariants:
   metadata or a browser bundle;
 - runtime metadata is treated as untrusted input and reduced to the explicit allowlist before
   it reaches Docker, Compose, cloud-init, or a shell; and
-- lifecycle endpoints require authenticated controller-to-provider traffic.
+- lifecycle endpoints require authenticated controller-to-provider traffic (see
+  [Provider service authentication](#provider-service-authentication)).
 
 Containers on one host share a kernel and Docker daemon. Operators needing a stronger
 tenant boundary should select a dedicated-machine allocator or add a sandbox appropriate to
 their threat model.
+
+## Provider service authentication
+
+The provider service (`runtime-provider-service`) launches, stops, inspects, lists and locates
+runtimes for whoever calls it. A launch request for a custom provider can choose the runtime
+image and the space whose checkout it mounts, so every route, `/healthz` included, requires a
+bearer token:
+
+- Set `PROVIDER_AUTH_TOKEN` to a long random secret (for example `openssl rand -hex 32`) and
+  register the same value as the provider's `authToken`. A provider with `CONTROLLER_URL` set
+  registers itself, with that token, each time it starts; otherwise register it with
+  `POST /providers`. Without `PROVIDER_AUTH_TOKEN` the service refuses to start.
+- `CONTROLLER_INTERNAL_TOKEN` and `CONTROLLER_SERVICE_ROLE_KEY` are controller-wide credentials.
+  The provider sends them, to register, to ask the controller about spaces and to the runtime
+  proxies it starts, but they never stand in for `PROVIDER_AUTH_TOKEN`. The provider never
+  registers them as its own token: the controller would store them with the provider and send
+  them to its endpoint on every call, while it sends its own credentials to no provider but its
+  Instafy Cloud route. The service still accepts them from its caller, for that route.
+- A `docker_pool` provider sends `DOCKER_POOL_AUTH_TOKEN` to its hosts. Give each host's
+  provider service the same value as its `PROVIDER_AUTH_TOKEN`.
+- For local development only, `PROVIDER_ALLOW_UNAUTHENTICATED=1` starts the service without a
+  token. It then checks none and listens on `127.0.0.1:9090`, or on the loopback address
+  `BIND_ADDR` names, and refuses any other address. With a token set, the flag is ignored and
+  `BIND_ADDR` defaults to `0.0.0.0:9090`. `pnpm stack:up` does not need the flag: it gives its
+  provider `PROVIDER_AUTH_TOKEN=dev-provider-token`.
+
+### Upgrading a provider that ran without a token
+
+Earlier releases started without `PROVIDER_AUTH_TOKEN`. With no token at all, the service
+checked none. With only `CONTROLLER_INTERNAL_TOKEN` or `CONTROLLER_SERVICE_ROLE_KEY`, it checked
+that one and registered it as its own token. Such a provider now refuses to start until it has
+a token of its own:
+
+1. Generate a token and set it as the service's `PROVIDER_AUTH_TOKEN`.
+2. If the provider does not register itself, register the same value as its `authToken` with
+   `POST /providers`.
+3. Give any health check that calls `/healthz` the token as well, or check the port instead.
+4. Start the new release.
+
+The controller refuses to change the credential of a provider whose runtimes are running
+(`409`, "provider route is in use"), with one exception: a provider stored without a
+credential may get its first one at any time. A provider that ran without a token therefore
+stays reachable across the upgrade. One that registered a controller credential keeps it until
+its runtimes stop: the controller keeps sending it, the provider still accepts it, and the
+provider's own registration retries until it succeeds.
 
 ## Host pools
 
