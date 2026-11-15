@@ -125,11 +125,37 @@ pub(crate) fn managed_webdev_generation_matches(
             == Some(lease_id)
 }
 
+/// The allocator settings [`apply_provider_overrides`] reads from a provider
+/// row's metadata, the Hetzner API token among them. The controller merges a
+/// provider row's top-level metadata into every launch request, so a row that
+/// holds them would hand them to each runtime: in `RUNTIME_METADATA` and, on
+/// Hetzner, in the server's user-data, which every process on the server can
+/// read. [`runtime_metadata_for_process`] removes them.
+pub(crate) const PROVIDER_CONFIG_METADATA_KEYS: [&str; 12] = [
+    "dockerComposeFile",
+    "dockerService",
+    "dockerProjectPrefix",
+    "dockerRepoHost",
+    "dockerCodexRoot",
+    "hetznerToken",
+    "hetznerServerType",
+    "hetznerImage",
+    "hetznerLocation",
+    "hetznerNetworkId",
+    "hetznerFirewallId",
+    "hetznerUserData",
+];
+
 pub(crate) fn runtime_metadata_for_process(
     provider: &str,
     metadata: Option<&JsonValue>,
 ) -> Option<JsonValue> {
     let mut metadata = metadata?.clone();
+    if let Some(root) = metadata.as_object_mut() {
+        for key in PROVIDER_CONFIG_METADATA_KEYS {
+            root.remove(key);
+        }
+    }
     if !is_exact_managed_provider(provider) {
         return Some(metadata);
     }
@@ -311,6 +337,8 @@ pub fn build_runtime_allocator(config: &ProviderConfig) -> anyhow::Result<DynRun
     build_runtime_allocator_for_kind(config, &provider)
 }
 
+/// Every metadata key read here is provider configuration and must be in
+/// [`PROVIDER_CONFIG_METADATA_KEYS`], so that no runtime receives it.
 fn apply_provider_overrides(
     config: &ProviderConfig,
     provider: &RuntimeProviderConfig,
@@ -525,6 +553,63 @@ mod tests {
             cfg.hetzner_runtime_user_data.as_deref(),
             Some("#cloud-config\nruncmd: []\n")
         );
+    }
+
+    /// The keys `apply_provider_overrides` reads, taken from its source, are exactly the ones
+    /// a runtime never receives.
+    #[test]
+    fn provider_config_metadata_keys_are_every_override_the_allocator_reads() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("fn apply_provider_overrides(")
+            .expect("apply_provider_overrides");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("end of apply_provider_overrides")];
+        let mut read = Vec::new();
+        for call in ["string(\"", "meta.get(\""] {
+            let mut rest = body;
+            while let Some(found) = rest.find(call) {
+                let key = &rest[found + call.len()..];
+                let end = key.find('"').expect("closing quote");
+                read.push(&key[..end]);
+                rest = &key[end..];
+            }
+        }
+        read.sort_unstable();
+        read.dedup();
+        let mut listed = PROVIDER_CONFIG_METADATA_KEYS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(read, listed);
+    }
+
+    #[test]
+    fn a_runtime_never_receives_provider_configuration() {
+        // The controller merges a provider row's top-level metadata into each launch request.
+        let mut metadata = serde_json::Map::new();
+        for key in PROVIDER_CONFIG_METADATA_KEYS {
+            metadata.insert(key.to_string(), json!(format!("provider-{key}")));
+        }
+        metadata.insert("source".to_string(), json!("ui"));
+        metadata.insert(
+            "env".to_string(),
+            json!({ "INSTAFY_ENABLE_BROWSER_SESSION": "1" }),
+        );
+        let metadata = JsonValue::Object(metadata);
+
+        for provider in ["hetzner", "external-http", "instafy-cloud"] {
+            let process =
+                runtime_metadata_for_process(provider, Some(&metadata)).expect("process metadata");
+            let root = process.as_object().expect("object");
+            for key in PROVIDER_CONFIG_METADATA_KEYS {
+                assert!(!root.contains_key(key), "{provider} kept {key}");
+            }
+            assert_eq!(root.get("source"), Some(&json!("ui")), "{provider}");
+            assert_eq!(
+                process["env"]["INSTAFY_ENABLE_BROWSER_SESSION"],
+                json!("1"),
+                "{provider}"
+            );
+        }
     }
 
     #[tokio::test]

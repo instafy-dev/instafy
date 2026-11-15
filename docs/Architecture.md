@@ -604,7 +604,45 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   `docker inspect` as whole JSON entries, so no value can pose as another
   variable.
 - Hetzner user-data templates may include `{{RUNTIME_AGENT_IMAGE}}`; when present, the allocator will substitute `metadata.runtimeAgentImage` (or `runtime_agent_image`) into the cloud-init payload. The Docker allocator's `RUNTIME_AGENT_IMAGE_FROM_REQUEST` does not apply to it.
-- Hetzner templates can also consume dynamic runtime env data via `{{RUNTIME_ENV_FLAGS}}` (shell `-e KEY='value'` segment) or `{{RUNTIME_ENV_EXPORTS}}` (`export KEY='value'` lines). This includes controller lease/origin env plus `metadata.env` overrides such as `INSTAFY_ENABLE_BROWSER_SESSION=1`.
+- Hetzner templates can also consume the runtime's env through
+  `{{RUNTIME_ENV_FLAGS}}` (one shell segment of `-e KEY='value'` words) or
+  `{{RUNTIME_ENV_EXPORTS}}` (`export KEY='value'` lines). Put the exports
+  placeholder on a line of its own: every line it writes keeps that line's
+  indentation, so the exports stay inside a YAML block scalar. A template
+  without `{{RUNTIME_ENV_FLAGS}}` gets the flags just before each
+  `{{RUNTIME_AGENT_IMAGE}}` that follows a space. The env holds the
+  allocator's own runtime, lease and origin values, which a request cannot
+  override, plus the request's `metadata.env` entries the provider takes:
+  exact `instafy_cloud` takes only the managed launch keys, and any other
+  provider takes those and the runtime container's own settings
+  (`RUNTIME_CONTAINER_ENV_KEYS` in `allocator/hetzner.rs`), such as
+  `INSTAFY_ENABLE_BROWSER_SESSION=1`. Every other key is dropped.
+- Much of a Hetzner template's input comes from the launch request, so the
+  allocator fills a template in one pass, in which no value reads as another
+  placeholder, and writes each value to read back unchanged in a shell command,
+  in a YAML plain or block scalar and after a `## template: jinja` render. Env
+  values become single-quoted shell words. JSON (`{{RUNTIME_METADATA_JSON}}`,
+  `{{ORIGIN_METADATA_JSON}}`, `RUNTIME_METADATA`, `ORIGIN_METADATA` and object
+  or array env values) writes every string character other than an ASCII
+  letter, digit, space or `_ . , / @ + = -` as a `\uXXXX` escape.
+  `{{RUNTIME_TOKEN}}`, `{{ORIGIN_MODE}}` and each origin protocol must be
+  empty or a letter or digit followed by letters, digits and `. _ + -`, or the
+  launch fails. A request's `runtimeAgentImage` must be a plain image
+  reference (a letter or digit, then letters, digits and `. _ / : @ + -`), or
+  the provider's `RUNTIME_AGENT_IMAGE` applies, which must pass the same
+  check. An env value with a line break, tab or other control character fails
+  the launch, since no YAML scalar can carry it. Keep placeholders in a shell script or in
+  a YAML plain or block scalar: a quoted or flow-style YAML value does not keep
+  them intact.
+- The controller copies a provider row's metadata, allocator settings
+  included, into each launch request. `RUNTIME_METADATA` and
+  `{{RUNTIME_METADATA_JSON}}` drop those settings (`hetznerToken`,
+  `hetznerUserData` and the rest of `PROVIDER_CONFIG_METADATA_KEYS` in
+  `allocator/mod.rs`), for the Docker allocator as well, so no runtime
+  receives them. Every process on a Hetzner server, containers included, can
+  still read the server's user-data, the runtime token among it, from the
+  metadata service, so a template that must carry another secret should block
+  `169.254.169.254` for the runtime's containers.
 
 ## AI Proxy
 All automation must route through the proxy. Do not call OpenAI/Anthropic directly. A
