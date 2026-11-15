@@ -379,12 +379,11 @@ fn parse_porcelain_v1_z(raw: &[u8]) -> Result<BTreeMap<String, String>> {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command as StdCommand;
 
     use super::*;
 
     fn git(repo: &Path, args: &[&str]) -> Result<()> {
-        let output = StdCommand::new("git")
+        let output = crate::test_support::plain_git()
             .args(args)
             .current_dir(repo)
             .output()?;

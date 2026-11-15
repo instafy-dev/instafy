@@ -298,14 +298,12 @@ fn hash_reader(file: &mut File, hash: &mut u64, max_bytes: usize) -> std::io::Re
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command as StdCommand;
-
     use anyhow::{Context, Result, ensure};
 
     use super::*;
 
     fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
-        let output = StdCommand::new("git")
+        let output = crate::git_env::git_command()
             .args(args)
             .current_dir(repo)
             .output()?;

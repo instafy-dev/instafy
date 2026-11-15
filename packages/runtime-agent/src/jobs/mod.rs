@@ -5712,6 +5712,11 @@ async fn run_single_agent_routing_pre_observation_command(
     command: RoutingPreObservationCommand,
 ) -> RoutingPreObservation {
     let mut process = Command::new(command.program.as_str());
+    // An observation reads the workspace's own repository, never the one an inherited GIT_DIR or
+    // GIT_INDEX_FILE names (crate::git_env).
+    for key in origin_http_server::git::REPOSITORY_ENV {
+        process.env_remove(key);
+    }
     process
         .args(&command.args)
         .current_dir(workspace_dir)
@@ -30125,7 +30130,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let initialized = std::process::Command::new("git")
+        let initialized = crate::git_env::git_command()
             .args(["init", "--quiet"])
             .arg(&workspace)
             .output()
@@ -30268,7 +30273,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let initialized = std::process::Command::new("git")
+        let initialized = crate::git_env::git_command()
             .args(["init", "--quiet"])
             .arg(&workspace)
             .output()
@@ -30325,7 +30330,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let initialized = std::process::Command::new("git")
+        let initialized = crate::git_env::git_command()
             .args(["init", "--quiet"])
             .arg(&workspace)
             .output()
@@ -31499,7 +31504,7 @@ mod tests {
     #[tokio::test]
     async fn routing_pre_observation_runs_safe_command() {
         let tmp = tempdir().expect("temp dir");
-        let init = std::process::Command::new("git")
+        let init = crate::git_env::git_command()
             .arg("init")
             .arg(tmp.path())
             .status()
@@ -31519,7 +31524,17 @@ mod tests {
 
         assert_eq!(observation.command, "git status --short");
         assert_eq!(observation.exit_code, Some(0));
-        assert!(observation.output.contains("README.md"));
+        let changes: Vec<&str> = observation
+            .output
+            .lines()
+            .filter(|line| !line.starts_with("## "))
+            .collect();
+        assert_eq!(
+            changes,
+            ["?? README.md"],
+            "the status of the workspace's own repository: {}",
+            observation.output
+        );
     }
 
     #[tokio::test]
@@ -31621,7 +31636,7 @@ mod tests {
     async fn routing_pre_observation_runs_instafy_canonical_git_workspace() {
         let tmp = tempdir().expect("temp dir");
         fs::create_dir_all(tmp.path().join(".instafy")).expect("create .instafy");
-        let init = std::process::Command::new("git")
+        let init = crate::git_env::git_command()
             .arg("--git-dir")
             .arg(tmp.path().join(".instafy").join(".git"))
             .arg("--work-tree")
@@ -31645,7 +31660,17 @@ mod tests {
 
         assert_eq!(observation.command, "instafy git status --short --branch");
         assert_eq!(observation.exit_code, Some(0));
-        assert!(observation.output.contains("README.md"));
+        let changes: Vec<&str> = observation
+            .output
+            .lines()
+            .filter(|line| !line.starts_with("## "))
+            .collect();
+        assert_eq!(
+            changes,
+            ["?? README.md"],
+            "the status of the workspace's own repository: {}",
+            observation.output
+        );
     }
 
     #[test]
@@ -36912,7 +36937,7 @@ mod tests {
         fs::create_dir_all(ws.join(".instafy")).expect("instafy folder");
         let git = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
-            let output = std::process::Command::new("git")
+            let output = crate::git_env::git_command()
                 .args(canonical_git_args(ws, &args))
                 .current_dir(ws)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -37045,7 +37070,7 @@ mod tests {
         fs::create_dir_all(ws.join(".instafy")).expect("instafy folder");
         let git = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
-            let output = std::process::Command::new("git")
+            let output = crate::git_env::git_command()
                 .args(canonical_git_args(ws, &args))
                 .current_dir(ws)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -39278,7 +39303,7 @@ mod tests {
     async fn native_workspace_changes_take_precedence_over_final_file_snapshots() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path();
-        let initialized = std::process::Command::new("git")
+        let initialized = crate::git_env::git_command()
             .args(["init", "--quiet"])
             .arg(workspace)
             .output()

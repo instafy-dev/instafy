@@ -3263,7 +3263,7 @@ mod tests {
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
+        let output = crate::git_env::git_command()
             .args(args)
             .current_dir(dir)
             .env("GIT_CONFIG_NOSYSTEM", "1")

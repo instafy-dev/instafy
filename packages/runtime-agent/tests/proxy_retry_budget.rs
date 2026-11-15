@@ -963,7 +963,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     if scenario == "tool_write_on_no_change_turn" {
         // A space's folder is a git checkout: the turn reads what it changed
         // from git's status.
-        let initialized = Command::new("git")
+        let initialized = runtime_agent::git_env::git_command()
             .args(["init", "--quiet"])
             .arg(&workspace)
             .output()?;

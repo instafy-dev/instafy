@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::jobs::tests::{test_job_processor, test_lease_job};
 
 fn git(dir: &Path, args: &[&str]) {
-    let status = StdCommand::new("git")
+    let status = crate::git_env::git_command()
         .args(args)
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

@@ -875,13 +875,13 @@ mod tests {
         ));
 
         // The runtime image always has git; so must this test.
-        let git = std::process::Command::new("git")
+        let git = crate::git_env::git_command()
             .args(["init", "-q"])
             .current_dir(workspace.path())
             .status()
             .expect("git is required for this test");
         assert!(git.success(), "git init failed");
-        let status = std::process::Command::new("git")
+        let status = crate::git_env::git_command()
             .args(["status", "--porcelain", "--untracked-files=all"])
             .current_dir(workspace.path())
             .output()

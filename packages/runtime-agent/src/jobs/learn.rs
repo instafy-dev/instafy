@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashSet};
 #[cfg(test)]
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -1341,7 +1340,7 @@ fn ensure_git_identity(workspace_dir: &Path) {
 }
 
 fn run_git(workspace_dir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    Command::new("git")
+    crate::git_env::git_command()
         .current_dir(workspace_dir)
         .arg("--git-dir")
         .arg(workspace_dir.join(".instafy").join(".git"))

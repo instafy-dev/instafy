@@ -2086,7 +2086,7 @@ fn push_dated(
         .unwrap()
         .as_secs()
         - days_ago * 86_400;
-    let output = std::process::Command::new("git")
+    let output = crate::test_support::plain_git()
         .current_dir(&sc.work)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")

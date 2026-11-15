@@ -14,6 +14,37 @@ use crate::error::ServiceError;
 /// (runtime-agent `learn.rs`), with its author and its being the only commit.
 const INIT_COMMIT_MESSAGE: &str = "Space created";
 
+/// Inherited environment that would point the shard's git at another
+/// repository, index, object store or set of refs than the one `-C` or the
+/// path names. git exports GIT_DIR to the commands `git rebase --exec` runs
+/// and to hooks, and GIT_INDEX_FILE to commit hooks, so a shard started from
+/// one, or this crate's tests run that way, would otherwise write the seed's
+/// objects into that repository, move its default branch to the seed and
+/// point HEAD there.
+const REPOSITORY_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_QUARANTINE_PATH",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+];
+
+/// git for the repository its arguments name, and no other.
+fn git() -> Command {
+    let mut command = Command::new("git");
+    for name in REPOSITORY_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
 const INSTAFY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/INSTAFY.md"
@@ -319,7 +350,7 @@ fn write_git_object(
 ) -> Result<String> {
     use std::io::Write;
 
-    let mut child = Command::new("git")
+    let mut child = git()
         .args(["-C", repo_str])
         .args(args)
         .stdin(Stdio::piped())
@@ -379,7 +410,7 @@ fn init_bare_repo(repo_path: &Path, default_branch: &str) -> Result<()> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("repo path is not valid utf-8"))?;
 
-    let output = Command::new("git")
+    let output = git()
         .args([
             "init",
             "--bare",
@@ -582,7 +613,7 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
         ],
     )?;
 
-    let commit_output = Command::new("git")
+    let commit_output = git()
         .args([
             "-C",
             repo_str,
@@ -612,7 +643,7 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
     }
 
     let ref_name = format!("refs/heads/{default_branch}");
-    let update_ref = Command::new("git")
+    let update_ref = git()
         .args(["-C", repo_str, "update-ref", &ref_name, &commit_hash])
         .output()
         .with_context(|| "git update-ref failed")?;
@@ -624,7 +655,7 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
     }
 
     // Ensure HEAD points to the default branch.
-    let _ = Command::new("git")
+    let _ = git()
         .args(["-C", repo_str, "symbolic-ref", "HEAD", &ref_name])
         .output();
 
@@ -645,7 +676,7 @@ mod tests {
     }
 
     fn run_git(repo_str: &str, args: &[&str]) -> Result<std::process::Output> {
-        Command::new("git")
+        git()
             .args(["-C", repo_str])
             .args(args)
             .output()
@@ -791,6 +822,107 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_root);
         Ok(())
+    }
+
+    /// Where `seed_child` creates and seeds its repository.
+    const SEED_CHILD_REPO_ENV: &str = "INSTAFY_GIT_SERVICE_TEST_SEED_REPO";
+
+    /// A shard started from `git rebase --exec` or a hook, or these tests run
+    /// that way, inherits GIT_DIR naming the repository it ran in, as an
+    /// absolute path in a linked worktree, and from a commit hook
+    /// GIT_INDEX_FILE too. The seed goes to its own repository and leaves that
+    /// one as it was.
+    #[test]
+    fn seed_leaves_the_repository_git_dir_names_alone() -> Result<()> {
+        let temp_root = unique_temp_dir("instafy-git-service-named");
+        let main = temp_root.join("main");
+        let linked = temp_root.join("linked");
+        std::fs::create_dir_all(&main)?;
+        let named = |dir: &Path, args: &[&str]| -> Result<String> {
+            let output = git()
+                .current_dir(dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args([
+                    "-c",
+                    "user.name=Named",
+                    "-c",
+                    "user.email=named@example.invalid",
+                ])
+                .args(args)
+                .output()?;
+            anyhow::ensure!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+        named(&main, &["init", "-q", "-b", "main"])?;
+        std::fs::write(main.join("README.md"), "not a seed\n")?;
+        named(&main, &["add", "README.md"])?;
+        named(&main, &["commit", "-q", "-m", "named"])?;
+        let linked_str = linked
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("temp path is not valid utf-8"))?;
+        named(
+            &main,
+            &["worktree", "add", "-q", "-b", "linked", linked_str],
+        )?;
+        let git_dir = named(&linked, &["rev-parse", "--absolute-git-dir"])?;
+        let state = || -> Result<Vec<String>> {
+            Ok(vec![
+                std::fs::read_to_string(main.join(".git").join("config"))?,
+                named(
+                    &linked,
+                    &["for-each-ref", "--format=%(refname) %(objectname)"],
+                )?,
+                named(&linked, &["symbolic-ref", "HEAD"])?,
+                named(&linked, &["ls-files", "--stage"])?,
+                named(&linked, &["count-objects"])?,
+            ])
+        };
+        let before = state()?;
+
+        let repo_path = temp_root.join("repo.git");
+        let output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "repo::tests::seed_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GIT_DIR", &git_dir)
+            .env("GIT_INDEX_FILE", Path::new(&git_dir).join("index"))
+            .env(SEED_CHILD_REPO_ENV, &repo_path)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "the seeding child failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_eq!(state()?, before);
+        let repo_str = repo_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("repo path is not valid utf-8"))?;
+        let subject = String::from_utf8(run_git_stdout(repo_str, &["log", "-1", "--format=%s"])?)?;
+        assert_eq!(subject.trim(), INIT_COMMIT_MESSAGE);
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "Child entrypoint; seed_leaves_the_repository_git_dir_names_alone supplies its environment"]
+    fn seed_child() -> Result<()> {
+        let repo_path = PathBuf::from(
+            std::env::var_os(SEED_CHILD_REPO_ENV)
+                .context("requires seed_leaves_the_repository_git_dir_names_alone")?,
+        );
+        init_bare_repo(&repo_path, "main")?;
+        seed_initial_commit(&repo_path, "main")
     }
 
     #[test]
