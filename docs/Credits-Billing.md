@@ -348,7 +348,10 @@ charged, even though its model ran: a browser turn whose every page failed to op
 the sweep fails after its machine was lost is judged the same way, whether or not a runtime held
 it, under the sweep's own refund reason (`system_turns.rs` `turn_left_nothing`). So is a browser
 turn that a stop of its machine fails on the spot, since it cannot move to another machine ("The
-Shared Browser closed when its machine stopped."; `give_back_reserve_of_lost_browser_turn`).
+Shared Browser closed when its machine stopped."; `give_back_reserve_of_lost_browser_turn`). Its
+reserve comes back with the end of its run, just after the stop commits, never inside the stop
+itself; if that write is lost, the idle sweep ends the run, and gives the reserve back, from 60 s
+after the stop. It comes back once, whichever of them ends the run.
 
 A failure alone is not proof that the person got nothing. The runtime fails a turn whose model
 ended without a final answer, and a model can be asked to do that after doing the work: the files

@@ -5387,6 +5387,7 @@ pub(crate) async fn persist_run_managed_ai_credit_metadata(
                 &[run_id],
             )
             .await
+            .inspect_err(crate::errors::note_sql_state)
             .map_err(|error| {
                 internal_error(format!(
                     "failed to load run metadata for managed AI credit trace: {error}"
@@ -5408,6 +5409,7 @@ pub(crate) async fn persist_run_managed_ai_credit_metadata(
                 &[run_id, &merged_param],
             )
             .await
+            .inspect_err(crate::errors::note_sql_state)
             .map_err(|error| {
                 internal_error(format!(
                     "failed to persist managed AI credit trace onto run: {error}"
@@ -5485,6 +5487,7 @@ pub(crate) async fn persist_run_ai_access_mode(
                 &[run_id],
             )
             .await
+            .inspect_err(crate::errors::note_sql_state)
             .map_err(|error| {
                 internal_error(format!(
                     "failed to load run metadata for AI access audit: {error}"
@@ -5505,6 +5508,7 @@ pub(crate) async fn persist_run_ai_access_mode(
                 &[run_id, &merged_param],
             )
             .await
+            .inspect_err(crate::errors::note_sql_state)
             .map_err(|error| {
                 internal_error(format!("failed to persist run AI access audit: {error}"))
             })?;
@@ -5542,6 +5546,7 @@ pub(crate) async fn persist_prompt_ai_access_mode(
             &[prompt_id],
         )
         .await
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| {
             internal_error(format!(
                 "failed to load prompt metadata for AI access audit: {error}"
@@ -5562,6 +5567,7 @@ pub(crate) async fn persist_prompt_ai_access_mode(
             &[prompt_id, &merged_param],
         )
         .await
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| {
             internal_error(format!("failed to persist prompt AI access audit: {error}"))
         })?;

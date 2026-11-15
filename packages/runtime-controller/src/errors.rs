@@ -1,9 +1,12 @@
+use std::cell::RefCell;
 use std::fmt::Display;
+use std::future::Future;
 
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use tokio_postgres::error::SqlState;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +83,40 @@ pub(crate) fn describe_db_error(error: &(dyn std::error::Error + 'static)) -> St
         source = cause.source();
     }
     described
+}
+
+tokio::task_local! {
+    /// What [`note_sql_state`] noted in the [`noting_sql_states`] it runs in.
+    static NOTED_SQL_STATES: RefCell<Vec<SqlState>>;
+}
+
+/// Runs `body`, and returns its output with the SQLSTATE of each failed
+/// statement whose error was noted while it ran ([`note_sql_state`]), first
+/// to last.
+///
+/// A statement's failure reaches its caller as `(StatusCode, Json<ApiError>)`,
+/// whose message keeps no SQLSTATE (see [`describe_db_error`]), and a
+/// savepoint that gives up on it returns no error at all. A caller that must
+/// still tell a lost lock race from a bug reads the codes here: the give-back
+/// of a stopped browser turn's reserve
+/// (`system_turns::give_back_reserve_of_lost_browser_turn`), whose statements
+/// note theirs.
+pub(crate) async fn noting_sql_states<T>(body: impl Future<Output = T>) -> (T, Vec<SqlState>) {
+    NOTED_SQL_STATES
+        .scope(RefCell::new(Vec::new()), async move {
+            let output = body.await;
+            (output, NOTED_SQL_STATES.with(RefCell::take))
+        })
+        .await
+}
+
+/// Notes the SQLSTATE of `error`, a statement's failure, for the
+/// [`noting_sql_states`] that runs the statement. Outside one it does nothing,
+/// so a caller that does not read the codes sees no change.
+pub(crate) fn note_sql_state(error: &tokio_postgres::Error) {
+    if let Some(code) = error.code() {
+        let _ = NOTED_SQL_STATES.try_with(|noted| noted.borrow_mut().push(code.clone()));
+    }
 }
 
 pub(crate) fn service_unavailable(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {

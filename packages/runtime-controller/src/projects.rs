@@ -314,6 +314,7 @@ pub(crate) async fn load_project_record(
             &[project_id],
         )
         .await
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| internal_error(format!("failed to load project: {error}")))?;
 
     let Some(row) = row else {

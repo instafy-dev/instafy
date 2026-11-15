@@ -238,6 +238,7 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
     fail_claude_code_turns_whose_lease_expired(state, &mut tick).await?;
     repair_stopped_claude_code_turns(state, &mut tick).await?;
+    repair_stopped_browser_turns(state, &mut tick).await?;
     fail_jobs_that_can_no_longer_start(state, &mut tick).await?;
     // Last: each of its stops may wait out a provider release.
     stop_runtimes_of_deleted_projects(state, &mut tick).await?;
@@ -1794,6 +1795,105 @@ async fn repair_stopped_claude_code_turns(
                 status = status.as_u16(),
                 error = %error.message,
                 "failed to write the end of a local-engine turn a runtime stop failed"
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// How long [`repair_stopped_browser_turns`] leaves a turn to the write its
+/// stop started (`stop::finish_failed_browser_turn`): longer than that
+/// write's tries can take, as for a local-engine turn.
+const STOPPED_BROWSER_TURN_REPAIR_GRACE_SECONDS: i64 = 60;
+/// A turn a stop failed longer ago than this is no longer repaired.
+const STOPPED_BROWSER_TURN_REPAIR_MAX_AGE_SECONDS: i64 = 24 * 60 * 60;
+/// The most turns one tick repairs, the oldest first.
+const STOPPED_BROWSER_TURN_REPAIRS_PER_TICK: i64 = 32;
+
+/// The Personal and Shared Browser turns a runtime stop failed whose run is
+/// still unfinished: failed with one of `$1`, the stops' sentences, between
+/// `$3` and `$2` seconds ago, the oldest first, `$4` at most. The query
+/// repeats the predicate of `agent_jobs_stopped_browser_turn_recovery_idx`
+/// word for word (`stop::stopped_browser_turn_predicate`), so it reads only
+/// that index's failed browser jobs, and `agent_jobs` is its only table with
+/// a `payload` column.
+fn stopped_browser_turns_to_repair_sql() -> String {
+    format!(
+        "select id, project_id, run_id, conversation_id, session_id, prompt_id, payload,
+                error_message
+           from agent_jobs
+          where {}
+            and error_message = any($1)
+            and completed_at < now() - ($2::bigint * interval '1 second')
+            and completed_at > now() - ($3::bigint * interval '1 second')
+            and exists (
+                select 1 from runs
+                 where runs.id = agent_jobs.run_id
+                   and runs.status in ('queued', 'in_progress', 'awaiting_approval')
+            )
+          order by completed_at, id
+          limit $4",
+        super::stop::stopped_browser_turn_predicate()
+    )
+}
+
+/// Writes the end of each Personal or Shared Browser turn a runtime stop
+/// failed whose own write never committed. A stop fails only the turn's job,
+/// and once it commits a task of its own ends the run and gives back a
+/// reserve the turn left nothing for (`stop::record_failed_browser_turn`). If
+/// the controller exits before that write commits, or the database refuses
+/// every try, nothing else would end the run: Home would list it as live work
+/// for good, the run would hold its space as watched, and no one would hear
+/// it failed. A turn past the grace whose run is still unfinished is written
+/// here, one try per tick, and published once its write commits; a write
+/// that finds the run already ended writes nothing twice. Always on: browser
+/// turns have no switch. A tick with nothing to repair runs one query, on the
+/// tick's connection, through `agent_jobs_stopped_browser_turn_recovery_idx`.
+async fn repair_stopped_browser_turns(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let sentences = vec![
+        super::stop::PERSONAL_BROWSER_DISCONNECTED_ERROR,
+        super::stop::SHARED_BROWSER_DISCONNECTED_ERROR,
+    ];
+    let rows = tick
+        .client("failed to acquire connection for stopped browser turns")
+        .await?
+        .query(
+            stopped_browser_turns_to_repair_sql().as_str(),
+            &[
+                &sentences,
+                &STOPPED_BROWSER_TURN_REPAIR_GRACE_SECONDS,
+                &STOPPED_BROWSER_TURN_REPAIR_MAX_AGE_SECONDS,
+                &STOPPED_BROWSER_TURN_REPAIRS_PER_TICK,
+            ],
+        )
+        .await
+        .context("failed to load stopped browser turns")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // Each write, and the publish after it, takes connections of its own.
+    tick.release();
+    for turn in rows
+        .iter()
+        .filter_map(super::stop::FailedBrowserTurn::of_stopped_job_row)
+    {
+        match super::stop::write_and_publish_failed_browser_turn(state, &turn).await {
+            Ok(true) => info!(
+                job_id = %turn.job_id,
+                project_id = %turn.project_id,
+                session_id = ?turn.session_id,
+                "ended the run of a browser turn a runtime stop failed, which its stop never ended"
+            ),
+            Ok(false) => {}
+            // The turn stays a candidate, and the next tick tries it again.
+            Err((status, Json(error))) => warn!(
+                job_id = %turn.job_id,
+                status = status.as_u16(),
+                error = %error.message,
+                "failed to end the run of a browser turn a runtime stop failed"
             ),
         }
     }
@@ -3647,12 +3747,71 @@ mod tests {
     use super::{
         lost_final_checkpoint_gives_up, runtime_heartbeat_stale_for_queued_recovery,
         should_recover_stuck_queued_runtime, should_request_runtime_recovery,
-        AUTO_STOP_STALE_RUNTIMES_QUERY,
+        stopped_browser_turns_to_repair_sql, AUTO_STOP_STALE_RUNTIMES_QUERY,
     };
     use axum::http::StatusCode;
     use chrono::Duration as ChronoDuration;
     use chrono::Utc;
     use uuid::Uuid;
+
+    /// The repair of stopped browser turns repeats its index's predicate
+    /// (`stop::stopped_browser_turn_predicate`, which a test holds the
+    /// migration to) and reads `agent_jobs` alone outside the run check, so
+    /// the predicate's `payload` and `status` are the job's.
+    #[test]
+    fn the_stopped_browser_turn_repair_reads_its_index() {
+        let query = stopped_browser_turns_to_repair_sql();
+        let predicate = super::super::stop::stopped_browser_turn_predicate();
+        assert!(query.contains(&format!("where {predicate}\n")), "{query}");
+        assert!(query.contains("from agent_jobs\n"), "{query}");
+        assert!(
+            query.contains("where runs.id = agent_jobs.run_id"),
+            "{query}"
+        );
+    }
+
+    /// The database plans the repair of stopped browser turns, as the sweep
+    /// sends it and with its parameters, on
+    /// `agent_jobs_stopped_browser_turn_recovery_idx`, so an idle tick never
+    /// scans every failed job. A database without that index's migration
+    /// (`20261114112320_agent_jobs_stopped_browser_turn_recovery_idx.sql`)
+    /// fails here. Sequential scans are off for this plan alone: the test
+    /// database's tables are too small for any index to look cheaper.
+    #[tokio::test]
+    async fn the_stopped_browser_turn_repair_is_planned_on_its_index() -> anyhow::Result<()> {
+        let pool =
+            crate::tests::require_origin_test_pool("stopped browser turn repair plan test").await?;
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        transaction
+            .batch_execute("set local enable_seqscan = off")
+            .await?;
+        let sentences = vec![
+            super::super::stop::PERSONAL_BROWSER_DISCONNECTED_ERROR,
+            super::super::stop::SHARED_BROWSER_DISCONNECTED_ERROR,
+        ];
+        let plan = transaction
+            .query(
+                format!("explain {}", stopped_browser_turns_to_repair_sql()).as_str(),
+                &[
+                    &sentences,
+                    &super::STOPPED_BROWSER_TURN_REPAIR_GRACE_SECONDS,
+                    &super::STOPPED_BROWSER_TURN_REPAIR_MAX_AGE_SECONDS,
+                    &super::STOPPED_BROWSER_TURN_REPAIRS_PER_TICK,
+                ],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+        transaction.rollback().await?;
+        assert!(
+            plan.contains("agent_jobs_stopped_browser_turn_recovery_idx"),
+            "{plan}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn a_lost_final_lead_is_given_up_soon_when_refused_and_late_when_it_may_pass() {

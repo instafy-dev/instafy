@@ -2711,6 +2711,7 @@ pub(crate) async fn run_has_visible_assistant_message(
         )
         .await
         .map(|row| row.get::<_, bool>(0))
+        .inspect_err(crate::errors::note_sql_state)
         .map_err(|error| {
             internal_error(format!(
                 "failed to check run assistant message visibility: {error}"

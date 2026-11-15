@@ -83,8 +83,10 @@ pub(crate) use db::{fetch_runtime_for_update, release_origin_instances_for_runti
 pub(crate) use status::determine_runtime_health;
 #[cfg(test)]
 pub(crate) use stop::{
-    finish_failed_claude_code_turn, perform_runtime_stop, record_failed_claude_code_turn,
-    FailedClaudeCodeTurn, RecordedClaudeCodeTurnEnd, RuntimeIdentityExpectation, StopOptions,
+    finish_failed_browser_turn, finish_failed_claude_code_turn, perform_runtime_stop,
+    record_failed_browser_turn, record_failed_browser_turn_in, record_failed_claude_code_turn,
+    BrowserTransport, FailedBrowserTurn, FailedClaudeCodeTurn, RecordedBrowserTurnEnd,
+    RecordedClaudeCodeTurnEnd, RuntimeIdentityExpectation, StopOptions,
     PERSONAL_BROWSER_DISCONNECTED_ERROR, SHARED_BROWSER_DISCONNECTED_ERROR,
 };
 #[cfg(test)]
