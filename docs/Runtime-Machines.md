@@ -782,10 +782,11 @@ storage: the durable copy is the bare repo on persistent git-shard storage plus
 encrypted offsite backups. That holds only when the runtime has a git remote,
 which needs both of these:
 
-- The controller has `GIT_REMOTE_BASE_URL` set. It then adds
-  `ORIGIN_GIT_REMOTE_URL=<base>/<project>.git` to each runtime's launch
-  metadata. Without it the controller logs an error at startup and keeps
-  serving.
+- The controller has `GIT_REMOTE_BASE_URL` set. It then sets
+  `ORIGIN_GIT_REMOTE_URL=<base>/<project>.git` in each runtime's launch
+  metadata, in place of any value the launch carried. Without it the
+  controller drops such a value, logs an error at startup and keeps serving;
+  only the provider service's own environment can then set one.
 - The provider's compose file forwards `ORIGIN_GIT_REMOTE_URL` into the runtime
   container. `docker/docker-compose.runtime.provider.yml` does, and
   `scripts/check-self-host-compose.test.mjs` fails when that file drops a

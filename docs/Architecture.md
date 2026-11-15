@@ -539,33 +539,71 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   of its newest own launch; a tenant lease is never read.
 - Custom and self-hosted providers retain their explicit metadata. A
   self-hosted runtime is started outside Instafy, so no allocator reads its
-  image. For a custom provider, the request's top-level
-  `metadata.runtimeAgentImage`, which is checked only for form, picks the
-  runtime image in place of the provider's own `RUNTIME_AGENT_IMAGE`, digest
-  pin included; the provider's image applies when the request names none. The
-  node pulls an image whose reference names a registry host on every launch,
-  and Compose pulls any other image that is missing from the node from Docker
-  Hub. The Docker allocator runs `docker compose` with a request's
-  `metadata.env` in its environment, so for every provider other than exact
-  `instafy_cloud` it takes from a request only the managed launch keys and
-  the variables either runtime Compose file passes into the runtime container
-  and neither uses anywhere else (`RUNTIME_CONTAINER_ENV_KEYS` in
-  `allocator/docker.rs`, kept in step by
-  `scripts/check-self-host-compose.test.mjs`). A provider row's `metadata.env`
-  travels inside each request and follows the same rule, so `metadata.env`
-  never picks the image. Of those keys only the CPU and memory limits, which the
-  controller sets from the runtime's size, reach Compose outside the runtime
-  container. Docker, Compose, BuildKit, loader and shell variables, the HTTP
-  proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), the
-  host directories a runtime mounts, `env_file` paths and the proxy sidecar's
-  settings come only from the provider service's own environment and
-  configuration. A request for a provider other than exact `instafy_cloud`
-  still sets the runtime container's own settings, including its model-proxy
-  addresses (`PROXY_BASE_URL`, `OPENAI_BASE_URL` and the `CODEX_*_ENDPOINT`
-  URLs), which otherwise point at the proxy sidecar. The Docker allocator never
-  builds a runtime image, for any provider: the image must already be on the
-  node or be pullable.
-- Hetzner user-data templates may include `{{RUNTIME_AGENT_IMAGE}}`; when present, the allocator will substitute `metadata.runtimeAgentImage` (or `runtime_agent_image`) into the cloud-init payload.
+  image. A custom provider runs its own `RUNTIME_AGENT_IMAGE`, digest pin
+  included. The request's top-level `metadata.runtimeAgentImage`, which is
+  checked only for form, picks the image in its place only where the provider
+  service sets `RUNTIME_AGENT_IMAGE_FROM_REQUEST=1`, and then reaches
+  Compose's `image:` as `RUNTIME_AGENT_IMAGE`: the image decides all the code
+  a runtime runs, and a custom provider's runtime runs the turns of every
+  member it serves, so with that set whoever launches chooses that code.
+  Otherwise the provider ignores a request's image and logs a warning. A
+  provider row's top-level `runtimeAgentImage` reaches the provider inside the
+  request, so it follows the same rule. The node pulls an image whose
+  reference names a registry host on every launch, and Compose pulls any other
+  image that is missing from the node from Docker Hub. The Docker allocator
+  never builds a runtime image, for any provider: the image must already be on
+  the node or be pullable.
+- The Docker allocator runs `docker compose` with a request's `metadata.env`
+  in its environment. A provider row's `metadata.env` travels inside each
+  request and follows the same rules, so `metadata.env` never picks the image.
+  For exact `instafy_cloud` the allocator takes the managed launch keys
+  (`is_allowed_managed_runtime_env_key` in `allocator/mod.rs`) with scalar
+  values; the controller has already stripped every client value but the
+  client launch keys. For any other provider it takes the same keys but the
+  Shared Browser's egress policy and its VNC host and depth
+  (`EXACT_ONLY_LAUNCH_ENV_KEYS` in `allocator/docker.rs`), and the WebRTC
+  switch only as a string, the form the controller's relay policy reads. Of
+  the WebRTC transport keys a launch can still set there, a provider row's
+  value wins, and the controller's relay policy, where it applies, replaces
+  the ICE servers and the TURN requirement. The controller sets the git remote
+  (`ORIGIN_GIT_REMOTE_URL`) from its `GIT_REMOTE_BASE_URL` and drops any value
+  a launch or provider row carried, since the runtime's git credential helper
+  hands a token to that remote's host; without a base only the provider
+  service's own environment sets one.
+- Apart from those keys and the variables the Docker allocator derives from a
+  request's own fields (`REQUEST_DERIVED_RUNTIME_ENV_KEYS`: the origin's mode,
+  protocols and metadata and the runtime's copy of its launch metadata,
+  `RUNTIME_METADATA`, whose env holds only what the request set), everything a
+  runtime container reads is the provider's or its operator's, for every
+  provider (`OPERATOR_ONLY_RUNTIME_ENV_KEYS` in `allocator/docker.rs`): its
+  model routing (`PROXY_BASE_URL`, `OPENAI_BASE_URL`, `USE_PROXY_FOR_LLM` and
+  the `CODEX_*` settings and endpoints), the agent's sandbox, model and tool
+  switches, `ORIGIN_SKIP_AUTH`, its lease and heartbeat timings, capabilities
+  and credentials. The provider sets some itself (the runtime's ids, token and
+  addresses); the others come only from the provider service's own
+  environment, which `docker compose` inherits, so set them there, not in a
+  provider row's `metadata.env`; the provider logs a warning naming each
+  variable it refused from a launch.
+  `scripts/check-self-host-compose.test.mjs` fails when a runtime Compose file
+  passes a variable into the runtime container that it uses nowhere else and
+  that is in none of those lists, and keeps each variable a launch decides
+  inside the runtime container: of them only the CPU and memory limits, which
+  the controller sets from the runtime's size, reach Compose outside it, along
+  with a request's image where the provider takes one. Docker, Compose,
+  BuildKit, loader and shell variables, the HTTP proxy variables
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), the host directories
+  a runtime mounts, `env_file` paths and the proxy sidecar's settings come
+  only from the provider service's own environment and configuration.
+- For every provider the Docker allocator drops, with a warning that names the
+  key but not the value, a request value that holds a control character or a
+  line break, after it writes a JSON list or object laid out over several
+  lines on one line. The Shared Browser's display must be a local X display
+  (`:0` to `:9999`), the origin mode one the runtime reads (`hosted`, `desktop`
+  or `efs`, in which a launch still chooses), and each origin protocol a
+  lowercase protocol name. It reads a runtime's lease generation back from
+  `docker inspect` as whole JSON entries, so no value can pose as another
+  variable.
+- Hetzner user-data templates may include `{{RUNTIME_AGENT_IMAGE}}`; when present, the allocator will substitute `metadata.runtimeAgentImage` (or `runtime_agent_image`) into the cloud-init payload. The Docker allocator's `RUNTIME_AGENT_IMAGE_FROM_REQUEST` does not apply to it.
 - Hetzner templates can also consume dynamic runtime env data via `{{RUNTIME_ENV_FLAGS}}` (shell `-e KEY='value'` segment) or `{{RUNTIME_ENV_EXPORTS}}` (`export KEY='value'` lines). This includes controller lease/origin env plus `metadata.env` overrides such as `INSTAFY_ENABLE_BROWSER_SESSION=1`.
 
 ## AI Proxy

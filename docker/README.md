@@ -82,6 +82,27 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   `RUNTIME_PROXY_IMAGE=<registry>/<organization>/instafy-openai-proxy-server@sha256:<digest>`.
   `docker/docker-compose.runtime.provider.yml` intentionally has no mutable
   fallback image for either service.
+- On a Docker provider with any id but exact `instafy_cloud`, a launch's
+  `metadata.env` sets only the runtime's launch settings: its size limits and
+  git remote, which the controller sets, and the Shared Browser's session,
+  rendering, display, VNC port and geometry and WebRTC settings. The launch's
+  own fields also set the origin's mode, protocols and metadata, and the
+  runtime receives its launch metadata as `RUNTIME_METADATA`. A launch does
+  not choose the image: a request's `metadata.runtimeAgentImage` replaces
+  `RUNTIME_AGENT_IMAGE` only when the provider service sets
+  `RUNTIME_AGENT_IMAGE_FROM_REQUEST=1`. Leave that unset on a provider that
+  serves more than one person, since the image decides the code that runs
+  everyone's turns. Set the model routing (`PROXY_BASE_URL`,
+  `OPENAI_BASE_URL`, `CODEX_*`), the agent's sandbox and tool switches,
+  `ORIGIN_SKIP_AUTH`, the lease and heartbeat timings, and the Shared
+  Browser's egress policy and VNC host and depth in the provider service's own
+  environment, which Compose interpolates into the runtime.
+- Upgrading such a provider: a provider row's `metadata.env` no longer sets
+  any of those operator settings, and its `runtimeAgentImage` no longer picks
+  the image. Move each value into the provider service's environment, the
+  image into `RUNTIME_AGENT_IMAGE`. The provider logs a warning that names the
+  variables it refused from a launch. See
+  [Runtime agent images](../docs/Architecture.md#runtime-agent-images-flavors).
 - `docker/docker-compose.runtime.provider.yml` forwards `ORIGIN_GIT_REMOTE_URL` into the runtime.
   When the controller sets `GIT_REMOTE_BASE_URL`, a runtime whose workspace already has files
   but no `.instafy/.git` then fails to start. Roll the file out only to fresh nodes or empty

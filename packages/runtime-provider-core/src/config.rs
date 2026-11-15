@@ -39,6 +39,12 @@ pub struct ProviderConfig {
     pub runtime_agent_image: Option<String>,
     /// Deploy-pinned webdev image for controller-attested managed launches.
     pub runtime_agent_webdev_image: Option<String>,
+    /// For a provider other than exact instafy_cloud, a launch request's
+    /// `metadata.runtimeAgentImage` picks the runtime image in place of
+    /// `runtime_agent_image` (`RUNTIME_AGENT_IMAGE_FROM_REQUEST`, off by
+    /// default). Whoever launches then chooses the code that runs every
+    /// member's turns on the runtime.
+    pub runtime_agent_image_from_request: bool,
     pub docker_pool_hosts: Vec<String>,
     pub docker_pool_auth_token: Option<String>,
     pub runtime_allocator_required: bool,
@@ -68,6 +74,7 @@ impl ProviderConfig {
             runtime_docker_codex_root: None,
             runtime_agent_image: None,
             runtime_agent_webdev_image: None,
+            runtime_agent_image_from_request: false,
             docker_pool_hosts: vec![],
             docker_pool_auth_token: None,
             runtime_allocator_required: true,
@@ -127,6 +134,9 @@ impl ProviderConfig {
             .ok()
             .map(|raw| raw.trim().to_string())
             .filter(|value| !value.is_empty());
+        if let Ok(raw) = std::env::var("RUNTIME_AGENT_IMAGE_FROM_REQUEST") {
+            config.runtime_agent_image_from_request = is_truthy(&raw);
+        }
 
         if let Ok(hosts) = std::env::var("DOCKER_POOL_HOSTS") {
             config.docker_pool_hosts = hosts
@@ -143,8 +153,7 @@ impl ProviderConfig {
             .filter(|value| !value.is_empty());
 
         if let Ok(required) = std::env::var("RUNTIME_ALLOCATOR_REQUIRED") {
-            let value = required.trim().to_ascii_lowercase();
-            config.runtime_allocator_required = value == "1" || value == "true" || value == "yes";
+            config.runtime_allocator_required = is_truthy(&required);
         }
 
         config.hetzner_token = std::env::var("HETZNER_TOKEN")
@@ -176,5 +185,53 @@ impl ProviderConfig {
         }
 
         config
+    }
+}
+
+/// `1`, `true` or `yes`, in any case and with surrounding whitespace.
+fn is_truthy(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A launch request picks a custom provider's image only where its operator opts in.
+    #[test]
+    fn requests_pick_no_image_unless_the_operator_opts_in() {
+        assert!(!ProviderConfig::default_docker().runtime_agent_image_from_request);
+        for raw in ["1", "true", "TRUE", " yes ", "Yes", "\ttrue\n"] {
+            assert!(is_truthy(raw), "{raw:?}");
+        }
+        for raw in [
+            "", " ", "0", "false", "no", "off", "on", "2", "y", "enabled", "1 1", "truthy",
+        ] {
+            assert!(!is_truthy(raw), "{raw:?}");
+        }
+    }
+
+    /// The provider service reads its opt-in from `RUNTIME_AGENT_IMAGE_FROM_REQUEST`. Nothing
+    /// else in the tests reads that variable.
+    #[test]
+    fn the_image_opt_in_comes_from_the_provider_services_environment() {
+        const NAME: &str = "RUNTIME_AGENT_IMAGE_FROM_REQUEST";
+        let previous = std::env::var_os(NAME);
+        let read = |value: Option<&str>| {
+            match value {
+                Some(value) => std::env::set_var(NAME, value),
+                None => std::env::remove_var(NAME),
+            }
+            ProviderConfig::from_env().runtime_agent_image_from_request
+        };
+        let results = [read(Some("1")), read(Some("0")), read(None)];
+        match previous {
+            Some(value) => std::env::set_var(NAME, value),
+            None => std::env::remove_var(NAME),
+        }
+        assert_eq!(results, [true, false, false]);
     }
 }
