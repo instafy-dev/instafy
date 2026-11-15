@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import kleur from "kleur";
+import { withoutGitRepositoryEnv } from "./git-env.js";
 import { buildInstafyGitCredentialHelperValue } from "./git-helper.js";
 import {
   resolveRuntimeControllerCredential,
@@ -109,6 +110,30 @@ export function buildInstafyGitArgs(context: InstafyGitContext, userArgs: string
   return ["--git-dir", context.gitDir, "--work-tree", context.workTree, ...userArgs];
 }
 
+// The environment of every git this file runs, which never stops to ask for a password. git exports
+// GIT_DIR, GIT_INDEX_FILE and the other variables in ./git-env.ts to its hooks and the commands
+// `git rebase --exec` runs. When GIT_DIR names this space's .instafy/.git, they are git's state for a
+// command in progress there, such as the index `commit -a` is building, and they stay. Otherwise they
+// belong to another repository: the repository, index and object store are the ones --git-dir and
+// --work-tree name.
+function instafyGitEnv(context: InstafyGitContext): NodeJS.ProcessEnv {
+  const inherited = namesInstafyGitDir(process.env["GIT_DIR"], context)
+    ? { ...process.env }
+    : withoutGitRepositoryEnv(process.env);
+  return { ...inherited, GIT_TERMINAL_PROMPT: "0" };
+}
+
+function namesInstafyGitDir(gitDir: string | undefined, context: InstafyGitContext): boolean {
+  if (!gitDir) {
+    return false;
+  }
+  try {
+    return fs.realpathSync(path.resolve(gitDir)) === fs.realpathSync(context.gitDir);
+  } catch {
+    return false;
+  }
+}
+
 function syncOriginRemoteFromEnv(context: InstafyGitContext, cwd: string) {
   const desiredRemote = normalizeToken(process.env["ORIGIN_GIT_REMOTE_URL"]);
   if (!desiredRemote) {
@@ -121,7 +146,7 @@ function syncOriginRemoteFromEnv(context: InstafyGitContext, cwd: string) {
     {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env: instafyGitEnv(context),
     },
   );
   const currentRemote =
@@ -138,7 +163,7 @@ function syncOriginRemoteFromEnv(context: InstafyGitContext, cwd: string) {
   const update = spawnSync("git", buildInstafyGitArgs(context, command), {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: instafyGitEnv(context),
   });
   if (update.error) {
     throw new Error(`Failed to update Instafy git origin remote: ${update.error.message}`);
@@ -170,7 +195,7 @@ function gitCapture(context: InstafyGitContext, args: string[], options: { cwd: 
   const result = spawnSync("git", ["--git-dir", context.gitDir, "--work-tree", context.workTree, ...args], {
     cwd: options.cwd,
     encoding: "utf8",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: instafyGitEnv(context),
   });
   return {
     status: typeof result.status === "number" ? result.status : 1,
@@ -347,7 +372,7 @@ function runInstafyGitAdd(context: InstafyGitContext, globalArgs: string[], comm
         "--",
         ...stagePaths,
       ],
-      { stdio: "inherit", cwd: options.cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+      { stdio: "inherit", cwd: options.cwd, env: instafyGitEnv(context) },
     );
 
     if (result.error) {
@@ -406,7 +431,7 @@ export function runInstafyGit(userArgs: string[], options?: { cwd?: string }): n
   const result = spawnSync("git", args, {
     stdio: "inherit",
     cwd,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: instafyGitEnv(context),
   });
   if (result.error) {
     throw new Error(`Failed to run git: ${result.error.message}`);

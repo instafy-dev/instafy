@@ -119,6 +119,33 @@ export const PERSONAL_BROWSER_CONTROL_ENV_KEYS = [
 ] as const;
 export const DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV =
   "INSTAFY_RUNTIME_PARENT_DISPOSITION";
+// The variables that point git at another repository, index or object store.
+// git exports them to the commands it runs: GIT_DIR, an absolute path in a
+// linked worktree, to a `git rebase --exec` command and every hook, and
+// GIT_INDEX_FILE to a commit hook. The runtime, and every git its agent runs,
+// works in the space's workspace instead. These are what
+// `git rev-parse --local-env-vars` lists, less GIT_CONFIG_PARAMETERS and
+// GIT_CONFIG_COUNT (`-c` settings, which git itself keeps for another
+// repository), plus a push's ref namespace, a pre-receive hook's quarantine and
+// an older git's submodule prefix: the list @instafy/cli's src/git-env.ts keeps.
+const GIT_REPOSITORY_ENV_KEYS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CONFIG",
+  "GIT_GRAFT_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_SHALLOW_FILE",
+  "GIT_PREFIX",
+  "GIT_NAMESPACE",
+  "GIT_QUARANTINE_PATH",
+  "GIT_INTERNAL_SUPER_PREFIX",
+] as const;
 // A launch grant may only carry Instafy-namespaced values, and never one this
 // launcher owns itself, so no grant can stand in for the runtime's identity,
 // binary, controller, proxy or Personal Browser capability.
@@ -373,6 +400,9 @@ export function applyProtectedDesktopRuntimeEnv(
   delete env.INSTAFY_RUNTIME_AGENT_BIN;
   delete env[DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV];
   for (const key of PERSONAL_BROWSER_CONTROL_ENV_KEYS) {
+    delete env[key];
+  }
+  for (const key of GIT_REPOSITORY_ENV_KEYS) {
     delete env[key];
   }
   // Every declared key goes, whether or not this start was granted anything:
