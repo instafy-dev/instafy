@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { testGitEnv } from "./gitEnv.js";
 import { getControllerUrl } from "./harness.js";
 
 /**
@@ -42,7 +43,7 @@ function resolveGitRemoteBaseUrl(): string {
 function git(args: string[], cwd: string): string {
   const result = spawnSync("git", args, {
     cwd,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: testGitEnv(),
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
   });

@@ -12,6 +12,7 @@ import { zipSync, strToU8 } from "fflate";
 import { sanitizeCodexSubscriptionAuthJson } from "./codexSubscriptionAuthJson.js";
 import { DEFAULT_CONTROLLER_URL, resolvePlaywrightControllerUrl } from "./controllerUrl.js";
 import { E2E_MODEL } from "./e2eModel.js";
+import { testGitEnv } from "./gitEnv.js";
 
 const DEFAULT_SUPABASE_URL = "http://127.0.0.1:54321";
 const __filename = fileURLToPath(import.meta.url);
@@ -1648,10 +1649,7 @@ function runGit(
 ): { exitCode: number; stdout: string; stderr: string } {
   const result = spawnSync("git", args, {
     cwd: options.cwd,
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: "0"
-    },
+    env: testGitEnv(),
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024
   });

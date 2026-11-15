@@ -23,6 +23,24 @@ export function cleanup(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+/**
+ * The environment of a fixture's own git: no user or system configuration, and nothing that points git at
+ * another repository. git sets GIT_DIR for `git rebase --exec` commands and for hooks, as an absolute path in a
+ * linked worktree, and GIT_INDEX_FILE for commit hooks, so a fixture that inherited them would init, stage and
+ * commit in that repository instead of its own temp folder.
+ */
+export function fixtureGitEnv(home, extra = {}) {
+  return {
+    PATH: process.env.PATH,
+    HOME: home,
+    LANG: "C",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    ...extra,
+  };
+}
+
 /** Start a binder on a free port with a clean environment (no Instafy login is picked up). */
 export async function startBinder(root, options = {}) {
   const logs = [];

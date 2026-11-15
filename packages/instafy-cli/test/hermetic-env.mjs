@@ -81,6 +81,31 @@ const SESSION_AND_JOB_VARIABLES = [
   "CLICOLOR_FORCE",
 ];
 
+// The repository git names for the commands it runs itself: GIT_DIR, an absolute path in a linked worktree, for a
+// `git rebase --exec` command and every hook, and GIT_INDEX_FILE for a commit hook. A test's own git, and the git
+// `instafy git` runs for it, would otherwise init, stage and commit in that repository instead of the test's temp
+// folder. These are the variables git itself clears when it moves into another repository
+// (`git rev-parse --local-env-vars`), and no test, live or not, needs one.
+const GIT_REPOSITORY_VARIABLES = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_GRAFT_FILE",
+  "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_PREFIX",
+  "GIT_INTERNAL_SUPER_PREFIX",
+  "GIT_SHALLOW_FILE",
+  "GIT_COMMON_DIR",
+];
+for (const name of GIT_REPOSITORY_VARIABLES) delete process.env[name];
+
 // The file this setup runs for, and each live suite's own gate, as the file writes it.
 const testFile = expect.getState().testPath ?? "";
 const brokerBaseUrl = (process.env.TUNNEL_BROKER_BASE_URL ?? process.env.VITE_TUNNEL_BROKER_BASE_URL ?? "").trim();
