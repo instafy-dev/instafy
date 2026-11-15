@@ -65,10 +65,24 @@ and a hosted runtime takes it. The private runtime never receives it.
 A local-engine job is not a platform AI job, though it holds no credential: only its sender's own
 private runtime with the attested `claudeCode` capability leases it, once and within a minute of
 the send, and it gets no proxy token, model-facing controller token or project secrets
-([Local-engine turns](Local-Engine-Turns.md)). Only the runtime that leased it can complete it or
-post its steps, whatever `STRICT_MODE` says: a scoped token that names no runtime, which a write
-member can mint while `STRICT_MODE` is off, and another runtime's token are both refused, and
-nothing is written.
+([Local-engine turns](Local-Engine-Turns.md)).
+
+Only the runtime that leased a job can complete it or post its messages and steps, for every job
+and whatever `STRICT_MODE` says. `POST /agent/complete` and `POST /agent/message` require a signed
+runtime ID: a scoped token that names no runtime, which any write member can mint by asking
+`POST /projects/:id/runtime/token` for fewer scopes than a machine's, is refused with 401. They
+take a job only while it is `leased` by the token's own runtime. Another runtime of the space,
+including another computer of the same person, is answered as for a job it cannot find (404, or
+403 with `STRICT_MODE` on), and so is every runtime for a job in the queue, whether no runtime
+has leased it yet or a stop, an idle lease release or a rate-limit retry put it back. A refused
+call writes nothing. A queued job is ended only by the runtime that leases it next, by a person's
+cancel or stop, or by the controller itself (its sweeps and runtime stops). There is no
+lease-expiry check: a runtime whose job lease lapsed still ends the job as long as nothing
+requeued it, and so do a plan worker whose renewal was refused for want of a worker slot and a
+draining runtime. The one result this loses is a turn that ends after the idle release requeued
+its job under its still-running private runtime, which the release never stops: that late
+completion gets 404 and the job runs again. The controller logs each completion that matched no
+job its runtime holds, with the job's status.
 
 `POST /agent/secrets` independently requires the same signed runtime identity and current
 generation. The requested job must belong to that exact runtime, remain leased, and have a

@@ -19850,25 +19850,60 @@ fn ambient_group_dispatch_request(
     .map_err(|error| controller_error("normalize ambient group dispatch", error))
 }
 
-fn mint_agent_message_token(config: &AppConfig, project_id: &Uuid) -> anyhow::Result<String> {
-    let minted = mint_scoped_token(
-        config,
-        ScopedTokenRequest {
-            audience: project_id.to_string(),
-            subject: "agent:skill-mode-test".to_string(),
-            project_id: project_id.to_string(),
-            origin_id: None,
-            runtime_id: None,
-            protocol: None,
-            scopes: vec!["agent.message".to_string(), "agent.complete".to_string()],
-            lease_id: None,
-            run_id: None,
-            prefer_runtime: None,
-            ttl_seconds: Some(300),
-        },
+/// Leases `job_id` to its space's runtime, as `/agent/lease` leaves a job
+/// (`status = 'leased'`, `leased_by_runtime_id` that runtime), and gives that
+/// runtime's agent token: only the runtime that leased a job posts to it or
+/// ends it (docs/Self-Hosted-Runtime-Security.md). The runtime is a ready
+/// hosted one, which may lease any job of the space; the space's first lease
+/// registers it and its later leases reuse it. Nothing else of the job
+/// changes, so a job that already ended can be leased again to deliver its
+/// end twice.
+pub(crate) async fn lease_job_to_space_runtime(
+    pool: &PgPool,
+    config: &AppConfig,
+    project_id: &Uuid,
+    job_id: &Uuid,
+) -> anyhow::Result<String> {
+    const TASK_REF: &str = "agent-route-test-runtime";
+    let connection = pool.get().await?;
+    let runtime_id: Uuid = match connection
+        .query_opt(
+            "select id from runtimes where project_id = $1 and task_ref = $2",
+            &[project_id, &TASK_REF],
+        )
+        .await?
+    {
+        Some(row) => row.get(0),
+        None => {
+            let runtime_id = Uuid::new_v4();
+            connection
+                .execute(
+                    "insert into runtimes (
+                         id, project_id, provider, status, task_ref, idle_ttl_seconds,
+                         last_seen_at, capabilities
+                     ) values (
+                         $1, $2, 'instafy-cloud', 'ready', $3, 600, now(),
+                         '{\"agent\": true, \"origin\": true}'::jsonb
+                     )",
+                    &[&runtime_id, project_id, &TASK_REF],
+                )
+                .await?;
+            runtime_id
+        }
+    };
+    let leased = connection
+        .execute(
+            "update agent_jobs set status = 'leased', leased_by_runtime_id = $3
+              where id = $1 and project_id = $2",
+            &[job_id, project_id, &runtime_id],
+        )
+        .await?;
+    anyhow::ensure!(leased == 1, "the space has no job {job_id} to lease");
+    Ok(
+        crate::auth::issue_agent_token(config, project_id, &runtime_id, None, None)
+            .map_err(|error| controller_error("the space runtime's agent token", error))?
+            .token,
     )
-    .map_err(|error| controller_error("mint agent token", error))?;
-    Ok(minted.token)
 }
 
 async fn post_agent_endpoint(
@@ -20002,7 +20037,6 @@ async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -
         "silent-automation",
     );
     let state = build_test_state(pool.clone(), config.clone());
-    let token = mint_agent_message_token(&config, &project_id)?;
 
     // Dispatch sequentially. The scheduler itself supports concurrency, but
     // concurrently bootstrapping several default-agent rows for the same new
@@ -20111,15 +20145,10 @@ async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -
                 .as_str()
                 .is_some_and(|prompt| prompt.contains("Scheduled automation run")));
         }
-        if case.stream_plain_text_decline {
-            connection
-                .execute(
-                    "update agent_jobs set status = 'leased' where id = $1",
-                    &[&job_id],
-                )
-                .await?;
-        }
         drop(connection);
+        // The space's runtime runs the automation: only the runtime that
+        // leased a job posts to it or ends it.
+        let token = lease_job_to_space_runtime(&pool, &config, &project_id, &job_id).await?;
 
         // Ignore any dispatch-time delivery attempts; the assertions below
         // cover only the streamed/final result paths.
@@ -21258,16 +21287,9 @@ async fn skill_mode_ambient_turn_dispatches_evaluation_and_swallows_decline() ->
         .await?
         .get(0);
     assert_eq!(ledger_count, 0, "an undecided evaluation must not burn");
-
-    connection
-        .execute(
-            "update agent_jobs set status = 'leased' where id = $1",
-            &[&job_id],
-        )
-        .await?;
     drop(connection);
 
-    let token = mint_agent_message_token(&config, &project_id)?;
+    let token = lease_job_to_space_runtime(&pool, &config, &project_id, &job_id).await?;
     let status = post_agent_endpoint(
         &state,
         &token,
@@ -21464,15 +21486,9 @@ async fn skill_mode_answered_evaluation_bills_on_first_visible_message() -> anyh
         )
         .await?
         .get("id");
-    connection
-        .execute(
-            "update agent_jobs set status = 'leased' where id = $1",
-            &[&job_id],
-        )
-        .await?;
     drop(connection);
 
-    let token = mint_agent_message_token(&config, &project_id)?;
+    let token = lease_job_to_space_runtime(&pool, &config, &project_id, &job_id).await?;
     let _watch = state.events.watch_project(project_id);
     let mut credit_events = state.events.subscribe();
     let status = post_agent_endpoint(
@@ -21701,15 +21717,9 @@ async fn no_response_on_direct_turn_persists_as_a_normal_message() -> anyhow::Re
         )
         .await?
         .get("id");
-    connection
-        .execute(
-            "update agent_jobs set status = 'leased' where id = $1",
-            &[&job_id],
-        )
-        .await?;
     drop(connection);
 
-    let token = mint_agent_message_token(&config, &project_id)?;
+    let token = lease_job_to_space_runtime(&pool, &config, &project_id, &job_id).await?;
     let status = post_agent_endpoint(
         &state,
         &token,
@@ -21952,16 +21962,9 @@ async fn skill_mode_multi_ai_ambient_turn_evaluates_every_agent_and_swallows_cus
         .await?
         .get(0);
     assert_eq!(ledger_count, 0, "undecided evaluations must not burn");
-
-    connection
-        .execute(
-            "update agent_jobs set status = 'leased' where id = $1",
-            &[&reviewer_job_id],
-        )
-        .await?;
     drop(connection);
 
-    let token = mint_agent_message_token(&config, &project_id)?;
+    let token = lease_job_to_space_runtime(&pool, &config, &project_id, &reviewer_job_id).await?;
     let status = post_agent_endpoint(
         &state,
         &token,

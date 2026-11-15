@@ -172,15 +172,8 @@ impl Chain {
         reply: Option<&str>,
         outcome: &str,
     ) -> anyhow::Result<()> {
-        self.pool
-            .get()
-            .await?
-            .execute(
-                "update agent_jobs set status = 'leased' where id = $1",
-                &[job_id],
-            )
-            .await?;
-        let token = mint_agent_message_token(&self.config, &self.project_id)?;
+        let token =
+            lease_job_to_space_runtime(&self.pool, &self.config, &self.project_id, job_id).await?;
         let status = post_agent_endpoint(
             &self.state,
             &token,
@@ -194,15 +187,8 @@ impl Chain {
 
     /// A runtime that streams its answer as a message instead.
     async fn stream(&self, job_id: &Uuid, text: &str) -> anyhow::Result<()> {
-        self.pool
-            .get()
-            .await?
-            .execute(
-                "update agent_jobs set status = 'leased' where id = $1",
-                &[job_id],
-            )
-            .await?;
-        let token = mint_agent_message_token(&self.config, &self.project_id)?;
+        let token =
+            lease_job_to_space_runtime(&self.pool, &self.config, &self.project_id, job_id).await?;
         let status = post_agent_endpoint(
             &self.state,
             &token,
@@ -223,15 +209,8 @@ impl Chain {
         message_type: &str,
         metadata: serde_json::Value,
     ) -> anyhow::Result<()> {
-        self.pool
-            .get()
-            .await?
-            .execute(
-                "update agent_jobs set status = 'leased' where id = $1",
-                &[job_id],
-            )
-            .await?;
-        let token = mint_agent_message_token(&self.config, &self.project_id)?;
+        let token =
+            lease_job_to_space_runtime(&self.pool, &self.config, &self.project_id, job_id).await?;
         let status = post_agent_endpoint(
             &self.state,
             &token,
@@ -820,16 +799,13 @@ async fn a_failed_browser_turn_and_a_forged_record_hand_nothing_back() -> anyhow
 
             // A browser turn that stopped for the person's step on the page.
             let (_, paused_job) = chain.card_and_running_browser_turn().await?;
-            chain
-                .pool
-                .get()
-                .await?
-                .execute(
-                    "update agent_jobs set status = 'leased' where id = $1",
-                    &[&paused_job],
-                )
-                .await?;
-            let token = mint_agent_message_token(&chain.config, &chain.project_id)?;
+            let token = lease_job_to_space_runtime(
+                &chain.pool,
+                &chain.config,
+                &chain.project_id,
+                &paused_job,
+            )
+            .await?;
             let status = post_agent_endpoint(
                 &chain.state,
                 &token,

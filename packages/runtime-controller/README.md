@@ -52,6 +52,8 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/runtime/ensure` | Guarantee a runtime record exists (creates idle agents when missing). |
 | POST | `/agent/login` | Exchange shared key for agent token, lease/heartbeat URLs, and proxy envelope. |
 | POST | `/agent/lease` | Claim work with a signed runtime ID bound to an eligible registered runtime and its current generation, including when `STRICT_MODE=false`. |
+| POST | `/agent/message` | Post a step or reply of a job. Only the runtime that leased the job, while it is `leased`, for every job and including when `STRICT_MODE=false`: a token with no runtime ID gets 401; another runtime, or any runtime for a queued or requeued job, gets 404 (403 in strict mode) and writes nothing. |
+| POST | `/agent/complete` | End a job with its outcome, under the same rule as `/agent/message`. There is no lease-expiry check: a runtime whose lease lapsed while nothing requeued the job still ends it. A completion that matches no job its runtime holds is logged with the job's status. |
 | POST | `/agent/jobs/:job_id/proxy-token` | Renew the proxy token of the runtime's active, unexpired job lease with `{lease_attempt}`. Machine authentication and runtime generation are required; identity comes from the stored job and renewal never extends its lease. |
 | POST | `/agent/secrets` | Resolve granted secrets only for the signed runtime's exact active, unexpired job lease and current runtime generation, including when `STRICT_MODE=false`. |
 | POST | `/credits` | Apply authenticated credit-ledger operations through the controller. |
@@ -498,6 +500,9 @@ The runtime-token endpoint accepts only the controller's built-in runtime-machin
 `telemetry.write`, `git.token.mint`, `workspace.lease.read`, and `personal_browser.control`.
 Omitting `scopes` issues the standard bundle; empty or unknown scope sets are rejected, and
 `personal_browser.control` requires the explicit `personalBrowser: true` request flag.
+A scope set that lacks any of the machine's `agent.*` and `origin.*` scopes above, minted without
+`runtimeId`, names no runtime: such a token posts to and completes no job, since
+`/agent/message` and `/agent/complete` take only the runtime that leased the job.
 `ttlSeconds` must be between 60 and 3600 seconds inclusive; omitting it or sending `null`
 uses 3600 seconds, independently of the origin-token TTL configuration.
 
