@@ -44,6 +44,7 @@ export type CredentialsConnectModalStep =
   | "zai"
   | "gemini";
 export type CredentialsConnectApiKeyProvider = "openai" | "deepseek" | "zai" | "gemini";
+type DeviceLoginCopyTarget = "code" | "link";
 
 // Where each provider issues API keys — shown as a "Get a key" link so users
 // don't have to hunt for the console.
@@ -165,8 +166,12 @@ export function CredentialsConnectModal({
 }: CredentialsConnectModalProps) {
   const isDesktop = useBreakpoint("sm", { freeze: connectModalOpen });
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [copiedDeviceCode, setCopiedDeviceCode] = useState(false);
-  const [copyDeviceCodeFailed, setCopyDeviceCodeFailed] = useState(false);
+  // Which device-login value (the one-time code or the login link) was just
+  // copied, or could not be copied because the browser blocked the clipboard.
+  const [copiedDeviceLoginValue, setCopiedDeviceLoginValue] =
+    useState<DeviceLoginCopyTarget | null>(null);
+  const [blockedDeviceLoginCopy, setBlockedDeviceLoginCopy] =
+    useState<DeviceLoginCopyTarget | null>(null);
   const [showDesktopDeviceCodePrerequisite, setShowDesktopDeviceCodePrerequisite] =
     useState(false);
   const canMaskWithTextSecurity = useMemo(() => {
@@ -215,8 +220,8 @@ export function CredentialsConnectModal({
   });
 
   useEffect(() => {
-    setCopiedDeviceCode(false);
-    setCopyDeviceCodeFailed(false);
+    setCopiedDeviceLoginValue(null);
+    setBlockedDeviceLoginCopy(null);
   }, [codexDeviceAuthSession?.sessionId]);
 
   useEffect(() => {
@@ -257,17 +262,32 @@ export function CredentialsConnectModal({
     }
   }, [codexDeviceAuthSession?.verificationUrl]);
 
-  const handleCopyText = async (value: string) => {
-    setCopiedDeviceCode(false);
-    setCopyDeviceCodeFailed(false);
+  // The full login link, shown as text so people can finish in another
+  // browser (one with their passkey, or when this one blocks the popup).
+  // Only an https link is shown; the Open button still uses the session's URL.
+  const deviceLoginUrl = useMemo(() => {
+    if (!codexDeviceAuthSession?.verificationUrl) {
+      return null;
+    }
+    try {
+      const url = new URL(codexDeviceAuthSession.verificationUrl);
+      return url.protocol === "https:" ? url.href : null;
+    } catch (_error) {
+      return null;
+    }
+  }, [codexDeviceAuthSession?.verificationUrl]);
+
+  const handleCopyText = async (value: string, target: DeviceLoginCopyTarget) => {
+    setCopiedDeviceLoginValue(null);
+    setBlockedDeviceLoginCopy(null);
     try {
       if (!navigator.clipboard?.writeText) {
         throw new Error("Clipboard is unavailable");
       }
       await navigator.clipboard.writeText(value);
-      setCopiedDeviceCode(true);
+      setCopiedDeviceLoginValue(target);
     } catch (_error) {
-      setCopyDeviceCodeFailed(true);
+      setBlockedDeviceLoginCopy(target);
     }
   };
 
@@ -349,21 +369,24 @@ export function CredentialsConnectModal({
               <Text variant="bodyStrong">Device login</Text>
               <Text variant="caption" tone="muted" className="mt-1">Open the OpenAI login page and enter this one-time code:</Text>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <code className="min-w-0 break-all rounded-lg bg-white px-3 py-2 text-base font-semibold tracking-widest text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700">
+                <code
+                  data-testid="credentials-codex-device-code"
+                  className="min-w-0 select-all break-all rounded-lg bg-white px-3 py-2 text-base font-semibold tracking-widest text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700"
+                >
                   {codexDeviceAuthSession.userCode}
                 </code>
                 <Button
-                  onPress={() => void handleCopyText(codexDeviceAuthSession.userCode)}
+                  onPress={() => void handleCopyText(codexDeviceAuthSession.userCode, "code")}
                   variant="outline"
                   size="sm"
                   radius="full"
                   isDisabled={modalBusy}
                   aria-label="Copy device code"
                 >
-                  {copiedDeviceCode ? "Copied" : "Copy"}
+                  {copiedDeviceLoginValue === "code" ? "Copied" : "Copy"}
                 </Button>
               </div>
-              {copyDeviceCodeFailed ? (
+              {blockedDeviceLoginCopy === "code" ? (
                 <Text variant="caption" tone="danger" className="mt-2" role="alert">
                   Copy was blocked. Press and hold the code to copy it manually.
                 </Text>
@@ -389,6 +412,36 @@ export function CredentialsConnectModal({
                   Cancel
                 </Button>
               </div>
+              {deviceLoginUrl ? (
+                <div className="mt-3 space-y-1" data-testid="credentials-codex-device-login-link">
+                  <Text variant="caption" tone="muted">
+                    Signing in from another browser? Open this link there:
+                  </Text>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <code
+                      data-testid="credentials-codex-device-login-url"
+                      className="min-w-0 select-all break-words rounded-lg bg-white px-2 py-1 font-sans text-sm text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700"
+                    >
+                      {deviceLoginUrl}
+                    </code>
+                    <Button
+                      onPress={() => void handleCopyText(deviceLoginUrl, "link")}
+                      variant="outline"
+                      size="sm"
+                      radius="full"
+                      isDisabled={modalBusy}
+                      aria-label="Copy login link"
+                    >
+                      {copiedDeviceLoginValue === "link" ? "Copied" : "Copy link"}
+                    </Button>
+                  </div>
+                  {blockedDeviceLoginCopy === "link" ? (
+                    <Text variant="caption" tone="danger" role="alert">
+                      Copy was blocked. Select the link to copy it, or type it into the other browser.
+                    </Text>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {codexDeviceAuthSession.status === "pending" ? (
                   <>
@@ -407,6 +460,10 @@ export function CredentialsConnectModal({
                   </Text>
                 ) : null}
               </div>
+              <Text variant="caption" tone="muted" className="mt-2">
+                OpenAI may also email you a sign-in code. That is a different code: enter it where OpenAI
+                asks for it, then this one.
+              </Text>
               <Text variant="caption" tone="muted" className="mt-2">
                 Only enter this code at <Text as="span" variant="captionStrong" tone="inherit">{deviceLoginHost}</Text>. Instafy will
                 never ask you to paste your ChatGPT password here.
