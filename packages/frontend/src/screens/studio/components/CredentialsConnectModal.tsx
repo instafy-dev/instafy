@@ -12,7 +12,6 @@ import { Button, IconButton } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { InlineNotice } from "../../../components/InlineNotice";
-import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import {
@@ -28,6 +27,7 @@ import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { CredentialsConnectionChoices, getCodexConnectionChoice } from "./CredentialsConnectionChoices";
 import { ChatGptDeviceCodeDisabledNotice } from "./ChatGptDeviceCodeDisabledNotice";
 import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
+import { ChatGptDeviceLoginCard } from "./device-auth/ChatGptDeviceLoginCard";
 import { CodexAdvancedConnectionOptions } from "./CodexAdvancedConnectionOptions";
 import {
   isLikelyDesktopDevice,
@@ -44,7 +44,6 @@ export type CredentialsConnectModalStep =
   | "zai"
   | "gemini";
 export type CredentialsConnectApiKeyProvider = "openai" | "deepseek" | "zai" | "gemini";
-type DeviceLoginCopyTarget = "code" | "link";
 
 // Where each provider issues API keys — shown as a "Get a key" link so users
 // don't have to hunt for the console.
@@ -165,13 +164,6 @@ export function CredentialsConnectModal({
   onConnectApiKey,
 }: CredentialsConnectModalProps) {
   const isDesktop = useBreakpoint("sm", { freeze: connectModalOpen });
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  // Which device-login value (the one-time code or the login link) was just
-  // copied, or could not be copied because the browser blocked the clipboard.
-  const [copiedDeviceLoginValue, setCopiedDeviceLoginValue] =
-    useState<DeviceLoginCopyTarget | null>(null);
-  const [blockedDeviceLoginCopy, setBlockedDeviceLoginCopy] =
-    useState<DeviceLoginCopyTarget | null>(null);
   const [showDesktopDeviceCodePrerequisite, setShowDesktopDeviceCodePrerequisite] =
     useState(false);
   const canMaskWithTextSecurity = useMemo(() => {
@@ -220,76 +212,8 @@ export function CredentialsConnectModal({
   });
 
   useEffect(() => {
-    setCopiedDeviceLoginValue(null);
-    setBlockedDeviceLoginCopy(null);
-  }, [codexDeviceAuthSession?.sessionId]);
-
-  useEffect(() => {
     setShowDesktopDeviceCodePrerequisite(false);
   }, [connectModalOpen, connectModalStep]);
-
-  useEffect(() => {
-    if (!codexDeviceAuthSession || codexDeviceAuthSession.status !== "pending") {
-      return;
-    }
-    setNowMs(Date.now());
-    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(intervalId);
-  }, [codexDeviceAuthSession]);
-
-  const deviceCodeExpiresIn = useMemo(() => {
-    if (!codexDeviceAuthSession?.expiresAt) {
-      return null;
-    }
-    const expiresAtMs = Date.parse(codexDeviceAuthSession.expiresAt);
-    if (!Number.isFinite(expiresAtMs)) {
-      return null;
-    }
-    const seconds = Math.max(0, Math.ceil((expiresAtMs - nowMs) / 1000));
-    const minutesPart = Math.floor(seconds / 60);
-    const secondsPart = String(seconds % 60).padStart(2, "0");
-    return `${minutesPart}:${secondsPart}`;
-  }, [codexDeviceAuthSession?.expiresAt, nowMs]);
-
-  const deviceLoginHost = useMemo(() => {
-    if (!codexDeviceAuthSession?.verificationUrl) {
-      return "auth.openai.com";
-    }
-    try {
-      return new URL(codexDeviceAuthSession.verificationUrl).hostname;
-    } catch (_error) {
-      return "auth.openai.com";
-    }
-  }, [codexDeviceAuthSession?.verificationUrl]);
-
-  // The full login link, shown as text so people can finish in another
-  // browser (one with their passkey, or when this one blocks the popup).
-  // Only an https link is shown; the Open button still uses the session's URL.
-  const deviceLoginUrl = useMemo(() => {
-    if (!codexDeviceAuthSession?.verificationUrl) {
-      return null;
-    }
-    try {
-      const url = new URL(codexDeviceAuthSession.verificationUrl);
-      return url.protocol === "https:" ? url.href : null;
-    } catch (_error) {
-      return null;
-    }
-  }, [codexDeviceAuthSession?.verificationUrl]);
-
-  const handleCopyText = async (value: string, target: DeviceLoginCopyTarget) => {
-    setCopiedDeviceLoginValue(null);
-    setBlockedDeviceLoginCopy(null);
-    try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error("Clipboard is unavailable");
-      }
-      await navigator.clipboard.writeText(value);
-      setCopiedDeviceLoginValue(target);
-    } catch (_error) {
-      setBlockedDeviceLoginCopy(target);
-    }
-  };
 
   const handleConnectApiKeyAndClose = async (provider: CredentialsConnectApiKeyProvider) => {
     if (modalBusy || !canManageAiConnections) return;
@@ -365,132 +289,14 @@ export function CredentialsConnectModal({
               testId="credentials-chatgpt-device-code-disabled"
             />
           ) : codexDeviceAuthSession ? (
-            <Surface tone="muted" radius="xl" shadow="none" className="p-3">
-              <Text variant="bodyStrong">Device login</Text>
-              <Text variant="caption" tone="muted" className="mt-1">Open the OpenAI login page and enter this one-time code:</Text>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <code
-                  data-testid="credentials-codex-device-code"
-                  className="min-w-0 select-all break-all rounded-lg bg-white px-3 py-2 text-base font-semibold tracking-widest text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700"
-                >
-                  {codexDeviceAuthSession.userCode}
-                </code>
-                <Button
-                  onPress={() => void handleCopyText(codexDeviceAuthSession.userCode, "code")}
-                  variant="outline"
-                  size="sm"
-                  radius="full"
-                  isDisabled={modalBusy}
-                  aria-label="Copy device code"
-                >
-                  {copiedDeviceLoginValue === "code" ? "Copied" : "Copy"}
-                </Button>
-              </div>
-              {blockedDeviceLoginCopy === "code" ? (
-                <Text variant="caption" tone="danger" className="mt-2" role="alert">
-                  Copy was blocked. Press and hold the code to copy it manually.
-                </Text>
-              ) : null}
-              <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                <Button
-                  onPress={() => void openExternalUrl(codexDeviceAuthSession.verificationUrl)}
-                  variant="primary"
-                  size="sm"
-                  radius="full"
-                  isDisabled={modalBusy}
-                  fullWidth
-                >
-                  Open {deviceLoginHost}
-                </Button>
-                <Button
-                  onPress={onCancelDeviceAuthSession}
-                  variant="ghost"
-                  size="sm"
-                  radius="full"
-                  isDisabled={modalBusy}
-                >
-                  Cancel
-                </Button>
-              </div>
-              {deviceLoginUrl ? (
-                <div className="mt-3 space-y-1" data-testid="credentials-codex-device-login-link">
-                  <Text variant="caption" tone="muted">
-                    Signing in from another browser? Open this link there:
-                  </Text>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <code
-                      data-testid="credentials-codex-device-login-url"
-                      className="min-w-0 select-all break-words rounded-lg bg-white px-2 py-1 font-sans text-sm text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700"
-                    >
-                      {deviceLoginUrl}
-                    </code>
-                    <Button
-                      onPress={() => void handleCopyText(deviceLoginUrl, "link")}
-                      variant="outline"
-                      size="sm"
-                      radius="full"
-                      isDisabled={modalBusy}
-                      aria-label="Copy login link"
-                    >
-                      {copiedDeviceLoginValue === "link" ? "Copied" : "Copy link"}
-                    </Button>
-                  </div>
-                  {blockedDeviceLoginCopy === "link" ? (
-                    <Text variant="caption" tone="danger" role="alert">
-                      Copy was blocked. Select the link to copy it, or type it into the other browser.
-                    </Text>
-                  ) : null}
-                </div>
-              ) : null}
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                {codexDeviceAuthSession.status === "pending" ? (
-                  <>
-                    <LoadingStatus size="xs">
-                      {deviceAuthCompleting
-                        ? "Login complete — checking the connection…"
-                        : "Waiting for login…"}
-                    </LoadingStatus>
-                    {!deviceAuthCompleting && deviceCodeExpiresIn ? (
-                      <Text as="span" variant="caption" tone="muted">Code expires in {deviceCodeExpiresIn}</Text>
-                    ) : null}
-                  </>
-                ) : codexDeviceAuthSession.status === "failed" ? (
-                  <Text variant="caption" tone="danger" role="alert">
-                    {codexDeviceAuthSession.error ?? "Device login failed."}
-                  </Text>
-                ) : null}
-              </div>
-              <Text variant="caption" tone="muted" className="mt-2">
-                OpenAI may also email you a sign-in code. That is a different code: enter it where OpenAI
-                asks for it, then this one.
-              </Text>
-              <Text variant="caption" tone="muted" className="mt-2">
-                Only enter this code at <Text as="span" variant="captionStrong" tone="inherit">{deviceLoginHost}</Text>. Instafy will
-                never ask you to paste your ChatGPT password here.
-              </Text>
-              {codexDeviceAuthSession.status === "failed" ? (
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <Button
-                    onPress={() => onBeginDeviceAuth("codex")}
-                    variant="primary"
-                    size="xs"
-                    radius="full"
-                    isDisabled={modalBusy}
-                  >
-                    Try again
-                  </Button>
-                  <Button
-                    onPress={onCancelDeviceAuthSession}
-                    variant="ghost"
-                    size="xs"
-                    radius="full"
-                    isDisabled={modalBusy}
-                  >
-                    Back
-                  </Button>
-                </div>
-              ) : null}
-            </Surface>
+            <ChatGptDeviceLoginCard
+              key={codexDeviceAuthSession.sessionId}
+              session={codexDeviceAuthSession}
+              busy={modalBusy}
+              completing={deviceAuthCompleting}
+              onCancel={onCancelDeviceAuthSession}
+              onTryAgain={() => onBeginDeviceAuth("codex")}
+            />
           ) : canUseDesktopConnect ? (
             <Surface tone="muted" radius="xl" shadow="none" className="p-3">
               {desktopCodexAuthJsonStatus?.exists ? (
