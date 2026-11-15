@@ -4311,6 +4311,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     remoteHistoryPresenceResolved:
       remoteConversationHistoryResolved && !isInitialHistoryLoading && !initialHistoryError,
     runtimeControllerEnabled,
+    turnEngineChosen,
   });
   // Connect: one sheet (browse and confirm stages) shared by the composer
   // sub-view, the getting-started card and the custom skill import modal.

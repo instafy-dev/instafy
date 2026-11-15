@@ -70,6 +70,13 @@ export const CLAUDE_CODE_COPY = {
     disable: "Turn off",
     on: "On for your messages when you choose it in the composer.",
     off: "Off. Choose Use for my messages to turn it on for this computer.",
+    /**
+     * Off, while Desktop has no find to offer and no problem to report: before
+     * any Find or Locate, or after Turn off when it holds none. After one that
+     * turned up nothing it can use, the row gives Desktop's reason instead.
+     */
+    offNotFound: "Off. Choose Find or Locate… to pick the claude program, then Use for my messages.",
+    /** While Desktop replaces this computer's runtime after a change that leaves it on (4.3). */
     checking: "Checking this computer…",
     ready: "Ready on this computer.",
     notRunning: "Start this space on this computer to check it here.",
@@ -120,7 +127,11 @@ export const CLAUDE_CODE_COPY = {
     /** While it is on: Find turned up nothing, and the copy in use stays. */
     candidateNotFound: "Find didn't turn up any other copy. Your messages keep using this one.",
     actionFailed: "Instafy Desktop couldn't do that. Try again.",
-    /** The one-time note once it is on (5.3). */
+    /**
+     * The one-time note once it is on (5.3). It is left out while this
+     * computer's runtime reports a Claude plan sign-in, the one kind of
+     * sign-in a runtime reports, and while the row checks a new runtime.
+     */
     firstUse: "Sign in to Claude Code on this computer first: run claude in a terminal once.",
     firstUseDismiss: "Got it",
   },
