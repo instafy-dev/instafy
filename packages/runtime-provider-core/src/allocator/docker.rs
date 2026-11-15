@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -90,7 +90,6 @@ pub struct DockerRuntimeAllocator {
     compose_semaphore: Arc<Semaphore>,
     assigned_ports: Mutex<HashMap<Uuid, u16>>,
     runtime_operation_locks: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
-    built_images: Mutex<HashSet<String>>,
     checkout_eviction: CheckoutEvictionPolicy,
     /// Held by a start for its project's checkout, and by the eviction sweep
     /// while it decides about and removes a checkout.
@@ -197,7 +196,6 @@ impl DockerRuntimeAllocator {
             compose_semaphore: Arc::new(Semaphore::new(max_ops)),
             assigned_ports: Mutex::new(HashMap::new()),
             runtime_operation_locks: Mutex::new(HashMap::new()),
-            built_images: Mutex::new(HashSet::new()),
             checkout_eviction: config.runtime_checkout_eviction.clone(),
             checkout_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             space_directory: match ControllerSpaceDirectory::from_env() {
@@ -463,37 +461,12 @@ impl DockerRuntimeAllocator {
         let project_name = project_name.to_string();
         let envs = envs.to_vec();
         let force_recreate_flag = force_recreate;
-        let build_target = envs
-            .iter()
-            .find(|(key, _)| key == "RUNTIME_AGENT_BUILD_TARGET")
-            .map(|(_, value)| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let build_requested = build_target.is_some();
-        let runtime_image = envs
+        let runtime_image_name = envs
             .iter()
             .find(|(key, _)| key == "RUNTIME_AGENT_IMAGE")
             .map(|(_, value)| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let runtime_image_name = runtime_image
-            .as_deref()
-            .unwrap_or("runtime-agent:local")
-            .trim()
-            .to_string();
-        let force_build = envs
-            .iter()
-            .find(|(key, _)| key == "RUNTIME_AGENT_FORCE_BUILD")
-            .map(|(_, value)| value.trim().to_ascii_lowercase())
-            .map(|value| value == "1" || value == "true" || value == "yes")
-            .unwrap_or(false);
-        let build_key = build_target
-            .as_deref()
-            .map(|target| format!("{}|{}", runtime_image_name, target));
-        let build_cached = if let Some(key) = build_key.as_deref() {
-            let guard = self.built_images.lock().await;
-            guard.contains(key)
-        } else {
-            false
-        };
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "runtime-agent:local".to_string());
         let space_directory = self.space_directory.clone();
         let permit = self.acquire_compose_permit().await?;
         task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -592,7 +565,9 @@ impl DockerRuntimeAllocator {
                     Ok((stale_container_count, stale_network_count))
                 };
 
-            if !build_requested && image_ref_looks_remote(&runtime_image_name) {
+            // The allocator never builds the runtime image: the one it starts must already be on
+            // this node, or be pulled here, and every `up` runs with --no-build.
+            if image_ref_looks_remote(&runtime_image_name) {
                 let pull_output = Command::new("docker")
                     .arg("pull")
                     .arg(&runtime_image_name)
@@ -602,53 +577,6 @@ impl DockerRuntimeAllocator {
                         "docker pull failed for runtime image {}: {}",
                         runtime_image_name,
                         summarize_command_output(&pull_output)
-                    ));
-                }
-            }
-
-            let should_build = if !build_requested {
-                false
-            } else if force_build {
-                true
-            } else if build_cached {
-                false
-            } else {
-                let inspect = Command::new("docker")
-                    .arg("image")
-                    .arg("inspect")
-                    .arg(&runtime_image_name)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-                match inspect {
-                    Ok(status) => !status.success(),
-                    Err(_) => true,
-                }
-            };
-
-            let mut build_cmd = Command::new("docker");
-            build_cmd
-                .current_dir(&compose_dir)
-                .env("COMPOSE_PROJECT_NAME", &project_name)
-                .arg("compose")
-                .arg("-p")
-                .arg(&project_name)
-                .arg("-f")
-                .arg(&compose_file)
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit());
-
-            if should_build {
-                let mut build = build_cmd;
-                build.arg("build").arg(&service);
-                for (key, value) in &envs {
-                    build.env(key, value);
-                }
-                let output = build.output()?;
-                if !output.status.success() {
-                    return Err(anyhow::anyhow!(
-                        "docker compose build failed: {}",
-                        summarize_command_output(&output)
                     ));
                 }
             }
@@ -750,12 +678,6 @@ impl DockerRuntimeAllocator {
             ))
         })
         .await??;
-        if build_requested {
-            if let Some(key) = build_key {
-                let mut guard = self.built_images.lock().await;
-                guard.insert(key);
-            }
-        }
         Ok(())
     }
 
@@ -871,10 +793,7 @@ impl DockerRuntimeAllocator {
                     if provider_set.contains(key) || is_operator_only_env_key(key) {
                         continue;
                     }
-                    if exact_managed_provider
-                        && (!is_allowed_managed_runtime_env_key(key)
-                            || canonical_managed_runtime_env_value(value).is_none())
-                    {
+                    if !request_may_set_compose_env(exact_managed_provider, key, value) {
                         continue;
                     }
                     let rendered = match value {
@@ -903,17 +822,16 @@ impl DockerRuntimeAllocator {
             }
         }
 
-        let has_repo_host = envs.iter().any(|(k, _)| k == "RUNTIME_REPO_HOST");
-        if !has_repo_host {
-            if let Some(repo_base) = &self.repo_base {
-                let project_repo = repo_base.join(request.project_id.to_string());
-                std::fs::create_dir_all(&project_repo)?;
-                touch_checkout(repo_base, request.project_id);
-                envs.push((
-                    "RUNTIME_REPO_HOST".to_string(),
-                    project_repo.to_string_lossy().to_string(),
-                ));
-            }
+        // The provider alone picks the host directories it mounts into the runtime: a request
+        // cannot set RUNTIME_REPO_HOST or RUNTIME_CACHE_HOST.
+        if let Some(repo_base) = &self.repo_base {
+            let project_repo = repo_base.join(request.project_id.to_string());
+            std::fs::create_dir_all(&project_repo)?;
+            touch_checkout(repo_base, request.project_id);
+            envs.push((
+                "RUNTIME_REPO_HOST".to_string(),
+                project_repo.to_string_lossy().to_string(),
+            ));
         }
 
         let codex_dir = self.codex_base.join(request.project_id.to_string());
@@ -927,23 +845,21 @@ impl DockerRuntimeAllocator {
         // recreation (idle stop, re-provision). Without it every wake
         // re-downloads cargo registries, npm/pip caches, and any toolchain
         // the agent installed — the container's writable layer is throwaway.
-        if !envs.iter().any(|(key, _)| key == "RUNTIME_CACHE_HOST") {
-            let cache_dir = self
-                .codex_base
-                .parent()
-                .map(|base| base.join("workspace-caches"))
-                .unwrap_or_else(|| self.codex_base.join("workspace-caches"))
-                .join(request.project_id.to_string());
-            std::fs::create_dir_all(&cache_dir)?;
-            // Freshness stamp: a project resumed after a long pause must not
-            // race the TTL cleanup sweep, which decides staleness by file
-            // mtimes — touching this file makes the cache instantly fresh.
-            let _ = std::fs::write(cache_dir.join(".instafy-ensure-stamp"), b"");
-            envs.push((
-                "RUNTIME_CACHE_HOST".to_string(),
-                cache_dir.to_string_lossy().to_string(),
-            ));
-        }
+        let cache_dir = self
+            .codex_base
+            .parent()
+            .map(|base| base.join("workspace-caches"))
+            .unwrap_or_else(|| self.codex_base.join("workspace-caches"))
+            .join(request.project_id.to_string());
+        std::fs::create_dir_all(&cache_dir)?;
+        // Freshness stamp: a project resumed after a long pause must not
+        // race the TTL cleanup sweep, which decides staleness by file
+        // mtimes — touching this file makes the cache instantly fresh.
+        let _ = std::fs::write(cache_dir.join(".instafy-ensure-stamp"), b"");
+        envs.push((
+            "RUNTIME_CACHE_HOST".to_string(),
+            cache_dir.to_string_lossy().to_string(),
+        ));
 
         let origin_id = request
             .origin_instance_id
@@ -1132,6 +1048,104 @@ fn first_status_quantity(status: &str) -> Option<u64> {
 /// file). A runtime request never sets it.
 fn is_operator_only_env_key(key: &str) -> bool {
     key.starts_with("PROXY_UPSTREAM_")
+}
+
+/// The variables a launch request may set for a provider other than exact instafy_cloud, besides
+/// the managed launch keys. `docker compose` runs with a request's variables in its own
+/// environment, where the Docker CLI, Compose, BuildKit and the dynamic loader read their
+/// settings, and the runtime compose files put each variable they use outside the runtime's
+/// `environment:` into another service, a bind mount, an `env_file` path, an image, a port, a
+/// build setting or a resource limit. A request is meant for the runtime container, so these are
+/// the variables either runtime compose file passes into the runtime's `environment:` and neither
+/// file uses anywhere else. scripts/check-self-host-compose.test.mjs keeps the list in step with
+/// both files, and a test here keeps every name to the runtime's own name families or a few
+/// names checked one by one, none of them a setting Docker tools or the process read. The
+/// provider's own value still wins for the ones it sets itself, such as the runtime's ids, token
+/// and addresses.
+const RUNTIME_CONTAINER_ENV_KEYS: &[&str] = &[
+    "CODEX_API_ENDPOINT",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_PATH",
+    "CODEX_BASE_INSTRUCTIONS",
+    "CODEX_CHATGPT_ENDPOINT",
+    "CODEX_DISABLED",
+    "CODEX_INCLUDE_APPLY_PATCH_TOOL",
+    "CODEX_INCLUDE_PLAN_TOOL",
+    "CODEX_INCLUDE_VIEW_IMAGE_TOOL",
+    "CODEX_MODEL",
+    "CODEX_MODEL_PROVIDER",
+    "CODEX_PROFILE",
+    "CODEX_PROXY_CHATGPT_ENDPOINT",
+    "CODEX_SANDBOX_MODE",
+    "CODEX_SHOW_RAW_AGENT_REASONING",
+    "INSTAFY_BROWSER_CDP_SCREENCAST",
+    "INSTAFY_BROWSER_DISPLAY",
+    "INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS",
+    "INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV",
+    "INSTAFY_BROWSER_EGRESS_ISOLATION",
+    "INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS",
+    "INSTAFY_BROWSER_EGRESS_PROXY_BIND",
+    "INSTAFY_BROWSER_MAX_FRAMEBUFFER_PIXELS",
+    "INSTAFY_BROWSER_PREFERRED_VIEWER",
+    "INSTAFY_BROWSER_PROFILE_PERSIST",
+    "INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS",
+    "INSTAFY_BROWSER_RENDER_SCALE",
+    "INSTAFY_BROWSER_VIEWPORT_ONLY",
+    "INSTAFY_BROWSER_WEBRTC_BITRATE_KBPS",
+    "INSTAFY_BROWSER_WEBRTC_ENABLED",
+    "INSTAFY_BROWSER_WEBRTC_FPS",
+    "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON",
+    "INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN",
+    "INSTAFY_ENABLE_BROWSER_SESSION",
+    "INSTAFY_PLAYWRIGHT_MCP_ALLOW_ISOLATED",
+    "INSTAFY_PLAYWRIGHT_MCP_MODE",
+    "INSTAFY_PLAYWRIGHT_MCP_PORT",
+    "INSTAFY_PLAYWRIGHT_MCP_PROFILE_DIR",
+    "INSTAFY_VNC_DEPTH",
+    "INSTAFY_VNC_GEOMETRY",
+    "INSTAFY_VNC_HOST",
+    "INSTAFY_VNC_PORT",
+    "OPENAI_BASE_URL",
+    "ORIGIN_BIND_HOST",
+    "ORIGIN_BIND_PORT",
+    "ORIGIN_DEVICE_ID",
+    "ORIGIN_ENABLE_PRESENCE_HEARTBEAT",
+    "ORIGIN_ENDPOINT",
+    "ORIGIN_GIT_REMOTE_URL",
+    "ORIGIN_ID",
+    "ORIGIN_LEASE_ID",
+    "ORIGIN_METADATA",
+    "ORIGIN_MODE",
+    "ORIGIN_PROTOCOLS",
+    "ORIGIN_SKIP_AUTH",
+    "ORIGIN_TUNNEL_ENABLED",
+    "PROXY_BASE_URL",
+    "PROXY_TOKEN_TTL_SECONDS",
+    "RUNTIME_ACCESS_TOKEN",
+    "RUNTIME_CAPABILITIES",
+    "RUNTIME_DEV_ISOLATION",
+    "RUNTIME_HEARTBEAT_SECONDS",
+    "RUNTIME_ID",
+    "RUNTIME_LEASE_ID",
+    "RUNTIME_LEASE_SECONDS",
+    "RUNTIME_METADATA",
+    "RUNTIME_STRICT_MODE",
+    "RUNTIME_TYPE",
+    "RUNTIME_VERSION",
+    "SUPABASE_ANON_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "USE_PROXY_FOR_LLM",
+];
+
+/// Whether a request's `metadata.env` entry joins the environment `docker compose` runs with.
+/// Exact instafy_cloud takes only the managed launch keys, with scalar values; any other provider
+/// also takes the variables the runtime compose files keep inside the runtime container.
+fn request_may_set_compose_env(exact_managed_provider: bool, key: &str, value: &JsonValue) -> bool {
+    if exact_managed_provider {
+        return is_allowed_managed_runtime_env_key(key)
+            && canonical_managed_runtime_env_value(value).is_some();
+    }
+    is_allowed_managed_runtime_env_key(key) || RUNTIME_CONTAINER_ENV_KEYS.contains(&key)
 }
 
 fn resolve_runtime_agent_image(metadata: &JsonValue) -> Option<String> {
@@ -1717,6 +1731,21 @@ mod tests {
             .map(|(_, value)| value.as_str())
     }
 
+    /// A directory under the temp dir that is removed when the test ends, passed or failed.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(label: &str) -> Self {
+            Self(std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4())))
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn resolve_runtime_agent_image_reads_camel_case_key() {
         let metadata = json!({
@@ -1790,7 +1819,7 @@ mod tests {
                         "ORIGIN_INTERNAL_TOKEN": "chosen",
                         "RUNTIME_ID": "chosen",
                         "SPACE_ID": "chosen",
-                        "DOCKER_HOST": "tcp://custom-docker.test:2375"
+                        "CODEX_MODEL": "chosen-model"
                     }
                 }))),
                 54332,
@@ -1821,49 +1850,245 @@ mod tests {
             env_value(&envs, "CONTROLLER_BASE_URL"),
             Some("http://controller.internal:8788")
         );
-        // other settings a self-hosted runtime request may choose still apply
-        assert_eq!(
-            env_value(&envs, "DOCKER_HOST"),
-            Some("tcp://custom-docker.test:2375")
-        );
+        // runtime settings a self-hosted runtime request may choose still apply
+        assert_eq!(env_value(&envs, "CODEX_MODEL"), Some("chosen-model"));
     }
 
     #[test]
     fn build_env_prefers_metadata_runtime_agent_image_over_provider_env() {
+        // The codex volumes the allocator and build_env create land in here.
+        let scratch = ScratchDir::new("instafy-runtime-image");
         let mut config = ProviderConfig::default_docker();
         config.runtime_agent_image =
             Some("ghcr.io/instafy-dev/instafy-runtime-agent:provider".to_string());
+        config.runtime_docker_codex_root = Some(scratch.0.join("codex"));
         let allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
-        let envs = allocator
-            .build_env(
-                &sample_request(Some(json!({
-                    "runtimeAgentImage": "ghcr.io/instafy-dev/instafy-runtime-agent:request",
-                    "env": {
-                        "INSTAFY_SHARED_BROWSER_APPROVAL_DIR": "/srv/custom/approvals",
-                        "DOCKER_HOST": "tcp://custom-docker.test:2375",
-                        "RUNTIME_AGENT_BUILD_TARGET": "runtime-custom"
-                    }
-                }))),
-                54332,
-            )
-            .expect("runtime env");
+        let images = |metadata: JsonValue| -> Vec<String> {
+            allocator
+                .build_env(&sample_request(Some(metadata)), 54332)
+                .expect("runtime env")
+                .into_iter()
+                .filter(|(key, _)| key == "RUNTIME_AGENT_IMAGE")
+                .map(|(_, value)| value)
+                .collect()
+        };
 
         assert_eq!(
-            env_value(&envs, "RUNTIME_AGENT_IMAGE"),
-            Some("ghcr.io/instafy-dev/instafy-runtime-agent:request")
+            images(json!({
+                "runtimeAgentImage": "ghcr.io/instafy-dev/instafy-runtime-agent:request",
+                "env": {
+                    "RUNTIME_AGENT_IMAGE": "ghcr.io/instafy-dev/instafy-runtime-agent:env"
+                }
+            })),
+            vec!["ghcr.io/instafy-dev/instafy-runtime-agent:request"]
+        );
+        // metadata.env never picks the image, with or without a top-level choice.
+        assert_eq!(
+            images(json!({
+                "env": {
+                    "RUNTIME_AGENT_IMAGE": "ghcr.io/instafy-dev/instafy-runtime-agent:env"
+                }
+            })),
+            vec!["ghcr.io/instafy-dev/instafy-runtime-agent:provider"]
+        );
+    }
+
+    /// `docker compose` runs with the environment build_env returns, and the Docker CLI,
+    /// Compose, BuildKit and the dynamic loader read their own settings from it, while the
+    /// runtime compose files turn other variables into host paths, images, ports and the proxy
+    /// sidecar. A request's metadata.env, for any provider, changes none of that apart from the
+    /// CPU and memory limits the controller sets from the runtime's size; it changes only what
+    /// the runtime container receives. The image comes from the provider or the request's
+    /// top-level metadata, never from metadata.env.
+    #[test]
+    fn a_request_changes_only_what_reaches_the_runtime_container() {
+        // The checkouts, codex volumes and caches the allocator and build_env create all land
+        // in here.
+        let scratch = ScratchDir::new("instafy-request-env");
+        let repo_base = scratch.0.join("repos");
+        let mut config = ProviderConfig::default_docker();
+        config.runtime_agent_image = Some("runtime-agent:provider".to_string());
+        config.runtime_docker_repo_host = Some(repo_base.clone());
+        config.runtime_docker_codex_root = Some(scratch.0.join("codex"));
+        let mut allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
+        allocator.controller_base_url = None;
+
+        let docker_and_host_settings: serde_json::Map<String, JsonValue> = [
+            // The Docker CLI, Compose and BuildKit.
+            ("DOCKER_HOST", "tcp://elsewhere.test:2375"),
+            ("DOCKER_CONTEXT", "elsewhere"),
+            ("DOCKER_CONFIG", "/tmp/elsewhere-docker-config"),
+            ("DOCKER_CERT_PATH", "/tmp/elsewhere-certs"),
+            ("DOCKER_TLS_VERIFY", "0"),
+            ("COMPOSE_FILE", "/tmp/elsewhere-compose.yml"),
+            ("COMPOSE_PROJECT_NAME", "elsewhere"),
+            ("COMPOSE_PROFILES", "elsewhere"),
+            ("COMPOSE_ENV_FILES", "/tmp/elsewhere.env"),
+            ("BUILDKIT_HOST", "tcp://elsewhere.test:1234"),
+            ("BUILDX_BUILDER", "elsewhere"),
+            // The process itself: loader, shell, proxies, TLS, Go and git.
+            ("PATH", "/tmp/elsewhere-bin"),
+            ("HOME", "/tmp/elsewhere-home"),
+            ("TMPDIR", "/tmp/elsewhere-tmp"),
+            ("XDG_CONFIG_HOME", "/tmp/elsewhere-config"),
+            ("LD_PRELOAD", "/tmp/elsewhere.so"),
+            ("LD_LIBRARY_PATH", "/tmp/elsewhere-lib"),
+            ("DYLD_INSERT_LIBRARIES", "/tmp/elsewhere.dylib"),
+            ("BASH_ENV", "/tmp/elsewhere-shell-init"),
+            ("HTTP_PROXY", "http://elsewhere.test:8080"),
+            ("HTTPS_PROXY", "http://elsewhere.test:8443"),
+            ("ALL_PROXY", "socks5://elsewhere.test:1080"),
+            ("NO_PROXY", "*"),
+            ("http_proxy", "http://elsewhere.test:8080"),
+            ("SSL_CERT_FILE", "/tmp/elsewhere-ca.pem"),
+            ("GODEBUG", "x509ignoreCN=1"),
+            ("GIT_DIR", "/tmp/elsewhere-repo/.git"),
+            ("GIT_CONFIG_GLOBAL", "/tmp/elsewhere-gitconfig"),
+            ("GIT_SSH_COMMAND", "/tmp/elsewhere-ssh"),
+            // What the runtime compose files interpolate outside the runtime's environment.
+            ("RUNTIME_REPO_HOST", "/"),
+            ("RUNTIME_CACHE_HOST", "/var/run"),
+            ("RUNTIME_CODEX_VOLUME", "/root"),
+            ("PROXY_CODEX_VOLUME", "/etc"),
+            ("INSTAFY_ENV_DIR", "/tmp/elsewhere-env"),
+            (
+                "PROXY_CREDENTIAL_LEASE_ENV_FILE",
+                "/tmp/elsewhere-lease.env",
+            ),
+            ("RUNTIME_PROXY_IMAGE", "elsewhere/proxy:latest"),
+            ("PROXY_CONTROLLER_BASE_URL", "https://elsewhere.test"),
+            ("CONTROLLER_BASE_URL", "https://elsewhere.test"),
+            ("CONTROLLER_INTERNAL_TOKEN", "elsewhere"),
+            ("PROXY_SIGNING_SECRET", "elsewhere"),
+            ("OPENAI_API_KEY", "elsewhere"),
+            ("ORIGIN_GIT_AUTHOR_NAME", "elsewhere"),
+            ("ORIGIN_HOST_PORT", "22"),
+            ("PROXY_PORT", "22"),
+            // What picks the image, or once asked the allocator to build one.
+            ("RUNTIME_AGENT_IMAGE", "elsewhere/runtime:latest"),
+            ("RUNTIME_AGENT_BUILD_TARGET", "elsewhere"),
+            ("RUNTIME_AGENT_FORCE_BUILD", "1"),
+            // Read inside a runtime, but no runtime compose file passes it on.
+            (
+                "INSTAFY_SHARED_BROWSER_APPROVAL_DIR",
+                "/tmp/elsewhere-approvals",
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), JsonValue::String(value.to_string())))
+        .collect();
+        let without_metadata = |envs: Vec<(String, String)>| {
+            envs.into_iter()
+                .filter(|(key, _)| key != "RUNTIME_METADATA")
+                .collect::<Vec<_>>()
+        };
+        for provider in [
+            "hosted",
+            "external-http",
+            "instafy-cloud-custom",
+            "self-hosted",
+            "instafy-cloud",
+        ] {
+            let mut request = sample_request(Some(json!({ "env": {} })));
+            request.provider = provider.to_string();
+            let unset = allocator.build_env(&request, 54332).expect("runtime env");
+            request.metadata = Some(json!({ "env": docker_and_host_settings }));
+            let requested = allocator.build_env(&request, 54332).expect("runtime env");
+            assert_eq!(
+                without_metadata(requested),
+                without_metadata(unset),
+                "{provider}"
+            );
+        }
+
+        let mut request = sample_request(Some(json!({
+            "env": {
+                "CODEX_MODEL": "chosen-model",
+                "ORIGIN_GIT_REMOTE_URL": "https://git.example.test/space.git",
+                "INSTAFY_ENABLE_BROWSER_SESSION": true,
+                "RUNTIME_CPU_LIMIT": "2",
+                "RUNTIME_MEMORY_LIMIT": "4g",
+            }
+        })));
+        request.provider = "external-http".to_string();
+        let envs = allocator.build_env(&request, 54332).expect("runtime env");
+        assert_eq!(env_value(&envs, "CODEX_MODEL"), Some("chosen-model"));
+        assert_eq!(
+            env_value(&envs, "ORIGIN_GIT_REMOTE_URL"),
+            Some("https://git.example.test/space.git")
         );
         assert_eq!(
-            env_value(&envs, "INSTAFY_SHARED_BROWSER_APPROVAL_DIR"),
-            Some("/srv/custom/approvals")
+            env_value(&envs, "INSTAFY_ENABLE_BROWSER_SESSION"),
+            Some("1")
         );
+        assert_eq!(env_value(&envs, "RUNTIME_CPU_LIMIT"), Some("2"));
+        assert_eq!(env_value(&envs, "RUNTIME_MEMORY_LIMIT"), Some("4g"));
         assert_eq!(
-            env_value(&envs, "DOCKER_HOST"),
-            Some("tcp://custom-docker.test:2375")
+            env_value(&envs, "RUNTIME_REPO_HOST"),
+            Some(
+                repo_base
+                    .join(request.project_id.to_string())
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
-        assert_eq!(
-            env_value(&envs, "RUNTIME_AGENT_BUILD_TARGET"),
-            Some("runtime-custom")
+    }
+
+    #[test]
+    fn no_runtime_container_variable_is_one_docker_or_the_process_reads() {
+        assert!(
+            RUNTIME_CONTAINER_ENV_KEYS
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "keep RUNTIME_CONTAINER_ENV_KEYS sorted and unique"
         );
+        // Every name belongs to one of the runtime's own families or is one of CHECKED_NAMES,
+        // checked one by one, and no Docker tool or the `docker compose` process takes a setting
+        // from those families or names (the JS compose check covers the names the compose files
+        // themselves use). Any other name, even one a runtime compose file passes into the
+        // runtime, needs the same check before it joins CHECKED_NAMES: OTEL_*, SSH_AUTH_SOCK and
+        // TZ, for example, would fail it.
+        const RUNTIME_FAMILIES: [&str; 5] =
+            ["CODEX_", "INSTAFY_", "ORIGIN_", "RUNTIME_", "SUPABASE_"];
+        const CHECKED_NAMES: [&str; 4] = [
+            "OPENAI_BASE_URL",
+            "PROXY_BASE_URL",
+            "PROXY_TOKEN_TTL_SECONDS",
+            "USE_PROXY_FOR_LLM",
+        ];
+        for key in RUNTIME_CONTAINER_ENV_KEYS {
+            assert!(
+                RUNTIME_FAMILIES
+                    .iter()
+                    .any(|family| key.starts_with(family))
+                    || CHECKED_NAMES.contains(key),
+                "{key} is outside the runtime's own variable families"
+            );
+            for prefix in [
+                "DOCKER_",
+                "COMPOSE_",
+                "BUILDKIT_",
+                "BUILDX_",
+                "LD_",
+                "DYLD_",
+                "GIT_",
+                "GO",
+                "OTEL_",
+                "SSH_",
+                "SSL_",
+                "XDG_",
+            ] {
+                assert!(!key.starts_with(prefix), "{key}");
+            }
+            assert!(
+                !matches!(
+                    *key,
+                    "PATH" | "HOME" | "TMPDIR" | "SHELL" | "BASH_ENV" | "ENV"
+                ),
+                "{key}"
+            );
+            assert!(!key.to_ascii_uppercase().ends_with("_PROXY"), "{key}");
+        }
     }
 
     #[test]

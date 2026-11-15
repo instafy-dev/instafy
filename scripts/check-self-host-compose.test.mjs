@@ -15,6 +15,13 @@ const REPO_ROOT = path.resolve(import.meta.dirname, "..");
 const PROVIDER_COMPOSE_FILE = "docker/docker-compose.runtime.provider.yml";
 const composeAvailable =
   spawnSync("docker", ["compose", "version"], { encoding: "utf8" }).status === 0;
+// Whether this Compose's `config` can leave env files unread and show their
+// paths instead.
+const composeShowsEnvFiles =
+  composeAvailable &&
+  spawnSync("docker", ["compose", "config", "--help"], { encoding: "utf8" }).stdout.includes(
+    "--no-env-resolution",
+  );
 
 test("self-host validation is bound to the public Compose example", () => {
   assert.equal(COMPOSE_FILE, "docker/docker-compose.runtime.yml");
@@ -213,12 +220,24 @@ function allocatorManagedEnvAllowlist() {
   return [...withoutComments.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g)].map((match) => match[1]);
 }
 
-// A Compose file's runtime service, line by line. Parsed by hand so the
-// checks need no Docker.
+// A Compose file's lines, as the checks here read it by hand so they need no
+// Docker. YAML also ends a line at a lone CR, U+0085, U+2028 or U+2029, which
+// these checks would read as part of the line, and a byte order mark hides
+// the first key from them, so a file that holds one fails instead. A CRLF
+// line ending reads as the LF it stands for.
+function composeLines(text, label) {
+  const normalized = text.replaceAll("\r\n", "\n");
+  assert.doesNotMatch(
+    normalized,
+    /[\r\u0085\u2028\u2029\uFEFF]/,
+    `${label}: the Compose file checks here read only LF and CRLF line breaks and no byte order mark; take out the lone CR, U+0085, U+2028, U+2029 or U+FEFF`,
+  );
+  return normalized.split("\n");
+}
+
+// A Compose file's runtime service, line by line.
 function runtimeServiceLines(composeFile) {
-  const lines = fs
-    .readFileSync(path.join(REPO_ROOT, composeFile), "utf8")
-    .split("\n");
+  const lines = composeLines(fs.readFileSync(path.join(REPO_ROOT, composeFile), "utf8"), composeFile);
   const start = lines.indexOf("  runtime:");
   assert.notEqual(start, -1, `${composeFile}: runtime service not found`);
   let end = lines.findIndex((line, index) => index > start && /^ {0,2}\S/.test(line));
@@ -230,8 +249,7 @@ function runtimeServiceLines(composeFile) {
 
 // The provider Compose file's runtime service as text, plus the variables its
 // `environment:` map sets.
-function providerRuntimeService() {
-  const service = runtimeServiceLines(PROVIDER_COMPOSE_FILE);
+function providerRuntimeService(service = runtimeServiceLines(PROVIDER_COMPOSE_FILE)) {
   const environmentStart = service.indexOf("    environment:");
   assert.notEqual(environmentStart, -1, `${PROVIDER_COMPOSE_FILE}: runtime environment not found`);
   const environment = new Map();
@@ -243,7 +261,10 @@ function providerRuntimeService() {
     if (!entry) {
       break;
     }
-    environment.set(entry[1], entry[2]);
+    // The value without a trailing comment or the quotes of a quoted scalar.
+    // Escapes and tags stay as written, so a value that starts with one fails
+    // the check below instead of passing it.
+    environment.set(entry[1], yamlLineParts(entry[2]).code.replace(/^(["'])(.*)\1$/, "$2"));
   }
   return { text: service.join("\n"), environment };
 }
@@ -289,6 +310,874 @@ test("the provider runtime receives every managed launch variable a runtime read
     assert.ok(allowlist.includes(key), `${key} is no longer allowlisted: drop its exception`);
   }
 });
+
+// The check above reads a value without its trailing comment or outer quotes,
+// so a quoted value, as a JSON default needs, passes a launch value through
+// as a plain one does, and an escaped `$$` still does not.
+test("the provider runtime's values drop a trailing comment and their quotes", () => {
+  const { environment } = providerRuntimeService([
+    "  runtime:",
+    "    environment:",
+    '      ICE_SERVERS_JSON: "${ICE_SERVERS_JSON:-[{\\"urls\\":[\\"stun:stun.example.test:19302\\"]}]}" # a default',
+    "      QUOTED: '${QUOTED:-a #b}'",
+    "      PLAIN: ${PLAIN:-} # from the launch",
+    '      ESCAPED: "$${ESCAPED:-}"',
+  ]);
+  assert.deepEqual(Object.fromEntries(environment), {
+    ICE_SERVERS_JSON: '${ICE_SERVERS_JSON:-[{\\"urls\\":[\\"stun:stun.example.test:19302\\"]}]}',
+    QUOTED: "${QUOTED:-a #b}",
+    PLAIN: "${PLAIN:-}",
+    ESCAPED: "$${ESCAPED:-}",
+  });
+});
+
+// Compose, the Docker CLI and the dynamic loader read the environment of the
+// `docker compose` process that carries a launch request's variables, and
+// Compose puts the variables a runtime Compose file uses outside the runtime's
+// `environment:` into other services, mounts, env_file paths, images, ports,
+// build settings and resource limits. So for a provider other than exact
+// instafy_cloud the allocator takes from a request the managed launch keys,
+// whose CPU and memory limits the controller sets from the runtime's size, and
+// otherwise exactly the variables either file passes into the runtime
+// container's `environment:` and neither file uses anywhere else.
+const ALLOCATOR_DOCKER_FILE = "packages/runtime-provider-core/src/allocator/docker.rs";
+
+function allocatorRuntimeContainerEnvKeys() {
+  const source = fs.readFileSync(path.join(REPO_ROOT, ALLOCATOR_DOCKER_FILE), "utf8");
+  const body = source.match(
+    /\nconst RUNTIME_CONTAINER_ENV_KEYS: &\[&str\] = &\[\n([\s\S]*?)\n\];\n/,
+  )?.[1];
+  assert.ok(body, `${ALLOCATOR_DOCKER_FILE}: RUNTIME_CONTAINER_ENV_KEYS not found`);
+  const withoutComments = body.replace(/\/\/.*$/gm, "");
+  return [...withoutComments.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g)].map((match) => match[1]);
+}
+
+// Where a YAML node can start on a line: after the indentation, after a `- `
+// or `? ` indicator or a `: ` value indicator, and inside a flow collection.
+const YAML_NODE_START = String.raw`(?:^\s*|(?:^|\s)[-?]\s+|:\s+|[[{,]\s*)`;
+// The tags a value may carry and still read as written: a value tagged !!null
+// is taken from the environment like an untagged null, the others set a value.
+const PLAIN_SCALAR_TAG = String.raw`!!(?:null|str|int|float|bool)(?=\s|$)`;
+// A block scalar's header (`|` or `>`, with optional indentation and chomping
+// indicators) as a sequence item or, with group 1 its key, a mapping value.
+const BLOCK_SCALAR_HEADER =
+  /^(?:((["']?)[^\s"'#][^#]*?\2\s*):\s+)?(?:!!str\s+)?[|>](?:[1-9][+-]?|[+-][1-9]?)?$/;
+
+// YAML the line scan below does not follow. Each can hide an `environment:` or
+// `args:` entry, or a `$`, from the scan, so a Compose file that uses one fails
+// the scan instead.
+const UNFOLLOWED_YAML = [
+  [new RegExp(String.raw`${YAML_NODE_START}(?:!\S*\s+)?[&*][^\s,\]}]`), "an anchor or alias"],
+  [new RegExp(String.raw`${YAML_NODE_START}<<\s*:`), "a merge key"],
+  [new RegExp(String.raw`${YAML_NODE_START}\?(?:\s|$)`), "an explicit key"],
+  [
+    new RegExp(String.raw`(?:^\s*|(?:^|\s)[-?]\s+|[[{,]\s*)!|:\s+(?!${PLAIN_SCALAR_TAG})!`),
+    "a tag, apart from a plain one on a value",
+  ],
+  [new RegExp(String.raw`${YAML_NODE_START}\{(?!\s*\})`), "a flow mapping"],
+];
+
+// Records each variable a line interpolates: $NAME or ${NAME}, but not an
+// escaped $$NAME.
+function addInterpolations(line, uses) {
+  for (const match of line.matchAll(
+    /\$\$|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))/g,
+  )) {
+    const name = match[1] ?? match[2];
+    if (name) {
+      uses.add(name);
+    }
+  }
+}
+
+// A YAML line without its comment (`code`), the same text with the contents of
+// its quoted scalars left out (`bare`), whether a quoted scalar is still open
+// at the end of the line, and whether a double-quoted one uses a \x, \u or \U
+// escape, which can spell any character, `$` included.
+function yamlLineParts(line) {
+  let code = "";
+  let bare = "";
+  let quote = "";
+  let spellingEscape = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote) {
+      code += char;
+      if (quote === '"' && char === "\\") {
+        const escaped = line[index + 1] ?? "";
+        spellingEscape ||= /^[xuU]$/.test(escaped);
+        code += escaped;
+        index += 1;
+      } else if (char === "'" && quote === "'" && line[index + 1] === "'") {
+        code += "'";
+        index += 1;
+      } else if (char === quote) {
+        quote = "";
+        bare += char;
+      }
+      continue;
+    }
+    if (char === "#" && (index === 0 || /\s/.test(line[index - 1]))) {
+      break;
+    }
+    // A quoted scalar starts where a node can, after a plain tag if it has one.
+    if (
+      (char === '"' || char === "'") &&
+      new RegExp(String.raw`${YAML_NODE_START}(?:${PLAIN_SCALAR_TAG}\s+)?$`).test(line.slice(0, index))
+    ) {
+      quote = char;
+    }
+    code += char;
+    bare += char;
+  }
+  return { code: code.trimEnd(), bare: bare.trimEnd(), openQuote: quote !== "", spellingEscape };
+}
+
+// The variable a block-style `environment:` or `args:` entry takes from the
+// process environment, null for an entry that sets its own value, and
+// undefined for a line that is no such entry.
+function passedThroughEntry(content) {
+  const item = content.match(/^-(?:\s+(.*))?$/);
+  if (item) {
+    const value = item[1] ?? "";
+    const name = value.match(/^(["']?)([A-Za-z_][A-Za-z0-9_]*)\1$/);
+    if (name) {
+      return name[2];
+    }
+    return /^(["']?)[A-Za-z_][A-Za-z0-9_]*=.*\1$/.test(value) ? null : undefined;
+  }
+  const entry = content.match(/^(["']?)([A-Za-z_][A-Za-z0-9_]*)\1\s*:(?:\s+(.*))?$/);
+  if (!entry) {
+    return undefined;
+  }
+  // YAML's null, which Compose reads as "take it from the environment".
+  return /^(?:~|null|!!null(?:\s.*)?)?$/i.test(entry[3] ?? "") ? entry[2] : null;
+}
+
+// The variables a Compose file uses inside its runtime service's
+// `environment:`, the ones its runtime service's `cpus:` and `mem_limit:` use,
+// and the ones it uses anywhere else. Compose takes a variable from the
+// environment of the `docker compose` process wherever the file interpolates
+// it ($NAME or ${NAME}, but not an escaped $$NAME), block scalars included,
+// and, with no `$`, for an `environment:` or build `args:` entry that has no
+// value or a null one and for a secret or config whose source is
+// `environment: NAME`. This is a line scan of the plain block style these files
+// are written in, not a YAML parser. It fails on the YAML it does not follow
+// (a line break other than LF or CRLF, a byte order mark, UNFOLLOWED_YAML, a
+// quoted value continued on another line, a \x, \u or \U escape, a $ in a
+// trailing comment, flow-style or unrecognised `environment:` and `args:`
+// entries, `extends:` and `include:`), and where Docker Compose is
+// available a test below checks Compose's own reading of both files. An
+// env_file's contents are not in this repository and are not checked.
+function composeVariableUsesInText(text, label) {
+  const lines = composeLines(text, label);
+  const codes = lines.map((line) => yamlLineParts(line).code);
+  const serviceStart = codes.indexOf("  runtime:");
+  assert.notEqual(serviceStart, -1, `${label}: runtime service not found`);
+  let serviceEnd = codes.findIndex((code, index) => index > serviceStart && /^ {0,2}\S/.test(code));
+  if (serviceEnd === -1) {
+    serviceEnd = lines.length;
+  }
+  const environmentStart = codes.indexOf("    environment:", serviceStart);
+  assert.ok(
+    environmentStart > serviceStart && environmentStart < serviceEnd,
+    `${label}: runtime environment not found`,
+  );
+  const environment = new Set();
+  const limits = new Set();
+  const elsewhere = new Set();
+  // The top-level key the current line is under.
+  let section = null;
+  // The `environment:` or `args:` key whose entries the current line is among.
+  let block = null;
+  // The block scalar whose content the current line may be.
+  let scalar = null;
+  lines.forEach((line, index) => {
+    const indent = line.length - line.trimStart().length;
+    if (scalar) {
+      if (line.trim() === "") {
+        return;
+      }
+      // Every line indented deeper than the scalar's parent node is content,
+      // a line that starts with `#` included.
+      if (indent > scalar.parent) {
+        addInterpolations(line, scalar.uses);
+        return;
+      }
+      scalar = null;
+    }
+    if (line.trim() === "" || /^\s*#/.test(line)) {
+      return;
+    }
+    const at = `${label}:${index + 1}`;
+    const parts = yamlLineParts(line);
+    assert.ok(
+      !parts.openQuote,
+      `${at}: the variable scan does not follow a quoted value continued on the next line; keep it on one line`,
+    );
+    assert.ok(
+      !parts.spellingEscape,
+      `${at}: the variable scan does not follow a \\x, \\u or \\U escape in a double-quoted value, which can spell a $`,
+    );
+    for (const [pattern, what] of UNFOLLOWED_YAML) {
+      assert.doesNotMatch(
+        parts.bare,
+        pattern,
+        `${at}: the variable scan does not follow ${what}; write this in plain block style, and quote a value that holds [, { or a comma`,
+      );
+    }
+    const content = parts.code.trimStart();
+    // A sequence item may start with its node's key, as a lifecycle hook's
+    // `- environment:` does.
+    const dashes = content.match(/^(?:-(?:\s+|$))*/)[0];
+    const node = content.slice(dashes.length);
+    const column = indent + dashes.length;
+    if (indent === 0) {
+      section = node.match(/^(["']?)([^\s"':#]+)\1\s*:/)?.[2] ?? null;
+      assert.notEqual(
+        section,
+        "include",
+        `${at}: the variable scan does not follow include:, which brings in another file`,
+      );
+    }
+    // A block sequence may sit at its key's own indentation.
+    if (block && (indent < block.indent || (indent === block.indent && dashes === ""))) {
+      block = null;
+    }
+    const sizesRuntime =
+      index > serviceStart &&
+      index < serviceEnd &&
+      indent === 4 &&
+      dashes === "" &&
+      /^(?:cpus|mem_limit)\s*:/.test(node);
+    const uses =
+      block?.start === environmentStart ? environment : sizesRuntime ? limits : elsewhere;
+    addInterpolations(parts.code, uses);
+    // Compose ignores a comment, but the scan finds one without a full YAML
+    // reading, so a $ after what it takes for a comment fails instead.
+    const afterCode = new Set();
+    addInterpolations(line.slice(parts.code.length), afterCode);
+    assert.equal(
+      afterCode.size,
+      0,
+      `${at}: the variable scan does not read a $ in a trailing comment; put the comment on a line of its own`,
+    );
+    const blockScalar = node.match(BLOCK_SCALAR_HEADER);
+    if (blockScalar) {
+      scalar = {
+        parent: blockScalar[1] === undefined ? indent + dashes.lastIndexOf("-") : column,
+        uses,
+      };
+    }
+    if (block) {
+      const passedThrough = passedThroughEntry(content);
+      assert.notEqual(
+        passedThrough,
+        undefined,
+        `${at}: the variable scan does not read this ${block.key}: entry; write it as NAME: value or - NAME=value`,
+      );
+      if (passedThrough) {
+        uses.add(passedThrough);
+      }
+      return;
+    }
+    assert.ok(
+      section !== "services" || !/^(["']?)extends\1\s*:/.test(node),
+      `${at}: the variable scan does not follow extends:, which copies another service's settings`,
+    );
+    const key = node.match(/^(["']?)(environment|args)\1\s*:\s*(.*)$/);
+    if (!key) {
+      return;
+    }
+    const value = key[3];
+    if (value === "") {
+      block = { start: index, indent: column, key: key[2] };
+      return;
+    }
+    assert.doesNotMatch(
+      value,
+      /^\[(?!\s*\]$)/,
+      `${at}: the variable scan reads ${key[2]}: entries only in block style, one per line`,
+    );
+    // A secret's or config's source. Anywhere else a scalar here is a label's
+    // value, or a service setting Compose rejects.
+    const source =
+      key[2] === "environment" && (section === "secrets" || section === "configs")
+        ? value.match(/^(["']?)([A-Za-z_][A-Za-z0-9_]*)\1$/)
+        : null;
+    if (source) {
+      uses.add(source[2]);
+    }
+  });
+  return { environment, limits, elsewhere };
+}
+
+function composeVariableUses(composeFile) {
+  return composeVariableUsesInText(
+    fs.readFileSync(path.join(REPO_ROOT, composeFile), "utf8"),
+    composeFile,
+  );
+}
+
+test("the Compose variable scan sees the variables Compose passes through without a $", () => {
+  const uses = composeVariableUsesInText(
+    [
+      "services:",
+      "  proxy:",
+      "    build:",
+      "      args:",
+      "        - BUILD_ARG_PASSED",
+      "        - BUILD_ARG_COMMENTED # passed through",
+      "        - BUILD_ARG_SET=1",
+      "    environment:",
+      "      SIDECAR_PASSED:",
+      "      SIDECAR_COMMENTED: # passed through",
+      "      SIDECAR_NULL: null",
+      "      SIDECAR_NULL_UPPER: NULL",
+      "      SIDECAR_NULL_TITLE: Null # passed through",
+      "      SIDECAR_NULL_TAGGED: !!null",
+      "      SIDECAR_TILDE: ~",
+      "      'SIDECAR_QUOTED':",
+      '      SIDECAR_EMPTY: ""',
+      "      SIDECAR_TAGGED_STRING: !!str",
+      "      SIDECAR_SET: ${SIDECAR_INTERPOLATED:-}",
+      "      SIDECAR_ESCAPED: $$NOT_INTERPOLATED $${NOT_INTERPOLATED_EITHER} $$$INTERPOLATED_AFTER_ESCAPE",
+      "      SIDECAR_HASH: value#${INTERPOLATED_AFTER_HASH}",
+      '      SIDECAR_JSON: "${SIDECAR_JSON_DEFAULTED:-[{\\"urls\\":[]}]}"',
+      '      SIDECAR_TAGGED_QUOTED: !!str "a # ${INTERPOLATED_IN_TAGGED_QUOTE}"',
+      "    depends_on:",
+      "      - redis",
+      "    volumes:",
+      "      - ${VOLUME_SOURCE:-.}:/data",
+      "      - proxy-cache:/cache",
+      "    labels:",
+      "      environment: prod-eu",
+      '    entrypoint: ["sh", "-lc"]',
+      "    command:",
+      "      - |",
+      "        # fetch through the proxy for ${BLOCK_SCALAR_COMMENT_LINE}",
+      '        case "$$1" in',
+      "          *) exec proxy ;;",
+      "        esac",
+      "        { echo start; exec proxy; }",
+      "        echo $${NOT_INTERPOLATED_IN_BLOCK_SCALAR} \\",
+      "",
+      "          && exec proxy ${BLOCK_SCALAR_LINE}",
+      "    healthcheck:",
+      "      test: [\"CMD\", \"sh\", \"-c\", \"echo '&' '*' '{' && true\"]",
+      "    post_start:",
+      "      - command: ./warm.sh",
+      "        environment:",
+      "          HOOK_PASSED:",
+      "      - environment:",
+      "          HOOK_FIRST_KEY_PASSED: null",
+      "        command: ./again.sh",
+      "  helper:",
+      "    cpus: ${HELPER_CPUS:-1}",
+      "    environment: # a sequence at the key's own indentation",
+      "    - HELPER_PASSED",
+      "    - 'HELPER_QUOTED' # passed through",
+      "    - HELPER_SET=${HELPER_INTERPOLATED:-}",
+      '    - "HELPER_SET_QUOTED=a b"',
+      "    cap_add:",
+      "    - SYS_ADMIN",
+      "  runtime: # the service under test",
+      "    image: ${RUNTIME_IMAGE}",
+      "    cpus: ${RUNTIME_CPUS:-2}",
+      "    mem_limit: ${RUNTIME_MEMORY:-4g} # sized by the controller",
+      "    environment: # what a launch request reaches",
+      "      # COMMENTED_OUT: ${COMMENTED_OUT}",
+      "      RUNTIME_PASSED:",
+      "      RUNTIME_COMMENTED: # passed through",
+      "      RUNTIME_SET: ${RUNTIME_INTERPOLATED:-}",
+      "      RUNTIME_SCRIPT: |",
+      "        # ${RUNTIME_BLOCK_SCALAR}",
+      "      RUNTIME_AFTER_SCRIPT: ${RUNTIME_AFTER_BLOCK_SCALAR}",
+      "    cap_drop:",
+      "      - NET_RAW",
+      "volumes:",
+      "  proxy-cache: {}",
+      "secrets:",
+      "  token:",
+      "    environment: SECRET_SOURCE # a secret's source",
+      "",
+    ].join("\n"),
+    "inline Compose file",
+  );
+  assert.deepEqual([...uses.environment].sort(), [
+    "RUNTIME_AFTER_BLOCK_SCALAR",
+    "RUNTIME_BLOCK_SCALAR",
+    "RUNTIME_COMMENTED",
+    "RUNTIME_INTERPOLATED",
+    "RUNTIME_PASSED",
+  ]);
+  assert.deepEqual([...uses.limits].sort(), ["RUNTIME_CPUS", "RUNTIME_MEMORY"]);
+  assert.deepEqual([...uses.elsewhere].sort(), [
+    "BLOCK_SCALAR_COMMENT_LINE",
+    "BLOCK_SCALAR_LINE",
+    "BUILD_ARG_COMMENTED",
+    "BUILD_ARG_PASSED",
+    "HELPER_CPUS",
+    "HELPER_INTERPOLATED",
+    "HELPER_PASSED",
+    "HELPER_QUOTED",
+    "HOOK_FIRST_KEY_PASSED",
+    "HOOK_PASSED",
+    "INTERPOLATED_AFTER_ESCAPE",
+    "INTERPOLATED_AFTER_HASH",
+    "INTERPOLATED_IN_TAGGED_QUOTE",
+    "RUNTIME_IMAGE",
+    "SECRET_SOURCE",
+    "SIDECAR_COMMENTED",
+    "SIDECAR_INTERPOLATED",
+    "SIDECAR_JSON_DEFAULTED",
+    "SIDECAR_NULL",
+    "SIDECAR_NULL_TAGGED",
+    "SIDECAR_NULL_TITLE",
+    "SIDECAR_NULL_UPPER",
+    "SIDECAR_PASSED",
+    "SIDECAR_QUOTED",
+    "SIDECAR_TILDE",
+    "VOLUME_SOURCE",
+  ]);
+});
+
+test("the Compose variable scan fails on YAML it does not follow", () => {
+  // Through each case Compose can hand the proxy sidecar a variable from the
+  // environment that runs Compose without the line scan seeing it, so the scan
+  // fails there instead.
+  for (const [what, topLevel, sidecar, failure] of [
+    ["an anchor", ["x-shared: &shared-env", "  SHARED_PASSED:"], ["    image: proxy"], /an anchor or alias/],
+    ["an alias", [], ["    environment: *shared-env"], /an anchor or alias/],
+    ["a merge key", [], ["    environment:", "      <<:", "        SHARED_PASSED:"], /a merge key/],
+    ["an explicit key", [], ["    ? environment", "    : - SIDECAR_PASSED"], /an explicit key/],
+    ["a flow mapping", [], ["    build: {args: [BUILD_ARG_PASSED]}"], /a flow mapping/],
+    ["a tagged flow mapping", [], ["    build: !!map {args: [BUILD_ARG_PASSED]}"], /a tag/],
+    ["a tagged key", [], ["    !!str environment:", "      SIDECAR_PASSED:"], /a tag/],
+    ["a verbatim null", [], ["    environment:", "      SIDECAR_PASSED: !<tag:yaml.org,2002:null>"], /a tag/],
+    ["Compose's !override", [], ["    environment: !override", "      SIDECAR_PASSED:"], /a tag/],
+    ["flow-style environment entries", [], ["    environment: [SIDECAR_PASSED]"], /environment: entries only in block style/],
+    ["flow-style build args", [], ["    build:", "      args: [BUILD_ARG_PASSED]"], /args: entries only in block style/],
+    ["flow-style entries under a block key", [], ["    environment:", "      [SIDECAR_PASSED]"], /does not read this environment: entry/],
+    ["a value continued on the next line", [], ["    environment:", "      SIDECAR_SET: one", "        two"], /does not read this environment: entry/],
+    ["a quoted value continued on the next line", [], ["    labels:", '      note: "model', '        #${SIDECAR_INTERPOLATED}"'], /a quoted value continued/],
+    ["an escape that spells a $", [], ["    environment:", '      SIDECAR_SET: "\\x24{SIDECAR_INTERPOLATED}"'], /escape in a double-quoted value/],
+    ["a tagged escape that spells a $", [], ["    environment:", '      SIDECAR_SET: !!str "\\x24{SIDECAR_INTERPOLATED:+1}"'], /escape in a double-quoted value/],
+    ["a tagged quoted value continued on the next line", [], ["    labels:", '      note: !!str "model', '        #${SIDECAR_INTERPOLATED:+set}"'], /a quoted value continued/],
+    ["a $ in a trailing comment", [], ["    environment:", "      SIDECAR_SET: one # ${SIDECAR_INTERPOLATED}"], /trailing comment/],
+    ["extends", [], ["    extends: runtime"], /extends:/],
+    ["include", ["include:", "  - sidecar.yml"], ["    image: proxy"], /include:/],
+    ["a lone CR", [], ["    image: proxy # the sidecar\r    environment:\r      - SIDECAR_PASSED"], /only LF and CRLF line breaks/],
+    ["a next line (U+0085)", [], ["    environment:", "      SIDECAR_SET: one\u0085      SIDECAR_PASSED:"], /only LF and CRLF line breaks/],
+    ["a line separator (U+2028)", [], ["    image: proxy # the sidecar\u2028    environment:\u2028      - SIDECAR_PASSED"], /only LF and CRLF line breaks/],
+    ["a paragraph separator (U+2029)", [], ["    image: proxy # the sidecar\u2029    environment:\u2029      - SIDECAR_PASSED"], /only LF and CRLF line breaks/],
+    ["a byte order mark", ["\uFEFFx-note: first"], ["    image: proxy"], /no byte order mark/],
+  ]) {
+    const text = [
+      ...topLevel,
+      "services:",
+      "  proxy:",
+      ...sidecar,
+      "  runtime:",
+      "    environment:",
+      "      RUNTIME_SET: ${RUNTIME_INTERPOLATED:-}",
+      "",
+    ].join("\n");
+    assert.throws(() => composeVariableUsesInText(text, "inline Compose file"), failure, what);
+  }
+});
+
+test("the Compose variable scan reads a CRLF line ending as an LF", () => {
+  const text = [
+    "services:",
+    "  proxy:",
+    "    environment:",
+    "      - SIDECAR_PASSED",
+    "  runtime:",
+    "    environment:",
+    "      RUNTIME_SET: ${RUNTIME_INTERPOLATED:-} # read by the runtime",
+    "",
+  ].join("\n");
+  assert.deepEqual(
+    composeVariableUsesInText(text.replaceAll("\n", "\r\n"), "inline Compose file"),
+    composeVariableUsesInText(text, "inline Compose file"),
+  );
+});
+
+test("apart from the size limits, a launch request sets only variables the runtime Compose files keep inside the runtime", () => {
+  const requestKeys = allocatorRuntimeContainerEnvKeys();
+  // Guard the parses themselves: an empty list would pass vacuously.
+  for (const key of ["CODEX_API_ENDPOINT", "ORIGIN_GIT_REMOTE_URL", "USE_PROXY_FOR_LLM"]) {
+    assert.ok(requestKeys.includes(key), `RUNTIME_CONTAINER_ENV_KEYS parse is missing ${key}`);
+  }
+  const environment = new Set();
+  const elsewhere = new Map();
+  for (const composeFile of [COMPOSE_FILE, PROVIDER_COMPOSE_FILE]) {
+    const uses = composeVariableUses(composeFile);
+    for (const key of uses.environment) {
+      environment.add(key);
+    }
+    for (const key of uses.elsewhere) {
+      if (!elsewhere.has(key)) {
+        elsewhere.set(key, composeFile);
+      }
+    }
+    for (const [key, reason] of NOT_FORWARDED_TO_RUNTIME) {
+      assert.ok(
+        reason !== "compose-level" || uses.limits.has(key),
+        `${composeFile}: Compose parse is missing ${key} on the runtime's cpus: or mem_limit:`,
+      );
+    }
+    // Only the size limits may size the runtime. Any other variable on its
+    // `cpus:` or `mem_limit:`, a default behind a size limit included, counts
+    // as used outside the runtime's environment.
+    for (const key of uses.limits) {
+      if (NOT_FORWARDED_TO_RUNTIME.get(key) !== "compose-level" && !elsewhere.has(key)) {
+        elsewhere.set(key, composeFile);
+      }
+    }
+  }
+  for (const key of ["RUNTIME_REPO_HOST", "RUNTIME_AGENT_IMAGE", "RUNTIME_PROXY_IMAGE", "INSTAFY_ENV_DIR"]) {
+    assert.ok(elsewhere.has(key), `Compose parse is missing ${key} outside the runtime environment`);
+  }
+
+  for (const key of requestKeys) {
+    assert.ok(
+      !elsewhere.has(key),
+      `${elsewhere.get(key)} uses ${key} outside the runtime container's environment, so a launch request must not set it`,
+    );
+    assert.ok(
+      environment.has(key),
+      `no runtime Compose file passes ${key} to the runtime container: drop it from RUNTIME_CONTAINER_ENV_KEYS`,
+    );
+  }
+  for (const key of environment) {
+    assert.ok(
+      elsewhere.has(key) || requestKeys.includes(key),
+      `the runtime container takes ${key} only from its environment: add it to RUNTIME_CONTAINER_ENV_KEYS so a launch on a provider other than exact instafy_cloud can still set it (a Rust test there keeps the list to the runtime's own name families and a few names checked one by one; this test keeps out the names the Compose files use anywhere else), or exempt it here if only the provider's operator may set it, as for a name a Docker tool or the process reads (TZ, *_PROXY and the like)`,
+    );
+  }
+  // Exact instafy_cloud's allowlist holds to the same rule, its size limits on
+  // the runtime's `cpus:` and `mem_limit:` apart.
+  for (const key of allocatorManagedEnvAllowlist()) {
+    assert.ok(
+      !elsewhere.has(key),
+      `${elsewhere.get(key)} uses the allowlisted ${key} outside the runtime container's environment`,
+    );
+  }
+});
+
+// The line scan above needs no Docker but is not a YAML parser, so where
+// Docker Compose is available this test also checks Compose's own reading of
+// both files. Compose renders each file without any variable a request may
+// set, with only the size limits, with every such variable but the size
+// limits, and with all of them, each holding a value of its own. Setting the
+// size limits may change only the runtime's `cpus:` and `mem_limit:`, and
+// setting any other of those variables, with or without the size limits, only
+// the runtime container's `environment:`. A change anywhere else is a place
+// where Compose reads one of those variables, a `${NAME:+...}` that only
+// tests whether it is set included. What Compose reads from its environment
+// only later, for a lifecycle hook or a secret or config, renders as the
+// variable's name either way, so that is looked for as well. Compose renders
+// without loading env files, so an env_file's path shows where it takes one
+// of those variables; a Compose too old for that merges each env file into
+// `environment:` and leaves its path out, and then only the line scan checks
+// env_file paths. A default behind a provider variable that every rendering
+// sets is never read, and no rendering sets one size limit without the other,
+// so such a default and a variable read only while just one size limit is
+// set are checked only by the line scan.
+const SIZE_LIMIT_VALUES = new Map([
+  ["RUNTIME_CPU_LIMIT", "1.25"],
+  ["RUNTIME_MEMORY_LIMIT", "1234m"],
+]);
+
+// A value of its own for each variable a launch request may set: delimited,
+// so that no key's value is part of another's, apart from the size limits,
+// which Compose parses.
+function requestValue(key) {
+  return SIZE_LIMIT_VALUES.get(key) ?? `launch-request(${key})`;
+}
+
+// Compose's reading of `composeFile` with `variables` in its environment,
+// every profile the file declares included, since Compose interpolates every
+// service of a file it loads, and env files left unread where this Compose
+// can show their paths instead.
+function composeConfig(root, composeFile, variables) {
+  const envFiles = composeShowsEnvFiles ? ["--no-env-resolution"] : [];
+  const run = (command) =>
+    spawnSync(
+      "docker",
+      ["compose", "--project-directory", root, "--env-file", path.join(root, "empty.env"), "--file", composeFile, ...command],
+      {
+        encoding: "utf8",
+        // Only what the Docker CLI needs, plus the given variables.
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          ...(process.env.DOCKER_CONFIG ? { DOCKER_CONFIG: process.env.DOCKER_CONFIG } : {}),
+          ...variables,
+        },
+        timeout: 30_000,
+      },
+    );
+  const profiles = run(["config", ...envFiles, "--profiles"]);
+  if (profiles.status !== 0) {
+    return { error: profiles.stderr || String(profiles.error) };
+  }
+  const profileArgs = profiles.stdout
+    .split("\n")
+    .filter((profile) => profile.trim() !== "")
+    .flatMap((profile) => ["--profile", profile.trim()]);
+  const result = run([...profileArgs, "config", ...envFiles, "--format", "json"]);
+  return result.status === 0
+    ? { config: JSON.parse(result.stdout) }
+    : { error: result.stderr || String(result.error) };
+}
+
+// Where Compose's reading of a file with more of a request's variables set
+// (`after`) takes something from them, compared with its reading with fewer
+// (`before`): every difference outside the runtime container's `environment:`
+// and, if `sized`, its size limits, and every lifecycle hook entry, secret or
+// config that names one of `keys` for Compose to read later.
+function composeRequestReads(before, after, keys, sized = true) {
+  const reads = [];
+  const runtimeOwn = (at) =>
+    at[0] === "services" &&
+    at[1] === "runtime" &&
+    (at[2] === "environment" ||
+      (sized && at.length === 3 && (at[2] === "cpus" || at[2] === "mem_limit")));
+  const isObject = (value) => value !== null && typeof value === "object";
+  const compare = (before, after, at) => {
+    if (before === after || runtimeOwn(at)) {
+      return;
+    }
+    if (isObject(before) && isObject(after) && Array.isArray(before) === Array.isArray(after)) {
+      for (const name of new Set([...Object.keys(before), ...Object.keys(after)])) {
+        compare(before[name], after[name], [...at, name]);
+      }
+      return;
+    }
+    reads.push(`${at.join(".")}: ${JSON.stringify(before)} becomes ${JSON.stringify(after)}`);
+  };
+  compare(before, after, []);
+  const visit = (value, at) => {
+    if (!isObject(value) || runtimeOwn(at)) {
+      return;
+    }
+    for (const [name, child] of Object.entries(value)) {
+      const childAt = [...at, name];
+      // An entry Compose takes from its environment only when it runs, as a
+      // lifecycle hook's is, renders as a null.
+      if (child === null && keys.includes(name)) {
+        reads.push(`${childAt.join(".")}: read when Compose runs it`);
+      }
+      // A secret's or config's source, read when Compose creates it.
+      if (
+        childAt.length === 3 &&
+        (childAt[0] === "secrets" || childAt[0] === "configs") &&
+        name === "environment" &&
+        keys.includes(child)
+      ) {
+        reads.push(`${childAt.join(".")}: ${child}, read when Compose creates it`);
+      }
+      visit(child, childAt);
+    }
+  };
+  visit(after, []);
+  return reads;
+}
+
+// Where the readings described above show Compose, reading `file` with
+// `providerVariables` in its environment, take something from a launch
+// request's variables `keys` outside the runtime container's `environment:`
+// and, for the size limits, the runtime's `cpus:` and `mem_limit:`, and its
+// reading with all of them (`set`). Otherwise an error that names the
+// readings Compose refused.
+function composeRequestReadsOf(root, file, keys, providerVariables = {}) {
+  const sizes = keys.filter((key) => SIZE_LIMIT_VALUES.has(key));
+  const others = keys.filter((key) => !SIZE_LIMIT_VALUES.has(key));
+  const readings = [
+    ["without a launch request's variables", []],
+    ["with only a launch request's size limits", sizes],
+    ["with a launch request's variables but its size limits", others],
+    ["with all of a launch request's variables", keys],
+  ].map(([what, included]) => ({
+    what,
+    ...composeConfig(root, file, {
+      ...providerVariables,
+      ...Object.fromEntries(included.map((key) => [key, requestValue(key)])),
+    }),
+  }));
+  const refused = readings.filter((reading) => !reading.config);
+  if (refused.length > 0) {
+    const which =
+      refused.length === readings.length
+        ? "with or without a launch request's variables"
+        : refused.map((reading) => reading.what).join(", or ");
+    return { error: `${which}: ${refused[0].error.trim()}` };
+  }
+  const [unset, sized, unsized, set] = readings.map((reading) => reading.config);
+  const reads = new Set([
+    ...composeRequestReads(unset, sized, keys),
+    ...composeRequestReads(unset, unsized, keys, false),
+    ...composeRequestReads(sized, set, keys, false),
+  ]);
+  return { reads: [...reads], set };
+}
+
+test(
+  "Compose takes a launch request's variables, apart from the size limits, only into the runtime container",
+  { skip: !composeAvailable && "Docker Compose v2 unavailable" },
+  (t) => {
+    if (!composeShowsEnvFiles) {
+      t.diagnostic("this Compose cannot show env_file paths, so only the line scan checks them");
+    }
+    const keys = [
+      ...new Set([...allocatorRuntimeContainerEnvKeys(), ...allocatorManagedEnvAllowlist()]),
+    ];
+    for (const key of SIZE_LIMIT_VALUES.keys()) {
+      assert.equal(NOT_FORWARDED_TO_RUNTIME.get(key), "compose-level", `${key} is no size limit`);
+      assert.ok(keys.includes(key), `${key} is not a variable a launch request may set`);
+    }
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-compose-request-"));
+    try {
+      fs.writeFileSync(path.join(root, "empty.env"), "");
+      fs.mkdirSync(path.join(root, "docker"));
+      fs.writeFileSync(path.join(root, "docker", ".env.local"), "");
+      const sidecarEnvFile = path.join(root, "proxy-credential-lease.env");
+      fs.writeFileSync(sidecarEnvFile, "");
+      // What the provider's own environment supplies. A variable a runtime
+      // Compose file requires and only the provider sets belongs here.
+      const providerVariables = {
+        INSTAFY_ENV_DIR: root,
+        PROXY_CREDENTIAL_LEASE_ENV_FILE: sidecarEnvFile,
+        RUNTIME_PROXY_IMAGE: "runtime-proxy:fixture",
+        RUNTIME_AGENT_IMAGE: "runtime-agent:fixture",
+      };
+      for (const composeFile of [COMPOSE_FILE, PROVIDER_COMPOSE_FILE]) {
+        const result = composeRequestReadsOf(root, path.join(REPO_ROOT, composeFile), keys, providerVariables);
+        assert.ok(result.reads, `${composeFile}: Compose cannot read it ${result.error}`);
+        assert.deepEqual(
+          result.reads,
+          [],
+          `${composeFile}: Compose takes these from a launch request's variables outside the runtime container`,
+        );
+        // Guard the check itself: the values do reach the runtime, the size
+        // limits size it, and the line scan saw each variable Compose passed
+        // into the runtime container.
+        const runtime = result.set.services.runtime;
+        assert.equal(
+          runtime.environment.ORIGIN_GIT_REMOTE_URL,
+          requestValue("ORIGIN_GIT_REMOTE_URL"),
+          `${composeFile}: the launch request's ORIGIN_GIT_REMOTE_URL never reached the runtime`,
+        );
+        assert.equal(String(runtime.cpus), requestValue("RUNTIME_CPU_LIMIT"), `${composeFile}: cpus`);
+        // 1234m, which Compose renders in bytes.
+        assert.equal(String(runtime.mem_limit), String(1234 * 1024 * 1024), `${composeFile}: mem_limit`);
+        const scanned = composeVariableUses(composeFile).environment;
+        for (const value of Object.values(runtime.environment)) {
+          for (const key of keys) {
+            if (!SIZE_LIMIT_VALUES.has(key) && String(value).includes(requestValue(key))) {
+              assert.ok(
+                scanned.has(key),
+                `${composeFile}: Compose passes ${key} to the runtime container, but the line scan did not see it there`,
+              );
+            }
+          }
+        }
+      }
+    } finally {
+      fs.rmSync(root, { force: true, recursive: true });
+    }
+  },
+);
+
+// The check above rests on how Compose renders what it reads. Each case here
+// is a scratch Compose file in which Compose takes a launch request's variable
+// somewhere the check must refuse, and the check must find it with the
+// Compose that runs these tests. A Compose that cannot load a lifecycle hook,
+// a watch action, or a secret or config from the environment cannot load one
+// in the runtime Compose files either, so such a case is skipped.
+test(
+  "the Compose check finds a launch request's variables wherever Compose reads them",
+  { skip: !composeAvailable && "Docker Compose v2 unavailable" },
+  (t) => {
+    const helper = ["  helper:", "    image: helper"];
+    const cases = [
+      ["another service's value", [...helper, "    environment:", "      HELPER_MODEL: ${CODEX_MODEL:-}"], "services.helper.environment.HELPER_MODEL"],
+      ["a test of whether it is set", [...helper, "    environment:", "      HELPER_HAS_MODEL: ${CODEX_MODEL:+set}"], "services.helper.environment.HELPER_HAS_MODEL"],
+      ["an entry passed through", [...helper, "    environment:", "      - CODEX_MODEL"], "services.helper.environment.CODEX_MODEL"],
+      ["a size limit", [...helper, "    environment:", "      HELPER_MEMORY: ${RUNTIME_MEMORY_LIMIT:-4g}"], "services.helper.environment.HELPER_MEMORY"],
+      ["a service under a profile", [...helper, "    profiles:", "      - debug", "    environment:", "      HELPER_MODEL: ${CODEX_MODEL:-}"], "services.helper.environment.HELPER_MODEL"],
+      ["the runtime's other settings", ["    labels:", "      model: ${CODEX_MODEL:-}"], "services.runtime.labels.model"],
+      ["a default behind a size limit", ["    cpus: ${RUNTIME_CPU_LIMIT:-${CODEX_MODEL:+1}2}"], "services.runtime.cpus"],
+      ["a test beside a size limit", ["    cpus: ${RUNTIME_CPU_LIMIT:+${CODEX_MODEL:+1}}${RUNTIME_CPU_LIMIT:-2}"], "services.runtime.cpus"],
+      ["a lifecycle hook", [...helper, "    post_start:", "      - command: ./warm.sh", "        environment:", "          - CODEX_MODEL"], "services.helper.post_start.0.environment.CODEX_MODEL", "optional"],
+      ["a watch action", [...helper, "    develop:", "      watch:", "        - path: ./src", "          target: /src", "          action: sync+exec", "          exec:", "            command: ./reload.sh", "            environment:", "              CODEX_MODEL:"], "services.helper.develop.watch.0.exec.environment.CODEX_MODEL", "optional"],
+      ["a secret", [...helper, "    secrets:", "      - model", "secrets:", "  model:", "    environment: CODEX_MODEL"], "secrets.model.environment", "optional"],
+      ["a config", [...helper, "    configs:", "      - model", "configs:", "  model:", "    environment: CODEX_MODEL"], "configs.model.environment", "optional"],
+    ];
+    if (composeShowsEnvFiles) {
+      cases.push(["an env file's path", ["    env_file:", "      - path: ${CODEX_MODEL:-/dev/null}", "        required: false"], "services.runtime.env_file.0.path"]);
+    } else {
+      t.diagnostic("an env file's path: skipped, this Compose cannot show env_file paths");
+    }
+    const keys = ["CODEX_MODEL", "ORIGIN_GIT_REMOTE_URL", ...SIZE_LIMIT_VALUES.keys()];
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-compose-reads-"));
+    try {
+      fs.writeFileSync(path.join(root, "empty.env"), "");
+      for (const [index, [what, lines, expected, optional]] of cases.entries()) {
+        const file = path.join(root, `case-${index}.yml`);
+        // The runtime, sized by its memory limit. A case that starts with a
+        // four-space line adds settings to the runtime, before its
+        // `environment:`; any other case follows the runtime.
+        const runtime = [
+          "services:",
+          "  runtime:",
+          "    image: runtime",
+          "    mem_limit: ${RUNTIME_MEMORY_LIMIT:-4g}",
+          "    environment:",
+          "      ORIGIN_GIT_REMOTE_URL: ${ORIGIN_GIT_REMOTE_URL:-}",
+          "      CODEX_MODEL: ${CODEX_MODEL:-}",
+        ];
+        const text = lines[0].startsWith("    ") ? [...runtime.slice(0, 4), ...lines, ...runtime.slice(4)] : [...runtime, ...lines];
+        fs.writeFileSync(file, `${text.join("\n")}\n`);
+        const result = composeRequestReadsOf(root, file, keys);
+        if (optional && result.error) {
+          t.diagnostic(`${what}: skipped, this Compose does not load it: ${result.error}`);
+          continue;
+        }
+        assert.ok(result.reads, `${what}: ${result.error}`);
+        assert.ok(
+          result.reads.some((read) => read.startsWith(`${expected}:`)),
+          `${what}: expected a read at ${expected}, got ${JSON.stringify(result.reads)}`,
+        );
+      }
+      // And the control: a file that keeps the variables inside the runtime
+      // container shows no read.
+      const file = path.join(root, "control.yml");
+      fs.writeFileSync(
+        file,
+        [
+          "services:",
+          "  runtime:",
+          "    image: runtime",
+          "    cpus: ${RUNTIME_CPU_LIMIT:-2}",
+          "    mem_limit: ${RUNTIME_MEMORY_LIMIT:-4g}",
+          "    environment:",
+          "      ORIGIN_GIT_REMOTE_URL: ${ORIGIN_GIT_REMOTE_URL:-}",
+          "      CODEX_MODEL:",
+          "",
+        ].join("\n"),
+      );
+      const control = composeRequestReadsOf(root, file, keys);
+      assert.ok(control.reads, control.error);
+      assert.deepEqual(control.reads, []);
+    } finally {
+      fs.rmSync(root, { force: true, recursive: true });
+    }
+  },
+);
 
 // The runtime agent and the origin server both trim the value and treat an
 // empty remote as none, so an unset variable keeps today's no-remote behavior.

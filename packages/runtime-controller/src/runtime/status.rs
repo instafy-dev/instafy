@@ -513,30 +513,14 @@ fn origin_info_from_status_row(row: &tokio_postgres::Row) -> Option<RuntimeEnsur
     })
 }
 
+/// The image a launch asked for: its top-level `runtimeAgentImage`. An image named only in
+/// `metadata.env` is not one, since neither the Docker nor the Hetzner allocator starts it.
 fn extract_runtime_image_from_metadata(metadata: Option<&JsonValue>) -> Option<String> {
-    let value = metadata?;
-    let object = value.as_object()?;
-
-    let direct = object
+    let object = metadata?.as_object()?;
+    object
         .get("runtimeAgentImage")
         .or_else(|| object.get("runtime_agent_image"))
         .or_else(|| object.get("runtime-agent-image"))
-        .and_then(JsonValue::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    if direct.is_some() {
-        return direct;
-    }
-
-    object
-        .get("env")
-        .and_then(JsonValue::as_object)
-        .and_then(|env| {
-            env.get("RUNTIME_AGENT_IMAGE")
-                .or_else(|| env.get("runtime_agent_image"))
-                .or_else(|| env.get("runtimeAgentImage"))
-        })
         .and_then(JsonValue::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -1983,6 +1967,25 @@ pub(crate) fn determine_runtime_health(
 mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
+
+    #[test]
+    fn the_runtime_image_is_the_one_a_launch_asked_for_at_the_top_level() {
+        assert_eq!(
+            extract_runtime_image_from_metadata(Some(&json!({
+                "runtimeAgentImage": " ghcr.io/acme/runtime:top ",
+                "env": { "RUNTIME_AGENT_IMAGE": "ghcr.io/acme/runtime:env" }
+            }))),
+            Some("ghcr.io/acme/runtime:top".to_string())
+        );
+        // No allocator starts an image named only in metadata.env.
+        assert_eq!(
+            extract_runtime_image_from_metadata(Some(&json!({
+                "env": { "RUNTIME_AGENT_IMAGE": "ghcr.io/acme/runtime:env" }
+            }))),
+            None
+        );
+        assert_eq!(extract_runtime_image_from_metadata(None), None);
+    }
 
     #[test]
     fn skill_packs_show_only_well_formed_bounded_entries() {

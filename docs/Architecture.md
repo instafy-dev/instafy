@@ -533,7 +533,34 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   image. Its size, and so its Boost billing, is not carried. A requeue
   relaunch copies the metadata of the runtime's live lease or, without one,
   of its newest own launch; a tenant lease is never read.
-- Custom and self-hosted providers retain their explicit metadata/image behavior.
+- Custom and self-hosted providers retain their explicit metadata. A
+  self-hosted runtime is started outside Instafy, so no allocator reads its
+  image. For a custom provider, the request's top-level
+  `metadata.runtimeAgentImage`, which is checked only for form, picks the
+  runtime image in place of the provider's own `RUNTIME_AGENT_IMAGE`, digest
+  pin included; the provider's image applies when the request names none. The
+  node pulls an image whose reference names a registry host on every launch,
+  and Compose pulls any other image that is missing from the node from Docker
+  Hub. The Docker allocator runs `docker compose` with a request's
+  `metadata.env` in its environment, so for every provider other than exact
+  `instafy_cloud` it takes from a request only the managed launch keys and
+  the variables either runtime Compose file passes into the runtime container
+  and neither uses anywhere else (`RUNTIME_CONTAINER_ENV_KEYS` in
+  `allocator/docker.rs`, kept in step by
+  `scripts/check-self-host-compose.test.mjs`). A provider row's `metadata.env`
+  travels inside each request and follows the same rule, so `metadata.env`
+  never picks the image. Of those keys only the CPU and memory limits, which the
+  controller sets from the runtime's size, reach Compose outside the runtime
+  container. Docker, Compose, BuildKit, loader and shell variables, the HTTP
+  proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), the
+  host directories a runtime mounts, `env_file` paths and the proxy sidecar's
+  settings come only from the provider service's own environment and
+  configuration. A request for a provider other than exact `instafy_cloud`
+  still sets the runtime container's own settings, including its model-proxy
+  addresses (`PROXY_BASE_URL`, `OPENAI_BASE_URL` and the `CODEX_*_ENDPOINT`
+  URLs), which otherwise point at the proxy sidecar. The Docker allocator never
+  builds a runtime image, for any provider: the image must already be on the
+  node or be pullable.
 - Hetzner user-data templates may include `{{RUNTIME_AGENT_IMAGE}}`; when present, the allocator will substitute `metadata.runtimeAgentImage` (or `runtime_agent_image`) into the cloud-init payload.
 - Hetzner templates can also consume dynamic runtime env data via `{{RUNTIME_ENV_FLAGS}}` (shell `-e KEY='value'` segment) or `{{RUNTIME_ENV_EXPORTS}}` (`export KEY='value'` lines). This includes controller lease/origin env plus `metadata.env` overrides such as `INSTAFY_ENABLE_BROWSER_SESSION=1`.
 
