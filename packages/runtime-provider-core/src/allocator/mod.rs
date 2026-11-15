@@ -125,12 +125,13 @@ pub(crate) fn managed_webdev_generation_matches(
             == Some(lease_id)
 }
 
-/// The allocator settings [`apply_provider_overrides`] reads from a provider
-/// row's metadata, the Hetzner API token among them. The controller merges a
-/// provider row's top-level metadata into every launch request, so a row that
-/// holds them would hand them to each runtime: in `RUNTIME_METADATA` and, on
-/// Hetzner, in the server's user-data, which every process on the server can
-/// read. [`runtime_metadata_for_process`] removes them.
+/// The allocator settings [`apply_provider_overrides`] reads from a provider's
+/// metadata, the Hetzner API token among them. They configure the allocator
+/// and nothing else, yet launch metadata can carry them, from a controller
+/// that copies a provider row's metadata in whole or from the caller. A
+/// runtime would then get them in `RUNTIME_METADATA` and, on Hetzner, in the
+/// server's user-data, which every process on the server can read, so
+/// [`runtime_metadata_for_process`] removes them.
 pub(crate) const PROVIDER_CONFIG_METADATA_KEYS: [&str; 12] = [
     "dockerComposeFile",
     "dockerService",
@@ -584,7 +585,8 @@ mod tests {
 
     #[test]
     fn a_runtime_never_receives_provider_configuration() {
-        // The controller merges a provider row's top-level metadata into each launch request.
+        // Launch metadata can carry them, from a controller that copies a provider row's
+        // metadata in whole or from the caller.
         let mut metadata = serde_json::Map::new();
         for key in PROVIDER_CONFIG_METADATA_KEYS {
             metadata.insert(key.to_string(), json!(format!("provider-{key}")));

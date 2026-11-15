@@ -1410,9 +1410,10 @@ runcmd:
         }
     }
 
-    /// The controller merges a provider row's top-level metadata into each launch request.
-    /// Allocator settings such as the Hetzner API token must not ride along into user-data,
-    /// which every process on the server can read from the metadata service.
+    /// Launch metadata can carry allocator settings such as the Hetzner API token, from a
+    /// controller that copies a provider row's metadata in whole or from the caller. They must
+    /// not ride along into user-data, which every process on the server can read from the
+    /// metadata service.
     #[test]
     fn provider_configuration_in_a_launch_never_reaches_user_data() {
         let template = r#"#cloud-config

@@ -634,11 +634,10 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   the launch, since no YAML scalar can carry it. Keep placeholders in a shell script or in
   a YAML plain or block scalar: a quoted or flow-style YAML value does not keep
   them intact.
-- The controller copies a provider row's metadata, allocator settings
-  included, into each launch request. `RUNTIME_METADATA` and
-  `{{RUNTIME_METADATA_JSON}}` drop those settings (`hetznerToken`,
-  `hetznerUserData` and the rest of `PROVIDER_CONFIG_METADATA_KEYS` in
-  `allocator/mod.rs`), for the Docker allocator as well, so no runtime
+- `RUNTIME_METADATA` and `{{RUNTIME_METADATA_JSON}}` drop a provider's
+  allocator settings (`hetznerToken`, `hetznerUserData` and the rest of
+  `PROVIDER_CONFIG_METADATA_KEYS` in `allocator/mod.rs`) whenever a launch's
+  metadata carries them, for the Docker allocator as well, so no runtime
   receives them. Every process on a Hetzner server, containers included, can
   still read the server's user-data, the runtime token among it, from the
   metadata service, so a template that must carry another secret should block
