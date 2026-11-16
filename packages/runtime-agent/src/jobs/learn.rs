@@ -466,9 +466,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // looked, also of a value only Octo's browser looked for), and prices and reviews per item
     // were the research skill's "Comparing items".
     include_str!("legacy/interactive-artifacts-v18.md"),
-    // From before a comparison got a `sort` entry for each of the person's criteria that is a
-    // number, so the line under its title names the option each puts first (its sort counted as
-    // one nobody asked for).
+    // From before a comparison got a `sort` entry for each amount the person compares by, so the
+    // line under its title names the option each puts first (its sort counted as one nobody asked
+    // for).
     include_str!("legacy/interactive-artifacts-v20.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
