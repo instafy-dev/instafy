@@ -43,7 +43,7 @@ import {
   unsavedWorkPlacementFor,
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
-import { pageFolderOf, useChatSite, useChatSiteSettled, type ChatSite } from "./chatSiteContext";
+import { pageFolderOf, useChatSite, useChatSiteSettled, useChatSiteSoFar, type ChatSite } from "./chatSiteContext";
 import { normalizeUndonePath, useChatLaterChanges } from "./chatLaterChanges";
 import { isFolderRevertablePath, runtimeFolderOriginId, undoFolderRuntimeId } from "./unsavedChangeRevert";
 
@@ -424,6 +424,7 @@ export function ChatFileChangeList({
   const chatSiteOrPending = useChatSite();
   const chatSite = chatSiteOrPending ?? null;
   const chatSiteSettled = useChatSiteSettled();
+  const chatSiteSoFar = useChatSiteSoFar();
   // The turn that made the site: the one that opened its card, or the chat's
   // first change. A later turn whose files are all new (a page added, a list
   // written) changed the site.
@@ -583,6 +584,19 @@ export function ChatFileChangeList({
   const pageWordsPending = pageOfTheFiles !== null &&
     (chatSiteOrPending === undefined ||
       (!chatSiteSettled && (!chatSite?.pageTitles.has(pageOfTheFiles) || createdByOrderAlone)));
+  // The words that row will most likely show, from the history loaded so far:
+  // its placeholder takes their width, so the row keeps its size when they
+  // come and nothing beside it moves. Never shown, and only for a page whose
+  // title is in, never "a page".
+  const likelySite = chatSiteOrPending === undefined ? chatSiteSoFar : chatSite;
+  const likelyWords = pageWordsPending && pageOfTheFiles !== null && likelySite?.pageTitles.has(pageOfTheFiles)
+    ? siteChangeLabel(
+        likelySite,
+        madeSite,
+        madeSite || likelySite.firstChangeAt == null || messageTimestamp == null || messageTimestamp <= likelySite.firstChangeAt,
+        files,
+      )
+    : null;
   // The chat's site can show up after these files did (a later turn opened its
   // card): its files then fold behind the site's line, unless the person opened them.
   // So do the files of a change that is undone, behind "Undone", before the row
@@ -608,6 +622,8 @@ export function ChatFileChangeList({
     }
     return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(pendingCount)}${notSavedSuffix}`;
   })();
+
+  const likelyLabel = likelyWords ? `${likelyWords}${notSavedCount > 0 ? ` · ${notSavedCount} not saved` : ""}` : null;
 
   // Reverted files have nothing left to save, so the state follows the actions.
   const unsavedNote =
@@ -1579,8 +1595,10 @@ export function ChatFileChangeList({
   // The chat's history is still coming in, and a card in it may name these
   // files' page or site: the row waits for it rather than read one way, then
   // another.
-  // A page's row keeps its place meanwhile, without words (below).
-  if (chatSiteOrPending === undefined && !pageWordsPending) {
+  // A page's row keeps its place meanwhile, without words (below). A row
+  // whose files were undone reads "Undone" (or how many were) whatever the
+  // cards say, so it shows at once, with the rows beside it.
+  if (chatSiteOrPending === undefined && !pageWordsPending && revertedCount === 0) {
     return null;
   }
 
@@ -1607,10 +1625,23 @@ export function ChatFileChangeList({
               {pageWordsPending ? (
                 <>
                   <span className="sr-only">Loading…</span>
-                  <span
-                    className="h-2 w-28 shrink-0 animate-pulse rounded-full bg-slate-200 dark:bg-white/[0.10]"
-                    aria-hidden="true"
-                  />
+                  {likelyLabel ? (
+                    // As wide as the words will be: the pulse lies over them,
+                    // drawn unseen (and read by no one) until they come.
+                    <span
+                      className="relative truncate before:invisible before:content-[attr(data-words)]"
+                      data-words={likelyLabel}
+                      aria-hidden="true"
+                      data-testid="chat-file-change-pending-words"
+                    >
+                      <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 animate-pulse rounded-full bg-slate-200 dark:bg-white/[0.10]" />
+                    </span>
+                  ) : (
+                    <span
+                      className="h-2 w-28 shrink-0 animate-pulse rounded-full bg-slate-200 dark:bg-white/[0.10]"
+                      aria-hidden="true"
+                    />
+                  )}
                 </>
               ) : (
                 <span className="truncate">{compactSummaryLabel}</span>

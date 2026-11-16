@@ -38,6 +38,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-transport-switch.spec.ts",
   "browser-recovery.spec.ts",
   "browser-keyboard-status.spec.ts",
+  "chat-file-change-pending-width.spec.ts",
   "conversation-surfaces.spec.ts",
   "composer-panels.spec.ts",
   "suggestion-browser-menus.spec.ts",
