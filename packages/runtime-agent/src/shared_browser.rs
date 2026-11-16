@@ -224,12 +224,28 @@ const CHANGED_AFTER_YES_CODE: &str = "approval_stale";
 /// of a fresh snapshot, or one that moves to another page or tab, starts the
 /// count again.
 const PAGE_CHANGED_STREAK_LIMIT: u32 = 2;
+/// Where a step that ends a page or an address sends Octo next, the same fact
+/// for every way a page ends, here and in the Shared Browser's own steps
+/// (`NEXT_SOURCE` in `assets/shared-browser-cli.js`): the browser skill's
+/// "Finding a page" says which source comes next. Each refusal once named a
+/// next source of its own, and the lists disagreed.
+macro_rules! next_source {
+    () => {
+        "Go on in this turn as \"Finding a page\" says."
+    };
+}
 /// What a step answers at [`PAGE_CHANGED_STREAK_LIMIT`], in place of the
 /// controller's "take a fresh snapshot". A home page's form that keeps
 /// changing (a live widget) often has a page of its own on the same site, one
 /// link away in its menu: a turn told only "the next source" left the site
-/// for a source that had already failed, while that page held still.
-const PAGE_KEEPS_CHANGING_MESSAGE: &str = "This page keeps changing while Octo reads it, so this step was not done, and another snapshot would not hold still either. That ends this page, not the task: open this site's own page for it from a link here (its menu: a planner, a search page), else the next source in this turn. When nothing is left to try, tell the person in plain words what could not be done on this page.";
+/// for a source that had already failed, while that page held still. "Finding
+/// a page" puts a link on a page read, then the site's own menu, before any
+/// other source; the step says only that the page ends here, and the fact that
+/// sends the turn there (`next_source!`).
+const PAGE_KEEPS_CHANGING_MESSAGE: &str = concat!(
+    "This page keeps changing while Octo reads it, so this step was not done, and another snapshot would not hold still either. That ends this page, not the task. ",
+    next_source!()
+);
 /// How long a person has to answer the prompts of one Shared Browser tool
 /// call, as `assets/shared-browser-approval.js` reads it. The script's
 /// `DEFAULT_APPROVAL_WAIT_MS` and `MAX_APPROVAL_WAIT_MS`, and the origin's

@@ -80,7 +80,8 @@ const WARRANTY_LINK: &str = "https://maker.example/warranty";
 const WARRANTY_WORDS: &str = "Read the maker's warranty page.";
 const READ_WARRANTY: &str = r#"{"url": "https://maker.example/warranty", "title": "Warranty", "facts": ["Laptops: 2 years"]}"#;
 /// What the wrap-up pass is told of such a link (runtime-agent `UNREAD_LINE`).
-const UNREAD_LINK: &str = "A page's own tab or link named for a value you didn't find there is one of them until you open it.";
+const UNREAD_LINK: &str =
+    "a page's own tab or link for a value you didn't find there is one until you open it.";
 
 fn unread_line(pages: &[&str]) -> String {
     json!({ "unread": pages }).to_string()

@@ -393,24 +393,32 @@ fn a_turn_with_no_shell_leaves_out_the_sections_a_skill_names() {
 }
 
 /// A browser turn that answers in words, with no building turn after it, may open a reviewer's
-/// own site for a review no page it read links to: "Finding a page", which every reader reads,
-/// says so. Said only in the part a browser turn that hands back reads, and in the research
-/// skill's searches, which a browser turn leaves out, such a turn had nowhere to look but a link.
+/// own site for a review no page it read links to: `instafy-comparing`, which every reader reads
+/// and a browser turn carries whenever its words ask for reviews, says so. Said only in the part a
+/// browser turn that hands back reads, and in the research skill's searches, which a browser turn
+/// leaves out, such a turn had nowhere to look but a link. A restored browser thread is given the
+/// skill again, as its words route it.
 #[test]
 fn a_browser_turn_that_answers_in_words_may_open_a_reviewers_own_site() {
     let tmp = space();
+    let request =
+        "In your browser, find two independent reviews of each of the three latest e-readers.";
+    let reviewer = "- A review no page you read links to comes from a reviewer's own site: its home page, its links and its own search box.";
+    let restored = json!({
+        "defaultThreadId": "existing-thread",
+        "sharedBrowserThreadId": "existing-browser-thread",
+        "historyReplayRequired": false,
+    });
     for transport in ["shared", "desktop-personal"] {
-        let (prompt, _) = prompt_for(tmp.path(), metadata(Some(transport)), None);
-        assert!(
-            !prompt.contains("Your part of this request is the reading"),
-            "{transport}"
-        );
-        assert!(
-            prompt.contains(
-                "else the official site of what the task names (for reviews, a reviewer's own site) and its links and search. Prefer available native search for discovery; never invent a page path."
-            ),
-            "{transport}"
-        );
+        for state in [None, Some(&restored)] {
+            let (prompt, _) =
+                prompt_for_request(tmp.path(), request, metadata(Some(transport)), state);
+            assert!(
+                !prompt.contains("Your part of this request is the reading"),
+                "{transport}"
+            );
+            assert_eq!(prompt.matches(reviewer).count(), 1, "{transport}: {prompt}");
+        }
     }
 }
 
@@ -846,11 +854,10 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
         })
     };
     let part = "\n\nYour part of this request is the reading: read every page it needs before you \
-                end (each item's own page from the links you read and, for reviews, each \
-                reviewer's own site, by its address or its own search box: this turn has no web \
-                search). What it asks Octo to make is the building turn's part, from your finding \
-                lines, so never stop because this turn can't make it, and say nothing about \
-                making it in your reply.\n\nLatest user request:\n";
+                end, as \"Finding a page\" says (this turn has no web search). What it asks Octo \
+                to make is the building turn's part, from your finding lines, so never stop \
+                because this turn can't make it, and say nothing about making it in your \
+                reply.\n\nLatest user request:\n";
     // Each turn's own line follows a blank line: nothing of a guardrail stands above it. Who
     // makes the thing is said once, in its part.
     let scope = "\n\n- This turn changes no files.\n\n";
@@ -975,22 +982,23 @@ fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_
         })
     };
     let request = "Add each laptop's warranty from its own page.";
-    let limits = "Octo's later turns read only these lines, never your reply's words, so a fact \
-                  carries what it doesn't confirm: which of its values you chose, not the page, \
-                  and what it leaves out.";
+    let limits = "Octo's later turns read only these lines, never your reply's words: write each \
+                  fact as \"Finding a page\" says.";
+    // What a fact carries is said in "Finding a page", in the browser skill the turn carries.
+    let carries = "with what it doesn't confirm: which of its values you chose, not the page, and \
+                   what it leaves out.";
     let search = "A value you looked for and didn't find is no fact of any page, and counts as not \
                   found only once you searched the whole text a step returned for it in the \
                   script that ran that step, never by printing the text (a long printed result is \
-                  cut in its middle), and opened that page's own Specs, Warranty, Support or FAQ \
-                  tab or link for it.";
+                  cut in its middle), and opened that page's own tab or link for it.";
     let missing = "After your finding lines, one line `{\"missing\": [\"<a value this request \
                    needs that you looked for and didn't find>\"]}`, each by its name alone \
                    (\"warranty\"), or `{\"missing\": []}`.";
-    let unread = "A page's own tab or link named for a value you didn't find there is one of them \
-                  until you open it.";
+    let unread = "a page's own tab or link for a value you didn't find there is one until you open \
+                  it.";
     // A tab with no address of its own has its page's, which a finding line lists: named by it,
     // the runtime takes it for that page, read already, and no second pass opens the tab.
-    let tab = "Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
+    let tab = "named with that page (\"<page>'s <link> link\"), never by that page's address;";
     let old = [
         "goes under that page as where you looked",
         "runtime not found on this page",
@@ -999,9 +1007,13 @@ fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_
     ];
 
     let (hand_back, _) = prompt_for_request(tmp.path(), request, routed(true), None);
-    for line in [limits, search, missing, unread, tab] {
+    for line in [carries, limits, search, missing, unread, tab] {
         assert_eq!(hand_back.matches(line).count(), 1, "{line}\n{hand_back}");
     }
+    assert!(
+        hand_back.find(carries) < hand_back.find(limits),
+        "{hand_back}"
+    );
     let at = |line: &str| hand_back.find(line).unwrap_or_else(|| panic!("{line}"));
     assert!(at(limits) < at(search), "{hand_back}");
     assert!(at(search) < at(missing), "{hand_back}");
@@ -1013,7 +1025,7 @@ fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_
     }
 
     let (other, _) = prompt_for_request(tmp.path(), request, routed(false), None);
-    for line in [limits, search] {
+    for line in [carries, limits, search] {
         assert_eq!(other.matches(line).count(), 1, "{line}\n{other}");
     }
     assert!(

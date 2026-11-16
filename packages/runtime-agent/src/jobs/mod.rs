@@ -1973,15 +1973,19 @@ fn select_recursive_context_nodes(
     contexts: &[ContextNode],
     prompt_text: &str,
 ) -> Vec<SelectedContextNode> {
-    select_recursive_context_nodes_admitting(contexts, prompt_text, &|_| true)
+    select_recursive_context_nodes_admitting(contexts, prompt_text, &|_| true, None)
 }
 
 /// [`select_recursive_context_nodes`], where a context `admit` refuses is never selected as a
-/// child, so it takes no parent's place from one it admits.
+/// child, so it takes no parent's place from one it admits. `pinned` is a skill the turn carries
+/// whatever its words (`PinnedSkill`): it takes no place itself, and its own children are routed
+/// as a selected skill's are. A skill's topics hang under it (the browser skill's routes and
+/// comparing), and a turn that carries the skill reads the ones its words name.
 fn select_recursive_context_nodes_admitting(
     contexts: &[ContextNode],
     prompt_text: &str,
     admit: &dyn Fn(&ContextNode) -> bool,
+    pinned: Option<&str>,
 ) -> Vec<SelectedContextNode> {
     let normalized_prompt = prompt_text.trim().to_ascii_lowercase();
     let prompt_terms = PromptRoutingTerms::new(prompt_text);
@@ -2061,6 +2065,9 @@ fn select_recursive_context_nodes_admitting(
             });
             queue.push_back(context.id.clone());
         }
+    }
+    if let Some(pinned) = pinned.filter(|pinned| contexts_by_id.contains_key(*pinned)) {
+        queue.push_back(pinned.to_string());
     }
 
     while let Some(parent_id) = queue.pop_front() {
@@ -2452,6 +2459,78 @@ fn usable_with_no_shell(context: &ContextNode) -> bool {
     !scripts && !pack_commands
 }
 
+/// Whether a turn with a pinned skill may be given `context` besides it: the space's memory and
+/// routing skills, which are always walked, and every other skill it can use with no shell. Its
+/// pinned skill is loaded whatever its words, so it takes no routing place.
+fn admitted_beside_pinned(context: &ContextNode, pinned: &PinnedSkill) -> bool {
+    context.metadata.always_include || (context.id != pinned.id && usable_with_no_shell(context))
+}
+
+/// The skills a browser turn on a restored thread is given beside its pinned skill's section: the
+/// ones its words route, as its first turn's snapshot gives them ([`format_project_memory_snapshot_with_preferences`]),
+/// each whole but for the sections a turn with no shell leaves out (and the router's own fields),
+/// highest score first, within [`PINNED_SKILL_MAX_BYTES`]. Its thread began on another turn's
+/// words, or before a skill existed: given only "Finding a page" and the replies guide, a
+/// comparison's later browser turns lost how to compare, and a route's how to read a planner,
+/// once both moved into skills of their own. None when its words route none.
+fn routed_skills_for_restored_thread(
+    workspace_dir: &Path,
+    prompt_text: &str,
+    pinned: &PinnedSkill,
+    routed: bool,
+) -> Option<String> {
+    let contexts = build_top_level_context_nodes(workspace_dir);
+    let mut selected: Vec<SelectedContextNode> = select_recursive_context_nodes_admitting(
+        &contexts,
+        prompt_text,
+        &|context| admitted_beside_pinned(context, pinned),
+        Some(pinned.id),
+    )
+    .into_iter()
+    .filter(|node| node.score > 0 && node.id != pinned.id)
+    .collect();
+    selected.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+    let mut out = String::new();
+    for node in selected {
+        let Some(context) = contexts
+            .iter()
+            .find(|context| context.id == node.id && usable_with_no_shell(context))
+        else {
+            continue;
+        };
+        let Some((text, _)) = read_text_file_lossy_truncated(
+            workspace_dir,
+            &context.path,
+            PROJECT_MEMORY_MAX_FILE_BYTES,
+        ) else {
+            continue;
+        };
+        let text = match skill_routing::split_front_matter(&text) {
+            (front, body) if !front.is_empty() && !body.trim().is_empty() => body.trim_start(),
+            _ => text.as_str(),
+        };
+        let mut text = without_markdown_h2_section(text, ROUTING_PREFLIGHT_SECTION).into_owned();
+        for heading in sections_left_out(&context.metadata, true, routed) {
+            text = without_markdown_h2_section(&text, &heading).into_owned();
+        }
+        let relative = context
+            .path
+            .strip_prefix(workspace_dir)
+            .unwrap_or(context.path.as_path());
+        let section = format!(
+            "\nFrom `{}` (`{}`; this thread may predate it):\n{}\n",
+            context.id,
+            relative.display(),
+            text.trim_end()
+        );
+        if out.len() + section.len() > PINNED_SKILL_MAX_BYTES {
+            continue;
+        }
+        out.push_str(&section);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// The section of a skill only the routing step reads ([`format_browser_routing_preflight_snapshot`]):
 /// no turn's memory snapshot carries it.
 const ROUTING_PREFLIGHT_SECTION: &str = "Routing preflight";
@@ -2803,16 +2882,15 @@ fn format_project_memory_snapshot_with_preferences(
             // A skill such a turn cannot use takes no routing place: the space's memory and
             // routing skills are still walked (they are always included), and its pinned skill
             // loads whatever its words, so it takes none either.
-            let mut selected_contexts =
-                select_recursive_context_nodes_admitting(&contexts, prompt_text, &|context| {
-                    match pinned {
-                        Some(pinned) => {
-                            context.metadata.always_include
-                                || (context.id != pinned.id && usable_with_no_shell(context))
-                        }
-                        None => true,
-                    }
-                });
+            let mut selected_contexts = select_recursive_context_nodes_admitting(
+                &contexts,
+                prompt_text,
+                &|context| match pinned {
+                    Some(pinned) => admitted_beside_pinned(context, pinned),
+                    None => true,
+                },
+                pinned_skill,
+            );
             // A pinned skill the words did not route is loaded too, under its parent.
             if let Some(pinned) = pinned_skill
                 && !selected_contexts.iter().any(|context| context.id == pinned)
@@ -11170,13 +11248,26 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 );
                 skill_hints = Some(("restoredSkillHints", hints.skills));
             }
-            // A browser turn is given the browser skill's "Finding a page" and
-            // `AGENTS.md`'s "Replies" again.
+            // A browser turn is given the browser skill's "Finding a page", the skills its
+            // words route and `AGENTS.md`'s "Replies" again.
             if include_workspace_memory && let Some(pinned) = pinned_skill_for_turn(job) {
+                let routed = job
+                    .payload
+                    .get("metadata")
+                    .is_some_and(browser_hand_back::carries_on_a_routed_card);
                 for (name, section) in [
                     (
                         "pinnedSkillSection",
                         pinned_skill_section(workspace_dir, pinned),
+                    ),
+                    (
+                        "restoredRoutedSkills",
+                        routed_skills_for_restored_thread(
+                            workspace_dir,
+                            request_for_skills,
+                            pinned,
+                            routed,
+                        ),
                     ),
                     (
                         "pinnedRepliesSection",

@@ -108,20 +108,22 @@ const READS_NOTE_KEY: &str = "browser_hand_back_reads_note";
 /// test, Nov 6), and with no word for a page a cookie notice covered, one called it `blocked`
 /// too, and the page people share said "Notebookcheck was blocked" (a local test, Nov 7). Only
 /// the first eight are never tried another way: for a page that is missing, fails or is
-/// covered, its browser skill's "Finding a page" sends it to the site's own search or menu, or
-/// the place's own site, first. A value it looked for and didn't find is no fact of any page
-/// ([`NOT_FOUND_SEARCH`]): a turn whose findings go back to the building turn names it in its
-/// missing line ([`MISSING_LINE`]). And a fact carries what it doesn't confirm, since later turns
-/// read only these lines: a planner's finding gave a route to a stop the turn chose, and only its
-/// reply said the route ended short of the shop, so the page people share showed that route as
-/// the way to the shop (a local test, Nov 8).
+/// covered, its browser skill's "Finding a page" says where it goes next. A value it looked for
+/// and didn't find is no fact of any page ([`NOT_FOUND_SEARCH`]): a turn whose findings go back
+/// to the building turn names it in its missing line ([`MISSING_LINE`]). How a fact is written
+/// (under a page that states it, in a few words, with what it doesn't confirm: a planner's
+/// finding gave a route to a stop the turn chose, and only its reply said the route ended short
+/// of the shop, so the page people share showed that route as the way to the shop, a local
+/// test, Nov 8) is judgement, and "Finding a page" says it, which a browser turn on a restored
+/// thread is given again: this line only points to it, as the run text does for what comes
+/// after a page that ends.
 const FINDING_LINES: &str = "End your reply with one finding per page, each one JSON object on its own line: \
 `{\"url\": \"<address>\", \"title\": \"<page title>\", \"facts\": [\"<what the page showed>\"]}` for a page you read, \
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only|no-page|timed-out|covered\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site \
 (never retry such a page another way), at an address with no page or no answer in time, or under a cookie notice or dialog the browser couldn't close. \
-Report only what the pages showed, never a secret, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text; Instafy adds when and in which browser each page was read. \
-Octo's later turns read only these lines, never your reply's words, so a fact carries what it doesn't confirm: which of its values you chose, not the page, and what it leaves out.";
+Report only what the pages showed, never a secret; Instafy adds when and in which browser each page was read. \
+Octo's later turns read only these lines, never your reply's words: write each fact as \"Finding a page\" says.";
 
 /// What a browser turn says in words of a page that stopped it: the person reads it.
 const FIRST_LINE_STOP: &str = "If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
@@ -158,9 +160,11 @@ const LATER_TURNS_FINDINGS: &str = "\n\nFindings for Octo's later turns:\n";
 /// say where it looked, a warranty's browser turn printed the last 1,100 and 700 characters of
 /// three product pages, each ending in a footer "Warranty" link it never opened, and wrote the
 /// warranty as not found under each (a local test, Nov 8). A question's turn is told this too:
-/// its reply is the person's answer, and later turns read its findings.
+/// its reply is the person's answer, and later turns read its findings. Which tabs a kind of page
+/// keeps a value on (a product's specs, warranty or support) is a topic skill's judgement
+/// (`instafy-comparing`): the line names none.
 const NOT_FOUND_SEARCH: &str = "A value you looked for and didn't find is no fact of any page, and counts as not found only once you searched the whole text a step returned for it in the script that ran that step, never by printing the text (a long printed result is cut in its middle), \
-and opened that page's own Specs, Warranty, Support or FAQ tab or link for it.";
+and opened that page's own tab or link for it.";
 
 /// What a browser turn whose findings go back to the building turn writes after its finding
 /// lines: each value its request needs that it looked for and didn't find ([`NOT_FOUND_SEARCH`]),
@@ -182,10 +186,17 @@ const MISSING_LINE: &str = "After your finding lines, one line `{\"missing\": [\
 /// that pass ([`MISSING_LINE`]). The wrap-up pass, which opens nothing, is told the same. A tab
 /// is named with its page, never by the page's address: one with no address of its own has its
 /// page's, which a finding line lists, and a page the turn's lines list is none to read again
-/// ([`take_unread_pages`]), so no second pass would open the tab.
-const UNREAD_LINE: &str = "Then one last line `{\"unread\": [\"<a page this request needs that you didn't open>\"]}`, each by its address or what it is (\"<item>'s own page\"), or `{\"unread\": []}` when you opened every one. \
-A page's own tab or link named for a value you didn't find there is one of them until you open it. \
-Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
+/// ([`take_unread_pages`]), so no second pass would open the tab. An entry needs its own address
+/// or a tab or link on a page the turn read: every name goes to the second pass as a page to
+/// read, and a comparison's first answer listed reviews no page it read linked to as unread,
+/// beside the same values in its missing line, so its pass tried a search engine's results page
+/// twice and was refused, and another pass read review indexes for a review it never found (a
+/// local test, Nov 9). A page with neither is a value the turn didn't find: its missing line names
+/// it. What that means for a topic (a review no page links to) is its skill's
+/// (`instafy-comparing`).
+const UNREAD_LINE: &str = "Then one last line `{\"unread\": [\"<a page this request needs that you didn't open>\"]}`, or `{\"unread\": []}` when you opened every one; a page's own tab or link for a value you didn't find there is one until you open it. \
+Each entry needs its own address, or a tab or link on a page you read, named with that page (\"<page>'s <link> link\"), never by that page's address; \
+a page you have neither for is a value you didn't find, not an unread page.";
 
 /// What a browser turn whose findings go back to the building turn ([`hands_back`]) reads last,
 /// after its finding lines' section and right before the request: its part of the request, in plain
@@ -200,14 +211,16 @@ Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address."
 /// nothing about making the thing in its reply, and is never told that the thing is made after
 /// it: when every page stopped it, no hand-back follows and [`move_findings_into_details`] posts
 /// its words, so a promise to make the thing would be kept by nothing. A review no page links to
-/// comes from a reviewer's own site, as the browser skill's "Finding a page" says for every
-/// reader: said here only, a browser turn that answers in words lost it. Told reviews came only
-/// from links on the pages it read, beside a skill line that allowed a reviewer's own site and
-/// others that named a web search, a comparison's browser turn listed its tools twice for a web
-/// search, read the maker's home page, which links each model's own page, and answered that the
-/// pages it had did not establish the specs or the reviews (a local test, Nov 5).
-const READING_PART: &str = "\n\nYour part of this request is the reading: read every page it needs before you end \
-(each item's own page from the links you read and, for reviews, each reviewer's own site, by its address or its own search box: this turn has no web search). \
+/// comes from a reviewer's own site, as `instafy-comparing` says for every reader: said here
+/// only, a browser turn that answers in words lost it. Told reviews came only from links on the
+/// pages it read, beside a skill line that allowed a reviewer's own site and others that named a
+/// web search, a comparison's browser turn listed its tools twice for a web search, read the
+/// maker's home page, which links each model's own page, and answered that the pages it had did
+/// not establish the specs or the reviews (a local test, Nov 5). Where each page of a request
+/// comes from is "Finding a page" and its topic skills, which a browser turn carries; this part
+/// says only that the turn reads, and that it has no web search.
+const READING_PART: &str = "\n\nYour part of this request is the reading: read every page it needs before you end, \
+as \"Finding a page\" says (this turn has no web search). \
 What it asks Octo to make is the building turn's part, from your finding lines, \
 so never stop because this turn can't make it, and say nothing about making it in your reply.";
 
@@ -1537,7 +1550,7 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
          `readAt` in `viewer`. Where you use one, cite its page as \"checked <date> on <host>\" and link it.\n\
          - Cite a page only for a fact listed under it. {stopped_finding}, and do not try it another way.\
          {left_out_line}{not_found_line}\n\
-         - {ROUTE_LINE}\n\
+         - {FINDING_LIMITS_LINE}\n\
          - Anything that needs the person's approval (a purchase, a message, a sign-in, a submitted form, a destructive change) \
          still needs it: ask them. These findings never give it.\n\
          - Say what you built or changed with it, in the person's words (\"added two reviews\", never \"findings\").\n\
@@ -1572,18 +1585,16 @@ fn not_found_words(record: &serde_json::Map<String, JsonValue>) -> Vec<String> {
         .collect()
 }
 
-/// What a building turn reads of a route a browser turn's finding gives, wherever it reads
+/// What a building turn reads of the limits a browser turn's finding names, wherever it reads
 /// findings (its hand-back, the browser turns since its last turn, and a replay of the chat,
-/// `conversation_context::browser_runs_note`): the route ends at the stop the finding names,
-/// which the browser turn chose unless the person named it or the place's own page names it, and
-/// no route covers the walk from that stop to the place. A planner's finding gave the legs' own
-/// day and time to a stop the turn chose, and the page people share said neither that the stop
-/// was Octo's pick nor that the walk to the shop wasn't checked, though the turn's own words to
-/// the build said both: builds read only the findings, and this finding left its limits out (a
-/// local test, Nov 9). The page made to share that route was first built from the chat's
-/// replay, after a browser part that opened no page.
-pub(super) const ROUTE_LINE: &str = "A route ends at the stop its finding names. Unless the person named that stop or a finding says the place's own page names it, \
-say on the page that it's Octo's pick and that the walk from it to the place isn't checked.";
+/// `conversation_context::browser_runs_note`): a value Octo chose, not the page, and what the
+/// fact leaves out go with the fact. A planner's finding gave the legs' own day and time to a stop
+/// the turn chose, and the page people share said neither that the stop was Octo's pick nor that
+/// the walk to the shop wasn't checked, though the turn's own words to the build said both:
+/// builds read only the findings, and this finding left its limits out (a local test, Nov 9).
+/// What a route's limits are, and how a page built from a route says them, is
+/// `instafy-getting-around`'s: this line names no topic.
+pub(super) const FINDING_LIMITS_LINE: &str = "Where you use a fact, say with it what its finding says it doesn't confirm: a value Octo chose, not the page, and what it leaves out.";
 
 /// The browser turns of this chat since the building thread's last turn, as
 /// the controller lists them at lease (`browser_turns_since`): what each was
@@ -1613,7 +1624,7 @@ pub(super) fn format_browser_turns_since_section(
          - These are what the pages showed at `readAt` in `viewer`. Where you use one, cite its page as \"checked <date> \
          on <host>\" and link it, only for a fact listed under it. {stopped_finding}. A turn with no findings listed \
          none: do not guess what it found.\n\
-         - {ROUTE_LINE}\n\
+         - {FINDING_LIMITS_LINE}\n\
          - A turn with `routedNotOpened` was sent to the browser but never ran there, and an `outcome` other than \
          `succeeded` did not finish: do not guess what it would have found.\n\
          - With `earlierLeftOut`, older browser turns of this chat are not listed: do not guess what they found; say \
@@ -1815,11 +1826,10 @@ mod tests {
             assert!(
                 section.ends_with(
                     "say so in your first line.\n\nYour part of this request is the reading: \
-                     read every page it needs before you end (each item's own page from the links \
-                     you read and, for reviews, each reviewer's own site, by its address or its \
-                     own search box: this turn has no web search). What it asks Octo to make is \
-                     the building turn's part, from your finding lines, so never stop because \
-                     this turn can't make it, and say nothing about making it in your reply."
+                     read every page it needs before you end, as \"Finding a page\" says (this \
+                     turn has no web search). What it asks Octo to make is the building turn's \
+                     part, from your finding lines, so never stop because this turn can't make \
+                     it, and say nothing about making it in your reply."
                 ),
                 "{section}"
             );
@@ -1882,7 +1892,9 @@ mod tests {
     /// battery figure, the finding put the figure under the maker's page, and the page built from
     /// it cited the maker for what only the review said; a review read in the same turn stated it
     /// itself. A quote never moves a fact to a page the turn did not open: every finding line
-    /// reads as a page read, and the building turn cites it as checked.
+    /// reads as a page read, and the building turn cites it as checked. How a fact is written is
+    /// judgement: the browser skill's "Finding a page" says it, which every browser turn carries
+    /// and a browser turn on a restored thread is given again, and the contract points to it.
     #[test]
     fn a_finding_puts_each_fact_under_a_page_read_that_states_it() {
         let metadata = json!({
@@ -1893,9 +1905,20 @@ mod tests {
         let section = format_browser_findings_contract_section(Some(&metadata)).expect("contract");
         assert!(
             section.contains(
-                "Report only what the pages showed, never a secret, each fact under a page you read that states it, not one that only quotes it, and copy no long listing text;"
+                "Report only what the pages showed, never a secret; Instafy adds when and in which browser each page was read."
             ),
             "{section}"
+        );
+        assert!(!section.contains("only quotes it"), "{section}");
+        let skill =
+            include_str!("../../assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md");
+        let finding = &skill[skill.find("## Finding a page").expect("section")..];
+        let finding = &finding[..finding.find("\n## ").expect("next section")];
+        assert!(
+            finding.contains(
+                "write a finding's fact under a page you read that states it, not one that only quotes it, in a few words of your own, never long listing text"
+            ),
+            "{finding}"
         );
     }
 
@@ -1903,12 +1926,18 @@ mod tests {
     /// doesn't confirm: which of its values the turn chose, not the page, and what it leaves out.
     /// A planner's finding gave a route to a stop the turn chose, and only its reply said the
     /// route ended short of the shop: the page people share showed that route as the way to the
-    /// shop (a local test, Nov 8). Every browser turn is told so, once.
+    /// shop (a local test, Nov 8). Every browser turn is told, once, that later turns read only
+    /// these lines and to write each fact as "Finding a page" says, which says what a fact
+    /// carries; what a route's limits are is `instafy-getting-around`'s.
     #[test]
     fn a_finding_carries_what_it_does_not_confirm() {
-        let limits = "Octo's later turns read only these lines, never your reply's words, so a \
-                      fact carries what it doesn't confirm: which of its values you chose, not \
-                      the page, and what it leaves out.";
+        let limits = "Octo's later turns read only these lines, never your reply's words: write \
+                      each fact as \"Finding a page\" says.";
+        let skill =
+            include_str!("../../assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md");
+        assert!(skill.contains(
+            "with what it doesn't confirm: which of its values you chose, not the page, and what it leaves out."
+        ));
         for metadata in [
             json!({
                 "browserTransport": "shared",
@@ -1950,14 +1979,13 @@ mod tests {
         let search = "A value you looked for and didn't find is no fact of any page, and counts \
                       as not found only once you searched the whole text a step returned for it \
                       in the script that ran that step, never by printing the text (a long \
-                      printed result is cut in its middle), and opened that page's own Specs, \
-                      Warranty, Support or FAQ tab or link for it.";
+                      printed result is cut in its middle), and opened that page's own tab or link \
+                      for it.";
         let missing = "After your finding lines, one line `{\"missing\": [\"<a value this request \
                        needs that you looked for and didn't find>\"]}`, each by its name alone \
                        (\"warranty\"), or `{\"missing\": []}`.";
-        let unread_link = "or `{\"unread\": []}` when you opened every one. A page's own tab or \
-                           link named for a value you didn't find there is one of them until you \
-                           open it.";
+        let unread_link = "or `{\"unread\": []}` when you opened every one; a page's own tab or \
+                           link for a value you didn't find there is one until you open it.";
         let old = [
             "goes under that page as where you looked",
             "runtime not found on this page",
@@ -1975,7 +2003,7 @@ mod tests {
         // After the finding lines, then the missing line, before the unread line.
         assert!(
             section.contains(&format!(
-                "and what it leaves out. {search} {missing} Then one last line `{{\"unread\": ["
+                "as \"Finding a page\" says. {search} {missing} Then one last line `{{\"unread\": ["
             )),
             "{section}"
         );
@@ -1996,7 +2024,7 @@ mod tests {
                 format_browser_findings_contract_section(Some(&metadata)).expect("contract");
             assert!(
                 section.contains(&format!(
-                    "and what it leaves out. {search} If a page stopped you"
+                    "as \"Finding a page\" says. {search} If a page stopped you"
                 )),
                 "{section}"
             );
@@ -2035,11 +2063,12 @@ mod tests {
     /// work, a comparison's browser turn read one maker page in 14 s and handed back; its
     /// follow-up read four, wrote that one of them links to reviews of each model, and opened none
     /// of them, while the hand-back was told the person can ask for a missing page. What the
-    /// request needs is said in its part, once: the findings section says no more who builds. It
-    /// says where each item's page and each review come from: the links it read, and each
-    /// reviewer's own site, by its address or its own search box, since the turn has no web
-    /// search. Told reviews came only from links on the pages it read, a comparison's browser
-    /// turn listed its tools twice for a web search and read one page (a local test, Nov 5).
+    /// request needs is said in its part, once: the findings section says no more who builds.
+    /// Where each item's page and each review come from is "Finding a page" and
+    /// `instafy-comparing` (each reviewer's own site, by its address or its own search box), and
+    /// the part says the turn has no web search. Told reviews came only from links on the pages
+    /// it read, a comparison's browser turn listed its tools twice for a web search and read one
+    /// page (a local test, Nov 5).
     #[test]
     fn a_browser_turn_that_hands_back_reads_what_the_request_needs() {
         let metadata = json!({
@@ -2050,9 +2079,8 @@ mod tests {
         let section = format_browser_findings_contract_section(Some(&metadata)).expect("contract");
         for line in [
             "\nFindings for the building turn:\nEnd your reply",
-            "read every page it needs before you end (each item's own page from the links you \
-             read and, for reviews, each reviewer's own site, by its address or its own search \
-             box: this turn has no web search). ",
+            "read every page it needs before you end, as \"Finding a page\" says (this turn has \
+             no web search). ",
             "Say what you read (\"Read 6 pages on <site>\"), never \"I couldn't finish\". ",
         ] {
             assert!(section.contains(line), "{line}: {section}");
@@ -2090,9 +2118,8 @@ mod tests {
         let (_, part) = section.rsplit_once("\n\n").expect("the part");
         assert_eq!(
             part,
-            "Your part of this request is the reading: read every page it needs before you end \
-             (each item's own page from the links you read and, for reviews, each reviewer's own \
-             site, by its address or its own search box: this turn has no web search). \
+            "Your part of this request is the reading: read every page it needs before you end, \
+             as \"Finding a page\" says (this turn has no web search). \
              What it asks Octo to make is the building turn's part, from your finding lines, so \
              never stop because this turn can't make it, and say nothing about making it in your \
              reply."
@@ -2208,12 +2235,12 @@ mod tests {
             "{section}"
         );
         assert!(!section.contains("A \"not found\" fact"), "{section}");
-        // A route says whose pick its end stop is, and that the walk from it isn't checked.
+        // A fact keeps the limits its finding names (a route's end stop that Octo chose, the
+        // walk from it it leaves out); what a route's are is `instafy-getting-around`'s.
         assert!(
             section.contains(
-                "\n- A route ends at the stop its finding names. Unless the person named that \
-                 stop or a finding says the place's own page names it, say on the page that it's \
-                 Octo's pick and that the walk from it to the place isn't checked.\n"
+                "\n- Where you use a fact, say with it what its finding says it doesn't confirm: a \
+                 value Octo chose, not the page, and what it leaves out.\n"
             ),
             "{section}"
         );
@@ -2389,18 +2416,28 @@ mod tests {
     /// local test, Nov 9). A stop the person named is never called Octo's pick: told to call
     /// every stop but the place's own page's Octo's pick, a page for "the metro from São Bento to
     /// Trindade" would have said the person's own end stop was Octo's. Every build that reads a
-    /// browser turn's findings reads the line once with them: after a browser part, routed or
-    /// from a card, and in the browser turns since its last turn. The page made to share a route
-    /// was first built after a browser part that opened no page, from findings the chat already
-    /// had: its hand-back quotes none, and the chat's replay carries the line
-    /// (`conversation_context::browser_runs_note`), as the section since the building thread's
-    /// last turn does.
+    /// browser turn's findings reads, once with them, that a fact keeps the limits its finding
+    /// names: after a browser part, routed or from a card, and in the browser turns since its
+    /// last turn. The page made to share a route was first built after a browser part that
+    /// opened no page, from findings the chat already had: its hand-back quotes none, and the
+    /// chat's replay carries the line (`conversation_context::browser_runs_note`), as the
+    /// section since the building thread's last turn does. What a route's limits are, and how a
+    /// page says them, is `instafy-getting-around`'s, which a build whose words name a route
+    /// carries: the line names no topic.
     #[test]
     fn a_build_after_a_browser_part_says_whose_pick_a_routes_end_stop_is() {
-        let route = "\n- A route ends at the stop its finding names. Unless the person named that \
-                     stop or a finding says the place's own page names it, say on the page that \
-                     it's Octo's pick and that the walk from it to the place isn't checked.\n";
-        assert_eq!(format!("\n- {ROUTE_LINE}\n"), route);
+        let route = "\n- Where you use a fact, say with it what its finding says it doesn't \
+                     confirm: a value Octo chose, not the page, and what it leaves out.\n";
+        assert_eq!(format!("\n- {FINDING_LIMITS_LINE}\n"), route);
+        assert!(
+            !FINDING_LIMITS_LINE.contains("route"),
+            "{FINDING_LIMITS_LINE}"
+        );
+        let skill =
+            include_str!("../../assets/instafy/.agents/skills/instafy-getting-around/SKILL.md");
+        assert!(skill.contains(
+            "- A route ends at the stop its finding names. Unless the person named that stop or a finding says the place's own page names it, say on the page that it's Octo's pick and that the walk from it to the place isn't checked."
+        ));
         let mut routed = fixtures()["stampedRecord"].clone();
         routed["personRequest"] = json!("Find the metro route to the bookshop for Monday morning.");
         for record in [fixtures()["stampedRecord"].clone(), routed.clone()] {
@@ -2416,7 +2453,7 @@ mod tests {
             let section =
                 format_browser_hand_back_section(Some(&json!({ "browserHandBack": routed })))
                     .expect("section");
-            assert!(!section.contains("A route ends"), "{section}");
+            assert!(!section.contains(FINDING_LIMITS_LINE), "{section}");
         }
         // The browser turns since a restored building thread's last turn.
         let since = format_browser_turns_since_section(
@@ -2443,7 +2480,7 @@ mod tests {
             "browserHandsBack": true,
         })))
         .expect("contract");
-        assert!(!contract.contains("A route ends"), "{contract}");
+        assert!(!contract.contains(FINDING_LIMITS_LINE), "{contract}");
     }
 
     /// A record as the controller stamps it from a browser turn that read sixteen pages: each
@@ -3803,7 +3840,7 @@ mod tests {
             format!("{not_found}\n{{\"unread\": [\"https://maker.example/laptop-12/\"]}}");
         assert!(take_unread_pages(&mut summary).is_empty());
 
-        let tab = "Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address.";
+        let tab = "named with that page (\"<page>'s <link> link\"), never by that page's address;";
         let section =
             format_browser_findings_contract_section(Some(&routed_turn(true))).expect("contract");
         assert_eq!(section.matches(tab).count(), 1, "{section}");
@@ -3817,6 +3854,60 @@ mod tests {
             let section =
                 format_browser_findings_contract_section(Some(&metadata)).expect("contract");
             assert!(!section.contains(tab), "{section}");
+        }
+    }
+
+    /// An unread entry is a page the second pass can open: one with its own address, or a tab or
+    /// link on a page the turn read. Every name goes to that pass as a page to read
+    /// ([`take_unread_pages`]): a comparison's first answer named two reviews no page it read
+    /// linked to as unread, beside the same values in its missing line, so its pass tried a search
+    /// engine's results page twice and was refused, and another pass read review indexes for
+    /// reviews it never found (a local test, Nov 9). A page with neither is a value the turn
+    /// didn't find, for its missing line: the line says so, and its wrap-up pass is told the
+    /// same. What that means for reviews is `instafy-comparing`'s, which a comparison's turn
+    /// carries; the line names no topic.
+    #[test]
+    fn an_unread_entry_needs_an_address_or_a_link_on_a_page_read() {
+        let rule = "Each entry needs its own address, or a tab or link on a page you read, named \
+                    with that page (\"<page>'s <link> link\"), never by that page's address; a page \
+                    you have neither for is a value you didn't find, not an unread page.";
+        assert!(UNREAD_LINE.contains(rule), "{UNREAD_LINE}");
+        for topic in ["review", "Specs", "<item>"] {
+            assert!(!UNREAD_LINE.contains(topic), "{topic}: {UNREAD_LINE}");
+        }
+        let section =
+            format_browser_findings_contract_section(Some(&routed_turn(true))).expect("contract");
+        assert_eq!(section.matches(rule).count(), 1, "{section}");
+        assert!(finding_lines_pass_prompt(true).contains(rule));
+        // Its meaning for a comparison, in the skill a comparison's browser turn carries.
+        let comparing =
+            include_str!("../../assets/instafy/.agents/skills/instafy-comparing/SKILL.md");
+        assert!(comparing.contains(
+            "- A review you have no address or link for is a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line."
+        ));
+    }
+
+    /// What every browser turn and its build read of findings is generic: how to compare items,
+    /// find a route or read a product's pages is the topic skills' (`instafy-comparing`,
+    /// `instafy-getting-around`), which a turn carries when its words name them. A case's own
+    /// words in these lines (a planner's end stop, a reviewer's own site, a product's Specs or
+    /// Warranty tab) reached every turn, a question's and a map's included.
+    #[test]
+    fn the_findings_contract_and_the_hand_back_name_no_topic() {
+        for line in [
+            FINDING_LINES,
+            NOT_FOUND_SEARCH,
+            UNREAD_LINE,
+            READING_PART,
+            FINDING_LIMITS_LINE,
+            NOT_FOUND_LINE,
+        ] {
+            for topic in [
+                "route", "planner", "review", "Specs", "Warranty", "FAQ", "maker", "venue",
+                "<item>",
+            ] {
+                assert!(!line.contains(topic), "{topic}: {line}");
+            }
         }
     }
 
@@ -4121,7 +4212,7 @@ mod tests {
             )
         );
         assert!(
-            prompt.ends_with("`{\"unread\": []}` when you opened every one. A page's own tab or link named for a value you didn't find there is one of them until you open it. Name a tab with its page (\"<item>'s Specs tab\"), never by the page's address. Use no tool, open no page and write no other words."),
+            prompt.ends_with("`{\"unread\": []}` when you opened every one; a page's own tab or link for a value you didn't find there is one until you open it. Each entry needs its own address, or a tab or link on a page you read, named with that page (\"<page>'s <link> link\"), never by that page's address; a page you have neither for is a value you didn't find, not an unread page. Use no tool, open no page and write no other words."),
             "{prompt}"
         );
         let read = r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;

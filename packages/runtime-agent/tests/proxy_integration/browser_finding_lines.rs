@@ -313,7 +313,7 @@ const NOTE_MISSING: &str = r#"{"missing":["warranty"]}"#;
 /// What every browser turn is told of a value it looked for and didn't find, right after its
 /// finding lines (runtime-agent `NOT_FOUND_SEARCH`): no fact of any page, and not found only
 /// after the whole text and the page's own link.
-const NOT_FOUND_SEARCH: &str = "A value you looked for and didn't find is no fact of any page, and counts as not found only once you searched the whole text a step returned for it in the script that ran that step, never by printing the text (a long printed result is cut in its middle), and opened that page's own Specs, Warranty, Support or FAQ tab or link for it.";
+const NOT_FOUND_SEARCH: &str = "A value you looked for and didn't find is no fact of any page, and counts as not found only once you searched the whole text a step returned for it in the script that ran that step, never by printing the text (a long printed result is cut in its middle), and opened that page's own tab or link for it.";
 /// How a turn whose findings go back to the building turn is told to name what it didn't find
 /// (runtime-agent `MISSING_LINE`).
 const ASKS_FOR_MISSING: &str = "After your finding lines, one line `{\"missing\": [\"<a value this request needs that you looked for and didn't find>\"]}`, each by its name alone (\"warranty\"), or `{\"missing\": []}`.";
@@ -858,7 +858,7 @@ pub(super) const DEVICE_PAGE: &str = "https://maker.example/laptop-13";
 /// refuses it with, as its text and its structured content's `error.reason` (the Shared
 /// Browser's `refuseUngivenAddress`, runtime-agent `shared_browser::failed_tool_result`).
 pub(super) const DEVICE_REFUSED: &str = "https://reviews.example/laptop-12";
-pub(super) const DEVICE_REFUSAL: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open https://reviews.example/ and follow its links to the page, or use the site's own search.";
+pub(super) const DEVICE_REFUSAL: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given, and this site's home page, https://reviews.example/, always opens. Go on in this turn as \"Finding a page\" says.";
 /// A line that writes the refused address as a page with no page there.
 const REFUSED_AS_NO_PAGE: &str =
     r#"{"url": "https://reviews.example/laptop-12", "stopped": "no-page"}"#;

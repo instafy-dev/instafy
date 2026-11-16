@@ -107,7 +107,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const actionPolicyModule = createRequire(import.meta.url)(path.join(repositoryRoot, "packages/browser-action-policy/actionPolicy.js"));
 // What a cookie notice the browser could not decline tells Octo when a click
 // under it was kept from its control.
-const NOTICE_WORDS = "A cookie notice covers this page, and the browser could not decline it. Open a link under it by its address, or the official site of the place or service the task is about.";
+const NOTICE_WORDS = 'A cookie notice covers this page, and the browser could not decline it. A link under it opens by its address. Go on in this turn as "Finding a page" says.';
 // What the action policy answers a press of a notice's accept a step still
 // reaches: the Personal Browser's policy gives the same.
 const ACCEPT_WORDS = "Octo never accepts cookies, so nothing was pressed. Carry on under the notice from a fresh snapshot. If it covers what you need, open that link by its address, or another official source.";
