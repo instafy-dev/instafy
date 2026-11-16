@@ -108,15 +108,25 @@ const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
 /// How long a stop-requeued job may wait for a runtime before it expires
 /// instead of silently re-running whenever a runtime next appears.
 pub(super) const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
-/// What an expired stop-requeued job tells the person who sent it.
+/// What an expired stop-requeued job tells the person who sent it. The Studio
+/// words it by its kind ([`INTERRUPTED_RUN_EXPIRED_CODE`]), but the CLI, the
+/// conversation history and the Studio's Details show it as stored. It keeps
+/// its wording, "runtime" included, because `GROUPS_OWED_A_FINAL_LEAD` finds a
+/// last worker a person's stop expired by this exact stored text, on every
+/// controller, an older one in a blue/green overlap included. A controller
+/// that expects another wording than the one stored could queue the final lead
+/// that stop ruled out, so a new wording needs a release whose readers accept
+/// both wordings first.
 pub(crate) const REQUEUED_JOB_EXPIRED_MESSAGE: &str = "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
 /// The `failureCode` of a run, and the `kind` of the chat message, when the
 /// requeued-job expiry gives up an interrupted turn.
 pub(super) const INTERRUPTED_RUN_EXPIRED_CODE: &str = "interrupted_run_expired";
 /// Why a message queued behind a turn a person stopped was not sent when the
 /// requeued-job expiry gave that turn up (see [`expire_stale_requeued_jobs`]).
+/// The Studio's send queue shows it with the message, word for word. Every
+/// reason in [`REQUEUE_REASONS_OF_A_PERSON`] is a stop of a machine.
 const HELD_BEHIND_A_STOPPED_TURN_MESSAGE: &str =
-    "Not sent because the runtime was stopped. Send it now if you still need it, or remove it.";
+    "Not sent because the machine was stopped. Send it now if you still need it, or remove it.";
 /// Requeue reasons of a stop a person asked for: Stop, Remove, and taking
 /// over the organization's hosted slot from the machines panel or a browser
 /// session. A click sends each of them, with one exception: a browser
@@ -1543,9 +1553,16 @@ async fn fail_stranded_platform_jobs(
 }
 
 const START_BY_PASSED_CODE: &str = "start_by_passed";
-const START_BY_PASSED_MESSAGE: &str = "This turn did not run: it had to start by a set time, and no runtime started it in time. Send it again if you still want it.";
+/// What a turn that runs only once says when no machine started it within its
+/// minute. The CLI and the conversation history show it as stored, and so does
+/// the Studio for a turn that holds device grants, while it reads plainly
+/// (`inlineGenericFailureText`). The Studio words a local-engine turn's failure
+/// by its code instead (`claudeCodeTurnPresentation.ts`).
+const START_BY_PASSED_MESSAGE: &str = "This turn didn't run: it had to start by a set time, and no machine started it in time. Send it again if you still want it.";
 const RUN_ONCE_INTERRUPTED_CODE: &str = "run_once_interrupted";
-const RUN_ONCE_INTERRUPTED_MESSAGE: &str = "This turn stopped and will not run again: it may run only once, and its runtime stopped while it ran. Send it again if you still want it.";
+/// What a turn that runs only once says when a lease of it ended: its machine
+/// stopped, or stopped renewing it. Shown as [`START_BY_PASSED_MESSAGE`] is.
+const RUN_ONCE_INTERRUPTED_MESSAGE: &str = "This turn stopped and won't run again: it may run only once, and its machine stopped while it ran. Send it again if you still want it.";
 
 /// Fails the queued jobs that run only once, holding device grants or running
 /// on their person's own engine, that the lease will never hand out
@@ -3930,6 +3947,66 @@ mod tests {
     #[test]
     fn runtime_recovery_not_requested_without_requeued_jobs() {
         assert!(!should_request_runtime_recovery(0));
+    }
+
+    /// The send queue shows this reason word for word, so it says machine, as
+    /// the Studio does (docs/Runtime-Machines.md, "The model"), and keeps both
+    /// things its sender can do.
+    #[test]
+    fn a_message_a_stop_held_says_the_machine_was_stopped() {
+        let reason = super::HELD_BEHIND_A_STOPPED_TURN_MESSAGE;
+        assert!(reason.contains("the machine was stopped"), "{reason}");
+        assert!(!reason.to_lowercase().contains("runtime"), "{reason}");
+        assert!(reason.contains("Send it now"), "{reason}");
+        assert!(reason.contains("remove it"), "{reason}");
+    }
+
+    /// The CLI and the conversation history show these as stored, and the
+    /// Studio does too for a turn that holds device grants, but only while it
+    /// reads plainly: no plumbing word such as "workspace", "request" or
+    /// "provider", and at most 240 characters (`inlineGenericFailureText` in
+    /// runFailurePresentation.ts). They say machine, as the Studio does
+    /// (docs/Runtime-Machines.md, "The model"), keep what their sender can
+    /// do, and keep the words the device-grant and local-engine tests find
+    /// them by.
+    #[test]
+    fn run_once_failures_say_machine_and_read_plainly() {
+        for message in [
+            super::START_BY_PASSED_MESSAGE,
+            super::RUN_ONCE_INTERRUPTED_MESSAGE,
+        ] {
+            let lower = message.to_lowercase();
+            assert!(lower.contains("machine"), "{message}");
+            for word in [
+                "runtime",
+                "cloud",
+                "project",
+                "workspace",
+                "request",
+                "provider",
+            ] {
+                assert!(!lower.contains(word), "{message}");
+            }
+            assert!(message.chars().count() <= 240, "{message}");
+            assert!(
+                message.ends_with("Send it again if you still want it."),
+                "{message}"
+            );
+        }
+        assert!(super::START_BY_PASSED_MESSAGE.contains("start by a set time"));
+        assert!(super::RUN_ONCE_INTERRUPTED_MESSAGE.contains("may run only once"));
+    }
+
+    /// `GROUPS_OWED_A_FINAL_LEAD` finds a last worker a person's stop expired
+    /// by this exact stored text, on every controller, an older one in a
+    /// blue/green overlap included, so it changes only after a release whose
+    /// readers accept both wordings (see [`super::REQUEUED_JOB_EXPIRED_MESSAGE`]).
+    #[test]
+    fn the_expired_requeued_job_message_keeps_the_text_its_readers_match() {
+        assert_eq!(
+            super::REQUEUED_JOB_EXPIRED_MESSAGE,
+            "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it."
+        );
     }
 
     #[test]

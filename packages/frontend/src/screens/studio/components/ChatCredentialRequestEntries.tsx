@@ -24,6 +24,7 @@ import { useStatus } from "../../../status/useStatus";
 import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
+import { SEMANTIC_TONE_CLASSES } from "../../../theme/semanticTones";
 import {
   AccessDecisionCard,
   AccessDecisionContent,
@@ -878,8 +879,8 @@ export function SecretRequestEntry({
           <Text
             as="div"
             variant="caption"
-            tone="inherit"
-            className="text-xxs leading-snug text-rose-600 dark:text-rose-300"
+            tone="danger"
+            className="text-xxs leading-snug"
             data-testid="secret-request-error"
           >
             {continueError}
@@ -1737,7 +1738,7 @@ export function IntegrationRequestEntry({
         ) : null}
         {githubImportRetryBusy ? (
           <div
-            className="mt-3 flex items-center gap-2 text-sm text-slate-500 dark:text-slate-300"
+            className="mt-3 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300"
             data-testid="integration-request-import-busy"
           >
             <Spinner aria-hidden="true" tone="slate" size="xs" />
@@ -1748,8 +1749,8 @@ export function IntegrationRequestEntry({
           <Text
             as="div"
             variant="caption"
-            tone="inherit"
-            className="mt-3 text-sm leading-5 text-rose-600 dark:text-rose-300"
+            tone="danger"
+            className="mt-3 text-sm leading-5"
             data-testid="integration-request-retry-error"
           >
             {retryError}
@@ -1759,8 +1760,8 @@ export function IntegrationRequestEntry({
           <Text
             as="div"
             variant="caption"
-            tone="inherit"
-            className="mt-3 text-sm leading-5 text-rose-600 dark:text-rose-300"
+            tone="danger"
+            className="mt-3 text-sm leading-5"
             data-testid="integration-request-device-auth-error"
           >
             {githubDeviceAuthError}
@@ -1769,7 +1770,7 @@ export function IntegrationRequestEntry({
         {parsed.agentHandles.length > 0 ? (
           <div className="mt-2 flex flex-wrap gap-1">
             {parsed.agentHandles.map((handle) => (
-              <Badge key={handle} size="xs" className="text-slate-600">
+              <Badge key={handle} size="xs">
                 @{handle}
               </Badge>
             ))}
@@ -1777,7 +1778,7 @@ export function IntegrationRequestEntry({
         ) : null}
         <div className={isGithub ? "mt-5 flex flex-col gap-3 sm:flex-row sm:items-center" : "mt-5 flex flex-wrap items-center gap-3"}>
           {githubCheckingAccess ? (
-            <div className="flex items-center gap-2 rounded-full border border-slate-200/70 bg-white/70 px-3 py-2 text-sm text-slate-500 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-300">
+            <div className="flex items-center gap-2 rounded-full border border-slate-200/70 bg-white/70 px-3 py-2 text-sm text-slate-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-300">
               <Spinner aria-hidden="true" tone="slate" size="xs" />
               <span>Checking saved GitHub connection…</span>
             </div>
@@ -1855,7 +1856,7 @@ export function IntegrationRequestEntry({
               Open login
             </Button>
           </div>
-          <div className="mt-4 flex items-center gap-2 text-sm text-slate-500 dark:text-slate-300">
+          <div className="mt-4 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
             {githubImportRetryBusy ? (
               <>
                 <Spinner aria-hidden="true" tone="slate" size="xs" />
@@ -1867,7 +1868,7 @@ export function IntegrationRequestEntry({
                 <span>Waiting for GitHub approval…</span>
               </>
             ) : githubDeviceAuthSession.status === "failed" ? (
-              <span className="text-rose-600 dark:text-rose-400">
+              <span className={SEMANTIC_TONE_CLASSES.danger.text}>
                 {githubDeviceAuthSession.error ?? "GitHub login failed."}
               </span>
             ) : (

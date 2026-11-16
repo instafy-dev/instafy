@@ -42,6 +42,9 @@ vi.mock("../../../../features/applicationFrontendFeatureComposition", async (imp
 });
 
 vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: mocks.user }) }));
+vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
+  useWorkspaceTabs: () => ({ openPanelTab: vi.fn(), requestUrlPush: vi.fn() }),
+}));
 vi.mock("../../../../lib/identityImages", () => ({ uploadIdentityImage: vi.fn() }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));

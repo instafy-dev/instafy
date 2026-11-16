@@ -729,7 +729,7 @@ describe("buildHomeFeed with ledger rows", () => {
     const model = ledgerFeed([
       activityItem({ kind: "run.failed", data: { failureCode: "self_hosted_runtime_offline" } }),
     ], [entry]);
-    expect(model.needs[0]).toMatchObject({ kind: "run_failed", statusLabel: "Runtime unavailable", dismissible: true, source: { type: "inbox", entry } });
+    expect(model.needs[0]).toMatchObject({ kind: "run_failed", statusLabel: "Machine unavailable", dismissible: true, source: { type: "inbox", entry } });
     expect(model.activity).toEqual([]);
   });
 

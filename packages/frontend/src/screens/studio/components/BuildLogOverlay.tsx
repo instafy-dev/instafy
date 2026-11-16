@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef } from "react";
-import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
 import { Heading } from "../../../components/Heading";
 import { Text } from "../../../components/Text";
@@ -17,6 +16,13 @@ interface BuildLogOverlayProps {
   emptyBody?: string;
   copyText?: string;
 }
+
+// The log panel is slate-950 in both themes, so a severity chip is a plain
+// span in its own dark-panel colours: Badge's tones are drawn for the light
+// theme's light surfaces, and its neutral fill and grey text painted over
+// these. Each label reads at least 11.5:1 on its log row in both themes.
+const SEVERITY_CHIP_CLASS =
+  "inline-flex items-center gap-2 whitespace-nowrap rounded-full px-2 py-0.5 text-3xs font-medium";
 
 function severityStyles(severity: BuildLogEntry["severity"]): { badge: string; dot: string; label: string } {
   switch (severity) {
@@ -53,10 +59,10 @@ export function BuildLogOverlay({
   logs,
   onClear,
   onClose,
-  title = "Runtime logs",
-  ariaLabel = "Runtime logs",
+  title = "Machine logs",
+  ariaLabel = "Machine logs",
   emptySummary = "No build output yet. Trigger a generation to see live logs.",
-  emptyBody = "Logs will appear here when a runtime task emits output.",
+  emptyBody = "Logs will appear here when a task on a machine writes output.",
   copyText,
 }: BuildLogOverlayProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -136,6 +142,10 @@ export function BuildLogOverlay({
               </Text>
             ) : null}
           </div>
+          {/* Copy and Clear keep the outline button's own colours. Colour
+              classes here lost to its text colour but beat its slate-100 hover
+              fill, so in light mode a hovered button read slate-900 on
+              near-black, 1.3:1. */}
           <div className="flex items-center gap-2">
             {copyText ? (
               <Button
@@ -143,7 +153,6 @@ export function BuildLogOverlay({
                 variant="outline"
                 size="xs"
                 radius="full"
-                className="border-white/20 text-slate-200 hover:bg-white/10 data-[hovered]:bg-white/10"
               >
                 Copy
               </Button>
@@ -154,7 +163,6 @@ export function BuildLogOverlay({
               variant="outline"
               size="xs"
               radius="full"
-              className="border-white/20 text-slate-200 hover:bg-white/10 data-[hovered]:bg-white/10"
             >
               Clear
             </Button>
@@ -185,10 +193,10 @@ export function BuildLogOverlay({
                 return (
                   <li key={entry.id} className="rounded-2xl border border-white/5 bg-slate-950/50 p-3 shadow-inner">
                     <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-wide text-slate-300">
-                      <Badge size="xs" className={`gap-2 ${styles.badge}`}>
+                      <span className={`${SEVERITY_CHIP_CLASS} ${styles.badge}`}>
                         <span className={`h-1.5 w-1.5 rounded-full ${styles.dot}`} aria-hidden="true" />
                         {styles.label}
-                      </Badge>
+                      </span>
                       <Text as="span" variant="mono" tone="subtle" className="text-xxs">
                         {formatTimestamp(entry.timestamp)}
                       </Text>

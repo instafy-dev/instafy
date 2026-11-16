@@ -33,7 +33,7 @@ export function pickerListRowTextClassName(active: boolean): string {
     : "!font-normal !text-slate-700 dark:!text-slate-200";
 }
 
-export const DRAWER_LIST_ROW_META_CLASS = "text-xs text-slate-500 dark:text-slate-400";
+export const DRAWER_LIST_ROW_META_CLASS = "text-xs text-slate-600 dark:text-slate-400";
 
 export function listRowSurfaceToneClassName(active: boolean): string {
   return active ? LIST_ROW_SURFACE_ACTIVE : LIST_ROW_SURFACE_IDLE;

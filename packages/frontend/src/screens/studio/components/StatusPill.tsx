@@ -24,7 +24,8 @@ function statusPillToneClassName(tone: StatusPillTone): string {
   if (tone === "primary") {
     return "border-primary-200 bg-primary-50 text-primary-700 dark:border-primary-400/30 dark:bg-primary-500/10 dark:text-primary-100";
   }
-  return "border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300";
+  // slate-700 reads 7.0:1 on the slate-100 fill, where slate-600 read 4.4:1.
+  return "border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300";
 }
 
 function statusPillClassName(tone: StatusPillTone, className?: string): string {

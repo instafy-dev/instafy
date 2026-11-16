@@ -66,7 +66,7 @@ async function returnToChat(page: Page) {
   if (await chatInput.isVisible().catch(() => false)) {
     return;
   }
-  const conversationTab = page.getByRole("button", { name: /^Return to / }).or(page.getByTestId("home-resume-conversation"));
+  const conversationTab = page.getByRole("navigation", { name: /(?:workspace|Team) navigation$/ }).getByRole("button", { name: /^Back to / }).or(page.getByTestId("home-resume-conversation"));
   if (await conversationTab.isVisible().catch(() => false)) {
     await conversationTab.click();
     if (await chatInput.isVisible().catch(() => false)) {

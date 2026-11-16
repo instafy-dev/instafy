@@ -46,10 +46,10 @@ export function HostedRuntimePromptDialog({
         onClick={(event) => event.stopPropagation()}
       >
         <Heading level={2} variant="title">
-          Instafy Cloud already running
+          A hosted machine is already running
         </Heading>
         <Text variant="body" tone="secondary" className="mt-2">
-          You already have an Instafy Cloud runtime for this project. You can reuse it or start an additional one.
+          This space already has a hosted machine. You can use it or start another one.
         </Text>
         <div className="mt-3 space-y-2">
           {runtimes.map((runtime) => {
@@ -105,7 +105,7 @@ export function HostedRuntimePromptDialog({
             radius="full"
             data-testid="hosted-runtime-launch-new"
           >
-            Start additional runtime
+            Start another hosted machine
           </Button>
         </div>
       </Card>

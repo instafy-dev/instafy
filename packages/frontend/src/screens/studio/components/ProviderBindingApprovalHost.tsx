@@ -36,7 +36,7 @@ export function ProviderBindingApprovalHost() {
           ? detail.projectId.trim()
           : null;
       if (requestedProjectId && activeProjectId && requestedProjectId !== activeProjectId) {
-        const message = "Switch to the requested project before approving provider access.";
+        const message = "Switch to the requested space before approving provider access.";
         showStatus(message, "warning", 3500);
         dispatchProviderBindingResult({
           providerId: detail.providerId,

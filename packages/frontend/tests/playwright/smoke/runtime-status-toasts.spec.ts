@@ -8,8 +8,9 @@ import {
 } from "../utils/harness.js";
 import { dismissToastIfVisible } from "../utils/toasts.js";
 
+// The offline toast after the machine's name (formatLocalRuntimeOfflineMessage).
 const DESKTOP_OFFLINE_MESSAGE =
-  "Desktop runtime went offline. Falling back to Instafy Cloud.";
+  "is offline. Agents can work on it again once it's back online.";
 
 async function watchForToastMessage(
   page: Page,
@@ -111,7 +112,7 @@ test.describe.serial("Runtime status toasts", () => {
       .toBe(true);
 
     const runtimeSelector = page.getByTestId("runtime-selector-button").first();
-    await expect(runtimeSelector).toContainText(/Cloud runtime|Hosted Runtime/i);
+    await expect(runtimeSelector).toContainText(/Instafy Cloud|Hosted Runtime/i);
     await dismissToastIfVisible(page);
 
     const sawDesktopOfflineToast = watchForToastMessage(

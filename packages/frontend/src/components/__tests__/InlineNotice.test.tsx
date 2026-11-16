@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InlineNotice } from "../InlineNotice";
 import { Button, IconButton } from "../Button";
+import { textTones } from "../../styles/typography";
+import { SEMANTIC_TONE_CLASSES } from "../../theme/semanticTones";
 
 describe("InlineNotice", () => {
   let container: HTMLDivElement;
@@ -37,6 +39,24 @@ describe("InlineNotice", () => {
     expect(notice.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
     await act(async () => notice.querySelector<HTMLButtonElement>("button")!.click());
     expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["warning", "primary", "secondary"],
+    ["danger", "danger", "danger"],
+    ["info", "info", "info"],
+    ["success", "success", "success"],
+  ] as const)("keeps the %s icon and surface, with %s and %s prose", async (tone, titleTone, bodyTone) => {
+    await act(async () => root.render(
+      <InlineNotice tone={tone} title="Changes not synced" data-testid="notice">Keep this page open.</InlineNotice>,
+    ));
+    const notice = container.querySelector('[data-testid="notice"]')!;
+    const classes = (element: Element | null | undefined) => element?.getAttribute("class")?.split(" ") ?? [];
+    const body = [...notice.querySelectorAll("div")].find((element) => element.textContent === "Keep this page open.");
+    expect(classes(notice)).toEqual(expect.arrayContaining(SEMANTIC_TONE_CLASSES[tone].surface.split(" ")));
+    expect(classes(notice.querySelector("svg"))).toEqual(expect.arrayContaining(SEMANTIC_TONE_CLASSES[tone].icon.split(" ")));
+    expect(classes(notice.querySelector("p"))).toEqual(expect.arrayContaining(textTones[titleTone].split(" ")));
+    expect(classes(body)).toEqual(expect.arrayContaining(textTones[bodyTone].split(" ")));
   });
 
   it("leaves announcement ownership explicit and supports status outcomes", async () => {

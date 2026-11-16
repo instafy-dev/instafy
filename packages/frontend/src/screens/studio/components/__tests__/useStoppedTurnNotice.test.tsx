@@ -48,7 +48,7 @@ const SAVED_FLUSH = { status: "flushed", unpushedRefs: 0, error: null };
 const THINKING_LABEL = "Starting…";
 /** What the typing status says while a send waits on the team's one machine. */
 const LIMIT_COPY =
-  'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
+  'Waiting for a free hosted machine. Stop one in "Space B" and this message sends. It waits up to 30 minutes.';
 /** The ensure's refusal when another space holds the team's only machine. */
 const LIMIT_REFUSAL: HostedRuntimeLimitErrorDetails = {
   limitReached: true,

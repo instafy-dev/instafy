@@ -6,6 +6,7 @@ import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { textTones } from "../../../styles/typography";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
 import {
   canUseDesktopCodexAuthJson,
@@ -333,7 +334,7 @@ export function CredentialConnectPanel({
       </div>
 
       {deviceAuthError ? (
-        <Text as="div" variant="caption" tone="muted" className="text-xs text-rose-600 dark:text-rose-300">
+        <Text as="div" variant="caption" tone="danger" className="text-xs">
           {deviceAuthError}
         </Text>
       ) : null}
@@ -385,7 +386,8 @@ export function CredentialConnectPanel({
               Cancel
             </Button>
           </div>
-          <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-300">
+          {/* Slate-600 in light: slate-500 read 3.0:1 on this slate-50 panel. */}
+          <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
             {deviceAuthSession.status === "pending" ? (
               <>
                 <Spinner aria-hidden="true" tone="slate" size="xs" />
@@ -397,7 +399,7 @@ export function CredentialConnectPanel({
                 <span>Connected — syncing credentials…</span>
               </>
             ) : deviceAuthSession.status === "failed" ? (
-              <span className="text-rose-600 dark:text-rose-400">
+              <span className={textTones.danger}>
                 {deviceAuthSession.error ?? "Device login failed."}
               </span>
             ) : null}

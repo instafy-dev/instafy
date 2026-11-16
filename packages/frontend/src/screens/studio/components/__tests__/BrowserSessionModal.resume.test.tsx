@@ -296,10 +296,32 @@ describe("production Shared modal resume selection", () => {
     expect(stage.classList.contains("overflow-hidden")).toBe(false);
     expect(stage.querySelector('[data-testid="browser-session-collapsed-card"]')).not.toBeNull();
     if (limit) {
-      expect(stage.textContent).toContain("Another space with a very long name");
+      // A machine's own name stays its name.
+      expect(stage.textContent).toContain(
+        "“Long-running research machine” is running in “Another space with a very long name”.",
+      );
       expect(stage.textContent).toContain("This can interrupt work running there.");
       expect(mocks.stop).not.toHaveBeenCalled();
-    } else expect(stage.textContent).toContain("Browsing hasn't been set up for this workspace.");
+    } else expect(stage.textContent).toContain("Instafy's browser runs on a hosted machine.");
+  });
+  it.each(["Hosted Runtime", null])("says a hosted machine for a blocker stored as %s, with no name of its own", async blockerRuntimeLabel => {
+    vi.stubGlobal("innerHeight", 700);
+    mocks.stop.mockClear();
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [] });
+    mocks.ensure.mockRejectedValue(Object.assign(new Error("Runtime limit reached"), { code: "runtime_limit_reached", details: {
+      activeCount: 1, maxActiveCount: 1, blockerRuntimeId: secondId, blockerProjectId: firstId,
+      blockerProjectLabel: "Other space", blockerRuntimeLabel,
+    } }));
+    await act(async () => root.render(<BrowserSessionModal isOpen onOpenChange={noop} projectId={projectId}
+      currentUserId="user-1" preferRuntimeId={null} resumeRuntimeId={null} presentation="docked" canControlBrowser
+      sharedBrowserCapabilitiesResolved={false} />));
+    const notice = container.querySelector('[data-testid="browser-runtime-limit-notice"]')!;
+    expect(notice).not.toBeNull();
+    expect(notice.textContent).toContain("Hosted machine limit reached");
+    expect(notice.textContent).toContain("This team's hosted machine is already in use.");
+    expect(notice.textContent).toContain("A hosted machine is running in “Other space”.");
+    expect(notice.textContent).not.toMatch(/runtime|Instafy Cloud/i);
+    expect(mocks.stop).not.toHaveBeenCalled();
   });
   it("requires a choice among multiple live sessions instead of taking the first", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId), entry(secondId)] });
@@ -334,8 +356,10 @@ describe("production Shared modal resume selection", () => {
     mocks.ensure.mockRejectedValue(new Error("provider 'test-cloud' is not configured on this controller"));
     await render(null);
     const notice = document.querySelector('[data-testid="browser-session-error-notice"]')!;
-    expect(notice.textContent).toContain("Browsing hasn't been set up for this workspace.");
-    expect(notice.textContent).toContain("Ask your administrator");
+    expect(notice.textContent).toContain("Instafy's browser runs on a hosted machine.");
+    expect(notice.textContent).toContain("This server isn't set up to start one.");
+    expect(notice.textContent).toContain("Ask whoever runs this Instafy server to set it up.");
+    expect(notice.getAttribute("data-view-state")).toBe("blocked");
     // The raw reason is not on screen, only where runtime debug finds it.
     expect(notice.querySelector("details")).toBeNull();
     expect(notice.textContent).not.toContain("is not configured on this controller");
@@ -351,9 +375,8 @@ describe("production Shared modal resume selection", () => {
     } finally {
       window.localStorage.removeItem(RUNTIME_DEBUG_STORAGE_KEY);
     }
-    const previousCalls = mocks.ensure.mock.calls.length;
-    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
-    expect(mocks.ensure.mock.calls.length).toBeGreaterThan(previousCalls);
+    // Another try would fail the same way until the server is set up.
+    expect(document.querySelector('[data-testid="browser-session-error-retry"]')).toBeNull();
   });
   it("pins a resolved session through repeated retries even when another browser remains live", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });

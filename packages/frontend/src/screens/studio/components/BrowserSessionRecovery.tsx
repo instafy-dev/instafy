@@ -41,15 +41,15 @@ export function BrowserSessionRecovery({
     >
       {runtimeLimit ? (
         <div className="min-w-0 space-y-3" data-testid="browser-runtime-limit-notice">
-          <Text variant="bodyStrong" tone="primary">Cloud runtime already in use</Text>
+          <Text variant="bodyStrong" tone="primary">Hosted machine limit reached</Text>
           <Text variant="bodyCompact" tone="secondary" className="[overflow-wrap:anywhere]">{runtimeLimit.summary}</Text>
           {runtimeLimit.blockerProjectCopy ? (
             <Text variant="bodyCompact" tone="secondary" className="[overflow-wrap:anywhere]">{runtimeLimit.blockerProjectCopy}</Text>
           ) : null}
           <Text variant="caption" tone="muted">
             {runtimeLimit.onTakeOver
-              ? "Stop it to free the slot and open Shared Browser here. This can interrupt work running there."
-              : "Stop another cloud runtime, then try again."}
+              ? "Stop it to open Shared Browser here. This can interrupt work running there."
+              : "Stop a hosted machine you no longer need, then try again."}
           </Text>
           <div className="flex flex-wrap items-center gap-2">
             {runtimeLimit.onTakeOver ? (

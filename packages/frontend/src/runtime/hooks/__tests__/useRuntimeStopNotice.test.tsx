@@ -77,6 +77,16 @@ describe("useRuntimeStopNotice", () => {
     expect(notices("runtime-paused-idle")).toHaveLength(1);
   });
 
+  it("says what wakes an idle machine in words true for viewers, who cannot write", async () => {
+    await render(true);
+    await publishStop({ reason: "idle" });
+
+    const [notice] = notices("runtime-paused-idle");
+    expect(notice?.[0]).toBe(
+      "Hosted machine paused after inactivity. Your files and caches are kept, and it wakes when someone writes in the chat.",
+    );
+  });
+
   it("holds the space again on a repeat of the same idle stop, without a second notice", async () => {
     await render(true);
     await publishStop({ reason: "idle" });
@@ -106,6 +116,17 @@ describe("useRuntimeStopNotice", () => {
       });
       await render(true);
     }
+  });
+
+  it("explains a reclaimed slot as a hosted machine paused for another space", async () => {
+    await render(true);
+    await publishStop({ reason: "runtime_limit_reclaim" });
+
+    const [notice] = notices("runtime-paused-reclaimed");
+    expect(notice?.[0]).toBe(
+      "This space's hosted machine was paused to make room for another space in this team. Your files are kept, and it starts again when someone writes in the chat and a hosted machine is free.",
+    );
+    expect(notice?.[0]).not.toMatch(/runtime/i);
   });
 
   it("shows one notice for one stop while the status still reads ready", async () => {

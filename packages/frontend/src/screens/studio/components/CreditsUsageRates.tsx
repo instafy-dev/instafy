@@ -2,6 +2,7 @@ import { Badge } from "../../../components/Badge";
 import { Heading } from "../../../components/Heading";
 import { Text } from "../../../components/Text";
 import type { CreditUsageRate, ManagedAiUsageRate } from "../../../credits/creditService";
+import { OWN_AI_CONNECTION_CREDITS_LINE } from "../../../credits/usageLabels";
 
 export interface CreditsUsageRateRow {
   key: string;
@@ -43,6 +44,11 @@ export function formatUnits(value: number, unitLabel: string): string {
   return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value)} ${unitFor(value, unitLabel)}`;
 }
 
+/** Whether a service costs something a minute: one that costs nothing is no rate. */
+export function isMeteredRate(rate: Pick<CreditUsageRate, "enabled" | "creditsPerMinute">): boolean {
+  return rate.enabled && rate.creditsPerMinute > 0;
+}
+
 export function formatProviderLabel(provider: string | null | undefined): string | null {
   const trimmed = provider?.trim();
   if (!trimmed) {
@@ -72,7 +78,7 @@ export function CreditsUsageRates({
   unitLabel,
 }: CreditsUsageRatesProps) {
   const managedAiProviderLabel = formatProviderLabel(managedAiUsage?.provider);
-  const meteredRows = usageRateRows.filter(({ rate }) => rate.enabled && rate.creditsPerMinute > 0);
+  const meteredRows = usageRateRows.filter(({ rate }) => isMeteredRate(rate));
 
   return (
     <div className="@container space-y-2" data-testid="credits-usage-rates">
@@ -212,8 +218,10 @@ export function CreditsUsageRates({
             </div>
           </div>
 
+          {/* Prompt usage is Instafy AI's alone, so it says what the person's own connection costs. */}
           <Text variant="caption" tone="muted">
-            Each message holds {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)}, then costs what it used.
+            Each message holds {formatUnits(managedAiUsage.creditsPerPrompt, unitLabel)}, then costs what it used.{" "}
+            {OWN_AI_CONNECTION_CREDITS_LINE}
           </Text>
         </div>
       ) : null}

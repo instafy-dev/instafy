@@ -126,12 +126,14 @@ test.describe.serial("Runtime limit CTA", () => {
       .toBeGreaterThan(0);
 
     await openRuntimeSelector(page);
-    await expect(page.getByText("Instafy Cloud runtime limit reached")).toBeVisible();
+    await expect(page.getByText("Hosted machine limit reached")).toBeVisible();
     await expect(
-      page.getByText('2/2 Instafy Cloud runtimes are in use. The blocker is in space "Other Project".'),
+      page.getByText('2/2 hosted machines for this team are in use. The blocking machine is in the space "Other Project".'),
     ).toBeVisible();
-    await expect(page.getByText("Blocking runtime: Hosted Runtime.")).toBeVisible();
-    await expect(page.getByText("Stop a stale runtime or retry after cleanup.")).toBeVisible();
+    // The blocker has only the generic name ("Hosted Runtime"), and the summary
+    // already names its space: no line for the blocking machine.
+    await expect(page.getByText("Blocking machine:")).toHaveCount(0);
+    await expect(page.getByText("Stop a hosted machine you no longer need, then try again.")).toBeVisible();
 
     const detailsButton = page.getByRole("button", { name: "View details" });
     await expect(detailsButton).toBeVisible();
@@ -149,9 +151,13 @@ test.describe.serial("Runtime limit CTA", () => {
     );
     await retryButton.click();
     await expect(
-      popover.getByText("Instafy Cloud runtime limit reached", { exact: true }),
+      popover.getByText("Hosted machine limit reached", { exact: true }),
     ).toBeVisible();
-    await expect(popover.getByText("Reconnecting Instafy Cloud…")).toBeVisible();
+    // Reconnect names a hosted machine only when the space lists one; a
+    // refusal before launch leaves none, and the retry starts one instead.
+    await expect(
+      popover.getByText(/^(Reconnecting the hosted machine|Starting a hosted machine)…$/),
+    ).toBeVisible();
     await retryResponse;
     await expect
       .poll(() => ensureAttempts, {
@@ -160,10 +166,10 @@ test.describe.serial("Runtime limit CTA", () => {
       })
       .toBeGreaterThan(attemptsBeforeClickRetry);
     await expect(page.getByTestId("runtime-action-error")).toContainText(
-      "Runtime is still at limit",
+      "All hosted machines for this team are still in use",
     );
     await expect(
-      page.getByTestId("status-toast").filter({ hasText: "Runtime is still at limit" }),
+      page.getByTestId("status-toast").filter({ hasText: "All hosted machines for this team are still in use" }),
     ).toHaveCount(0);
     await expect(retryButton).toBeVisible();
   });
@@ -278,7 +284,7 @@ test.describe.serial("Runtime limit CTA", () => {
       })
       .toBeGreaterThan(ensureAttemptsBeforeTakeover);
 
-    await expect(page.getByText("Instafy Cloud runtime limit reached")).toHaveCount(0);
+    await expect(page.getByText("Hosted machine limit reached")).toHaveCount(0);
   });
 
   test("stop-blocker failures stay inline in the runtime menu", async ({ page }) => {
@@ -369,10 +375,10 @@ test.describe.serial("Runtime limit CTA", () => {
       .toBeGreaterThan(0);
 
     await expect(popover.getByTestId("runtime-action-error")).toContainText(
-      "Unable to take over runtime",
+      "Couldn't stop the blocking machine",
     );
     await expect(
-      page.getByTestId("status-toast").filter({ hasText: "Unable to take over runtime" }),
+      page.getByTestId("status-toast").filter({ hasText: "Couldn't stop the blocking machine" }),
     ).toHaveCount(0);
   });
 });

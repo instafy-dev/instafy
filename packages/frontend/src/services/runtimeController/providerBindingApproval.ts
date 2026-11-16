@@ -52,7 +52,7 @@ export async function requestProjectProviderBinding(
   const projectId = params.projectId.trim();
   const providerId = params.providerId.trim();
   if (!projectId) {
-    throw new Error("Select or create a project before approving provider access.");
+    throw new Error("Select or create a space before approving provider access.");
   }
   if (!providerId) {
     throw new Error("Provider id is required.");

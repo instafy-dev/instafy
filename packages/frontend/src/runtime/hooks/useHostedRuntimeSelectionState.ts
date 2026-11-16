@@ -223,7 +223,7 @@ export function useHostedRuntimeSelectionState({
     );
     const blockerRuntimeId = limitDetails.blockerRuntimeId;
     if (!blockerRuntimeId) {
-      throw new Error("No blocking runtime was found in the current limit error.");
+      throw new Error("Instafy didn't say which machine it is.");
     }
     if (hostedRuntimeTakeoverInProgress) {
       return false;

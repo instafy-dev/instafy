@@ -27,6 +27,8 @@ import {
 } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import { useAuth } from "../../../providers/AuthProvider";
+import { textTones } from "../../../styles/typography";
+import { AI_PROVIDER_OPTIONS } from "../../../utils/aiProviderModels";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import {
   clearPendingProjectSecretPrefill,
@@ -42,6 +44,40 @@ type TextSecurityStyle = CSSProperties & {
 
 /** What the space's Secrets say about a secret the credential guard refuses (docs/Local-Engine-Turns.md 6). */
 export const REFUSED_SECRET_NOTICE = "Instafy no longer stores Claude sign-ins; remove it";
+
+/**
+ * A secret never connects the AI that answers in chat; Your AI does. A secret
+ * named for the API key of a provider Your AI connects says so. The names come
+ * from that catalog, `<ID>_API_KEY`: OPENAI_API_KEY, DEEPSEEK_API_KEY,
+ * ZAI_API_KEY and GEMINI_API_KEY. A provider Your AI does not connect, such as
+ * ANTHROPIC_API_KEY, gets no note.
+ */
+const YOUR_AI_PROVIDER_BY_KEY_NAME: ReadonlyMap<string, string> = new Map(
+  AI_PROVIDER_OPTIONS.map((provider) => [`${provider.id.toUpperCase()}_API_KEY`, provider.label]),
+);
+
+/** The Your AI provider whose API key this name is, read as the controller stores names. */
+function yourAiProviderForSecretName(name: string): string | null {
+  return YOUR_AI_PROVIDER_BY_KEY_NAME.get(name.trim().replace(/[ -]/g, "_").toUpperCase()) ?? null;
+}
+
+// A page's name inside a sentence, pressed like a link. It keeps the
+// sentence's own size and line height, and the preflight leaves buttons on the
+// default cursor.
+const PAGE_LINK_CLASS_NAME = [
+  textTones.accent,
+  "cursor-pointer rounded-sm font-medium underline underline-offset-2 hover:text-primary-700 dark:hover:text-primary-300",
+  "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950",
+].join(" ");
+
+/** "Your AI" in a sentence: opens the page where the AI that answers in chat is connected. */
+function YourAiLink({ onPress, testId }: { onPress: () => void; testId: string }) {
+  return (
+    <button type="button" className={PAGE_LINK_CLASS_NAME} onClick={onPress} data-testid={testId}>
+      Your AI
+    </button>
+  );
+}
 
 /**
  * Whether the controller marks this secret `refused`: its name is reserved
@@ -77,6 +113,7 @@ function SecretModal({
   selectedAgentHandles,
   onToggleAgentHandle,
   autoFocusValue,
+  onOpenYourAi,
   onClose,
   onSave,
 }: {
@@ -100,10 +137,18 @@ function SecretModal({
   selectedAgentHandles: Set<string>;
   onToggleAgentHandle: (agentHandle: string) => void;
   autoFocusValue?: boolean;
+  onOpenYourAi: () => void;
   onClose: () => void;
   onSave: () => void;
 }) {
   const isDesktop = useBreakpoint("sm", { freeze: isOpen });
+  const yourAiProvider = yourAiProviderForSecretName(name);
+  const intro = (
+    <>
+      Agents you allow get this secret as an environment variable when they run commands. To chat with
+      your own AI account, connect it in <YourAiLink onPress={onOpenYourAi} testId="project-secret-modal-your-ai" />.
+    </>
+  );
   const saveLabel = mode === "create" ? "Create" : "Save";
   const valuePlaceholder = mode === "edit" ? "Leave blank to keep current value" : "";
   const valueInputRef = useRef<HTMLInputElement | null>(null);
@@ -165,15 +210,26 @@ function SecretModal({
   const form = (
     <StudioDialogBody scrollable={isDesktop} className="space-y-3">
       {!isDesktop ? <Text as="p" variant="caption" tone="muted">
-        Secrets are injected into the runtime as environment variables.
+        {intro}
       </Text> : null}
       <Field
-        label="Name (env var)"
+        label="Variable name"
         htmlFor="project-secret-name"
         hint={
           <>
             Example: <span className="font-mono">GITHUB_TOKEN</span>,{" "}
             <span className="font-mono">CLOUDFLARE_API_TOKEN</span>
+            {/* Mounted empty, so the note is announced when the name becomes a
+                provider's key. It never blocks saving. */}
+            <span role="status" className="block">
+              {yourAiProvider ? (
+                <Text as="span" variant="caption" tone="secondary" className="mt-1 block"
+                  data-testid="project-secret-your-ai-note">
+                  This key doesn't change the AI that answers in chat. To chat with {yourAiProvider}, connect it
+                  in <YourAiLink onPress={onOpenYourAi} testId="project-secret-your-ai-note-link" />.
+                </Text>
+              ) : null}
+            </span>
           </>
         }
       >
@@ -328,7 +384,7 @@ function SecretModal({
       dialogAriaLabel={title} data-testid="project-secret-modal"
       layout="editor" gutter="responsive">
       <StudioDialogHeader title={title}
-        description="Secrets are injected into the runtime as environment variables."
+        description={intro}
         onClose={onClose} closeButtonDisabled={pending} closeLabel="Close" />
       {form}
       {actions}
@@ -513,6 +569,11 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
     requestUrlPush();
     openPanelTab("chat", { activate: true });
   }, [modalOpen, openPanelTab, requestUrlPush, returnToChatPending, saving]);
+  // The editor's guard still applies: a draft asks to be kept or discarded first.
+  const openYourAi = useCallback(() => {
+    requestUrlPush();
+    openPanelTab("ai", { activate: true });
+  }, [openPanelTab, requestUrlPush]);
 
   const toggleAgentHandle = useCallback((agentHandle: string) => {
     const normalized = normalizeAgentHandle(agentHandle);
@@ -710,7 +771,9 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
                   No secrets yet.
                 </Text>
                 <Text variant="bodyCompact" tone="muted">
-                  Store API keys and tokens for agents and runtimes in this space.
+                  Store keys and tokens your agents' commands need, like{" "}
+                  <span className="font-mono">GITHUB_TOKEN</span>. To chat with your own AI account, connect it
+                  in <YourAiLink onPress={openYourAi} testId="project-secrets-your-ai" />.
                 </Text>
               </div>
             ) : activeSecrets.length > 0 ? (
@@ -799,6 +862,7 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
         selectedAgentHandles={selectedAgentHandles}
         onToggleAgentHandle={toggleAgentHandle}
         autoFocusValue={autoFocusValue}
+        onOpenYourAi={openYourAi}
         onClose={dismissModal}
         onSave={() => void saveModal()}
       />

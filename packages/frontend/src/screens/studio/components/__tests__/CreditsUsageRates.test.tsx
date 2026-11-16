@@ -63,6 +63,17 @@ describe("CreditsUsageRates", () => {
     expect(rates(2)).toContain("Each message holds 2 credits, then costs what it used.");
   });
 
+  // Settings review, Nov 16: Usage listed Instafy AI alone under Prompt usage
+  // and never said what a message on the person's own AI connection costs.
+  it("says a message answered by the person's own AI connection uses no credits", () => {
+    const markup = renderToStaticMarkup(
+      <CreditsUsageRates usageRateRows={[]} managedAiUsage={managedAiUsage} unitLabel="credits" />,
+    ).replace(/\s+/g, " ");
+    expect(markup).toContain(
+      "Each message holds 1 credit, then costs what it used. Messages answered by your own AI connection use that account, not credits.",
+    );
+  });
+
   // Usage read like an operator's page: "In $0.10/1M Cached $0.01/1M Out
   // $0.50/1M" under the message's price. A person pays in credits.
   it("names no price per million tokens", () => {

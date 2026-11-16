@@ -214,7 +214,7 @@ export function getUnifiedDiffRowClass(row: DiffRow): string {
     case "hunk":
       return "bg-slate-100 text-slate-700 dark:bg-slate-900/60 dark:text-slate-200";
     case "meta":
-      return "text-slate-500 dark:text-slate-400";
+      return "text-slate-600 dark:text-slate-400";
     case "add":
       return "border-l-2 border-emerald-400 bg-emerald-50 text-emerald-900 dark:border-emerald-500/70 dark:bg-emerald-500/10 dark:text-emerald-200";
     case "del":

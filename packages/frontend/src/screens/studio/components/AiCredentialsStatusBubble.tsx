@@ -11,6 +11,7 @@ import {
   type ControllerCredentialListItem,
 } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { textTones } from "../../../styles/typography";
 import { formatCredentialOptionLabel, resolveCredentialLabel } from "../../../utils/credentialFormatting";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
 import {
@@ -1051,7 +1052,8 @@ export function AiCredentialsStatusBubble({
                 Only enter this code on the OpenAI page. Instafy will never ask you to paste your ChatGPT password
                 here.
               </Text>
-              <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-300">
+              {/* Slate-600 in light: slate-500 read 3.1:1 on the card. */}
+              <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
                 {deviceAuthSession.status === "pending" ? (
                   <>
                     <Spinner aria-hidden="true" tone="slate" size="xs" />
@@ -1073,7 +1075,7 @@ export function AiCredentialsStatusBubble({
                     </>
                   )
                 ) : deviceAuthSession.status === "failed" ? (
-                  <span className="text-rose-600 dark:text-rose-400">
+                  <span className={textTones.danger}>
                     {deviceAuthSession.error ?? "Device login failed."}
                   </span>
                 ) : null}

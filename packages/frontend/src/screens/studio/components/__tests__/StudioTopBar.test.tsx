@@ -291,11 +291,28 @@ describe("StudioTopBar navigation", () => {
     mocks.conversationWorkspace = true;
     mocks.tab = { id: "settings", kind: "panel", panel: "settings", title: "Settings" };
     await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
-    const back = container.querySelector<HTMLButtonElement>('[aria-label="Return to Draft chat"]');
+    const back = container.querySelector<HTMLButtonElement>('[aria-label="Back to Draft chat"]');
     expect(back).not.toBeNull();
+    expect(back!.textContent).toBe("Draft chat");
+    expect(back!.getAttribute("title")).toBe("Back to Draft chat");
     await act(async () => back!.click());
     expect(mocks.openConversationTab).toHaveBeenCalledWith("conversation-1", { restoreWorkspace: true });
     expect(mocks.requestUrlPush).toHaveBeenCalled();
+  });
+
+  it.each(["New chat", "Conversation 3", " "])("never names the way back to an untitled chat (%j) like the New chat command", async title => {
+    mocks.isLargeScreen = true;
+    mocks.conversationWorkspace = true;
+    mocks.tab = { id: "settings", kind: "panel", panel: "settings", title: "Settings" };
+    mocks.conversations = [{ localId: "conversation-1", title }];
+    await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
+    const back = container.querySelector<HTMLButtonElement>('[aria-label="Back to chat"]');
+    expect(back).not.toBeNull();
+    expect(back!.textContent).toBe("Back to chat");
+    expect(back!.getAttribute("title")).toBe("Back to chat");
+    expect(container.textContent).not.toContain("New chat");
+    await act(async () => back!.click());
+    expect(mocks.openConversationTab).toHaveBeenCalledWith("conversation-1", { restoreWorkspace: true });
   });
 
   it("offers no way back to a chat of a space that was removed", async () => {
@@ -309,16 +326,16 @@ describe("StudioTopBar navigation", () => {
     mocks.activeProjectId = "";
     mocks.projectList = [];
     await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
-    expect(container.querySelector('[aria-label="Return to Connect FreeFinance"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Back to Connect FreeFinance"]')).toBeNull();
 
     mocks.projectList = [{ id: otherSpace }];
     await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
-    expect(container.querySelector('[aria-label="Return to Connect FreeFinance"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Back to Connect FreeFinance"]')).toBeNull();
 
     // The same chat in a space the store still holds keeps its way back.
     mocks.projectList = [{ id: otherSpace }, { id: deletedSpace }];
     await act(async () => root.render(<StudioTopBar inlineDesktop newChatInSidebar />));
-    expect(container.querySelector('[aria-label="Return to Connect FreeFinance"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Back to Connect FreeFinance"]')).not.toBeNull();
   });
 
   it("embeds desktop tabs without nesting headers or repeating the native inset", async () => {

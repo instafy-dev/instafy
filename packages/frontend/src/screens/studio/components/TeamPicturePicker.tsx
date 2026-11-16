@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { OrgIdentity } from "../../../components/OrgIdentity";
+import { textTones } from "../../../styles/typography";
 import { validateTeamAvatar } from "./teamAvatar";
 
 export function TeamPicturePicker({
@@ -40,7 +41,7 @@ export function TeamPicturePicker({
           onPress={() => { onChange(null); setError(null); }}>Remove</Button> : null}
       </div>
       <Text variant="caption" tone="muted">PNG, JPEG or WebP, up to 2 MB. You can change this later in Team profile.</Text>
-      {error ? <p role="alert" className="text-sm text-rose-600 dark:text-rose-400">{error}</p> : null}
+      {error ? <p role="alert" className={`text-sm ${textTones.danger}`}>{error}</p> : null}
     </div>
   );
 }

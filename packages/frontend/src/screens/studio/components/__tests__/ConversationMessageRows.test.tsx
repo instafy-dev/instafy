@@ -334,6 +334,7 @@ describe("ConversationMessageRows", () => {
       onOpenCredits: () => void;
       onRunAutomation?: (automationId: string) => void;
       viewerUserId?: string | null;
+      canChangeSpace?: boolean;
     },
   ) {
     await act(async () => {
@@ -342,6 +343,7 @@ describe("ConversationMessageRows", () => {
           value={{
             onRunAutomation: vi.fn(),
             viewerUserId: null,
+            canChangeSpace: true,
             ...actions,
           }}
         >
@@ -405,6 +407,29 @@ describe("ConversationMessageRows", () => {
     });
     expect(onShowSelfHostHelp).toHaveBeenCalledTimes(1);
     expect(onOpenMachines).not.toHaveBeenCalled();
+  });
+
+  it("tells only someone who can change the space to start a machine in Machines", async () => {
+    // Machines offers a viewer no start, so the card a viewer reads says what
+    // happened and keeps the same way in, without the instruction.
+    const notice = createMessage({
+      id: "runtime-unavailable",
+      role: "assistant",
+      authorId: null,
+      content: "Runtime is unavailable.",
+      metadata: { source: "controller", kind: "runtime_alert", details: { reason: "runtime_unavailable" } },
+    });
+    const noticeText = () =>
+      container.querySelector('[data-testid="chat-controller-notice"]')?.textContent ?? "";
+    const handlers = { onOpenMachines: vi.fn(), onShowSelfHostHelp: vi.fn(), onOpenCredits: vi.fn() };
+
+    await renderWithNoticeActions([notice], { ...handlers, canChangeSpace: true });
+    expect(noticeText()).toContain("No machine is connected to this space. Open Machines to start one.");
+
+    await renderWithNoticeActions([notice], { ...handlers, canChangeSpace: false });
+    expect(noticeText()).toContain("No machine is connected to this space.");
+    expect(noticeText()).not.toContain("to start one");
+    expect(container.querySelector('[data-testid="chat-controller-notice-action"]')).not.toBeNull();
   });
 
   it("routes an out-of-credits failure to credits rather than Machines", async () => {
@@ -1953,12 +1978,15 @@ describe("ConversationMessageRows", () => {
     const evidenceRow = container.querySelector<HTMLButtonElement>('[data-testid="multi-agent-evidence-row"]');
     expect(evidenceRow).not.toBeNull();
     const teamChip = container.querySelector<HTMLElement>('[data-testid="multi-agent-team-chip"]');
-    expect(teamChip?.getAttribute("aria-label")).toContain("1 runtime for 1 leased lane");
+    expect(teamChip?.getAttribute("aria-label")).toContain("1 workstream on 1 machine");
     expect(container.querySelector('[data-testid="multi-agent-open-run"]')).toBeNull();
     expect(container.querySelector('[data-testid="multi-agent-runtime-metrics"]')).toBeNull();
     expect(evidenceRow?.getAttribute("aria-label")).toBe("Open run trace for Runtime/tool boundaries (@runtime); status done");
     expect(evidenceRow?.getAttribute("aria-expanded")).toBeNull();
-    expect(evidenceRow?.getAttribute("title")).toContain("Runtime: 11111111-1111-4111-8111-111111111111");
+    expect(evidenceRow?.getAttribute("title")).toContain("Machine: 11111111-1111-4111-8111-111111111111");
+    expect(evidenceRow?.getAttribute("title")).toContain("Started: 2026-05-12T10:00:02.250Z");
+    expect(evidenceRow?.getAttribute("title")).toContain("Attempts: 2");
+    expect(evidenceRow?.getAttribute("title")).not.toMatch(/lease/i);
     expect(evidenceRow?.getAttribute("title")).toContain("Tool updates: 1");
     expect(container.textContent).not.toContain("Copy metrics");
 
@@ -1995,7 +2023,7 @@ describe("ConversationMessageRows", () => {
       "Worker evidence.",
     );
     expect(container.querySelector('[data-testid="multi-agent-runtime-metrics"]')?.textContent).toBe(
-      "runtime 11111111 · wait 2.3s · ran 4.3s · try 2 · 1 tool update",
+      "machine 11111111 · wait 2.3s · ran 4.3s · try 2 · 1 tool update",
     );
 
     await act(async () => {
@@ -2105,7 +2133,7 @@ describe("ConversationMessageRows", () => {
     });
 
     expect(container.querySelector('[data-testid="multi-agent-runtime-metrics"]')?.textContent).toBe(
-      "runtime 11111111 · wait 2.3s · ran 4.3s · 3 tool updates",
+      "machine 11111111 · wait 2.3s · ran 4.3s · 3 tool updates",
     );
   });
 
@@ -2242,7 +2270,7 @@ describe("ConversationMessageRows", () => {
     });
   });
 
-  it("summarizes runtime spread on the workstreams chip without adding visible metric badges", async () => {
+  it("summarizes the workstreams' machines on their chip without adding visible metric badges", async () => {
     const planMessage = createMessage({
       id: "plan-message",
       content: "I'm splitting this into workstreams.",
@@ -2324,10 +2352,10 @@ describe("ConversationMessageRows", () => {
 
     const status = container.querySelector('[data-testid="multi-agent-inline-status"]');
     const teamChip = container.querySelector<HTMLElement>('[data-testid="multi-agent-team-chip"]');
-    expect(status?.getAttribute("aria-label")).toContain("2 runtimes across 2 leased lanes");
+    expect(status?.getAttribute("aria-label")).toContain("2 workstreams on 2 machines");
     expect(teamChip?.tagName).toBe("BUTTON");
-    expect(teamChip?.getAttribute("aria-label")).toContain("2 runtimes across 2 leased lanes");
-    expect(container.textContent).not.toContain("2 runtimes across 2 leased lanes");
+    expect(teamChip?.getAttribute("aria-label")).toContain("2 workstreams on 2 machines");
+    expect(container.textContent).not.toContain("2 workstreams on 2 machines");
 
     await act(async () => {
       teamChip?.click();
@@ -2335,11 +2363,12 @@ describe("ConversationMessageRows", () => {
 
     const teamMenu = document.body.querySelector('[data-testid="multi-agent-team-menu"]');
     const teamRuntimeSummary = document.body.querySelector('[data-testid="multi-agent-team-runtime-summary"]');
-    expect(teamRuntimeSummary?.textContent).toContain("2 runtimes across 2 leased lanes");
-    expect(teamRuntimeSummary?.textContent).not.toContain("Runtime spread:");
-    expect(teamRuntimeSummary?.textContent).toContain("Alpha · runtime aaaaaaaa · wait 100ms · ran 4.3s");
-    expect(teamRuntimeSummary?.textContent).toContain("Beta · runtime bbbbbbbb · wait 1.4s · ran 980ms");
-    expect(teamMenu?.textContent).toContain("Copy runtime summary");
+    // The heading once, above one line per workstream, and no runtime wording.
+    expect(teamRuntimeSummary?.textContent?.split("2 workstreams on 2 machines")).toHaveLength(2);
+    expect(teamRuntimeSummary?.textContent).not.toMatch(/runtime|lane/i);
+    expect(teamRuntimeSummary?.textContent).toContain("Alpha · machine aaaaaaaa · wait 100ms · ran 4.3s");
+    expect(teamRuntimeSummary?.textContent).toContain("Beta · machine bbbbbbbb · wait 1.4s · ran 980ms");
+    expect(teamMenu?.textContent).toContain("Copy summary");
   });
 
   it("does not draw a nested run spine through an attached workflow continuation", async () => {

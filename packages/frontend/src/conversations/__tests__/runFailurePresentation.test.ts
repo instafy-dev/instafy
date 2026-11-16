@@ -1168,7 +1168,7 @@ describe("resolveRunFailurePresentation", () => {
     // Recorded by runtime/limit_waits.rs when a message waited out the
     // 30-minute window behind the team's hosted runtime limit.
     const reason =
-      "This message didn't start: every cloud runtime in this team stayed busy for 30 minutes. Stop a runtime you aren't using, then send it again.";
+      "This message didn't start: all hosted machines for this team stayed in use for 30 minutes. In Machines, stop one you no longer need, then send it again.";
     const presentation = resolveRunFailurePresentation({
       metadata: {
         source: "controller",
@@ -1207,6 +1207,67 @@ describe("resolveRunFailurePresentation", () => {
     expect(presentation?.kind).toBe("generic");
     expect(presentation?.friendlyText).toBe(reason);
     expect(isAutoRetryEligibleFailureKind(presentation?.kind)).toBe(false);
+  });
+
+  it("shows the controller's other limit-wait reasons in full too", () => {
+    // runtime/limit_waits.rs: the give-up after other refusals, and the plain
+    // reason for a refusal whose own text is not written for the person.
+    for (const [kind, reason] of [
+      [
+        "runtime_limit_wait_expired",
+        "This message didn't start: Instafy couldn't start a hosted machine for this space within 30 minutes. Send it again to retry.",
+      ],
+      [
+        "runtime_limit_wait_refused",
+        "This message didn't start: Instafy couldn't start a hosted machine for this space. Send it again to retry.",
+      ],
+    ]) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: {
+          source: "controller",
+          kind,
+          outcome: "failed",
+          messageType: "error",
+          jobId: "job-1",
+          runId: "run-1",
+          errorMessage: reason,
+        },
+        content: reason,
+      });
+      expect(presentation?.kind, reason).toBe("generic");
+      expect(presentation?.friendlyText, reason).toBe(reason);
+    }
+  });
+
+  it("shows the controller's run-once reasons in full for a turn that holds device grants", () => {
+    // runtime/sweeps.rs: a turn that runs only once that no machine started
+    // within its minute, and one a lease of which ended. A local-engine turn's
+    // failure carries the controller's stamp and reads by its code instead.
+    for (const [kind, reason] of [
+      [
+        "start_by_passed",
+        "This turn didn't run: it had to start by a set time, and no machine started it in time. Send it again if you still want it.",
+      ],
+      [
+        "run_once_interrupted",
+        "This turn stopped and won't run again: it may run only once, and its machine stopped while it ran. Send it again if you still want it.",
+      ],
+    ]) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: {
+          source: "controller",
+          kind,
+          outcome: "failed",
+          messageType: "error",
+          jobId: "job-1",
+          runId: "run-1",
+          errorMessage: reason,
+        },
+        content: reason,
+      });
+      expect(presentation?.kind, reason).toBe("generic");
+      expect(presentation?.friendlyText, reason).toBe(reason);
+    }
   });
 
   describe("a turn a stop put back in the queue that no machine picked up in time", () => {

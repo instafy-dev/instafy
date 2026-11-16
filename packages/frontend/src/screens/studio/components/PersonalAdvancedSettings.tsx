@@ -1,6 +1,7 @@
 import { Button } from "../../../components/Button";
 import { ControlChevron } from "../../../components/ControlChevron";
 import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
+import { Text } from "../../../components/Text";
 import { useWorkspaceControls } from "../workspaceControls";
 import { SettingsSection } from "./SettingsSection";
 
@@ -15,7 +16,7 @@ export function PersonalAdvancedSettings() {
             <span className="ml-auto transition-transform group-open/developer:rotate-180 motion-reduce:transition-none"><ControlChevron /></span>
           </summary>
           <div className="space-y-3 px-2 pb-2 pt-3">
-            <p className="text-sm text-slate-500 dark:text-slate-400">Inspect app and runtime logs, build information, connections, and layout overrides.</p>
+            <Text variant="bodyCompact" tone="muted">Inspect app and machine logs, build information, connections, and layout overrides.</Text>
             <Button variant="outline" isDisabled={!onOpenDiagnostics} onPress={onOpenDiagnostics} data-testid="settings-open-diagnostics">Open diagnostics</Button>
           </div>
         </details>

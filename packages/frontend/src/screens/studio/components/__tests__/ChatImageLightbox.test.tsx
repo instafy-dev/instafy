@@ -114,6 +114,10 @@ describe("image inspection controls", () => {
     for (let i = 0; i < 12; i += 1) await press("zoom-in");
     expect(zoomIn.getAttribute("aria-disabled")).toBe("true");
     expect(zoomIn.disabled).toBe(false);
+    // The limit keeps the available control's colours and fades as a disabled
+    // button does: the muted grey read too close to the neutral one.
+    expect([...zoomIn.classList]).toContain("aria-disabled:opacity-60");
+    expect(zoomIn.className).toBe(button("zoom-out").className);
     expect(document.activeElement).toBe(zoomIn);
     const maximum = scale();
     await press("zoom-in");

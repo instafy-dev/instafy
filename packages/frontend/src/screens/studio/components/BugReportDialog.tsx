@@ -496,20 +496,20 @@ export function BugReportDialog({
               <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
                 <Text variant="caption" tone="secondary">Space context: {activeProjectId ? "Included" : "None"}</Text>
                 <Text variant="caption" tone="secondary">Conversation context: {activeConversationId ? "Included" : "None"}</Text>
-                <Text variant="caption" tone="secondary">Runtime context: {activeRuntimeId ? "Included" : "None"}</Text>
+                <Text variant="caption" tone="secondary">Machine context: {activeRuntimeId ? "Included" : "None"}</Text>
               </div>
               <Checkbox
                 isSelected={includeDiagnostics}
                 onChange={setIncludeDiagnostics}
                 label="Include diagnostics"
-                description="Share app and runtime logs plus browser, build, release, and page-path information. This is off by default."
+                description="Share app and machine logs plus browser, build, release, and page-path information. This is off by default."
                 data-testid="bug-report-include-diagnostics"
               />
               {includeDiagnostics ? (
                 <Card tone="default" radius="xl" shadow="none" padding="sm" data-testid="bug-report-diagnostics-preview">
                   <Text variant="caption" tone="secondary" className="font-medium">Diagnostics preview</Text>
                   <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600 dark:text-slate-300">
-                    <li>{logSummary.app} app log entries and {logSummary.runtime} runtime log entries</li>
+                    <li>{logSummary.app} app log entries and {logSummary.runtime} machine log entries</li>
                     <li>App mode, build identifier, and release information</li>
                     <li>Browser or device user-agent information</li>
                     <li>

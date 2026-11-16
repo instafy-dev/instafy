@@ -25,8 +25,13 @@ interface Options {
 
 export const LOCAL_RUNTIME_OFFLINE_TOAST_DEBOUNCE_MS = 2500;
 
+/**
+ * Says what the machine's status reads and when agents can work on it again,
+ * and nothing a person may not be able to do: there may be no other machine
+ * to use, and the toast's "How to reconnect" carries the way back.
+ */
 export function formatLocalRuntimeOfflineMessage(runtimeName: string): string {
-  return `${runtimeName} appears offline. Reconnect it or select another runtime if work stalls.`;
+  return `${runtimeName} is offline. Agents can work on it again once it's back online.`;
 }
 
 function clearTimerRef(ref: { current: ReturnType<typeof setTimeout> | null }) {
@@ -87,10 +92,13 @@ export function useRuntimeStatusToasts({
   const workspaceOfflineToastShownRef = useRef(false);
   const originOfflineToastShownRef = useRef(false);
 
+  // Without an entry (only the tunnel logs below then use a name), the machine
+  // is the workspace's: this person's own Instafy Desktop presence, which its
+  // machine row calls "Your machine" when it has no name of its own.
   const runtimeName = useMemo(() => {
     return (
       (runtimeEntry?.displayName ?? runtimeEntry?.runtimeId)?.toString() ??
-      "Desktop runtime"
+      "Your machine"
     );
   }, [runtimeEntry?.displayName, runtimeEntry?.runtimeId]);
   const trackLocalWorkspaceStatus = useMemo(

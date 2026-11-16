@@ -215,7 +215,7 @@ export function RuntimeOperationsProvider({
             if (cleared) {
               await refreshRuntimeStatuses();
               showStatus(
-                "Selected runtime is no longer available. Using best available instead.",
+                "The selected machine is no longer available. Using the best available one instead.",
                 "warning",
                 4000,
               );
@@ -224,7 +224,7 @@ export function RuntimeOperationsProvider({
           } else {
             preferenceClearRequestedRef.current = false;
           }
-          showStatus("Unable to update runtime preference", "error", 4000);
+          showStatus("Couldn't change the selected machine.", "error", 4000);
           return false;
         }
         await refreshRuntimeStatuses();
@@ -234,7 +234,7 @@ export function RuntimeOperationsProvider({
           preferenceClearRequestedRef.current = false;
         }
         const message = error instanceof Error ? error.message : String(error);
-        showStatus(`Failed to update runtime: ${message}`, "error", 4000);
+        showStatus(`Couldn't change the selected machine: ${message}`, "error", 4000);
         return false;
       }
     },
@@ -340,7 +340,7 @@ export function RuntimeOperationsProvider({
   });
   const takeOverHostedRuntimeLimit = useCallback(async () => {
     if (!runtimeMutationEnabled) {
-      showStatus("This space is read-only. Runtime controls are unavailable.", "warning", 3500);
+      showStatus("This space is read-only. Machine controls are unavailable.", "warning", 3500);
       return false;
     }
     return takeOverHostedRuntimeLimitUnsafe();
@@ -350,7 +350,7 @@ export function RuntimeOperationsProvider({
       const targetRuntimeId = runtimeId ?? effectiveRuntimeId;
       if (!targetRuntimeId) {
         showStatus(
-          "Select a desktop runtime before copying its tunnel link.",
+          "Select a machine before copying its tunnel link.",
           "warning",
           5000,
         );
@@ -359,7 +359,7 @@ export function RuntimeOperationsProvider({
       const grant = state.tunnelGrants[targetRuntimeId];
       if (!grant) {
         showStatus(
-          "Tunnel details are not available yet. Try again once the desktop runtime is online.",
+          "Tunnel details aren't available yet. Try again once the machine is online.",
           "warning",
           6000,
           { actionLabel: "How to reconnect", onAction: showDesktopRuntimeHelp },
@@ -370,19 +370,19 @@ export function RuntimeOperationsProvider({
         const normalizedStatus = (grant.status ?? "").trim().toLowerCase();
         const message =
           normalizedStatus === "revoked"
-            ? "Tunnel link was revoked. Reconnect your desktop runtime to refresh it."
+            ? "Tunnel link was revoked. Reconnect the machine to refresh it."
             : normalizedStatus === "expired"
-              ? "Tunnel link expired. Reconnect your desktop runtime to refresh it."
+              ? "Tunnel link expired. Reconnect the machine to refresh it."
               : normalizedStatus === "failed"
-                ? "Tunnel link failed. Reconnect your desktop runtime or start Instafy Cloud."
-                : "Tunnel link is unavailable. Reconnect your desktop runtime to refresh it.";
+                ? "Tunnel link failed. Reconnect the machine, or start a hosted machine."
+                : "Tunnel link is unavailable. Reconnect the machine to refresh it.";
         showStatus(
           message,
           "warning",
           7000,
           normalizedStatus === "failed"
             ? {
-                actionLabel: "Start Instafy Cloud",
+                actionLabel: "Start a hosted machine",
                 onAction: () => {
                   void ensureHostedRuntime();
                 },
@@ -394,7 +394,7 @@ export function RuntimeOperationsProvider({
       const value =
         mode === "host" ? resolveTunnelHostname(grant) : resolveTunnelUrl(grant);
       if (!value) {
-        showStatus("Tunnel endpoint is unavailable for this runtime.", "warning", 5000);
+        showStatus("Tunnel endpoint is unavailable for this machine.", "warning", 5000);
         return false;
       }
       try {
@@ -426,15 +426,15 @@ export function RuntimeOperationsProvider({
   const terminateRuntime = useCallback(
     async (runtimeId: string | null) => {
       if (!runtimeMutationEnabled) {
-        showStatus("This space is read-only. Runtime controls are unavailable.", "warning", 3500);
+        showStatus("This space is read-only. Machine controls are unavailable.", "warning", 3500);
         return false;
       }
       if (!runtimeControllerEnabled) {
-        showStatus("Runtime control is unavailable.", "warning", 4000);
+        showStatus("Machine controls are unavailable.", "warning", 4000);
         return false;
       }
       if (!runtimeId) {
-        showStatus("Select a runtime before terminating it.", "warning", 4000);
+        showStatus("Select a machine before stopping it.", "warning", 4000);
         return false;
       }
       const entry = state.runtimeStatuses.find(
@@ -442,7 +442,7 @@ export function RuntimeOperationsProvider({
       );
       if (entry?.isLocal) {
         showStatus(
-          "Disconnect desktop runtimes from the agent instead of terminating them here.",
+          "Stop this machine from the computer it runs on.",
           "warning",
           5000,
         );
@@ -463,12 +463,12 @@ export function RuntimeOperationsProvider({
         await stopUnderManualHold(projectId, hold, () =>
           controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" }),
         );
-        showStatus("Runtime termination requested", "info", 2500);
+        showStatus("Stopping the machine…", "info", 2500);
         await refreshRuntimeStatuses();
         return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        showStatus(`Unable to terminate runtime: ${message}`, "error", 4000);
+        showStatus(`Couldn't stop the machine: ${message}`, "error", 4000);
         return false;
       }
     },
@@ -485,15 +485,15 @@ export function RuntimeOperationsProvider({
   const removeRuntimeEntry = useCallback(
     async (runtimeId: string | null) => {
       if (!runtimeMutationEnabled) {
-        showStatus("This space is read-only. Runtime controls are unavailable.", "warning", 3500);
+        showStatus("This space is read-only. Machine controls are unavailable.", "warning", 3500);
         return false;
       }
       if (!runtimeControllerEnabled) {
-        showStatus("Runtime control is unavailable.", "warning", 4000);
+        showStatus("Machine controls are unavailable.", "warning", 4000);
         return false;
       }
       if (!runtimeId) {
-        showStatus("Select a runtime before removing it.", "warning", 4000);
+        showStatus("Select a machine before removing it.", "warning", 4000);
         return false;
       }
       const entry = state.runtimeStatuses.find(
@@ -501,7 +501,7 @@ export function RuntimeOperationsProvider({
       );
       if (entry?.isLocal) {
         showStatus(
-          "Remove is only available for hosted runtimes.",
+          "Only hosted machines can be removed here.",
           "warning",
           4000,
         );
@@ -520,7 +520,7 @@ export function RuntimeOperationsProvider({
         await removeUnderManualHold(projectId, hold, () =>
           controllerClient.runtimes.remove({ runtimeId, reason: "user_remove" }),
         );
-        showStatus("Runtime removed", "info", 2500);
+        showStatus("Machine removed.", "info", 2500);
         if (state.sessionRuntimeId === runtimeId) {
           clearSessionRuntimeOverride();
         }
@@ -531,7 +531,7 @@ export function RuntimeOperationsProvider({
         return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        showStatus(`Unable to remove runtime: ${message}`, "error", 4000);
+        showStatus(`Couldn't remove the machine: ${message}`, "error", 4000);
         return false;
       }
     },
@@ -552,38 +552,38 @@ export function RuntimeOperationsProvider({
   const startRuntimeEntry = useCallback(
     async (runtimeId: string | null) => {
       if (!runtimeMutationEnabled) {
-        showStatus("This space is read-only. Runtime controls are unavailable.", "warning", 3500);
+        showStatus("This space is read-only. Machine controls are unavailable.", "warning", 3500);
         return false;
       }
       if (!runtimeControllerEnabled) {
-        showStatus("Runtime control is unavailable.", "warning", 4000);
+        showStatus("Machine controls are unavailable.", "warning", 4000);
         return false;
       }
       if (!runtimeId) {
-        showStatus("Select a runtime before starting it.", "warning", 4000);
+        showStatus("Select a machine before starting it.", "warning", 4000);
         return false;
       }
       const projectId = resolveProjectId();
       if (!projectId) {
-        showStatus("Project id is missing; reload and try again.", "warning", 4000);
+        showStatus("Couldn't find this space. Reload and try again.", "warning", 4000);
         return false;
       }
       const entry = state.runtimeStatuses.find(
         (runtime) => runtime.runtimeId === runtimeId,
       );
       if (!entry) {
-        showStatus("Runtime not found for this project.", "warning", 4000);
+        showStatus("Couldn't find that machine in this space.", "warning", 4000);
         return false;
       }
       if (entry.isLocal) {
-        showStatus("Local/desktop runtimes cannot be started from here.", "warning", 4000);
+        showStatus("Start this machine from the computer it runs on.", "warning", 4000);
         return false;
       }
       try {
         await controllerClient.runtimes.start(
           resolveStartRuntimeParams(projectId, entry, Date.now()),
         );
-        showStatus("Runtime start requested", "info", 2500);
+        showStatus("Starting the machine…", "info", 2500);
         await refreshRuntimeStatuses();
         // An explicit Start is intent in this space, so it lifts a deliberate
         // Stop and every other hold, and overrides the person's stops its
@@ -595,13 +595,13 @@ export function RuntimeOperationsProvider({
         return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        showStatus(`Unable to start runtime: ${message}`, "error", 4000);
+        showStatus(`Couldn't start the machine: ${message}`, "error", 4000);
         // If the hosted runtime could not be restarted (stale entry, bad compose state),
         // fall back to launching a fresh cloud runtime so the user can keep working.
         if (!entry.isLocal) {
           const newRuntime = await ensureHostedRuntime();
           if (newRuntime) {
-            showStatus("Started a new Instafy Cloud runtime instead.", "info", 3000);
+            showStatus("Using a hosted machine instead.", "info", 3000);
             return true;
           }
         }

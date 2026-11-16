@@ -622,6 +622,12 @@ async fn lock_hosted_runtime_admission(
     Ok(())
 }
 
+/// What a launch refused on platform capacity says. The Studio shows it as it
+/// is when a person's own start is refused (`useHostedRuntimeEnsure`), and a
+/// scheduled run that could not start quotes it after "This scheduled run
+/// couldn't start:" (`automations.rs`).
+const PLATFORM_AT_CAPACITY_MESSAGE: &str = "Instafy is at capacity right now because too many hosted machines are running. Try again in a few minutes.";
+
 /// Whether a new hosted runtime should be refused on platform capacity.
 /// `cap <= 0` disables the gate. `active < 0` signals a failed count and fails
 /// OPEN (never blocks), so a transient DB error can't lock everyone out.
@@ -2813,7 +2819,7 @@ async fn ensure_runtime_launch_inner(
                     return Err((
                         StatusCode::SERVICE_UNAVAILABLE,
                         Json(ApiError::with_details(
-                            "Instafy is at capacity right now — too many cloud runtimes are running. Please try again in a few minutes.",
+                            PLATFORM_AT_CAPACITY_MESSAGE,
                             "platform_at_capacity",
                             json!({
                                 "activeCount": global_active_count,
@@ -3809,6 +3815,21 @@ mod tests {
     fn platform_cap_fails_open_on_failed_count() {
         // A failed count is signaled as -1 and must never block, even under a cap.
         assert!(!platform_at_capacity(-1, 12));
+    }
+
+    /// The Studio shows this refusal as it is, so it says machine, as the
+    /// Studio does (docs/Runtime-Machines.md, "The model"). It follows "This
+    /// scheduled run couldn't start:" in a scheduled run's notice, so it has
+    /// no colon of its own.
+    #[test]
+    fn platform_at_capacity_message_says_hosted_machines() {
+        let message = PLATFORM_AT_CAPACITY_MESSAGE;
+        let lower = message.to_lowercase();
+        assert!(lower.contains("too many hosted machines"), "{message}");
+        assert!(!lower.contains("runtime"), "{message}");
+        assert!(!lower.contains("cloud"), "{message}");
+        assert!(!message.contains(':'), "{message}");
+        assert!(message.contains("Try again in a few minutes."), "{message}");
     }
 
     #[test]

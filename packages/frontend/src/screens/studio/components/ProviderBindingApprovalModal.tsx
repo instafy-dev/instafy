@@ -128,7 +128,7 @@ export function ProviderBindingApprovalModal({
 
   const handleSave = async () => {
     if (!projectId) {
-      setFormError("Select a project before granting provider access.");
+      setFormError("Select a space before granting provider access.");
       return;
     }
     if (!normalizedProviderId) {
@@ -188,7 +188,7 @@ export function ProviderBindingApprovalModal({
         title={defaults.title ?? "Approve provider access"}
         description={
           defaults.description ??
-          "Allow this provider to use the current project workspace."
+          "Allow this provider to use this space's files."
         }
         onClose={onClose}
       />
@@ -238,7 +238,7 @@ export function ProviderBindingApprovalModal({
                 }
               }}
               disabled={savePending}
-              placeholder="Store learned state and project summaries."
+              placeholder="Store learned state and summaries of this space."
               data-testid="provider-binding-purpose"
             />
           </Field>
@@ -274,7 +274,7 @@ export function ProviderBindingApprovalModal({
                     setFormError(null);
                   }
                 }}
-                label="Read project files"
+                label="Read space files"
                 description="Allow this provider to inspect files and saved state."
                 data-testid="provider-binding-read"
               />
@@ -290,8 +290,8 @@ export function ProviderBindingApprovalModal({
                     setFormError(null);
                   }
                 }}
-                label="Write project files"
-                description="Allow this provider to create or update project content."
+                label="Write space files"
+                description="Allow this provider to create or update content in this space."
                 data-testid="provider-binding-write"
               />
             </div>

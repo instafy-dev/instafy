@@ -17,10 +17,16 @@ export type ControllerNoticeActionsContextValue = {
   onRunAutomation: (automationId: string) => void;
   /** Who is reading, so an owner-only action knows whether to render. */
   viewerUserId: string | null;
+  /**
+   * Whether the reader can change this space, so a notice tells only someone
+   * who can to start, reconnect or stop a machine in Machines
+   * (`resolveControllerConversationNoticeContent`).
+   */
+  canChangeSpace: boolean;
 };
 
 /**
- * Supplied by ChatPanel beside the run-failure context. Nullable on purpose:
+ * Supplied by StudioLayout, around every chat it shows. Nullable on purpose:
  * the notice card also renders in thread previews and in tests that mock
  * neither the workspace tabs nor the runtime provider. With no provider the
  * card simply shows no button rather than throwing on mount or on click.

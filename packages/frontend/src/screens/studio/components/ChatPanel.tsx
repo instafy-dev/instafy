@@ -3740,7 +3740,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       const now = Date.now();
       if (now >= staleStartingRecoveryCooldownUntilRef.current) {
         staleStartingRecoveryCooldownUntilRef.current = now + 20_000;
-        showStatus("Octo is still starting. Re-syncing runtime status…", "info", 3500);
+        showStatus("Octo is still starting. Checking machine status…", "info", 3500);
       }
       void refreshRuntimeStatuses();
     }, STALE_STARTING_RECOVERY_DELAY_MS);

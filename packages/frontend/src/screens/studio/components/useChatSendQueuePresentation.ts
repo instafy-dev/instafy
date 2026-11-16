@@ -100,14 +100,15 @@ export function useChatSendQueuePresentation({
     if (totalQueuedCount === 0) {
       return null;
     }
+    // resolveChatComposerAffordances compares these three: change them together.
     if (waitingForPreferredRuntime || hostedRuntimeEnsuring) {
-      return "Starting runtime";
+      return "Waiting for a machine";
     }
     if (runtimeEnsureError && !runtimeReady) {
-      return "Runtime start failed";
+      return "Machine didn't start";
     }
     if (!runtimeReady) {
-      return "Runtime offline";
+      return "Machine not ready";
     }
     if (activeConversationRun || isAssistantTyping || sendingAttachment) {
       return "Reply in progress";

@@ -42,13 +42,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function formatFallbackRuntimeLabel(runtimeId: string): string {
   if (!runtimeId) {
-    return "Runtime";
+    return "Machine";
   }
   const trimmed = runtimeId.trim();
   if (trimmed.length <= 8) {
-    return `Runtime ${trimmed}`;
+    return `Machine ${trimmed}`;
   }
-  return `Runtime ${trimmed.slice(0, 8)}`;
+  return `Machine ${trimmed.slice(0, 8)}`;
 }
 
 export function formatRuntimeSourceLabel(source: string | null): string | null {
@@ -58,7 +58,7 @@ export function formatRuntimeSourceLabel(source: string | null): string | null {
   const normalized = source.trim().toLowerCase();
   switch (normalized) {
     case "project":
-      return "Project preference";
+      return "Selected machine";
     case "conversation":
       return null;
     case "user":

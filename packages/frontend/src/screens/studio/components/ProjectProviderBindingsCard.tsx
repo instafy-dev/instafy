@@ -53,7 +53,7 @@ function statusLabel(status: ProviderProjectBinding["status"]): string {
 
 function hardwareResourceLabel(binding: LocalHardwareBinding): string {
   if (binding.grantedResources.length === 0) {
-    return "Any serial device on this runtime host";
+    return "Any serial device on this machine";
   }
   return binding.grantedResources
     .map((resource) => resource.displayName || resource.path)
@@ -117,7 +117,7 @@ function combinedCountLabel(options: {
     parts.push(`${options.providerCount} provider${options.providerCount === 1 ? "" : "s"}`);
   }
   if (options.hardwareCount > 0) {
-    parts.push(`${options.hardwareCount} runtime host${options.hardwareCount === 1 ? "" : "s"}`);
+    parts.push(`${options.hardwareCount} machine${options.hardwareCount === 1 ? "" : "s"}`);
   }
   return parts.length > 0 ? parts.join(" · ") : "No access";
 }
@@ -137,7 +137,7 @@ function hardwareHostGroupKey(binding: LocalHardwareBinding): string {
 function bindingRuntimeHostLabel(binding: LocalHardwareBinding): string {
   return (
     normalizeText(binding.runtimeHostLabel) ??
-    (binding.runtimeHostId ? `Runtime ${shortRuntimeHostId(binding.runtimeHostId)}` : "Unknown host")
+    (binding.runtimeHostId ? `Machine ${shortRuntimeHostId(binding.runtimeHostId)}` : "Unknown machine")
   );
 }
 
@@ -196,7 +196,7 @@ function resolveProjectWorkspaceSummary(
   localWorkspace: LocalWorkspacePresence | null,
 ): ProjectWorkspaceSummary {
   const summary: ProjectWorkspaceSummary = {
-    sourceCaption: "Stored in Instafy. Desktop and runtimes work on synced copies.",
+    sourceCaption: "Stored in Instafy. Machines work on synced copies.",
     localPath: null,
     localPathLabel: "No local copy connected",
   };
@@ -225,9 +225,11 @@ function resolveRuntimeHostGrantScope(
     typeof window !== "undefined" && typeof window.instafyDesktop === "object";
   const fallback: RuntimeHostGrantScope = {
     id: null,
-    label: "No local runtime connected",
+    label: "No local machine connected",
+    // With the Desktop bridge, the machine missing here is this computer's,
+    // which Desktop starts for one space at a time.
     detail: hasDesktopBridge
-      ? "Start a local runtime to grant hardware."
+      ? "Start this space on this computer to grant hardware."
       : "Open Desktop or connect the CLI to grant hardware.",
     scoped: false,
   };
@@ -269,7 +271,7 @@ function resolveRuntimeHostGrantScope(
     const label =
       normalizeText(localWorkspace?.hostname) ??
       normalizeText(runtimeEntry?.displayName) ??
-      `Runtime ${shortRuntimeHostId(runtimeHostId)}`;
+      `Machine ${shortRuntimeHostId(runtimeHostId)}`;
     return {
       id: runtimeHostId,
       label,
@@ -374,16 +376,18 @@ export function ProjectProviderBindingsCard({
         path: result.path,
         defaultPath: current?.defaultPath ?? "",
       }));
+      // Desktop asks for a restart only while it runs this space on this
+      // computer; otherwise the folder is used the next time it starts here.
       if (result.runtimeRestartRequired) {
         showStatus(
-          "Folder linked. Restart the local runtime to start using it.",
+          "Folder linked. Restart this space on this computer to start using it.",
           "success",
           8000,
-          { actionLabel: "Runtime controls", onAction: showDesktopRuntimeHelp },
+          { actionLabel: "Machine controls", onAction: showDesktopRuntimeHelp },
         );
       } else {
         showStatus(
-          "Folder linked. The local runtime will use it for this space's files.",
+          "Folder linked. This computer will use it for this space's files.",
           "success",
           4000,
         );
@@ -403,8 +407,10 @@ export function ProjectProviderBindingsCard({
       setWorkspaceFolderBinding((current) =>
         current ? { ...current, path: null } : current,
       );
-      showStatus("Reset to the managed folder. Restart the local runtime to apply.", "info", 8000, {
-        actionLabel: "Runtime controls",
+      // Clearing the link does not say whether this space runs here now, so
+      // the toast holds whether it does or not.
+      showStatus("Reset to the managed folder. It applies the next time this space starts on this computer.", "info", 8000, {
+        actionLabel: "Machine controls",
         onAction: showDesktopRuntimeHelp,
       });
     } catch (error) {
@@ -425,7 +431,7 @@ export function ProjectProviderBindingsCard({
     purpose: "",
     providerId: "",
     title: "Approve provider access",
-    description: "Allow a provider to use this project's files.",
+    description: "Allow a provider to use this space's files.",
   });
   const [devicePath, setDevicePath] = useState("");
   const [ioOpportunities, setIoOpportunities] = useState<LocalHardwareIoOpportunity[]>([]);
@@ -587,7 +593,7 @@ export function ProjectProviderBindingsCard({
       preferredPrefix: "",
       capabilities: ["project_content_read", "project_content_write"],
       title: "Approve provider access",
-      description: "Allow a provider to use this project's files.",
+      description: "Allow a provider to use this space's files.",
       saveLabel: "Allow access",
     });
     setModalOpen(true);
@@ -618,7 +624,7 @@ export function ProjectProviderBindingsCard({
     const confirmed =
       typeof window === "undefined"
         ? true
-        : window.confirm(`Revoke project access for ${binding.providerId}?`);
+        : window.confirm(`Revoke provider access for ${binding.providerId}?`);
     if (!confirmed) {
       return;
     }
@@ -682,8 +688,10 @@ export function ProjectProviderBindingsCard({
     if (!canManageAccess) {
       return;
     }
+    // Only Instafy Desktop's bridge runs these actions; a machine connected
+    // elsewhere does not.
     if (typeof window === "undefined" || !window.instafyDesktop?.localHardwareIoRunAction) {
-      showStatus("Open Desktop or connect a runtime before running host IO.", "error", 3500);
+      showStatus("Open this space in Instafy Desktop to run this action.", "error", 3500);
       return;
     }
     const action = opportunity.actions.find((entry) => entry.id === actionId);
@@ -750,7 +758,7 @@ export function ProjectProviderBindingsCard({
     <>
       <SettingsSection
         title="Connections"
-        description="Project files, providers, and local hardware access."
+        description="Files, providers, and local hardware for this space."
         actions={
           <Text variant="caption" tone="muted" data-testid="project-provider-bindings-count">
             {bindingsCountLabel}
@@ -762,7 +770,7 @@ export function ProjectProviderBindingsCard({
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="min-w-0">
                 <Text variant="bodyStrong" tone="primary">
-                  Project files
+                  Space files
                 </Text>
                 <Text variant="caption" tone="muted" className="mt-1">
                   {workspaceSummary.sourceCaption}
@@ -837,7 +845,7 @@ export function ProjectProviderBindingsCard({
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="min-w-0">
                 <Text variant="bodyStrong" tone="primary">
-                  Project providers
+                  Providers
                 </Text>
                 <Text variant="caption" tone="muted" className="mt-1">
                   File access for external tools.
@@ -870,7 +878,7 @@ export function ProjectProviderBindingsCard({
 
             {!providerError && !providerLoading && providerBindings.length === 0 ? (
               <Text variant="caption" tone="muted">
-                No project providers yet.
+                No providers yet.
               </Text>
             ) : null}
 
@@ -934,7 +942,7 @@ export function ProjectProviderBindingsCard({
                 Local hardware
               </Text>
               <Text variant="caption" tone="muted" className="mt-1">
-                Serial devices this runtime can probe on demand.
+                Serial devices this machine can probe on demand.
               </Text>
               {!isDesktopAppSurface ? (
                 <div className="mt-2 flex flex-wrap gap-2">
@@ -963,7 +971,7 @@ export function ProjectProviderBindingsCard({
               data-testid="project-hardware-current-host"
             >
               <Text variant="caption" tone="muted">
-                Current host
+                Current machine
               </Text>
               <Text variant="bodyStrong" tone="primary" className="mt-1 break-words">
                 {runtimeHostScope.label}
@@ -986,7 +994,7 @@ export function ProjectProviderBindingsCard({
                     Available actions
                   </Text>
                   <Text variant="caption" tone="muted" className="mt-1">
-                    Probe a detected serial device, then grant access if this project needs it.
+                    Probe a detected serial device, then grant access if this space needs it.
                   </Text>
                   {ioOpportunitiesLoading ? (
                     <Text variant="caption" tone="muted" className="mt-2">
@@ -1073,7 +1081,7 @@ export function ProjectProviderBindingsCard({
                     </Text>
                   ) : null}
                   <Field className="mt-3" label="Device path to grant" htmlFor={`${fieldId}-device-path`}
-                    hint="Save access for a serial device on this host.">
+                    hint="Save access for a serial device on this machine.">
                     <Input
                       id={`${fieldId}-device-path`}
                       value={devicePath}
@@ -1100,7 +1108,7 @@ export function ProjectProviderBindingsCard({
 
             {currentHostGroup ? (
               <HardwareHostSavedAccess
-                title="Saved on this host"
+                title="Saved on this machine"
                 group={currentHostGroup}
                 pendingId={hardwareRevokePendingId}
                 canRevoke={canManageAccess}
@@ -1123,7 +1131,7 @@ export function ProjectProviderBindingsCard({
             {!hardwareError && otherHostGroups.length > 0 ? (
               <div className="space-y-2" data-testid="project-hardware-other-hosts">
                 <Text variant="caption" tone="muted">
-                  Other hosts
+                  Other machines
                 </Text>
                 {otherHostGroups.map((group) => (
                   <HardwareHostSavedAccess
@@ -1181,7 +1189,7 @@ function HardwareHostSavedAccess({
       </Text>
       {group.runtimeHostId ? (
         <Text variant="caption" tone="muted" className="mt-1 break-all">
-          Host id: {group.runtimeHostId}
+          Machine id: {group.runtimeHostId}
         </Text>
       ) : null}
       <div className="mt-2 divide-y divide-slate-200/70 dark:divide-slate-800">

@@ -16,7 +16,7 @@ const TONE_CLASSES: Record<TextLinkTone, string> = {
   muted:
     "text-slate-600 decoration-slate-300 hover:text-slate-900 hover:decoration-slate-500 dark:text-slate-300 dark:decoration-slate-600 dark:hover:text-slate-50 dark:hover:decoration-slate-400",
   danger:
-    "text-rose-600 decoration-rose-200 hover:text-rose-700 hover:decoration-rose-300 dark:text-rose-300 dark:decoration-rose-900/60 dark:hover:text-rose-200 dark:hover:decoration-rose-700/70",
+    "text-rose-700 decoration-rose-200 hover:text-rose-800 hover:decoration-rose-300 dark:text-rose-300 dark:decoration-rose-900/60 dark:hover:text-rose-200 dark:hover:decoration-rose-700/70",
 };
 
 export type TextLinkProps = Omit<LinkProps, "className" | "children"> & {

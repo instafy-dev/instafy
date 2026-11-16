@@ -61,9 +61,9 @@ export function resolveChatComposerAffordances({
   const composerHasSendPayload = inputValue.trim().length > 0 || imageAttachmentCount > 0;
   const queueCanUseDurableControllerPath =
     runtimeControllerEnabled &&
-    (queueStatusLabel === "Runtime offline" ||
-      queueStatusLabel === "Runtime start failed" ||
-      queueStatusLabel === "Starting runtime");
+    (queueStatusLabel === "Machine not ready" ||
+      queueStatusLabel === "Machine didn't start" ||
+      queueStatusLabel === "Waiting for a machine");
   const queueCanSendNow =
     totalQueuedCount > 0 &&
     (queueStatusLabel === "Ready to send" || queueCanUseDurableControllerPath) &&

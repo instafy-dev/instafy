@@ -131,16 +131,16 @@ export function StudioSidebarAccountSection({
           <Text
             as="p"
             variant="label"
-            tone="subtle"
+            tone="muted"
             className={["truncate", DRAWER_SECTION_LABEL_CLASS].join(" ")}
           >
             Signed in
           </Text>
-          <Text as="p" variant="bodyStrong" tone="primary" className="truncate">
+          <Text as="p" variant="bodyStrong" tone="primary" className="truncate" title={displayName}>
             {displayName}
           </Text>
           {accountSubtitle ? (
-            <Text as="p" variant="caption" tone="muted" className="truncate">
+            <Text as="p" variant="caption" tone="muted" className="truncate" title={accountSubtitle}>
               {accountSubtitle}
             </Text>
           ) : null}
@@ -177,9 +177,9 @@ export function StudioSidebarAccountSection({
                 ) : updatePresentation?.emphasis === "danger" ? (
                   <span className="inline-flex h-2 w-2 rounded-full bg-rose-500" aria-hidden="true" />
                 ) : null}
-                <span className="text-xs text-slate-400 dark:text-slate-500">
+                <Text as="span" variant="caption" tone="muted">
                   {updatePresentation?.detail ?? "Check now"}
-                </span>
+                </Text>
               </span>
             </button>
           </div>
@@ -278,7 +278,7 @@ export function StudioSidebarAccountSection({
           title={`Get desktop app · v${installEntry.version}`}
           data-testid="sidebar-get-desktop"
           className={[
-            "inline-flex min-h-10 items-center rounded-lg text-sm font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60 dark:text-slate-400 dark:hover:text-slate-100 pointer-coarse:min-h-11",
+            "inline-flex min-h-10 items-center rounded-lg text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60 dark:text-slate-400 dark:hover:text-slate-100 pointer-coarse:min-h-11",
             DARK_RAIL_HOVER_CLASS,
             showLabels ? "w-full gap-3 px-3" : "w-10 justify-center",
           ].join(" ")}
@@ -320,11 +320,11 @@ export function StudioSidebarAccountSection({
               ) : null}
             </span>
             <span className="min-w-0 flex-1">
-              <Text as="span" variant="bodyStrong" tone="primary" className="block truncate">
+              <Text as="span" variant="bodyStrong" tone="primary" className="block truncate" title={displayName}>
                 {displayName}
               </Text>
               {accountSubtitle ? (
-                <Text as="span" variant="caption" tone="muted" className="block truncate">
+                <Text as="span" variant="caption" tone="muted" className="block truncate" title={accountSubtitle}>
                   {accountSubtitle}
                 </Text>
               ) : null}

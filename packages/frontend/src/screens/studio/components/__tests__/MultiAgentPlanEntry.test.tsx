@@ -66,7 +66,7 @@ describe("multi-agent lifecycle from persisted runs", () => {
     expect(refrain.title).toContain("poems/refrain.txt");
     expect(status("poet09")).toBe("Open run trace for Refrain poem (@poet09); status done");
     expect(status("poet10")).toBe("Open run trace for Moon poem (@poet10); status queued");
-    expect(container.querySelector('[data-testid="multi-agent-team-chip"]')?.getAttribute("title")).toContain("Refrain poem · runtime runtime-");
+    expect(container.querySelector('[data-testid="multi-agent-team-chip"]')?.getAttribute("title")).toContain("Refrain poem · machine runtime-");
     await act(async () => { refrain.click(); moon.click(); });
     expect(openRun.mock.calls).toEqual([
       [{ jobId: "parent-job-poet09-job", title: "Refrain poem run" }],
@@ -267,7 +267,7 @@ describe("multi-agent lifecycle from persisted runs", () => {
     it("reads the continuation's own run over the stopped one whatever order the feed holds them in", async () => {
       await render([continuation("success"), run("poet09", "success"), stopped()]);
       expect(status("poet10")).toContain("status done");
-      expect(container.querySelector('[data-testid="multi-agent-inline-status"]')?.getAttribute("aria-label")).toContain("2/2 lanes done");
+      expect(container.querySelector('[data-testid="multi-agent-inline-status"]')?.getAttribute("aria-label")).toContain("2/2 workstreams done");
       expect(notice()?.getAttribute("data-rerun-reason")).toBe("turn_continuation");
     });
 

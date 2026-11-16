@@ -9,6 +9,7 @@ import {
   sanitizeValueHint,
 } from "./packCardText";
 import type { ChatMessage } from "../types";
+import type { SemanticTone } from "../../../theme/semanticTones";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { parseCommandExecutionOutput } from "./chatContentHelpers";
 import { extractAgentJobId } from "./chatMessagePresentation";
@@ -50,21 +51,31 @@ function formatStatusLabel(status: string): string {
   return pretty.charAt(0).toUpperCase() + pretty.slice(1);
 }
 
-function resolveStatusBadge(status: string | null): { label: string; className: string } | null {
+// A timeline row's status chip. Badge paints it from `tone`: colour classes
+// passed as className lose to Badge's own neutral fill, border and text, since
+// Tailwind orders utilities that set the same property by name, so the chip
+// read grey whatever its status. className carries layout only.
+export type TimelineStatusBadge = {
+  label: string;
+  tone: "neutral" | SemanticTone;
+  className?: string;
+  showSpinner?: boolean;
+};
+
+function resolveStatusBadge(status: string | null): TimelineStatusBadge | null {
   if (!status) {
     return null;
   }
   const normalized = status.trim().toLowerCase();
-  const base = "border-slate-200 bg-slate-100 text-slate-600";
   switch (normalized) {
     case "completed":
-      return { label: "Completed", className: "border-primary-200 bg-primary-50 text-primary-700" };
+      return { label: "Completed", tone: "info" };
     case "failed":
-      return { label: "Failed", className: "border-rose-200 bg-rose-50 text-rose-700" };
+      return { label: "Failed", tone: "danger" };
     case "in_progress":
-      return { label: "In progress", className: "border-primary-200 bg-primary-50 text-primary-600" };
+      return { label: "In progress", tone: "info" };
     default:
-      return { label: formatStatusLabel(status), className: base };
+      return { label: formatStatusLabel(status), tone: "neutral" };
   }
 }
 
@@ -593,7 +604,7 @@ export function getTimelineHeading(messageType: string | null, details: Record<s
     case "mcp_tool_call":
       return "Tool call";
     case "runtime_switch":
-      return "Runtime";
+      return "Machine";
     case "todo_list":
       return "Plan";
     case "file_change":
@@ -617,7 +628,7 @@ export function getTimelineHeading(messageType: string | null, details: Record<s
 export function resolveTimelineStatusBadge(
   messageType: string | null,
   status: string | null,
-): { label: string; className: string; showSpinner?: boolean } | null {
+): TimelineStatusBadge | null {
   if (!status) {
     return null;
   }
@@ -630,7 +641,8 @@ export function resolveTimelineStatusBadge(
       return {
         label: "Switching",
         showSpinner: true,
-        className: "flex items-center gap-1 border-primary-200 bg-primary-50 text-primary-600",
+        tone: "info",
+        className: "flex items-center gap-1",
       };
     }
   }
@@ -642,7 +654,8 @@ export function resolveTimelineStatusBadge(
       return {
         label: "",
         showSpinner: true,
-        className: "flex items-center gap-1 border-primary-200 bg-primary-50 text-primary-600",
+        tone: "info",
+        className: "flex items-center gap-1",
       };
     }
   }
@@ -654,7 +667,8 @@ export function resolveTimelineStatusBadge(
       return {
         label: "",
         showSpinner: true,
-        className: "flex items-center gap-1 border-primary-200 bg-primary-50 text-primary-600",
+        tone: "info",
+        className: "flex items-center gap-1",
       };
     }
   }
@@ -666,7 +680,8 @@ export function resolveTimelineStatusBadge(
       return {
         label: "Thinking",
         showSpinner: true,
-        className: "flex items-center gap-1 border-primary-200 bg-primary-50 text-primary-600",
+        tone: "info",
+        className: "flex items-center gap-1",
       };
     }
   }

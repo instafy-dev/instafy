@@ -62,7 +62,7 @@ export function RuntimePreferenceIndicator({
         />
       </span>
       {runtimeSourceLabel ? (
-        <Text as="span" variant="caption" tone="subtle" className="text-xxs">
+        <Text as="span" variant="caption" tone="muted" className="text-xxs">
           {runtimeSourceLabel}
         </Text>
       ) : null}
