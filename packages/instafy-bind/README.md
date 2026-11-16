@@ -210,7 +210,9 @@ load is one), and exits 2 only when nothing could look at it. It names each line
 HTML from a string (`innerHTML`, `outerHTML`, `insertAdjacentHTML`; never one that only empties an element, nor words
 in a string or a comment), to draw with `site.h` (text as text) and `site.trust(fact)` instead; that never fails the
 page. A comparison the compare starter draws writes the line under its title itself, so a `lede` in its `data.json`
-is not read as the page's words, and the check notes that it isn't drawn. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
+is not read as the page's words, and the check notes that it isn't drawn. That starter also names what each row is
+still missing once, from its cells, first under "Still to confirm", so the check notes an `unchecked` entry that names
+a column no row has a value for: the entry stays only for what the reader can do that the page doesn't say. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
 value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
 it was read (`src`, `url`, `date`), a filter applied without `site.byFilter`, and a comparison of two or more options
 whose `sort` decides nothing while a column reads as a number in every row (the line under its title names the

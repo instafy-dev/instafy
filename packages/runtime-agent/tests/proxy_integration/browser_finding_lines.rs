@@ -314,8 +314,7 @@ const NOTE_MISSING: &str = r#"{"missing":["warranty"]}"#;
 /// finding lines (runtime-agent `NOT_FOUND_SEARCH`): no fact of any page, and not found only
 /// after the whole text and the page's own link.
 const NOT_FOUND_SEARCH: &str = "A value you looked for and didn't find is no fact of any page, and counts as not found only once you searched the whole text a step returned for it in the script that ran that step, never by printing the text (a long printed result is cut in its middle), and opened that page's own Specs, Warranty, Support or FAQ tab or link for it.";
-/// How a turn whose findings go back to the building turn is told to name what it didn't find
-/// (runtime-agent `MISSING_LINE`).
+/// How every browser turn is told to name what it didn't find (runtime-agent `MISSING_LINE`).
 const ASKS_FOR_MISSING: &str = "After your finding lines, one line `{\"missing\": [\"<a value this request needs that you looked for and didn't find>\"]}`, each by its name alone (\"warranty\"), or `{\"missing\": []}`.";
 /// What every browser turn was told of a value it didn't find before: under its page, as where
 /// it looked.
@@ -1196,12 +1195,15 @@ async fn a_whole_device_turn(
             );
         }
         assert!(passes(state).is_empty(), "no pass on the person's device");
-        // Its note keeps the page it opened, which a later building turn reads. It was told of
-        // no missing line, and the one it wrote anyway never reaches the person; it was told how
-        // a value it didn't find is not found, as every browser turn is.
+        // Its note keeps the page it opened and the missing line it was told to write, as every
+        // browser turn is, which a later building turn reads; the line never reaches the person.
         let prompt = last_user_text(&offered[0]);
-        assert!(!prompt.contains("{\"missing\""), "{prompt}");
+        assert!(
+            prompt.contains(&format!("{NOT_FOUND_SEARCH} {ASKS_FOR_MISSING}")),
+            "{prompt}"
+        );
         assert_eq!(prompt.matches(NOT_FOUND_SEARCH).count(), 1, "{prompt}");
+        assert_eq!(prompt.matches(ASKS_FOR_MISSING).count(), 1, "{prompt}");
         for old in OLD_NOT_FOUND {
             assert!(!prompt.contains(old), "{old}: {prompt}");
         }

@@ -54,7 +54,7 @@ const CITE_LINE: &str = "\n- Cite a page only for a fact listed under it. A find
 /// `jobs/browser_hand_back.rs`): in the runtime's words, to use as they are. Told to say "I
 /// didn't find…" of a fact that said a value was not found, a build replied that a maker's specs
 /// pages "don't give runtime estimates".
-const NOT_FOUND_LINE: &str = "\n- `notFound` says what Octo looked for and didn't find, in the words to say it: wherever such a value would go, use them as they are, unless a finding gives it.\n";
+const NOT_FOUND_LINE: &str = "\n- `notFound` says what Octo looked for and didn't find, in the words to say it: wherever such a value would go, use them as they are, unless the person gave it, or a finding or a page you read this turn gives it.\n";
 /// Those words for the value the record names, and never where: the record says which pages
 /// the turn read, not where it looked for the value.
 const NOT_FOUND: &str = "\"notFound\": [\n    \"I didn't find warranty\"\n  ]";

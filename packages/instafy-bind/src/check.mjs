@@ -182,6 +182,9 @@ const DEFINES_SITE = /\bwindow\.site\s*=\s*\{/;
  *  (`lede: verdict(…)`), so data.json's "lede" is not drawn on that page. A page made before keeps its own app.js,
  *  which draws it. */
 const OWN_LEDE = /\blede\s*:\s*verdict\s*\(/;
+/** The compare starter's app.js names what each row is still missing itself, from its cells (`gapsByRow(…)`): under
+ *  "Still to confirm", or under its title on a page made before. A page with its own app.js may name nothing. */
+const OWN_GAPS = /\bgapsByRow\s*\(/;
 /** Code that sets HTML from a string (`el.innerHTML = …`, `+=`, outerHTML, insertAdjacentHTML). The starters draw
  *  text with site.h, always as text, and a fact with site.trust, which links its page; HTML from a string is text the
  *  check cannot read, and runs whatever markup it holds. Read in code only (codeOnly), so words in a string, a comment
@@ -747,8 +750,51 @@ export function uncitedRows(data) {
   return out;
 }
 
+/** The columns of a comparison that every row shows no value for, which the compare starter names first under "Still to
+ *  confirm", from the cells, each with its note: a value nobody found, or one looked for on a page and not found there.
+ *  A price whose store the page can open or check is no such value: its row offers that instead. */
+function missingColumns(data) {
+  const columns = data.columns.filter((c) => c && typeof c === "object" && c.key).slice(0, 5);
+  const items = data.items.filter((item) => item && typeof item === "object");
+  const canCheck = (item) => !!(item.store && typeof item.store === "object" && (item.store.readable === true || httpsUrl(item.store.url)));
+  if (!items.length) return [];
+  return columns.filter((c) => items.every((item) => !hasValue(item.facts?.[c.key]) && !(c.type === "price" && canCheck(item))));
+}
+
+/** The "unchecked" entries of a comparison that name a column no row has a value for, which the compare starter already
+ *  names as missing from its cells: its label, or that label in the plural, as whole words in any case (a label's part
+ *  in brackets, "Weight (kg)", left out). The page would say it twice: a comparison of three e-readers said under "Still
+ *  to confirm" that "Weight, price and the requested independent reviews were not found in the pages read", beside its
+ *  cells' own (a local test, Nov 10). Read from the page's own labels, never a list of words. Naming a label is no
+ *  repeat by itself: "Check train times on Taiwan Railway before you book" says what the reader can do, so each is a
+ *  note for the build to judge, never a problem. A column some rows have is left to the entry: "Today's prices" says
+ *  more than the one price missing. A page from what Octo knows looked nothing up, so its "unchecked" says what that
+ *  leaves unchecked. [{entry, labels, note}] */
+export function uncheckedRepeats(data) {
+  if (!isOptionsData(data) || !Array.isArray(data.columns) || !Array.isArray(data.unchecked) || fromMemory(data)) return [];
+  const words = (text) => String(text ?? "").toLowerCase().replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const labels = missingColumns(data)
+    .map((c) => ({ label: String(c.label ?? c.key), words: words(c.label ?? c.key) }))
+    .filter((l) => l.words)
+    .map((l) => ({ ...l, named: new RegExp(`(?:^|[^\\p{L}\\p{N}])${escape(l.words)}(?:e?s)?(?=$|[^\\p{L}\\p{N}])`, "u") }));
+  const out = [];
+  for (const entry of data.unchecked) {
+    if (typeof entry !== "string" || !entry.trim()) continue;
+    const named = labels.filter((l) => l.named.test(words(entry))).map((l) => l.label);
+    if (!named.length) continue;
+    const list = named.length > 1 ? `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}` : named[0];
+    out.push({
+      entry,
+      labels: named,
+      note: `"unchecked": "${entry.trim()}" names ${list}, which the page already names as still missing, from its cells, with each value's "note". Keep the entry only for what the reader can do that the page doesn't say; leave out one that only says again what is missing.`,
+    });
+  }
+  return out;
+}
+
 /** The values of a site's page of options, and where its rows come from: problems to fix before the card, and notes
- *  for the reply. */
+ *  for the reply or on what the page already says. */
 export function checkValues(dir) {
   const root = path.resolve(dir);
   const problems = [];
@@ -786,6 +832,8 @@ export function checkValues(dir) {
   }
   for (const row of uncitedRows(data)) problems.push(row.problem);
   problems.push(...memoryCitations(data));
+  // only where app.js names each row's missing values itself
+  if (OWN_GAPS.test(app)) for (const repeat of uncheckedRepeats(data)) notes.push(repeat.note);
 
   const filter = data.filter;
   // a page from what Octo knows has no filter (memoryCitations)
