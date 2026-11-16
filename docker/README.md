@@ -86,6 +86,10 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   When the controller sets `GIT_REMOTE_BASE_URL`, a runtime whose workspace already has files
   but no `.instafy/.git` then fails to start. Roll the file out only to fresh nodes or empty
   workspaces; see [Workspace durability](../docs/Runtime-Machines.md#workspace-durability).
+- `docker/docker-compose.runtime.provider.yml` also forwards `INSTAFY_HOLD_PAGES` from the provider service's own
+  environment, `1` when unset. Set it to `0` there to stop holding another chat's pages on the runtimes the provider
+  starts after that; see [Which chat made a page](../docs/Previews.md#which-chat-made-a-page).
+  `docker/docker-compose.runtime.yml` takes it from `.env.local` instead.
 - The origin gateway (`docker/origin-gateway/Dockerfile`, `origin-http-server` with
   `ORIGIN_MULTI_TENANT=1`) is stateless: it serves every cloud space from its canonical repository
   under `ORIGIN_GIT_REMOTE_BASE_URL` and keeps no working copy. Leave `ORIGIN_GIT_REMOTE_URL`
