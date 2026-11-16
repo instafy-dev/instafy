@@ -629,7 +629,7 @@ describe("summarizeTurnActivity", () => {
   it("leads with the step that answered, then the biggest other thing the turn did", () => {
     const search = {
       v: 1,
-      key: "builtin/web-search",
+      key: "instafy/web-search",
       role: "content",
       live: "Searching the web",
       done: { one: "searched the web", other: "searched the web {n} times", some: "searched the web" },
@@ -642,6 +642,16 @@ describe("summarizeTurnActivity", () => {
       ...Array.from({ length: 3 }, () => command(ADD_POINT)),
     ];
     expect(summarize(messages).summary).toBe("Looked up 3 places, read 6 pages");
+  });
+
+  // The runtime gives `instafy web search` and the AI's own search one label
+  // (activity_labels.rs), so a turn that used both says it once, counted.
+  it("says a turn that searched with the CLI and with the AI's own search searched the web once, counted", () => {
+    const messages = [
+      command(WEB_SEARCH, { command: "bash -lc 'instafy web search \"kobo clara bw\"'" }),
+      step("web_search", { ...WEB_SEARCH, count: 2 }, { kind: "codex_web_search", query: "a · b" }),
+    ];
+    expect(summarize(messages).summary).toBe("Searched the web 3 times");
   });
 
   it("follows the running step, then says Thinking between steps", () => {

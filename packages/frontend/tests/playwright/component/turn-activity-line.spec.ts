@@ -16,7 +16,7 @@ const LONG_SUMMARY =
 // Longer than a phone's line once the arrow follows it.
 const LONG_LIVE = "Judging calm and lively areas around the river and the old town…";
 
-type LineState = { running: boolean; long: boolean; longStep: boolean; approval: boolean };
+type LineState = { running: boolean; long: boolean; longStep: boolean; approval: boolean; search: boolean };
 // The longest a done label may be (48 characters once {n} is 999).
 const LONG_STEP_LABEL = "Looked up 999 places in the old town of Lisbon";
 
@@ -45,15 +45,31 @@ async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {
       metadata: { source: "agent", jobId, messageType: "command_execution",
         details: { kind: "codex_command_execution", itemId: id, command: text, status, aggregatedOutput: output } },
     });
-    const steps = (running, longStep) => [
+    // A search the AI ran with its own web search, as the runtime stores it: its words, and the
+    // pages it returned for Details.
+    const search = (id, query, pages) => ({
+      id, role: "assistant", authorId: null, content: \`Web search completed: "\${query}"\`, timestamp: 0,
+      files: null, messageType: "web_search",
+      metadata: { source: "agent", jobId, messageType: "web_search",
+        details: { kind: "codex_web_search", itemId: id, query, status: "completed", pages } },
+    });
+    const searchStep = { kind: "step", id: "c", step: { kind: "search", state: "done", activity: null,
+      label: "Searched the web 2 times",
+      message: search("c", "belém tower opening hours sunday · jerónimos monastery tickets price today", [
+        { url: "https://www.museusemonumentos.pt/en/museums-and-monuments/belem-tower", title: "Belém Tower | Opening hours, tickets and how to get there from the city centre" },
+        { url: "https://www.museusemonumentos.pt/en/museums-and-monuments/jeronimos-monastery" },
+        { url: "https://www.visitlisboa.com/en/places/jeronimos-monastery", title: "Jerónimos Monastery" },
+      ]) } };
+    const steps = (running, longStep, searched) => [
       { kind: "step", id: "a", step: { kind: "command", state: "done", activity: null, label: "Read 6 pages",
         message: command("a", "bash -lc 'instafy web read https://www.visitlisboa.com/en/places/belem-tower https://en.wikipedia.org/wiki/Bel%C3%A9m_Tower'", "completed", "Belém Tower\\n".repeat(30)) } },
       { kind: "step", id: "b", step: { kind: "command", state: running ? "running" : "done", activity: null,
         label: running ? "Looking up places" : longStep ? ${JSON.stringify(LONG_STEP_LABEL)} : "Looked up 14 places",
         message: command("b", "bash -lc 'uw() { node .agents/skills/interactive-map/scripts/uw.mjs \\"$@\\"; }\\nfor spec in a b c; do uw add-point --json \\"$spec\\"; done'", running ? "in_progress" : "completed", "Serving map at http://localhost:4173/") } },
+      ...(searched ? [searchStep] : []),
     ];
     function Fixture() {
-      const [state, setState] = React.useState({ running: true, long: false, longStep: false, approval: false });
+      const [state, setState] = React.useState({ running: true, long: false, longStep: false, approval: false, search: false });
       const [detailsOpen, setDetailsOpen] = React.useState(false);
       window.__setLineState = (update) => setState((current) => ({ ...current, ...update }));
       // A Shared Browser prompt of the turn's run, as the approval lane hands it over.
@@ -75,7 +91,7 @@ async function mountFixture(page: Page, { dark = false }: { dark?: boolean } = {
         live: state.running ? (state.approval ? "Waiting for you" : state.long ? ${JSON.stringify(LONG_LIVE)} : "Looking up places…") : null,
         summary: state.running ? null : (state.long ? ${JSON.stringify(LONG_SUMMARY)} : "Looked up 14 places, read 6 pages, built the map"),
         stepCount: 2,
-        details: steps(state.running, state.longStep),
+        details: steps(state.running, state.longStep, state.search),
       };
       return h(TurnBrowserApprovalStateContext.Provider, { value: approvalState }, h("main", { style: { padding: "16px 16px 16px 48px", maxWidth: "1000px" } },
         h(AgentJobThreadPreviewLayout, {
@@ -299,6 +315,27 @@ for (const dark of [false, true]) {
   }
 }
 
+for (const dark of [false, true]) {
+  test(`a web search's pages open by keyboard under its row at 1280px (${dark ? "dark" : "light"})`, async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const errors = await mountFixture(page, { dark });
+    await setLine(page, { running: false, search: true });
+    await page.getByTestId("turn-activity-line").click();
+    const toggle = page.getByRole("button", { name: "Show pages" });
+    await toggle.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: "Hide pages" })).toHaveAttribute("aria-expanded", "true");
+    const links = page.getByRole("list", { name: "Pages the search returned" }).getByRole("link");
+    await expect(links).toHaveCount(3);
+    // A titled page names its site beside it.
+    await expect(page.getByRole("list", { name: "Pages the search returned" }).getByRole("listitem").first()).toContainText("museusemonumentos.pt");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1280);
+    await page.screenshot({ path: testInfo.outputPath(`turn-search-pages-1280-${dark ? "dark" : "light"}.png`) });
+    expect(errors, errors.join("; ")).toEqual([]);
+  });
+}
+
 test.describe("touch", () => {
   test.use({ viewport: { width: 390, height: 800 }, hasTouch: true, isMobile: true });
 
@@ -321,6 +358,53 @@ test.describe("touch", () => {
     expect(box?.height).toBeGreaterThanOrEqual(44);
     expect(box?.width).toBeGreaterThanOrEqual(44);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    expect(errors, errors.join("; ")).toEqual([]);
+  });
+
+  // A web search's row names its words, and the pages it returned wait
+  // behind its own chevron, as a command's output does: each a link with its
+  // site, a 44px target for a finger, inside the turn and the screen.
+  test("opens a web search's pages under its row and keeps them on a phone's screen", async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    const errors = await mountFixture(page);
+    await setLine(page, { running: false, search: true });
+    await page.getByTestId("turn-activity-line").tap();
+    const row = page.getByTestId("turn-activity-search");
+    await expect(row.getByTestId("turn-activity-step-label")).toHaveText("Searched the web 2 times");
+    await expect(row).toContainText("belém tower opening hours sunday · jerónimos monastery tickets price today");
+    await expect(page.getByTestId("turn-activity-search-pages")).toHaveCount(0);
+    const toggle = row.getByTestId("turn-activity-search-pages-toggle");
+    await expect(toggle).toHaveAccessibleName("Show pages");
+    const box = await toggle.boundingBox();
+    expect(box?.height).toBeGreaterThanOrEqual(44);
+    expect(box?.width).toBeGreaterThanOrEqual(44);
+    await toggle.tap();
+    await expect(toggle).toHaveAccessibleName("Hide pages");
+    const pages = page.getByRole("list", { name: "Pages the search returned" });
+    const links = pages.getByRole("link");
+    await expect(links).toHaveText([
+      "Belém Tower | Opening hours, tickets and how to get there from the city centre",
+      "museusemonumentos.pt",
+      "Jerónimos Monastery",
+    ]);
+    await expect(links.first()).toHaveAttribute("target", "_blank");
+    await expect(links.first()).toHaveAttribute("rel", "noopener noreferrer nofollow");
+    const geometry = await pages.evaluate((list) => {
+      const turn = list.closest('[data-testid="chat-bubble-assistant"]')!.getBoundingClientRect();
+      return [...list.querySelectorAll("a")].map((link) => {
+        const rect = link.getBoundingClientRect();
+        return { height: rect.height, right: rect.right, turnRight: turn.right, truncated: link.scrollWidth > link.clientWidth };
+      });
+    });
+    for (const link of geometry) {
+      expect(link.height).toBeGreaterThanOrEqual(44);
+      expect(link.right).toBeLessThanOrEqual(link.turnRight + 0.5);
+    }
+    // The long title is cut to the turn's width, with the whole address as its title.
+    expect(geometry[0].truncated).toBe(true);
+    await expect(links.first()).toHaveAttribute("title", "https://www.museusemonumentos.pt/en/museums-and-monuments/belem-tower");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+    await page.screenshot({ path: testInfo.outputPath("turn-search-pages-390.png") });
     expect(errors, errors.join("; ")).toEqual([]);
   });
 

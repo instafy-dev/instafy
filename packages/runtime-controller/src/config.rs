@@ -116,6 +116,24 @@ fn managed_ai_chat_reasoning_effort(configured: Option<&str>) -> Option<String> 
     }
 }
 
+/// The switch that lets managed (Instafy AI) jobs use the AI's own web search.
+pub(crate) const MANAGED_AI_NATIVE_WEB_SEARCH_ENV: &str = "MANAGED_AI_NATIVE_WEB_SEARCH";
+
+/// `MANAGED_AI_NATIVE_WEB_SEARCH`: unset or empty is off. A value that is not
+/// a boolean stops the controller at startup, as the proxy's own switch
+/// (`PROXY_MANAGED_NATIVE_WEB_SEARCH`) stops the proxy, so a typo never
+/// leaves an operator believing search is on, or off.
+fn managed_ai_native_web_search(configured: Option<&str>) -> anyhow::Result<bool> {
+    let value = configured.unwrap_or_default().trim().to_ascii_lowercase();
+    match value.as_str() {
+        "" | "0" | "false" | "no" | "off" => Ok(false),
+        "1" | "true" | "yes" | "on" => Ok(true),
+        _ => anyhow::bail!(
+            "{MANAGED_AI_NATIVE_WEB_SEARCH_ENV} must be a boolean (1/0, true/false, yes/no, on/off)"
+        ),
+    }
+}
+
 /// `SUPABASE_JWKS_ON_DEMAND_INTERVAL_SECONDS`: how soon after a JWKS fetch a
 /// request with an unknown key id may cause another. Anything under the floor
 /// means the default: the interval is what keeps such requests from turning
@@ -839,6 +857,13 @@ pub struct AppConfig {
     pub managed_ai_cached_input_usd_micros_per_1k: i64,
     pub managed_ai_output_usd_micros_per_1k: i64,
     pub managed_ai_startup_check: bool,
+    /// `MANAGED_AI_NATIVE_WEB_SEARCH`, off by default: whether a managed
+    /// (Instafy AI) job's proxy grant lets it use the AI's own web search, as
+    /// a person's own ChatGPT login does (see
+    /// [`crate::credentials::managed_job_allows_native_web_search`]). The
+    /// proxy serves those searches only with its own
+    /// `PROXY_MANAGED_NATIVE_WEB_SEARCH` on as well.
+    pub managed_ai_native_web_search: bool,
     /// Controller-owned OpenAI API key for the managed lane. Proxies lease it
     /// through the internal credential-lease route under
     /// [`MANAGED_AI_CREDENTIAL_ID`], so a per-runtime proxy sidecar with no
@@ -1709,6 +1734,16 @@ impl AppConfig {
             .map(|value| value.to_lowercase())
             .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(managed_ai_enabled && !dev_mode);
+        let managed_ai_native_web_search = managed_ai_native_web_search(
+            std::env::var(MANAGED_AI_NATIVE_WEB_SEARCH_ENV)
+                .ok()
+                .as_deref(),
+        )?;
+        if managed_ai_native_web_search {
+            tracing::warn!(
+                "{MANAGED_AI_NATIVE_WEB_SEARCH_ENV} is on: managed AI jobs may use the AI's own web search where the proxy allows it, and no credits are charged for those searches yet"
+            );
+        }
 
         let runtime_idle_release_seconds = std::env::var("RUNTIME_IDLE_RELEASE_SECONDS")
             .ok()
@@ -1920,6 +1955,7 @@ impl AppConfig {
             managed_ai_cached_input_usd_micros_per_1k,
             managed_ai_output_usd_micros_per_1k,
             managed_ai_startup_check,
+            managed_ai_native_web_search,
             managed_ai_openai_api_key,
             tunnel_broker_hook_secret,
             git_event_hook_secret,
@@ -2086,12 +2122,13 @@ mod tests {
     use super::{
         created_admin_user_id, database_pool_size_from_values, find_admin_user_by_email,
         jwks_on_demand_interval_seconds, managed_ai_chat_reasoning_effort,
-        managed_ai_decline_waiver_units, match_admin_users_page, normalize_public_app_url,
-        normalized_admin_user_email, parse_browser_profile_persist_project_ids,
-        published_development_key_warning, resolve_credential_encryption_key,
-        resolve_credential_key_ring, resolve_user_token_secret, working_state_saves_enabled,
-        AdminUserLookup, AdminUsersPage, ClaudeCodeLaneUsers, CredentialEncryptionKey,
-        DeviceGrantUsers, HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
+        managed_ai_decline_waiver_units, managed_ai_native_web_search, match_admin_users_page,
+        normalize_public_app_url, normalized_admin_user_email,
+        parse_browser_profile_persist_project_ids, published_development_key_warning,
+        resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
+        working_state_saves_enabled, AdminUserLookup, AdminUsersPage, ClaudeCodeLaneUsers,
+        CredentialEncryptionKey, DeviceGrantUsers, HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
+        MANAGED_AI_NATIVE_WEB_SEARCH_ENV,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -2591,6 +2628,40 @@ mod tests {
                 managed_ai_chat_reasoning_effort(Some(unsupported)).as_deref(),
                 Some("medium"),
                 "{unsupported}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_ai_native_web_search_is_off_unless_turned_on_and_a_typo_stops_startup() {
+        for off in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("0"),
+            Some("false"),
+            Some("No"),
+            Some("off"),
+        ] {
+            assert!(
+                !managed_ai_native_web_search(off).expect("a boolean"),
+                "{off:?}"
+            );
+        }
+        for on in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(
+                managed_ai_native_web_search(Some(on)).expect("a boolean"),
+                "{on:?}"
+            );
+        }
+        for typo in ["ture", "enabled", "2", "o n"] {
+            let error = managed_ai_native_web_search(Some(typo))
+                .expect_err("a value that is not a boolean")
+                .to_string();
+            assert!(error.contains(MANAGED_AI_NATIVE_WEB_SEARCH_ENV), "{error}");
+            assert!(
+                !error.contains(typo.trim()),
+                "the value is not echoed: {error}"
             );
         }
     }

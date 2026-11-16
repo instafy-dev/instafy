@@ -214,10 +214,11 @@ inferred from API web-search prices.
 `PROXY_MANAGED_NATIVE_WEB_SEARCH` (off by default) lets a managed run search through
 `POST /v1/alpha/search` when the controller granted its job native search: a job-bound token
 with `native_web_search`, a `run_id` and no `credential_id`. The controller grants native search
-only for a person's own ChatGPT login, so the setting changes nothing until the controller grants
-it to managed runs as well. Turning it off refuses every managed search at once with 403
-`native_web_search_unavailable`. Hosted `web_search` in a model request stays off on the
-platform lane either way.
+to managed runs only with its own `MANAGED_AI_NATIVE_WEB_SEARCH` on (off by default), so a managed
+run searches only with both settings on; `docs/Credits-Billing.md` ("Web search for Instafy AI")
+says how to turn them on in a test environment. Turning the proxy's setting off refuses every
+managed search at once with 403 `native_web_search_unavailable`. Hosted `web_search` in a model
+request stays off on the platform lane either way.
 
 A managed run's search goes through the search bridge, which works the same on either kind of
 platform credential:
@@ -237,11 +238,15 @@ platform credential:
   searched across the whole web.
 - The answer is codex's `SearchResponse`. `output` gives what the search wrote for each query
   inside `<untrusted_page_content viewer="provider search" read_at="…">`, with the pages it cites,
-  and says what was removed, refused or not run; `results` lists the cited pages
-  (`type: "text_result"`, `url`, `title`); `encrypted_output` is `null`. Only public web pages are
-  cited: http(s) on the default ports, without a user name, a private, local or reserved host, or
-  a fragment, and percent-encoded, so no address can close the wrapper. Hidden characters in what
-  the search wrote become spaces, and a tag of the wrapper's name in it is defused.
+  and says what was removed, refused or not run; `encrypted_output` is `null`. `results`, which
+  codex hands to its clients and never to the model, starts with
+  `{"type": "searched_queries", "queries": […]}`: the queries that searched, as they were sent
+  (not one refused, repeated, past the limit or not run, nor one whose search failed), which the
+  chat shows in place of the words codex asked for, then lists the cited pages
+  (`type: "text_result"`, `url`, `title`). Only public web pages are cited: http(s) on the
+  default ports, without a user name, a private, local or reserved host, or a fragment, and
+  percent-encoded, so no address can close the wrapper. Hidden characters in what the search
+  wrote become spaces, and a tag of the wrapper's name in it is defused.
 - A query whose search fails is told in `output`. When every search fails, the route answers with
   the first failure, redacted like any upstream failure. Nothing is retried here: codex owns
   retries.

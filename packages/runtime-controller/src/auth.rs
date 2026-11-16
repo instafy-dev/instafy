@@ -631,7 +631,12 @@ pub(crate) fn issue_proxy_envelope(
     let exp = issued_at + ChronoDuration::seconds(config.proxy_token_ttl_seconds);
 
     let claims = ProxyTokenClaims {
-        native_web_search: credential_id.is_some()
+        // Only a job-bound token may carry search, and only on a lane the
+        // proxy can tell apart: a person's own credential, or the managed
+        // lane, which the proxy knows by its run id and no credential. The
+        // binding's own value comes from
+        // `credentials::job_allows_native_web_search`.
+        native_web_search: (credential_id.is_some() || run_id.is_some())
             && job_binding.is_some_and(|binding| binding.native_web_search),
         aud: "proxy",
         iss: "runtime-controller",
@@ -1015,6 +1020,7 @@ mod tests {
                 DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,
             managed_ai_output_usd_micros_per_1k: DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
             managed_ai_startup_check: true,
+            managed_ai_native_web_search: false,
             managed_ai_openai_api_key: None,
             tunnel_broker_hook_secret: None,
             git_event_hook_secret: None,
@@ -1162,28 +1168,41 @@ mod tests {
     }
 
     #[test]
-    fn native_search_claim_requires_both_a_job_binding_and_byo_credential() {
+    fn native_search_claim_needs_a_job_grant_on_an_own_credential_or_the_managed_lane() {
         let mut config = base_app_config();
         config.proxy_signing_secret = Some("proxy-secret".to_string());
         let project = Uuid::new_v4();
         let runtime = Uuid::new_v4();
         let credential = Uuid::new_v4();
+        let run = Uuid::new_v4();
         let binding = ProxyJobBinding {
             job_id: Uuid::new_v4(),
             lease_attempt: 1,
             native_web_search: true,
         };
-        for (credential_id, job, expected) in [
-            (Some(&credential), Some(binding), true),
-            (None, Some(binding), false),
-            (Some(&credential), None, false),
-            (None, None, false),
+        let refused = ProxyJobBinding {
+            native_web_search: false,
+            ..binding
+        };
+        for (run_id, credential_id, job, expected) in [
+            // A person's own credential, as before.
+            (None, Some(&credential), Some(binding), true),
+            (Some(&run), Some(&credential), Some(binding), true),
+            (None, None, Some(binding), false),
+            (Some(&run), Some(&credential), Some(refused), false),
+            (Some(&run), Some(&credential), None, false),
+            (None, None, None, false),
+            // The managed lane: a job on a run with no credential of its own
+            // carries the grant it was given, and only that.
+            (Some(&run), None, Some(binding), true),
+            (Some(&run), None, Some(refused), false),
+            (Some(&run), None, None, false),
         ] {
             let envelope = issue_proxy_envelope(
                 &config,
                 &project,
                 &runtime,
-                None,
+                run_id,
                 credential_id,
                 job,
                 None,
@@ -1193,7 +1212,8 @@ mod tests {
             .expect("proxy envelope");
             assert_eq!(
                 proxy_token_claims(&config, &envelope.token)["native_web_search"],
-                json!(expected)
+                json!(expected),
+                "run {run_id:?}, credential {credential_id:?}, binding {job:?}"
             );
         }
     }
