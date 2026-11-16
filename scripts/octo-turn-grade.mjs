@@ -94,15 +94,16 @@ export function jobsQuery(projectId, sinceIso) {
 }
 
 /** Credits the turn's project was charged since `sinceIso` (managed AI prompts and token adjustments, refunds
- *  netted), and the token rates the controller billed them at (the `pricing` it writes on each reconciled row).
- *  Same input checks as jobsQuery. */
+ *  netted, and Instafy AI's web searches, which `webSearch` also gives on their own), and the token rates the
+ *  controller billed them at (the `pricing` it writes on each reconciled row). Same input checks as jobsQuery. */
 export function creditsQuery(projectId, sinceIso) {
   jobsQuery(projectId, sinceIso);
   return `select json_build_object('charged', coalesce(-sum(delta), 0), 'entries', count(*),
+      'webSearch', coalesce(-sum(delta) filter (where reason = 'managed_ai_web_search'), 0),
       'pricing', (array_agg(metadata->'pricing' order by created_at desc) filter (where metadata ? 'pricing'))[1])
     from org_credit_ledger
     where project_id = '${projectId}' and created_at >= '${sinceIso}'
-      and reason in ('managed_ai_prompt', 'managed_ai_adjustment', 'managed_ai_refund')`;
+      and reason in ('managed_ai_prompt', 'managed_ai_adjustment', 'managed_ai_refund', 'managed_ai_web_search')`;
 }
 
 export function collectCredits({ projectId, sinceIso, dbUrl = process.env.OCTO_EVAL_DB_URL || DEFAULT_DB_URL }) {
@@ -697,14 +698,17 @@ export function caseMetrics(evidence) {
   };
 }
 
-/** What the turn was charged and what its tokens should have cost (null when the evidence has no credits). */
+/** What the turn was charged, its web searches included, and what it should have cost: its tokens, and the
+ *  searches as charged, which no usage receipt holds (null when the evidence has no credits). */
 function creditsOf(evidence, jobs, usage) {
   const recorded = evidence?.credits;
   if (!recorded || typeof recorded.charged !== "number") return null;
+  const webSearch = Number(recorded.webSearch ?? 0);
   const expected = expectedCreditsOf(jobs, recorded.pricing);
   return {
     charged: recorded.charged,
-    expected: expected?.units ?? null,
+    webSearch,
+    expected: expected ? expected.units + webSearch : null,
     tolerance: expected?.tolerance ?? null,
     perMillionInput: usage.input > 0 ? Math.round((recorded.charged / usage.input) * 1e6 * 10) / 10 : null,
   };
@@ -822,9 +826,9 @@ export function gradeCase(caseDef, evidence) {
   // Turns are billed by tokens. With the ledger's rates the charge must match the tokens; without them, a flat
   // 1-credit charge for a heavy turn is still a billing bug.
   if (m.credits && m.credits.expected !== null && m.usage.reported) {
-    const { charged, expected, tolerance } = m.credits;
+    const { charged, expected, tolerance, webSearch } = m.credits;
     check(checks, "credits_match_tokens", "should", Math.abs(charged - expected) <= tolerance,
-      `${charged} credits charged, ${expected} expected from ${m.usage.input} input (${m.usage.cachedInput} cached) and ${m.usage.output} output tokens at the ledger's rates (±${tolerance})`);
+      `${charged} credits charged, ${expected} expected from ${m.usage.input} input (${m.usage.cachedInput} cached) and ${m.usage.output} output tokens at the ledger's rates (±${tolerance})${webSearch ? `, and ${webSearch} for web searches` : ""}`);
   } else if (evidence?.credits && typeof evidence.credits.charged === "number") {
     const heavy = m.usage.reported && m.usage.input > 500_000;
     check(checks, "credits_charged", "should", heavy ? evidence.credits.charged > 1 : evidence.credits.charged >= 0,

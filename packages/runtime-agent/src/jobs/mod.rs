@@ -303,6 +303,10 @@ struct AgentRoutingPreflight {
     requires_context_lookup: bool,
     requires_command_execution: bool,
     workspace_file_change_requirement: WorkspaceFileChangeRequirement,
+    /// The person's own words ask for deeper research than a quick answer: with Instafy AI the
+    /// message may run more web searches (`managed_web_search`), each of which costs them
+    /// credits.
+    deeper_research: bool,
     observation_commands: Vec<String>,
 }
 
@@ -3391,20 +3395,53 @@ fn routing_preflight_failure(job: &LeaseJob, error: anyhow::Error) -> anyhow::Er
     error
 }
 
+/// The receipts a job's completion carries, whether it succeeded or failed: its model calls'
+/// usage (`ai/task-usage`), then what its web searches cost (`ai/web-search-usage`).
+fn attach_job_receipts(
+    result: Result<JobExecution>,
+    task_usage: &TaskUsage,
+    job_id: Uuid,
+) -> Result<JobExecution> {
+    attach_web_search_usage(attach_task_usage(result, task_usage), job_id)
+}
+
 fn attach_task_usage(result: Result<JobExecution>, task_usage: &TaskUsage) -> Result<JobExecution> {
     let Some(receipt) = task_usage.artifact() else {
         return result;
     };
+    attach_artifact(result, receipt)
+}
+
+/// What an Instafy AI job's web searches cost (`managed_web_search`), on its completion whether
+/// it succeeded or failed: a turn that searched and then ended in an error or its time limit has
+/// no `turn.completed`, and its searches still ran and cost what they cost. The searches of every
+/// run of the job are in it, a recovery retry's too. A job that lost its lease sends no
+/// completion: what it searched is kept for the job's next attempt on this runtime.
+fn attach_web_search_usage(result: Result<JobExecution>, job_id: Uuid) -> Result<JobExecution> {
+    if result
+        .as_ref()
+        .is_err_and(crate::agent_executor::is_lease_lost)
+    {
+        return result;
+    }
+    match crate::managed_web_search::usage_artifact_of_job(job_id) {
+        Some(artifact) => attach_artifact(result, artifact),
+        None => result,
+    }
+}
+
+/// Adds `artifact` to a job's result, a failure's included.
+fn attach_artifact(result: Result<JobExecution>, artifact: JsonValue) -> Result<JobExecution> {
     match result {
         Ok(mut execution) => {
-            execution.artifacts.push(receipt);
+            execution.artifacts.push(artifact);
             Ok(execution)
         }
         Err(error) => {
             let mut artifacts = extract_job_failure_artifacts(&error)
                 .unwrap_or_default()
                 .to_vec();
-            artifacts.push(receipt);
+            artifacts.push(artifact);
             let message = extract_job_failure_message(&error)
                 .map(str::to_owned)
                 .unwrap_or_else(|| error.to_string());
@@ -5046,6 +5083,30 @@ fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text:
     !is_bounded_job(job) && should_run_agent_routing_preflight(job, prompt_text)
 }
 
+/// An Instafy AI message's allowance of web searches for this turn (`managed_web_search`), or
+/// None where the job's grant lets no managed run search: a person's own ChatGPT login searches
+/// on their own plan. It holds more searches when the turn's routing step read the person's own
+/// words as asking for deeper research (`deeper_research`). A hand-back goes on with the allowance
+/// of the turn whose card it carries on, and a job's later attempt with its earlier attempt's, so
+/// the message keeps to one allowance. Each job of a team plan has one of its own: a team's jobs
+/// skip the routing step, so they get [`crate::managed_web_search::SEARCHES_PER_MESSAGE`].
+fn managed_web_search_allowance(
+    job: &LeaseJob,
+    deeper_research: bool,
+) -> Option<Arc<crate::managed_web_search::ManagedWebSearch>> {
+    crate::job_proxy_auth::current().filter(|auth| auth.allows_managed_web_search())?;
+    let limit = if deeper_research {
+        crate::managed_web_search::SEARCHES_FOR_DEEPER_RESEARCH
+    } else {
+        crate::managed_web_search::SEARCHES_PER_MESSAGE
+    };
+    Some(crate::managed_web_search::allowance_for_job(
+        job.id,
+        browser_hand_back::card_job_of(job),
+        limit,
+    ))
+}
+
 /// Ends a job whose lease is gone (a Stop cancelled it, and its heartbeat or a refused request
 /// said so) before it does any more: before its folder is brought up to date, its routing step
 /// asks a model, or its thread is restored and its prompt written into it. Its error says the
@@ -5203,6 +5264,12 @@ fn parse_agent_routing_preflight(value: &JsonValue) -> Option<AgentRoutingPrefli
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
     let workspace_file_change_requirement = parse_workspace_file_change_requirement(value).ok()?;
+    // An answer without it (a cached or older one) asks for no deeper research.
+    let deeper_research = object
+        .get("deeperResearch")
+        .or_else(|| object.get("deeper_research"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
     let observation_commands = object
         .get("observationCommands")
         .or_else(|| object.get("observation_commands"))
@@ -5227,6 +5294,7 @@ fn parse_agent_routing_preflight(value: &JsonValue) -> Option<AgentRoutingPrefli
         requires_context_lookup,
         requires_command_execution,
         workspace_file_change_requirement,
+        deeper_research,
         observation_commands,
     })
 }
@@ -5253,6 +5321,7 @@ fn agent_routing_preflight_artifact(preflight: &AgentRoutingPreflight) -> JsonVa
         "requiresCommandExecution": preflight.requires_command_execution,
         "workspaceFileChangeRequirement": preflight.workspace_file_change_requirement.label(),
         "requiresWorkspaceFileChanges": preflight.workspace_file_change_requirement.requires_changes(),
+        "deeperResearch": preflight.deeper_research,
         "observationCommands": &preflight.observation_commands,
     })
 }
@@ -7676,7 +7745,7 @@ impl JobProcessor {
             turn_baseline::forget(&self.config.project_workspace_dir(&project_id), job.id);
         }
         let result = left_thread.attach_to_failure(result);
-        attach_task_usage(result, &task_usage)
+        attach_job_receipts(result, &task_usage, job.id)
     }
 
     async fn run_apply_job_observed(
@@ -8168,6 +8237,8 @@ impl JobProcessor {
                             continue_building,
                             "routing step sent the message straight to Instafy's browser"
                         );
+                        // The build after the browser goes on with this message's allowance.
+                        managed_web_search_allowance(job, preflight.deeper_research);
                         return Ok(execution);
                     }
                     preflight.route = AgentRoutingPreflightRoute::Direct;
@@ -8368,6 +8439,14 @@ impl JobProcessor {
             // The turn's steps reach the chat, so it may search when the job's grant lets it
             // (`codex.rs`): never in a routing step or a browser or granted turn.
             disable_native_web_search: false,
+            // With Instafy AI each search costs the person credits, so the message keeps to its
+            // allowance, which a hand-back goes on with.
+            managed_web_search: managed_web_search_allowance(
+                job,
+                routing_preflight
+                    .as_ref()
+                    .is_some_and(|preflight| preflight.deeper_research),
+            ),
             disable_final_output_json_schema: final_output_mode.disable_final_output_json_schema(),
             final_output_schema,
             // Browser-mode is a runtime capability (VNC + headed Chromium via CDP), not inferred
@@ -18366,13 +18445,14 @@ fn agent_routing_preflight_prompt(
         Set `requiresCommandExecution = true` when a correct final answer needs a separate fresh observation of current filesystem, Git, process, repo, runtime, server, or tool state. Prior-conversation retrieval belongs only in `requiresContextLookup`; the fact that its transport uses a CLI does not set this flag. Leave it false when supplied current evidence is enough. Both flags may be true when both kinds of evidence are needed.\n\
         Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files (a map, page or site the person asks for is files); `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
         {browser_change_line}\
+        Set `deeperResearch = true` only when the latest request's own words ask to research in depth or to search further or more thoroughly; asking for a comparison, for reviews or for a page does not by itself. Otherwise false. It lets the turn run more web searches, and each one costs the person credits.\n\
         Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; classify `workspaceFileChangeRequirement` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
         {skill_snapshot}{browser_snapshot}\n"
     );
     let mut rest = format!(
         "{plan_group_guidance}\
         Latest user request:\n```text\n{prompt_text}\n```\n\
-        Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, `observationCommands`, and nullable `workerQuestionReply`."
+        Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, `deeperResearch`, `observationCommands`, and nullable `workerQuestionReply`."
     );
     if let Some(pending) = pending {
         pending.append_prompt(&mut rest);
@@ -22920,6 +23000,7 @@ mod tests {
             requires_context_lookup,
             requires_command_execution,
             workspace_file_change_requirement: WorkspaceFileChangeRequirement::None,
+            deeper_research: false,
             observation_commands: Vec::new(),
         }
     }
@@ -23974,6 +24055,163 @@ mod tests {
             .unwrap_err();
         assert!(extract_job_failure_artifacts(&error).is_none());
         assert_eq!(error.to_string(), "no model configured");
+    }
+
+    /// An Instafy AI job's completion says what its web searches cost, whether the job succeeded
+    /// or failed: a turn that searched and then ended in an error or its time limit has no
+    /// `turn.completed`, and a recovery retry's searches are its job's too. Each search is
+    /// reported once. A job that lost its lease sends no completion, so what it searched waits
+    /// for its next attempt.
+    #[test]
+    fn a_jobs_completion_says_what_its_web_searches_cost_whether_it_succeeded_or_failed() {
+        use crate::managed_web_search::{
+            SEARCHES_PER_MESSAGE, allowance_for_job, record_searches_for_test,
+        };
+        let execution = || JobExecution {
+            summary: "The museum is open on Sunday.".to_string(),
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: vec![json!({"kind": "codex/run-log", "events": []})],
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        let two_searches = json!({"kind": "ai/web-search-usage", "searches": 2,
+            "input_tokens": 16_824, "cached_input_tokens": 0, "output_tokens": 782});
+
+        // A turn that searched once, and its recovery retry that searched once more.
+        let succeeded = Uuid::new_v4();
+        let allowance = allowance_for_job(succeeded, None, SEARCHES_PER_MESSAGE);
+        record_searches_for_test(&allowance, 1, 8_412, 391);
+        record_searches_for_test(&allowance, 1, 8_412, 391);
+        // Beside the receipt of the job's model calls, as every completion carries it.
+        let task_usage = TaskUsage::default();
+        task_usage
+            .call(UsagePhase::Main)
+            .start_attempt(1)
+            .finish(crate::task_usage::UsageOutcome::Success);
+        let result = attach_job_receipts(Ok(execution()), &task_usage, succeeded).unwrap();
+        let kinds = result
+            .artifacts
+            .iter()
+            .map(|artifact| artifact["kind"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            ["codex/run-log", "ai/task-usage", "ai/web-search-usage"]
+        );
+        assert_eq!(result.artifacts.last(), Some(&two_searches));
+        let again = attach_job_receipts(Ok(execution()), &TaskUsage::default(), succeeded).unwrap();
+        assert_eq!(again.artifacts.len(), 1, "reported once");
+
+        // A turn that searched twice and then lost its stream.
+        let failed = Uuid::new_v4();
+        record_searches_for_test(
+            &allowance_for_job(failed, None, SEARCHES_PER_MESSAGE),
+            2,
+            16_824,
+            782,
+        );
+        let error = attach_job_receipts(
+            Err(anyhow!("stream disconnected before completion")),
+            &TaskUsage::default(),
+            failed,
+        )
+        .unwrap_err();
+        assert_eq!(
+            extract_job_failure_artifacts(&error),
+            Some([two_searches.clone()].as_slice())
+        );
+        assert_eq!(
+            extract_job_failure_message(&error),
+            Some("stream disconnected before completion")
+        );
+
+        // A job that lost its lease: nothing now, all of it with its next attempt's completion.
+        let lost = Uuid::new_v4();
+        record_searches_for_test(
+            &allowance_for_job(lost, None, SEARCHES_PER_MESSAGE),
+            2,
+            16_824,
+            782,
+        );
+        let error = attach_job_receipts(
+            Err(anyhow!("lease lost: job canceled")),
+            &TaskUsage::default(),
+            lost,
+        )
+        .unwrap_err();
+        assert!(extract_job_failure_artifacts(&error).is_none());
+        let next_attempt =
+            attach_job_receipts(Ok(execution()), &TaskUsage::default(), lost).unwrap();
+        assert_eq!(next_attempt.artifacts.last(), Some(&two_searches));
+
+        // A job with no allowance (a person's own login), or that searched nothing, says nothing.
+        let unsearched = Uuid::new_v4();
+        allowance_for_job(unsearched, None, SEARCHES_PER_MESSAGE);
+        for job in [unsearched, Uuid::new_v4()] {
+            let result = attach_job_receipts(Ok(execution()), &TaskUsage::default(), job).unwrap();
+            assert_eq!(result.artifacts.len(), 1);
+        }
+    }
+
+    /// Only a managed job (Instafy AI: a run and no credential of its own, with the grant's
+    /// search) keeps to an allowance of web searches, of 2, or 8 when the routing step read the
+    /// person's own words as asking for deeper research. A person's own login, a grant without
+    /// search and a job with no grant have none. A hand-back, whose verified record names the
+    /// job whose card it carries on, goes on with that job's allowance, deeper research and all,
+    /// as a routed message's build after the browser does.
+    #[tokio::test]
+    async fn only_an_instafy_ai_job_keeps_to_an_allowance_of_web_searches() {
+        use crate::managed_web_search::{SEARCHES_FOR_DEEPER_RESEARCH, SEARCHES_PER_MESSAGE};
+        let job = |credential: bool, metadata: JsonValue| {
+            let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+            job.run_id = Some(Uuid::new_v4());
+            job.credential_id = credential.then(Uuid::new_v4);
+            job
+        };
+        let allowance = |mut job: LeaseJob, native_web_search: bool, deeper_research: bool| async move {
+            let (auth, _guard) =
+                crate::job_proxy_auth::granted_for_test(&mut job, native_web_search);
+            crate::job_proxy_auth::scope(Some(auth), async {
+                managed_web_search_allowance(&job, deeper_research)
+            })
+            .await
+        };
+
+        let message = job(false, json!({}));
+        let routed = allowance(message.clone(), true, true)
+            .await
+            .expect("a managed job keeps to an allowance");
+        assert_eq!(routed.limit(), SEARCHES_FOR_DEEPER_RESEARCH);
+        assert_eq!(
+            allowance(job(false, json!({})), true, false)
+                .await
+                .expect("a managed job keeps to an allowance")
+                .limit(),
+            SEARCHES_PER_MESSAGE
+        );
+        // A person's own ChatGPT login searches on their own plan; a grant without search, or
+        // no grant at all, searches nothing.
+        assert!(allowance(job(true, json!({})), true, false).await.is_none());
+        assert!(
+            allowance(job(false, json!({})), false, false)
+                .await
+                .is_none()
+        );
+        assert!(managed_web_search_allowance(&job(false, json!({})), false).is_none());
+
+        let hand_back = job(
+            false,
+            json!({"browserHandBack": {"verified": true, "cardJobId": message.id.to_string()}}),
+        );
+        let carried_on = allowance(hand_back, true, false)
+            .await
+            .expect("a hand-back keeps to its message's allowance");
+        assert!(Arc::ptr_eq(&routed, &carried_on));
+        assert_eq!(carried_on.limit(), SEARCHES_FOR_DEEPER_RESEARCH);
     }
 
     #[test]
@@ -30638,6 +30876,54 @@ mod tests {
                 "git status --short".to_string(),
                 "git remote -v".to_string()
             ]
+        );
+    }
+
+    /// The routing step says whether the person's own words ask for deeper research, which
+    /// gives an Instafy AI message more web searches (`managed_web_search`); the job's record of
+    /// its route keeps it. An answer without it, cached or from an older runtime, asks for none.
+    #[test]
+    fn routing_reads_whether_the_persons_words_ask_for_deeper_research() {
+        let answer = |deeper: Option<bool>| {
+            let mut value = json!({"route": "direct", "workspaceFileChangeRequirement": "none"});
+            if let Some(deeper) = deeper {
+                value["deeperResearch"] = json!(deeper);
+            }
+            parse_agent_routing_preflight(&value).expect("parse preflight")
+        };
+        assert!(answer(Some(true)).deeper_research);
+        assert!(!answer(Some(false)).deeper_research);
+        assert!(!answer(None).deeper_research);
+        assert_eq!(
+            agent_routing_preflight_artifact(&answer(Some(true)))["deeperResearch"],
+            json!(true)
+        );
+
+        // The routing answer must give it, and the prompt says when it is true.
+        let schema = crate::codex::routing_preflight_final_output_json_schema();
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!("deeperResearch")))
+        );
+        assert_eq!(schema["properties"]["deeperResearch"]["type"], "boolean");
+        let tmp = tempdir().expect("temp dir");
+        let prompt = build_agent_routing_preflight_prompt(
+            tmp.path(),
+            "Research the best e-readers in depth, keep searching until you're sure.",
+            None,
+            None,
+        );
+        assert!(prompt.contains("Set `deeperResearch = true` only when the latest request's own words ask to research in depth or to search further or more thoroughly;"));
+        // Research the person asked for in the ordinary way is not deeper research by itself.
+        assert!(
+            prompt
+                .contains("asking for a comparison, for reviews or for a page does not by itself")
+        );
+        assert!(
+            prompt.contains(
+                "`workspaceFileChangeRequirement`, `deeperResearch`, `observationCommands`"
+            )
         );
     }
 

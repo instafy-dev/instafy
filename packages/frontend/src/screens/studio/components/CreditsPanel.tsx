@@ -340,6 +340,10 @@ export function CreditsPanel() {
       // Says what the panel's refill line says: the balance tops back up.
       return "Daily top-up";
     }
+    if (normalized === "managed_ai_web_search") {
+      // What an Instafy AI turn's web searches cost: a row of their own.
+      return "Web search";
+    }
     const humanized = normalized.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
     return humanized.charAt(0).toUpperCase() + humanized.slice(1);
   }, []);

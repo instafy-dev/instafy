@@ -167,6 +167,37 @@ describe("Credits display choices", () => {
     expect(container.textContent).not.toMatch(/AI usage|AI adjustment|AI refund|GPT|OpenAI|tokens|Instafy AI|1 credits/);
   });
 
+  // With Instafy AI each web search costs credits: a row of its own, named in
+  // plain words, beside its turn's, and counted with the AI in the graph.
+  it("shows a turn's web searches as a Web search row with their credits", async () => {
+    const lisbon = "What's on in Lisbon this weekend?";
+    // Within the graph's last 7 days, whenever the test runs.
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+    mocks.ledger = [
+      { delta: -22, reason: "managed_ai_web_search",
+        metadata: { promptId: "turn-lisbon", jobId: "job-lisbon", webSearch: { searches: 2 } },
+        createdAt: minutesAgo(10) },
+      { delta: -6, reason: "managed_ai_adjustment", metadata: { promptId: "turn-lisbon" },
+        createdAt: minutesAgo(11), chatName: lisbon },
+      { delta: -1, reason: "managed_ai_prompt", metadata: { promptId: "turn-lisbon" },
+        createdAt: minutesAgo(12), chatName: lisbon },
+    ];
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    const rows = [...container.querySelectorAll('[data-testid="credit-ledger-entry"]')];
+    expect(rows.map((row) => [
+      row.querySelector("p")?.textContent,
+      row.querySelector('[data-testid="credit-ledger-delta"]')?.textContent,
+    ])).toEqual([
+      ["Web search", "-22 credits"],
+      [lisbon, "-7 credits"],
+    ]);
+    expect(container.textContent).not.toMatch(/managed|Managed ai|tokens|OpenAI/);
+    // In the graph every one of them is the AI's colour, not "Other spending".
+    await act(async () => radio("credits-activity-view-graph").click());
+    const markers = [...container.querySelectorAll('[data-testid="credit-activity-graph"] circle[r="3.25"]')];
+    expect(markers.map((marker) => marker.getAttribute("fill"))).toEqual(["#2563eb", "#2563eb", "#2563eb"]);
+  });
+
   // The ledger is the team's: a chat of the same name in another space read
   // the same as this space's.
   it("names the space of a turn from another space beside its time", async () => {

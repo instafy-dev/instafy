@@ -84,6 +84,9 @@ Managed Instafy AI can run without a user-provided provider key and burn the sha
 - Set `MANAGED_AI_INPUT_USD_MICROS_PER_1K` (default `100`, that is `$0.10 / 1M`)
 - Set `MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K` (default `10`, that is `$0.01 / 1M`)
 - Set `MANAGED_AI_OUTPUT_USD_MICROS_PER_1K` (default `500`, that is `$0.50 / 1M`)
+- Set `MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH` to what one web search of Instafy AI costs
+  (default `10000`, that is `$0.01`: OpenAI's `$10 / 1K` searches), charged on top of its tokens;
+  see [Web search for Instafy AI](#web-search-for-instafy-ai)
 - Set `BILLING_UNITS_PER_USD` if you want the UI to expose USD equivalents for the shared balance
 
 A person's spaces run on their default AI connection when they have one, and on managed AI
@@ -207,18 +210,19 @@ Native searches do not use the CLI search counters or direct-reader page budgets
 private-network checks, actual access refusals, explicit user site policies and browser permissions continue
 to apply to Instafy's own readers. Instafy supplies no curated website denylist.
 Codex selects the search transport for the model: Responses Lite uses the proxy's native search
-route. Its provider response has no token-usage receipt, so search attempts are recorded separately
-with unknown usage; model token totals do not measure the account's complete search cost or quota.
-A managed run on the controller's OpenAI API key has no ChatGPT login, and OpenAI's ChatGPT search
-endpoint does not serve an API key. With the proxy's `PROXY_MANAGED_NATIVE_WEB_SEARCH` on (off by
-default), the proxy answers such a run's native search itself with OpenAI's hosted `web_search` on
-the platform key, which OpenAI bills at $10 per 1,000 searches plus the search content's tokens at
-the model's input rate. A static ChatGPT login serving managed runs (a local stack) searches the
-same way through the login's own search, on its allowance. The proxy logs each of these searches
-with its job, model, tokens and billable searches, never its query (see the proxy README), and
-charges no credits for them. The controller grants native search to a managed run only with its
-own `MANAGED_AI_NATIVE_WEB_SEARCH` on, so a managed run searches only with both switches on; see
-[Web search for Instafy AI](#web-search-for-instafy-ai).
+route. On a person's own ChatGPT login its provider response has no token-usage receipt, so search
+attempts are recorded separately with unknown usage; model token totals do not measure the
+account's complete search cost or quota. A managed run on the controller's OpenAI API key has no
+ChatGPT login, and OpenAI's ChatGPT search endpoint does not serve an API key. With the proxy's
+`PROXY_MANAGED_NATIVE_WEB_SEARCH` on (off by default), the proxy answers such a run's native search
+itself with OpenAI's hosted `web_search` on the platform key, which OpenAI bills at $10 per 1,000
+searches plus the search content's tokens at the model's input rate. A static ChatGPT login serving
+managed runs (a local stack) searches the same way through the login's own search, on its
+allowance. The proxy logs each of these searches with its job, model, tokens and billable
+searches, never its query (see the proxy README), and tells the runtime what each search cost,
+which the person pays in credits. The controller grants native search to a managed run only with
+its own `MANAGED_AI_NATIVE_WEB_SEARCH` on, so a managed run searches only with both switches on;
+see [Web search for Instafy AI](#web-search-for-instafy-ai).
 Static proxy credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
 The pricing envs are standard-tier rates, so the platform key also serves only OpenAI's standard
@@ -360,11 +364,77 @@ on. Both are off by default, and each is read at startup: a value that is not a 
 | `PROXY_MANAGED_NATIVE_WEB_SEARCH` | every proxy that serves managed runs | off | Lets a run with that grant search through the proxy's search bridge: OpenAI's hosted web search on the platform's API key, or, where the managed lane is a static ChatGPT login (a local stack), that login's own search, on its allowance. Each search is logged (see the proxy README). |
 
 A person's own ChatGPT login is not affected by either switch: its grant follows the live login,
-as before, and its searches run on that person's plan. A person's own API key gets no search.
+as before, and its searches run on that person's plan, with no Instafy credits and no limit of
+Instafy's. A person's own API key gets no search.
 
-No credits are charged for these searches yet, and OpenAI bills the platform key for each one
-($10 per 1,000 searches plus the content's tokens at the model's input rate), so leave both off in
-production until the per-search charge ships. To turn them on in a test environment:
+**What a search costs.** Each search Instafy AI runs costs the person credits, at what OpenAI
+charges for it, passed through:
+
+- **The price.** One search costs `MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH` (default 10,000
+  micro-dollars: OpenAI's $10 per 1,000 searches), plus its request's tokens, the pages' content
+  among the input, at the managed rates (`MANAGED_AI_*_USD_MICROS_PER_1K`), each kind of token in
+  whole micro-dollars rounded up as a turn's are. A turn's searches together are rounded up to
+  whole credits at `BILLING_UNITS_PER_USD` (`calculate_managed_ai_web_search_charge` in
+  `credits.rs`). At the defaults (1,000 credits a dollar) one search is 10 credits plus its
+  reading: one that read 8,412 tokens of pages and wrote 391 costs 12 credits, and two such cost 23.
+  The search runs as the managed model, or as `PROXY_MANAGED_WEB_SEARCH_MODEL` when the proxy sets
+  one, but its tokens are priced at the managed rates either way.
+- **What counts as a search.** One query the proxy's search bridge searched: the queries the
+  chat's "Searched the web" step names. A query the bridge refused, merged with another or did not
+  run, and a search that failed, cost nothing. On a local stack, whose managed lane is a static
+  ChatGPT login, a search reports no tokens and costs its price alone.
+- **When it is charged.** With the turn's completion, whether the turn succeeded or failed: the
+  runtime adds up what the bridge said each search of the job cost (the proxy README's
+  `search_usage`), over all of the job's runs (a recovery retry's searches are its job's too), and
+  the completion carries it as one `ai/web-search-usage` artifact (`searches`, `input_tokens`,
+  `cached_input_tokens`, `output_tokens`). A turn that searched and then ended in an error or its
+  time limit has no `turn.completed`, so none of its tokens are reconciled, but its searches ran
+  and are charged. The completion charges them on the turn's message (its `promptId`), once per
+  job: a `managed_ai_web_search` row with the key `managed-ai-web-search:{promptId}:{jobId}`,
+  apart from the turn's reserve and adjustment, so a completion settled again writes nothing new.
+  The searches have run, so their cost is owed whatever the balance: a balance that cannot cover
+  them is charged what it holds, and the row records the rest as `cost.unpaidUnits`, as a turn's
+  tokens are settled (an empty balance gets no row, and the controller logs what went unpaid). A
+  turn that costs nothing (one Instafy started that ended without a reply and left nothing, a
+  failed turn that left nothing) is not charged its searches either; a search step is a step that
+  worked, so a turn that searched leaves something. A turn the person stopped sends no
+  completion, so its searches are not charged. Only a job that ran on Instafy AI is charged:
+  `managedAiUsed`, or an ambient evaluation whose charge waits for it to speak
+  (`managedAiBillingDeferred`), whose searches are charged even when it then declines, though its
+  tokens are not. A job on the person's own AI connection never is, whatever its completion
+  says.
+- **In Credits.** The activity log shows the row as "Web search" with its credits, next to the
+  turn's own row, and the graph counts it with the AI.
+
+**At most 2 searches a message.** A message's turns run at most 2 searches, or 8 when the person's
+own words in it ask to research in depth or to search further or more thoroughly (a comparison,
+reviews or a page to make do not by themselves): its routing step says so (`deeperResearch` in its
+answer; runtime-agent `managed_web_search`). The runtime keeps to it:
+
+- a search sends only as many of its queries as the message has left, and the model reads that
+  only the first of them ran;
+- a search with none left does not run, and the model reads, in place of its results, that the
+  message has already used its web searches, to answer from what it has already found or read, to
+  read a page whose address it has, and to say what it could not check; and that a message gets
+  more only when the person's own words ask for deeper research;
+- a build Instafy starts after the browser (a hand-back) goes on with the allowance of the turn
+  whose card it carries on, and a job's later attempt with its earlier attempt's, while the
+  runtime that ran them is up; a runtime started since gives the turn a new allowance;
+- a native helper, and a recovery retry of the turn, search from its turn's allowance. A retry
+  that starts afresh does not see what the earlier attempt's searches found, and has none left
+  when that attempt used them;
+- each job of a team plan (each worker, the lead's continuation) has an allowance of its own of 2,
+  since a team's jobs may run on machines of their own: a team plan's message can run 2 searches
+  for each of them.
+
+Searches a call held and did not run go back to the message. The limits are the runtime's own
+(`SEARCHES_PER_MESSAGE` and `SEARCHES_FOR_DEEPER_RESEARCH` in `managed_web_search.rs`).
+
+**Turning it on.** OpenAI bills the platform key for each search, and each costs the person
+credits. A controller or runtime from before the per-search charge lets searches run uncharged and
+without the allowance, and a proxy from before it reports no tokens, so searches cost their price
+alone: update all three before turning search on in production. To turn it on in a test
+environment:
 
 1. **The proxy first.** Set `PROXY_MANAGED_NATIVE_WEB_SEARCH=true` where the proxies that serve
    managed runs read their environment (both runtime compose files pass it through,
@@ -377,7 +447,8 @@ production until the per-search charge ships. To turn them on in a test environm
    switch is on. Jobs leased from then on get search.
 3. **Check one turn.** Ask Instafy AI something that needs today's information. The turn's line
    says it searched the web, its Details list the words each search sent and the pages it
-   returned, and the proxy logs one `[proxy] managed web search {…}` line per search.
+   returned, the proxy logs one `[proxy] managed web search {…}` line per search, and Credits shows
+   a "Web search" row with the searches' credits beside the turn's own.
 
 To turn search off at once, turn the proxy's switch off: it refuses every managed search with
 403 `native_web_search_unavailable`. Turning the controller's off only stops new grants: a job
@@ -771,7 +842,9 @@ records which jobs run on the platform key and which tokens they hold:
 
 ## Controller Endpoints
 - `GET /credits/status` — current team credit balance/limit.
-- `GET /credits/ledger` — recent burn/refill events. An Instafy AI turn's rows (its
+- `GET /credits/ledger` — recent burn/refill events. An Instafy AI turn's web searches are a
+  `managed_ai_web_search` row of their own (`metadata.promptId`, `jobId`, `webSearch.searches` and
+  `cost`). An Instafy AI turn's rows (its
   `managed_ai_prompt` reserve, `managed_ai_adjustment` and `managed_ai_refund`, which share the
   turn's `metadata.promptId`) also carry `chatName`, the title of the chat the turn was sent in,
   when the viewer may open that chat by Home's rule (a space of theirs, and a chat that is not
@@ -804,7 +877,8 @@ Required envs (GitHub secrets/vars or local env):
   time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
   chat. A turn from another space names that space beside its time (`spaceName`), since chats in
   two spaces can share a name. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
-  is a row of its own ("Daily top-up", "Starting balance", "Hosted machine time"). A row shows its name,
+  is a row of its own ("Daily top-up", "Starting balance", "Hosted machine time", and "Web search" for an Instafy AI
+  turn's searches). A row shows its name,
   its time and its amount ("1 credit", "14 credits"), never the model, the AI vendor, a token count
   or an id: the ledger keeps those in each row's metadata. The Usage section says what a message
   costs in credits ("From 1 credit a message", then what it used) and lists only a service that

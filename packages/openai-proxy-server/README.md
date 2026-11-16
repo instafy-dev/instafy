@@ -242,8 +242,13 @@ platform credential:
   codex hands to its clients and never to the model, starts with
   `{"type": "searched_queries", "queries": […]}`: the queries that searched, as they were sent
   (not one refused, repeated, past the limit or not run, nor one whose search failed), which the
-  chat shows in place of the words codex asked for, then lists the cited pages
-  (`type: "text_result"`, `url`, `title`). Only public web pages are cited: http(s) on the
+  chat shows in place of the words codex asked for. Next comes
+  `{"type": "search_usage", "searches": n, "input_tokens": …, "cached_input_tokens": …, "output_tokens": …}`:
+  one search for each query named before it, and the tokens of their requests as the provider
+  reported them, the search content among the input (0 on a ChatGPT login, whose search reports
+  none). The runtime reports it with the job's completion, and the controller charges Instafy AI's
+  searches from it (`docs/Credits-Billing.md`), so a search that failed costs the person nothing. Then come
+  the cited pages (`type: "text_result"`, `url`, `title`). Only public web pages are cited: http(s) on the
   default ports, without a user name, a private, local or reserved host, or a fragment, and
   percent-encoded, so no address can close the wrapper. Hidden characters in what the search
   wrote become spaces, and a tag of the wrapper's name in it is defused.
@@ -277,8 +282,13 @@ the response's status (`completed`, `incomplete`, `failed`), `error` for a reque
 answer, or `interrupted` when the caller went away first. An `error` the provider refused, or
 one that never connected, ran no search (`searches: 0`); one the provider may have run, because
 it answered but its answer could not be read or the connection broke after the request went
-out, has unknown `searches` (`null`), as an `interrupted` one does. No credits are charged for
-these searches.
+out, has unknown `searches` (`null`), as an `interrupted` one does. This log is the operator's
+record of what OpenAI may bill; the person's credits are charged from the `search_usage` entry
+above, for the searches that answered.
+
+The controller prices a search's tokens at the managed model's rates (its pricing envs), so a
+`PROXY_MANAGED_WEB_SEARCH_MODEL` other than `MANAGED_AI_MODEL_ID` is charged as if it were the
+managed model.
 
 **The model.** For hosted search, `PROXY_MANAGED_WEB_SEARCH_MODEL` when set, else the lease's
 pinned model (the controller's `MANAGED_AI_MODEL_ID`, by default `gpt-6-luna`, which OpenAI's

@@ -78,12 +78,19 @@ pub struct Expect {
     /// When set, a run also needs one of these: what the turn after it must change in the space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_file_change_requirement: Option<Vec<String>>,
+    /// Whether the person's own words ask for deeper research, which gives an Instafy AI message
+    /// more web searches, each of which costs them credits: a run's `deeperResearch` must say
+    /// the same. False unless the case says so, so a router that reads an ordinary question as
+    /// asking for more shows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deeper_research: bool,
 }
 
 impl Case {
     /// Whether a run's answer is the one this case expects.
     pub fn answered_by(&self, answer: &Answer) -> bool {
         answer.route == self.expect.route
+            && answer.deeper_research == self.expect.deeper_research
             && self
                 .expect
                 .workspace_file_change_requirement
@@ -98,9 +105,14 @@ impl Case {
 
     /// The expected answer in a few words.
     pub fn expected(&self) -> String {
-        match &self.expect.workspace_file_change_requirement {
+        let route = match &self.expect.workspace_file_change_requirement {
             Some(allowed) => format!("{} (change: {})", self.expect.route, allowed.join(" or ")),
             None => self.expect.route.clone(),
+        };
+        if self.expect.deeper_research {
+            format!("{route}, deeper research")
+        } else {
+            route
         }
     }
 }
@@ -254,6 +266,8 @@ pub struct Answer {
     /// The route the job takes, or `invalid` for an answer it cannot use.
     pub route: String,
     pub workspace_file_change_requirement: Option<String>,
+    /// Whether the answer read the person's own words as asking for deeper research.
+    pub deeper_research: bool,
     /// The router's own reason.
     pub reason: String,
 }
@@ -266,6 +280,7 @@ pub fn read_answer(final_json: &JsonValue, case: &Case, input: &RoutingInput) ->
     let invalid = |reason: &str| Answer {
         route: "invalid".to_string(),
         workspace_file_change_requirement: None,
+        deeper_research: false,
         reason: reason.to_string(),
     };
     if super::parse_workspace_file_change_requirement(final_json).is_err() {
@@ -287,6 +302,7 @@ pub fn read_answer(final_json: &JsonValue, case: &Case, input: &RoutingInput) ->
         workspace_file_change_requirement: artifact["workspaceFileChangeRequirement"]
             .as_str()
             .map(str::to_string),
+        deeper_research: preflight.deeper_research,
         reason: preflight.reason,
     }
 }
@@ -473,13 +489,21 @@ impl CaseResult {
 fn run_label(case_expects_requirement: bool, run: &Run) -> String {
     match &run.answer {
         None => "error".to_string(),
-        Some(answer) => match (
-            case_expects_requirement,
-            &answer.workspace_file_change_requirement,
-        ) {
-            (true, Some(requirement)) => format!("{} ({requirement})", answer.route),
-            _ => answer.route.clone(),
-        },
+        Some(answer) => {
+            let route = match (
+                case_expects_requirement,
+                &answer.workspace_file_change_requirement,
+            ) {
+                (true, Some(requirement)) => format!("{} ({requirement})", answer.route),
+                _ => answer.route.clone(),
+            };
+            // Shown whenever a run says so, as a case that expects none fails on it.
+            if answer.deeper_research {
+                format!("{route} + deeper research")
+            } else {
+                route
+            }
+        }
     }
 }
 
@@ -661,6 +685,7 @@ mod tests {
             answer: Some(Answer {
                 route: route.to_string(),
                 workspace_file_change_requirement: Some("required".to_string()),
+                deeper_research: false,
                 reason: format!("routed {route}"),
             }),
             error: None,
@@ -767,6 +792,7 @@ mod tests {
             answer: Some(Answer {
                 route: route.to_string(),
                 workspace_file_change_requirement: Some("none".to_string()),
+                deeper_research: false,
                 reason: format!("routed {route}"),
             }),
             error: None,
@@ -1295,9 +1321,9 @@ mod tests {
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "75197efdcecd534f0575075d457199661589b8e4a37182f68e6da2e00826e806";
+            "77a6ff811540fcf33678be3098a49e5a1697da0ee866c0e5d5c93ace844befb3";
         const CASE_PROMPTS_SHA256: &str =
-            "e9c1eb9b588b19a4c19f665c3462a022459a240c7eec4eec942756733cdc4cf7";
+            "c9b062d7434807d7d0e35ae186d9ac8bd4d52ea2c38e47888fec221ea3abcd92";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1413,10 +1439,47 @@ mod tests {
             Answer {
                 route: "browser_then_build".to_string(),
                 workspace_file_change_requirement: Some("none".to_string()),
+                deeper_research: false,
                 reason: "Because.".to_string(),
             }
         );
         assert!(comparison.answered_by(&answer));
+        // An answer that reads the person's words as asking for deeper research says so, and a
+        // case that does not expect it is not answered by it: the message would run, and charge,
+        // more web searches than it asked for.
+        let mut deeper = answer_json("browser_then_build", "none");
+        deeper["deeperResearch"] = json!(true);
+        let deeper = read_answer(&deeper, &comparison, &input);
+        assert!(deeper.deeper_research);
+        assert!(!comparison.answered_by(&deeper));
+        let in_depth = case(&cases, "research-in-depth");
+        assert!(in_depth.expect.deeper_research);
+        assert_eq!(in_depth.expected(), "direct, deeper research");
+        let mut asked = answer_json("direct", "none");
+        asked["deeperResearch"] = json!(true);
+        let in_depth_input = routing_input(&in_depth, workspace.path()).unwrap();
+        assert!(in_depth.answered_by(&read_answer(&asked, &in_depth, &in_depth_input)));
+        assert!(!in_depth.answered_by(&read_answer(
+            &answer_json("direct", "none"),
+            &in_depth,
+            &in_depth_input
+        )));
+        let table = table(
+            std::slice::from_ref(&comparison),
+            &[CaseResult::new(
+                &comparison,
+                vec![Run {
+                    answer: Some(deeper),
+                    error: None,
+                    tokens: Tokens::default(),
+                    seconds: 5.0,
+                }],
+            )],
+        );
+        assert!(
+            table.contains("| browser_then_build + deeper research | WRONG |"),
+            "{table}"
+        );
         // Where the browser routes were not offered, a browser answer runs direct.
         let not_offered = RoutingInput {
             browser_routes_offered: false,

@@ -734,7 +734,7 @@ fn multi_agent_plan_final_output_json_schema() -> JsonValue {
     .expect("multi-agent final output schema must be valid JSON")
 }
 
-fn routing_preflight_final_output_json_schema() -> JsonValue {
+pub(crate) fn routing_preflight_final_output_json_schema() -> JsonValue {
     serde_json::from_str(
         r#"{
   "type": "object",
@@ -748,6 +748,7 @@ fn routing_preflight_final_output_json_schema() -> JsonValue {
     "requiresContextLookup",
     "requiresCommandExecution",
     "workspaceFileChangeRequirement",
+    "deeperResearch",
     "observationCommands",
     "workerQuestionReply"
   ],
@@ -784,6 +785,9 @@ fn routing_preflight_final_output_json_schema() -> JsonValue {
         "required"
       ],
       "description": "none: no file changes requested; conditional: inspect or validate and change files only if warranted, so no change can be correct; required: success requires actual file changes. This describes the completion requirement, not write permission."
+    },
+    "deeperResearch": {
+      "type": "boolean"
     },
     "observationCommands": {
       "type": "array",
@@ -1052,6 +1056,11 @@ pub struct CodexRunOptions {
     /// never reach the chat as steps, such as the pass that only recovers a turn's missing answer
     /// (`finalization_codex_run_options`), so no search runs that the chat would not show.
     pub disable_native_web_search: bool,
+    /// An Instafy AI message's allowance of web searches, which its turn's runs and native helpers
+    /// share (`managed_web_search`): the search tool keeps to it and counts what its searches
+    /// cost, which the job's completion reports. None on any other lane: a person's own ChatGPT
+    /// login searches on their own plan.
+    pub managed_web_search: Option<Arc<crate::managed_web_search::ManagedWebSearch>>,
     pub disable_final_output_json_schema: bool,
     pub final_output_schema: CodexFinalOutputSchema,
     pub expect_browser_session: bool,
@@ -2417,6 +2426,7 @@ impl CodexClient {
                     &run_instructions,
                     options.project_id.map(|id| (id, self.workspace_dir())),
                     auth_manager.clone(),
+                    options.managed_web_search.clone(),
                 ),
                 Arc::new(EmptyUserInstructionsProvider),
                 None,
@@ -5191,15 +5201,18 @@ impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
 /// `turn_start_token_usage`, which the run's `CodexEventStreamAdapter` reads, and enforces
 /// `required_execution` on the threads the run arms. Native search uses the same scoped proxy
 /// authentication; the run's search mode keeps it unavailable without controller authority.
+/// With `managed_web_search`, an Instafy AI message's allowance, its search tool keeps to that
+/// allowance and counts what each search cost (`managed_web_search::install`).
 fn codex_extension_registry(
     turn_start_token_usage: &TurnStartTokenUsage,
     required_execution: &RequiredExecutionGate,
     run_instructions: &RunInstructions,
     project_context: Option<(uuid::Uuid, &Path)>,
     auth_manager: Arc<AuthManager>,
+    managed_web_search: Option<Arc<crate::managed_web_search::ManagedWebSearch>>,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::new();
-    codex_web_search_extension::install(&mut extensions, auth_manager);
+    crate::managed_web_search::install(&mut extensions, auth_manager, managed_web_search);
     extensions.prompt_contributor(Arc::new(run_instructions::RunInstructionsContext::new(
         run_instructions,
     )));
@@ -5248,6 +5261,7 @@ pub(crate) async fn start_test_turn(
         &RunInstructions::default(),
         None,
         AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key("inert")),
+        None,
     );
     for contributor in registry.turn_lifecycle_contributors() {
         contributor
@@ -9000,6 +9014,7 @@ mod tests {
             &RunInstructions::default(),
             None,
             AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key("inert")),
+            None,
         );
         gate.arm("thread-a");
         let mut metadata = None;
@@ -14366,6 +14381,7 @@ required = true
             &RunInstructions::default(),
             None,
             AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key("inert")),
+            None,
         );
         let thread_store = ExtensionData::new("thread-main");
         let contributors = registry.turn_lifecycle_contributors();

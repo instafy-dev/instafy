@@ -507,6 +507,204 @@ pub(crate) fn calculate_managed_ai_usage_charge(
     }
 }
 
+/// The ledger reason of the charge for an Instafy AI turn's web searches, a row
+/// of its own that Credits names "Web search".
+pub(crate) const MANAGED_AI_WEB_SEARCH_REASON: &str = "managed_ai_web_search";
+
+/// The kind of the artifact an Instafy AI job's completion carries with what
+/// its web searches cost (runtime-agent `managed_web_search`), whether the job
+/// succeeded or failed.
+pub(crate) const MANAGED_AI_WEB_SEARCH_USAGE_ARTIFACT: &str = "ai/web-search-usage";
+
+/// What an Instafy AI job's web searches cost, as its runtime reports them
+/// ([`MANAGED_AI_WEB_SEARCH_USAGE_ARTIFACT`]): how many ran, and their
+/// requests' tokens, the search content among the input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ManagedAiWebSearchUsage {
+    pub(crate) searches: u64,
+    pub(crate) input_tokens: u64,
+    pub(crate) cached_input_tokens: u64,
+    pub(crate) output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ManagedAiWebSearchCharge {
+    /// The searches, each at `MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH`.
+    pub(crate) searches_usd_micros: i64,
+    /// Their tokens, priced as a turn's are.
+    pub(crate) tokens_usd_micros: i64,
+    pub(crate) total_usd_micros: i64,
+    pub(crate) charged_units: i32,
+    /// The part the team's balance could not cover: the searches already ran,
+    /// so it is recorded rather than refused.
+    pub(crate) unpaid_units: i32,
+    /// Whether this call wrote the row: false for nothing to charge and for a
+    /// turn charged before.
+    pub(crate) ledger_row_written: bool,
+}
+
+/// The price of a turn's web searches: each search at the configured price
+/// (OpenAI's $10 per 1,000 by default), plus their tokens at the managed rates,
+/// each kind of token in whole micro-dollars rounded up as a turn's are, and the
+/// sum rounded up to whole credits at `BILLING_UNITS_PER_USD`. So searches that
+/// cost anything cost at least one credit.
+pub(crate) fn calculate_managed_ai_web_search_charge(
+    config: &AppConfig,
+    usage: ManagedAiWebSearchUsage,
+) -> ManagedAiWebSearchCharge {
+    let searches_usd_micros = (i128::from(usage.searches)
+        * i128::from(config.managed_ai_web_search_usd_micros_per_search.max(0)))
+    .clamp(0, i128::from(i64::MAX)) as i64;
+    let tokens_usd_micros = calculate_managed_ai_usage_charge(
+        config,
+        ManagedAiTokenUsage {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            output_tokens: usage.output_tokens,
+        },
+    )
+    .total_cost_usd_micros;
+    let total_usd_micros = searches_usd_micros.saturating_add(tokens_usd_micros);
+    let mut charged_units = if total_usd_micros > 0 && config.billing_units_per_usd > 0 {
+        clamp_i128_to_i32(ceil_div_i128(
+            i128::from(total_usd_micros) * i128::from(config.billing_units_per_usd),
+            1_000_000,
+        ))
+    } else {
+        0
+    };
+    if total_usd_micros > 0 && charged_units == 0 {
+        charged_units = 1;
+    }
+    ManagedAiWebSearchCharge {
+        searches_usd_micros,
+        tokens_usd_micros,
+        total_usd_micros,
+        charged_units,
+        unpaid_units: 0,
+        ledger_row_written: false,
+    }
+}
+
+/// Charges an Instafy AI turn's web searches on the message it served
+/// (`prompt_id`), in a row of their own (`managed_ai_web_search`), once per
+/// turn: a completion settled again takes the same key
+/// (`managed-ai-web-search:{prompt_id}:{job_id}`) and writes nothing. The
+/// searches already ran, so their cost is owed whatever the balance: when the
+/// team cannot cover it, the row takes what the balance holds and records the
+/// rest as unpaid, as a turn's tokens are settled.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn charge_managed_ai_web_searches(
+    transaction: &Transaction<'_>,
+    config: &AppConfig,
+    project_id: &Uuid,
+    org_id: &Uuid,
+    runtime_id: Option<Uuid>,
+    prompt_id: &Uuid,
+    job_id: &Uuid,
+    usage: ManagedAiWebSearchUsage,
+) -> Result<ManagedAiWebSearchCharge, (StatusCode, Json<ApiError>)> {
+    let mut charge = calculate_managed_ai_web_search_charge(config, usage);
+    if charge.charged_units <= 0 {
+        return Ok(charge);
+    }
+    let key = format!("managed-ai-web-search:{prompt_id}:{job_id}");
+    let mut metadata = json!({
+        "category": "ai_usage",
+        "source": "managed_ai_web_search",
+        "managedAiProvider": DEFAULT_MANAGED_AI_PROVIDER_ID,
+        "promptId": prompt_id,
+        "jobId": job_id,
+        "webSearch": {
+            "searches": usage.searches,
+            "usage": {
+                "input_tokens": usage.input_tokens,
+                "cached_input_tokens": usage.cached_input_tokens,
+                "output_tokens": usage.output_tokens,
+            },
+        },
+        "pricing": {
+            "currency": "USD",
+            "billingUnitsPerUsd": config.billing_units_per_usd,
+            "webSearchUsdMicrosPerSearch": config.managed_ai_web_search_usd_micros_per_search,
+            "inputUsdMicrosPer1k": config.managed_ai_input_usd_micros_per_1k,
+            "cachedInputUsdMicrosPer1k": config.managed_ai_cached_input_usd_micros_per_1k,
+            "outputUsdMicrosPer1k": config.managed_ai_output_usd_micros_per_1k,
+        },
+        "cost": {
+            "searchesUsdMicros": charge.searches_usd_micros,
+            "tokensUsdMicros": charge.tokens_usd_micros,
+            "estimatedUsdMicros": charge.total_usd_micros,
+            "chargedUnits": charge.charged_units,
+        },
+    });
+    let mut units = charge.charged_units;
+    for attempt in 0..2 {
+        transaction
+            .batch_execute("savepoint managed_ai_web_search")
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to open web search charge savepoint: {error}"
+                ))
+            })?;
+        match process_credit_burn(
+            transaction,
+            project_id,
+            org_id,
+            runtime_id,
+            units,
+            MANAGED_AI_WEB_SEARCH_REASON,
+            Some(&key),
+            &mut metadata,
+        )
+        .await
+        {
+            Ok(_) => {
+                transaction
+                    .batch_execute("release savepoint managed_ai_web_search")
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!(
+                            "failed to release web search charge savepoint: {error}"
+                        ))
+                    })?;
+                charge.ledger_row_written = credit_ledger_row_written(&metadata);
+                break;
+            }
+            Err(error) => {
+                transaction
+                    .batch_execute(
+                        "rollback to savepoint managed_ai_web_search;
+                         release savepoint managed_ai_web_search",
+                    )
+                    .await
+                    .map_err(|rollback_error| {
+                        internal_error(format!(
+                            "failed to roll back web search charge savepoint: {rollback_error}"
+                        ))
+                    })?;
+                if attempt > 0 || !error.1.message.contains("insufficient credits") {
+                    return Err(error);
+                }
+                let available = get_credit_snapshot(transaction, org_id).await?.balance;
+                match partial_burn_units(units, available) {
+                    Some(partial) => {
+                        charge.unpaid_units = units - partial;
+                        metadata["cost"]["unpaidUnits"] = json!(charge.unpaid_units);
+                        units = partial;
+                    }
+                    None => {
+                        charge.unpaid_units = units;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(charge)
+}
+
 fn parse_json_i32(value: &JsonValue) -> Option<i32> {
     match value {
         JsonValue::Number(number) => number.as_i64().and_then(|v| i32::try_from(v).ok()),
@@ -3749,6 +3947,84 @@ mod tests {
         assert_eq!(charge.total_cost_usd_micros, 180);
         assert_eq!(charge.charged_units, 1);
         assert_eq!(charge.adjustment_units, 0);
+    }
+
+    /// Each web search Instafy AI runs costs the configured price, OpenAI's $10 per 1,000 by
+    /// default (10 credits at 1,000 credits a dollar), plus its tokens at the managed rates, the
+    /// sum rounded up: one search that read 8,412 tokens of pages and wrote 391 costs 12 credits.
+    /// The price and the credit's value are the configured ones, not literals.
+    #[test]
+    fn a_web_search_costs_its_price_and_its_tokens_at_the_configured_rates() {
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "test-key",
+        );
+        assert_eq!(config.managed_ai_web_search_usd_micros_per_search, 10_000);
+        assert_eq!(config.billing_units_per_usd, 1_000);
+        let search = |searches: u64| ManagedAiWebSearchUsage {
+            searches,
+            input_tokens: 8_412 * searches,
+            cached_input_tokens: 0,
+            output_tokens: 391 * searches,
+        };
+        let one = calculate_managed_ai_web_search_charge(&config, search(1));
+        // 10,000 for the search; 8,412 input tokens at 100 per 1K is 842 (rounded up), 391
+        // output tokens at 500 per 1K is 196: 11,038 micro-dollars, 12 credits.
+        assert_eq!(one.searches_usd_micros, 10_000);
+        assert_eq!(one.tokens_usd_micros, 1_038);
+        assert_eq!(one.total_usd_micros, 11_038);
+        assert_eq!(one.charged_units, 12);
+        assert_eq!(one.unpaid_units, 0);
+        assert!(!one.ledger_row_written);
+        let two = calculate_managed_ai_web_search_charge(&config, search(2));
+        assert_eq!((two.total_usd_micros, two.charged_units), (22_074, 23));
+
+        // Cached content is priced once, at the cached rate, as a turn's is.
+        let cached = calculate_managed_ai_web_search_charge(
+            &config,
+            ManagedAiWebSearchUsage {
+                searches: 1,
+                input_tokens: 8_000,
+                cached_input_tokens: 8_000,
+                output_tokens: 0,
+            },
+        );
+        assert_eq!(cached.tokens_usd_micros, 80);
+
+        // The configured price and the credit's value, whatever they are.
+        config.managed_ai_web_search_usd_micros_per_search = 25_000;
+        assert_eq!(
+            calculate_managed_ai_web_search_charge(&config, search(1)).charged_units,
+            27
+        );
+        config.billing_units_per_usd = 2_000;
+        assert_eq!(
+            calculate_managed_ai_web_search_charge(&config, search(1)).charged_units,
+            53
+        );
+
+        // Nothing searched costs nothing; a free search that read pages costs at least a credit.
+        assert_eq!(
+            calculate_managed_ai_web_search_charge(&config, ManagedAiWebSearchUsage::default())
+                .charged_units,
+            0
+        );
+        config.managed_ai_web_search_usd_micros_per_search = 0;
+        config.billing_units_per_usd = 1_000;
+        assert_eq!(
+            calculate_managed_ai_web_search_charge(
+                &config,
+                ManagedAiWebSearchUsage {
+                    searches: 1,
+                    input_tokens: 10,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                },
+            )
+            .charged_units,
+            1
+        );
     }
 
     #[test]

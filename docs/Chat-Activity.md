@@ -640,6 +640,12 @@ takes e-mail addresses and long numbers out of a query, does not send one that l
 repeat or more than 4, and runs no image or other command. A query it did not search, or whose
 search failed, is not shown, and a call it searched nothing for is no step.
 
+An Instafy AI message runs at most 2 searches, or 8 when the person asks for deeper research, and
+each job of a team plan has 2 of its own (`docs/Credits-Billing.md`, "Web search for Instafy AI").
+A search past them does not run, so it is no step either: the AI reads that the message has used
+its searches, and answers from what it has found or read. The chat names no limit and no price;
+Credits shows what the searches cost.
+
 ## Browser steps
 
 A Shared Browser step says what it did and on which site: "Searching visitlisboa.com…" while it

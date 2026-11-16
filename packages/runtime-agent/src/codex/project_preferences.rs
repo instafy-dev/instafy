@@ -207,7 +207,7 @@ mod tests {
         );
         // The run's own instructions are always there; preferences only with a project.
         assert_eq!(
-            codex_extension_registry(&usage, &gate, &run, None, auth.clone())
+            codex_extension_registry(&usage, &gate, &run, None, auth.clone(), None)
                 .context_contributors()
                 .len(),
             1
@@ -220,6 +220,7 @@ mod tests {
                 &run,
                 Some((Uuid::new_v4(), workspace.path())),
                 auth,
+                None,
             )
             .context_contributors()
             .len(),

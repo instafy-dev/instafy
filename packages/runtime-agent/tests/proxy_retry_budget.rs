@@ -31,6 +31,10 @@ const SEARCH_TEXT: &str =
 const FINISHED_CALL_ID: &str = "call-local-finished";
 /// Where the child leaves the room's search steps of its turn for the parent.
 const SEARCH_STEPS_FILE: &str = "search-steps.json";
+/// What a managed run reads when its message has no web search left, and under a search that
+/// ran only some of its queries (runtime-agent `managed_web_search`).
+const SEARCH_LIMIT_LINE: &str = "Not searched: this message has already used its 2 web searches.";
+const SEARCH_FEWER_LINE: &str = "Only the first query of this search ran";
 const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
 /// Selects the Codex model the scenarios run; every Codex bump runs them for each model the
@@ -558,6 +562,46 @@ async fn responses(
         "personal_browser_tools"
         | "personal_browser_behind_proxy"
         | "personal_browser_native_search" => return answer(FINAL_TEXT),
+        // An Instafy AI message runs two web searches. The AI asks for one, then two (one is left,
+        // so only the first runs, and it reads so), then one more, which does not run: it reads
+        // that the message has used its searches, and answers.
+        "native_search_managed_allowance" => {
+            if !offers_standalone_web_search(&body) {
+                return answer(FINAL_TEXT);
+            }
+            let input = body["input"].to_string();
+            let expect = |ordinal_text: &str, text: &str| {
+                if !input.contains(text) {
+                    state.errors.lock().unwrap().push(format!(
+                        "request {ordinal_text} did not read {text:?}: {input}"
+                    ));
+                }
+            };
+            let queries = match ordinal {
+                1 => json!([{"q":"local fixture source"}]),
+                2 => {
+                    expect("2", SEARCH_TEXT);
+                    json!([{"q":"second query"},{"q":"third query"}])
+                }
+                3 => {
+                    expect("3", SEARCH_FEWER_LINE);
+                    json!([{"q":"fourth query"}])
+                }
+                _ => {
+                    expect("4", SEARCH_LIMIT_LINE);
+                    return answer(FINAL_TEXT);
+                }
+            };
+            let commands = json!({"search_query": queries});
+            let call_id = format!("local-search-{ordinal}");
+            return sse(if offers_namespaced_tool(&body, "web", "run") {
+                json!({"type":"function_call", "call_id":call_id,
+                    "namespace":"web", "name":"run", "arguments":commands.to_string()})
+            } else {
+                json!({"type":"custom_tool_call", "call_id":call_id, "name":"exec",
+                    "input":format!("const result = await tools.web__run({commands}); text(result);")})
+            });
+        }
         // So does an ordinary turn whose config asks for web search.
         "native_search_authorized" | "native_search_custom_provider" | "native_search_managed" => {
             if ordinal == 1 && offers_standalone_web_search(&body) {
@@ -648,11 +692,23 @@ async fn native_search(
             .push("unauthorized native search".into());
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    state.search_requests.lock().unwrap().push(body);
+    state.search_requests.lock().unwrap().push(body.clone());
     let page = json!({"url":"https://example.invalid/source"});
     // For a managed run the proxy's search bridge answers, and names the queries it searched
     // (openai-proxy-server `search_bridge.rs`): here the first, as the second looks like a key.
-    let results = if managed_native_search_grant(&state.scenario) {
+    let results = if state.scenario == "native_search_managed_allowance" {
+        // The bridge searched each query it was sent, and says what they cost.
+        let queries: Vec<Value> = body["commands"]["search_query"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|query| query["q"].clone())
+            .collect();
+        let searches = queries.len() as u64;
+        json!([{"type":"searched_queries","queries":queries},
+            {"type":"search_usage","searches":searches,"input_tokens":1000 * searches,
+             "cached_input_tokens":0,"output_tokens":10 * searches}, page])
+    } else if managed_native_search_grant(&state.scenario) {
         json!([{"type":"searched_queries","queries":["local fixture source"]}, page])
     } else {
         json!([page])
@@ -1143,9 +1199,21 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     let requests = state.requests.lock().unwrap();
     let standalone_search = authorized_native_search(scenario)
         && requests.first().is_some_and(offers_standalone_web_search);
+    // A message's allowance of two searches: three calls, two searches, and the answer.
+    let allowance = scenario == "native_search_managed_allowance";
+    let searches = match (standalone_search, allowance) {
+        (false, _) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+    };
     assert_eq!(
         requests.len(),
-        expected_requests + usize::from(standalone_search),
+        expected_requests
+            + if allowance {
+                3 * usize::from(standalone_search)
+            } else {
+                searches
+            },
         "{scenario}: {diagnostics}"
     );
     // Only the ordinary turn with the controller capability offers native retrieval. Local
@@ -1163,7 +1231,15 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         }
     }
     let search_requests = state.search_requests.lock().unwrap();
-    assert_eq!(search_requests.len(), usize::from(standalone_search));
+    assert_eq!(search_requests.len(), searches);
+    if allowance && standalone_search {
+        // The second call asked for two queries with one search left: only the first was sent.
+        assert_eq!(
+            search_requests[1]["commands"]["search_query"],
+            json!([{"q": "second query"}]),
+            "{scenario}: {diagnostics}"
+        );
+    }
     // Each search the proxy answered is one search step in the room, with the words searched for
     // and the page the search returned, and a turn that did not search has none.
     if has_native_search_grant(scenario) || scenario == "web_search_requested" {
@@ -1171,10 +1247,15 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
             serde_json::from_slice(&fs::read(workspace.join(SEARCH_STEPS_FILE))?)?;
         let expected: Vec<Value> = search_requests
             .iter()
-            .map(|_| {
+            .map(|search| {
+                let query = if allowance {
+                    search["commands"]["search_query"][0]["q"].clone()
+                } else {
+                    json!("local fixture source")
+                };
                 json!({
                     "id": "local-search", "type": "web_search",
-                    "query": "local fixture source", "queries": ["local fixture source"],
+                    "query": query, "queries": [query],
                     "pages": [{"url": "https://example.invalid/source"}],
                     "status": "completed",
                 })
@@ -1483,6 +1564,14 @@ scenario_test!(
     "native_search_managed_routing",
     1
 );
+// An Instafy AI message runs at most two web searches: a call is sent only the queries left, and
+// one with none left does not run and reads a plain line instead. The turn reports what the two
+// cost for the controller to charge.
+scenario_test!(
+    a_managed_runs_message_keeps_to_its_two_web_searches,
+    "native_search_managed_allowance",
+    1
+);
 // The pass that only recovers a turn's missing answer runs with `disable_native_web_search`, as
 // `finalization_codex_run_options` sets it: nothing of its run reaches the chat, so it never
 // searches, whatever the job's grant.
@@ -1692,7 +1781,10 @@ fn shared_browser_mcp_records_its_own_process_group_before_serving() -> Result<(
 fn authorized_native_search(scenario: &str) -> bool {
     matches!(
         scenario,
-        "native_search_authorized" | "native_search_custom_provider" | "native_search_managed"
+        "native_search_authorized"
+            | "native_search_custom_provider"
+            | "native_search_managed"
+            | "native_search_managed_allowance"
     )
 }
 
@@ -1703,6 +1795,7 @@ fn has_native_search_grant(scenario: &str) -> bool {
             | "native_search_custom_provider"
             | "native_search_routing"
             | "native_search_managed"
+            | "native_search_managed_allowance"
             | "native_search_managed_routing"
             | "native_search_managed_finalization"
             | "personal_browser_native_search"
@@ -1714,6 +1807,7 @@ fn managed_native_search_grant(scenario: &str) -> bool {
     matches!(
         scenario,
         "native_search_managed"
+            | "native_search_managed_allowance"
             | "native_search_managed_routing"
             | "native_search_managed_finalization"
     )
@@ -1847,6 +1941,8 @@ async fn isolated_retry_child() -> Result<()> {
     });
     let started = Instant::now();
     let task_usage = TaskUsage::default();
+    let allowance = (scenario == "native_search_managed_allowance")
+        .then(|| Arc::new(runtime_agent::managed_web_search::ManagedWebSearch::new(2)));
     let mut retry_started = None;
     let mut observe_retry = |event: &Value| -> Result<()> {
         if event["type"] == "stream.retry" {
@@ -1879,6 +1975,8 @@ async fn isolated_retry_child() -> Result<()> {
                     Default::default()
                 },
                 disable_native_web_search: scenario == "native_search_managed_finalization",
+                // Its message's allowance, as the job processor gives a managed run's turn.
+                managed_web_search: allowance.clone(),
                 disable_final_output_json_schema: true,
                 allow_plain_text_final_fallback: true,
                 suppress_contextual_instructions: true,
@@ -1975,12 +2073,41 @@ async fn isolated_retry_child() -> Result<()> {
             | "native_search_custom_provider"
             | "native_search_routing"
             | "native_search_managed"
+            | "native_search_managed_allowance"
             | "native_search_managed_routing"
             | "native_search_managed_finalization"
             | "personal_browser_native_search"
     ) {
         let output = result?;
         assert_eq!(output.final_json["summary"], FINAL_TEXT);
+        // What the message's two searches cost, as the bridge reported it, for the third that
+        // did not run nothing: the allowance holds it for the job's completion, which reports
+        // it to the controller (`ai/web-search-usage`). The turn's own events carry none of it.
+        let searched = allowance.is_some()
+            && output
+                .events
+                .iter()
+                .any(|event| event["item"]["type"] == "web_search");
+        assert_eq!(
+            allowance
+                .as_ref()
+                .and_then(|allowance| allowance.take_unreported())
+                .map(|cost| (
+                    cost.searches,
+                    cost.input_tokens,
+                    cost.cached_input_tokens,
+                    cost.output_tokens
+                )),
+            searched.then_some((2, 2000, 0, 20)),
+            "{scenario}"
+        );
+        assert!(
+            output
+                .events
+                .iter()
+                .all(|event| event.get("webSearch").is_none()),
+            "{scenario}"
+        );
         // The room's search steps (a search that ended with words), for the parent to hold
         // against the searches the proxy saw.
         let steps = output
