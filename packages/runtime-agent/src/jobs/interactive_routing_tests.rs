@@ -574,7 +574,7 @@ fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     assert!(
-        flat(hub).contains("The page holds the detail; chat holds a short reply. One site per request. Never stop to ask"),
+        flat(hub).contains("The page holds the detail; chat holds a short reply. One site per request. ## 1. Pick the builder"),
         "{hub}"
     );
     assert!(!hub.contains("another chat"), "{hub}");

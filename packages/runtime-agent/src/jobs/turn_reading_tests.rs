@@ -63,7 +63,12 @@ fn a_browser_turn_reads_only_the_replies_guide_of_agents_md() {
             replies.trim_end()
         );
         assert!(prompt.contains(&block), "{transport}\n{prompt}");
-        for shell in ["## Responsiveness", "Treat “read-only”", "write_stdin"] {
+        for shell in [
+            "## Responsiveness",
+            "Treat “read-only”",
+            "write_stdin",
+            "## Reading the web",
+        ] {
             assert!(!prompt.contains(shell), "{transport}: {shell}");
         }
     }

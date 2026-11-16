@@ -9,7 +9,6 @@ routing_keywords: interactive, map, maps, tap through, as a page, on a page, int
 # Interactive artifacts
 
 The page holds the detail; chat holds a short reply. One site per request.
-Never stop to ask before building: a vague ask gets sensible defaults, stated in the reply.
 
 ## 1. Pick the builder
 
