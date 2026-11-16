@@ -9,6 +9,7 @@ import { useProject } from "../../../projects/useProject";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { SEMANTIC_TONE_CLASSES } from "../../../theme/semanticTones";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { GitReviewMode, WorkspaceGitReviewEntry, WorkspaceGitReviewSource } from "../../../workspace/gitReviewTypes";
 import { WorkspaceGitDiffPanel } from "./WorkspaceGitDiffPanel";
@@ -339,7 +340,7 @@ export function GitReviewView({
               <span>Loading review…</span>
             </div>
           ) : error && entries.length === 0 ? (
-            <div className="px-4 py-6 text-sm text-rose-600 dark:text-rose-300">{error}</div>
+            <div className={`px-4 py-6 text-sm ${SEMANTIC_TONE_CLASSES.danger.text}`}>{error}</div>
           ) : (
             <WorkspaceGitRollingDiffPanel
               paths={paths}

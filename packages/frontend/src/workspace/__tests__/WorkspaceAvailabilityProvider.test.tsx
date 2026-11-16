@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceAvailabilityProvider, useWorkspaceAvailability, type WorkspaceAvailabilityScope } from "../WorkspaceAvailabilityProvider";
 import { WorkspaceAvailabilityBanner } from "../WorkspaceAvailabilityBanner";
+import { textTones } from "../../styles/typography";
 
 const mocks = vi.hoisted(() => ({ probe: vi.fn() }));
 vi.mock("../../services/runtimeController/workspaceAvailabilityProbe", () => ({ probeWorkspaceAvailability: mocks.probe }));
@@ -101,6 +102,13 @@ describe("shared workspace availability", () => {
     expect(document.activeElement).toBe(retry);
     await act(async () => resolve({ kind: "available" }));
     expect(document.activeElement?.getAttribute("data-testid")).toBe("studio-context-workspace-focus");
+  });
+  it("gives Retry a padded target in readable muted text", async () => {
+    mocks.probe.mockResolvedValue({ kind: "connection" });
+    await render(); await act(async () => latest.reportFailure());
+    const retry = container.querySelector<HTMLButtonElement>('[data-testid="workspace-availability-retry"]')!;
+    expect([...retry.classList]).toEqual(expect.arrayContaining(["px-2.5", "py-1.5", ...textTones.muted.split(" ")]));
+    expect(retry.classList.contains("p-0")).toBe(false);
   });
   it("resumes on browser reconnection but skips probes while hidden", async () => {
     mocks.probe.mockResolvedValueOnce({ kind: "connection" }).mockResolvedValue({ kind: "available" });

@@ -435,7 +435,7 @@ function formatLeaseMetrics(
   }
   const parts: string[] = [];
   if (metrics?.leasedByRuntimeId) {
-    parts.push(`runtime ${shortenRuntimeId(metrics.leasedByRuntimeId)}`);
+    parts.push(`machine ${shortenRuntimeId(metrics.leasedByRuntimeId)}`);
   }
   const wait = formatQueueWait(metrics?.queueWaitMs ?? null);
   if (wait) {
@@ -455,14 +455,15 @@ function formatLeaseMetrics(
     return null;
   }
   const titleParts = [
-    metrics?.leasedByRuntimeId ? `Runtime: ${metrics.leasedByRuntimeId}` : null,
+    metrics?.leasedByRuntimeId ? `Machine: ${metrics.leasedByRuntimeId}` : null,
     metrics?.agentHandle ? `Agent: ${metrics.agentHandle}` : null,
     metrics?.queuedAt ? `Queued: ${metrics.queuedAt}` : null,
-    metrics?.leasedAt ? `Leased: ${metrics.leasedAt}` : null,
+    // When a machine took the job (its lease) and began it.
+    metrics?.leasedAt ? `Started: ${metrics.leasedAt}` : null,
     metrics?.completedAt ? `Completed: ${metrics.completedAt}` : null,
     wait ? `Queue wait: ${wait}` : null,
     wallTime ? `Wall time: ${wallTime}` : null,
-    typeof metrics?.leaseAttempts === "number" ? `Lease attempts: ${metrics.leaseAttempts}` : null,
+    typeof metrics?.leaseAttempts === "number" ? `Attempts: ${metrics.leaseAttempts}` : null,
     toolUpdates ? `Tool updates: ${Math.round(toolUpdateCount)}` : null,
   ].filter((part): part is string => Boolean(part));
   return { label: parts.join(" · "), title: titleParts.join("\n") };
@@ -495,7 +496,7 @@ function formatTeamRuntimeSummary({
         runtimeId: metrics.leasedByRuntimeId,
         summary: [
           label,
-          `runtime ${shortenRuntimeId(metrics.leasedByRuntimeId)}`,
+          `machine ${shortenRuntimeId(metrics.leasedByRuntimeId)}`,
           wait ? `wait ${wait}` : null,
           wallTime ? `ran ${wallTime}` : null,
           attempts,
@@ -511,16 +512,16 @@ function formatTeamRuntimeSummary({
   }
 
   const uniqueRuntimeIds = new Set(rows.map((row) => row.runtimeId));
-  const runtimeCount = uniqueRuntimeIds.size;
-  const laneCount = rows.length;
-  const label = `${runtimeCount} runtime${runtimeCount === 1 ? "" : "s"}`;
+  const machineCount = uniqueRuntimeIds.size;
+  // Each row is a workstream a machine took on (its job's lease).
+  const workstreamCount = rows.length;
   const spreadLabel =
-    runtimeCount > 1
-      ? `${label} across ${laneCount} leased lane${laneCount === 1 ? "" : "s"}`
-      : `${label} for ${laneCount} leased lane${laneCount === 1 ? "" : "s"}`;
+    `${workstreamCount} workstream${workstreamCount === 1 ? "" : "s"} on ` +
+    `${machineCount} machine${machineCount === 1 ? "" : "s"}`;
   return {
     label: spreadLabel,
-    title: [`Runtime spread: ${spreadLabel}`, ...rows.map((row) => `- ${row.summary}`)].join("\n"),
+    // Copy summary copies this: the popover's heading, then its rows.
+    title: [spreadLabel, ...rows.map((row) => `- ${row.summary}`)].join("\n"),
   };
 }
 
@@ -988,10 +989,10 @@ function formatTeamStatusSummary({
     return parts.join(" · ");
   }
   if (leadStatus === "done") {
-    return `Lead ready · ${done}/${plan.agents.length} lanes`;
+    return `Lead ready · ${done}/${plan.agents.length} workstreams done`;
   }
   if (leadStatus === "working") {
-    return `Lead active · ${done}/${plan.agents.length} lanes`;
+    return `Lead active · ${done}/${plan.agents.length} workstreams done`;
   }
   if (working > 0) {
     const parts = [`${working} active`];
@@ -1004,9 +1005,9 @@ function formatTeamStatusSummary({
     return parts.join(" · ");
   }
   if (done > 0) {
-    return `${done}/${plan.agents.length} lanes done`;
+    return `${done}/${plan.agents.length} workstreams done`;
   }
-  return `${plan.agents.length} lane${plan.agents.length === 1 ? "" : "s"} queued`;
+  return `${plan.agents.length} workstream${plan.agents.length === 1 ? "" : "s"} queued`;
 }
 
 // A touch or pen long-press on a lane opens that lane's "…" menu (touch has no
@@ -1264,7 +1265,7 @@ export function MultiAgentPlanEntry({
               data-testid="multi-agent-team-runtime-summary"
             >
               <div className="font-medium text-slate-700 dark:text-slate-100">{teamRuntimeSummary.label}</div>
-              <div className="mt-1 whitespace-pre-wrap text-xxs text-slate-500 dark:text-slate-400">
+              <div className="mt-1 whitespace-pre-wrap text-xxs text-slate-600 dark:text-slate-400">
                 {teamRuntimeDetail}
               </div>
             </div>
@@ -1279,7 +1280,7 @@ export function MultiAgentPlanEntry({
             >
               <StudioMenuSeparator />
               <StudioMenuItem id="copy-runtime-summary">
-                <MenuItemContent>Copy runtime summary</MenuItemContent>
+                <MenuItemContent>Copy summary</MenuItemContent>
               </StudioMenuItem>
             </StudioMenu>
           </StudioPopover>

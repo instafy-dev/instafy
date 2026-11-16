@@ -739,10 +739,16 @@ function ControllerConversationNoticeEntry({
   const noticeClassName = isRuntimeAlert
     ? "border-secondary-200/80 bg-secondary-50/80 text-secondary-900 shadow-sm dark:border-secondary-400/25 dark:bg-secondary-500/10 dark:text-secondary-100"
     : "border-rose-200/80 bg-rose-50/80 text-rose-900 shadow-sm dark:border-rose-400/25 dark:bg-rose-500/10 dark:text-rose-100";
-  const displayContent = resolveControllerConversationNoticeContent(message);
   // Without the provider (thread previews, tests) the card keeps its old
-  // button-free shape rather than throwing.
+  // button-free shape rather than throwing, and the wording for someone who
+  // can change the space.
   const noticeActions = useControllerNoticeActions();
+  // Only someone who can change the space is told to start, reconnect or stop
+  // a machine in Machines; a viewer reads what happened.
+  const displayContent = resolveControllerConversationNoticeContent(message, {
+    viewerUserId: noticeActions?.viewerUserId ?? null,
+    canChangeSpace: noticeActions?.canChangeSpace,
+  });
   const noticeAction = resolveControllerConversationNoticeAction(message, {
     viewerUserId: noticeActions?.viewerUserId ?? null,
   });

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../screens/studio/types";
 import {
   RATE_LIMIT_AUTO_RETRY_DEFAULT_DELAY_MS,
@@ -255,7 +255,65 @@ describe("provider usage limit", () => {
     expect(presentation?.friendlyText).toContain("Instafy AI is unavailable right now");
     expect(presentation?.friendlyText).toContain("not your credits");
     expect(presentation?.friendlyText).not.toContain("Oct 23rd");
+    expect(presentation?.friendlyText).toMatch(/Try again later\.$/u);
     expect(presentation?.rawText).toBe(CODEX_PLAN_LIMIT);
+  });
+
+  describe("once the runtime names the moment in UTC", () => {
+    // What the runtime makes of Codex's "Try again at Nov 14th, 2026 11:03 PM." on a machine on UTC.
+    const IN_UTC = "You\u2019ve hit your usage limit. Try again at 2026-11-14 23:03 UTC.";
+    const zone = process.env.TZ;
+    beforeEach(() => {
+      vi.useFakeTimers();
+      // A reader an hour east of UTC, on a Tuesday morning that week.
+      process.env.TZ = "Europe/Warsaw";
+      vi.setSystemTime(new Date("2026-11-10T09:05:00Z"));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      process.env.TZ = zone;
+    });
+
+    // 23:03 UTC, as a reader in a given zone reads it, in whatever language their browser is in.
+    const reset = new Date(Date.UTC(2026, 10, 14, 23, 3));
+    const inZone = (timeZone: string, withDay: boolean) =>
+      new Intl.DateTimeFormat(undefined, {
+        ...(withDay ? { weekday: "short" as const, month: "short" as const, day: "numeric" as const } : {}),
+        hour: "numeric",
+        minute: "2-digit",
+        timeZone,
+      }).format(reset);
+
+    it("says when to come back in the reader's own clock, on every copy", () => {
+      const sentence = (aiAccessMode?: string) =>
+        resolveRunFailurePresentation({ metadata: { ...FAILED, ...(aiAccessMode ? { aiAccessMode } : {}) }, content: IN_UTC })
+          ?.friendlyText;
+      // Already Sunday there.
+      const when = inZone("Europe/Warsaw", true);
+      expect(when).toContain("15");
+      expect(sentence("managed")).toBe(
+        `Instafy AI is unavailable right now: it has reached its usage limit, so this turn stopped. This is on Instafy's side, not your credits or your plan. Try again after ${when}.`,
+      );
+      expect(sentence("byoc")).toBe(
+        `Your AI account has reached its usage limit, so this turn stopped. Try again after ${when}, or connect another AI.`,
+      );
+      expect(sentence()).toBe(
+        `The AI account for this turn has reached its usage limit, so it stopped. Try again after ${when}, or connect another AI.`,
+      );
+      // Details keep the service's words as the runtime passed them on.
+      expect(resolveRunFailurePresentation({ metadata: { ...FAILED, aiAccessMode: "managed" }, content: IN_UTC })?.rawText).toBe(IN_UTC);
+    });
+
+    it("gives the time alone on the reader's own day", () => {
+      vi.setSystemTime(new Date("2026-11-14T22:30:00Z"));
+      const managed = () =>
+        resolveRunFailurePresentation({ metadata: { ...FAILED, aiAccessMode: "managed" }, content: IN_UTC })?.friendlyText;
+      // Half past eleven at night there: the limit opens just after midnight, another day.
+      expect(managed()).toMatch(new RegExp(`Try again after ${inZone("Europe/Warsaw", true)}\\.$`, "u"));
+      // Half past five in the afternoon in New York: the same moment, later that day.
+      process.env.TZ = "America/New_York";
+      expect(managed()).toMatch(new RegExp(`Try again after ${inZone("America/New_York", false)}\\.$`, "u"));
+    });
   });
 
   it("tells a run on the person's own AI when the provider says it resets", () => {
@@ -1168,7 +1226,7 @@ describe("resolveRunFailurePresentation", () => {
     // Recorded by runtime/limit_waits.rs when a message waited out the
     // 30-minute window behind the team's hosted runtime limit.
     const reason =
-      "This message didn't start: every cloud runtime in this team stayed busy for 30 minutes. Stop a runtime you aren't using, then send it again.";
+      "This message didn't start: all hosted machines for this team stayed in use for 30 minutes. In Machines, stop one you no longer need, then send it again.";
     const presentation = resolveRunFailurePresentation({
       metadata: {
         source: "controller",
@@ -1207,6 +1265,67 @@ describe("resolveRunFailurePresentation", () => {
     expect(presentation?.kind).toBe("generic");
     expect(presentation?.friendlyText).toBe(reason);
     expect(isAutoRetryEligibleFailureKind(presentation?.kind)).toBe(false);
+  });
+
+  it("shows the controller's other limit-wait reasons in full too", () => {
+    // runtime/limit_waits.rs: the give-up after other refusals, and the plain
+    // reason for a refusal whose own text is not written for the person.
+    for (const [kind, reason] of [
+      [
+        "runtime_limit_wait_expired",
+        "This message didn't start: Instafy couldn't start a hosted machine for this space within 30 minutes. Send it again to retry.",
+      ],
+      [
+        "runtime_limit_wait_refused",
+        "This message didn't start: Instafy couldn't start a hosted machine for this space. Send it again to retry.",
+      ],
+    ]) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: {
+          source: "controller",
+          kind,
+          outcome: "failed",
+          messageType: "error",
+          jobId: "job-1",
+          runId: "run-1",
+          errorMessage: reason,
+        },
+        content: reason,
+      });
+      expect(presentation?.kind, reason).toBe("generic");
+      expect(presentation?.friendlyText, reason).toBe(reason);
+    }
+  });
+
+  it("shows the controller's run-once reasons in full for a turn that holds device grants", () => {
+    // runtime/sweeps.rs: a turn that runs only once that no machine started
+    // within its minute, and one a lease of which ended. A local-engine turn's
+    // failure carries the controller's stamp and reads by its code instead.
+    for (const [kind, reason] of [
+      [
+        "start_by_passed",
+        "This turn didn't run: it had to start by a set time, and no machine started it in time. Send it again if you still want it.",
+      ],
+      [
+        "run_once_interrupted",
+        "This turn stopped and won't run again: it may run only once, and its machine stopped while it ran. Send it again if you still want it.",
+      ],
+    ]) {
+      const presentation = resolveRunFailurePresentation({
+        metadata: {
+          source: "controller",
+          kind,
+          outcome: "failed",
+          messageType: "error",
+          jobId: "job-1",
+          runId: "run-1",
+          errorMessage: reason,
+        },
+        content: reason,
+      });
+      expect(presentation?.kind, reason).toBe("generic");
+      expect(presentation?.friendlyText, reason).toBe(reason);
+    }
   });
 
   describe("a turn a stop put back in the queue that no machine picked up in time", () => {

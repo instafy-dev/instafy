@@ -588,7 +588,7 @@ export function usePersonalBrowserBridge({
       }
       const runtimeId = result?.runtimeId?.trim() || null;
       if (!runtimeId) {
-        throw new Error("The desktop browser agent did not return a runtime id.");
+        throw new Error("The personal browser is usable, but its desktop agent did not start correctly.");
       }
       setStartedRuntimeId(runtimeId);
       setRuntimeStartState("succeeded");

@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Puzzle } from "iconoir-react";
+import { Globe } from "iconoir-react";
 import { Toggle } from "../../../components/Toggle";
 import {
   buildExtensionPanelSectionViewModel,
@@ -96,10 +96,11 @@ export function ExtensionsPanel() {
           localProviderHostUnavailableOnThisClient
             ? "Showing on-device extensions only."
             : activeProject
-              ? `Connect devices and tools to ${activeProject.name}.`
+              ? `Let ${activeProject.name} use features of a phone or computer, such as a camera or speech.`
               : "Select a space to attach extensions intentionally."
         }
-        icon={<Puzzle className="h-5 w-5" aria-hidden={true} />}
+        // The same globe as the Extensions row in the sidebar and its tab.
+        icon={<Globe className="h-5 w-5" aria-hidden={true} />}
         tone="activity"
         actions={
           activeProjectId && showExtensionDeveloperTools ? (

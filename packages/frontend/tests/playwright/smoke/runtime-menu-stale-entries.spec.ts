@@ -146,6 +146,6 @@ test.describe.serial("Runtime menu stale entries", () => {
     await openRuntimeSelector(page);
     const popover = page.getByTestId("runtime-selector-popover");
 
-    await expect(popover.locator('span[title="Instafy Cloud runtime"]')).toHaveCount(1);
+    await expect(popover.locator('span[title="Instafy Cloud"]')).toHaveCount(1);
   });
 });

@@ -595,10 +595,13 @@ export function useRuntimeControllerSync({
           if (event.kind?.startsWith("local_workspace.")) {
             if (event.kind === "local_workspace.unregistered") {
               dispatch({ type: "setLocalWorkspace", workspace: null });
+              // The controller says this space's folder is gone: it has no
+              // origin now, which is an answer, not an origin still loading.
               dispatch({
                 type: "applyOriginSummary",
                 summary: null,
                 derivedPresence: null,
+                projectId,
               });
             } else {
               const presence = mapLocalWorkspacePresenceFromPayload(

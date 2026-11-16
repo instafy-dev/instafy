@@ -136,7 +136,7 @@ export function DevDiagnosticsMenu({
               className="justify-between"
             >
               <Text as="span" variant="bodyStrong" tone="inherit">
-                View runtime logs
+                View machine logs
               </Text>
               {hasLogs ? (
                 <span
@@ -183,7 +183,7 @@ export function DevDiagnosticsMenu({
         </div>
 
         <div className={SECTION_CLASS}>
-          <Text variant="overline" tone="subtle">
+          <Text variant="overline" tone="muted">
             Build
           </Text>
           <div className="mt-2 flex items-center justify-between gap-3">
@@ -221,7 +221,7 @@ export function DevDiagnosticsMenu({
         </div>
 
         <div className={SECTION_CLASS}>
-          <Text variant="overline" tone="subtle">
+          <Text variant="overline" tone="muted">
             Overrides
           </Text>
             {onToggleShakeToReport ? (
@@ -235,7 +235,7 @@ export function DevDiagnosticsMenu({
                       {shakeToReportStatus ?? "Off"}
                     </Text>
                     {shakeToReportDetail ? (
-                      <Text as="p" variant="caption" tone="subtle" className="mt-1">
+                      <Text as="p" variant="caption" tone="muted" className="mt-1">
                         {shakeToReportDetail}
                       </Text>
                     ) : null}
@@ -308,7 +308,7 @@ export function DevDiagnosticsMenu({
                 >
                   Use automatic detection
                 </Button>
-                <Text as="span" variant="caption" tone="subtle">
+                <Text as="span" variant="caption" tone="muted">
                   URL: ?touchMode=1 or ?touchMode=0
                 </Text>
               </div>
@@ -317,8 +317,8 @@ export function DevDiagnosticsMenu({
 
         {runtimeOptions.length > 0 ? (
           <div className={SECTION_CLASS}>
-            <Text variant="overline" tone="subtle">
-              Runtimes
+            <Text variant="overline" tone="muted">
+              Machines
             </Text>
             <div className="mt-2 space-y-2">
               {runtimeOptions.map((option) => (

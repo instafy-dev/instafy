@@ -807,7 +807,7 @@ export function useChatSubmitFlow({
         showStatus(
           usePersonalBrowserRuntime
             ? "Personal Browser is still available for manual browsing, but its agent is unavailable. Retry agent control before sending this task."
-            : "Shared Browser is visible, but its agent runtime isn't ready yet. Wait for it to come up before sending this task.",
+            : "Shared Browser is visible, but the machine it runs on isn't ready yet. Send this task once it is.",
           "warning",
           5500,
           usePersonalBrowserRuntime && personalBrowserAgentSurfaceReady

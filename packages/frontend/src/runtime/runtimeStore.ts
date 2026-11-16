@@ -41,6 +41,13 @@ export interface RuntimeStoreState {
    * a commit, and this tells the two apart.
    */
   desktopOriginProjectId: string | null;
+  /**
+   * The project whose default origin the controller has answered for, with an
+   * origin or with none; null until then. While it names another project, an
+   * empty `desktopOrigin` means the origin is still loading, not that the
+   * space has none.
+   */
+  desktopOriginAnsweredProjectId: string | null;
   runtimeStatuses: ControllerRuntimeStatusEntry[];
   preferredRuntimeId: string | null;
   /**
@@ -126,6 +133,7 @@ export function createInitialRuntimeStoreState(): RuntimeStoreState {
     localWorkspace: null,
     desktopOrigin: null,
     desktopOriginProjectId: null,
+    desktopOriginAnsweredProjectId: null,
     runtimeStatuses: [],
     preferredRuntimeId: null,
     sharedBrowserHostPolicy: null,
@@ -680,6 +688,9 @@ export function runtimeReducer(
         ...state,
         desktopOrigin: nextOrigin,
         desktopOriginProjectId: nextOrigin ? (action.projectId ?? null) : null,
+        // A summary for a project is the controller's answer for it; one
+        // without a project forgets the origin until the next answer.
+        desktopOriginAnsweredProjectId: action.projectId ?? null,
         localWorkspace: nextWorkspace,
       };
     }

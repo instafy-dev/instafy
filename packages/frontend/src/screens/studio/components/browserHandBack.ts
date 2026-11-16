@@ -218,6 +218,11 @@ export function claimBrowserHandBack(jobId: string): boolean {
   return true;
 }
 
+/** Whether this page claimed a browser job's hand-back. */
+export function browserHandBackClaimed(jobId: string): boolean {
+  return claimedHandBacks.has(jobId);
+}
+
 /** Forgets every claim, as a reload would. Tests only. */
 export function forgetBrowserHandBacksForTests(): void {
   claimedHandBacks.clear();

@@ -157,6 +157,23 @@ determines the winner. Arbitrary layout classes remain supported.
   competing font-size/line-height classes. `InlineNotice` owns severity styling and accepts
   an `actions` slot. Its `density` selects compact or comfortable copy. Shared success,
   information, warning and danger colors come from the same semantic definitions.
+  Warning notices keep the semantic icon and surface with neutral prose. Each tone's text
+  meets WCAG AA (4.5:1) and its icon 3:1, on its surface and bare, at rest and on a hovered
+  row, in both themes; `src/theme/__tests__/semanticTones.test.ts` measures them from the
+  theme tokens. Muted buttons use the same grey as muted `Text`, so muted is not an
+  "unavailable" look: an unavailable control that keeps focus (`aria-disabled`, not
+  `isDisabled`) keeps its tone and fades with `aria-disabled:opacity-60`, as a disabled
+  button does.
+- Words a person needs to read use `Text tone="muted"` or stronger; `tone="subtle"` (2.1:1 in
+  light) is for decoration, `aria-hidden` separators and text on a dark panel only. Status
+  words use the semantic tones, and a chip takes its colour from `Badge`'s `tone`, never from
+  colour classes in `className`: Tailwind orders utilities that set the same property by name,
+  so a Badge's neutral classes, a menu row's grey and Button's own text colour paint over a
+  plain colour class. A colour that must win there is marked important, as the danger rows in
+  Settings navigation and the workspace tab menu are, and the token test guards them. Muted
+  text reads 4.39:1 on the slate-100 fill, so a row that turns slate-100 darkens its text too:
+  hovered, focused and pressed menu rows go to slate-800, a selected row's subtitle to
+  `secondary`, and Home's rows hover with slate-50.
 - Use `SegmentedControl` for a mutually exclusive value. Reusing its CSS on separate buttons
   omits its radio-group and arrow-key behavior. Navigation tabs keep their navigation semantics.
   Like action buttons, segment sizing follows the primary pointer rather than the viewport:
@@ -350,6 +367,14 @@ On phones these forms retain `MobileFocusDialog`, including its visual-viewport
 handling, Back behavior and very-short-viewport fallback. The footer scrolls with the
 form when there is too little room to fix both header and actions on screen.
 
+Secrets says what a secret is for: keys and tokens that agents' commands need, which the agents a
+person allows get as environment variables when they run commands. Its empty state and editor
+link to Your AI for the AI that answers in chat, and Your AI's Connections tab points back to
+Secrets in one line. When a secret's name is the API key of a provider Your AI connects
+(`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY` or `GEMINI_API_KEY`, from the same provider
+catalog), a note that never blocks saving says the key doesn't change the AI that answers in chat
+and links to Your AI. A key Your AI does not connect, such as `ANTHROPIC_API_KEY`, gets no note.
+
 A secret the controller refuses as a Claude sign-in (the name `CLAUDE_CODE_OAUTH_TOKEN`, or a
 value that holds Claude sign-in material) stays in the Secrets list, marked "Instafy no longer
 stores Claude sign-ins; remove it", instead of being hidden: the controller never delivers it to
@@ -411,6 +436,17 @@ in its details. Start/Stop stay visible in the header, while More actions opens 
 Remove confirmation. Inspecting a machine never changes the space's preferred machine.
 Expanded machine details use alignment and spacing, without a divider or enclosing card.
 Routine actions use the shared ghost button treatment; empty states remain plain content.
+The Machines page's empty state lines up with the heading and says what a machine is for. Only to
+someone who can start a machine, and only while no failure shows, it adds that Instafy starts a
+hosted machine when they message an agent, with a content-width neutral **Start one now** rather
+than a full-width primary bar. On the page, Start on an offline machine uses the same neutral,
+label-width button. A start keeps focus while it runs (`isPending`). After a failed start the
+warning's retry reads **Reconnect the hosted machine** only when the space lists a hosted
+machine, and **Try again** otherwise. On a server with no hosted machine provider the warning
+says the server isn't set up to start hosted machines and who can set it up, offers no retry,
+and offers **Connect your own machine** where the page can open that dialog. Chat notices about
+a missing, failed or busy machine tell only someone who can change the space to start,
+reconnect or stop one in Machines; a viewer reads what happened, with the same Open Machines.
 Machine icon actions use `size="sm"` and the shared 8px corner default: 32px on fine pointers and
 44px on coarse pointers, including Close, Copy, Start/Stop, More and picker disclosure.
 **Use this machine** uses the flat secondary treatment (`elevation="none"`) to stay
@@ -670,7 +706,7 @@ React Aria’s focus-visible state; pointer clicks must not draw a second frame 
 whole option. Share these styles through `segmentedControlStyles` while preserving each
 control’s meaning: category navigation uses `aria-current`, while mutually exclusive values
 use a labelled radio group with one tab stop and arrow-key selection. `SegmentedControl` owns
-that radio behavior; Appearance, Credits display options, Automation schedule/runtime and
+that radio behavior; Appearance, Credits display options, Automation schedule/machine and
 Invite access share it. Multi-select weekday chips keep `aria-pressed` instead.
 Use checkboxes for Automation choices that remain drafts until Save, and say when they apply.
 Keep category routes, immediate preference updates and explicit form saves independent.

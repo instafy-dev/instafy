@@ -75,7 +75,7 @@ describe("ChatTypingRows", () => {
   it.each([
     { label: "Thinking…", phase: "thinking" as const, wraps: false, motion: "thinking" },
     { label: "Checking the opening hours…", phase: "thinking" as const, wraps: false, motion: "thinking" },
-    { label: 'Your cloud runtime is busy in "Space B". Stop it there or wait until it is free.', phase: "waiting" as const, wraps: true, motion: "idle" },
+    { label: 'Waiting for a free hosted machine. Stop one in "Space B" and this message sends. It waits up to 30 minutes.', phase: "waiting" as const, wraps: true, motion: "idle" },
   ])("keeps solo status '$label' beside one small face without a heading or gutter", async ({ label, phase, wraps, motion }) => {
     await act(async () => {
       root.render(<ChatTypingRows {...soloStatusProps} typingIndicatorState={{ phase, label: null }} typingStatusLabel={label} typingStatusWraps={wraps} />);
@@ -355,15 +355,15 @@ describe("ChatTypingRows", () => {
     expect(spoken()).toBe("Octo is thinking");
   });
 
-  // The runtime-busy notice asks the person to do something ("Stop it there or
-  // let it go idle"), so it never waits behind the label before it, and the
-  // label after it follows at once when the machine is free.
+  // The runtime-busy notice asks the person to do something ("Stop one in
+  // …"), so it never waits behind the label before it, and the label after it
+  // follows at once when the machine is free.
   it("shows the runtime-busy notice at once, and lets it go at once", async () => {
     vi.useFakeTimers();
     const shown = () =>
       container.querySelector('[data-testid="assistant-typing-indicator"] [data-sweep-text]')?.textContent;
     const notice =
-      'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
+      'Waiting for a free hosted machine. Stop one in "Space B" and this message sends. It waits up to 30 minutes.';
     const row = (text: string, wraps: boolean) => (
       <ChatTypingRows
         peerTypingLabel={null}
@@ -448,7 +448,7 @@ describe("ChatTypingRows", () => {
     // So does the runtime-busy notice: under a row that covers the typing
     // row it shows nothing, and it leaves nothing once it ends.
     await act(async () => {
-      root.render(row(true, 'Your cloud runtime is busy in "Space B".', true));
+      root.render(row(true, "Waiting for a free hosted machine.", true));
     });
     expect(rowShown()).toEqual(nothing);
     await act(async () => {
@@ -516,7 +516,7 @@ describe("ChatTypingRows", () => {
     expect(label()?.getAttribute("title")).toBe("Starting…");
 
     const busyNotice =
-      'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
+      'Waiting for a free hosted machine. Stop one in "Space B" and this message sends. It waits up to 30 minutes.';
     await act(async () => {
       root.render(
         <ChatTypingRows

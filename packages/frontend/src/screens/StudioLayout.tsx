@@ -427,8 +427,11 @@ function StudioLayoutInner() {
         })();
       },
       viewerUserId: currentUserId,
+      // False until the space's access resolves, as for the machine controls
+      // themselves (RuntimeOperationsProvider, MachinesPanel).
+      canChangeSpace: canWriteProject,
     }),
-    [currentUserId, openPanelTab, requestHistoryPush, showDesktopRuntimeHelp, showStatus],
+    [canWriteProject, currentUserId, openPanelTab, requestHistoryPush, showDesktopRuntimeHelp, showStatus],
   );
   const isChatSurfaceVisible =
     activeWorkspaceTab?.kind === "conversation" ||
@@ -2317,11 +2320,11 @@ function DesktopRuntimeHelpDialog() {
 
   const handleStartDesktopRuntime = async () => {
     if (!activeProjectId) {
-      showStatus("Select a space before starting the desktop runtime.", "error", 4000);
+      showStatus("Select a space before starting it on this computer.", "error", 4000);
       return;
     }
     if (!canUseDesktopApp || !window.instafyDesktop?.startDesktopRuntime) {
-      showStatus("Desktop runtime launch is only available in the Instafy desktop app.", "warning", 4500);
+      showStatus("Use Instafy Desktop to start this space on your computer.", "warning", 4500);
       return;
     }
     if (desktopRuntimeBusy) {
@@ -2332,7 +2335,7 @@ function DesktopRuntimeHelpDialog() {
     try {
       const requestContext = await controllerClient.core.resolveRequestContext(null);
       if (!requestContext.accessToken) {
-        showStatus("Login required to start the desktop runtime.", "error", 4500);
+        showStatus("Sign in again to start this space on this computer.", "error", 4500);
         return;
       }
       const desktopRuntimeOptions = {
@@ -2352,11 +2355,11 @@ function DesktopRuntimeHelpDialog() {
             typeof refreshed.logFilePath === "string" ? refreshed.logFilePath : undefined,
         });
       }
-      showStatus("Desktop runtime started.", "success", 3200);
+      showStatus("Started this space on this computer.", "success", 3200);
       hideDesktopRuntimeHelp();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      showStatus(`Failed to start desktop runtime: ${message}`, "error", 5000);
+      showStatus(`Couldn't start this space on this computer: ${message}`, "error", 5000);
     } finally {
       setDesktopRuntimeBusy(false);
     }
@@ -2373,10 +2376,11 @@ function DesktopRuntimeHelpDialog() {
     try {
       await window.instafyDesktop.stopDesktopRuntime();
       setDesktopRuntimeStatus({ running: false });
-      showStatus("Desktop runtime stopped.", "success", 3200);
+      // Desktop stops the space it runs here, which need not be this one.
+      showStatus("Stopped the space running on this computer.", "success", 3200);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      showStatus(`Failed to stop desktop runtime: ${message}`, "error", 5000);
+      showStatus(`Couldn't stop the space running on this computer: ${message}`, "error", 5000);
     } finally {
       setDesktopRuntimeBusy(false);
     }
@@ -2395,9 +2399,11 @@ function DesktopRuntimeHelpDialog() {
       >
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <Heading level={2}>Self-host a runtime</Heading>
+            <Heading level={2}>Connect your own machine</Heading>
             <Text variant="body" tone="secondary" className="mt-1 max-w-lg">
-              Run Instafy on your own machine. Pick the easiest path below.
+              {canUseDesktopApp
+                ? "Agents can work on this computer, or on a self-hosted machine you start with the Instafy CLI."
+                : "Agents can work on a self-hosted machine you start with the Instafy CLI."}
             </Text>
           </div>
           <IconButton
@@ -2416,10 +2422,7 @@ function DesktopRuntimeHelpDialog() {
             <div className="rounded-2xl border border-slate-200/70 bg-white p-4 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <Badge
-                    size="xs"
-                    className="border-primary-200 bg-primary-50 text-primary-700 dark:border-primary-500/30 dark:bg-primary-500/15 dark:text-primary-200"
-                  >
+                  <Badge size="xs" tone="info">
                     Installed
                   </Badge>
                   <Text variant="bodyStrong" tone="primary">
@@ -2444,14 +2447,15 @@ function DesktopRuntimeHelpDialog() {
                     onPress={handleStartDesktopRuntime}
                     isDisabled={desktopRuntimeBusy}
                   >
-                    {desktopRuntimeBusy ? "Starting…" : "Start runtime"}
+                    {desktopRuntimeBusy ? "Starting…" : "Start on this computer"}
                   </Button>
                 )}
               </div>
               <Text variant="caption" tone="muted" className="mt-2">
+                {/* The space Desktop runs here may not be this one. */}
                 {desktopRuntimeStatus?.running
-                  ? `Runtime is running${typeof desktopRuntimeStatus.pid === "number" ? ` (pid ${desktopRuntimeStatus.pid})` : ""}.`
-                  : "Launch a self-hosted runtime connected to this space."}
+                  ? `A space is running on this computer${typeof desktopRuntimeStatus.pid === "number" ? ` (pid ${desktopRuntimeStatus.pid})` : ""}.`
+                  : "Lets agents in this space work on this computer."}
               </Text>
               {desktopRuntimeStatus?.running && desktopRuntimeStatus.logFilePath ? (
                 <Text variant="caption" tone="muted" className="mt-1">

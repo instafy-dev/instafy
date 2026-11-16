@@ -43,6 +43,14 @@ export interface EnsureHostedRuntimeOptions {
 export const STALLED_LAUNCH_RETRY_FAILED_MESSAGE =
   "Couldn't restart the workspace yet. Try again in a minute.";
 
+/**
+ * A refusal on platform capacity that came without its message says what the
+ * controller's own does (PLATFORM_AT_CAPACITY_MESSAGE in runtime-controller's
+ * runtime/ensure.rs), so the toast reads the same either way.
+ */
+const PLATFORM_AT_CAPACITY_MESSAGE =
+  "Instafy is at capacity right now because too many hosted machines are running. Try again in a few minutes.";
+
 interface UseHostedRuntimeEnsureOptions {
   enabled: boolean;
   projectId: string | null;
@@ -163,7 +171,7 @@ export function useHostedRuntimeEnsure({
     const replaceStalledLaunch = options?.replaceStalledLaunch === true;
     const effectiveProjectId = resolveEffectiveProjectId();
     if (!enabled || !effectiveProjectId) {
-      showStatus("Instafy Cloud runtime is unavailable right now.", "warning", 4000);
+      showStatus("Hosted machines are unavailable right now.", "warning", 4000);
       return false;
     }
     if (isBrowserRuntimeClaimActive(effectiveProjectId)) {
@@ -248,7 +256,7 @@ export function useHostedRuntimeEnsure({
         result = await ensureWithTimeout(null);
       }
       if (!result) {
-        showStatus("Unable to request Instafy Cloud runtime", "error", 4000);
+        showStatus("Couldn't start a hosted machine.", "error", 4000);
         debugLog("hosted-runtime:perform-result-null", { projectId: effectiveProjectId });
         return false;
       }
@@ -277,8 +285,8 @@ export function useHostedRuntimeEnsure({
         error && typeof error === "object" && "code" in error
           ? String((error as { code?: unknown }).code ?? "")
           : "";
-      // Both refusals point at the same escape hatch — a self-hosted machine —
-      // so give the sentence the control it names instead of leaving it as advice.
+      // Both refusals leave the same way out, a machine of one's own, so each
+      // toast carries the control that connects one.
       if (errorCode === "insufficient_credits") {
         showStatus(
           message ||
@@ -293,8 +301,7 @@ export function useHostedRuntimeEnsure({
         );
       } else if (errorCode === "platform_at_capacity") {
         showStatus(
-          message ||
-            "All hosted machines are in use right now — try again in a few minutes, or connect your own machine.",
+          message || PLATFORM_AT_CAPACITY_MESSAGE,
           "warning",
           8000,
           {
@@ -334,7 +341,7 @@ export function useHostedRuntimeEnsure({
     // with the limit below writes one.
     lastHostedEnsureLimitRef.current = null;
     if (!enabled || !effectiveProjectId) {
-      showStatus("Instafy Cloud runtime is unavailable right now.", "warning", 4000);
+      showStatus("Hosted machines are unavailable right now.", "warning", 4000);
       debugLog("hosted-runtime:ensure-skip", {
         reason: "unavailable",
         projectId: effectiveProjectId ?? "",
@@ -410,7 +417,7 @@ export function useHostedRuntimeEnsure({
         status: pendingHosted.status,
         health: pendingHosted.health,
       });
-      showStatus("Instafy Cloud runtime is starting…", "info", 3000);
+      showStatus("A hosted machine is already starting.", "info", 3000);
       return true;
     }
 
@@ -433,7 +440,7 @@ export function useHostedRuntimeEnsure({
         })),
       });
       // Keep `ensureHostedRuntime` non-interrupting: reuse the existing runtime.
-      showStatus("Instafy Cloud runtime is already running.", "info", 2500);
+      showStatus("A hosted machine is already running.", "info", 2500);
       return true;
     }
     debugLog("hosted-runtime:ensure-launch", {

@@ -36,6 +36,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "browser-pause-continue.spec.ts",
       "browser-recovery.spec.ts",
       "browser-keyboard-status.spec.ts",
+      "chat-file-change-pending-width.spec.ts",
       "conversation-surfaces.spec.ts",
       "suggestion-browser-menus.spec.ts",
       "queue-composer.spec.ts",

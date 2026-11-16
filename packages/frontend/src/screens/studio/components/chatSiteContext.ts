@@ -39,6 +39,18 @@ export function useChatSite(): ChatSite | null | undefined {
 }
 
 /**
+ * The chat's site from the history loaded so far, also while its rows wait
+ * for the rest. A row that waits for its words takes the width of the words
+ * this gives it, so nothing beside it moves when they come; it never shows
+ * them (its words are {@link useChatSite}'s).
+ */
+export const ChatSiteSoFarContext = createContext<ChatSite | null>(null);
+
+export function useChatSiteSoFar(): ChatSite | null {
+  return useContext(ChatSiteSoFarContext);
+}
+
+/**
  * The longest a turn's files row waits for the chat's history before it shows
  * anyway: a history that never comes in must not keep the files, and their
  * Undo, away.

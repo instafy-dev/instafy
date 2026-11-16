@@ -312,9 +312,10 @@ describe("a message Octo answers in its browser and then builds from what it fou
     expect(answered.filter((moment) => moment.octoRows !== 1 || moment.faces !== 1 || moment.typingRow || moment.notice))
       .toEqual([]);
 
-    // The hand-back went out, and its turn has shown nothing yet: the row goes on.
+    // The hand-back went out, and its turn has shown nothing yet: the row goes
+    // on, and says the work does, never a long "Thinking…" between the parts.
     const handedBack = await show(chat, Date.parse("2026-11-04T08:11:53.700Z"));
-    expect(handedBack).toMatchObject({ octoRows: 1, typingRow: false, notice: false, lines: ["Thinking…"] });
+    expect(handedBack).toMatchObject({ octoRows: 1, typingRow: false, notice: false, lines: ["Working…"] });
 
     const done = await show(chat, Date.parse("2026-11-04T08:13:49.000Z"));
     expect(done).toMatchObject({ octoRows: 1, typingRow: false, notice: false });
@@ -991,6 +992,6 @@ describe("a message Octo answers in its browser and then builds from what it fou
       createdAt: new Date(sent).toISOString(), updatedAt: new Date(sent).toISOString(), metadata: { agent: OCTO },
     };
     const view = await show(chat, sent + 60_000, [], { runs: [waiting] });
-    expect(view).toMatchObject({ octoRows: 1, typingRow: false, lines: ["Thinking…"] });
+    expect(view).toMatchObject({ octoRows: 1, typingRow: false, lines: ["Working…"] });
   });
 });

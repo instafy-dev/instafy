@@ -733,7 +733,7 @@ export function HistoryDrawer({
                 Saved versions
               </Text>
               {workspaceIssue && entries.length > 0 ? (
-                <Text variant="caption" tone="subtle" className="px-1" data-testid="history-stale-notice">
+                <Text variant="caption" tone="muted" className="px-1" data-testid="history-stale-notice">
                   Showing previously loaded versions.
                 </Text>
               ) : null}
@@ -836,7 +836,7 @@ export function HistoryDrawer({
                             tone="muted"
                           >
                             <NavArrowRight
-                              className={`h-4 w-4 shrink-0 text-slate-400 transition-transform dark:text-slate-500 ${
+                              className={`h-4 w-4 shrink-0 text-slate-500 transition-transform dark:text-slate-500 ${
                                 isExpanded ? "rotate-90" : ""
                               }`}
                               aria-hidden="true"

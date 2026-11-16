@@ -284,7 +284,7 @@ describe("homeAttention", () => {
       inboxItems: [createInboxItem("recovered", { lastMessageId: "older-failure", lastMessageType: "error" })],
     });
     expect(entries.map((entry) => [entry.title, entry.statusLabel])).toEqual([
-      ["Conversation failed", "Runtime unavailable"],
+      ["Conversation failed", "Machine unavailable"],
       ["Conversation recovered", undefined],
     ]);
   });

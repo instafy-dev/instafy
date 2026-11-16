@@ -180,7 +180,7 @@ describe("ChatSendQueueSurface", () => {
     expect(
       container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.getAttribute("aria-expanded"),
     ).toBe("true");
-    expect(container.textContent).not.toContain("Runtime offline");
+    expect(container.textContent).not.toContain("Machine not ready");
     expect(container.textContent).not.toContain("Reconnect");
     expect(container.querySelector('[data-testid="chat-send-queue-runtime-action-expanded"]')).toBeNull();
     expect(container.textContent).not.toContain("@octo");
@@ -279,7 +279,7 @@ describe("ChatSendQueueSurface", () => {
 describe("a message queued behind a turn a person's Stop cut off", () => {
   // What the controller records when it gives the stopped turn up: the
   // messages queued behind it are failed, not sent, with this reason.
-  const REASON = "Not sent because the runtime was stopped. Send it now if you still need it, or remove it.";
+  const REASON = "Not sent because the machine was stopped. Send it now if you still need it, or remove it.";
   const entry: ControllerSendQueueEntry = {
     id: "entry-1",
     conversationId: "controller-conversation-1",

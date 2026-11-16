@@ -36,8 +36,16 @@ export const HOSTED_BROWSER_VIEW_ACTION = {
   tryAgain: "Try again",
 } as const;
 
+/**
+ * A browser open that asked for a hosted machine and heard that the server
+ * has no such provider (`provider '…' is not configured on this controller`).
+ * That is the server's setup, the same for every space on it, and Instafy's
+ * browser runs only on hosted machines (docs/Shared-Browser.md). Only whoever
+ * runs the server can change it, so the view says who, and offers no Try
+ * again: until then every try fails the same way.
+ */
 export const HOSTED_BROWSER_SETUP_COPY =
-  "Browsing hasn't been set up for this workspace. Ask your administrator to connect a browser runtime.";
+  "Instafy's browser runs on a hosted machine. This server isn't set up to start one. Ask whoever runs this Instafy server to set it up.";
 
 const PROVIDER_NOT_CONFIGURED = /provider\s+['"][^'"]+['"]\s+is not configured/i;
 
@@ -57,6 +65,7 @@ const PROVIDER_NOT_CONFIGURED = /provider\s+['"][^'"]+['"]\s+is not configured/i
  * | error `failed`                   | failed   | "... did not open. Try again."   | Try again    |
  * | error `machine`                  | failed   | "This space's machine did not…"  | Try again    |
  * | error `blocked`                  | blocked  | its own                          | none         |
+ * | error `failed`, no provider      | blocked  | "Instafy's browser runs on a…"   | none         |
  * | error `notice`                   | failed   | its own                          | Try again    |
  */
 export function hostedBrowserViewState(input: {
@@ -80,13 +89,11 @@ export function hostedBrowserViewState(input: {
       case "notice":
         return { kind: "failed", sentence: failure?.reason || SHARED_BROWSER_HOST_COPY.didNotOpen, action: HOSTED_BROWSER_VIEW_ACTION.tryAgain };
       default:
-        return {
-          kind: "failed",
-          sentence: PROVIDER_NOT_CONFIGURED.test(failure?.reason ?? "")
-            ? HOSTED_BROWSER_SETUP_COPY
-            : SHARED_BROWSER_HOST_COPY.didNotOpen,
-          action: HOSTED_BROWSER_VIEW_ACTION.tryAgain,
-        };
+        // A server without the hosted provider cannot open it from here.
+        if (PROVIDER_NOT_CONFIGURED.test(failure?.reason ?? "")) {
+          return { kind: "blocked", sentence: HOSTED_BROWSER_SETUP_COPY, action: null };
+        }
+        return { kind: "failed", sentence: SHARED_BROWSER_HOST_COPY.didNotOpen, action: HOSTED_BROWSER_VIEW_ACTION.tryAgain };
     }
   }
   if (input.status === "connected" && input.hasConnection) {

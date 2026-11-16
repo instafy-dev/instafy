@@ -151,7 +151,7 @@ describe("BugReportDialog diagnostic consent", () => {
     await act(async () => checkbox?.click());
 
     const preview = document.querySelector('[data-testid="bug-report-diagnostics-preview"]');
-    expect(preview?.textContent).toContain("1 app log entries and 1 runtime log entries");
+    expect(preview?.textContent).toContain("1 app log entries and 1 machine log entries");
     expect(preview?.textContent).toContain("http://localhost:3000/studio/demo");
     expect(preview?.textContent).not.toContain("oauth_code");
     expect(preview?.textContent).not.toContain("private-fragment");

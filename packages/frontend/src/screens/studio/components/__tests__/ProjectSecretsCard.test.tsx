@@ -253,3 +253,121 @@ describe("project secrets panel", () => {
     expect(document.querySelector('[data-testid="project-secret-modal"]')).toBeNull();
   });
 });
+
+// A key saved here never connects the AI that answers in chat, so Secrets says
+// what it is for and points to Your AI, where that AI is connected.
+describe("what a secret is for, beside Your AI", () => {
+  beforeEach(() => {
+    // clearAllMocks keeps an implementation an earlier test gave these.
+    mocks.openPanelTab.mockReset();
+    mocks.requestUrlPush.mockReset();
+  });
+
+  async function typeInto(testId: string, value: string) {
+    const input = field(testId)!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  async function openCreateModal() {
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="project-secret-create"]')!.click());
+    expect(document.querySelector('[data-testid="project-secret-modal"]')).not.toBeNull();
+  }
+
+  function yourAiNote() {
+    return document.querySelector('[data-testid="project-secret-your-ai-note"]');
+  }
+
+  it("says what secrets are for when there are none, and its Your AI opens Your AI", async () => {
+    render("project-1");
+    expect(container!.textContent).toContain("No secrets yet.");
+    expect(container!.textContent).toContain(
+      "Store keys and tokens your agents' commands need, like GITHUB_TOKEN. "
+        + "To chat with your own AI account, connect it in Your AI.",
+    );
+    expect(container!.textContent).not.toMatch(/runtime/i);
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="project-secrets-your-ai"]')!.click());
+    expect(mocks.requestUrlPush).toHaveBeenCalledOnce();
+    expect(mocks.openPanelTab).toHaveBeenCalledExactlyOnceWith("ai", { activate: true });
+  });
+
+  it.each([
+    ["on a phone", false],
+    ["on a wide screen", true],
+  ])("explains the editor in plain words %s and points to Your AI", async (_layout, wide) => {
+    vi.stubGlobal("matchMedia", () => ({ matches: wide, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    render("project-1");
+    await openCreateModal();
+    // The phone form carries the words in its body; the wide one in its header.
+    expect(document.querySelector("[data-mobile-dialog-body]") !== null).toBe(!wide);
+    const modal = document.querySelector('[data-testid="project-secret-modal"]')!;
+    expect(modal.textContent).toContain(
+      "Agents you allow get this secret as an environment variable when they run commands. "
+        + "To chat with your own AI account, connect it in Your AI.",
+    );
+    expect(modal.textContent).not.toMatch(/runtime/i);
+    expect(document.querySelector('label[for="project-secret-name"]')?.textContent).toBe("Variable name");
+    expect(yourAiNote()).toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="project-secret-modal-your-ai"]')!.click());
+    expect(mocks.openPanelTab).toHaveBeenCalledExactlyOnceWith("ai", { activate: true });
+  });
+
+  it.each([
+    ["OPENAI_API_KEY", "OpenAI"],
+    ["DEEPSEEK_API_KEY", "DeepSeek"],
+    ["ZAI_API_KEY", "z.ai"],
+    ["GEMINI_API_KEY", "Gemini"],
+    // Read as the controller stores the name.
+    [" openai-api-key ", "OpenAI"],
+  ])("notes that %s does not connect chat", async (name, provider) => {
+    render("project-1");
+    await openCreateModal();
+    await typeInto("project-secret-name-input", name);
+    expect(yourAiNote()?.textContent).toBe(
+      `This key doesn't change the AI that answers in chat. To chat with ${provider}, connect it in Your AI.`,
+    );
+    // Announced as it appears, from a region that was already there.
+    expect(yourAiNote()?.closest('[role="status"]')).not.toBeNull();
+  });
+
+  it.each(["GITHUB_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY_BACKUP"])(
+    "adds no note for %s, which is not a key Your AI connects",
+    async (name) => {
+      render("project-1");
+      await openCreateModal();
+      await typeInto("project-secret-name-input", name);
+      expect(yourAiNote()).toBeNull();
+    },
+  );
+
+  it("never blocks saving a provider's key, and its Your AI opens Your AI", async () => {
+    vi.mocked(controllerClient.secrets.createForProject).mockResolvedValue({ success: true });
+    render("project-1");
+    await openCreateModal();
+    await typeInto("project-secret-name-input", "OPENAI_API_KEY");
+    await typeInto("project-secret-value-input", "inert-test-value");
+    expect(yourAiNote()).not.toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="project-secret-your-ai-note-link"]')!.click());
+    expect(mocks.openPanelTab).toHaveBeenCalledExactlyOnceWith("ai", { activate: true });
+    const save = document.querySelector<HTMLButtonElement>('[data-testid="project-secret-save"]')!;
+    expect(save.disabled).toBe(false);
+    await act(async () => save.click());
+    expect(controllerClient.secrets.createForProject).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ name: "OPENAI_API_KEY", value: "inert-test-value" }),
+    );
+  });
+
+  it("notes an existing provider key when it is edited", async () => {
+    mocks.query.data.secrets = [{
+      id: "secret-openai", name: "OPENAI_API_KEY", description: null, agentIds: [], agentHandles: ["octo"],
+      lastUsedAt: null, revokedAt: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    }];
+    render("project-1");
+    expect(container!.textContent).not.toContain("To chat with OpenAI");
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="project-secret-edit-secret-openai"]')!.click());
+    expect(yourAiNote()?.textContent).toContain("To chat with OpenAI, connect it in Your AI.");
+  });
+});

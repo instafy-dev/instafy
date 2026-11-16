@@ -8,6 +8,27 @@ describe("resolveChromeMode", () => {
     );
   });
 
+  it("keeps the first-paint guess while the space's origin is still loading", () => {
+    // A reload: this device last saw the space as History, and the controller
+    // has not answered for its origin yet.
+    expect(
+      resolveChromeMode({ originId: null, resolved: false, mode: "legacy", firstPaintMode: "stateless", originPending: true }),
+    ).toBe("stateless");
+    expect(
+      sourceControlTitle(
+        resolveChromeMode({ originId: null, resolved: false, mode: "legacy", firstPaintMode: "desktop", originPending: true }),
+      ),
+    ).toBe("History");
+    // Nothing remembered: the guess is legacy, as before.
+    expect(
+      resolveChromeMode({ originId: null, resolved: false, mode: "legacy", firstPaintMode: "legacy", originPending: true }),
+    ).toBe("legacy");
+    // Answered with no origin: legacy, whatever the guess.
+    expect(
+      resolveChromeMode({ originId: null, resolved: false, mode: "legacy", firstPaintMode: "stateless", originPending: false }),
+    ).toBe("legacy");
+  });
+
   it("uses the probed mode once resolved", () => {
     expect(resolveChromeMode({ originId: "o", resolved: true, mode: "legacy", firstPaintMode: "stateless" })).toBe(
       "legacy",

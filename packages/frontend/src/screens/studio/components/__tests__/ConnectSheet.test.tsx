@@ -294,9 +294,9 @@ describe("ConnectSheet", () => {
       // No aria-label: the visible text names the row, meta included.
       expect(slack.getAttribute("aria-label")).toBeNull();
       expect(accessibleText(slack)).toBe("Slack Soon");
-      // Meta keeps the muted token (slate-600), not subtle (slate-400): 12 px
-      // text needs the contrast; the Badge's neutral tone carries it.
-      expect(query('[data-testid="connect-row-slack-meta"]')?.className).toContain("text-slate-600");
+      // Meta takes the Badge's neutral tone (slate-700 on slate-100), not
+      // subtle (slate-400): its small text needs the contrast.
+      expect(query('[data-testid="connect-row-slack-meta"]')?.className).toContain("text-slate-700");
       expect(query('[data-testid="connect-row-slack-meta"]')?.className).toContain("rounded-full");
       // A published pack is selectable and shows its region as the meta.
       const freefinance = query<HTMLButtonElement>('[data-testid="connect-row-freefinance"]')!;

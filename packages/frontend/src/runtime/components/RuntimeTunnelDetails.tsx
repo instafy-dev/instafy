@@ -2,10 +2,7 @@ import { Copy } from "iconoir-react";
 import { Badge } from "../../components/Badge";
 import { IconButton } from "../../components/Button";
 import type { ControllerTunnelGrant } from "../../sdk/instafy";
-import {
-  formatTunnelLabel,
-  RUNTIME_BADGE_CLASSES
-} from "../runtimeMenuShared";
+import { formatTunnelLabel } from "../runtimeMenuShared";
 import {
   extractTunnelEntitlementDetails,
   formatTunnelEntitlementDetail,
@@ -50,17 +47,13 @@ export function RuntimeTunnelDetails({
     <div className={containerClass}>
       <Badge
         size="xs"
-        className="min-w-0 max-w-full overflow-hidden text-ellipsis border-transparent bg-slate-100 text-slate-600 dark:bg-white/[0.08] dark:text-slate-300"
+        className="min-w-0 max-w-full overflow-hidden text-ellipsis border-transparent dark:bg-white/[0.08] dark:text-slate-300"
         data-testid={pillTestId}
       >
         {tunnelLabel}
       </Badge>
       {statusBadge ? (
-        <Badge
-          size="xs"
-          className={`border-transparent ${RUNTIME_BADGE_CLASSES[statusBadge.tone]}`}
-          data-testid={statusBadgeTestId}
-        >
+        <Badge size="xs" tone={statusBadge.tone} data-testid={statusBadgeTestId}>
           {statusBadge.text}
         </Badge>
       ) : null}

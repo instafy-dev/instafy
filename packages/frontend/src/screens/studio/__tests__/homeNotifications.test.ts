@@ -342,7 +342,7 @@ describe("Home's durable notifications", () => {
       })],
     });
     expect(model.needs[0]).toMatchObject({
-      kind: "automation_failed", title: "Nightly checks", preview: "The runtime was unavailable.", statusLabel: "Runtime unavailable",
+      kind: "automation_failed", title: "Nightly checks", preview: "The runtime was unavailable.", statusLabel: "Machine unavailable",
     });
   });
 

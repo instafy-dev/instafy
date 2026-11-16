@@ -269,7 +269,10 @@ another device is read before writing.
 Every untitled chat is called **New chat**, in the chat list, its tab, Home and on every device:
 never a number taken from its place in the list, which changed whenever the list did. (Older chats
 stored as "Conversation 3" keep that name until they are titled.) Home's rows use a chat's real
-name, and a run that belongs to no chat is named after its space. A new chat holding a `/skills
+name, and a run that belongs to no chat is named after its space. The header's way back from a
+settings or utility page is the one exception: for an untitled chat it reads **Back to chat**, so it
+is not mistaken for the **New chat** command, and for a titled chat it shows the title, with "Back
+to <title>" as its tooltip and accessible name. A new chat holding a `/skills
 import` line is titled after what it sets up: **Connect FreeFinance** for a built-in connector or
 **Set up Bookkeeping** for any other pack. Otherwise the client of the person who wrote the chat's
 opening message names it from that message's first line as soon as it is sent, so the chat has a
@@ -331,7 +334,9 @@ team has a persistent side marker as well as its background highlight.
 The team chip opens an anchored menu for Switch team, Team overview and Team settings.
 The space chip beside it changes the working space. Less frequent tools, personal AI
 connections and Credits appear in navigation when space permits, with remaining destinations
-available through More. Desktop and mobile both use available height; no destination is
+available through More. A quiet divider separates these setup pages (Extensions, Secrets, Skills,
+Your AI, Machines and Credits) from the everyday tools above them, in the expanded sidebar, the
+compact rail and mobile navigation. Desktop and mobile both use available height; no destination is
 permanently kept in More. The desktop space picker shows only
 the selected team's spaces; Browse teams retains the full team-and-space directory.
 Home hides the team-specific desktop sidebar. Personal settings opened alongside a space keep
@@ -720,8 +725,8 @@ cards fetch public fields by exact agent ID and space, with current access requi
 the viewer and the agent owner. A cleared bio disappears from the card.
 
 Lists that mix people and AI mark each AI's name with a quiet **AI** word: the mention picker's
-rows, the participants list (which heads its agents **AI**, or **Runtimes & AI** when it groups
-them by runtime), the Shared Browser's participant list and agent profile cards. Thread rows and
+rows, the participants list (which heads its agents **AI**, or **Machines & AI** when it groups
+them by machine), the Shared Browser's participant list and agent profile cards. Thread rows and
 sentences never carry it; there the rounded square face says it. AI faces and controls with an
 accessible name add ", AI" to it, so a screen reader hears "Pia, AI".
 

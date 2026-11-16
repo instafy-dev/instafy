@@ -82,6 +82,8 @@ mod conversation_notification_http_tests;
 #[path = "notification_conversation_read_tests.rs"]
 mod notification_conversation_read_tests;
 
+#[path = "managed_ai_mixed_dispatch_tests.rs"]
+mod managed_ai_mixed_dispatch_tests;
 #[path = "multi_agent_settings/tests.rs"]
 mod multi_agent_settings_tests;
 #[path = "org_accent_tests.rs"]
@@ -29602,7 +29604,8 @@ async fn load_conversation_history_for_agent_drops_dispatch_alerts_and_labels_fa
     let conversation_id = Uuid::new_v4();
     let question = "What's next in the setup?";
     let rate_limited = "exceeded retry limit, last status: 429 Too Many Requests";
-    let startup_failed = "Workspace startup failed. Open Machines to reconnect Instafy Cloud.";
+    let startup_failed =
+        "Workspace startup failed. Open Machines to reconnect this space's machine.";
     let canceled = "Stopped by the person. (pending work canceled.)";
     let launch_failed =
         "This scheduled run couldn't start: no self-hosted runtime was online for this space";
@@ -30511,7 +30514,7 @@ fn dispatch_reconnect_test_config(label: &str) -> AppConfig {
 }
 
 const WORKSPACE_STARTUP_FAILED_ALERT: &str =
-    "Workspace startup failed. Open Machines to reconnect Instafy Cloud.";
+    "Workspace startup failed. Open Machines to reconnect this space's machine.";
 
 /// The dispatch reconnect used to name no flavor, and reuse refuses a request
 /// whose flavor differs from the live lease's ("managed runtime flavor does

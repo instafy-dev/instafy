@@ -75,12 +75,14 @@ export function ProviderTriggerNotice({
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1">
+          {/* Badge has no cyan tone, and cyan text in className lost to the
+              neutral tone's grey; info is the nearest. */}
           <div className="flex flex-wrap items-center gap-2">
-            <Badge size="xs" className="text-cyan-700 dark:text-cyan-100">
+            <Badge size="xs" tone="info">
               Trigger candidate
             </Badge>
             {candidateCount > 1 ? (
-              <Badge size="xs" className="text-cyan-700 dark:text-cyan-100">
+              <Badge size="xs" tone="info">
                 +{candidateCount - 1} more
               </Badge>
             ) : null}

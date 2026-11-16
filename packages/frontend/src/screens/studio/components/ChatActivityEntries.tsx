@@ -126,7 +126,7 @@ export function ReasoningEntry({
           </span>
         )}
         {statusBadge ? (
-          <Badge size="xs" className={statusBadge.className}>
+          <Badge size="xs" tone={statusBadge.tone} className={statusBadge.className}>
             {statusBadge.showSpinner ? (
               <>
                 <Spinner aria-hidden="true" tone="primary" size="xs" />
@@ -220,7 +220,7 @@ export function LocalCapabilityInlineEntry({
               className={[
                 "mt-1.5 inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-1 text-xxs font-medium",
                 cameraRequestPresentation.tone === "warning"
-                  ? "border-secondary-200 bg-secondary-50 text-secondary-700 dark:border-secondary-500/30 dark:bg-secondary-500/10 dark:text-secondary-100"
+                  ? "border-secondary-200 bg-secondary-50 text-secondary-800 dark:border-secondary-500/30 dark:bg-secondary-500/10 dark:text-secondary-100"
                   : "border-primary-200 bg-primary-50 text-primary-700 dark:border-primary-500/30 dark:bg-primary-500/10 dark:text-primary-100",
               ].join(" ")}
             >
@@ -246,7 +246,7 @@ export function LocalCapabilityInlineEntry({
           ) : null}
         </div>
         {statusBadge ? (
-          <Badge size="xs" className={statusBadge.className}>
+          <Badge size="xs" tone={statusBadge.tone} className={statusBadge.className}>
             {statusBadge.showSpinner ? (
               <>
                 <Spinner aria-hidden="true" tone="primary" size="xs" />
@@ -397,7 +397,7 @@ export function StatusActivityEntry({
             </span>
           )}
           {statusBadge ? (
-            <Badge size="xs" className={statusBadge.className}>
+            <Badge size="xs" tone={statusBadge.tone} className={statusBadge.className}>
               {statusBadge.showSpinner ? (
                 <>
                   <Spinner aria-hidden="true" tone="primary" size="xs" />
@@ -416,7 +416,7 @@ export function StatusActivityEntry({
           className="mt-2 whitespace-pre-wrap text-slate-600"
         >
           <span className="font-medium text-slate-700 dark:text-slate-200">{displayLead}</span>
-          {displayDetails ? <span className="text-slate-500 dark:text-slate-400"> {displayDetails}</span> : null}
+          {displayDetails ? <span className="text-slate-600 dark:text-slate-400"> {displayDetails}</span> : null}
         </Text>
         {providerEventSummary ? (
           <Text as="p" variant="caption" tone="muted" className="mt-2 text-slate-500 dark:text-slate-400">
@@ -425,7 +425,7 @@ export function StatusActivityEntry({
         ) : null}
         {artifact ? (
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <Badge size="xs" className="text-slate-600">
+            <Badge size="xs">
               {promotionState === "saved" ? artifact.savedLabel : artifact.readyLabel}
             </Badge>
             <Button

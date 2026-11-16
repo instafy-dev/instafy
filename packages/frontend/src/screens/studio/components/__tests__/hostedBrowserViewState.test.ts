@@ -41,8 +41,9 @@ describe("hostedBrowserViewState", () => {
       { kind: "blocked", sentence: SHARED_BROWSER_HOST_COPY.poisoned, action: null }],
     ["a plain notice", view("error", { kind: "notice", reason: "No Shared session is available. Ask a space builder to start one." }),
       { kind: "failed", sentence: "No Shared session is available. Ask a space builder to start one.", action: "Try again" }],
+    // Every try fails the same way until the server is set up: no Try again.
     ["a missing provider", view("error", { kind: "failed", reason: "provider 'test-cloud' is not configured on this controller" }),
-      { kind: "failed", sentence: HOSTED_BROWSER_SETUP_COPY, action: "Try again" }],
+      { kind: "blocked", sentence: HOSTED_BROWSER_SETUP_COPY, action: null }],
   ] as const)("%s", (_name, state, expected) => {
     expect(state).toEqual(expected);
   });
@@ -93,7 +94,12 @@ describe("hostedBrowserViewState", () => {
       expect(text).not.toMatch(/[—–]/);
       expect(text).not.toMatch(/Click Retry|Press Retry/);
     }
-    // One sentence per state the view shows (the setup notice keeps its two).
+    // A missing provider is the server's setup, not the space's, and it
+    // names the machine the browser needs in the Studio's words.
+    expect(HOSTED_BROWSER_SETUP_COPY).not.toMatch(/runtime|workspace/i);
+    // It says who can change that setup.
+    expect(HOSTED_BROWSER_SETUP_COPY).toContain("Ask whoever runs this Instafy server to set it up.");
+    // One sentence per state the view shows (the setup notice keeps its three).
     for (const text of Object.values(SHARED_BROWSER_HOST_COPY)) {
       expect(text.split(/(?<=[.…])\s+/).filter(Boolean).length).toBeLessThanOrEqual(2);
     }

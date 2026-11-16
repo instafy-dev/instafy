@@ -15,12 +15,13 @@ import { Button } from "../../../components/Button";
 import {
   hasFailedRunMetadata,
   readControllerStampedTurnEngine,
+  runFailureSentenceForViewer,
+  runtimeEntryOfTurn,
   usesTurnEngine,
   type RunFailurePresentation,
   type TurnEngineTurnOwner,
 } from "../../../conversations/runFailurePresentation";
 import { useOptionalRuntimeState } from "../../../runtime/RuntimeStateProvider";
-import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
 import type { ChatMessage } from "../types";
 import { TurnActivityLine } from "./TurnActivityLine";
 import type { ScheduledRunFailureAutoRetry } from "./useRunFailureAutoRetry";
@@ -107,30 +108,6 @@ function readAiAccessMode(message: ChatMessage): string {
   }
   const mode = (metadata as Record<string, unknown>)["aiAccessMode"];
   return typeof mode === "string" ? mode.trim().toLowerCase() : "";
-}
-
-/**
- * The status entry of the runtime that ran a turn, as the turn's final
- * message names it (`runtimePreference`, which the controller copies from
- * the job), when the viewer has that entry.
- */
-function runtimeEntryOfTurn(
-  message: ChatMessage,
-  runtimeStatuses: readonly ControllerRuntimeStatusEntry[] | null | undefined,
-): ControllerRuntimeStatusEntry | null {
-  const metadata = message.metadata;
-  const preference =
-    metadata && typeof metadata === "object" && !Array.isArray(metadata)
-      ? (metadata as Record<string, unknown>)["runtimePreference"]
-      : null;
-  const runtimeId =
-    preference && typeof preference === "object" && !Array.isArray(preference)
-      ? (preference as Record<string, unknown>)["runtimeId"]
-      : null;
-  if (typeof runtimeId !== "string" || !runtimeId.trim() || !runtimeStatuses) {
-    return null;
-  }
-  return runtimeStatuses.find((entry) => entry.runtimeId === runtimeId.trim()) ?? null;
 }
 
 /**
@@ -305,11 +282,10 @@ export function RunFailureMessageBody({
   const turnEngine = presentation.turnEngine ?? null;
   const turnEngineOwner = turnEngine ? retryContext?.turnEngineOwnerOf?.(message) ?? null : null;
   const turnEngineSender = turnEngineOwner?.isViewer === true;
-  const friendlyText = turnEngine
-    ? turnEngineSender
-      ? turnEngine.authorText(runtimeEntryOfTurn(message, runtimeStatuses))
-      : turnEngine.teammateText(turnEngineOwner?.name ?? null)
-    : presentation.friendlyText;
+  const friendlyText = runFailureSentenceForViewer(presentation, {
+    owner: turnEngineOwner,
+    runtime: runtimeEntryOfTurn(message, runtimeStatuses),
+  });
   const resendWithTurnEngine =
     turnEngine && turnEngineSender ? retryContext?.resendWithTurnEngine ?? null : null;
   // Nothing sends a turn-engine turn again from its card, also one this

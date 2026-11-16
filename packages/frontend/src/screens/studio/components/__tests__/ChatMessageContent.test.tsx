@@ -212,7 +212,7 @@ describe("ChatMessageContent", () => {
 
     const rail = container.querySelector('[data-testid="team-flow-inline-status"]');
     expect(rail).not.toBeNull();
-    expect(rail?.getAttribute("aria-label")).toBe("Workstream references: 2 lanes");
+    expect(rail?.getAttribute("aria-label")).toBe("2 referenced workstreams");
     expect(container.querySelector('[data-testid="team-flow-team-chip"]')?.textContent?.trim()).toBe("Workstreams");
     expect(container.textContent).not.toContain("Workstreams:");
     expect(container.textContent).toContain("frontend lane");
@@ -2284,7 +2284,7 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="multi-agent-plan-card"]')).toBeNull();
     expect(container.querySelector('[data-testid="thread-spine"]')).not.toBeNull();
     expect(container.textContent).toContain("I'm splitting this into workstreams.");
-    expect(statusStrip?.getAttribute("aria-label")).toBe("Lead ready · 1/2 lanes");
+    expect(statusStrip?.getAttribute("aria-label")).toBe("Lead ready · 1/2 workstreams done");
     expect(container.textContent).not.toContain("Explicit team workflow");
     expect(container.textContent).toContain("Frontend review");
     expect(container.textContent).not.toContain("Auth/session UI");

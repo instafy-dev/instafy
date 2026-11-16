@@ -352,7 +352,9 @@ test.afterEach(async ({ page }) => {
 
     await openSecretsPanel(page);
     await expect(title).toHaveText("Secrets");
-    await page.getByRole("button", { name: `Return to ${conversationTitle}`, exact: true }).click();
+    // An untitled chat's way back says where it goes, not its "New chat" name.
+    const returnName = /^(?:New chat|Conversation \d+)$/i.test(conversationTitle) ? "Back to chat" : `Back to ${conversationTitle}`;
+    await page.getByRole("button", { name: returnName, exact: true }).click();
     await expect(title).toHaveText(conversationTitle);
     await expect(page.getByTestId("workspace-tabs")).toHaveCount(0);
   });

@@ -9,7 +9,7 @@ import {
 const ASSISTANT_MENTION_BASE =
   "inline-flex items-center rounded-full px-2 py-0.5 font-semibold leading-none ring-1 align-baseline";
 const ASSISTANT_MENTION_STYLE =
-  `${ASSISTANT_MENTION_BASE} bg-secondary-50 text-secondary-700 ring-secondary-200 dark:bg-secondary-500/15 dark:text-secondary-200 dark:ring-secondary-500/30`;
+  `${ASSISTANT_MENTION_BASE} bg-secondary-50 text-secondary-800 ring-secondary-200 dark:bg-secondary-500/15 dark:text-secondary-200 dark:ring-secondary-500/30`;
 const ASSISTANT_MENTION_STYLES = Object.fromEntries(
   listBuiltInAssistantMentionTokens().map((token) => [token, ASSISTANT_MENTION_STYLE]),
 ) as Record<AssistantMentionToken, string>;

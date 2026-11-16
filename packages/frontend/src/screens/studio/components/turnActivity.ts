@@ -378,6 +378,12 @@ export type TurnActivity = {
 export const STARTING_LINE = "Starting…";
 /** The line while the model works with no step running. */
 export const THINKING_LINE = "Thinking…";
+/**
+ * The line while a message passes from one part to the next, as from a
+ * browser turn to the building turn it handed what it found: no model is
+ * thinking yet, and the work goes on.
+ */
+export const WORKING_LINE = "Working…";
 /** The line while a request in the turn waits on the person viewing it. */
 export const WAITING_FOR_YOU_LINE = "Waiting for you";
 
@@ -1356,6 +1362,12 @@ export type SummarizeTurnActivityOptions = {
    * (turnEngineStartingLine), in place of {@link STARTING_LINE}.
    */
   startingLine?: string | null;
+  /**
+   * The row's work has passed to the next turn of the same message (a
+   * hand-back to the building turn), which has shown nothing yet: with no
+   * step running the line reads {@link WORKING_LINE}, not "Thinking…".
+   */
+  handingOver?: boolean;
 };
 
 /**
@@ -1510,7 +1522,7 @@ export function summarizeTurnActivity(
           : "Working";
       live = `${label}…`;
     } else {
-      live = THINKING_LINE;
+      live = options.handingOver ? WORKING_LINE : THINKING_LINE;
     }
   } else {
     const ended = byLastChange.map((index) => steps[index]);

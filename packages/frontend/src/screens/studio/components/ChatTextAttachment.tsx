@@ -109,14 +109,15 @@ function TextAttachmentPreview({ blob, fileName }: { blob: Blob; fileName: strin
       </StudioDialogBody>
       {paginated || canDownload ? <StudioDialogFooter padding="default" divider className="flex flex-wrap items-center gap-2">
         {paginated ? <>
-          <Button preset="inline" variant="ghost" tone={previousUnavailable ? "muted" : "neutral"} aria-disabled={previousUnavailable}
+          {/* Either end stays focusable (aria-disabled) and fades as a disabled button does. */}
+          <Button preset="inline" variant="ghost" tone="neutral" className="aria-disabled:opacity-60" aria-disabled={previousUnavailable}
             isPending={pendingNavigation === "previous"} onPress={() => {
               if (!page || pageIndex === 0) return;
               setPendingNavigation("previous");
               setPageIndex((value) => value - 1);
             }}>Previous</Button>
           <Text as="span" variant="caption" tone="muted" role="status">Page {pageIndex + 1}</Text>
-          <Button preset="inline" variant="ghost" tone={nextUnavailable ? "muted" : "neutral"} aria-disabled={nextUnavailable}
+          <Button preset="inline" variant="ghost" tone="neutral" className="aria-disabled:opacity-60" aria-disabled={nextUnavailable}
             isPending={pendingNavigation === "next"} onPress={() => {
             const nextOffset = page?.nextOffset;
             if (nextOffset == null) return;
