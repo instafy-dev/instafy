@@ -670,8 +670,8 @@ export async function runSharedBrowserAgentTabsFixture() {
     // way: the task named one review), and each page the run reads adds its
     // own address and site, its links and the addresses its text spells out.
     // A made-up address is refused before any prompt or load, with where to
-    // go instead: its site's root on a site the chat was given, else the
-    // official site of what the task names.
+    // go instead: its site's root on a site the chat was given, else only
+    // that a site's home page always opens, naming no site.
     startRun([]);
     const siteOf = (url) => `${url.hostname.replace(/^www\./u, "")}${url.port ? `:${url.port}` : ""}`;
     const fingerprint = (text) => createHash("sha256").update(text).digest("hex").slice(0, 32);
@@ -690,7 +690,7 @@ export async function runSharedBrowserAgentTabsFixture() {
     // A site nobody gave, a search engine's say: never its root.
     const nobodyGave = await refused(/./u, "POST", "/v1/navigate", { url: "https://www.search.test/maps" }, []);
     assert.ok(
-      nobodyGave.includes("Open the official site of what the task names (the venue's, operator's, shop's or reviewer's; for a route, the operator's journey planner), and follow its links or use its own search.") &&
+      nobodyGave.includes("A site's home page, its address with no path, always opens.") &&
         !nobodyGave.includes("search.test"),
       `/v1/navigate: ${nobodyGave}`,
     );

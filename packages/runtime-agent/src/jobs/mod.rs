@@ -8769,7 +8769,7 @@ impl JobProcessor {
                 &mut outcome.summary,
                 &output.browser_not_given,
                 &output.browser_pages,
-                output.browser_tried.known(),
+                &output.browser_tried,
             );
         }
         apply_terminal_shared_browser_summary(
@@ -9566,10 +9566,7 @@ impl JobProcessor {
                     &retry_output.browser_not_given,
                     &retry_output.browser_pages,
                     // What the first attempt's steps tried, the turn tried.
-                    output
-                        .browser_tried
-                        .with(&retry_output.browser_tried)
-                        .known(),
+                    &output.browser_tried.with(&retry_output.browser_tried),
                 );
             }
             apply_terminal_shared_browser_summary(
@@ -16708,9 +16705,9 @@ pub struct BrowserTurnEnd {
 /// (`browser_hand_back::hands_the_message_to_the_building_turn`). A turn whose findings go back
 /// to the building turn and that named pages it didn't open reads them first, in a second pass
 /// (`read_the_unread_pages`). A turn that used the browser and wrote no finding lines gets the
-/// runtime's wrap-up pass on its own thread, asked for those lines only and, when its findings go
-/// back to the building turn and no second pass ran, for its missing and unread lines too, whose
-/// pages the second pass then reads; with still none, its
+/// runtime's wrap-up pass on its own thread, asked for those lines and its missing line only and,
+/// when its findings go back to the building turn and no second pass ran, for its unread line
+/// too, whose pages the second pass then reads; with still none, its
 /// note holds its reply and the pages its own steps opened, so a later building turn reads which
 /// pages it opened, a hand-back still goes, and a turn whose findings go back to the building
 /// turn posts no words of its own (`browser_hand_back::move_findings_into_details`). One with its
@@ -16745,12 +16742,7 @@ pub async fn end_browser_turn_answer(
         .cloned()
         .collect();
     let tried = answer.tried.with(&second.tried);
-    browser_hand_back::leave_out_addresses_never_opened(
-        summary,
-        &not_given,
-        &opened,
-        tried.known(),
-    );
+    browser_hand_back::leave_out_addresses_never_opened(summary, &not_given, &opened, &tried);
     let mut ended = BrowserTurnEnd {
         artifacts: second.artifacts,
         messages: second.messages,
@@ -16768,9 +16760,9 @@ pub async fn end_browser_turn_answer(
         && !canceled
         && browser_hand_back::needs_finding_lines(metadata, summary)
     {
-        // A turn whose findings go back to the building turn is asked for its missing and unread
-        // lines too, unless a second pass ran already: a second pass's own unread line starts no
-        // third.
+        // Every turn is asked for its missing line too, and one whose findings go back to the
+        // building turn for its unread line, unless a second pass ran already: a second pass's
+        // own unread line starts no third.
         let asks_for_unread = !second.ran && metadata.is_some_and(browser_hand_back::hands_back);
         let mut lines = None;
         if answer.thread.is_some() {
@@ -16804,7 +16796,7 @@ pub async fn end_browser_turn_answer(
                         );
                     } else {
                         // Its lines, without a refused address no step opened, as above, and
-                        // the missing and unread lines it was asked for after them.
+                        // the missing line, and the unread line it was asked for, after them.
                         let mut written = output
                             .final_json
                             .get("summary")
@@ -16815,14 +16807,15 @@ pub async fn end_browser_turn_answer(
                             &mut written,
                             &not_given,
                             &opened,
-                            tried.known(),
+                            &tried,
                         );
                         lines = browser_hand_back::finding_lines_of(&written).map(|lines| {
-                            let closing = browser_hand_back::closing_lines_of(&written);
-                            if asks_for_unread && !closing.is_empty() {
-                                format!("{lines}\n{}", closing.join("\n"))
-                            } else {
+                            let closing =
+                                browser_hand_back::closing_lines_of(&written, asks_for_unread);
+                            if closing.is_empty() {
                                 lines
+                            } else {
+                                format!("{lines}\n{}", closing.join("\n"))
                             }
                         });
                     }
@@ -16866,7 +16859,7 @@ pub async fn end_browser_turn_answer(
                 summary,
                 &[not_given.as_slice(), read.not_given.as_slice()].concat(),
                 &[opened.as_slice(), read.pages.as_slice()].concat(),
-                tried.with(&read.tried).known(),
+                &tried.with(&read.tried),
             );
             ended.artifacts.extend(read.artifacts);
             ended.messages.extend(read.messages);
@@ -16957,7 +16950,7 @@ async fn read_the_unread_pages(
         summary,
         &turn.not_given,
         &turn.pages,
-        turn.tried.known(),
+        &turn.tried,
     );
     let pages = browser_hand_back::take_unread_pages(summary);
     let canceled = turn
@@ -31273,10 +31266,10 @@ mod tests {
             &mut summary,
             &["https://unnamed.example/".to_string()],
             &["https://visit.example/en".to_string()],
-            &[
+            &crate::codex::BrowserTried::from(vec![
                 "https://unnamed.example/".to_string(),
                 "https://visit.example/en".to_string(),
-            ],
+            ]),
         );
         let mut fallback = None;
         apply_terminal_shared_browser_summary(

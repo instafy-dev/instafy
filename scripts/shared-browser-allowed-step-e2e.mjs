@@ -586,8 +586,8 @@ export async function runSharedBrowserAllowedStepFixture() {
     // refused at once with no prompt, naming the cover by its tag, role and
     // label, or, with neither, by the first words a person sees on it (never
     // a style sheet, a hidden part or a part hidden from people), or saying a
-    // cookie notice covers the page and where to go instead, never to pause
-    // on it; nothing is sent, and no yes is listed. A person waited about 45 seconds to allow a click on a
+    // cookie notice covers the page and that a site's home page always opens,
+    // never to pause on it; nothing is sent, and no yes is listed. A person waited about 45 seconds to allow a click on a
     // search button a cookie notice covered, which was then refused, and the
     // turn's line said they had allowed it. Once the cover goes, the next try
     // asks and runs.
@@ -595,7 +595,7 @@ export async function runSharedBrowserAllowedStepFixture() {
       ["the page's own time picker", "picker", 'Something else on the page covers "Plan your journey" (<div role="dialog"> named "Choose a time"), so nothing was clicked. Take a fresh snapshot and try once more.'],
       ["a carousel's slide", "slide", 'Something else on the page covers "Plan your journey" (<a> named "Night service"), so nothing was clicked. Take a fresh snapshot and try once more.'],
       ["a banner with no name", "banner", 'Something else on the page covers "Plan your journey" (<div> named "Subscribe"), so nothing was clicked. Take a fresh snapshot and try once more.'],
-      ["a cookie notice", "cookies", "A cookie notice covers this page, and the browser could not decline it. Open a link under it by its address, or the official site of the place or service the task is about."],
+      ["a cookie notice", "cookies", "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site's home page, its address with no path, always opens."],
     ]) {
       await check(`a button under ${name}`, async () => {
         freshRun();

@@ -56,6 +56,8 @@ const PASS_ASKS_FOR_UNREAD: &str = "Then one last line `{\"unread\": [";
 /// What it asks such a turn for before that line: the values it looked for and didn't find, by
 /// name (runtime-agent `MISSING_LINE`).
 const PASS_ASKS_FOR_MISSING: &str = "After your finding lines, one line `{\"missing\": [";
+/// The missing line a question's wrap-up pass writes: kept after its lines, for later turns.
+const QUESTION_MISSING: &str = r#"{"missing": ["the warranty"]}"#;
 /// The missing line the turn ends its answer with, and its second pass's: the values each looked
 /// for and didn't find. The turn's note keeps their names once, in one line.
 const MISSING_FIRST: &str = r#"{"missing": ["warranty"]}"#;
@@ -366,9 +368,15 @@ async fn provider_request(
         });
     }
     if turn.contains(PASS_OPENING) {
-        // The unread line, when the pass asks for it.
+        // The unread line, when the pass asks for it. A pass asked only for the missing line
+        // writes that, and an unread line too, which it wasn't asked for.
         return final_answer(&if turn.contains(PASS_ASKS_FOR_UNREAD) {
             format!("{READ_HOME}\n{READ_13}\n{}", unread_line(&UNREAD))
+        } else if turn.contains(PASS_ASKS_FOR_MISSING) {
+            format!(
+                "{READ_HOME}\n{READ_13}\n{QUESTION_MISSING}\n{}",
+                unread_line(&UNREAD)
+            )
         } else {
             format!("{READ_HOME}\n{READ_13}")
         });
@@ -1054,8 +1062,8 @@ async fn words_then_the_wrap_up_then_a_second_pass(
         json!({ "pages": 5, "pagesRead": 5 })
     );
 
-    // A question's turn hands nothing back: its wrap-up pass asks for no unread line, and no
-    // second pass follows.
+    // A question's turn hands nothing back: its wrap-up pass asks for its missing line and no
+    // unread line, keeps the one and not the other, and no second pass follows.
     let mut summary = FIRST_PROSE.to_string();
     let question = browser_job(project_id, false);
     tokio::time::timeout(
@@ -1075,8 +1083,12 @@ async fn words_then_the_wrap_up_then_a_second_pass(
     let wrap_up = last_user_text(&requests[3]);
     assert!(wrap_up.contains(PASS_OPENING), "{wrap_up}");
     assert!(!wrap_up.contains(PASS_ASKS_FOR_UNREAD), "{wrap_up}");
-    assert!(!wrap_up.contains(PASS_ASKS_FOR_MISSING), "{wrap_up}");
-    assert_eq!(summary, format!("{FIRST_PROSE}\n\n{READ_HOME}\n{READ_13}"));
+    // Its missing line, as every browser turn's: a later building turn reads what it didn't find.
+    assert!(wrap_up.contains(PASS_ASKS_FOR_MISSING), "{wrap_up}");
+    assert_eq!(
+        summary,
+        format!("{FIRST_PROSE}\n\n{READ_HOME}\n{READ_13}\n{QUESTION_MISSING}")
+    );
     Ok(())
 }
 

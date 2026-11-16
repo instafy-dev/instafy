@@ -37,7 +37,10 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // never says nothing was opened. An address the site
 // answers 404 or 410 for fails as soon as that answer comes, saying it has no
 // page, without waiting for the not-found page to load; a page that only reads
-// as not found is still the step's page. A page with a few
+// as not found is still the step's page. A load the network cut (its
+// connection closed with no answer) ends on the page the browser's own reload
+// brings a second later, at the address a redirect led to, and fails only when
+// that reload is cut too. A page with a few
 // hundred controls is described in one call to the page each time a step
 // reads it, not in one call per control. No model, Studio, controller, account
 // or external site is used, and Chromium resolves no other host.
@@ -159,6 +162,13 @@ const OPENED_LATE_AGAIN_MESSAGE = `This address was still loading after 20 secon
 const UNANSWERED_ANSWER_MS = 5_000;
 // What a navigation answers when the site says the address has no page.
 const NO_PAGE_MESSAGE = "This address has no page. Open a link from a page you read, or that site's own search.";
+// How long a shop's server cuts the connection of every request for its page
+// after the first one: Chromium's own quick retry comes within it, and its
+// reload of a page the network cut, a second after its error page, after it.
+const CUT_MS = 500;
+// The most a load the network cut may take to end: the browser's reload and
+// its answer, or its cut.
+const CUT_ANSWER_MS = 8_000;
 // A site's not-found page: its head and heading come at once, and the rest of
 // it takes longer than a step (a heavy page's scripts hold its load as long).
 const NOT_FOUND_START = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,">
@@ -296,6 +306,8 @@ export async function runSharedBrowserStepTimeFixture() {
   const neverEnding = [];
   // The listing page's script, held while `holdListingScript` is set.
   const heldScripts = [];
+  // When each request for a page whose connection is cut came, by its path.
+  const cutAt = new Map();
   let holdListingScript = true;
   try {
     const requests = [];
@@ -335,6 +347,25 @@ export async function runSharedBrowserStepTimeFixture() {
       }
       if (url.pathname === "/api/more") {
         response.writeHead(204, { "cache-control": "no-store" }).end();
+        return;
+      }
+      // A shop's product address, whose redirect leads to its page on a server
+      // that closes the connection of every request for it, with no answer,
+      // for CUT_MS after the first one ("/cut/reader") or always
+      // ("/cut/always").
+      if (url.pathname === "/cut/product") {
+        response.writeHead(302, { location: "/cut/reader?ref=menu", "cache-control": "no-store" }).end();
+        return;
+      }
+      if (url.pathname === "/cut/reader" || url.pathname === "/cut/always") {
+        const times = cutAt.get(url.pathname) ?? [];
+        cutAt.set(url.pathname, [...times, Date.now()]);
+        if (url.pathname === "/cut/always" || Date.now() - (times[0] ?? Date.now()) < CUT_MS) {
+          request.socket.destroy();
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        response.end(page("Reader", "<p>A 6-inch screen and 16 GB of storage.</p>"));
         return;
       }
       if (url.pathname === "/never-loads") {
@@ -772,6 +803,40 @@ export async function runSharedBrowserStepTimeFixture() {
     assert.match(tower.payload.visibleText, /Open daily\./u);
     assert.equal(prompts.length, promptsBeforeForm + 1, "Nothing asked for the addresses");
 
+    // 1g'. A load the network cut ends on the tab's final page: a shop's
+    // product address whose redirect leads to its page on a server that closes
+    // the first connections with no answer. Chromium loads such a page again
+    // by itself a second after its error page, and the page comes then, at the
+    // address the redirect led to, which the step answers with, as an open of
+    // it: a step answered at once that Instafy's browser couldn't reach a shop's
+    // product page, which the tab showed loaded two seconds later (a local
+    // test, Nov 10). One whose reload is cut too still fails, within a few
+    // seconds, and the tab shows no page.
+    requests.length = 0;
+    const cut = await runTool("POST", "/v1/navigate", { url: `${origin}/cut/product` });
+    const cutMs = Math.round(cut.wallMs);
+    assert.equal(cut.code, 0, `The cut load failed: ${cut.stderr}`);
+    assert.equal(cut.payload.url, `${origin}/cut/reader?ref=menu`);
+    assert.match(cut.payload.visibleText, /A 6-inch screen and 16 GB of storage\./u);
+    assert.equal(cut.payload.activity.step, "navigate");
+    assert.equal(cut.payload.activity.url, `${origin}/cut/reader?ref=menu`, "The step's line names where its tab ended");
+    assert.equal(new URL(runPage.url()).pathname, "/cut/reader", "The tab did not end on the page");
+    assert.equal(requests[0], "GET /cut/product", "The step asked for its address");
+    assert.ok(requests.filter((line) => line === "GET /cut/reader?ref=menu").length >= 2, `The page was cut, then loaded: ${requests.join(", ")}`);
+    assert.ok(cut.wallMs < CUT_ANSWER_MS, `It answered once the reload came (${cutMs} ms)`);
+    requests.length = 0;
+    const alwaysCut = await runTool("POST", "/v1/navigate", { url: `${origin}/cut/always` });
+    const alwaysCutMs = Math.round(alwaysCut.wallMs);
+    assert.equal(alwaysCut.code, 1, `A load cut every time opened: ${alwaysCut.stdout}`);
+    assert.match(alwaysCut.stderr, /net::ERR_(?:EMPTY_RESPONSE|CONNECTION_CLOSED|CONNECTION_RESET)/u, alwaysCut.stderr);
+    // It waited for the browser's reload, a second after the first try.
+    const alwaysCutTimes = cutAt.get("/cut/always");
+    assert.ok(alwaysCutTimes.at(-1) - alwaysCutTimes[0] >= CUT_MS, `The browser's reload was not waited for: ${alwaysCutTimes.map((at) => at - alwaysCutTimes[0]).join(", ")} ms`);
+    assert.ok(alwaysCut.wallMs < CUT_ANSWER_MS, `It failed once the reload was cut too (${alwaysCutMs} ms)`);
+    assert.doesNotMatch(runPage.url(), /\/cut\/always/u, "The tab ended on the page cut every time");
+    assert.equal(prompts.length, promptsBeforeForm + 1, "Nothing asked for the cut loads");
+    await ok("POST", "/v1/navigate", { url: `${origin}/places/tower` });
+
     // 1h. A tourism site whose page never finishes loading and shows nothing:
     // its site answered, but when the step's time is up the page is still too
     // busy to be read. It fails as a site that did not answer: its words name
@@ -987,6 +1052,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a link clicked on a page that had loaded, to a site that does not answer, is stopped once the click stops waiting for it and fails the same way, never as the page the tab still shows nor as the click's own timeout; the next step reaches the browser at once, and the site's late answer never lands",
         "a form sent to a site that does not answer is not stopped and never reads as nothing opened: the step answers once its time is up and says to check what it did, and the form's late answer lands",
         "a navigation the site answers 404 or 410 for fails as soon as that answer comes, saying the address has no page, even when the rest of its not-found page comes later than a step or there is no page at all; a page that only reads as not found, and a 200, are the step's page",
+        "a load the network cut, at the address a redirect led to, ends on the page the browser's own reload brings a second later, which the step answers with; one whose reload is cut too still fails within a few seconds, and the tab shows no page",
         "a page that never finishes loading and shows nothing fails once the step's time is up as a site that did not answer, naming the next source, never 'take a snapshot in a moment', and a read of it while it is still busy says the same; its address is then refused at once in the turn, and the place's own site still opens",
         "a page that answers and can be read but has not finished loading when the step's time is up is the step's answer, read as it is, and says where to go if it lacks what the task needs; its address and the one its redirect led to are refused at once for the rest of the turn, by navigate and open_tab, never kept as a site that did not answer, the place's own site opens, a Let Octo continue run whose record runtime-agent started with the page refuses it at once too, and the chat's next turn opens the page again",
         "a click that opens a window and keeps the page busy fails once the step's time is up, as it would in its time: the window is closed and never loads anything, then or later",
@@ -994,7 +1060,7 @@ export async function runSharedBrowserStepTimeFixture() {
         "a hand-off whose fields the page is too busy to highlight in time answers with the page as it is and leaves no hand-off behind",
         "a search whose results page keeps the page busy fails once the step's time is up as a site that did not answer, naming the next source, never waiting out the page; its line still names a search, and the results' address is kept as one that did not answer",
       ],
-      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyClickMs: Math.round(loaded.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), neverLoadsMs: Math.round(busyPage.wallMs), openedLateMs: Math.round(listing.wallMs), openedLateRefusedMs: refusedLate.map((again) => Math.round(again.wallMs)), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs },
+      timings: { slowAnswerMs: Math.round(slow.wallMs), manyControlsReadMs: Math.round(planner.wallMs), manyControlsChoiceMs: Math.round(chose.wallMs), busyWindowMs: Math.round(clicked.wallMs), busyClickMs: Math.round(loaded.wallMs), busyHandoffMs: Math.round(handoff.wallMs), busySearchMs: Math.round(searched.wallMs), neverLoadsMs: Math.round(busyPage.wallMs), openedLateMs: Math.round(listing.wallMs), openedLateRefusedMs: refusedLate.map((again) => Math.round(again.wallMs)), unansweredLoadMs: Math.round(loading.wallMs), refusedAgainMs: refusedAgain.map((again) => Math.round(again.wallMs)), lateRedirectMs: Math.round(redirected.wallMs), unansweredLoadFromPageMs: Math.round(fromPage.wallMs), unansweredClickMs: Math.round(followed.wallMs), unansweredFormMs: Math.round(sent.wallMs), noPageMs, cutLoadMs: cutMs, cutEveryTimeMs: alwaysCutMs },
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; those are unit-tested."],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
