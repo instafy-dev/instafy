@@ -329,6 +329,15 @@ const NEXT_SOURCE = 'Go on in this turn as "Finding a page" says.';
 // A refused address ends that address, not the task, and only a site the
 // person asked for is theirs to open.
 const SEND_PAGE_HINT = `${NEXT_SOURCE} Give the person this link only if they asked for this site: they may open it themselves and, if they want Octo to see it, use "Send page to Octo".`;
+// What a cookie notice's refusal says of where Octo may go: a fact of the
+// browser's, never a site, beside the step fact that points to "Finding a
+// page" (NEXT_SOURCE). A site's root is never refused as an address nobody
+// gave (refuseUngivenAddress, whose refusal says so in its own words); which
+// site to open next is "Finding a page". Told only to open the official site
+// of what the task names, a turn tried a path it made up on a bookshop's site,
+// was refused, and ended without the opening hours it was asked for, which the
+// bookshop's home page showed (a local test, Nov 9).
+const HOME_PAGE_OPENS = "A site's home page, its address with no path, always opens.";
 
 // Octo opens an address, in any tab, only when it is not on a site the skill
 // keeps link-only, and only while that list is known. Called before any prompt.
@@ -3688,7 +3697,19 @@ const COVER_LOOK_MS = 100;
 // when it can. Only a notice that really covers the control says it covers
 // the page. A notice is never the person's step: nobody is asked to answer
 // one, and its accept is never pressed or listed (collectInteractiveElements).
-const CONSENT_COVER_MESSAGE = `A cookie notice covers this page, and the browser could not decline it. A link under it opens by its address. ${NEXT_SOURCE}`;
+// A plain link under it is no click to refuse: its address opens instead
+// (CoveredByNotice). Told to open such a link by its address, a turn wrote
+// the address of a tourism site's listing into its own "stopped" line and
+// never opened it (a local test, Nov 9).
+const CONSENT_COVER_MESSAGE = `A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. ${HOME_PAGE_OPENS} ${NEXT_SOURCE}`;
+// What a click a cookie notice keeps from its control throws (refuseCovered),
+// in the notice's words. The click step catches it for a plain link and opens
+// the link's address instead (openCoveredLink).
+class CoveredByNotice extends Error {
+  constructor() {
+    super(CONSENT_COVER_MESSAGE);
+  }
+}
 
 async function clickLanding(target) {
   const landing = await target.locator
@@ -3758,7 +3779,7 @@ async function settledLanding(page, target) {
 // try under a cover that stays.
 async function refuseCovered(page, target, landing) {
   if (landing.covered !== true) return;
-  if (landing.consent === true) throw new Error(CONSENT_COVER_MESSAGE);
+  if (landing.consent === true) throw new CoveredByNotice();
   const control = quotedControlLabel(target.description);
   const cover = await coverWords(page, landing.cover);
   throw new Error(
@@ -4553,15 +4574,75 @@ class NoPageError extends Error {
   }
 }
 
+// A load the network cut: the site's connection closed or was reset, it sent
+// nothing back, or the network changed under it. Chromium loads such a page
+// again by itself about a second after its error page shows, and the page
+// often comes then: a step answered at once that Instafy's browser couldn't
+// reach a shop's product page, which the tab showed two seconds later at the
+// address the shop's redirect led to, and the turn ended without it (a local
+// test, Nov 10). So the step waits for that reload, as a person would, and the
+// page it brings is the step's (reloadBroughtAPage); the step fails only when
+// the tab ends on no page. Any other failure ends the step at once.
+const CUT_LOAD = /\bnet::ERR_(?:CONNECTION_(?:CLOSED|RESET|ABORTED)|EMPTY_RESPONSE|NETWORK_CHANGED)\b/u;
+// How long a step whose load the network cut waits for the browser's own
+// reload to begin.
+const RELOAD_LOOK_MS = 2_500;
+
+// Whether the browser's own reload of a load the network cut (CUT_LOAD)
+// brought a page: the reload began within RELOAD_LOOK_MS, and the tab then
+// showed a web page before `deadline`. A reload the network cut again fails
+// in place, the error page still shown. It loads under the step's guards, as
+// the step's own load did.
+function reloadBroughtAPage(page, deadline) {
+  const left = () => Math.max(deadline - Date.now(), 1);
+  const tabLoad = (request) => {
+    try {
+      return request.isNavigationRequest() && request.frame() === page.mainFrame();
+    } catch (_) {
+      return false;
+    }
+  };
+  return new Promise((resolve) => {
+    let reloading = false;
+    let timer = null;
+    const end = (brought) => {
+      clearTimeout(timer);
+      page.off("request", began);
+      page.off("framenavigated", shown);
+      page.off("requestfailed", failed);
+      resolve(brought);
+    };
+    const began = (request) => {
+      if (reloading || !tabLoad(request)) return;
+      reloading = true;
+      clearTimeout(timer);
+      timer = setTimeout(() => end(false), left());
+    };
+    const shown = (frame) => {
+      if (reloading && frame === page.mainFrame()) end(/^https?:/iu.test(frame.url()));
+    };
+    const failed = (request) => {
+      if (reloading && tabLoad(request)) end(false);
+    };
+    page.on("request", began);
+    page.on("framenavigated", shown);
+    page.on("requestfailed", failed);
+    timer = setTimeout(() => end(false), Math.min(RELOAD_LOOK_MS, left()));
+  });
+}
+
 // Loads the address navigate or open_tab asked for, as one page.goto that waits
 // for the document to load would, but reads the site's answer as soon as the
 // tab has it: an address with no page fails the step then (its line reads
-// "Tried opening <site>"), without waiting for the not-found page to load.
+// "Tried opening <site>"), without waiting for the not-found page to load. A
+// load the network cut ends on the page the browser's own reload brings, if
+// any (CUT_LOAD).
 async function openAddress(page, url) {
   const deadline = Date.now() + 30_000;
   // The site's answer for the tab's own document, after any redirects, as it
   // comes: Chromium fails the load of a 404 or 410 with an empty body itself
-  // (net::ERR_HTTP_RESPONSE_CODE_FAILURE), so page.goto never returns it.
+  // (net::ERR_HTTP_RESPONSE_CODE_FAILURE), so page.goto never returns it. A
+  // reload's answer counts the same.
   let status = null;
   const answered = (response) => {
     try {
@@ -4572,18 +4653,22 @@ async function openAddress(page, url) {
     }
   };
   page.on("response", answered);
-  let response;
+  let response = null;
   try {
     response = await page.goto(url, { waitUntil: "commit", timeout: 30_000 });
   } catch (error) {
-    if (NO_PAGE_STATUSES.has(status) && /\bERR_HTTP_RESPONSE_CODE_FAILURE\b/u.test(String(error?.message || ""))) {
+    const message = String(error?.message || "");
+    if (NO_PAGE_STATUSES.has(status) && /\bERR_HTTP_RESPONSE_CODE_FAILURE\b/u.test(message)) {
       throw new NoPageError();
     }
-    throw error;
+    if (!CUT_LOAD.test(message)) throw error;
+    if (!(await reloadBroughtAPage(page, deadline))) {
+      throw NO_PAGE_STATUSES.has(status) ? new NoPageError() : error;
+    }
   } finally {
     page.off("response", answered);
   }
-  if (response && NO_PAGE_STATUSES.has(response.status())) {
+  if (NO_PAGE_STATUSES.has(response ? response.status() : status)) {
     // The not-found page stops loading while the step's guards still hold, and
     // they hold as long after that as after any page a step loads
     // (settleAfterAction): what it would load next (a refresh, or a script
@@ -4822,6 +4907,18 @@ function resolvedTargetDestination(description, currentUrl) {
     return destination.toString();
   } catch (_) {
     return null;
+  }
+}
+
+// An address without its fragment, the part a link to a place on its page
+// adds: the page it loads.
+function addressWithoutFragment(address) {
+  try {
+    const url = new URL(address);
+    url.hash = "";
+    return url.toString();
+  } catch (_) {
+    return address;
   }
 }
 
@@ -6194,6 +6291,72 @@ async function refuseLinkOnlyTargetBeforeSitePrompt(page, body) {
   }
 }
 
+// A navigate step: opens `rawUrl` (a full address, or a path on the tab's own
+// site) in the tab, under the rules for opening an address.
+async function openPageStep(browser, page, rawUrl) {
+  const sourceOrigin = approvalProtocol.normalizedOrigin(page.url());
+  const url = validateNavigationUrl(rawUrl, sourceOrigin);
+  // Risky addresses (sign-out, exports, files, one-time links, action
+  // addresses) are judged by the address alone and ask even under routine
+  // browsing. Under routine browsing, an address for a site the run has not
+  // used yet does not ask on its own.
+  const step = classifyStep("navigate", null, { url });
+  const readingStep = step.verdict !== "ask" && !addressWordsAsk(url);
+  assertMayOpen(url);
+  refuseUnansweredAddress(url);
+  refuseUngivenAddress(url);
+  refuseUnlessReadingStep(readingStep);
+  // A plain address (a reading step) needs only its site's approval in this
+  // tab: the site prompt names the exact address, and a site already
+  // approved here opens without one. A risky address still asks for the
+  // step itself, in every mode.
+  await ensureSiteApproved(url, () => `Open ${labelAddress(url)}`, { destinationUrl: url });
+  if (!readingStep) {
+    await allowStepOnce({
+      operation: "navigate",
+      label: `Go to ${labelAddress(url)}`,
+      categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
+      sourceOrigin,
+      ...approvalProtocol.destinationBinding(url),
+      snapshotId: null,
+      targetFingerprint: null,
+      payloadFingerprint: approvalProtocol.sha256("navigate"),
+    });
+  }
+  page = await resolveExpectedPage(browser);
+  if (sourceOrigin) {
+    assertSameOrigin(page.url(), sourceOrigin);
+  }
+  const revalidatedUrl = validateNavigationUrl(rawUrl, sourceOrigin);
+  // An address the agent opens itself is not the page a credential step
+  // opened. That record belongs to the page the person chose, so a
+  // navigation in one of Octo's own tabs leaves it.
+  if (!inAgentTab()) {
+    approvalProtocol.clearWithholdNextDocument();
+  }
+  assertStepOnTime();
+  emitAction({ type: "navigate", label: `Go to ${url}`, url });
+  openingAddress = { url: revalidatedUrl, startedAt: Date.now() };
+  await openAddress(page, revalidatedUrl);
+  await settleAfterAction(page);
+  page = await resolveExpectedPage(browser);
+  await emitNavigationResult(page);
+  return withActivity(await snapshotForResult(page, { decline: true }), stepActivity(page, "navigate", stepApproval()));
+}
+
+// A click on a plain link that a cookie notice the browser could not decline
+// keeps from its control (CoveredByNotice) opens the link's address in the
+// same tab instead, as a navigate step to that address does and under its
+// rules: the address is judged, its site asked for when the run has not used
+// it, and a risky one asks the person. Its result says so.
+async function openCoveredLink(browser, page, target, url) {
+  const opened = await openPageStep(browser, page, url);
+  return {
+    ...opened,
+    done: `A cookie notice covers ${quotedControlLabel(target.description)}, so its address was opened in this tab instead.`,
+  };
+}
+
 async function executeOnPage(browser, method, requestPath, body, page, tabs, documents = null) {
   if (method === "GET" && requestPath === "/v1/status") {
     const shared = {
@@ -6318,54 +6481,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
   }
 
   if (method === "POST" && requestPath === "/v1/navigate") {
-    const sourceOrigin = approvalProtocol.normalizedOrigin(page.url());
-    const url = validateNavigationUrl(body.url, sourceOrigin);
-    // Risky addresses (sign-out, exports, files, one-time links, action
-    // addresses) are judged by the address alone and ask even under routine
-    // browsing. Under routine browsing, an address for a site the run has not
-    // used yet does not ask on its own.
-    const step = classifyStep("navigate", null, { url });
-    const readingStep = step.verdict !== "ask" && !addressWordsAsk(url);
-    assertMayOpen(url);
-    refuseUnansweredAddress(url);
-    refuseUngivenAddress(url);
-    refuseUnlessReadingStep(readingStep);
-    // A plain address (a reading step) needs only its site's approval in this
-    // tab: the site prompt names the exact address, and a site already
-    // approved here opens without one. A risky address still asks for the
-    // step itself, in every mode.
-    await ensureSiteApproved(url, () => `Open ${labelAddress(url)}`, { destinationUrl: url });
-    if (!readingStep) {
-      await allowStepOnce({
-        operation: "navigate",
-        label: `Go to ${labelAddress(url)}`,
-        categoryTitle: step.verdict === "ask" ? approvalCategoryTitle(step) : "",
-        sourceOrigin,
-        ...approvalProtocol.destinationBinding(url),
-        snapshotId: null,
-        targetFingerprint: null,
-        payloadFingerprint: approvalProtocol.sha256("navigate"),
-      });
-    }
-    page = await resolveExpectedPage(browser);
-    if (sourceOrigin) {
-      assertSameOrigin(page.url(), sourceOrigin);
-    }
-    const revalidatedUrl = validateNavigationUrl(body.url, sourceOrigin);
-    // An address the agent opens itself is not the page a credential step
-    // opened. That record belongs to the page the person chose, so a
-    // navigation in one of Octo's own tabs leaves it.
-    if (!inAgentTab()) {
-      approvalProtocol.clearWithholdNextDocument();
-    }
-    assertStepOnTime();
-    emitAction({ type: "navigate", label: `Go to ${url}`, url });
-    openingAddress = { url: revalidatedUrl, startedAt: Date.now() };
-    await openAddress(page, revalidatedUrl);
-    await settleAfterAction(page);
-    page = await resolveExpectedPage(browser);
-    await emitNavigationResult(page);
-    return withActivity(await snapshotForResult(page, { decline: true }), stepActivity(page, "navigate", stepApproval()));
+    return await openPageStep(browser, page, body.url);
   }
 
   if (method === "POST" && requestPath === "/v1/click") {
@@ -6401,13 +6517,30 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const readingStep = freeSearch || consentRejection || (routineCovers(step, target.description) &&
       !isFormSubmissionControl(target.description));
     refuseUnlessReadingStep(readingStep, step);
+    // A plain link: one that leads to an http(s) address other than the page
+    // it is on, sends no form, downloads nothing and names no risk
+    // (routineCovers). A cookie notice the browser could not decline over it
+    // opens that address instead (openCoveredLink); any other control under
+    // one is refused in its words, a link to the page it is on too: one whose
+    // `href="#"` only runs the page's script, opened as an address, moved
+    // within the page, ran nothing, and the step said its address was opened.
+    const plainLink = Boolean(target.description.href) && Boolean(rawDestination) &&
+      addressWithoutFragment(rawDestination) !== addressWithoutFragment(page.url()) && !clickSubmission &&
+      !isFormSubmissionControl(target.description) && target.description.policy?.download !== true &&
+      !WITHHOLDING_CATEGORIES.has(step.category) && routineCovers(step, target.description);
+    const coveredLink = (error) => error instanceof CoveredByNotice && plainLink;
     // A click that asks the person is looked at where it would land first, so
     // nobody is asked about a click that cannot land; one nobody is asked
     // about is looked at right before it is made (clickControlItself). The
     // person is then asked about the page as it is: the look may have brought
     // the control into view, and the page may have answered that.
     if (!consentRejection && !(readingStep && approvalProtocol.routineBrowsingAllowed())) {
-      await refuseUnlandableClick(page, target);
+      try {
+        await refuseUnlandableClick(page, target);
+      } catch (error) {
+        if (coveredLink(error)) return await openCoveredLink(browser, page, target, rawDestination);
+        throw error;
+      }
       target = { ...target, asked: await askedNow(page, target) };
     }
     if (
@@ -6465,7 +6598,13 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ...size,
     });
     const beforeUrl = page.url();
-    const before = await clickControlItself(page, target);
+    let before;
+    try {
+      before = await clickControlItself(page, target);
+    } catch (error) {
+      if (coveredLink(error)) return await openCoveredLink(browser, page, target, rawDestination);
+      throw error;
+    }
     const unchanged = await settleAfterAction(page, before);
     page = await resolveExpectedPage(browser);
     await page.bringToFront();

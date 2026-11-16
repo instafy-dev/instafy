@@ -500,11 +500,24 @@ Two steps never ask, in Ask too:
   had allowed a click. The control is brought to the middle of the view, past
   a pinned header, and a cover still there after about 600 ms refuses the
   step at once, in words: a cookie or consent notice says
-  "A cookie notice covers this page, and the browser could not decline it.
-  Open a link under it by its address, or the official site of the place or
-  service the task is about." (it may have no reject button, sit on a page the
-  browser presses nothing on, or have come after the page was read, which the
-  next look declines when it can), never to pause on it, any other cover that something covers the
+  "A cookie notice covers this page, and the browser could not decline it, so
+  nothing was clicked. A site's home page, its address with no path, always
+  opens. Go on in this turn as "Finding a page" says." (it may have no reject button, sit on a page the browser presses
+  nothing on, or have come after the page was read, which the next look
+  declines when it can), never to pause on it and naming no site (which site
+  to open next is the browser skill's "Finding a page"). A plain link under
+  such a notice is no click to refuse: one that leads to an http(s) address
+  other than the page it is on, sends no form, downloads nothing and names no
+  risk opens that address in the same tab instead, as a `navigate` step to it
+  does and under its rules (the address is judged, its site asked for when the
+  run has not used it, a risky one asks the person), and the step's `done`
+  says so ("A cookie notice covers "Attractions", so its address was opened
+  in this tab instead."). Told to open such a link by its address, a turn
+  wrote the address of a tourism site's listing into its own `stopped` line
+  and never opened it. A link to the page it is on (`href="#"`, or a part of
+  the page) is refused as a button is: opened as an address, one that only
+  ran the page's script moved within the page, ran nothing, and the step said
+  its address was opened. Any other cover says that something covers the
   control, names it by its tag, role and label from the same look (the
   nearest element around the click's point that has a role or a label or is a
   control, such as a page's own date picker or a carousel's slide: `Something
@@ -1626,10 +1639,12 @@ named an address on it, or the site's name alone, or the chat's browser turns
 read a page on it past its root, which opens without anyone giving it; a page's
 link or text gives its address, never its site), and otherwise "a site's home
 page always opens", which names no site; then "Go on in this turn as "Finding a
-page" says." Sent to the root of whatever site it refused, a route question
-opened a search engine nobody named and asked the person to let it send a
-search, which they refused: the browser skill opens a search engine only when
-the person named one. runtime-agent reads the
+page" says." Told instead to open the official site of what the task names, a
+turn tried a path it made up on a bookshop's site and ended without the opening
+hours its home page showed. Sent to the root of whatever site it refused, a
+route question opened a search engine nobody named and asked the person to let
+it send a search, which they refused: the browser skill opens a search engine
+only when the person named one. runtime-agent reads the
 refusal by those words, the only thing its result says: the browser never
 opened such an address, so it leaves out a finding line, of any pass of the
 turn, that gives it as a page that stopped the turn, unless a step opened it.
@@ -1672,6 +1687,25 @@ address is left as the turn wrote it. When the addresses a turn's steps tried
 are not all known, this leaves no line out: no step named an address, or a
 step pressed a control of a page reading the run was not given (a press in the
 browser on the person's device names no reading).
+
+**A page read at another address has a page.** runtime-agent also keeps where
+each `navigate` or `open_tab` left its tab for the address it asked for. A
+`no-page` line for an address whose open ended on that page at another address
+(a redirect, or the browser's own reload of a load the network cut), which the
+turn's answer gives what it showed (a finding line with its address and no
+stop), is left out of any pass of the turn, compared as pages as above: a
+shop's product address that led to its page at another address got `no-page`
+beside the facts read on that page, and the reply and the page said the
+product's page "wasn't there". The page keeps its own name there, the last
+part of its path, and the query it was asked with; a line or a finding that
+leaves the query out, as a turn wrote a product link without its tracking
+words, still names it. A path an open asked for is a page of the site its tab
+ended on. These stay, in the turn's own words: a `no-page` at the address where
+a tab ended; one whose open ended on another page, such as the home page, the
+listing or another product a shop sends a product it no longer sells to; one
+whose open ended on a page the answer gives nothing of; one for the same path
+on another site; another stop at the asked address; and a line for another
+page or query of the site.
 
 Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load
@@ -1813,6 +1847,16 @@ model to end the turn, and the person reads "Instafy's browser closed or
 stopped responding, so I stopped there. Open the browser again and send a
 message to continue." One failed call followed by any other answer starts the
 count over, so a single slow connect does not end a turn.
+A load the network cut (`net::ERR_CONNECTION_CLOSED`, `_RESET` or `_ABORTED`,
+`ERR_EMPTY_RESPONSE` or `ERR_NETWORK_CHANGED`) does not fail a `navigate` or
+`open_tab` at once: Chromium loads such a page again by itself about a second
+after its error page shows, and the step waits up to 2.5 seconds for that
+reload to begin, under the step's guards, and answers with the page it brings,
+wherever a redirect led (`scripts/shared-browser-step-time-e2e.mjs`). Only a
+tab that ends on no page fails the step: a step had answered at once that the
+browser couldn't reach a shop's product page, which the tab showed two seconds
+later at the address the shop's redirect led to. Any other failure ends the
+step at once, as below.
 A page that did not load (a Chromium `net::ERR_…` code in the controller's
 error) fails with a plain reason as the result's text, and the code only in
 `structuredContent.error.details`: "Instafy's browser couldn't reach that

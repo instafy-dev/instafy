@@ -950,11 +950,13 @@ pub struct CodexRunOutput {
 
 /// The addresses a run's own browser steps tried (`CodexRunOutput::browser_tried`), and whether
 /// those are all of them: a step that pressed a control of a page reading the run was not given
-/// may have tried an address the run cannot name.
+/// may have tried an address the run cannot name. And where each open's tab ended for the
+/// address it asked for (`shared_browser_activity::step_ended_at`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BrowserTried {
     addresses: Vec<String>,
     one_not_known: bool,
+    ended: Vec<(String, String)>,
 }
 
 impl BrowserTried {
@@ -968,6 +970,13 @@ impl BrowserTried {
         }
     }
 
+    /// Each address an open asked for, with the page it left its tab on: another address of
+    /// that page when a redirect, or the browser's own reload of a load the network cut, sent it
+    /// there. Known whatever else the steps tried.
+    pub fn ended_at(&self) -> &[(String, String)] {
+        &self.ended
+    }
+
     /// These and the ones another pass of the same turn tried.
     pub fn with(&self, other: &Self) -> Self {
         let mut all = self.clone();
@@ -975,12 +984,22 @@ impl BrowserTried {
             all.keep(address.clone());
         }
         all.one_not_known |= other.one_not_known;
+        for (asked, ended) in &other.ended {
+            all.keep_ended(asked.clone(), ended.clone());
+        }
         all
     }
 
     fn keep(&mut self, address: String) {
         if !self.addresses.contains(&address) {
             self.addresses.push(address);
+        }
+    }
+
+    pub(crate) fn keep_ended(&mut self, asked: String, ended: String) {
+        let pair = (asked, ended);
+        if !self.ended.contains(&pair) {
+            self.ended.push(pair);
         }
     }
 }
@@ -990,6 +1009,7 @@ impl From<Vec<String>> for BrowserTried {
         Self {
             addresses,
             one_not_known: false,
+            ended: Vec::new(),
         }
     }
 }
@@ -5758,6 +5778,17 @@ impl CodexEventStreamAdapter {
                         tool_call.invocation.arguments.as_ref(),
                         payload,
                     );
+                    // Where an open's tab ended for the address it asked for.
+                    if tool_call.is_success()
+                        && terminal_code.is_none()
+                        && let Some((asked, ended)) = crate::shared_browser_activity::step_ended_at(
+                            &tool_call.invocation.tool,
+                            tool_call.invocation.arguments.as_ref(),
+                            payload,
+                        )
+                    {
+                        self.browser_tried.keep_ended(asked, ended);
+                    }
                     // The links of the page it read, for a later step that presses one.
                     if let Some(links) = crate::shared_browser_activity::step_page_links(payload) {
                         self.browser_links = Some(links);
@@ -12654,6 +12685,87 @@ required = true
         assert!(adapter.browser_tried().known().is_empty());
         assert!(other.with(adapter.browser_tried()).known().is_empty());
         assert!(adapter.browser_tried().with(&other).known().is_empty());
+    }
+
+    /// An open keeps where it left its tab for the address it asked for, for the turn's findings
+    /// (`jobs::browser_hand_back::leave_out_addresses_never_opened`), never projected: a shop's
+    /// product address whose redirect led to its page at another address (a local test, Nov 10).
+    /// One that failed, a look and a press keep none. Another pass's join the turn's, once each.
+    #[test]
+    fn the_adapter_keeps_where_an_open_left_its_tab_unprojected() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let end = |call: &str, tool: &str, url: &str, structured: JsonValue, failed: bool| Event {
+            id: "evt_mcp_end".to_string(),
+            msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                call_id: call.to_string(),
+                invocation: McpInvocation {
+                    server: "instafy_shared_browser".to_string(),
+                    tool: tool.to_string(),
+                    arguments: Some(json!({ "url": url, "index": 1, "snapshotId": "reading-0" })),
+                },
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                duration: Duration::from_millis(1),
+                result: Ok(CallToolResult {
+                    content: vec![json!({"type": "text", "text": "answer"})],
+                    structured_content: Some(structured),
+                    is_error: Some(failed),
+                    meta: None,
+                }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        const ASKED: &str = "https://shop.example/products/reader?ref=menu";
+        const READ: &str = "https://ereader.shop.example/en/products/reader?ref=menu";
+        const TAB: &str = "https://shop.example/products/colour";
+        let on = |step: &str, url: &str| json!({ "activity": { "step": step, "url": url } });
+        for event in [
+            end(
+                "call_open",
+                "navigate",
+                ASKED,
+                on("navigate", &format!("{READ}#specs")),
+                false,
+            ),
+            end("call_tab", "open_tab", TAB, on("open_tab", TAB), false),
+            end(
+                "call_cut",
+                "navigate",
+                "https://shop.example/products/plus",
+                json!({ "error": { "reason": "Instafy's browser couldn't reach that site." } }),
+                true,
+            ),
+            end("call_look", "snapshot", ASKED, on("status", READ), false),
+            end("call_press", "click", ASKED, on("click", READ), false),
+        ] {
+            for projected in adapter.collect(&event) {
+                assert!(!projected.to_string().contains("https://"), "{projected}");
+            }
+        }
+        let ended = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(asked, ended)| (asked.to_string(), ended.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            adapter.browser_tried().ended_at(),
+            ended(&[(ASKED, READ), (TAB, TAB)])
+        );
+        // Another pass's, once each.
+        let mut other = BrowserTried::default();
+        other.keep_ended(ASKED.to_string(), READ.to_string());
+        other.keep_ended("/products/plus".to_string(), TAB.to_string());
+        assert_eq!(
+            adapter.browser_tried().with(&other).ended_at(),
+            ended(&[(ASKED, READ), (TAB, TAB), ("/products/plus", TAB)])
+        );
     }
 
     /// A browser step that answered with a page that shows a secret marks the run, which then

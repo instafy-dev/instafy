@@ -3701,8 +3701,9 @@ fn a_site_that_did_not_answer_says_not_to_open_it_again() {
 /// skill's "Finding a page" says which source comes next. Each once named its own next source
 /// (the maker's, venue's, shop's, operator's or reviewer's own site, the operator's journey
 /// planner, a planner or search page on the same site), the lists disagreed, and what a kind of
-/// task reads first is a skill's judgement. Each step keeps only its facts: a link under a
-/// cookie notice opens by its address, and a site's home page always opens.
+/// task reads first is a skill's judgement. Each step keeps only its facts: nothing under a
+/// cookie notice was clicked (a plain link under it opens its own address instead), and a site's
+/// home page always opens.
 #[test]
 fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
     let next = next_source!();
@@ -3712,7 +3713,7 @@ fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
         ("SEND_PAGE_HINT", "const SEND_PAGE_HINT = `${NEXT_SOURCE} "),
         (
             "CONSENT_COVER_MESSAGE",
-            "const CONSENT_COVER_MESSAGE = `A cookie notice covers this page, and the browser could not decline it. A link under it opens by its address. ${NEXT_SOURCE}`;",
+            "const CONSENT_COVER_MESSAGE = `A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. ${HOME_PAGE_OPENS} ${NEXT_SOURCE}`;",
         ),
         (
             "NoPageError",
@@ -3773,16 +3774,22 @@ fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
     // asked for again in the run, and a search engine opens only when someone named it, so a
     // refused results page nobody gave goes on to the official site, not to that engine's
     // search box. That a home page always opens is said only by the refusal of an address
-    // nobody gave, the one place it is true.
+    // nobody gave and a cookie notice's over a control, both of an address the browser's rule
+    // never refuses (a site's root).
     assert!(!finding.contains("always opens"), "{finding}");
-    assert_eq!(
-        SHARED_BROWSER_SCRIPT
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .filter(|line| line.contains("always opens"))
-            .count(),
-        1
+    let said: Vec<&str> = SHARED_BROWSER_SCRIPT
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .filter(|line| line.contains("always opens"))
+        .collect();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(
+        said.iter()
+            .any(|line| line.contains("const HOME_PAGE_OPENS = "))
     );
+    assert!(said.iter().any(|line| {
+        line.contains("Octo opens only addresses it was given, and ${home} always opens.")
+    }));
     assert!(SHARED_BROWSER_SCRIPT.contains("is link-only: Octo never opens it, in any tab."));
 }
 
@@ -4044,7 +4051,7 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
     end_chat_browser_run(run);
 
     // Another chat's turn was given none of it, its site included: the way on
-    // is the official site of what its task names.
+    // is only that a site's home page always opens, naming no site.
     let run = chat_browser_run_given(
         &fixture,
         Uuid::new_v4(),
@@ -4115,9 +4122,9 @@ async fn a_page_gives_the_addresses_its_text_spells_out() {
 /// A refused address's way on names its site's root only on a site the chat
 /// was given: one the person's messages or the task named, by an address or by
 /// its name alone, or one the chat's browser turns read a page on past the
-/// site's root. On any other site, a search engine's included, it is the
-/// official site of what the task names, in the chat's own tab and in a tab of
-/// Octo's own alike. Sent to the root of whatever site it refused, a route
+/// site's root. On any other site, a search engine's included, it says only
+/// that a site's home page always opens, naming no site, in the chat's own tab
+/// and in a tab of Octo's own alike. Sent to the root of whatever site it refused, a route
 /// question opened a search engine nobody named and asked the person to let it
 /// send a search, which they refused (a local test, Nov 8). A page's link or
 /// text gives its address, never its site, and a site's root, which opens
@@ -4157,7 +4164,7 @@ async fn a_refused_address_names_its_sites_root_only_on_a_site_the_chat_was_give
         words.contains(&made_up_address_words("https://www.visit.example")),
         "{words}"
     );
-    // A site nobody named: the official site of what the task names, and no
+    // A site nobody named: only that a site's home page always opens, and no
     // word of the refused site, in either tab.
     for path in ["/v1/tabs/open", "/v1/navigate"] {
         let words = failure_of(&step(path, "https://www.search.example/maps"));
@@ -13871,7 +13878,7 @@ fn a_covered_click_is_refused_at_once_in_words() {
     for (mode, words) in [
         (
             "click-covered-by-notice",
-            "A cookie notice covers this page, and the browser could not decline it. A link under it opens by its address. Go on in this turn as \"Finding a page\" says.",
+            "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site's home page, its address with no path, always opens. Go on in this turn as \"Finding a page\" says.",
         ),
         (
             "click-covered",

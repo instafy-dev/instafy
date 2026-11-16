@@ -143,6 +143,13 @@ struct ProxyState {
     /// since it started. Shared by every clone of the state, as above.
     required_tool_call_fallbacks: Arc<AtomicU64>,
     affinity_codec: Arc<AffinityCodec>,
+    /// `PROXY_MANAGED_NATIVE_WEB_SEARCH`: whether a managed run that the
+    /// controller granted native search may search (see
+    /// [`managed_native_web_search_claims_allowed`]). Off by default.
+    managed_native_web_search: bool,
+    /// `PROXY_MANAGED_WEB_SEARCH_MODEL`: the model the search bridge runs a
+    /// managed run's searches as, instead of the lease's.
+    managed_web_search_model: Option<String>,
 }
 
 struct AuthenticatedProxyClaims(Option<ProxyClaims>);
@@ -1136,6 +1143,16 @@ where
     let require_credential_claim = boolean_env("PROXY_REQUIRE_CREDENTIAL_CLAIM")?;
     let service_tier_endpoints =
         ServiceTierEndpoints::parse(std::env::var(ServiceTierEndpoints::ENV).ok().as_deref())?;
+    let managed_native_web_search = boolean_env("PROXY_MANAGED_NATIVE_WEB_SEARCH")?;
+    let managed_web_search_model = crate::search_bridge::search_model_setting()?;
+    if managed_native_web_search {
+        eprintln!(
+            "[proxy] PROXY_MANAGED_NATIVE_WEB_SEARCH is on: managed runs the controller grants native search may search; on an API key the proxy runs OpenAI's hosted web search as {}",
+            managed_web_search_model
+                .as_deref()
+                .unwrap_or("the managed run's model")
+        );
+    }
     // Fail at startup rather than accepting requests with unusable transport settings.
     ModelTransportConfig::from_env()?;
     let controller = ControllerIntegration::from_env()?;
@@ -1172,6 +1189,8 @@ where
         service_tier_endpoints,
         required_tool_call_fallbacks: Arc::new(AtomicU64::new(0)),
         affinity_codec: Arc::new(AffinityCodec::from_env()),
+        managed_native_web_search,
+        managed_web_search_model,
     };
 
     let app = Router::new()
@@ -1618,6 +1637,21 @@ fn native_web_search_claims_allowed(claims: Option<&ProxyClaims>) -> bool {
             && claims.lease_attempt.is_some_and(|attempt| attempt > 0)
             && credential_id_from_claims(Some(claims))
                 .is_some_and(|id| !is_reserved_credential_id(id))
+    })
+}
+
+/// A managed run's job token that the controller granted native search: bound
+/// to its job and lease attempt, on the platform lane (a run id and no
+/// credential of its own). The proxy serves it only with
+/// `PROXY_MANAGED_NATIVE_WEB_SEARCH` on, and only on the standalone search
+/// route: hosted search in a model request stays off on the platform lane.
+fn managed_native_web_search_claims_allowed(claims: Option<&ProxyClaims>) -> bool {
+    claims.is_some_and(|claims| {
+        claims.native_web_search
+            && claims.job_id.is_some()
+            && claims.lease_attempt.is_some_and(|attempt| attempt > 0)
+            && credential_id_from_claims(Some(claims)).is_none()
+            && run_id_from_claims(Some(claims)).is_some()
     })
 }
 
@@ -4173,6 +4207,8 @@ mod tests {
             service_tier_endpoints: ServiceTierEndpoints::default(),
             required_tool_call_fallbacks: Arc::new(AtomicU64::new(0)),
             affinity_codec: Arc::new(AffinityCodec::from_env()),
+            managed_native_web_search: false,
+            managed_web_search_model: None,
         }
     }
 
