@@ -611,7 +611,10 @@
   function refit() { oneColWidth = 0; tidySoon(); }
   /** No caption line starts or ends in a dot: a part the line wrapped before (or right after its dot) goes on a line
    * of its own without the dot, and a caption that starts under its value drops its first dot. Runs after each render
-   * and when the page width changes, after the fact grids have their columns (fitFacts). */
+   * and when the page width changes, after the fact grids have their columns (fitFacts). Putting a part on a line of
+   * its own can move the part before it onto a new line too (a table's column a little wider than another row needs),
+   * so the dots still drawn are looked at once more, with those changes in place: a price's "· seen 17 Oct" started a
+   * line after its store link took a line of its own. */
   function tidyCaptions() {
     var metas = document.querySelectorAll(".trust .meta");
     for (var i = 0; i < metas.length; i++) {
@@ -621,25 +624,27 @@
       for (var j = 0; j < wrapped.length; j++) wrapped[j].classList.remove("is-wrap");
     }
     fitFacts();
-    for (var k = 0; k < metas.length; k++) {
-      var meta = metas[k];
-      var lead = meta.querySelector(":scope > .lead");
-      var leadAt = lines(lead);
-      var first = meta.querySelector(":scope > .part");
-      if (leadAt) {
-        var v = lines(meta.previousElementSibling);
-        var f = lines(first);
-        if ((v && leadAt.first > v.last + 4) || (f && f.first > leadAt.last + 4)) meta.classList.add("is-wrap");
-      }
-      var prev = first;
-      var sps = meta.querySelectorAll(":scope > .sp");
-      for (var n = 0; n < sps.length; n++) {
-        var sp = sps[n];
-        var dot = lines(sp.firstChild);
-        var before = lines(prev);
-        var part = lines(sp.lastChild);
-        if (dot && ((before && dot.first > before.last + 4) || (part && part.first > dot.last + 4))) sp.classList.add("is-wrap");
-        prev = sp.lastChild;
+    for (var pass = 0; pass < 2; pass++) {
+      for (var k = 0; k < metas.length; k++) {
+        var meta = metas[k];
+        var lead = meta.querySelector(":scope > .lead");
+        var leadAt = lines(lead);
+        var first = meta.querySelector(":scope > .part");
+        if (leadAt) {
+          var v = lines(meta.previousElementSibling);
+          var f = lines(first);
+          if ((v && leadAt.first > v.last + 4) || (f && f.first > leadAt.last + 4)) meta.classList.add("is-wrap");
+        }
+        var prev = first;
+        var sps = meta.querySelectorAll(":scope > .sp");
+        for (var n = 0; n < sps.length; n++) {
+          var sp = sps[n];
+          var dot = lines(sp.firstChild);
+          var before = lines(prev);
+          var part = lines(sp.lastChild);
+          if (dot && ((before && dot.first > before.last + 4) || (part && part.first > dot.last + 4))) sp.classList.add("is-wrap");
+          prev = sp.lastChild;
+        }
       }
     }
   }
@@ -896,17 +901,25 @@
       } else if (basis) basis.remove();
     }
   }
-  /** The footer: "Still to confirm" (each thing once, plain text) and "Sources: A ↗, B ↗" (one link per site). */
+  /** The footer: "Still to confirm" (each thing once, plain text) and "Sources: A ↗, B ↗" (one link per site). An
+   * entry is text, or a list of text and elements the page drew itself (a value's missing parts, citing the page it was
+   * looked for on); anything else in a list is its text. */
   function notes(unchecked, sources) {
     var el = document.getElementById("notes");
     if (!el) return;
     el.replaceChildren();
-    var list = (unchecked || []).filter(Boolean);
+    var list = (unchecked || []).filter(function (t) { return Array.isArray(t) ? t.length > 0 : !!t; });
+    var entry = function (t) {
+      if (!Array.isArray(t)) return h("li", { text: String(t) });
+      return h("li", null, t.map(function (part) {
+        return part && typeof part === "object" && part.nodeType ? part : String(part == null ? "" : part);
+      }));
+    };
     if (list.length) {
       // "Still to confirm", not "Not checked": a checklist's boxes are "checked" too, and a value's own caption says
       // "Not checked"
       el.appendChild(h("h2", { text: "Still to confirm" }));
-      el.appendChild(h("ul", { "class": "cap" }, list.map(function (t) { return h("li", { text: t }); })));
+      el.appendChild(h("ul", { "class": "cap" }, list.map(entry)));
     }
     var seen = {};
     var links = [];
@@ -1129,7 +1142,7 @@
   }
 
   window.site = {
-    version: "1.9.0",
+    version: "1.10.0",
     h: h, append: append, icon: icon, link: link, clip: clip, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,

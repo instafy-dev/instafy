@@ -1,0 +1,5 @@
+---
+"@instafy/cli": patch
+---
+
+The compare starter names what each row is still missing once, first under "Still to confirm" at the foot of the page, read from its cells with each value's note ("Option B: Weight (not found · checked 17 Oct on maker.com ↗), Price"), and then the page's own `unchecked` entries. Nothing is named under the title any more, a wide table's cell for a missing value reads only "Unknown", and a phone's row still leaves it out. A note that only says the value wasn't found, in Octo's words ("I didn't find weight"), adds nothing beside it, also under a label with its unit in brackets ("Weight (g)"). `instafy bind check` now notes a comparison's `unchecked` entry that names a column no row has a value for, since the page already names it from its cells: the entry stays only for what the reader can do. `site.notes` takes entries with links the page drew itself, and captions are tidied once more after a part takes a line of its own, so no caption line starts with a dot ("· seen 17 Oct") in a table whose columns changed width (`site.js` 1.10.0). Pages made before keep their own copies of `app.js` and `site.js`.

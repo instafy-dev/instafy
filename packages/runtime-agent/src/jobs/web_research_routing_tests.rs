@@ -2051,8 +2051,8 @@ fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
 
     let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
     let edited = BROWSER_SKILL.replace(
-        "and what it leaves out.\n\n## Shared Browser command",
-        "and what it leaves out.\n- Start from the city's open-data portal.\n\n## Shared Browser command",
+        "not the page.\n\n## Shared Browser command",
+        "not the page.\n- Start from the city's open-data portal.\n\n## Shared Browser command",
     );
     assert_ne!(edited, BROWSER_SKILL);
     fs::write(&skill, &edited).unwrap();

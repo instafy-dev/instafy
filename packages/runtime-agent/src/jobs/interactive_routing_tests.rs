@@ -1055,6 +1055,41 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
     }
 }
 
+/// A comparison told what it didn't find three times: under its title, in each cell and under
+/// "Still to confirm", where the build's own `unchecked` said it again (a local test, Nov 10). The
+/// compare starter names each row's missing values once, first in its footer, and the bound-sites
+/// cheat sheet says so: nothing names them under the title any more, and `unchecked` never says
+/// again that they are missing, while an entry may still say what the reader can do about one. The
+/// unedited copy from before is upgraded; an edited one is kept.
+#[test]
+fn a_comparisons_missing_values_are_named_once_in_its_footer() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let sheet = include_str!(
+        "../../assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
+    );
+    let previous = include_str!("legacy/bound-sites-cheatsheet-v6.md");
+    let rule = "A comparison's footer first names what each row is still missing, from its cells, with each value's `note`: its `unchecked` never says again that they are missing.";
+    assert!(flat(sheet).contains(rule), "{sheet}");
+    assert!(
+        !flat(sheet).contains("and what each row is still missing"),
+        "{sheet}"
+    );
+    assert!(flat(previous).contains("and what each row is still missing"));
+    assert!(!flat(previous).contains(rule));
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    let path = root.join(learn::BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), sheet);
+    let edited = format!("{previous}\nLocal page preference.\n");
+    fs::write(&path, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}
+
 /// A comparison's headline was free text the hub asked for ("The lede gives the verdict"). Asked
 /// for it three times, a build wrote what a page lists and named the missing reviews right above
 /// the line that names them; the build before it claimed reviews the page didn't have. The compare
@@ -1078,7 +1113,7 @@ fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
     }
     assert!(!flat(sheet).contains("biggest unknown"), "{sheet}");
     assert!(flat(sheet).contains(
-        "Lede: the verdict. A comparison has none of its own: under its title the compare starter names the row each `sort` entry puts first, when every row shows that value, and what each row is still missing."
+        "Lede: the verdict. A comparison has none of its own: under its title the compare starter names the row each `sort` entry puts first, when every row shows that value."
     ));
 
     let tmp = tempdir().unwrap();

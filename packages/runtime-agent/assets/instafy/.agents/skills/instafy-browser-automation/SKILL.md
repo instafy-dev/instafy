@@ -78,7 +78,7 @@ For direct readers and browsers (provider-hosted retrieval follows `instafy-web-
 - A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page: those only lead to it.
 - A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source.
 - A page's own tab or link named for a value (its hours, its warranty) is a page to read: open it before you call the value not found.
-- In Instafy's browser, write a finding's fact under a page you read that states it, not one that only quotes it, in a few words of your own, never long listing text, with what it doesn't confirm: which of its values you chose, not the page, and what it leaves out.
+- In Instafy's browser, write a finding's fact under a page you read that states it, not one that only quotes it, in a few words of your own, never long listing text, saying which of its values you chose, not the page.
 
 ## Shared Browser command (only when Shared Browser is exposed)
 
