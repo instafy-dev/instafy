@@ -359,7 +359,8 @@ describe("browser hand-back: the send", () => {
 });
 
 type Options = Parameters<typeof useBrowserHandBack>[0];
-function Harness({ value }: { value: Options }) { useBrowserHandBack(value); return null; }
+let handBack: ReturnType<typeof useBrowserHandBack> | null = null;
+function Harness({ value }: { value: Options }) { handBack = useBrowserHandBack(value); return null; }
 
 describe("useBrowserHandBack", () => {
   let root: Root;
@@ -430,6 +431,32 @@ describe("useBrowserHandBack", () => {
     value.canWrite = false;
     await browserTurnFinishes();
     expect(value.send).not.toHaveBeenCalled();
+  });
+
+  // Stop stays through the moment between the browser turn and the building
+  // turn: the hand-back is due from the browser turn's end until its prompt
+  // is in the chat, and no longer once its send was refused.
+  it("is due from the browser turn's end until its prompt is in the chat", async () => {
+    await render();
+    expect(handBack?.due).toBe(false);
+    await browserTurnFinishes();
+    expect(value.send).toHaveBeenCalledTimes(1);
+    expect(handBack?.due).toBe(true);
+    value.messages = [...value.messages, { id: "hb", role: "user", content: "notice", timestamp: Date.now(),
+      metadata: { [BROWSER_HAND_BACK_CLAIM_KEY]: BROWSER_JOB } }];
+    await render();
+    expect(handBack?.due).toBe(false);
+  });
+
+  it("is not due once its send was refused, or while the person holds it", async () => {
+    value.send = vi.fn(async () => false);
+    await browserTurnFinishes();
+    await act(async () => { await Promise.resolve(); });
+    await render();
+    expect(handBack?.due).toBe(false);
+    forgetBrowserHandBacksForTests();
+    value.held = true; await render();
+    expect(handBack?.due).toBe(false);
   });
 
   it("never sends a hand-back for a browser turn the person answered while it was held", async () => {

@@ -19,7 +19,7 @@ import { resolveTypingAgentLanes, type AssistantTypingAgent } from "../chatAssis
 import { ChatTypingRows } from "../ChatTypingRows";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import { ConversationMessageRows } from "../ConversationMessageRows";
-import { routedBrowserWaitingKeys } from "../routedBrowserFold";
+import { resolveRoutedBrowserFold } from "../routedBrowserFold";
 import { resolveAgentWaitingActivityCopy } from "../runtimeAlertPresentation";
 import {
   isTranscriptTailActiveTurnOutcome,
@@ -446,13 +446,16 @@ function chatPanel(step: Step) {
     : null;
   const status = multiStatus ??
     resolveSingleAgentTypingStatus({ state, runStatus: activeRun?.status ?? null, agentName: lead.displayName, waiting });
+  // As ChatPanel reads the routed cards for its browser host.
+  const routedFold = resolveRoutedBrowserFold(messages, isAssistantTyping);
   const host: BrowserRequestHost = {
     transport: "shared",
     personalAvailable: false,
     sharedUnavailable: false,
     cardStates: new Map(step.card ? [[step.cardKey ?? CARD_KEY, step.card]] : []),
     continuedKeys: browserRequestContinuedKeys(messages),
-    routedWaitingKeys: routedBrowserWaitingKeys(messages, isAssistantTyping),
+    routedWaitingKeys: routedFold.waitingCardKeys,
+    routedHandedOverKeys: routedFold.handedOverCardKeys,
     newestCardKey: newestBrowserRequestKey(messages),
   };
   return {
@@ -653,9 +656,10 @@ describe("a message Octo sends straight to Instafy's browser", () => {
   });
 
   // Nothing opened a page in that turn, and it handed the message over: one
-  // row reads "Thinking…" from the card to the building turn's first step,
-  // never "Opening Instafy's browser…" and never a "Starting…" in between.
-  it("reads Thinking… until the building turn's first step when the browser turn opens no page and hands the message over", async () => {
+  // row reads "Thinking…" from the card until then, and "Working…" from the
+  // hand-over to the building turn's first step, never "Opening Instafy's
+  // browser…" and never a "Starting…" in between.
+  it("reads Working… from the hand-over to the building turn's first step when the browser turn opens no page", async () => {
     const page = (time: string, runs: RunRecord[], card?: BrowserRequestCardState, awaitingLease = false) =>
       show({ chat: PAGE_CHAT, cardKey: PAGE_CARD_KEY, time, runs, card, awaitingLease });
     const seen: Array<ReturnType<typeof read>> = [];
@@ -679,19 +683,19 @@ describe("a message Octo sends straight to Instafy's browser", () => {
       one("01:11:33.334", ["Thinking…"]),
       one("01:11:33.864", ["Thinking…"]),
       one("01:11:40.000", ["Thinking…"]),
-      one("01:11:46.741", ["Thinking…"]),
-      one("01:11:46.790", ["Thinking…"]),
-      one("01:11:46.888", ["Thinking…"]),
-      one("01:11:47.080", ["Thinking…"]),
+      one("01:11:46.741", ["Working…"]),
+      one("01:11:46.790", ["Working…"]),
+      one("01:11:46.888", ["Working…"]),
+      one("01:11:47.080", ["Working…"]),
       one("01:11:51.618", ["Working…"]),
     ]);
   });
 
   // The same turn, but the controller sent no hand-back (it refuses one
   // without a word when the chat's building lane is busy, say). Once nothing
-  // of the chat runs any more, nothing more will come: the "Thinking…" goes,
-  // as the typing row and Stop do, also after a reload, for every viewer.
-  it("stops reading Thinking… once nothing runs and the hand-over never came", async () => {
+  // of the chat runs any more, nothing more will come: the line goes, as the
+  // typing row and Stop do, also after a reload, for every viewer.
+  it("stops reading Working… once nothing runs and the hand-over never came", async () => {
     const noHandBack = PAGE_CHAT.slice(0, 5);
     const page = (time: string, runs: RunRecord[], card?: BrowserRequestCardState) =>
       show({ chat: noHandBack, cardKey: PAGE_CARD_KEY, time, runs, card });
@@ -705,12 +709,13 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     // A reload: Studio holds no card state and no run.
     seen.push(await page("01:20:00.000", []));
 
-    const one = (time: string) => ({ time, octoRows: 1, faces: { desktop: 1, phone: 1 }, says: ["Thinking…"], typingAnnounces: null });
+    const one = (time: string, line = "Thinking…") =>
+      ({ time, octoRows: 1, faces: { desktop: 1, phone: 1 }, says: [line], typingAnnounces: null });
     const none = (time: string) => ({ time, octoRows: 0, faces: { desktop: 0, phone: 0 }, says: [], typingAnnounces: null });
     expect(seen).toEqual([
       one("01:11:40.000"),
-      one("01:11:46.741"),
-      one("01:11:46.790"),
+      one("01:11:46.741", "Working…"),
+      one("01:11:46.790", "Working…"),
       none("01:11:47.100"),
       none("01:12:30.000"),
       none("01:20:00.000"),

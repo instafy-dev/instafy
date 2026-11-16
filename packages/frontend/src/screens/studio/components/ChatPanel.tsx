@@ -141,7 +141,7 @@ import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import { useChatRunStop } from "./useChatRunStop";
-import { resolveChatRunStopTargets } from "./chatRunStopTargets";
+import { chatRunStopFollowOnTargets, resolveChatRunStopTargets } from "./chatRunStopTargets";
 import { ChatRunStopNoticeProvider } from "./ChatRunStopNotice";
 import { useChatRunStopContinuation } from "./useChatRunStopContinuation";
 import {
@@ -351,11 +351,13 @@ import {
 import {
   collapseLifecycleMessages,
   extractAgentJobId,
+  readPendingHandBack,
   runMatchesThreadJobId,
   shouldDisplayChatMessage,
   shouldDisplayJobThreadMessage,
   synthesizeAgentJobThreadMessages,
 } from "./chatMessagePresentation";
+import { isAutomaticRetryPending } from "./automaticRetryFold";
 import { resolveAgentWaitingActivityCopy } from "./runtimeAlertPresentation";
 import {
   formatPromptContextModeLabel,
@@ -453,7 +455,7 @@ import {
   pressedBrowserCardSites,
   type BrowserRequestHost,
 } from "./browserRequest";
-import { routedBrowserWaitingKeys } from "./routedBrowserFold";
+import { resolveRoutedBrowserFold } from "./routedBrowserFold";
 import {
   BROWSER_AUTO_START_COPY,
   browserAutoStartHeldByDraft,
@@ -5153,7 +5155,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return statuses;
   }, [runs]);
-  useBrowserHandBack({
+  const browserHandBack = useBrowserHandBack({
     identity: browserRequestIdentity,
     messages,
     canWrite: browserAutoStartAllowed,
@@ -5184,11 +5186,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [messages, promptSendFailures]);
   const newestBrowserRequest = useMemo(() => newestBrowserRequestKey(messages), [messages]);
   // Cards for a message Octo sent straight to the browser that Studio opened
-  // by itself and that still stand in for their turn (routedBrowserFold.ts).
-  const routedBrowserWaiting = useMemo(() => {
+  // by itself and that still stand in for their turn (routedBrowserFold.ts),
+  // and those of them that stand for the building turn it was handed to.
+  const routedBrowserCards = useMemo(() => {
     void promptSendFailures;
-    return routedBrowserWaitingKeys(messages, isAssistantTyping);
+    const fold = resolveRoutedBrowserFold(messages, isAssistantTyping);
+    return { waiting: fold.waitingCardKeys, handedOver: fold.handedOverCardKeys };
   }, [isAssistantTyping, messages, promptSendFailures]);
+  const routedBrowserWaiting = routedBrowserCards.waiting;
   const browserRequestHost = useMemo<BrowserRequestHost>(() => ({
     transport: browserTransport,
     personalAvailable: personalBrowser.available,
@@ -5197,9 +5202,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     cardStates: browserRequestState.cardStates,
     continuedKeys: browserRequestContinued,
     routedWaitingKeys: routedBrowserWaiting,
+    routedHandedOverKeys: routedBrowserCards.handedOver,
     newestCardKey: newestBrowserRequest,
   }), [
     browserRequestContinued,
+    routedBrowserCards.handedOver,
     routedBrowserWaiting,
     newestBrowserRequest,
     browserRequestState.cardStates,
@@ -6023,9 +6030,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   ), [agentByHandle, messages, runs, stopConversationId]);
   const canStopRuns = projectCapabilitiesResolved === true && canWriteProject === true
     && !projectAccessPending && Boolean(currentUserId) && !jobThread;
+  // The newest message is between two of its parts, and the next goes on by
+  // itself: Studio is opening a browser card or its turn has not started, a
+  // browser turn's hand-back to the building turn is due or on its way, or
+  // Instafy is trying a failed turn again. Stop stays through it.
+  const newestDisplayedRow = displayedMessages[displayedMessages.length - 1];
+  const stopBetweenParts = browserCardOpeningNow || routedBrowserWaiting.size > 0 || browserHandBack.due ||
+    Boolean(newestDisplayedRow && (readPendingHandBack(newestDisplayedRow) || isAutomaticRetryPending(newestDisplayedRow)));
+  const stopFollowOnTargets = useMemo(() => chatRunStopFollowOnTargets(stopTargets, messages), [messages, stopTargets]);
   const runStop = useChatRunStop({
     conversationId: stopConversationId,
     targets: stopTargets,
+    between: stopBetweenParts,
+    followOnTargets: stopFollowOnTargets,
     canStop: canStopRuns,
     viewerUserId: currentUserId,
     active: chatVisible && !jobThread,

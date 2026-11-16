@@ -82,6 +82,12 @@ export type RoutedBrowserFold = {
    */
   waitingCardKeys: ReadonlySet<string>;
   /**
+   * Those of {@link waitingCardKeys} that stand for the building turn their
+   * browser turn handed the message to: the message is passing to its next
+   * part, and the card's line reads "Working…" until that turn shows something.
+   */
+  handedOverCardKeys: ReadonlySet<string>;
+  /**
    * Browser turns of routed cards that handed the person's message to the
    * building turn: their card stands for the building turn, and nothing of
    * theirs shows once the hand-back is in the chat.
@@ -252,6 +258,7 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[], turnO
   // hand-back without a word. Nor for a hand-back whose run this chat cannot
   // tell: that turn could not be told from any other.
   const buildingJobIdsByBrowserJobId = new Map<string, Set<string>>();
+  const handedOverCardKeys = new Set<string>();
   for (const [browserJobId, { key, continuationIndex }] of handingOver) {
     const handBackRuns = buildRequestHandBacks.get(browserJobId);
     if (handBackRuns === undefined) {
@@ -260,6 +267,7 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[], turnO
       continue;
     }
     waitingCardKeys.add(key);
+    handedOverCardKeys.add(key);
     const buildingJobs = new Set<string>();
     for (const runId of handBackRuns ?? []) {
       const jobId = runId ? jobByRunId.get(runId) : undefined;
@@ -271,6 +279,7 @@ export function resolveRoutedBrowserFold(messages: readonly ChatMessage[], turnO
     hiddenPromptIds,
     cardIdByBrowserJobId,
     waitingCardKeys,
+    handedOverCardKeys,
     buildRequestJobIds,
     buildingJobIdsByBrowserJobId,
     handedBackBuildRequestJobIds,

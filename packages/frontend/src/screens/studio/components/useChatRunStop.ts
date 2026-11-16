@@ -1,4 +1,4 @@
-import { startTransition, useCallback, useEffect, useId, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { endReplyDraftRun } from "../../../conversations/replyDrafts";
 import { useOptionalRuntimeState } from "../../../runtime/RuntimeStateProvider";
 import { stopConversationJobs, type ControllerConversationStopResult } from "../../../services/runtimeController/conversationStop";
@@ -7,6 +7,13 @@ import { chatRunStopNeedsConfirmation, groupChatRunStopTargets, runsCanceledBySt
 
 export type { ChatRunStopTarget } from "./chatRunStopTargets";
 export const CHAT_RUN_STOP_TIMEOUT_MS = 20_000;
+/**
+ * How long Stop keeps its place after the turns it would stop end by
+ * themselves. The record that ends one part of a message and the one that
+ * starts the next (a browser card's continuation, a hand-back to the building
+ * turn) can come a moment apart: Stop stays put across that moment.
+ */
+export const CHAT_RUN_STOP_HANDOVER_MS = 600;
 export type ChatRunStopPhase = "idle" | "stopping" | "requested" | "error";
 
 export type ChatRunStopOptions = {
@@ -18,6 +25,19 @@ export type ChatRunStopOptions = {
   escapeBlocked?: boolean;
   cancelJobs?: (conversationId: string, jobIds: readonly string[]) => Promise<ControllerConversationStopResult>;
   onStopped?: (result: ControllerConversationStopResult, targets: readonly ChatRunStopTarget[]) => void;
+  /**
+   * The chat's message is between two of its parts: one has ended, and the
+   * next, which goes on by itself (a browser card's continuation, a hand-back
+   * to the building turn, Instafy's own retry of a failed turn), has not
+   * started yet. Stop stays meanwhile, and a press stops that part as it starts.
+   */
+  between?: boolean;
+  /**
+   * Of `targets`, those that carry a message on by themselves
+   * (chatRunStopFollowOnTargets): the only turns a press between two parts
+   * stops once they start, never a message someone sends.
+   */
+  followOnTargets?: readonly ChatRunStopTarget[];
 };
 
 type StopState = {
@@ -27,13 +47,19 @@ type StopState = {
   confirmationTargets: ChatRunStopTarget[] | null;
   acceptedJobIds: string[];
   error: string | null;
+  /** Pressed between two parts: the next part is stopped as it starts. */
+  awaitingNext: boolean;
 };
 
 function emptyState(conversationId: string | null): StopState {
-  return { conversationId, phase: "idle", attemptedTargets: [], confirmationTargets: null, acceptedJobIds: [], error: null };
+  return {
+    conversationId, phase: "idle", attemptedTargets: [], confirmationTargets: null, acceptedJobIds: [], error: null,
+    awaitingNext: false,
+  };
 }
 
 function effectivePhase(state: StopState, targets: readonly ChatRunStopTarget[]): ChatRunStopPhase {
+  if (state.awaitingNext) return "stopping";
   if (state.phase !== "requested") return state.phase;
   const hasUnrequestedTarget = targets.some((target) => !state.acceptedJobIds.includes(target.jobId));
   const requestedStillActive = state.attemptedTargets.some((target) => targets.some((candidate) => candidate.jobId === target.jobId));
@@ -47,8 +73,12 @@ export function useChatRunStop(options: ChatRunStopOptions) {
   const state = storedState.conversationId === conversationId ? storedState : emptyState(conversationId);
   // The chat's run records, where the Stop's answer is written.
   const runRecords = useOptionalRuntimeState();
-  const latest = useRef({ options, state, runRecords });
-  latest.current = { options, state, runRecords };
+  // The turns it would stop ended by themselves a moment ago: the next part
+  // of the same message may be on its way (CHAT_RUN_STOP_HANDOVER_MS).
+  const [handingOver, setHandingOver] = useState(false);
+  const between = options.between === true || handingOver;
+  const latest = useRef({ options, state, runRecords, between });
+  latest.current = { options, state, runRecords, between };
   const operation = useRef(0);
   const busy = useRef(false);
   const mounted = useRef(true);
@@ -60,7 +90,29 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     operation.current += 1;
     busy.current = false;
     setState(emptyState(conversationId));
+    setHandingOver(false);
   }, [conversationId]);
+  // Before the frame that would draw no Stop: the turns ended by themselves,
+  // none of them by this Stop.
+  const shownJobIds = targets.filter((target) => !state.acceptedJobIds.includes(target.jobId)).map((target) => target.jobId);
+  const shownJobIdsKey = shownJobIds.join(",");
+  const lastShown = useRef<{ conversationId: string | null; jobIds: string[] }>({ conversationId, jobIds: [] });
+  useLayoutEffect(() => {
+    const ended = lastShown.current.conversationId === conversationId ? lastShown.current.jobIds : [];
+    lastShown.current = { conversationId, jobIds: shownJobIdsKey ? shownJobIdsKey.split(",") : [] };
+    if (lastShown.current.jobIds.length > 0) {
+      setHandingOver(false);
+      return;
+    }
+    if (ended.length > 0 && !ended.some((jobId) => latest.current.state.acceptedJobIds.includes(jobId))) {
+      setHandingOver(true);
+    }
+  }, [conversationId, shownJobIdsKey]);
+  useEffect(() => {
+    if (!handingOver) return undefined;
+    const timer = setTimeout(() => setHandingOver(false), CHAT_RUN_STOP_HANDOVER_MS);
+    return () => clearTimeout(timer);
+  }, [handingOver]);
   useEffect(() => {
     if (state.phase !== "requested") return;
     if (effectivePhase(state, targets) === "idle") setState((previous) => ({ ...previous, phase: "idle", attemptedTargets: [] }));
@@ -82,7 +134,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     startTransition(() => {
       setState((previous) => ({
         ...(previous.conversationId === capturedConversation ? previous : emptyState(capturedConversation)),
-        phase: "stopping", attemptedTargets: captured, confirmationTargets: null, error: null,
+        phase: "stopping", attemptedTargets: captured, confirmationTargets: null, error: null, awaitingNext: false,
       }));
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -138,16 +190,45 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     if (!current.options.canStop || current.options.active === false || !current.options.conversationId || busy.current) return;
     const captured = (selection ?? current.options.targets.filter((target) => !current.state.acceptedJobIds.includes(target.jobId)))
       .map((target) => ({ ...target }));
-    if (captured.length === 0) return;
+    if (captured.length === 0) {
+      // Between two parts of a message nothing runs yet: the press waits for
+      // the part that goes on by itself, and stops it as it starts.
+      if (!selection && current.between && !current.state.awaitingNext) {
+        setState((previous) => ({
+          ...(previous.conversationId === current.options.conversationId ? previous : emptyState(current.options.conversationId)),
+          phase: "idle", attemptedTargets: [], confirmationTargets: null, error: null, awaitingNext: true,
+        }));
+      }
+      return;
+    }
     if (chatRunStopNeedsConfirmation(captured, current.options.viewerUserId)) {
       setState((previous) => ({
         ...(previous.conversationId === current.options.conversationId ? previous : emptyState(current.options.conversationId)),
-        confirmationTargets: captured,
+        confirmationTargets: captured, awaitingNext: false,
       }));
       return;
     }
     void execute(captured);
   }, [execute]);
+  // A press between two parts: the next one is stopped as it starts, as if
+  // the press came then. Nothing more comes (the part never started, or
+  // someone wrote meanwhile): nothing is left to stop.
+  const followOnKey = (options.followOnTargets ?? [])
+    .filter((target) => !state.acceptedJobIds.includes(target.jobId))
+    .map((target) => target.jobId)
+    .join(",");
+  useEffect(() => {
+    if (!state.awaitingNext) return;
+    const current = latest.current;
+    const next = (current.options.followOnTargets ?? []).filter((target) => !state.acceptedJobIds.includes(target.jobId));
+    if (next.length > 0 && current.options.canStop && current.options.active !== false) {
+      requestStop(next);
+      return;
+    }
+    if (next.length > 0 || !between) {
+      setState((previous) => ({ ...previous, awaitingNext: false }));
+    }
+  }, [between, followOnKey, requestStop, state.acceptedJobIds, state.awaitingNext]);
   const confirmStop = useCallback(() => {
     const captured = latest.current.state.confirmationTargets;
     if (captured) void execute(captured);
@@ -193,7 +274,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
   const availableTargets = targets.filter((target) => !state.acceptedJobIds.includes(target.jobId));
   const phase = effectivePhase(state, targets);
   const visible = active && canStop && Boolean(conversationId)
-    && (availableTargets.length > 0 || phase === "stopping" || phase === "error" || phase === "requested");
+    && (availableTargets.length > 0 || phase === "stopping" || phase === "error" || phase === "requested" || between);
   return {
     visible, phase, feedbackId, targets: availableTargets, groups: groupChatRunStopTargets(availableTargets),
     error: state.error, confirmationTargets: state.confirmationTargets,

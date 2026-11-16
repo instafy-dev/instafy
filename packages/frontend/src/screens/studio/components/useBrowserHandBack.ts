@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { SubmitConversationOptions } from "../../../conversations/conversationSubmitTypes";
 import { findPromptSentFromThisPageForRun } from "../../../conversations/sentPromptRegistry";
 import type { RunStatus } from "../../../types";
@@ -7,6 +7,7 @@ import {
   BROWSER_HAND_BACK_CLAIM_KEY,
   BROWSER_HAND_BACK_PROMPT,
   browserHandBackCandidate,
+  browserHandBackClaimed,
   browserHandBackNotice,
   claimBrowserHandBack,
   readBrowserHandBackOf,
@@ -111,7 +112,7 @@ type Options = {
  * the controller refuses shows nothing: the browser turn stays the last word,
  * and the person can write as usual.
  */
-export function useBrowserHandBack(options: Options) {
+export function useBrowserHandBack(options: Options): { due: boolean } {
   const latest = useRef(options);
   latest.current = options;
   const openedAt = useRef(Date.now());
@@ -121,6 +122,21 @@ export function useBrowserHandBack(options: Options) {
     openedAt.current = Date.now();
   }
   const activeRunIdsKey = useMemo(() => [...options.activeRunIds].sort().join(","), [options.activeRunIds]);
+  // Hand-backs this hook sent, and those of them that did not go out.
+  const sentHere = useRef(new Set<string>());
+  const [unsent, setUnsent] = useState<ReadonlySet<string>>(() => new Set());
+  // A browser turn ended, and its hand-back goes (or went) out and is not in
+  // the chat yet: the message is between its browser part and its build.
+  const dueJobId = useMemo(() => {
+    if (!options.canWrite || options.held) return null;
+    return browserHandBackCandidate({
+      messages: options.messages,
+      openedAtMs: openedAt.current,
+      activeRunIds: options.activeRunIds,
+      runStatus: (id) => options.runStatuses.get(id) ?? null,
+      sentPromptForRun: findPromptSentFromThisPageForRun,
+    });
+  }, [options.activeRunIds, options.canWrite, options.held, options.messages, options.runStatuses]);
 
   useEffect(() => {
     const current = latest.current;
@@ -133,10 +149,13 @@ export function useBrowserHandBack(options: Options) {
       sentPromptForRun: findPromptSentFromThisPageForRun,
     });
     if (!jobId || !claimBrowserHandBack(jobId)) return;
+    sentHere.current.add(jobId);
     void current.send(BROWSER_HAND_BACK_PROMPT, {
       display: browserHandBackNotice(current.agentName ?? "Octo"),
       metadata: { [BROWSER_HAND_BACK_CLAIM_KEY]: jobId },
-    }).catch(() => false);
+    }).catch(() => false).then((sent) => {
+      if (!sent) setUnsent((previous) => new Set(previous).add(jobId));
+    });
   }, [
     activeRunIdsKey,
     options.busy,
@@ -146,4 +165,9 @@ export function useBrowserHandBack(options: Options) {
     options.messages,
     options.runStatuses,
   ]);
+  // Due until its prompt is in the chat: about to go, or gone from here and
+  // not refused. One another page or an earlier mount claimed is not known here.
+  const due = dueJobId !== null && !unsent.has(dueJobId) &&
+    (sentHere.current.has(dueJobId) || !browserHandBackClaimed(dueJobId));
+  return { due };
 }

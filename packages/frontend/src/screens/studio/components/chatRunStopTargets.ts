@@ -1,7 +1,10 @@
 import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
+import { readRunFailureRetryOf } from "../../../conversations/runFailurePresentation";
+import { wasRunStartedByPromptSentFromThisPage } from "../../../conversations/sentPromptRegistry";
 import type { ControllerConversationStopResult } from "../../../services/runtimeController/conversationStop";
 import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
+import { isBrowserNoticePrompt } from "./browserHandBack";
 import { extractAgentIdentityFromMetadata } from "./chatAssistantIdentity";
 import { resolveExpectedSteerJobId, resolveSteerableComposerRuns } from "./composerSendMode";
 
@@ -39,6 +42,32 @@ export function resolveChatRunStopTargets(
       initiatingUserId: typeof initiator === "string" && initiator.trim() ? initiator.trim() : null,
     }];
   });
+}
+
+function promptRunId(message: ChatMessage): string | null {
+  const metadata = message.metadata;
+  for (const key of ["runId", "run_id"]) {
+    const value = metadata?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/**
+ * The targets whose turn carries a message on by itself: a browser card's
+ * continuation, a hand-back to the building turn, or Instafy's own retry of a
+ * failed turn, never a message someone wrote. A Stop pressed between two
+ * parts of a message stops these as they start, and nothing else.
+ */
+export function chatRunStopFollowOnTargets(
+  targets: readonly ChatRunStopTarget[],
+  messages: readonly ChatMessage[],
+): ChatRunStopTarget[] {
+  if (targets.length === 0) return [];
+  const prompts = messages.filter((message) =>
+    message.role === "user" && (isBrowserNoticePrompt(message) || readRunFailureRetryOf(message) !== null));
+  return targets.filter((target) => prompts.some((prompt) =>
+    promptRunId(prompt) === target.runId || wasRunStartedByPromptSentFromThisPage(prompt, [target.runId, target.jobId])));
 }
 
 export function groupChatRunStopTargets(targets: readonly ChatRunStopTarget[]) {

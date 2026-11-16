@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../../../types";
-import { chatRunStopNeedsConfirmation, groupChatRunStopTargets, resolveChatRunStopTargets, runsCanceledByStop } from "../chatRunStopTargets";
+import {
+  forgetPromptsSentFromThisPageForTests,
+  recordRunsStartedByPromptSentFromThisPage,
+  rememberPromptSentFromThisPage,
+} from "../../../../conversations/sentPromptRegistry";
+import type { ChatMessage } from "../../types";
+import {
+  chatRunStopFollowOnTargets,
+  chatRunStopNeedsConfirmation,
+  groupChatRunStopTargets,
+  resolveChatRunStopTargets,
+  runsCanceledByStop,
+  type ChatRunStopTarget,
+} from "../chatRunStopTargets";
 
 const JOB = "aaaaaaaa-0000-4000-8000-000000000001";
 const JOB_2 = "aaaaaaaa-0000-4000-8000-000000000002";
@@ -44,5 +57,40 @@ describe("chat run stop targets", () => {
     expect(stopped).toEqual([{ ...runs.r1, status: "canceled" }]);
     expect(runsCanceledByStop({ ok: false, canceledRunIds: ["r1"] }, runs)).toEqual([]);
     expect(runsCanceledByStop({ ok: true, canceledRunIds: ["r1"] }, null)).toEqual([]);
+  });
+});
+
+// A Stop pressed between two parts of a message stops the part that goes on
+// by itself, and nothing anyone sends.
+describe("the turns that carry a message on by themselves", () => {
+  const target = (jobId: string, runId: string): ChatRunStopTarget =>
+    ({ jobId, runId, agentHandle: "octo", agentDisplayName: "Octo", initiatingUserId: "viewer" });
+  const prompt = (id: string, metadata: Record<string, unknown>): ChatMessage =>
+    ({ id, role: "user", content: "words", timestamp: 1, metadata });
+
+  it("are a browser card's continuation, a hand-back and Instafy's own retry, by the run their prompt names", () => {
+    forgetPromptsSentFromThisPageForTests();
+    const continuation = prompt("continuation", { runId: "run-browser", browserRequestOf: "job:card" });
+    const handBack = prompt("hand-back", { runId: "run-build", browserHandBack: { browserJobId: "job-browser" } });
+    const retry = prompt("retry", { runId: "run-retry", retryOfMessageId: "failure-1" });
+    const own = prompt("own", { runId: "run-own" });
+    const targets = [
+      target("job-browser", "run-browser"), target("job-build", "run-build"), target("job-retry", "run-retry"),
+      target("job-own", "run-own"),
+    ];
+    expect(chatRunStopFollowOnTargets(targets, [continuation, handBack, retry, own]).map((entry) => entry.jobId))
+      .toEqual(["job-browser", "job-build", "job-retry"]);
+    // Octo's own words naming such a claim are no prompt.
+    expect(chatRunStopFollowOnTargets(targets, [{ ...handBack, role: "assistant" }])).toEqual([]);
+  });
+
+  it("are known by the runs a prompt this page sent started, before the controller's copy names them", () => {
+    forgetPromptsSentFromThisPageForTests();
+    const sent = prompt("sent", { clientMessageId: "client-hb", continuesFromBrowserJob: "job-browser" });
+    rememberPromptSentFromThisPage(sent);
+    expect(chatRunStopFollowOnTargets([target("job-build", "run-build")], [sent])).toEqual([]);
+    recordRunsStartedByPromptSentFromThisPage(sent, ["run-build", "job-build"]);
+    expect(chatRunStopFollowOnTargets([target("job-build", "run-build")], [sent]).map((entry) => entry.jobId))
+      .toEqual(["job-build"]);
   });
 });
