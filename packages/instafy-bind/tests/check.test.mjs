@@ -1050,6 +1050,24 @@ test("check asks a comparison whose sorts decide nothing for an entry per criter
     write({ ...laptops(), sort: [{ key: "reviews", dir: "desc" }, { key: "weight", dir: "asc" }] });
     assert.deepEqual(checkValues(dir).problems, []);
 
+    // under a stated limit the line speaks of the rows the page draws first: those within it (and any it can't place)
+    const limited = () => {
+      const data = laptops();
+      data.columns[3].type = "price";
+      data.filter = { key: "price", max: 1400, label: "€1,400 or less", rest: "over €1,400" };
+      return data;
+    };
+    // the 16 is over the limit: the weight it lacks keeps no sort from deciding between the other two
+    const over = limited();
+    over.items[2].facts.weight = { note: "not found on maker.example's page" };
+    write({ ...over, sort: [{ key: "weight", label: "Weight, light first", dir: "asc" }] });
+    assert.deepEqual(checkValues(dir).problems, []);
+    // and a sort that decides only by the row over the limit says nothing on the page as first drawn
+    const tie = limited();
+    for (const i of tie.items.slice(0, 2)) i.facts.battery = at("60 Wh", "specs");
+    write({ ...tie, sort: [{ key: "battery", label: "Battery, largest first", dir: "desc" }] });
+    assert.deepEqual(checkValues(dir).problems, [asked.replace("CPU, Battery, Weight", "CPU, Weight")]);
+
     // nothing to decide between: one option, or no column a number in every row
     write({ ...laptops(), items: laptops().items.slice(0, 1) });
     assert.deepEqual(checkValues(dir).problems, []);

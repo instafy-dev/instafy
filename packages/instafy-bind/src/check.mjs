@@ -876,29 +876,41 @@ export function checkValues(dir) {
 const OLD_PRICE_MS = 30 * 86400000;
 
 /** The line under a comparison's title is the compare starter's own (its verdict): it names the option a "sort" entry
- *  puts first when every row shows a number for that column, a fresh one for a price, and they are not all the same.
- *  Two builds wrote every column of a comparison as text and no "sort", and their pages said nothing there although
- *  each row had a price and a weight (a local test, Nov 9). The numbers are read as the page reads them (site.known):
- *  a value with its source, or an estimate, by its "n" or else the first number in its text ("From €619" is 619,
- *  "1.3kg" 1.3); for a price, what a check read first. With two or more options and no entry that decides anything:
- *  the columns an entry would decide on, [{key, label}], in the page's order; else []. Which of them are the person's
- *  criteria, and which way each goes, is the build's to say. */
+ *  puts first when every row the page draws shows a number for that column, a fresh one for a price, and they are not
+ *  all the same. Two builds wrote every column of a comparison as text and no "sort", and their pages said nothing
+ *  there although each row had a price and a weight (a local test, Nov 9). The numbers are read as the page reads them
+ *  (site.known): a value with its source, or an estimate, by its "n" or else the first number in its text ("From €619"
+ *  is 619, "1.3kg" 1.3); for a price, what a check read first. The rows are those the page draws first: under a stated
+ *  limit, the ones within it and the ones it cannot place. With two or more of them and no entry that decides
+ *  anything: the columns an entry would decide on, [{key, label}], in the page's order; else []. Which of them are the
+ *  person's criteria, and which way each goes, is the build's to say. */
 export function unsortedNumbers(data, records = new Map()) {
   if (!isOptionsData(data) || !Array.isArray(data.columns) || fromMemory(data)) return [];
-  const items = data.items.filter((item) => item && typeof item === "object");
-  if (items.length < 2) return [];
   // the page draws its first 5 columns, and an entry sorts by one of them
   const columns = data.columns.slice(0, 5).filter((c) => c && typeof c === "object" && c.key);
+  const read = (item, col) => (col.type === "price" ? liveValue(records.get(item.ref), col.key) : null);
+  // the rows the line speaks of are those the page draws first: under a stated limit, the rows within it and those it
+  // cannot place (site.within, which counts an old price too)
+  const filter = data.filter && typeof data.filter === "object" ? data.filter : null;
+  const bound = (value) => (value == null || value === "" ? null : Number(value));
+  const drawn = (item) => {
+    if (!filter) return true;
+    const col = columns.find((c) => c.key === filter.key) ?? { key: filter.key };
+    const n = read(item, col) ?? knownNumber(item.facts?.[col.key]);
+    const [max, min] = [bound(filter.max), bound(filter.min)];
+    return n == null || ((max == null || n <= max) && (min == null || n >= min));
+  };
+  const rows = data.items.filter((item) => item && typeof item === "object" && drawn(item));
+  if (rows.length < 2) return [];
   const numberOf = (item, col) => {
+    const checked = read(item, col);
+    if (checked != null) return checked;
     const fact = item.facts?.[col.key];
-    if (col.type !== "price") return knownNumber(fact);
-    const read = liveValue(records.get(item.ref), col.key);
-    if (read != null) return read;
-    const asof = Date.parse(fact?.asof ?? "");
+    const asof = col.type === "price" ? Date.parse(fact?.asof ?? "") : NaN;
     return Number.isFinite(asof) && Date.now() - asof > OLD_PRICE_MS ? null : knownNumber(fact);
   };
   const decides = (col) => {
-    const values = items.map((item) => numberOf(item, col));
+    const values = rows.map((item) => numberOf(item, col));
     return values.every((n) => n != null) && new Set(values).size > 1;
   };
   const sorts = Array.isArray(data.sort) ? data.sort : [];
