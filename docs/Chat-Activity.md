@@ -196,6 +196,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
       stopped, and it won't run again. Send it again to start over."
     - anything else: "Claude Code stopped with an error.", with the failure's own first line after
       it only when that line passes the rule above.
+
+    Copy message and Copy conversation carry the sentence the row shows whoever copies it: a
+    teammate's copy says only that it couldn't finish, never the sender's own sentence.
   - Its notes, which everyone in the chat reads under the reply once the turn is done:
     - "Claude Code skipped N steps that need your OK, since nobody can give it here. You can allow
       them in your own Claude Code settings." The turn still succeeds.

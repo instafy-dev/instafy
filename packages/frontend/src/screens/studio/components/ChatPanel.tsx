@@ -40,7 +40,7 @@ import { useInstalledSkillNames } from "./useInstalledSkillNames";
 import { useSkillsImportFlow } from "./useSkillsImportFlow";
 import { buildSkillStartMessage } from "../../../conversations/skillCommands";
 import { type ChatInputHandle } from "./chat-input/ChatInput";
-import { formatConversationTranscript, resolveCopyableMessageContent } from "./chatTranscriptCopy";
+import { formatConversationTranscript, resolveCopyableMessageContent, type ChatCopyReader } from "./chatTranscriptCopy";
 import {
   resolveChatInputCanRunAmbientParticipationPreflight,
   resolveChatInputHasBrowserTask,
@@ -3978,11 +3978,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [openMessageMenuAt],
   );
 
+  // A copy words a failed turn of someone's own AI as this viewer's row does.
+  const copyReader = useMemo<ChatCopyReader>(() => ({
+    turnEngineOwnerOf: runFailureRetryContextValue.turnEngineOwnerOf,
+    runtimeStatuses,
+  }), [runFailureRetryContextValue.turnEngineOwnerOf, runtimeStatuses]);
+
   const handleCopySelectedMessage = useCallback(async () => {
     if (!selectedMessage) {
       return;
     }
-    const content = resolveCopyableMessageContent(selectedMessage);
+    const content = resolveCopyableMessageContent(selectedMessage, copyReader);
     if (!content) {
       showStatus("No message content to copy.", "warning", 3000);
       closeMessageMenu();
@@ -3996,10 +4002,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       const message = error instanceof Error ? error.message : String(error);
       showStatus(`Unable to copy message: ${message}`, "error", 4000);
     }
-  }, [closeMessageMenu, selectedMessage, showStatus]);
+  }, [closeMessageMenu, copyReader, selectedMessage, showStatus]);
 
   const handleCopyConversation = useCallback(async () => {
-    const transcript = formatConversationTranscript(displayedMessages);
+    const transcript = formatConversationTranscript(displayedMessages, copyReader);
 
     if (!transcript) {
       showStatus("No conversation messages to copy.", "warning", 3000);
@@ -4015,7 +4021,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       const message = error instanceof Error ? error.message : String(error);
       showStatus(`Unable to copy conversation: ${message}`, "error", 4000);
     }
-  }, [closeMessageMenu, displayedMessages, showStatus]);
+  }, [closeMessageMenu, copyReader, displayedMessages, showStatus]);
 
   const handleCopyTokenUsage = useCallback(async () => {
     if (!selectedMessageTokenUsage) {

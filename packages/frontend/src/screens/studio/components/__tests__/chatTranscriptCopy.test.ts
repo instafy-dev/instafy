@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+// Registers the application's turn engines, as the application does at startup.
+import "../../../../features/applicationFrontendFeatureComposition";
 import { mapControllerMessageToChat } from "../../../../conversations/conversationMessageUtils";
+import type { ControllerRuntimeStatusEntry } from "../../../../services/runtimeController/runtimes";
 import type { ChatMessage } from "../../types";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import { formatConversationTranscript, resolveCopyableMessageContent } from "../chatTranscriptCopy";
@@ -262,5 +265,49 @@ describe("chatTranscriptCopy", () => {
     expect(resolveCopyableMessageContent(failure)).toBe(shown);
     // A reply that only quotes such words is no failure: it is copied as written.
     expect(resolveCopyableMessageContent(createMessage({ id: "reply", content: raw }))).toBe(raw);
+  });
+
+  // A failed turn of someone's own Claude Code reads one way for its sender,
+  // about their own plan or sign-in, and for everyone else only that it
+  // couldn't finish on their computer. A copy carries what its reader's row
+  // shows, never the sender's own sentence to a teammate.
+  it("copies a failed turn of someone's own AI as the row words it for whoever copies it", () => {
+    const failure = (code: string, content: string) => createMessage({
+      id: `failure-${code}`,
+      content,
+      timestamp: 2,
+      messageType: "error",
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-cc", runId: "run-cc",
+        aiAccessMode: "claude-code", claudeCode: { version: 1 }, claudeCodeFailure: code,
+        runtimePreference: { runtimeId: "runtime-sam" } },
+    });
+    const planLimit = failure("plan_limit", "Claude AI usage limit reached\nThe limit resets at 2026-11-14 23:03 UTC.");
+    const messages = [
+      createMessage({ id: "ask", role: "user", authorId: "sam", content: "Plan 3 days in Krak\u00f3w.", timestamp: 1 }),
+      planLimit,
+    ];
+    const collapsed = collapseLifecycleMessages(messages);
+    const rows = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage));
+    const teammate = { turnEngineOwnerOf: () => ({ isViewer: false, name: "Sam" }) };
+    const theirs = "Claude Code couldn't finish this turn on Sam's computer.";
+    expect(formatConversationTranscript(rows, teammate)).toBe(`User: Plan 3 days in Krak\u00f3w.\n\nAssistant: ${theirs}`);
+    expect(resolveCopyableMessageContent(planLimit, teammate)).toBe(theirs);
+    // A chat that cannot tell who sent it names nobody's computer, as its row does.
+    expect(resolveCopyableMessageContent(planLimit)).toBe("Claude Code couldn't finish this turn on the sender's computer.");
+    // Its sender reads their own AI's sentence, with what the computer that ran it says.
+    const sender = {
+      turnEngineOwnerOf: () => ({ isViewer: true, name: "Sam" }),
+      runtimeStatuses: [{
+        runtimeId: "runtime-sam",
+        claudeCode: { ready: true, reason: null, cli: "2.2.0", verified: false, planSignIn: true },
+      } as ControllerRuntimeStatusEntry],
+    };
+    expect(resolveCopyableMessageContent(planLimit, sender)).toMatch(
+      /^Your Claude plan's usage limit was reached, so this turn stopped\. Send your message again after it resets at .+\.$/,
+    );
+    expect(resolveCopyableMessageContent(failure("not_signed_in", "Error: authentication_failed (status 401)"), sender)).toBe(
+      "Claude Code isn't signed in on this computer. Open a terminal, run claude and sign in, then send your message again. " +
+        "If you're signed in, this newer Claude Code may no longer let other apps use your sign-in.",
+    );
   });
 });

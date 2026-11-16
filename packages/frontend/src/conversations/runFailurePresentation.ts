@@ -393,6 +393,44 @@ function turnEngineFailurePresentation(
   };
 }
 
+/**
+ * The status entry of the runtime that ran a turn, as the turn's final
+ * message names it (`runtimePreference`, which the controller copies from
+ * the job), when the viewer has that entry.
+ */
+export function runtimeEntryOfTurn(
+  message: Pick<ChatMessage, "metadata">,
+  runtimeStatuses: readonly ControllerRuntimeStatusEntry[] | null | undefined,
+): ControllerRuntimeStatusEntry | null {
+  const preference = isRecord(message.metadata) ? message.metadata["runtimePreference"] : null;
+  const runtimeId = isRecord(preference) ? preference["runtimeId"] : null;
+  if (typeof runtimeId !== "string" || !runtimeId.trim() || !runtimeStatuses) {
+    return null;
+  }
+  return runtimeStatuses.find((entry) => entry.runtimeId === runtimeId.trim()) ?? null;
+}
+
+/**
+ * The sentence a failed turn's card shows whoever views it, and a copy of
+ * the chat carries. A turn engine's failure reads as its engine words it for
+ * its sender, with what the runtime that ran it says, and for everyone else
+ * only that it couldn't finish on the sender's computer, also when the chat
+ * cannot tell who sent it (docs/Local-Engine-Turns.md 5.5). Any other
+ * failure reads the same for everyone.
+ */
+export function runFailureSentenceForViewer(
+  presentation: RunFailurePresentation,
+  viewer: { owner: TurnEngineTurnOwner | null; runtime: ControllerRuntimeStatusEntry | null },
+): string {
+  const turnEngine = presentation.turnEngine;
+  if (!turnEngine) {
+    return presentation.friendlyText;
+  }
+  return viewer.owner?.isViewer === true
+    ? turnEngine.authorText(viewer.runtime)
+    : turnEngine.teammateText(viewer.owner?.name ?? null);
+}
+
 export const RETRYING_STATUS_DISPLAY_TEXT = "Trying again…";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
