@@ -1529,7 +1529,8 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
             let timetable_read_at = chain
                 .read_page(&browser, "https://rail.example.org/timetable", 4)
                 .await?;
-            let lines = r#"{"url": "https://rail.example.org/timetable", "title": "Coastal line timetable", "facts": ["The 08:05 express arrives at 10:16."]}"#;
+            let lines = r#"{"url": "https://rail.example.org/timetable", "title": "Coastal line timetable", "facts": ["The 08:05 express arrives at 10:16."]}
+{"missing":["the platform"]}"#;
             chain
                 .post(
                     &browser,
@@ -1630,6 +1631,13 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
                 first["findings"][0]["url"],
                 "https://rail.example.org/timetable"
             );
+            // Each finding with what its page showed, and what the turn didn't find, by name:
+            // the runtime quotes a listed turn by these alone, never its reply.
+            assert_eq!(
+                first["findings"][0]["facts"],
+                json!(["The 08:05 express arrives at 10:16."])
+            );
+            assert_eq!(first["missing"], json!(["the platform"]));
             assert_eq!(first["viewer"], "Instafy's browser in the workspace");
             assert_eq!(first["outcome"], "succeeded");
             assert!(first["readAt"].is_string());
@@ -1641,6 +1649,7 @@ async fn a_building_lease_lists_the_browser_turns_since_its_lanes_last_saved_tur
             assert_ne!(first["findings"][0]["readAt"], first["readAt"]);
             assert_eq!(turns[1]["request"], LET_OCTO_CONTINUE_LINE);
             assert_eq!(turns[1]["reply"], "The sign-in page is still open.");
+            assert!(turns[1].get("missing").is_none(), "{:?}", turns[1]);
 
             // The hand-back's own browser turn is in its record, not the list.
             let mut handed_back = payload.clone();

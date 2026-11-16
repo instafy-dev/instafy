@@ -83,9 +83,11 @@
 //! data: a building job's lease lists the conversation's browser turns since
 //! the building thread's last turn ([`browser_turns_since`]), each with what
 //! it was asked, its reply with its finding lines put back (at most
-//! [`TURN_REPLY_MAX_CHARS`]), and those findings labelled as above.
-//! The runtime quotes them to a building turn on a restored thread; the
-//! hand-back's own browser turn is in its record, not the list.
+//! [`TURN_REPLY_MAX_CHARS`]), those findings labelled as above, with their
+//! facts, and the values its missing line names (`missing`).
+//! The runtime quotes them to a building turn on a restored thread, by their
+//! findings and what they didn't find, never their replies; the hand-back's
+//! own browser turn is in its record, not the list.
 
 use std::collections::HashMap;
 
@@ -766,7 +768,8 @@ pub(crate) fn browser_request_for_building(prompt: &str) -> String {
     prompt.chars().take(REQUEST_MAX_CHARS).collect()
 }
 
-/// A finding labelled with when and in which browser its page was read.
+/// A finding labelled with when and in which browser its page was read, with what its page
+/// showed (`facts`) and how many more facts its lines list than it keeps (`factsLeftOut`).
 fn labelled(finding: &Finding, viewer: &str, read_at: &str) -> JsonValue {
     let mut labelled = json!({
         "url": finding.url,
@@ -777,10 +780,19 @@ fn labelled(finding: &Finding, viewer: &str, read_at: &str) -> JsonValue {
     if let Some(reason) = finding.stopped {
         labelled["stopped"] = json!(reason);
     }
+    if !finding.facts.is_empty() {
+        labelled["facts"] = json!(finding.facts);
+    }
+    if finding.facts_left_out > 0 {
+        labelled["factsLeftOut"] = json!(finding.facts_left_out);
+    }
     labelled
 }
 
-/// A listed browser turn's findings, labelled: its reply holds their facts.
+/// A listed browser turn's findings, labelled as a hand-back's record labels them, each with what
+/// its page showed: the runtime quotes a listed turn by its findings alone, never its reply
+/// (runtime-agent `browser_hand_back::format_browser_turns_since_section`), so a finding without
+/// its facts would leave the building turn only the page's address and title.
 fn labelled_findings(reply: &str, viewer: &str, read_at: &str) -> Vec<JsonValue> {
     findings_from_reply(reply)
         .iter()
@@ -911,16 +923,7 @@ pub(crate) fn hand_back_record(
     let (findings, findings_left_out) = findings_that_can_fit(findings);
     let findings: Vec<JsonValue> = findings
         .iter()
-        .map(|finding| {
-            let mut value = labelled(finding, viewer, &read_at);
-            if !finding.facts.is_empty() {
-                value["facts"] = json!(finding.facts);
-            }
-            if finding.facts_left_out > 0 {
-                value["factsLeftOut"] = json!(finding.facts_left_out);
-            }
-            value
-        })
+        .map(|finding| labelled(finding, viewer, &read_at))
         .collect();
     let mut record = json!({
         "version": HAND_BACK_VERSION,
@@ -1945,9 +1948,10 @@ pub(crate) fn stamp_lease(
 
 /// The browser turns of a conversation since its building thread's last
 /// turn, for a building job's lease: what each was asked, its reply with the
-/// findings its runtime moved into Details put back ([`bounded_reply`]), and
-/// those findings labelled as the hand-back's record labels them, oldest
-/// first.
+/// findings its runtime moved into Details put back ([`bounded_reply`]),
+/// those findings labelled as the hand-back's record labels them, with what
+/// each page showed ([`labelled_findings`]), and the values its missing line
+/// names (`missing`, [`missing_from_reply`]), oldest first.
 ///
 /// The building thread's last turn is the newest other job of the
 /// conversation that is not a browser turn and saved a provider state, in the
@@ -2171,6 +2175,9 @@ pub(crate) async fn browser_turns_since(
             row.get::<_, Option<String>>("summary"),
         )
         .await?;
+        // What its missing line names, from the whole reply: the note keeps that line after its
+        // finding lines, where the reply's bound would cut it from a long one.
+        let missing = missing_from_reply(&reply);
         let (reply, truncated) = bounded_reply(&reply);
         let request = browser_payload
             .get("prompt_text")
@@ -2186,19 +2193,20 @@ pub(crate) async fn browser_turns_since(
         )
         .await?;
         stamp_page_read_times(&mut findings, &read_times);
-        listed.push((
-            row.get::<_, DateTime<Utc>>("run_created_at"),
-            json!({
-                "browserJobId": browser_job_id.to_string(),
-                "request": browser_request_for_building(request),
-                "reply": reply,
-                "replyTruncated": truncated,
-                "findings": findings,
-                "readAt": read_at,
-                "viewer": viewer,
-                "outcome": row.get::<_, Option<String>>("outcome"),
-            }),
-        ));
+        let mut turn = json!({
+            "browserJobId": browser_job_id.to_string(),
+            "request": browser_request_for_building(request),
+            "reply": reply,
+            "replyTruncated": truncated,
+            "findings": findings,
+            "readAt": read_at,
+            "viewer": viewer,
+            "outcome": row.get::<_, Option<String>>("outcome"),
+        });
+        if !missing.is_empty() {
+            turn["missing"] = json!(missing);
+        }
+        listed.push((row.get::<_, DateTime<Utc>>("run_created_at"), turn));
     }
     // Oldest first, the newest TURNS_SINCE_MAX of both kinds. Each query
     // read one more than are kept, so a longer list means some were left out.
@@ -3192,6 +3200,60 @@ missing: weight
             );
             assert!(record.get("missing").is_none(), "{none}: {record}");
         }
+    }
+
+    /// A browser turn listed since the building thread's last turn is quoted
+    /// by its findings alone (runtime-agent
+    /// `browser_hand_back::format_browser_turns_since_section`), so each
+    /// finding carries what its page showed, labelled as a hand-back's record
+    /// labels it: listed with its address and title only, a restored building
+    /// thread read no fact of any browser turn since its last turn. A page
+    /// that stopped the turn showed nothing.
+    #[test]
+    fn a_listed_browser_turns_findings_carry_what_their_pages_showed() {
+        let many: Vec<String> = (0..30)
+            .map(|n| format!("Fact {n}: {}", "x".repeat(90)))
+            .collect();
+        let reply = [
+            "Read 2 pages.".to_string(),
+            json!({"url": "https://metro.example/planner", "title": "Journey planner", "facts": ["Cathedral and Square are both on line D."]}).to_string(),
+            json!({"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": many}).to_string(),
+            json!({"url": "https://reviews.example/laptop-12", "stopped": "covered", "facts": ["Not read."]}).to_string(),
+            json!({"missing": ["a metro route"]}).to_string(),
+        ]
+        .join("\n");
+        let read_at = "2026-11-10T09:00:00Z";
+        let listed = labelled_findings(&reply, VIEWER_WORKSPACE, read_at);
+        assert_eq!(listed.len(), 3, "{listed:?}");
+        assert_eq!(
+            listed[0],
+            json!({
+                "url": "https://metro.example/planner",
+                "title": "Journey planner",
+                "readAt": read_at,
+                "viewer": VIEWER_WORKSPACE,
+                "facts": ["Cathedral and Square are both on line D."],
+            })
+        );
+        let kept = listed[1]["facts"].as_array().expect("facts").len();
+        assert!(kept > 0 && kept < 30, "{}", listed[1]);
+        assert_eq!(listed[1]["factsLeftOut"], json!(30 - kept));
+        assert_eq!(listed[2]["stopped"], "covered");
+        assert!(listed[2].get("facts").is_none(), "{}", listed[2]);
+        // The same findings as a hand-back's record of that reply.
+        let record = hand_back_record(
+            &Uuid::nil(),
+            &Uuid::nil(),
+            VIEWER_WORKSPACE,
+            DateTime::parse_from_rfc3339(read_at)
+                .unwrap()
+                .with_timezone(&Utc),
+            "",
+            None,
+            &reply,
+        );
+        assert_eq!(record["findings"], json!(listed));
+        assert_eq!(record["missing"], json!(["a metro route"]));
     }
 
     /// A comparison's browser part opened a review address that got no

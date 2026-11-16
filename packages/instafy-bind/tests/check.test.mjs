@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, uncitedRows } from "../src/check.mjs";
+import { UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, uncheckedRepeats, uncitedRows } from "../src/check.mjs";
 import { readScript } from "../src/script-text.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
@@ -771,6 +771,70 @@ test("check fails a comparison row that says nowhere where it comes from", () =>
 
 // The rows a turn built when the maker's site never answered: each cell unknown, nothing read, and the turn listed the
 // rows' own names (or the brand) as the request's items. Listing a row is not where it comes from, so the check fails.
+// A comparison of three e-readers told what it didn't find three times; the third was its own "unchecked" entry, "Weight,
+// price and the requested independent reviews were not found in the pages read.", under "Still to confirm", beside what
+// the page names there from its cells (a local test, Nov 10). The check fails an "unchecked" entry that names a column
+// no row has a value for, by the page's own labels: once, naming them. A column some rows have, a price a store can
+// still check, words that only contain a label, and a page from what Octo knows are left as they are.
+test("check fails an \"unchecked\" entry that repeats what the page names from its cells", () => {
+  const DAY = "2026-11-10";
+  const reader = (ref, name) => ({
+    ref: `reader:${ref}`, name,
+    facts: {
+      screen: { v: "6 in", src: "Maker", url: `https://maker.example/${ref}`, date: DAY },
+      weight: { note: "I didn't find weight" },
+      price: { note: "I didn't find price" },
+      reviews: { note: `I didn't find two independent reviews for ${name}` },
+    },
+  });
+  const readers = () => ({
+    title: "Three e-readers",
+    columns: [{ key: "screen", label: "Screen", type: "text" }, { key: "weight", label: "Weight (g)", type: "text" },
+      { key: "price", label: "Price", type: "price" }, { key: "reviews", label: "Independent reviews", type: "text" }],
+    items: [reader("a", "Reader A"), reader("b", "Reader B"), reader("c", "Reader C")],
+    unchecked: [
+      "Weight, price and the requested independent reviews were not found in the pages read.",
+      "Reader A's page at its first address wasn't at the address Octo tried.",
+      "Which models are priced in euros",
+      "Screens of other sizes",
+    ],
+  });
+  const repeats = uncheckedRepeats(readers());
+  assert.deepEqual(repeats.map((r) => [r.entry, r.labels]), [
+    ["Weight, price and the requested independent reviews were not found in the pages read.", ["Weight (g)", "Price", "Independent reviews"]],
+  ]);
+  assert.equal(
+    repeats[0].problem,
+    '"unchecked": "Weight, price and the requested independent reviews were not found in the pages read." names Weight (g), Price and Independent reviews, which the page already names under "Still to confirm" from its cells, with each value\'s "note". Leave it out: "unchecked" holds only what no cell says.',
+  );
+  // in the plural too
+  assert.deepEqual(uncheckedRepeats({ ...readers(), unchecked: ["Prices for each model"] }).map((r) => r.labels), [["Price"]]);
+  // a column one row has a value for: the entry may say more than the missing ones
+  const somePrice = readers();
+  somePrice.items[0].facts.price = { v: "€149", src: "Shop", url: "https://shop.example/a", date: DAY };
+  assert.deepEqual(uncheckedRepeats(somePrice).map((r) => r.labels), [["Weight (g)", "Independent reviews"]]);
+  // a price every store can still check is on its row
+  const stores = readers();
+  for (const item of stores.items) item.store = { name: "Shop", url: `https://shop.example/${item.ref}`, readable: true };
+  assert.deepEqual(uncheckedRepeats(stores).map((r) => r.labels), [["Weight (g)", "Independent reviews"]]);
+  // a page from what Octo knows, and a page that is no comparison
+  assert.deepEqual(uncheckedRepeats({ ...readers(), from: "memory" }), []);
+  assert.deepEqual(uncheckedRepeats({ title: "Plan", unchecked: ["Weight"] }), []);
+
+  const dir = optionsSite("compare", () => readers());
+  try {
+    const { problems } = checkValues(dir);
+    assert.deepEqual(problems, [repeats[0].problem]);
+    const out = run("check", dir, "--expect", "Reader A, Reader B, Reader C");
+    assert.equal(out.status, 1, out.stdout);
+    assert.match(out.stdout, /^VALUES: 1 value\(s\) to fix in data\.json:$/m);
+    fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify({ ...readers(), unchecked: readers().unchecked.slice(1) }));
+    assert.deepEqual(checkValues(dir).problems, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("check fails placeholder rows even when --expect or the data's own list names them", () => {
   const unread = { note: "Unknown: no official product page could be read" };
   const names = [1, 2, 3].map((n) => `Latest eligible Brightvac model ${n}`);

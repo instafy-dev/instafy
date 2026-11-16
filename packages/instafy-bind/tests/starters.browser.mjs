@@ -608,9 +608,10 @@ try {
       ok(/Not counted as €600 or less/.test(await page.locator("#group-unknown").innerText()), `${label}: and that they are not counted as within the limit`);
       ok(/1 more over €600 · Show/.test(await text(page)), `${label}: the row over the limit leaves one line`);
       const none = (await page.locator("#row-none").innerText()).replace(/\s+/g, " ");
-      const said = (await page.locator("#missing").innerText()).replace(/\s+/g, " ");
-      ok(/Still missing for Silent Model: Price and Weight \(checked 27 Oct( 2026)? on maker\.example ↗\)/.test(said), `${label}: under the headline, a page read without the price says where it was looked for and cites it: ${said}`);
-      ok((label === "phone" ? !/Still missing|Not found/.test(none) : /Not found · checked 27 Oct( 2026)? on maker\.example ↗/.test(none)) && !/Not listed/.test(none), `${label}: ${label === "phone" ? "the row does not say it again" : "the table's cell says where it was looked for"}: ${none}`);
+      const said = (await page.locator("#notes").innerText()).replace(/\s+/g, " ");
+      ok(/^Still to confirm .*Silent Model: Price and Weight \(not found · checked 27 Oct( 2026)? on maker\.example ↗\)/.test(said), `${label}: under "Still to confirm", a page read without the price says where it was looked for and cites it: ${said}`);
+      ok(!/Still missing|Not found|maker\.example/.test(none) && (label === "phone" || /Unknown/.test(none)) && !/Not listed/.test(none), `${label}: ${label === "phone" ? "the row does not say it again" : "the table's cell reads Unknown"}: ${none}`);
+      eq(await page.locator("#missing").count(), 0, `${label}: nothing under the headline`);
       ok(!/—/.test(none), `${label}: a dash is never drawn as a value: ${none}`);
       const blocked = (await page.locator("#row-blocked").innerText()).replace(/\s+/g, " ");
       ok(/(Price unknown|Unknown) · shop-two\.example blocks automated price checks/.test(blocked), `${label}: a blocked shop says why: ${blocked}`);
@@ -634,9 +635,9 @@ try {
     await rp.context().close();
   }
 
-  // ---------- 2i. phones (320, 375, 414): a row shows the values found, what is missing is named once under the
-  // headline, a row's facts take one column when two would cut a value or its source line, and nothing is wider than
-  // the screen; the table is as it was.
+  // ---------- 2i. phones (320, 375, 414): a row shows the values found, what is missing is named once under "Still to
+  // confirm", a row's facts take one column when two would cut a value or its source line, and nothing is wider than
+  // the screen; the table's gaps read "Unknown".
   // A comparison with 4 of 15 values found listed every column on every phone row with "Unknown" ("Unknown · Two
   // independent reviews not checked"), and two narrow columns cut values and their sources over lines. ----------
   {
@@ -653,7 +654,7 @@ try {
         { ref: "laptop:max", name: "Maker Laptop Max", why: "CPU found on the maker's site",
           facts: { cpu: maker("Other Chip AI 300 Series", "max"), battery: { note: "Not checked" }, weight: { note: "Not checked" }, price: { note: "Not checked" }, reviews: { note: "Two independent reviews not checked" } } },
       ],
-      unchecked: ["Battery, weight and price of the Air and the Max", "Two independent reviews for each model"],
+      unchecked: ["How each holds up after a year"],
     });
     const site = await staticServer(makeSite("compare-gaps", "compare", gaps));
     // short values whose column cites one page under the list (no source line in the cells) keep two columns
@@ -661,8 +662,9 @@ try {
       weight: { v: i.ref.slice(-1) === "a" ? "8.9 oz" : "9.1 oz", src: "Maker", url: "https://example.com/specs", date: "2026-10-17" },
       rating: { v: "4.5 of 5", src: "Reviews", url: "https://example.com/reviews", date: "2026-10-16" } } })) })));
     const missing = [
-      "Still missing for Maker Laptop Pro: Weight, Price, Two independent reviews",
-      "Still missing for Maker Laptop Air and Maker Laptop Max: Battery, Weight, Price, Two independent reviews",
+      "Maker Laptop Pro: Weight, Price, Two independent reviews",
+      "Maker Laptop Air and Maker Laptop Max: Battery, Weight, Price, Two independent reviews",
+      "How each holds up after a year",
     ];
     for (const width of [320, 375, 414]) {
       for (const scheme of ["light", "dark"]) {
@@ -676,13 +678,13 @@ try {
             found: [...li.querySelectorAll("dl.facts > div")].map((d) => `${d.querySelector("dt").innerText}: ${d.querySelector("dd").innerText.replace(/\s+/g, " ")}`),
             details: li.querySelectorAll(".more-btn").length,
           }));
-          const header = [...document.querySelectorAll("#missing .not-found")].map((p) => p.innerText);
+          const header = [...document.querySelectorAll("#notes li")].map((li) => li.innerText);
           return { overflow: document.documentElement.scrollWidth - innerWidth, wider, cards, header, list: document.getElementById("list").innerText, notes: document.getElementById("notes").innerText };
         });
         eq(facts.overflow, 0, `${where}: no sideways scroll`);
         eq(facts.wider, [], `${where}: nothing is wider than the screen`);
         eq(facts.cards.map((c) => [c.id, c.ref]), [["row-pro", "laptop:pro"], ["row-air", "laptop:air"], ["row-max", "laptop:max"]], `${where}: ids and order`);
-        eq(facts.header, missing, `${where}: under the headline, what the rows are missing, once for rows missing the same`);
+        eq(facts.header, missing, `${where}: under "Still to confirm", what the rows are missing, once for rows missing the same`);
         for (const c of facts.cards) eq(c.missing, [], `${where}: ${c.id} does not say it again`);
         ok(!/Unknown/.test(facts.list), `${where}: no stack of unknowns`);
         eq(facts.cards[0].found.map((t) => t.replace(/ 2026 on/, " on").replace(/(\S) (checked \d)/g, "$1 · $2")), [
@@ -691,7 +693,7 @@ try {
         ], `${where}: what was found, each with its source line`);
         eq(await drawnParts(page), { cut: [], past: [] }, `${where}: no value or source line is cut over two lines, nor ends past its cell`);
         eq(facts.cards[0].details, 1, `${where}: Details stays`);
-        ok(/Still to confirm\s+Battery, weight and price of the Air and the Max/.test(facts.notes), `${where}: Still to confirm stays`);
+        ok(/^Still to confirm\s+Maker Laptop Pro: Weight/.test(facts.notes), `${where}: Still to confirm starts with them`);
         eq(page.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], `${where}: no script errors`);
         if (SHOTS && scheme === "dark") await page.screenshot({ path: path.join(SHOTS, `compare-gaps-${width}.png`), fullPage: true });
         await page.context().close();
@@ -701,23 +703,23 @@ try {
       eq(tracks, width >= 360 ? [2, 2, 2] : [1, 1, 1], `${width} px: short values cited under the list keep two columns where they fit`);
       await sp.context().close();
     }
-    // the wide table: a cell per column, each gap says "Unknown" as before, and no line of what was not found
+    // the wide table: a cell per column, each gap says only "Unknown", and no line of what was not found
     const wide = await open(`${site}/`, { width: 1280, height: 800 });
     const table = await wide.evaluate(() => ({
       head: [...document.querySelectorAll("thead th")].map((th) => th.innerText.trim()),
       pro: [...document.querySelectorAll("#row-pro td")].slice(1).map((td) => td.innerText.replace(/\s+/g, " ").trim()),
       air: [...document.querySelectorAll("#row-air td")].slice(2).map((td) => td.innerText.replace(/\s+/g, " ").trim()),
-      lines: document.querySelectorAll("#list .not-found").length,
-      header: [...document.querySelectorAll("#missing .not-found")].map((p) => p.innerText),
+      lines: document.querySelectorAll("#list .not-found, #missing").length,
+      header: [...document.querySelectorAll("#notes li")].map((li) => li.innerText),
     }));
     eq(table.head, ["Option", "CPU", "Battery", "Weight", "Price", "Two independent reviews", "Details"], "1280 px: the table's columns");
     eq(table.pro.map((t) => t.replace(/ 2026 on/, " on").replace(/(\S) (checked \d)/g, "$1 · $2")), [
       "Chip Ultra Series 3 · checked 27 Oct on maker.example ↗", "Up to 20 hours, the maker says · checked 27 Oct on maker.example ↗",
-      "Unknown", "Unknown", "Unknown · Two independent reviews not checked", "Details",
-    ], "1280 px: a cell per column, as before");
-    eq(table.air, ["Unknown", "Unknown", "Unknown", "Unknown · Two independent reviews not checked", ""], "1280 px: the gaps say Unknown in their cells");
-    eq(table.lines, 0, "1280 px: no line of what was not found under the table");
-    eq(table.header, missing, "1280 px: the same lines under the headline");
+      "Unknown", "Unknown", "Unknown", "Details",
+    ], "1280 px: a cell per column");
+    eq(table.air, ["Unknown", "Unknown", "Unknown", "Unknown", ""], "1280 px: the gaps say only Unknown in their cells");
+    eq(table.lines, 0, "1280 px: no line of what was not found under the table or the headline");
+    eq(table.header, missing, "1280 px: the same entries under \"Still to confirm\"");
     if (SHOTS) await wide.screenshot({ path: path.join(SHOTS, "compare-gaps-1280.png"), fullPage: true });
     await wide.context().close();
     // no binder: each row's store link ("Open Example Store ↗") stays inside its narrow price cell, with no empty line
@@ -826,11 +828,11 @@ try {
     await lp.route("**/__bind/health", async (route) => { await new Promise((r) => setTimeout(r, 700)); await route.continue(); });
     await lp.goto(`${late.url}/`);
     await lp.waitForFunction(() => document.querySelector("#row-option-c"));
-    const shape = () => lp.evaluate(() => { const li = document.getElementById("row-option-c"); return { right: li.querySelector(".sortv")?.innerText.replace(/\s+/g, " ") ?? "", missing: /Option C/.test(document.getElementById("missing")?.innerText ?? "") }; });
+    const shape = () => lp.evaluate(() => { const li = document.getElementById("row-option-c"); return { right: li.querySelector(".sortv")?.innerText.replace(/\s+/g, " ") ?? "", missing: [...document.querySelectorAll("#notes li")].some((e) => /^Option C\b/.test(e.innerText)) }; });
     const first = await shape();
     await lp.waitForFunction(() => /Open Other Store/.test(document.getElementById("row-option-c").innerText), null, { timeout: 5000 });
     const settled = await shape();
-    eq(first, { right: "Price unknown · the store blocks price checks", missing: false }, "first view: the price is on the right of its row, not under the headline");
+    eq(first, { right: "Price unknown · the store blocks price checks", missing: false }, "first view: the price is on the right of its row, not under \"Still to confirm\"");
     eq(settled, { right: "Price unknown · the store blocks price checks Open Other Store ↗", missing: false }, "once the binder answers its store link joins it there");
     await lc.close();
 
@@ -869,9 +871,11 @@ try {
     }
   }
 
-  // ---------- 2k. the page says what is missing itself, on every screen, and names each source by its page's site.
-  // A comparison's lede, written before the check changed a cell, said two reviews were found for a laptop whose cell
-  // read "no independent review read", and a source named "Review One / Maker" linked only to the review's site. ----------
+  // ---------- 2k. the page says what is missing itself, once, under "Still to confirm", on every screen, and names each
+  // source by its page's site. A comparison's lede, written before the check changed a cell, said two reviews were found
+  // for a laptop whose cell read "no independent review read", and a source named "Review One / Maker" linked only to
+  // the review's site; a later one told its missing values three times (under its title, in its cells and under "Still
+  // to confirm"). ----------
   {
     const day = "2026-11-08";
     const fact = (v, src, url) => ({ v, src, url, date: day });
@@ -896,7 +900,7 @@ try {
             battery: { ...fact("about 85 Wh", "Review Two / Maker", "https://review-two.example/16"), est: true }, reviews: { note: "no independent review read" },
             price: { ...fact("$1,499", "Review One / Maker", "https://review-one.example/16"), list: true } } },
       ],
-      // only what no cell says: the line under the headline names each row's missing values
+      // only what no cell says: "Still to confirm" names each row's missing values first
       unchecked: ["Prices of configurations other than the base model"],
     });
     const site = await staticServer(makeSite("compare-says-missing", "compare", laptops));
@@ -907,35 +911,34 @@ try {
           const page = await open(`${site}/${open13 ? "?open=13-pro" : ""}`, { width, height, scheme });
           const seen = await page.evaluate(() => {
             const lede = document.getElementById("lede");
-            const box = document.getElementById("missing");
-            const shown = !!box && box.getClientRects().length > 0;
-            const style = box ? getComputedStyle(box) : null;
+            const entries = [...document.querySelectorAll("#notes li")];
+            const style = entries.length ? getComputedStyle(entries[0]) : null;
             return {
               lede: lede.innerText,
-              lines: shown ? [...box.querySelectorAll(".not-found")].map((p) => p.innerText) : [],
-              underLede: !!box && box.previousElementSibling === lede,
-              saidMissing: (document.body.innerText.match(/Still missing/g) || []).length,
-              // the gap itself, outside that line and the cells: the title, the lede, the footer and any row's own line
-              gapElsewhere: ["title", "lede", "notes"].map((id) => document.getElementById(id).innerText)
-                .concat([...document.querySelectorAll("#list .not-found")].map((p) => p.innerText))
-                .filter((text) => /independent review/i.test(text)),
+              lines: entries.filter((li) => li.getClientRects().length > 0).map((li) => li.innerText),
+              underLede: !!document.getElementById("missing"),
+              saidMissing: (document.body.innerText.match(/no independent review read/g) || []).length,
+              // the gap itself, outside "Still to confirm": the title, the lede and the list (its rows and cells)
+              gapElsewhere: ["title", "lede"].map((id) => document.getElementById(id).innerText)
+                .concat([...document.querySelectorAll("#list [data-ref]")].map((row) => row.innerText))
+                .filter((text) => /review read/i.test(text)),
               links: [...document.querySelectorAll("a[href]")].map((a) => ({ text: a.innerText.replace(/\s*↗\s*$/, "").trim(), site: new URL(a.href).hostname.replace(/^www\./, "") })),
               details: [...document.querySelectorAll(".more .cap")].map((p) => p.innerText).filter((t) => /^Sources:/.test(t)),
               overflow: document.documentElement.scrollWidth - innerWidth,
               ink: style && style.color !== getComputedStyle(document.body).backgroundColor,
             };
           });
-          eq(seen.lines, ["Still missing for Maker Laptop 12 and Maker Laptop 16: Independent reviews (no independent review read)"], `${where}: the page names the missing reviews itself`);
-          ok(seen.underLede, `${where}: right under the lede`);
-          eq(seen.saidMissing, 1, `${where}: said in that one line, by no row and in no other line`);
-          eq(seen.gapElsewhere, [], `${where}: the missing reviews are named in that line and their cells only`);
+          eq(seen.lines, ["Maker Laptop 12 and Maker Laptop 16: Independent reviews (no independent review read)", "Prices of configurations other than the base model"], `${where}: the page names the missing reviews itself, first under "Still to confirm"`);
+          eq(seen.underLede, false, `${where}: nothing under the headline`);
+          eq(seen.saidMissing, 1, `${where}: said in that one entry, by no row or cell`);
+          eq(seen.gapElsewhere, [], `${where}: the missing reviews are named in that entry only`);
           eq(seen.lede, "", `${where}: with nothing to sort nothing is decided, and the stored lede is not drawn`);
           ok(seen.links.length >= 6, `${where}: the page links its sources (${seen.links.length})`);
           for (const link of seen.links) eq(link.text, link.site, `${where}: a source is named by its page's site`);
           ok(!/Review One \/ Maker|Review Two review|Maker Laptop 12 overview/.test(JSON.stringify(seen.links)), `${where}: no source keeps a name of its own`);
           if (open13) eq(seen.details, ["Sources: review-one.example ↗, review-two.example ↗"], `${where}: Details names each source by its site, once`);
           eq(seen.overflow, 0, `${where}: no sideways scroll`);
-          ok(seen.ink, `${where}: the line is drawn in a colour of its own`);
+          ok(seen.ink, `${where}: the entry is drawn in a colour of its own`);
           eq(page.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], `${where}: no script errors`);
           if (SHOTS && !open13) await page.screenshot({ path: path.join(SHOTS, `compare-says-missing-${width}-${scheme}.png`), fullPage: true });
           await page.context().close();
@@ -975,10 +978,10 @@ try {
           return {
             lede: lede.getClientRects().length ? lede.innerText : null,
             ink: getComputedStyle(lede).color !== getComputedStyle(document.body).backgroundColor,
-            missing: [...document.querySelectorAll("#missing .not-found")].filter((p) => p.getClientRects().length).map((p) => p.innerText),
+            missing: [...document.querySelectorAll("#notes li")].filter((li) => li.getClientRects().length).map((li) => li.innerText),
             saidMissing: (document.body.innerText.match(/Still missing/g) || []).length,
             reviewsSaid: (document.body.innerText.match(/two independent reviews not found/g) || []).length,
-            elsewhere: ["title", "lede", "notes"].map((id) => document.getElementById(id).innerText).filter((t) => /independent review|featured/i.test(t)),
+            elsewhere: ["title", "lede"].map((id) => document.getElementById(id).innerText).filter((t) => /independent review|featured/i.test(t)),
             rows: document.querySelectorAll("#list [data-ref]").length,
             notice: !!document.querySelector(".notice.is-error"),
             overflow: document.documentElement.scrollWidth - innerWidth,
@@ -986,11 +989,11 @@ try {
         });
         eq(seen.lede, "Lowest starting price and lowest weight: Maker Laptop 12", `${where}: the line under the title names what the cells decide`);
         ok(seen.ink, `${where}: the line is drawn in a colour of its own`);
-        eq(seen.missing, ["Still missing for Maker Laptop 13 Pro, Maker Laptop 12 and Maker Laptop 16: Independent reviews (two independent reviews not found)"], `${where}: what is missing, under it`);
-        eq(seen.saidMissing, 1, `${where}: said once`);
-        // on the table each cell says why too; on a phone only that line does
-        eq(seen.reviewsSaid, width >= 760 ? 4 : 1, `${where}: the missing reviews are said in that line${width >= 760 ? " and their cells" : ""} only`);
-        eq(seen.elsewhere, [], `${where}: not by the title, the line above it or the footer`);
+        eq(seen.missing, ["Maker Laptop 13 Pro, Maker Laptop 12 and Maker Laptop 16: Independent reviews (two independent reviews not found)"], `${where}: what is missing, under "Still to confirm"`);
+        eq(seen.saidMissing, 0, `${where}: never under the headline`);
+        // said once, in that entry: a table's cell reads only "Unknown"
+        eq(seen.reviewsSaid, 1, `${where}: the missing reviews are said in that entry only`);
+        eq(seen.elsewhere, [], `${where}: not by the title or the line under it`);
         eq({ rows: seen.rows, notice: seen.notice }, { rows: 3, notice: false }, `${where}: a page that still has a stored lede loads`);
         eq(seen.overflow, 0, `${where}: no sideways scroll`);
         eq(page.errors.filter((e) => !/404|Failed to load resource/.test(e)), [], `${where}: no script errors`);
@@ -1171,10 +1174,13 @@ try {
     eq(await off.locator("button", { hasText: /Check/ }).count(), 0, "no check buttons without a binder");
     ok(await off.locator(".trust a", { hasText: /^Open .+ ↗$/ }).count() >= 1, "each row links its store instead");
     eq(await emptyLines(off), [], "no empty line before a store link in a price cell");
-    // looked for and not found is "Not found" with where and when it was looked for; never a blank cell
-    const b = await off.locator("#row-option-b").innerText();
-    ok(/Not found · checked 17 Oct( 2026)? on example\.com ↗/.test(b.replace(/\s+/g, " ").replace(/found checked/, "found · checked")) && !/Not checked|Unknown/.test(b), `a value not found on the source: Not found (${b.replace(/\s+/g, " ")})`);
-    ok(await off.locator("#row-option-b td:nth-child(5) .trust a", { hasText: /^example\.com ↗$/ }).count() === 1, "it links the page that was read");
+    // looked for and not found: its cell reads "Unknown", never blank, and "Still to confirm" says once where and when
+    // it was looked for, linking the page that was read
+    const b = (await off.locator("#row-option-b").innerText()).replace(/\s+/g, " ");
+    ok(/Unknown/.test(b) && !/Not found|Not checked|specs/.test(b), `a value not found on the source reads only Unknown in its cell (${b})`);
+    const confirm = (await off.locator("#notes").innerText()).replace(/\s+/g, " ");
+    ok(/Option B: Warranty \(not found · checked 17 Oct( 2026)? on example\.com ↗\)/.test(confirm), `"Still to confirm" says where it was looked for: ${confirm}`);
+    ok(await off.locator('#notes li a[href="https://example.com/option-b/specs"]', { hasText: /^example\.com ↗$/ }).count() === 1, "it links the page that was read");
     // one link pattern at two weights: a cited source is quiet (caption colour), an action ("Open Store ↗") is in the
     // link colour; both are underlined
     const looks = await off.evaluate(() => {
@@ -1188,8 +1194,9 @@ try {
     await off.context().close();
 
     // a caption too long for its cell breaks before a " · ", never inside "Not found" ("Not" / "found · …"):
-    // a short part keeps its dot with it, so the break must come before the dot
-    const longSrc = await staticServer(makeSite("long-source", "compare", (d) => ({ ...d, items: d.items.map((i) => i.ref !== "option:option-b" ? i : { ...i, facts: { ...i.facts, warranty: { ...i.facts.warranty, src: "Maker's product spec sheet" } } }) })));
+    // a short part keeps its dot with it, so the break must come before the dot. A price a store can still open stays
+    // on its row, so its "Not found" caption is in its cell.
+    const longSrc = await staticServer(makeSite("long-source", "compare", (d) => ({ ...d, items: d.items.map((i) => i.ref !== "option:option-b" ? i : { ...i, facts: { ...i.facts, price: { src: "Maker's product spec sheet", url: "https://example.com/option-b/specs", date: "2026-10-17" } } }) })));
     const ls = await open(`${longSrc}/`, { width: 1024, height: 800 });
     const lines = await ls.evaluate(() => {
       const part = [...document.querySelectorAll("#row-option-b .trust .part")].find((p) => p.textContent === "Not found");

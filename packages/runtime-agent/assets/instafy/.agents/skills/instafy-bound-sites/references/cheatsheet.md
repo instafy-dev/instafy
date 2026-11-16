@@ -217,10 +217,11 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
 ## Writing the content (every starter)
 
 - Lede: the verdict. A comparison has none of its own: under its title the compare starter names the row each `sort`
-  entry puts first, when every row shows that value, and what each row is still missing. A row names only its own
-  unknown. The footer ("Still to confirm") holds only what the page does not already say (not a cell's "Not found"),
-  each as something the reader can do ("Check train times on Taiwan Railway before you book"), never how you worked
-  ("no timetable was read").
+  entry puts first, when every row shows that value. A row names only its own unknown. The footer ("Still to confirm")
+  holds only what the page does not already say (not a cell's "Not found"), each as something the reader can do
+  ("Check train times on Taiwan Railway before you book"), never how you worked ("no timetable was read"). A
+  comparison's footer first names what each row is still missing, from its cells, with each value's `note`: its
+  `unchecked` never names those again.
 - `url` is the page you read and `date` the day you read it: each value cites them ("checked 17 Oct on
   fleetfeet.com ↗"; a price "seen 17 Oct"); add `asof` when the source dates the fact itself
   (shown instead: "seen 5 Aug"; a price over 30 days old also says "may have changed"), so an old list price never
