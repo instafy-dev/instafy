@@ -614,9 +614,9 @@ Only a search is a step. Opening a page or finding text in one with the search t
 other commands, end with no words and no pages, so no step shows for them: the proxy runs only
 searches for Instafy AI, so such a call may have run nothing. A search's start names only its
 call, for the run log's timings, and a search the provider refused never ends, so no step shows
-for it either. The words are the ones the AI searched for; for Instafy AI the proxy takes e-mail
-addresses and long numbers out of a query before it searches (see the proxy README), and Details
-does not repeat that.
+for it either. The words are the ones the AI wrote: for Instafy AI the proxy takes e-mail
+addresses and long numbers out of a query before it searches, and refuses one that looks like a
+key (see the proxy README), so Details may show words that never reached the search.
 
 ## Browser steps
 
