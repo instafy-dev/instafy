@@ -558,6 +558,17 @@ fn stat_reports_zombie(stat: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a failed `/proc/<pid>/...` read means the process is gone: its entry
+/// no longer exists (ENOENT), or it was reaped between opening the file and
+/// reading it, which Linux reports as ESRCH ("No such process").
+pub fn proc_read_reports_exit(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return true;
+    }
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
 /// Ask Chromium to shut down *gracefully* over CDP so it flushes its stores to
 /// disk before we snapshot. This matters: a bare SIGTERM does NOT flush
 /// Chromium's cookie store (cookies are batched and committed on a ~30s timer or
@@ -680,7 +691,8 @@ async fn chromium_process_identity(pid: i32) -> Result<Option<ChromiumProcessIde
     #[cfg(target_os = "linux")]
     match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
         Ok(stat) => return parse_chromium_process_identity(&stat).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        // Gone, or reaped mid-read: the signal-0 probe below confirms it.
+        Err(error) if proc_read_reports_exit(&error) => {}
         Err(error) => return Err(error).context("cannot inspect Chromium process"),
     }
     #[cfg(target_os = "linux")]
@@ -1400,6 +1412,37 @@ mod tests {
         let parsed = parse_chromium_process_identity(&stat).unwrap();
         assert_eq!(parsed.start_ticks, 42);
         assert!(parsed.zombie);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_proc_read_racing_the_exit_counts_as_exited() {
+        // ENOENT: the entry is gone. ESRCH: reaped between open and read, which
+        // failed the Shared Browser profile lifecycle test on main (65538c8f).
+        assert!(proc_read_reports_exit(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(proc_read_reports_exit(&std::io::Error::from_raw_os_error(
+            libc::ENOENT
+        )));
+        assert!(proc_read_reports_exit(&std::io::Error::from_raw_os_error(
+            libc::ESRCH
+        )));
+        for other in [libc::EACCES, libc::EPERM, libc::EIO, libc::EINVAL] {
+            assert!(
+                !proc_read_reports_exit(&std::io::Error::from_raw_os_error(other)),
+                "errno {other} must not read as an exit"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_reaped_chromium_process_reads_as_stopped() {
+        let mut child = tokio::process::Command::new("true").spawn().unwrap();
+        let pid = i32::try_from(child.id().unwrap()).unwrap();
+        child.wait().await.unwrap();
+        assert!(chromium_process_identity(pid).await.unwrap().is_none());
     }
 
     #[tokio::test]
