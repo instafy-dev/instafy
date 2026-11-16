@@ -7,13 +7,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   status: vi.fn(),
   origin: null as { originId: string; mode: string } | null,
+  // The project the controller has answered for, with an origin or none.
+  answered: "project-1" as string | null,
 }));
 
 vi.mock("../../../../projects/useProject", () => ({
   useProject: () => ({ activeProjectId: "project-1" }),
 }));
 vi.mock("../../../../runtime/useRuntime", () => ({
-  useRuntime: () => ({ desktopOrigin: mocks.origin }),
+  useRuntime: () => ({ desktopOrigin: mocks.origin, desktopOriginAnsweredProjectId: mocks.answered }),
 }));
 vi.mock("../../../../services/runtimeController/workspaceGit", () => ({
   fetchWorkspaceGitStatusFromController: mocks.status,
@@ -82,6 +84,7 @@ describe("SourceControlDrawer switch", () => {
     mocks.status.mockReset();
     mocks.status.mockResolvedValue(status());
     mocks.origin = null;
+    mocks.answered = "project-1";
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -102,6 +105,32 @@ describe("SourceControlDrawer switch", () => {
     await render();
     expect(container.querySelector('[data-testid="legacy-body"]')).not.toBeNull();
     expect(mocks.status).not.toHaveBeenCalled();
+  });
+
+  it("keeps the space's last mode while its origin loads, and checks it once the origin comes", async () => {
+    window.localStorage.setItem("instafy.versioning.mode.project-1", "stateless");
+    mocks.answered = null;
+    mocks.status.mockResolvedValue(status(true));
+    await render();
+    const history = () => container.querySelector('[data-testid="history-body"]');
+    // History waits for the origin: nothing was asked, so nothing failed.
+    expect(history()?.getAttribute("data-ready")).toBe("false");
+    expect(history()?.getAttribute("data-probe-failed")).toBe("false");
+    expect(container.querySelector('[data-testid="legacy-body"]')).toBeNull();
+    expect(mocks.status).not.toHaveBeenCalled();
+
+    mocks.origin = { originId: "gateway", mode: "hosted" };
+    mocks.answered = "project-1";
+    await render();
+    expect(history()?.getAttribute("data-ready")).toBe("true");
+    expect(history()?.getAttribute("data-probe-failed")).toBe("false");
+  });
+
+  it("is Changes once the controller says the space has no origin, whatever this device last saw", async () => {
+    window.localStorage.setItem("instafy.versioning.mode.project-1", "stateless");
+    await render();
+    expect(container.querySelector('[data-testid="legacy-body"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="history-body"]')).toBeNull();
   });
 
   it("keeps today's Changes drawer on the stateful gateway", async () => {

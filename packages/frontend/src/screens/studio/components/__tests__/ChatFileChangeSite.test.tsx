@@ -6,9 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ChatMessageFileChange } from "../../types";
 import { ChatFileChangeList } from "../ChatFileChangeList";
 import {
-  CHAT_HISTORY_SETTLE_MS, CHAT_HISTORY_WAIT_MS, ChatSiteContext, ChatSiteSettledProvider, chatHistoryIn, conversationSite,
-  useKnownChatSite, type ChatSite,
+  CHAT_HISTORY_SETTLE_MS, CHAT_HISTORY_WAIT_MS, ChatSiteContext, ChatSiteSettledProvider, ChatSiteSoFarContext, chatHistoryIn,
+  conversationSite, useKnownChatSite, type ChatSite,
 } from "../chatSiteContext";
+import { ChatLaterChangesContext, conversationLaterChanges } from "../chatLaterChanges";
 
 // Every file reads as 100 added lines. Nothing here may hit the network.
 const fetchDiff = vi.hoisted(() =>
@@ -359,16 +360,22 @@ describe("a page's row until its words are known", () => {
     const [olderPageOnItsWay, setOlderPageOnItsWay] = useState(false);
     useLayoutEffect(() => { setOlderPageOnItsWay(newestPageIn && !fillsWindow); }, [newestPageIn, fillsWindow]);
     const ready = chatHistoryIn({ newestPage: newestPageIn, olderPageOnItsWay });
-    const site = useKnownChatSite(conversationSite(messages), ready, "chat-1");
+    const siteSoFar = conversationSite(messages);
+    const site = useKnownChatSite(siteSoFar, ready, "chat-1");
     return (
       <ChatSiteContext.Provider value={site}>
-        <ChatSiteSettledProvider historyReady={ready} chatKey="chat-1">
-          {messages.map((message) => message.files
-            ? <ChatFileChangeList key={message.id} files={message.files} projectId="project-1" messageTimestamp={message.timestamp}
-              // As Studio's row for a turn does: the turn's own card is in.
-              madeSite={messages.some((other) => other.messageType === "action_request" && other.metadata?.jobId === message.metadata?.jobId)} />
-            : null)}
-        </ChatSiteSettledProvider>
+        <ChatSiteSoFarContext.Provider value={siteSoFar}>
+          <ChatSiteSettledProvider historyReady={ready} chatKey="chat-1">
+            <ChatLaterChangesContext.Provider value={conversationLaterChanges(messages)}>
+              {messages.map((message) => message.files
+                ? <ChatFileChangeList key={message.id} files={message.files} projectId="project-1" messageTimestamp={message.timestamp}
+                  messageId={message.id}
+                  // As Studio's row for a turn does: the turn's own card is in.
+                  madeSite={messages.some((other) => other.messageType === "action_request" && other.metadata?.jobId === message.metadata?.jobId)} />
+                : null)}
+            </ChatLaterChangesContext.Provider>
+          </ChatSiteSettledProvider>
+        </ChatSiteSoFarContext.Provider>
         <Probe />
       </ChatSiteContext.Provider>
     );
@@ -478,6 +485,52 @@ describe("a page's row until its words are known", () => {
     expect(labels()).toEqual(["Loading…", "Changed Three days in Seville"]);
     await wait(CHAT_HISTORY_SETTLE_MS);
     expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
+  });
+
+  /** The words a waiting row is as wide as, which no one sees or hears; null for a row that does not wait. */
+  const widthWords = () => rows().map((row) =>
+    row.querySelector('[data-testid="chat-file-change-pending-words"]')?.getAttribute("data-words") ?? null);
+
+  it("waits as wide as the words it will most likely show, so nothing beside it moves when they come", async () => {
+    await draw(newestWithLaterCard, { newestPageIn: true, fillsWindow: true });
+    expect(widthWords()).toEqual(["Created Three days in Seville", null]);
+    // Its words are for no one until they are known: the row still reads as loading.
+    expect(labels()[0]).toBe("Loading…");
+    const placeholder = rows()[0]!.querySelector('[data-testid="chat-file-change-pending-words"]');
+    expect(placeholder?.getAttribute("aria-hidden")).toBe("true");
+    expect(placeholder?.className).toContain("before:invisible");
+    await wait(CHAT_HISTORY_SETTLE_MS);
+    expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
+    expect(widthWords()).toEqual([null, null]);
+  });
+
+  it("takes those words from the cards in so far, while the rest of the chat's history comes", async () => {
+    await draw([card, ...newestPage], { newestPageIn: false, fillsWindow: false });
+    expect(labels()).toEqual(["Loading…", "Loading…"]);
+    expect(widthWords()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
+    await draw([card, ...newestPage], { newestPageIn: true, fillsWindow: true });
+    expect(labels()).toEqual(["Created Three days in Seville", "Changed Three days in Seville"]);
+  });
+
+  it("keeps its plain pulse while no card in so far names its page, never sized by a page or its folder", async () => {
+    await draw(newestPage, { newestPageIn: true, fillsWindow: false });
+    expect(labels()).toEqual(["Loading…", "Loading…"]);
+    expect(widthWords()).toEqual([null, null]);
+    expect(container.innerHTML).not.toContain("a page");
+    expect(container.innerHTML).not.toContain("seville-3-days\"");
+  });
+
+  it("shows a row whose change was undone at once, beside the rows that wait", async () => {
+    const undoLine: ChatMessage = {
+      id: "undo-line", role: "assistant", content: "The person undid the change from “Add a note.”", timestamp: 6_000,
+      metadata: { source: "controller", kind: "change_undone", presentation: { hidden: true },
+        undoneMessageId: "note-files", undoneRunId: "run-note", undonePaths: ["sites/seville-3-days/map.config.json"] },
+    };
+    await draw([...newestPage, undoLine], { newestPageIn: false, fillsWindow: false });
+    // The page's row waits for its words; the undone one needs none of the chat's cards.
+    expect(labels()).toEqual(["Loading…", "Undone"]);
+    await draw([card, ...newestPage, undoLine], { newestPageIn: true, fillsWindow: true });
+    expect(labels()).toEqual(["Created Three days in Seville", "Undone"]);
   });
 });
 

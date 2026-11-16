@@ -1,5 +1,25 @@
+import {
+  hasFailedRunMetadata,
+  resolveRunFailurePresentation,
+  runFailureSentenceForViewer,
+  runtimeEntryOfTurn,
+  type TurnEngineTurnOwner,
+} from "../../../conversations/runFailurePresentation";
+import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
 import type { ChatMessage, ChatMessageFileChange } from "../types";
 import { readRowStopNotice, rowWentOnFromStop } from "./chatMessagePresentation";
+
+/**
+ * Who copies the chat, as its rows word a failed turn for them: a failed
+ * turn of someone's own AI (a turn engine) reads one way for its sender and
+ * another for everyone else (RunFailureNotice).
+ */
+export type ChatCopyReader = {
+  /** Who sent the turn-engine turn a message belongs to, as the chat tells it (RunFailureRetryContextValue). */
+  turnEngineOwnerOf?: (message: ChatMessage) => TurnEngineTurnOwner | null;
+  /** The runtimes the reader's chat knows: its sender's sentence names what the one that ran the turn says. */
+  runtimeStatuses?: readonly ControllerRuntimeStatusEntry[] | null;
+};
 
 const THREAD_COPY_EXCLUDED_TYPES = new Set([
   "command_execution",
@@ -27,6 +47,28 @@ function normalizeMessageType(message: ChatMessage): string {
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value.replace(/\r\n/g, "\n").trim() : "";
+}
+
+/**
+ * A message's words as the chat shows them to `reader`. A failed turn shows
+ * a plain sentence ("Instafy AI is unavailable right now: …"), with the
+ * service's own words one press away in Details: a copy carries that
+ * sentence too, never the raw text it stands for.
+ */
+function chatWords(message: ChatMessage, reader: ChatCopyReader | undefined): string {
+  if (message.role === "assistant" && (normalizeMessageType(message) === "error" || hasFailedRunMetadata(message.metadata))) {
+    const failure = resolveRunFailurePresentation({ metadata: message.metadata, content: message.content, assumeFailed: true });
+    const sentence = failure
+      ? normalizeText(runFailureSentenceForViewer(failure, {
+        owner: failure.turnEngine ? reader?.turnEngineOwnerOf?.(message) ?? null : null,
+        runtime: runtimeEntryOfTurn(message, reader?.runtimeStatuses),
+      }))
+      : "";
+    if (sentence) {
+      return sentence;
+    }
+  }
+  return normalizeText(message.content);
 }
 
 function coerceThreadMessages(rawThreadMessages: unknown): ChatMessage[] {
@@ -110,7 +152,7 @@ function shouldTreatStatusAsSummary(message: ChatMessage): boolean {
  * after them, never the names of the files it changed. Only a turn with no
  * words copies what it changed.
  */
-function resolveThreadSummary(threadMessages: ChatMessage[]): string {
+function resolveThreadSummary(threadMessages: ChatMessage[], reader: ChatCopyReader | undefined): string {
   let latestFileSummary = "";
 
   for (let index = threadMessages.length - 1; index >= 0; index -= 1) {
@@ -118,7 +160,7 @@ function resolveThreadSummary(threadMessages: ChatMessage[]): string {
     if (!latestFileSummary) {
       latestFileSummary = formatFileChangeSummary(candidate.files);
     }
-    const content = normalizeText(candidate.content);
+    const content = chatWords(candidate, reader);
     if (!content) {
       continue;
     }
@@ -135,21 +177,21 @@ function resolveThreadSummary(threadMessages: ChatMessage[]): string {
   return latestFileSummary;
 }
 
-export function resolveCopyableMessageContent(message: ChatMessage): string {
-  const directContent = normalizeText(message.content);
+export function resolveCopyableMessageContent(message: ChatMessage, reader?: ChatCopyReader): string {
+  const directContent = chatWords(message, reader);
   if (directContent) {
     return directContent;
   }
 
   if (normalizeMessageType(message) === "agent_job_thread") {
     const metadata = isRecord(message.metadata) ? message.metadata : null;
-    return resolveThreadSummary(coerceThreadMessages(metadata?.threadMessages));
+    return resolveThreadSummary(coerceThreadMessages(metadata?.threadMessages), reader);
   }
 
   return formatFileChangeSummary(message.files);
 }
 
-export function formatConversationTranscript(messages: ChatMessage[]): string {
+export function formatConversationTranscript(messages: ChatMessage[], reader?: ChatCopyReader): string {
   const listed = new Set(messages.map((message) => message.id));
   return messages
     // A stopped turn's row holds the notice of its Stop (foldStopNotices): the
@@ -161,7 +203,7 @@ export function formatConversationTranscript(messages: ChatMessage[]): string {
       return stopNotice && !listed.has(stopNotice.id) && !rowWentOnFromStop(message) ? [message, stopNotice] : [message];
     })
     .map((message) => {
-      const content = resolveCopyableMessageContent(message);
+      const content = resolveCopyableMessageContent(message, reader);
       if (!content) {
         return null;
       }

@@ -72,6 +72,11 @@ export type BrowserRequestHost = {
    */
   routedWaitingKeys?: ReadonlySet<string>;
   /**
+   * Those of {@link routedWaitingKeys} whose browser turn handed the message
+   * to the building turn, which has shown nothing yet (routedBrowserFold.ts).
+   */
+  routedHandedOverKeys?: ReadonlySet<string>;
+  /**
    * The conversation's newest card, by {@link browserRequestKey}. An older
    * card leaves the chat: the newer one carries the task on.
    */
