@@ -85,21 +85,25 @@ fn the_reserved_name_is_what_normalize_secret_name_makes_of_it() {
     }
 }
 
-struct Space {
-    pool: PgPool,
-    app: Router,
-    keys: CredentialKeyRing,
-    owner: Uuid,
-    project_id: Uuid,
-    bearer: String,
+pub(super) struct Space {
+    pub(super) pool: PgPool,
+    pub(super) app: Router,
+    pub(super) keys: CredentialKeyRing,
+    pub(super) owner: Uuid,
+    pub(super) project_id: Uuid,
+    pub(super) bearer: String,
 }
 
 impl Space {
-    fn secrets_path(&self) -> String {
+    pub(super) fn secrets_path(&self) -> String {
         format!("/projects/{}/secrets", self.project_id)
     }
 
-    async fn create(&self, name: &str, value: &str) -> anyhow::Result<(StatusCode, Value)> {
+    pub(super) async fn create(
+        &self,
+        name: &str,
+        value: &str,
+    ) -> anyhow::Result<(StatusCode, Value)> {
         call_router(
             &self.app,
             Some(&self.bearer),
@@ -110,7 +114,11 @@ impl Space {
         .await
     }
 
-    async fn update(&self, secret_id: Uuid, body: Value) -> anyhow::Result<(StatusCode, Value)> {
+    pub(super) async fn update(
+        &self,
+        secret_id: Uuid,
+        body: Value,
+    ) -> anyhow::Result<(StatusCode, Value)> {
         call_router(
             &self.app,
             Some(&self.bearer),
@@ -123,12 +131,12 @@ impl Space {
 
     /// Stores a secret as a release before the guard could have: sealed with
     /// the space's key, under a name the API may no longer accept.
-    async fn store_legacy(&self, name: &str, value: &str) -> anyhow::Result<Uuid> {
+    pub(super) async fn store_legacy(&self, name: &str, value: &str) -> anyhow::Result<Uuid> {
         let (nonce, ciphertext) = self.keys.seal(value.as_bytes())?;
         self.store_sealed(name, &nonce, &ciphertext).await
     }
 
-    async fn store_sealed(
+    pub(super) async fn store_sealed(
         &self,
         name: &str,
         nonce: &str,
@@ -152,7 +160,7 @@ impl Space {
         Ok(secret_id)
     }
 
-    async fn sealed_value(&self, secret_id: Uuid) -> anyhow::Result<(String, String)> {
+    pub(super) async fn sealed_value(&self, secret_id: Uuid) -> anyhow::Result<(String, String)> {
         let row = self
             .pool
             .get()
@@ -165,7 +173,7 @@ impl Space {
         Ok((row.get(0), row.get(1)))
     }
 
-    async fn stored_count(&self) -> anyhow::Result<i64> {
+    pub(super) async fn stored_count(&self) -> anyhow::Result<i64> {
         sql_one(
             &self.pool,
             "select count(*) from project_secrets where project_id = $1 and revoked_at is null",
@@ -177,7 +185,7 @@ impl Space {
 
 /// Runs `body` with a fresh owner and space on the shared test database, then
 /// deletes them and the space's secrets, however `body` ends.
-async fn with_space<F, Fut>(label: &str, body: F) -> anyhow::Result<()>
+pub(super) async fn with_space<F, Fut>(label: &str, body: F) -> anyhow::Result<()>
 where
     F: FnOnce(Space) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,

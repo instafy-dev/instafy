@@ -8,6 +8,7 @@ pub mod chat_activity;
 pub mod claude_code_lane;
 pub mod multi_agent;
 pub mod own_ai_model;
+pub mod proxy_route;
 pub mod research;
 pub mod types;
 pub use types::{AccessTokenClaims, CreditSnapshotPayload, ProxyEnvelopePayload};

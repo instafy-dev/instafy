@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use runtime_contracts::multi_agent::{AgentRuntimeSettings, NativeSubagentLimit};
+use runtime_contracts::proxy_route::is_proxy_route_env_key;
 use serde_json::json;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::{Notify, watch};
@@ -214,6 +215,10 @@ mod origin_cycle_tests;
 #[cfg(all(test, unix))]
 #[path = "agent_claude_code_tests.rs"]
 mod claude_code_tests;
+
+#[cfg(test)]
+#[path = "agent_proxy_route_tests.rs"]
+mod proxy_route_tests;
 
 struct JobInputTask {
     stop_signal: ShutdownSignal,
@@ -2356,9 +2361,11 @@ fn repoll_at_once(
     false
 }
 
-pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, String> {
-    const SECRET_INVENTORY_ENV_KEY: &str = "INSTAFY_PROJECT_SECRET_INVENTORY";
+/// The names and descriptions of the project's secrets, which the agent reads to know what it was
+/// given.
+const SECRET_INVENTORY_ENV_KEY: &str = "INSTAFY_PROJECT_SECRET_INVENTORY";
 
+pub(crate) fn resolved_job_environment(secrets: &JobSecrets) -> HashMap<String, String> {
     let mut resolved_env = secrets.env.clone();
     crate::research_budget::ResearchBudgetAccess::scrub(&mut resolved_env);
     apply_canonical_secret_aliases(&mut resolved_env, &secrets.inventory);
@@ -2464,8 +2471,44 @@ pub(crate) fn resolved_worker_job_config(
     })
 }
 
+/// What `apply_job_secrets` sets in this process's environment: the job's resolved environment
+/// without the proxy route (`runtime_contracts::proxy_route`). The turn's engine, its direct
+/// worker lanes and its commands read from here where to send the turn's model traffic and its
+/// proxy grant, and only the runtime's launch environment and the turn's proxy envelope
+/// (`jobs::ProxyEnvGuard`) may say. A secret of one of those names set here would move the route
+/// as the turn starts, since the guard reads `PROXY_BASE_URL` after the job's secrets are set, and
+/// at every refresh while the turn runs. The list of the project's secrets the agent reads leaves
+/// such a secret out too, since its name holds the route's value. Current controllers never
+/// deliver one.
+fn process_job_environment(secrets: &JobSecrets) -> HashMap<String, String> {
+    let mut environment = resolved_job_environment(secrets);
+    environment.retain(|name, _| !is_proxy_route_env_key(name));
+    if secrets
+        .inventory
+        .iter()
+        .any(|item| is_proxy_route_env_key(&item.name))
+    {
+        debug!("not setting project secrets named after the proxy route");
+        let inventory: Vec<AgentSecretInventoryItem> = secrets
+            .inventory
+            .iter()
+            .filter(|item| !is_proxy_route_env_key(&item.name))
+            .cloned()
+            .collect();
+        match serialize_secret_inventory(&inventory) {
+            Some(serialized) => {
+                environment.insert(SECRET_INVENTORY_ENV_KEY.to_string(), serialized);
+            }
+            None => {
+                environment.remove(SECRET_INVENTORY_ENV_KEY);
+            }
+        }
+    }
+    environment
+}
+
 fn apply_job_secrets(managed_keys: &Mutex<HashSet<String>>, secrets: &JobSecrets) {
-    let resolved_env = resolved_job_environment(secrets);
+    let resolved_env = process_job_environment(secrets);
     let mut guard = managed_keys.lock();
 
     // Host-owned research fields never inherit process launch or granted-secret values.

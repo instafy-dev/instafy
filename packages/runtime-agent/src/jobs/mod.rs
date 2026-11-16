@@ -3876,48 +3876,41 @@ impl Drop for EnvOverride {
     }
 }
 
-struct ProxyEnvGuard {
+/// Sets the proxy route for a turn and puts back what it replaced when the turn ends.
+pub(crate) struct ProxyEnvGuard {
     _overrides: Vec<EnvOverride>,
 }
 
 impl ProxyEnvGuard {
-    fn new(envelope: &ProxyEnvelopePayload) -> Self {
-        let mut overrides = Vec::new();
-
-        overrides.push(EnvOverride::apply("CODEX_API_KEY", &envelope.token));
-        overrides.push(EnvOverride::apply("OPENAI_API_KEY", &envelope.token));
-
-        let base_override = std::env::var("PROXY_BASE_URL")
-            .ok()
-            .map(|raw| raw.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty());
-        let base =
-            base_override.unwrap_or_else(|| envelope.url.trim().trim_end_matches('/').to_string());
-        // Desktop runtimes run outside Docker; let PROXY_BASE_URL remap container hostnames.
-
-        overrides.push(EnvOverride::apply(
-            "OPENAI_BASE_URL",
-            &format!("{}/v1", base),
-        ));
-        overrides.push(EnvOverride::apply(
-            "CODEX_API_ENDPOINT",
-            &format!("{}/api", base),
-        ));
-
-        let responses_path = format!("{}/backend-api/codex/responses", base);
-        overrides.push(EnvOverride::apply(
-            "CODEX_CHATGPT_ENDPOINT",
-            &responses_path,
-        ));
-        overrides.push(EnvOverride::apply(
-            "CODEX_PROXY_CHATGPT_ENDPOINT",
-            &responses_path,
-        ));
-
+    pub(crate) fn new(envelope: &ProxyEnvelopePayload) -> Self {
         Self {
-            _overrides: overrides,
+            _overrides: proxy_route(envelope)
+                .into_iter()
+                .map(|(key, value)| EnvOverride::apply(key, &value))
+                .collect(),
         }
     }
+}
+
+/// The proxy route a turn's guard sets (`runtime_contracts::proxy_route`): the turn's grant and the
+/// proxy's addresses. The addresses come from the envelope, or from `PROXY_BASE_URL` when the
+/// runtime's launch environment sets it: Desktop runtimes run outside Docker, and it remaps
+/// container hostnames. A job's secrets never set it (`agent::process_job_environment`).
+fn proxy_route(envelope: &ProxyEnvelopePayload) -> [(&'static str, String); 6] {
+    let base = std::env::var("PROXY_BASE_URL")
+        .ok()
+        .map(|raw| raw.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| envelope.url.trim().trim_end_matches('/').to_string());
+    let responses_path = format!("{base}/backend-api/codex/responses");
+    [
+        ("CODEX_API_KEY", envelope.token.clone()),
+        ("OPENAI_API_KEY", envelope.token.clone()),
+        ("OPENAI_BASE_URL", format!("{base}/v1")),
+        ("CODEX_API_ENDPOINT", format!("{base}/api")),
+        ("CODEX_CHATGPT_ENDPOINT", responses_path.clone()),
+        ("CODEX_PROXY_CHATGPT_ENDPOINT", responses_path),
+    ]
 }
 
 struct ControllerTokenGuard {
@@ -34485,6 +34478,26 @@ mod tests {
             extract_direct_worker_summary(&response).as_deref(),
             Some("Evidence from path A. Gap from path B.")
         );
+    }
+
+    #[test]
+    fn the_turns_guard_sets_the_proxy_route_and_nothing_else() {
+        // A job's secrets never set a name in `PROXY_ROUTE_ENV_KEYS`, and the controller refuses to
+        // save one: every name the guard sets has to be there, with the `PROXY_BASE_URL` it reads.
+        let envelope = ProxyEnvelopePayload {
+            url: "http://proxy.test:8789/".to_string(),
+            token: "inert-proxy-grant".to_string(),
+            expires_at: None,
+        };
+        let mut names: Vec<&str> = proxy_route(&envelope)
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(["PROXY_BASE_URL"])
+            .collect();
+        names.sort_unstable();
+        let mut route = runtime_contracts::proxy_route::PROXY_ROUTE_ENV_KEYS.to_vec();
+        route.sort_unstable();
+        assert_eq!(names, route);
     }
 
     #[test]

@@ -37,6 +37,7 @@ Guidelines:
 - `name` should be an env var name (examples: `GITHUB_TOKEN`, `CLOUDFLARE_API_TOKEN`).
 - `agentHandles` should include the current agent handle (so the UI can preselect access).
 - Secret names can be generic (for example `TOKEN`) if description clearly states provider/capability.
+- Never ask for a name Instafy keeps for its proxy: `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`, `CODEX_API_ENDPOINT`, `CODEX_CHATGPT_ENDPOINT`, `CODEX_PROXY_CHATGPT_ENDPOINT` or `PROXY_BASE_URL`. Every turn sets them to send your AI requests through Instafy, so a secret can't be saved under one. For an app's own key, ask for another name, such as `APP_OPENAI_API_KEY`, and have the app read that name.
 
 ## Common secret names
 

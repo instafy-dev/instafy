@@ -60,6 +60,19 @@ per-job `CONTROLLER_ACCESS_TOKEN`, the proxy envelope key `CODEX_API_KEY` and
 granted project secrets are still passed through. The exclusion list lives in
 `packages/runtime-agent/src/model_environment.rs`.
 
+A granted project secret never takes one of the proxy route's names
+(`OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`, `CODEX_API_ENDPOINT`,
+`CODEX_CHATGPT_ENDPOINT`, `CODEX_PROXY_CHATGPT_ENDPOINT` and `PROXY_BASE_URL`,
+listed in `runtime_contracts::proxy_route`). A job's secrets share the agent's
+process environment with the turn's proxy route: the agent sets them before the
+turn starts and again at every refresh (`RUNTIME_SECRETS_REFRESH_INTERVAL_SECONDS`,
+15 by default), and the turn's guard reads `PROXY_BASE_URL` as it sets the
+route. So the agent never sets one of these names from a job's secrets, and the
+controller refuses to save or deliver one. The turn's engine, its direct worker
+lanes and its commands always get the proxy's addresses and the turn's grant
+under these names, and a runtime's own launch `PROXY_BASE_URL` lasts from one
+job to the next.
+
 The browser relay variable `INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON` is
 excluded from model shells but stays in the agent's environment, because the
 origin server reads it per request. Processes the agent starts with its whole
