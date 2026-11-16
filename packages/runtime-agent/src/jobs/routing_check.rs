@@ -1224,6 +1224,70 @@ mod tests {
         assert_eq!(after.replacen(reworded, rule, 1), before);
     }
 
+    /// The routing step's input, pinned by its hash: the start every chat offered the same
+    /// routes shares (the routing instructions and the skills' routing sections, which a
+    /// provider serves from its cache) and each case's whole routing prompt, built in a new
+    /// space holding the files this checkout ships. The history's counts line is left out of the
+    /// hash, as it reads the machine's model settings. A change to what turns read that leaves
+    /// routing alone (a skill's other sections, a browser turn's run text, a section only a turn
+    /// reads) keeps both hashes. A change that means to move routes updates them, and its pull
+    /// request carries the routing check's table.
+    #[test]
+    fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
+        use sha2::{Digest, Sha256};
+        const SHARED_START_SHA256: &str =
+            "c902914e76efd97d0029bb0a95ce36e1f03bff0c921b54b53bd11e2b672c3768";
+        const CASE_PROMPTS_SHA256: &str =
+            "c3caf66aeab8ba4a60d9fe615ff6c006dfcccb2e7de136e047fbab8c26362836";
+        const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
+        let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
+        let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
+            Some((head, rest)) => {
+                let rest = rest.split_once('\n').map_or("", |(_, rest)| rest);
+                format!("{head}{COUNTS_LINE}{rest}")
+            }
+            None => prompt.to_string(),
+        };
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let inputs: Vec<(String, RoutingInput)> = shipped()
+            .iter()
+            .map(|case| {
+                let input = routing_input(case, workspace.path()).unwrap();
+                (case.id.clone(), input)
+            })
+            .collect();
+        let starts: HashSet<&str> = inputs
+            .iter()
+            .map(|(_, input)| input.shared_start.as_str())
+            .collect();
+        assert!(
+            inputs.iter().all(|(_, input)| input.browser_routes_offered),
+            "every case is offered the browser routes"
+        );
+        assert_eq!(starts.len(), 1, "every case shares one start");
+        let start = starts.into_iter().next().expect("a start");
+        let mut prompts = String::new();
+        let mut each = String::new();
+        for (id, input) in &inputs {
+            let prompt = without_counts(&input.prompt);
+            assert!(
+                prompt.starts_with(start),
+                "{id}: the prompt opens with the start"
+            );
+            let _ = writeln!(each, "{id}: {}", digest(&prompt));
+            let _ = writeln!(prompts, "{id}\n{prompt}");
+        }
+        assert_eq!(
+            (digest(start), digest(&prompts)),
+            (
+                SHARED_START_SHA256.to_string(),
+                CASE_PROMPTS_SHA256.to_string()
+            ),
+            "the routing input changed; each case's prompt now hashes to:\n{each}"
+        );
+    }
+
     fn answer_json(route: &str, requirement: &str) -> JsonValue {
         json!({
             "summary": "s", "route": route, "reason": "Because.", "selectedSkills": [],

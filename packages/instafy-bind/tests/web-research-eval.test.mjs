@@ -36,6 +36,7 @@ before(async () => {
 after(() => web.close());
 
 const BROWSER_SKILL = fs.readFileSync(new URL("../../runtime-agent/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md", import.meta.url), "utf8");
+const GETTING_AROUND_SKILL = fs.readFileSync(new URL("../../runtime-agent/assets/instafy/.agents/skills/instafy-getting-around/SKILL.md", import.meta.url), "utf8");
 const AGENTS_DOC = fs.readFileSync(new URL("../../runtime-agent/assets/instafy/AGENTS.md", import.meta.url), "utf8");
 const flat = (s) => s.replace(/\s+/g, " ");
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -275,12 +276,15 @@ test("research and browser policy checks match the current skills", () => {
   // "Finding a page" is the browser skill's, and the research skill points to it.
   const browser = flat(BROWSER_SKILL);
   const finding = {
-    no_guessed_paths: ["Open an address the person or a skill gave or a link on a page you read (print a page's links with its text), else the official site of what the task names (for reviews, a reviewer's own site) and its links and search.", "never invent a page path"],
-    missing_page_searched: ["A page that says it is missing (\"not found\", \"are you lost?\"): use that site's own search box or menu."],
-    configured_sites_not_opened: ["Use a search engine only if the person named one or no official site is known", "an explicit workspace policy refusal ends that page"],
-    facts_from_own_page: ["comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose the start, the stop nearest the place (the one its own page names, else your pick), the person's day and time (else a daytime hour); press its button and read the route), not a listing or a kiosk page: those only lead to it."],
+    no_guessed_paths: ["Open an address the person or a skill gave, or a link on a page you read (print a page's links with its text), else the official site of what the task names and its links and search box.", "never invent a page path"],
+    missing_page_searched: ["A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task.", "then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named"],
+    configured_sites_not_opened: ["Instafy's browser has no web search: open a search engine only when the person named one.", "an explicit workspace policy refusal ends that page"],
+    facts_from_own_page: ["A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page: those only lead to it."],
   };
   for (const [id, needles] of Object.entries(finding)) for (const needle of needles) assert.ok(browser.includes(needle), `${id}: ${needle}`);
+  // A route's own page is the operator's journey planner: `instafy-getting-around`, which a turn whose words name a
+  // route carries.
+  assert.ok(flat(GETTING_AROUND_SKILL).includes("A route comes from the transit operator's own journey planner, reached from the operator's site."), "facts_from_own_page: route");
   assert.ok(skill.includes('"Finding a page" not loaded? Print it:'));
   // "Not checked" is the replies guide's, which every turn reads, a browser turn its "Replies".
   assert.ok(flat(AGENTS_DOC).includes(`A fact or tip you add to the reply or a page says "not checked", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.`), "unchecked_said");

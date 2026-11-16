@@ -802,8 +802,10 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
 /// "Assumed: the official hours are useful without a specific visit date." closed a page's reply that
 /// assumed nothing: the hub asked every reply for one `Assumed:` line. It is only for a default the
 /// person didn't give (dates, a currency, which models) now. And "the review search had no provider"
-/// reached a comparison's cell: a note on a page says where Octo looked, never its tools. An
-/// unedited hub from before is upgraded (`a_comparison_asked_in_a_new_chat_is_the_hubs_…`).
+/// reached a comparison's cell: a note on a page never names Octo's tools. What a value nobody
+/// found says (where Octo looked itself, or the browser's own words for one it didn't find) is
+/// `instafy-comparing`'s. An unedited hub from before is upgraded
+/// (`a_comparison_asked_in_a_new_chat_is_the_hubs_…`).
 #[test]
 fn a_reply_assumes_only_what_the_person_left_open_and_a_page_names_no_tool() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -813,11 +815,15 @@ fn a_reply_assumes_only_what_the_person_left_open_and_a_page_names_no_tool() {
     let previous = flat(include_str!("legacy/interactive-artifacts-v13.md"));
     for needle in [
         "An `Assumed:` line only for a default you chose that the person didn't give (dates, a currency, which models), and none when there is none.",
-        "A note on the page says where you looked, never the tools, searches or services you used.",
+        "A note on the page never names the tools, searches or services you used.",
     ] {
         assert!(hub.contains(needle), "{needle}");
         assert!(!previous.contains(needle), "new in this version: {needle}");
     }
+    assert!(
+        hub.contains("one nobody found reads `Unknown` and why, as `instafy-comparing` says"),
+        "{hub}"
+    );
     assert!(!hub.contains("ONE `Assumed:` line"), "{hub}");
     assert!(previous.contains("ONE `Assumed:` line for the defaults you chose"));
 }
@@ -1152,7 +1158,7 @@ fn a_comparison_gets_a_sort_for_each_criterion_that_is_a_number() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
-    let previous = include_str!("legacy/interactive-artifacts-v19.md");
+    let previous = include_str!("legacy/interactive-artifacts-v20.md");
     let rule = "A comparison still gets a `sort` entry, with `dir`, for each of the person's criteria that is a number: under 5 options it only writes the line under the title (\"Lowest price: Option B\").";
     assert!(flat(hub).contains(rule), "{hub}");
     assert!(!flat(previous).contains(rule), "new in this version");

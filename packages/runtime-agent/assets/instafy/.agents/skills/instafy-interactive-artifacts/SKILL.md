@@ -41,8 +41,8 @@ own kind of page.
   `checked 17 Oct on maker.com`, `€549 at Shop · seen 17 Oct`, `checked 4 min ago`, `Estimate`, `Unknown`. A tip no
   page gave is plain text, never styled like a source line.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
-  why ("price not found on maker.com's page"), never a blank or a dash. A note on the page says where you looked, never
-  the tools, searches or services you used. A value cites only a page that gives it: a count of
+  why, as `instafy-comparing` says, never a blank or a dash. A note on the page never names the tools, searches or
+  services you used. A value cites only a page that gives it: a count of
   what you found cites only what it counts, so none found cites no page. A filter from a stated limit ("under €600")
   counts known values only: an item whose value is unknown is listed apart ("Price unknown"), never as within it, on
   the page or in the reply. The starters do this with `site.byFilter`; a page you write uses it too. A
@@ -62,7 +62,7 @@ own kind of page.
   command. A site with no binder, such as a map a builder skill hosts: post the card first (step 3), then run that
   skill's own check.
 - Facts come from pages you opened this turn, never from memory unless asked (above): the builder skill's source or
-  fetch command when it has one, else `instafy-web-research` (its "Comparing items" for prices and reviews per item)
+  fetch command when it has one, else `instafy-web-research` (`instafy-comparing` for prices and reviews per item)
   or Instafy's browser (`instafy-browser-automation`). Keep each fact's link and date.
 - "Near me": never `navigator.geolocation` (Studio blocks it); `await instafyBind.location()` per
   `instafy-bound-sites`, with a typed place as a fallback.
