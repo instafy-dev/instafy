@@ -5,7 +5,8 @@ const COMPOSER_INLINE_REMAINDER_WORD_START_PATTERN = /^[A-Za-z0-9"'([{]/;
 export const COMPOSER_INLINE_COMPLETION_DEBOUNCE_MS = 80;
 // Ghost text in the chat composer is opt-in: every pause while typing would
 // otherwise send the draft to a model before the user presses send, which
-// costs a managed-lane call and moves unsent text off the device.
+// spends a call on the person's own AI connection and moves unsent text off
+// the device.
 export const COMPOSER_INLINE_COMPLETION_PREFERENCE_KEY = "instafy.composer.inlineCompletion";
 
 export function readComposerInlineCompletionPreference(

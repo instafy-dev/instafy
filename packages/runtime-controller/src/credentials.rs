@@ -17,7 +17,7 @@ use tokio_postgres::{types::Json as PgJson, GenericClient, Transaction};
 use uuid::Uuid;
 
 use crate::ai_agents;
-use crate::ai_connection_limits::{self, AiConnectionLimits};
+use crate::ai_connection_limits::{self, AiConnectionLimits, SideCall};
 use crate::auth::{
     authenticate_request, bearer_token, issue_proxy_envelope, require_user_session, RequestContext,
 };
@@ -1304,10 +1304,26 @@ async fn request_project_editor_completion(
     let credential =
         resolve_editor_completion_credential(&transaction, user_id, body.credential_id.as_deref())
             .await?;
+    // A completion counts before it reaches the provider; one with no
+    // connection of the person's own is sent nowhere and counts nothing.
+    if let Some(credential) = &credential {
+        ai_connection_limits::record_side_call(
+            &transaction,
+            user_id,
+            credential.credential_id,
+            SideCall::EditorCompletion,
+            &AiConnectionLimits::FOR_EVERYONE,
+        )
+        .await?;
+    }
 
+    // Committing releases the lock, and the connection goes back to the pool:
+    // the proxy calls back into the controller for the credential while the
+    // provider answers.
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to finalize completion lookup: {error}"))
     })?;
+    drop(connection);
 
     let Some(credential) = credential else {
         return Ok(Json(EditorCompletionResponse {
@@ -1331,15 +1347,7 @@ async fn request_project_editor_completion(
     .await;
 
     if response.completion.is_some() {
-        if let Err(error) = connection
-            .execute(
-                "update user_credentials set last_used_at = now(), updated_at = now() where id = $1",
-                &[&credential.credential_id],
-            )
-            .await
-        {
-            tracing::warn!(?error, "failed to update inline completion credential last_used_at");
-        }
+        mark_side_call_credential_used(&state, credential.credential_id, "inline completion").await;
     }
 
     Ok(Json(response))
@@ -1387,11 +1395,26 @@ async fn request_project_conversation_title(
     let credential =
         resolve_editor_completion_credential(&transaction, user_id, body.credential_id.as_deref())
             .await?;
+    // A title counts before it reaches the provider; one with no connection
+    // of the person's own is sent nowhere and counts nothing.
+    if let Some(credential) = &credential {
+        ai_connection_limits::record_side_call(
+            &transaction,
+            user_id,
+            credential.credential_id,
+            SideCall::ConversationTitle,
+            &AiConnectionLimits::FOR_EVERYONE,
+        )
+        .await?;
+    }
 
+    // As for a completion, the lock and the pooled connection are released
+    // before the provider is called.
     transaction
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to finalize title lookup: {error}")))?;
+    drop(connection);
 
     let Some(credential) = credential else {
         return Ok(Json(ConversationTitleResponse {
@@ -1407,18 +1430,33 @@ async fn request_project_conversation_title(
         generate_conversation_title_via_proxy(&state, &project_id, &credential, &message).await;
 
     if response.title.is_some() {
-        if let Err(error) = connection
-            .execute(
-                "update user_credentials set last_used_at = now(), updated_at = now() where id = $1",
-                &[&credential.credential_id],
-            )
-            .await
-        {
-            tracing::warn!(?error, "failed to update conversation title credential last_used_at");
-        }
+        mark_side_call_credential_used(&state, credential.credential_id, "conversation title")
+            .await;
     }
 
     Ok(Json(response))
+}
+
+/// Marks a connection used after a side call it answered. Best effort: the
+/// answer is already in hand, so a busy pool or a failed update must not turn
+/// it into an error.
+async fn mark_side_call_credential_used(state: &AppState, credential_id: Uuid, call: &str) {
+    match state.pool.get().await {
+        Ok(connection) => {
+            if let Err(error) = connection
+                .execute(
+                    "update user_credentials set last_used_at = now(), updated_at = now() where id = $1",
+                    &[&credential_id],
+                )
+                .await
+            {
+                tracing::warn!(?error, call, "failed to update side call credential last_used_at");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, call, "no connection to update side call credential last_used_at");
+        }
+    }
 }
 
 async fn resolve_editor_completion_credential(
