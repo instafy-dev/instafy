@@ -217,7 +217,15 @@ reads it and never changes it, and the runtime holds it to that. The controller 
   release, or a checkout cloned again) has each page as its maker's from the first turn. A controller from before the
   rows sends none, and the file stands as it is.
 - **The switch.** A runtime started with `INSTAFY_HOLD_PAGES=0` holds no page: nothing is put back or left unwritten
-  there. See [`instafy preview open`](CLI.md) for what a turn is told and what goes back.
+  there. See [`instafy preview open`](CLI.md) for what a turn is told and what goes back. A runtime keeps the value it
+  started with, so the switch reaches the runtimes started after it is set, and one already running holds pages until
+  it stops. Where to set it depends on what starts the runtime:
+  - **Desktop:** the environment the Desktop app starts with, which its runtime inherits.
+  - **Self-hosted with `docker/docker-compose.runtime.yml`:** `$INSTAFY_ENV_DIR/docker/.env.local`, which that file
+    passes to the runtime whole.
+  - **Hosted, with `docker/docker-compose.runtime.provider.yml`:** the environment the runtime provider service runs
+    with. The provider runs Compose with that environment, and the file forwards `INSTAFY_HOLD_PAGES` to every runtime
+    it starts, as `1` (holding on) when it is unset or empty.
 
 ## Waking a stopped site
 
