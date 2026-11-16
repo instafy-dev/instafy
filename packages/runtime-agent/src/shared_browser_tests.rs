@@ -3938,7 +3938,7 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
     end_chat_browser_run(run);
 
     // Another chat's turn was given none of it, its site included: the way on
-    // is the official site of what its task names.
+    // is only that a site's home page always opens, naming no site.
     let run = chat_browser_run_given(
         &fixture,
         Uuid::new_v4(),
@@ -3959,8 +3959,11 @@ fn made_up_address_words(site: &str) -> String {
 }
 
 /// The words an address no message and no page gave is refused with, on a site the chat was
-/// not given: to the official site of what the task names, never the refused site's root.
-const MADE_UP_ON_A_SITE_NOBODY_GAVE: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open the official site of what the task names (the venue's, operator's, shop's or reviewer's; for a route, the operator's journey planner), and follow its links or use its own search.";
+/// not given: only that a site's home page always opens, naming no site, never the refused
+/// site's root. Which site to open is the browser skill's "Finding a page": told to open the
+/// official site of what the task names, a turn tried a path it made up on a bookshop's site and
+/// ended without the opening hours its home page showed (a local test, Nov 9).
+const MADE_UP_ON_A_SITE_NOBODY_GAVE: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. A site's home page, its address with no path, always opens.";
 
 /// A page gives the addresses its text spells out, read as a task's are: with
 /// a scheme or without, and with a parenthesis of its own
@@ -4007,9 +4010,9 @@ async fn a_page_gives_the_addresses_its_text_spells_out() {
 /// A refused address's way on names its site's root only on a site the chat
 /// was given: one the person's messages or the task named, by an address or by
 /// its name alone, or one the chat's browser turns read a page on past the
-/// site's root. On any other site, a search engine's included, it is the
-/// official site of what the task names, in the chat's own tab and in a tab of
-/// Octo's own alike. Sent to the root of whatever site it refused, a route
+/// site's root. On any other site, a search engine's included, it says only
+/// that a site's home page always opens, naming no site, in the chat's own tab
+/// and in a tab of Octo's own alike. Sent to the root of whatever site it refused, a route
 /// question opened a search engine nobody named and asked the person to let it
 /// send a search, which they refused (a local test, Nov 8). A page's link or
 /// text gives its address, never its site, and a site's root, which opens
@@ -4049,7 +4052,7 @@ async fn a_refused_address_names_its_sites_root_only_on_a_site_the_chat_was_give
         words.contains(&made_up_address_words("https://www.visit.example")),
         "{words}"
     );
-    // A site nobody named: the official site of what the task names, and no
+    // A site nobody named: only that a site's home page always opens, and no
     // word of the refused site, in either tab.
     for path in ["/v1/tabs/open", "/v1/navigate"] {
         let words = failure_of(&step(path, "https://www.search.example/maps"));
@@ -13761,7 +13764,7 @@ fn a_covered_click_is_refused_at_once_in_words() {
     for (mode, words) in [
         (
             "click-covered-by-notice",
-            "A cookie notice covers this page, and the browser could not decline it. Open a link under it by its address, or the official site of the place or service the task is about.",
+            "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site's home page, its address with no path, always opens.",
         ),
         (
             "click-covered",
