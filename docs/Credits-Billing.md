@@ -209,6 +209,14 @@ to apply to Instafy's own readers. Instafy supplies no curated website denylist.
 Codex selects the search transport for the model: Responses Lite uses the proxy's native search
 route. Its provider response has no token-usage receipt, so search attempts are recorded separately
 with unknown usage; model token totals do not measure the account's complete search cost or quota.
+A managed run on the controller's OpenAI API key has no ChatGPT login, and OpenAI's ChatGPT search
+endpoint does not serve an API key. With the proxy's `PROXY_MANAGED_NATIVE_WEB_SEARCH` on (off by
+default), the proxy answers such a run's native search itself with OpenAI's hosted `web_search` on
+the platform key, which OpenAI bills at $10 per 1,000 searches plus the search content's tokens at
+the model's input rate. The proxy logs each of these searches with its job, model, tokens and
+billable searches, never its query (see the proxy README), and charges no credits for them. The
+controller grants native search only for a person's own ChatGPT login, so no managed run searches
+this way today.
 Static proxy credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
 The pricing envs are standard-tier rates, so the platform key also serves only OpenAI's standard

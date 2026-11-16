@@ -2,7 +2,7 @@ use super::*;
 use axum::body::Body;
 use futures_util::stream;
 
-fn search_reply() -> Value {
+pub(super) fn search_reply() -> Value {
     json!({"output":"Found the source: https://example.org/source", "encrypted_output":"opaque:unchanged", "results":[{"type":"text_result","ref_id":"turn0search0","url":"https://example.org/source","future":{"preserved":true}}], "future_top_level":true})
 }
 
@@ -19,8 +19,14 @@ pub(super) async fn upstream_search_stub(
     AxumJson(payload): AxumJson<Value>,
 ) -> axum::response::Response {
     let bearer = record_upstream_request(&stub, &headers, &payload);
-    assert_eq!(bearer, format!("Bearer {BYO_CHATGPT_STUB_TOKEN}"));
-    assert_eq!(headers["chatgpt-account-id"], "chatgpt-account-stub");
+    // A person's own login comes with its account; the proxy's static login,
+    // which serves managed runs on a local stack, with none.
+    if bearer == format!("Bearer {MANAGED_STUB_KEY}") {
+        assert!(headers.get("chatgpt-account-id").is_none());
+    } else {
+        assert_eq!(bearer, format!("Bearer {BYO_CHATGPT_STUB_TOKEN}"));
+        assert_eq!(headers["chatgpt-account-id"], "chatgpt-account-stub");
+    }
     if let Some((status, body)) = next_canned_response(&stub) {
         return (status, AxumJson(body)).into_response();
     }
@@ -47,7 +53,7 @@ pub(super) async fn upstream_search_stub(
     AxumJson(search_reply()).into_response()
 }
 
-fn grant(credential: Option<&str>, enabled: bool, bound: bool) -> String {
+pub(super) fn grant(credential: Option<&str>, enabled: bool, bound: bool) -> String {
     let mut claims = json!({"aud":"proxy","iss":"runtime-controller","project_id":"11111111-1111-4111-8111-111111111111","runtime_id":"22222222-2222-4222-8222-222222222222","run_id":RUN_ID,"credential_id":credential,"native_web_search":enabled,"exp":chrono::Utc::now().timestamp()+300});
     if bound {
         claims["job_id"] = json!("77777777-7777-4777-8777-777777777777");
@@ -60,7 +66,7 @@ fn grant(credential: Option<&str>, enabled: bool, bound: bool) -> String {
     )
     .unwrap()
 }
-fn request() -> Value {
+pub(super) fn request() -> Value {
     json!({"id":"session-ref","model":"gpt-6-luna","commands":{"search_query":[{"q":"native contract","domains":["example.org"]}],"open":[{"ref_id":"turn0search0"}]},"settings":{"external_web_access":true,"filters":{"allowed_domains":["example.org"]}},"input":[{"role":"user","type":"message","content":[{"type":"input_text","text":"visible question"}]}],"max_output_tokens":8192})
 }
 

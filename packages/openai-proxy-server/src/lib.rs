@@ -9,6 +9,8 @@ mod incomplete_response;
 mod model_transport;
 pub mod proxy;
 pub mod proxy_auth;
+pub mod search_bridge;
+mod search_query;
 mod stream_passthrough;
 mod upstream_error;
 mod usage;
