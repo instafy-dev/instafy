@@ -325,7 +325,10 @@ is refunded anyway, under the rule in "Failed turns" below, which covers every f
 refund row is keyed per prompt, so a completion delivered again, the other rule, or the expiry
 sweep reaching the same prompt, never writes a second one. The Studio tells a managed-AI run that hit the limit that Instafy AI is unavailable
 (`aiAccessMode` on the run's final message), with no "Try again", since a resend before the
-window reopens fails the same way.
+window reopens fails the same way. It says when to come back, in the reader's own clock ("Try
+again after Sun, Nov 15, 12:03 AM."): Codex words the reset in its machine's clock, and the
+runtime passes it on as the moment in UTC (`usage_limit_reset.rs`). A copy of the chat carries
+the same sentence, never the service's own.
 
 Ambient multi-human evaluation turns defer the managed reserve and prompt count until
 the agent actually answers. Telemetry and explicitly hidden progress do not start a

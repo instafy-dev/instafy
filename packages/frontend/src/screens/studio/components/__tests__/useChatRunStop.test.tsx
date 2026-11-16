@@ -8,7 +8,10 @@ vi.mock("../../../../services/runtimeController/conversationStop", () => ({ stop
 import { applyReplyDraft, clearReplyDrafts, conversationReplyDrafts } from "../../../../conversations/replyDrafts";
 import { RuntimeStateProvider, useRuntimeState } from "../../../../runtime/RuntimeStateProvider";
 import type { RunRecord } from "../../../../types";
-import { CHAT_RUN_STOP_TIMEOUT_MS, useChatRunStop, type ChatRunStopController, type ChatRunStopOptions, type ChatRunStopTarget } from "../useChatRunStop";
+import {
+  CHAT_RUN_STOP_HANDOVER_MS, CHAT_RUN_STOP_TIMEOUT_MS, useChatRunStop, type ChatRunStopController, type ChatRunStopOptions,
+  type ChatRunStopTarget,
+} from "../useChatRunStop";
 
 const octo: ChatRunStopTarget = { jobId: "octo-1", runId: "r1", agentHandle: "octo", agentDisplayName: "Octo", initiatingUserId: "viewer" };
 const scribe: ChatRunStopTarget = { jobId: "scribe-1", runId: "r2", agentHandle: "scribe", agentDisplayName: "Scribe", initiatingUserId: "viewer" };
@@ -127,6 +130,89 @@ describe("useChatRunStop", () => {
     await act(async () => { document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await vi.runAllTicks(); });
     expect(cancel).toHaveBeenLastCalledWith("chat", ["replacement"]);
     expect(cancel).toHaveBeenCalledTimes(2);
+  });
+
+  // A local test, Nov 10: between a message's routing step and its browser
+  // turn there was nothing to press for 3.35 s, and 0.36 s between the
+  // browser turn and its build. Stop stays through those gaps, and a press
+  // there stops the part that comes next as it starts.
+  describe("between two parts of a message", () => {
+    const browserTurn: ChatRunStopTarget = { ...octo, jobId: "browser-1", runId: "r3" };
+
+    it("keeps Stop for a moment after a turn ends by itself, then lets it go when nothing follows", async () => {
+      await render();
+      await render({ targets: [] });
+      expect(controller!.visible).toBe(true);
+      expect(controller!.phase).toBe("idle");
+      await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS));
+      expect(controller!.visible).toBe(false);
+    });
+
+    it("keeps Stop for as long as the next part is on its way", async () => {
+      await render();
+      await render({ targets: [], between: true });
+      await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS * 10));
+      expect(controller!.visible).toBe(true);
+      await render({ between: false });
+      expect(controller!.visible).toBe(false);
+    });
+
+    it("stops the part that goes on by itself as soon as it starts", async () => {
+      cancel.mockResolvedValue(accepted("browser-1"));
+      await render({ targets: [], between: true });
+      await act(async () => controller!.requestStop());
+      // Nothing runs yet: nothing is asked of the controller, and Stop says it is stopping.
+      expect(cancel).not.toHaveBeenCalled();
+      expect(controller!.visible).toBe(true);
+      expect(controller!.phase).toBe("stopping");
+      await render({ targets: [browserTurn], followOnTargets: [browserTurn], between: false });
+      expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["browser-1"]);
+      expect(controller!.phase).toBe("requested");
+    });
+
+    it("works the same from Escape, and in the moment after a turn ends by itself", async () => {
+      cancel.mockResolvedValue(accepted("browser-1"));
+      await render();
+      await render({ targets: [] });
+      await act(async () => { document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await vi.runAllTicks(); });
+      expect(controller!.phase).toBe("stopping");
+      await render({ targets: [browserTurn], followOnTargets: [browserTurn] });
+      expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["browser-1"]);
+    });
+
+    it("never stops a message someone sends meanwhile, and lets go once nothing more comes", async () => {
+      const own: ChatRunStopTarget = { ...octo, jobId: "own-1", runId: "r4" };
+      await render({ targets: [], between: true });
+      await act(async () => controller!.requestStop());
+      // The person wrote: their turn starts, and the next part never does.
+      await render({ targets: [own], followOnTargets: [], between: false });
+      expect(cancel).not.toHaveBeenCalled();
+      expect(controller!.phase).toBe("idle");
+      expect(controller!.targets).toEqual([own]);
+    });
+
+    it("asks before it stops a part someone else started", async () => {
+      const theirs: ChatRunStopTarget = { ...browserTurn, initiatingUserId: "another-person" };
+      await render({ targets: [], between: true });
+      await act(async () => controller!.requestStop());
+      await render({ targets: [theirs], followOnTargets: [theirs], between: false });
+      expect(cancel).not.toHaveBeenCalled();
+      expect(controller!.confirmationTargets?.map((target) => target.jobId)).toEqual(["browser-1"]);
+    });
+
+    it("keeps no Stop in another chat opened as a turn of this one runs", async () => {
+      await render();
+      await render({ conversationId: "other-chat", targets: [] });
+      expect(controller!.visible).toBe(false);
+    });
+
+    it("keeps no Stop after a turn the Stop itself ended", async () => {
+      cancel.mockResolvedValue(accepted("octo-1"));
+      await render();
+      await act(async () => controller!.requestStop());
+      await render({ targets: [] });
+      expect(controller!.visible).toBe(false);
+    });
   });
 
   // A local test, Nov 7: the controller committed a Stop 42 ms after the

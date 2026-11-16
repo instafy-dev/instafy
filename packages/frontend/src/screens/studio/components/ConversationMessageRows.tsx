@@ -17,7 +17,7 @@ import {
 } from "./chatAssistantIdentity";
 import { shouldAssistantMessagesShareVisualGroup } from "./assistantMessageGrouping";
 import { ChatBubbleRow } from "./ChatBubbleRow";
-import { ChatSiteContext, ChatSiteSettledProvider, conversationSite, useKnownChatSite } from "./chatSiteContext";
+import { ChatSiteContext, ChatSiteSettledProvider, ChatSiteSoFarContext, conversationSite, useKnownChatSite } from "./chatSiteContext";
 import { ChatLaterChangesContext, conversationLaterChanges } from "./chatLaterChanges";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
 import {
@@ -667,11 +667,13 @@ export function ConversationMessageRows({
 
   return (
     <ChatSiteContext.Provider value={knownSite}>
-      <ChatSiteSettledProvider historyReady={historyReady} chatKey={conversationLocalId}>
-        <ChatLaterChangesContext.Provider value={laterChanges}>
-          <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>
-        </ChatLaterChangesContext.Provider>
-      </ChatSiteSettledProvider>
+      <ChatSiteSoFarContext.Provider value={site}>
+        <ChatSiteSettledProvider historyReady={historyReady} chatKey={conversationLocalId}>
+          <ChatLaterChangesContext.Provider value={laterChanges}>
+            <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>
+          </ChatLaterChangesContext.Provider>
+        </ChatSiteSettledProvider>
+      </ChatSiteSoFarContext.Provider>
     </ChatSiteContext.Provider>
   );
 }

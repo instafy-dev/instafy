@@ -751,6 +751,9 @@ export function useAgentJobThreadPreviewState({
       viewerCanAnswer: browserApproval.viewerCanAnswer,
       approvals: browserApproval.settled,
       startingLine,
+      // The browser turn's part is over and the building turn's is on its
+      // way: the hand-over reads as work going on, never as a long "Thinking…".
+      handingOver: handBackPending && !startsAgain,
     };
     const loaded = summarizeTurnActivity(threadMessages, options);
     if (!recordedSteps || (activityPhase !== "completed" && activityPhase !== "cancelled")) {
@@ -765,9 +768,11 @@ export function useAgentJobThreadPreviewState({
     browserApproval.settled,
     browserApproval.viewerCanAnswer,
     detailUpdates,
+    handBackPending,
     jobId,
     recordedSteps,
     startingLine,
+    startsAgain,
     threadMessages,
     turnJobIds,
   ]);
