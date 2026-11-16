@@ -94,6 +94,11 @@ services:
       INSTAFY_PLAYWRIGHT_MCP_PORT: ${INSTAFY_PLAYWRIGHT_MCP_PORT:-}
       INSTAFY_PLAYWRIGHT_MCP_PROFILE_DIR: ${INSTAFY_PLAYWRIGHT_MCP_PROFILE_DIR:-}
       INSTAFY_PLAYWRIGHT_MCP_ALLOW_ISOLATED: ${INSTAFY_PLAYWRIGHT_MCP_ALLOW_ISOLATED:-}
+      # The held-pages off switch (docs/Previews.md, "The switch"). The
+      # provider runs Compose with its own environment, so set
+      # INSTAFY_HOLD_PAGES=0 on the provider service to stop holding pages on
+      # the runtimes it starts from then on. Unset or empty keeps holding on.
+      INSTAFY_HOLD_PAGES: ${INSTAFY_HOLD_PAGES:-1}
       CONTROLLER_BASE_URL: ${CONTROLLER_BASE_URL:-http://host.docker.internal:80}
       SPACE_ID: ${SPACE_ID:-00000000-0000-0000-0000-000000000000}
       PROJECT_ID: ${SPACE_ID:-00000000-0000-0000-0000-000000000000}

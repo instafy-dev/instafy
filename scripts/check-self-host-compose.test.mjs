@@ -299,6 +299,109 @@ test("the provider runtime forwards an unset git remote as empty", () => {
   );
 });
 
+// The runtime agent's held-pages switch turns holding another chat's pages off
+// without a release. A provider runtime gets only what the provider Compose
+// file's `environment:` lists, and that file once left the switch out, so it
+// could not be set on hosted runtimes at all.
+const HOLD_PAGES_SOURCE_FILE = "packages/runtime-agent/src/jobs/space_pages.rs";
+
+function holdPagesVariable() {
+  const source = fs.readFileSync(path.join(REPO_ROOT, HOLD_PAGES_SOURCE_FILE), "utf8");
+  const name = source.match(/const HOLD_PAGES_ENV: &str = "([A-Za-z_][A-Za-z0-9_]*)";/)?.[1];
+  assert.ok(name, `${HOLD_PAGES_SOURCE_FILE}: HOLD_PAGES_ENV not found`);
+  return name;
+}
+
+test("the provider runtime forwards the held-pages switch, on when unset", () => {
+  const name = holdPagesVariable();
+  assert.equal(name, "INSTAFY_HOLD_PAGES");
+  assert.equal(providerRuntimeService().environment.get(name), `\${${name}:-1}`);
+});
+
+test(
+  "the held-pages switch reaches the runtime from where each Compose file reads it",
+  { skip: !composeAvailable && "Docker Compose v2 unavailable" },
+  () => {
+    const name = holdPagesVariable();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-compose-hold-pages-"));
+    try {
+      const emptyEnvFile = path.join(root, "empty.env");
+      fs.writeFileSync(emptyEnvFile, "");
+      fs.mkdirSync(path.join(root, "docker"));
+      const localEnvFile = path.join(root, "docker", ".env.local");
+      const sidecarEnvFile = path.join(root, "proxy-credential-lease.env");
+      fs.writeFileSync(sidecarEnvFile, "");
+      const runtimeValue = (composeFile, { environment = {}, envLocal = "" } = {}) => {
+        fs.writeFileSync(localEnvFile, envLocal);
+        const result = spawnSync(
+          "docker",
+          [
+            "compose",
+            "--project-directory",
+            root,
+            "--env-file",
+            emptyEnvFile,
+            "--file",
+            path.join(REPO_ROOT, composeFile),
+            "config",
+            "--format",
+            "json",
+            "runtime",
+          ],
+          {
+            encoding: "utf8",
+            // Only what the Docker CLI needs, so no ambient value leaks in.
+            env: {
+              PATH: process.env.PATH,
+              HOME: process.env.HOME,
+              ...(process.env.DOCKER_CONFIG
+                ? { DOCKER_CONFIG: process.env.DOCKER_CONFIG }
+                : {}),
+              INSTAFY_ENV_DIR: root,
+              PROXY_CREDENTIAL_LEASE_ENV_FILE: sidecarEnvFile,
+              RUNTIME_PROXY_IMAGE: "runtime-proxy:fixture",
+              RUNTIME_AGENT_IMAGE: "runtime-agent:fixture",
+              ...environment,
+            },
+            timeout: 30_000,
+          },
+        );
+        assert.equal(result.status, 0, `${composeFile}: ${result.stderr}`);
+        return JSON.parse(result.stdout).services.runtime.environment[name];
+      };
+
+      // Hosted: the provider service runs Compose with its own environment
+      // (allocator/docker.rs), so its value is the one that counts.
+      assert.equal(runtimeValue(PROVIDER_COMPOSE_FILE), "1", "unset keeps holding on");
+      assert.equal(
+        runtimeValue(PROVIDER_COMPOSE_FILE, { environment: { [name]: "" } }),
+        "1",
+        "empty keeps holding on",
+      );
+      assert.equal(
+        runtimeValue(PROVIDER_COMPOSE_FILE, { environment: { [name]: "0" } }),
+        "0",
+        "the provider's 0 reaches the runtime",
+      );
+
+      // Self-hosted: the local file hands the runtime all of .env.local. An
+      // `environment:` entry would override that file, so it must list none.
+      assert.equal(
+        runtimeValue(COMPOSE_FILE, { envLocal: `${name}=0\n` }),
+        "0",
+        ".env.local's 0 reaches the runtime",
+      );
+      assert.equal(
+        runtimeValue(COMPOSE_FILE),
+        undefined,
+        "unset stays unset, which the runtime reads as on",
+      );
+    } finally {
+      fs.rmSync(root, { force: true, recursive: true });
+    }
+  },
+);
+
 // runtime-agent runs as the container's first process, and nothing else
 // there reaps the processes its tools leave behind: a machine kept 145
 // finished ones (git, Chromium and its crash handler) after 52 minutes. An
