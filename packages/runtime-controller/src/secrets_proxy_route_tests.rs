@@ -21,6 +21,8 @@ use super::{
     is_proxy_route_secret_name, normalize_secret_name, proxy_route_name_refused,
     PROXY_ROUTE_NAME_REFUSED_CODE,
 };
+use crate::config::CredentialEncryptionKey;
+use crate::credential_keys::CredentialKeyRing;
 use crate::tests::{build_test_state, call_router, sql, sql_one};
 
 const CHOSEN_URL: &str = "http://project-chosen.invalid";
@@ -262,9 +264,12 @@ async fn delivery_skips_the_proxy_routes_names_and_the_listing_keeps_them() -> a
             }
         }
         // A route name is skipped before anything is decrypted, so a row no key opens does not
-        // fail the job's other secrets, in a spelling the API never wrote either.
+        // fail the job's other secrets, in a spelling the API never wrote either. This one is
+        // sealed with a fresh key the space does not hold.
+        let other_keys: CredentialKeyRing = CredentialEncryptionKey::random_for_test().into();
+        let (nonce, ciphertext) = other_keys.seal(b"inert-unreadable-value")?;
         let unreadable = space
-            .store_sealed("codex-api-key", "AAAAAAAAAAAAAAAA", "AAAA")
+            .store_sealed("codex-api-key", &nonce, &ciphertext)
             .await?;
         sql(
             &space.pool,
@@ -282,8 +287,8 @@ async fn delivery_skips_the_proxy_routes_names_and_the_listing_keeps_them() -> a
                 .map_err(|(status, error)| anyhow::anyhow!("{status}: {}", error.0.message))?;
         let app = super::router().with_state(build_test_state(space.pool.clone(), config));
         let (status, body) = request_secrets(&app, &token, json!({ "job_id": job_id })).await?;
-        // The body carries secret values, so it is never printed.
-        assert!(status == StatusCode::OK, "agent secrets answered {status}");
+        // The answer carries secret values, so no message prints any part of it.
+        assert!(status == StatusCode::OK, "agent secrets did not answer 200");
 
         let env = &body["env"];
         for (_, name, value) in &delivered {
@@ -318,7 +323,10 @@ async fn delivery_skips_the_proxy_routes_names_and_the_listing_keeps_them() -> a
         inventory.sort_unstable();
         let mut expected: Vec<&str> = delivered.iter().map(|(_, name, _)| name.as_str()).collect();
         expected.sort_unstable();
-        assert_eq!(inventory, expected);
+        assert!(
+            inventory == expected,
+            "the job's inventory names other secrets than {expected:?}"
+        );
 
         // Only what was delivered counts as used.
         for (secret_id, name, _) in delivered.iter().chain(skipped.iter()) {
