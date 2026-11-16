@@ -56,7 +56,7 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    with no wait and no call log, and a cover that goes within a moment is
 //    waited for. A plain link under a cookie notice is no click to refuse: its
 //    address opens in the same tab, as a navigate step to it does, and the
-//    step says so.
+//    step says so. A link to the page itself is refused as a button is.
 // 9. A cookie notice is never the person's step. A notice's accept is never
 //    listed, as a button, a link, an "Allow all" or an "Agree and close": a
 //    reading counts it among the controls it leaves out, so no step can press
@@ -322,12 +322,15 @@ const POLICY = `<h1>Your account</h1><p>Signed in as Ana.</p><p><a href="/readin
 const CHECKOUT = `<p>Total 140 euros</p><form method="post" action="/pay">
 <iframe src="{frame}/card" title="Secure card payment input frame" width="420" height="60"></iframe><button>Pay</button></form>`;
 // A tourism site's consent notice over the whole page, with an accept and its
-// settings and no reject button, over a link and a button of the page's own,
-// and a cover that is no notice (a loading screen). `live.hideOnScroll()`
-// makes the cover go 300 ms after the page scrolls, as a toast that fades once
-// the page moves does.
+// settings and no reject button, over a link and a button of the page's own
+// and a link to the page itself that only runs its script (`href="#"`), and a
+// cover that is no notice (a loading screen). `live.hideOnScroll()` makes the
+// cover go 300 ms after the page scrolls, as a toast that fades once the page
+// moves does.
 const NOTICE = `<h1>Visit the city</h1><p style="margin-top:1200px"><a href="/reading/visit" id="attractions">Attractions</a>
-<button type="button" onclick="window.pressed = 'map'">Show the map</button></p>
+<button type="button" onclick="window.pressed = 'map'">Show the map</button>
+<a href="#" onclick="window.pressed = 'hours'; document.getElementById('hours').hidden = false; return false;">Opening hours</a></p>
+<p id="hours" hidden>Open daily from 10:00 to 19:00.</p>
 <div id="consent-backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.4)"><div role="dialog" aria-label="Your privacy" style="margin:80px auto;width:320px;padding:16px;background:#fff">
 <p>We and our partners store and read data on your device.</p>
 <button type="button" onclick="window.consentAnswer = 'settings'">Learn more</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Agree and close</button>
@@ -989,6 +992,22 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.equal(new URL(runPage.url()).pathname, "/reading/notice");
     assert.deepEqual(requests, [], "the covered click opened something");
     assert.equal(prompts.length, promptsBeforeBanner);
+    // So is a link to the page itself (an "Opening hours" whose `href="#"`
+    // only runs the page's script): it has no address of its own to open.
+    // Opened as one, it moved within the page, ran nothing, showed no hours,
+    // and the step said its address was opened.
+    const selfLink = await runTool("POST", "/v1/click", { index: control(reading, "Opening hours").index, snapshotId: reading.snapshotId });
+    assert.equal(selfLink.code, 1, selfLink.stdout);
+    assert.ok(selfLink.stderr.includes(NOTICE_WORDS), selfLink.stderr);
+    assert.doesNotMatch(selfLink.stderr, /address was opened/u);
+    assert.deepEqual(
+      await runPage.evaluate(() => [window.pressed ?? null, document.getElementById("hours").hidden]),
+      [null, true],
+      "the link to the page itself ran or showed something",
+    );
+    assert.equal(runPage.url(), `${sites().site}/reading/notice`, "the link to the page itself moved the tab");
+    assert.deepEqual(requests, [], "the link to the page itself opened something");
+    assert.equal(prompts.length, promptsBeforeBanner);
     // A plain link under it is no click to refuse: its address opens in the
     // same tab, as a navigate step to it does, at once and with no prompt
     // under routine browsing, and the result says so. Told to open such a
@@ -1277,7 +1296,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a long page's text says where it is cut and how far to scroll, and scrolling reads all of it within the reading's cap, past a skip link and a pinned header, on a plain-text page and in a long paragraph; a view out of reach says so; past 200 controls those scrolled past are left out and counted, past 600 matches too, and a closed list's options never crowd out a form",
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
-        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so, a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
+        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so (a link to the page itself is refused as a button is), a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never the person's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's buttons is refused as one on anything but fields, outlining, publishing and pressing nothing, in the chat's own tab and in Octo's own; under a bar whose only button accepts the planner's own button works with no prompt",
         "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
       ],

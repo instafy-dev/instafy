@@ -506,15 +506,18 @@ Two steps never ask, in Ask too:
   nothing on, or have come after the page was read, which the next look
   declines when it can), never to pause on it and naming no site (which site
   to open next is the browser skill's "Finding a page"). A plain link under
-  such a notice is no click to refuse: one that leads to its own http(s)
-  address, sends no form, downloads nothing and names no risk opens that
-  address in the same tab instead, as a `navigate` step to it does and under
-  its rules (the address is judged, its site asked for when the run has not
-  used it, a risky one asks the person), and the step's `done` says so ("A
-  cookie notice covers "Opening hours", so its address was opened in this tab
-  instead."). Told to open such a link by its address, a turn wrote the
-  address of a tourism site's listing into its own `stopped` line and never
-  opened it. Any other cover says that something covers the
+  such a notice is no click to refuse: one that leads to an http(s) address
+  other than the page it is on, sends no form, downloads nothing and names no
+  risk opens that address in the same tab instead, as a `navigate` step to it
+  does and under its rules (the address is judged, its site asked for when the
+  run has not used it, a risky one asks the person), and the step's `done`
+  says so ("A cookie notice covers "Attractions", so its address was opened
+  in this tab instead."). Told to open such a link by its address, a turn
+  wrote the address of a tourism site's listing into its own `stopped` line
+  and never opened it. A link to the page it is on (`href="#"`, or a part of
+  the page) is refused as a button is: opened as an address, one that only
+  ran the page's script moved within the page, ran nothing, and the step said
+  its address was opened. Any other cover says that something covers the
   control, names it by its tag, role and label from the same look (the
   nearest element around the click's point that has a role or a label or is a
   control, such as a page's own date picker or a carousel's slide: `Something
@@ -1666,16 +1669,22 @@ browser on the person's device names no reading).
 
 **A page read at another address has a page.** runtime-agent also keeps where
 each `navigate` or `open_tab` left its tab for the address it asked for. A
-`no-page` line for an address whose open ended on another page (a redirect, or
-the browser's own reload of a load the network cut) that the turn's answer
-gives what it showed (a finding line with its address and no stop) is left out
-of any pass of the turn, compared as pages as above: a shop's product address
-that led to its page at another address got `no-page` beside the facts read on
-that page, and the reply and the page said the product's page "wasn't there".
-A `no-page` at the address where a tab ended, one whose open ended on a page
-the answer gives nothing of (a page that says the product is gone), another
-stop at the asked address and a line for another page of the site stay, in the
-turn's own words.
+`no-page` line for an address whose open ended on that page at another address
+(a redirect, or the browser's own reload of a load the network cut), which the
+turn's answer gives what it showed (a finding line with its address and no
+stop), is left out of any pass of the turn, compared as pages as above: a
+shop's product address that led to its page at another address got `no-page`
+beside the facts read on that page, and the reply and the page said the
+product's page "wasn't there". The page keeps its own name there, the last
+part of its path, and the query it was asked with; a line or a finding that
+leaves the query out, as a turn wrote a product link without its tracking
+words, still names it. A path an open asked for is a page of the site its tab
+ended on. These stay, in the turn's own words: a `no-page` at the address where
+a tab ended; one whose open ended on another page, such as the home page, the
+listing or another product a shop sends a product it no longer sells to; one
+whose open ended on a page the answer gives nothing of; one for the same path
+on another site; another stop at the asked address; and a line for another
+page or query of the site.
 
 Whether the site answered is judged by the load's own request,
 never by the tab's address, which a page's script may change while the load

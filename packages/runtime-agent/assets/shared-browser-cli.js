@@ -4902,6 +4902,18 @@ function resolvedTargetDestination(description, currentUrl) {
   }
 }
 
+// An address without its fragment, the part a link to a place on its page
+// adds: the page it loads.
+function addressWithoutFragment(address) {
+  try {
+    const url = new URL(address);
+    url.hash = "";
+    return url.toString();
+  } catch (_) {
+    return address;
+  }
+}
+
 // The step stays on the site it was judged on. A page that moved to another
 // site after the person said yes in this step ends the browser run
 // (approval_stale): their yes was for a step on that site, and the reply says
@@ -6496,11 +6508,15 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const readingStep = freeSearch || consentRejection || (routineCovers(step, target.description) &&
       !isFormSubmissionControl(target.description));
     refuseUnlessReadingStep(readingStep, step);
-    // A plain link: one that leads to its http(s) address, sends no form,
-    // downloads nothing and names no risk (routineCovers). A cookie notice the
-    // browser could not decline over it opens that address instead
-    // (openCoveredLink); any other control under one is refused in its words.
-    const plainLink = Boolean(target.description.href) && Boolean(rawDestination) && !clickSubmission &&
+    // A plain link: one that leads to an http(s) address other than the page
+    // it is on, sends no form, downloads nothing and names no risk
+    // (routineCovers). A cookie notice the browser could not decline over it
+    // opens that address instead (openCoveredLink); any other control under
+    // one is refused in its words, a link to the page it is on too: one whose
+    // `href="#"` only runs the page's script, opened as an address, moved
+    // within the page, ran nothing, and the step said its address was opened.
+    const plainLink = Boolean(target.description.href) && Boolean(rawDestination) &&
+      addressWithoutFragment(rawDestination) !== addressWithoutFragment(page.url()) && !clickSubmission &&
       !isFormSubmissionControl(target.description) && target.description.policy?.download !== true &&
       !WITHHOLDING_CATEGORIES.has(step.category) && routineCovers(step, target.description);
     const coveredLink = (error) => error instanceof CoveredByNotice && plainLink;

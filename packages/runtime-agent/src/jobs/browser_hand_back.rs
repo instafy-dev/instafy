@@ -1004,6 +1004,38 @@ fn site_and_page(raw: &str) -> Option<(Option<String>, String)> {
     Some((site, page))
 }
 
+/// A page as [`site_and_page`] gives it: its path, and its query if it has one.
+fn path_and_query(page: &str) -> (&str, Option<&str>) {
+    page.split_once('?')
+        .map_or((page, None), |(path, query)| (path, Some(query)))
+}
+
+/// Whether a browser turn's line names this page of a site, as [`site_and_page`] gives both:
+/// the same path, and the same query unless the line leaves it out. A shop's product link
+/// carried tracking words, which its redirect kept, and the turn wrote the page it read, and
+/// the address it asked for, without them (a local test, Nov 10). A line with a query of its
+/// own names another page: a search's results, say.
+fn names_page(written: &str, page: &str) -> bool {
+    let ((path, query), (page_path, page_query)) = (path_and_query(written), path_and_query(page));
+    path == page_path && (query.is_none() || query == page_query)
+}
+
+/// Whether the page an open's tab ended on is the page it asked for at another address, as
+/// [`site_and_page`] gives both: a page a site moves to another host or under another folder
+/// keeps its own name, the last part of its path, and the query it was asked with. A site's
+/// home page, the listing above the page and another product a shop sends one it no longer
+/// sells to are other pages, so a `no-page` for the address asked for stands.
+fn moved_page(asked: &str, ended: &str) -> bool {
+    fn name(path: &str) -> &str {
+        path.rsplit('/').next().unwrap_or_default()
+    }
+    let ((asked_path, asked_query), (ended_path, ended_query)) =
+        (path_and_query(asked), path_and_query(ended));
+    !name(asked_path).is_empty()
+        && name(asked_path).eq_ignore_ascii_case(name(ended_path))
+        && (asked_query.is_none() || asked_query == ended_query)
+}
+
 /// Leaves out of a browser turn's answer each finding that says a page stopped it at an address
 /// none of its steps tried. `tried` holds the addresses its steps asked the browser to open,
 /// whatever it answered, the ones the browser said a step's tab was on and the address of each
@@ -1028,13 +1060,16 @@ fn site_and_page(raw: &str) -> Option<(Option<String>, String)> {
 ///
 /// Nor does a `no-page` stand for an address whose page the turn read at another address:
 /// pages are compared by where the tab ended. An open that asked for it and left its tab on
-/// another page (`BrowserTried::ended_at`: a redirect, or the browser's own reload of a load the
-/// network cut) read its page there, when the answer gives what that page showed (a finding line
-/// with its address and no stop). A shop's product address that led to its page at another
+/// that page at another address (`BrowserTried::ended_at`: a redirect, or the browser's own
+/// reload of a load the network cut; the page keeps its own name there, [`moved_page`]) read
+/// its page there, when the answer gives what that page showed (a finding line with its address
+/// and no stop, [`names_page`]). A shop's product address that led to its page at another
 /// address got `no-page` beside the facts read on that page, and the reply and the page said the
 /// product's page "wasn't there" (a local test, Nov 10). A `no-page` at the address where a tab
-/// ended stays, in the turn's own words about a page it opened, and so does one whose open ended
-/// on a page the answer gives nothing of, such as a page that says the product is gone.
+/// ended stays, in the turn's own words about a page it opened, and so do one whose open ended
+/// on another page, such as the home page a shop sends a product it no longer sells to, and one
+/// whose open ended on a page the answer gives nothing of. A path an open asked for is a page of
+/// the site its tab ended on, so a `no-page` for the same path on another site stays.
 pub(super) fn leave_out_addresses_never_opened(
     summary: &mut String,
     not_given: &[String],
@@ -1050,25 +1085,37 @@ pub(super) fn leave_out_addresses_never_opened(
                     .is_none_or(|listed_site| listed_site == site)
         })
     };
-    // The pages the answer gives what they showed: a finding line with an address and no stop.
-    let read: Vec<(Option<String>, String)> = summary
+    // The pages the answer gives what they showed: a finding line with a full address and no
+    // stop.
+    let read: Vec<(String, String)> = summary
         .lines()
         .filter_map(json_object_line)
         .filter(|object| stop_of(object).is_none())
-        .filter_map(|object| site_and_page(object.get("url")?.as_str()?))
+        .filter_map(
+            |object| match site_and_page(object.get("url")?.as_str()?)? {
+                (Some(site), page) => Some((site, page)),
+                (None, _) => None,
+            },
+        )
         .collect();
-    // The pages an open asked for whose tab ended on another page, which the answer read.
-    let read_elsewhere: Vec<(Option<String>, String)> = tried
+    // Each page an open asked for whose tab ended on that page at another address
+    // ([`moved_page`]), which the answer read, with that address. A path asked for on its tab's
+    // own site is a page of the site the tab ended on, never of any site.
+    let read_elsewhere: Vec<((String, String), (String, String))> = tried
         .ended_at()
         .iter()
         .filter_map(|(asked, ended)| {
-            let asked = site_and_page(asked)?;
             let (Some(ended_site), ended_page) = site_and_page(ended)? else {
                 return None;
             };
-            let same =
-                asked.1 == ended_page && asked.0.as_ref().is_none_or(|site| *site == ended_site);
-            (!same && among(&read, &ended_site, &ended_page)).then_some(asked)
+            let (asked_site, asked_page) = site_and_page(asked)?;
+            let asked_site = asked_site.unwrap_or_else(|| ended_site.clone());
+            let moved = (asked_site != ended_site || asked_page != ended_page)
+                && moved_page(&asked_page, &ended_page);
+            let read_there = read
+                .iter()
+                .any(|(site, page)| *site == ended_site && names_page(page, &ended_page));
+            (moved && read_there).then_some(((asked_site, asked_page), (ended_site, ended_page)))
         })
         .collect();
     // With no address its steps tried known, a stop is left out only for a refusal as not
@@ -1113,11 +1160,18 @@ pub(super) fn leave_out_addresses_never_opened(
                 Some((Some(site), page)) => Some((site, page)),
                 _ => None,
             };
-            // Read at another address: it was there.
+            // Read at another address: it was there. The address where the tab ended keeps its
+            // line, in the turn's own words about a page it opened.
             if stop.trim().eq_ignore_ascii_case(NO_PAGE_STOP)
-                && full
-                    .as_ref()
-                    .is_some_and(|(site, page)| among(&read_elsewhere, site, page))
+                && full.as_ref().is_some_and(|(site, page)| {
+                    read_elsewhere
+                        .iter()
+                        .any(|((asked_site, asked_page), ended)| {
+                            asked_site == site
+                                && names_page(page, asked_page)
+                                && (ended.0 != *site || ended.1 != *page)
+                        })
+                })
             {
                 return true;
             }
@@ -3538,11 +3592,18 @@ mod tests {
             );
         }
         // Known though the addresses the steps tried are not, and asked for as a path on its
-        // tab's own site.
-        for (asked, written) in [
-            (asked, asked),
-            ("/products/reader", "https://shop.example/products/reader"),
+        // tab's own site, which its redirect kept the tab on.
+        for (asked, read, written) in [
+            (asked, read, asked),
+            (
+                "/products/reader",
+                "https://shop.example/en/products/reader",
+                "https://shop.example/products/reader",
+            ),
         ] {
+            let fact = format!(
+                "{{\"url\":\"{read}\",\"title\":\"Reader\",\"facts\":[\"A 6-inch screen.\"]}}"
+            );
             let mut ended = BrowserTried::default();
             ended.keep_ended(asked.to_string(), read.to_string());
             let mut summary = format!("{fact}\n{}", line(written, "no-page"));
@@ -3586,6 +3647,85 @@ mod tests {
             leave_out_addresses_never_opened(&mut summary, &[], &opened, &ended);
             assert_eq!(summary, summary_before, "{other}");
         }
+    }
+
+    /// A `no-page` for a page its site sent to another page stays, though the turn read that
+    /// page: a shop sends a product it no longer sells to its home page, to the listing above
+    /// it or to another product, and none of them is the page asked for. Only a page that keeps
+    /// its own name, the last part of its path, at another address is.
+    #[test]
+    fn a_no_page_line_stays_for_a_page_its_site_sent_to_another_page() {
+        let asked = "https://shop.example/products/reader-1";
+        let line = format!("{{\"url\":\"{asked}\",\"stopped\":\"no-page\"}}");
+        for ended in [
+            "https://shop.example/",
+            "https://www.shop.example/en/",
+            "https://shop.example/products",
+            "https://shop.example/products/reader-2",
+        ] {
+            let answer = format!(
+                "{{\"url\":\"{ended}\",\"title\":\"Shop\",\"facts\":[\"The shop sells the Reader 2 and the Reader Colour.\"]}}\n{line}"
+            );
+            let mut tried = steps_tried(&[asked.to_string(), ended.to_string()]);
+            tried.keep_ended(asked.to_string(), ended.to_string());
+            let mut summary = answer.clone();
+            leave_out_addresses_never_opened(&mut summary, &[], &[ended.to_string()], &tried);
+            assert_eq!(summary, answer, "{ended}");
+        }
+    }
+
+    /// A path an open asked for on its tab's own site is a page of the site where its tab
+    /// ended, never of any site: a `no-page` for the same path on another site stays.
+    #[test]
+    fn a_no_page_line_stays_for_the_same_path_on_another_site() {
+        let line = |url: &str| format!("{{\"url\":\"{url}\",\"stopped\":\"no-page\"}}");
+        let fact =
+            |url: &str| format!("{{\"url\":\"{url}\",\"title\":\"Page\",\"facts\":[\"A fact.\"]}}");
+        for (asked, ended, other_site) in [
+            (
+                "/products/reader",
+                "https://ereader.shop.example/en/products/reader",
+                "https://reseller.example/products/reader",
+            ),
+            (
+                "/pricing",
+                "https://a.example/en/pricing",
+                "https://b.example/pricing",
+            ),
+        ] {
+            let mut tried =
+                steps_tried(&[asked.to_string(), ended.to_string(), other_site.to_string()]);
+            tried.keep_ended(asked.to_string(), ended.to_string());
+            let answer = format!("{}\n{}", fact(ended), line(other_site));
+            let mut summary = answer.clone();
+            leave_out_addresses_never_opened(&mut summary, &[], &[ended.to_string()], &tried);
+            assert_eq!(summary, answer, "{asked}");
+        }
+    }
+
+    /// A page read at its other address is that page whether or not an address carries a link's
+    /// query: a shop's product link with tracking words kept them through its redirect, and the
+    /// turn wrote the page it read, and the address it asked for, without them. A `no-page` for
+    /// another query of the page stays.
+    #[test]
+    fn a_no_page_line_goes_for_a_page_read_at_its_other_address_without_its_query() {
+        let tail = "utm_source=shop&utm_medium=menu";
+        let asked = format!("https://shop.example/products/reader?{tail}");
+        let ended = format!("https://ereader.shop.example/en-ww/products/reader?{tail}");
+        let line = |url: &str| format!("{{\"url\":\"{url}\",\"stopped\":\"no-page\"}}");
+        let fact = "{\"url\":\"https://ereader.shop.example/en-ww/products/reader\",\"title\":\"Reader\",\"facts\":[\"A 6-inch screen.\"]}";
+        let white = "https://shop.example/products/reader?colour=white";
+        let mut tried = steps_tried(&[asked.clone(), ended.clone(), white.to_string()]);
+        tried.keep_ended(asked.clone(), ended.clone());
+        for written in [asked.as_str(), "https://shop.example/products/reader"] {
+            let mut summary = format!("{fact}\n{}", line(written));
+            leave_out_addresses_never_opened(&mut summary, &[], &[ended.clone()], &tried);
+            assert_eq!(summary, fact, "{written}");
+        }
+        let answer = format!("{fact}\n{}", line(white));
+        let mut summary = answer.clone();
+        leave_out_addresses_never_opened(&mut summary, &[], &[ended.clone()], &tried);
+        assert_eq!(summary, answer);
     }
 
     /// A step's address and a finding's are compared as pages, not as text: `http` or `https`,
