@@ -1234,7 +1234,8 @@ runcmd:
         };
         let mut request = sample_request();
         request.metadata = None;
-        request.runtime_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig-_A".to_string();
+        // A JWT's shape, with every character a word may hold.
+        request.runtime_token = "header.payload.sig-_+0".to_string();
         request.origin_protocols = vec!["http".to_string(), "ws".to_string()];
         // No space before the image, which would take the env flags there.
         assert_eq!(
@@ -1244,7 +1245,7 @@ runcmd:
                 Some(PROVIDER_IMAGE),
             )
             .expect("plain words"),
-            format!("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig-_A|hosted|http,ws|{PROVIDER_IMAGE}")
+            format!("header.payload.sig-_+0|hosted|http,ws|{PROVIDER_IMAGE}")
         );
 
         let mut mode = request.clone();
