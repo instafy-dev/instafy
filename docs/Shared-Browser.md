@@ -2987,10 +2987,16 @@ unless the policy is `"covered"`.
   way, as data: each building job's lease lists the chat's finished browser
   turns since the building thread's last turn (`browser_turns_since`: the
   newest six of this agent's, never the one a hand-back's record carries, and
-  whether older ones were left out), each with what it was asked and its reply
+  whether older ones were left out), each with what it was asked, its reply
   with its finding lines put back (at most 6,000 characters), those findings
-  labelled like the record's. A building turn reads a browser turn only by its
-  findings, never by its reply's own words: a page people share once took
+  labelled like the record's, each with what its page showed, and the values
+  its missing line names (`missing`). The findings and the names are read from
+  the whole reply, as the record's are, and the findings keep to those 6,000
+  characters themselves, whole and in order, with how many were left out
+  (`findingsLeftOut`): read from the reply as cut, a question's turn answered
+  in finding lines alone, whose posted words repeat its facts ahead of its
+  lines, lost its last pages. A building turn reads a browser turn only by its
+  findings and what it didn't find, never by its reply's own words: a page people share once took
   "nearest" and "a short walk uphill" from a metro turn's reply, which no page
   said. On a restored thread it reads them as one section of quoted page data;
   a new or lost building thread reads them in its replay of the chat, each
@@ -3036,10 +3042,13 @@ unless the policy is `"covered"`.
   line in the runtime's log with the turn's job.
   Every browser turn is asked to end its reply with one finding per page, one
   JSON object per line, each fact under a page it read that states it rather
-  than one that only quotes it, and carrying what it doesn't confirm (which of
-  its values the turn chose rather than the page, and what it leaves out),
-  since later turns read only these lines; and a page that stopped it as a
-  stop with its word (`no-page`, `timed-out` and `covered` among them). A
+  than one that only quotes it, and saying which of its values the turn chose
+  rather than the page, since later turns read only these lines; and a page
+  that stopped it as a stop with its word (`no-page`, `timed-out` and
+  `covered` among them). Told also that a fact carries what it leaves out, a
+  comparison's browser turn wrote "weight and price are not stated in the page
+  text" under each product page it read: what a page leaves out goes in the
+  missing line below, by name. A
   value it looked for and didn't find is no fact of any page, and is not
   found until the turn searched the whole text a step returned for it in the
   script that ran the step, never by printing the text (a printed result over
@@ -3051,9 +3060,13 @@ unless the policy is `"covered"`.
   that a Specs page "did not show an estimated runtime", and the builds said
   the pages "didn't identify reviews" and "don't give runtime estimates". A
   turn whose reply answers the person drafts it as it writes, up to its first
-  finding line. A browser turn that continues a building card also ends with
-  one line naming, by name alone, the values its request needs that it looked
-  for and didn't find (`{"missing": [...]}`), and then one line naming the
+  finding line. Every browser turn then ends with one line naming, by name
+  alone, the values its request needs that it looked for and didn't find
+  (`{"missing": [...]}`), a question's turn too: told nowhere else to put such a
+  value, two metro turns wrote that the planner "did not show a route" as
+  facts, and the page people share, built from the chat's replay, said the
+  planner returned no route. A browser turn that continues a building card
+  then ends with one line naming the
   pages its request needs that it didn't open (`{"unread": [...]}`), as its
   wrap-up pass below is told too; a page's own tab or link for a value it
   didn't find there is one of the unread pages until it opens it. A tab is named with
@@ -3080,9 +3093,11 @@ unless the policy is `"covered"`.
   keeps every finding line in hand; no hand-back follows it. Its unread line
   starts no third pass, and it ends with its own missing line too. The unread
   line is the runtime's alone: no reply and no note keeps it. The missing
-  lines of both passes go into the note as one line after the finding lines,
-  each name once, where the controller stamps them on the record as
-  `missing`; no reply keeps them. Told only to read every page the request needs, a
+  lines of a browser turn, both passes' for one with a second pass, go into
+  its note as one line after the finding lines, each name once, where the
+  controller stamps them on the record as `missing` and lists them with the
+  browser turns since a building thread's last turn, and a replay of the chat
+  reads them; no reply keeps the line as written. Told only to read every page the request needs, a
   comparison's browser turn read three pages and ended, and the page was built
   with four of its fifteen facts. Those lines are for Octo: the runtime takes every line
   the controller would read as a finding out of the reply the person reads, and
@@ -3107,8 +3122,9 @@ unless the policy is `"covered"`.
   ("On livrarialello.pt: Open daily, 09:00 to 19:30."), as a fact may name its
   page only as "this page", then each page that stopped it, by its site, in
   plain words ("The page on visitporto.travel didn't answer in time."), one
-  sentence for a site and a stop, and "Finished in the browser." only when they
-  give neither. Told only that line, the person never read that a journey
+  sentence for a site and a stop, then what its missing line names, as Octo
+  says it to its later turns ("I didn't find a metro route."), and "Finished
+  in the browser." only when they give none of these. Told only that line, the person never read that a journey
   planner "did not display a route result". The building turn cannot open the
   browser, so the browser turn reads what the request needs before it ends:
   each item's own page from the links it read and, for reviews, each
@@ -3133,13 +3149,19 @@ unless the policy is `"covered"`.
   turns since its last turn and its replay of the chat alike, and never reads
   the browser turn's own words. Told plain words for two stops, a build wrote
   "Notebookcheck was blocked" for a search a cookie notice covered. Its
-  hand-back quotes, with the findings, what the browser turn didn't find in the
+  hand-back, the browser turns since its last turn and its replay of the chat
+  quote, with each browser turn's findings, what that turn didn't find in the
   runtime's own words (`notFound`: "I didn't find <name>", never where: the
   record says which pages the turn read, not where it looked for a value, and
   an address the browser refused leaves no finding), and the build uses those
-  words as they are wherever such a value would go, unless a finding gives it:
-  told to say "I didn't find…" and where it looked of a "not found" fact, a
-  build still wrote that a maker's specs pages "don't give runtime estimates".
+  words as they are wherever such a value would go, unless the person gave it,
+  or a finding or a page it read itself gives it: told to say "I didn't
+  find…" and where it looked of a "not found" fact, a build still wrote that a
+  maker's specs pages "don't give runtime estimates"; and a replay quotes
+  turns the person may have answered since, as `AGENTS.md` lets a reply state
+  a value the person gave. A building turn never says a site or page lacks
+  what it didn't find there, even of a page it read: beside "unless a page you
+  read says so", findings quoted as page data read as such a page.
   Wherever a building turn reads findings (its hand-back, the browser turns
   since its last turn and its replay of the chat), it is also told that a
   route ends at the stop its finding names, and, unless the person named that
@@ -3153,9 +3175,9 @@ unless the policy is `"covered"`.
   finding line would leave a later building turn nothing of the pages it read,
   and one that continues a building card would hand nothing back: it gets the
   runtime's wrap-up pass on its own thread, which holds those
-  pages, asked for the finding lines alone (and, for a turn that continues a
-  building card and had no second pass yet, its missing and unread lines after
-  them: asked
+  pages, asked for the finding lines and its missing line alone (and, for a
+  turn that continues a building card and had no second pass yet, its unread
+  line after them: asked
   for the lines alone, a comparison's turn that said in words which pages it
   hadn't reached lost that list, and its page was built with five of fifteen
   facts), and not billed, as a recovery retry
