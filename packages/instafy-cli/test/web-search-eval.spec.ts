@@ -180,10 +180,10 @@ describe("the web search eval (fixtures)", () => {
       "It enforces robots.txt, task/per-site budgets",
       "Nothing from a search's result list is kept: no title or snippet",
       "A source blocked by an explicit workspace policy may be offered as a link without claiming its content was read.",
-      "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
+      "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
       "Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.",
       "never ask for a key in chat or wait for it",
-      "Ask the person to search in their own browser and press **Send page to Octo**",
+      "The person's own search: they open the pages they pick and press **Send page to Octo**",
     ]) {
       expect(skill, rule).toContain(rule);
     }
