@@ -218,7 +218,10 @@ export function referencePage(kase, readAt, { key }) {
     lede: key
       ? "The Brightvac Q5 (399 EUR) and the Brightvac S8 (549 EUR) are 600 EUR or less; the Brightvac S8 Pro's price is unknown."
       : "The Brightvac Q5 (399 EUR) is 600 EUR or less; the prices of the Brightvac S8 and the Brightvac S8 Pro are unknown.",
-    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }],
+    // an entry for each of the person's criteria that is a number here, as `instafy bind check` asks: with one price
+    // unknown, the suction and the battery say what the cells decide under the title
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }, { key: "suction", label: "Suction, strongest first", dir: "desc" },
+      { key: "battery", label: "Battery, longest first", dir: "desc" }],
     columns: [
       { key: "price", label: "Price", type: "price" },
       { key: "suction", label: "Suction", type: "number" },
