@@ -2497,10 +2497,15 @@ pub(crate) async fn process_dispatch_prompt_timed(
             "managedAiCredit".to_string(),
             managed_ai_credit_trace.clone(),
         );
-        let run_ids: Vec<Uuid> = agent_runs.iter().map(|(run_id, _)| *run_id).collect();
-        if let Err((status, Json(api_error))) =
-            persist_run_managed_ai_credit_metadata(&transaction, &run_ids, &managed_ai_credit_trace)
-                .await
+        // The reserve is the managed targets' alone: a target with its own
+        // credential is billed by that credential's account.
+        let (managed_run_ids, _) = split_run_ids_by_credential(&agent_runs);
+        if let Err((status, Json(api_error))) = persist_run_managed_ai_credit_metadata(
+            &transaction,
+            &managed_run_ids,
+            &managed_ai_credit_trace,
+        )
+        .await
         {
             warn!(
                 project_id = %project.id,
@@ -2525,7 +2530,18 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // failed allocation still has a durable run to report. Persist the
     // authoritative access decision after selection as a separate step; do not
     // trust similarly named client metadata for billing or audit assertions.
-    let run_ids: Vec<Uuid> = agent_runs.iter().map(|(run_id, _)| *run_id).collect();
+    // The prompt holds the dispatch's one reserve and daily prompt slot, so
+    // it is managed when any target is. A run whose target has its own
+    // credential is billed by that credential's account, so it is `byoc`
+    // whatever its siblings answer on.
+    let (access_mode_run_ids, own_credential_run_ids) = if uses_managed_ai {
+        split_run_ids_by_credential(&agent_runs)
+    } else {
+        (
+            agent_runs.iter().map(|(run_id, _)| *run_id).collect(),
+            Vec::new(),
+        )
+    };
     // Deferred skill-mode evaluations audit as managed access without a usage
     // mark: managedAiUsed flips to true (and the burn lands) only when the
     // run's first visible assistant message persists.
@@ -2544,9 +2560,16 @@ pub(crate) async fn process_dispatch_prompt_timed(
     .await?;
     persist_run_ai_access_mode(
         &transaction,
-        &run_ids,
+        &access_mode_run_ids,
         access_mode,
         managed_ai_used_at_dispatch,
+    )
+    .await?;
+    persist_run_ai_access_mode(
+        &transaction,
+        &own_credential_run_ids,
+        ai_access_mode(false),
+        false,
     )
     .await?;
 
@@ -2611,27 +2634,26 @@ pub(crate) async fn process_dispatch_prompt_timed(
             write_scope_plan.get(&target.handle),
         );
         if skill_mode_ambient_evaluation {
-            let map = ensure_object(&mut agent_request.metadata);
             if let Some(participants) = ambient_ai_participants.as_ref() {
-                map.insert("groupAiParticipants".to_string(), participants.clone());
+                ensure_object(&mut agent_request.metadata)
+                    .insert("groupAiParticipants".to_string(), participants.clone());
             }
-            // A BYOC evaluation job has no flat managed-AI burn to defer: its
-            // upstream usage bills to the user's own credential. The deferral
-            // markers were stamped on the shared dispatch metadata for the
-            // managed participants, so override them per credentialed job or
-            // a custom agent's first visible message would burn a managed
-            // prompt it never used.
-            if target.credential_id.is_some() {
-                map.insert(
-                    "aiAccessMode".to_string(),
-                    JsonValue::String("byoc".to_string()),
-                );
-                map.insert("managedAiUsed".to_string(), JsonValue::Bool(false));
-                map.insert(
-                    "managedAiBillingDeferred".to_string(),
-                    JsonValue::Bool(false),
-                );
-            }
+        }
+        // A job on its own credential bills its upstream usage to that
+        // credential's account. The managed markers (and an ambient
+        // evaluation's deferral of the flat burn) were stamped on the shared
+        // dispatch metadata for the managed targets, and completion
+        // reconciliation, the failed-turn refunds and the expiry sweep read
+        // them per job. Override them per credentialed job, or its completion
+        // would settle the prompt's managed reserve from its own tokens, its
+        // failure would give that reserve and the daily slot back, and a
+        // custom agent's first visible message would burn a managed prompt it
+        // never used.
+        if target.credential_id.is_some() && (uses_managed_ai || skill_mode_ambient_evaluation) {
+            stamp_own_credential_job_metadata(
+                &mut agent_request.metadata,
+                skill_mode_ambient_evaluation,
+            );
         }
         if let Some(scope) = write_scope_plan.get(&target.handle) {
             if scope.is_coordination_required() {
@@ -5453,6 +5475,60 @@ fn ai_access_mode(managed_ai_access: bool) -> &'static str {
     }
 }
 
+/// The run ids of `agent_runs` whose target has no credential of its own
+/// (the platform lane), then those whose target has one.
+fn split_run_ids_by_credential(agent_runs: &[(Uuid, AgentTarget)]) -> (Vec<Uuid>, Vec<Uuid>) {
+    let mut platform_run_ids = Vec::new();
+    let mut own_credential_run_ids = Vec::new();
+    for (run_id, target) in agent_runs {
+        if target.credential_id.is_none() {
+            platform_run_ids.push(*run_id);
+        } else {
+            own_credential_run_ids.push(*run_id);
+        }
+    }
+    (platform_run_ids, own_credential_run_ids)
+}
+
+/// What dispatch stamps on its shared metadata for its managed targets once
+/// any target answers on Instafy AI: the reserve's labels, amounts, balance
+/// snapshot and ledger trace, and an ambient evaluation's deferral of the
+/// flat burn. A dispatch with no managed target stamps none of them.
+const MANAGED_AI_TARGET_METADATA_KEYS: [&str; 9] = [
+    "managedAiLabel",
+    "managedAiProvider",
+    "managedAiModelLabel",
+    "managedAiCreditBurnAmount",
+    "managedAiDailyPromptLimit",
+    "managedAiDailyPromptsUsedBeforeBurn",
+    "managedAiBillingDeferred",
+    "creditSnapshot",
+    "managedAiCredit",
+];
+
+/// Stamps the job of a target that answers on its own credential, whatever
+/// its dispatch's other targets answer on: `byoc`, unused, and none of the
+/// managed targets' markers, as a dispatch with no managed target leaves it.
+/// An ambient evaluation's job keeps the deferral flag, cleared: it has no
+/// flat managed burn to defer.
+fn stamp_own_credential_job_metadata(metadata: &mut JsonValue, ambient_evaluation: bool) {
+    let map = ensure_object(metadata);
+    for key in MANAGED_AI_TARGET_METADATA_KEYS {
+        map.remove(key);
+    }
+    map.insert(
+        "aiAccessMode".to_string(),
+        JsonValue::String(ai_access_mode(false).to_string()),
+    );
+    map.insert("managedAiUsed".to_string(), JsonValue::Bool(false));
+    if ambient_evaluation {
+        map.insert(
+            "managedAiBillingDeferred".to_string(),
+            JsonValue::Bool(false),
+        );
+    }
+}
+
 pub(crate) async fn persist_run_ai_access_metadata(
     transaction: &Transaction<'_>,
     run_ids: &[Uuid],
@@ -7887,6 +7963,72 @@ mod tests {
         assert_eq!(merged["custom"], json!(true));
         assert_eq!(merged["aiAccessMode"], json!("byoc"));
         assert_eq!(merged["managedAiUsed"], json!(false));
+    }
+
+    #[test]
+    fn own_credential_job_keeps_none_of_the_managed_targets_markers() {
+        let shared = json!({
+            "agent": { "handle": "helper" },
+            "aiAccessMode": "managed",
+            "managedAiUsed": true,
+            "managedAiLabel": "Instafy AI",
+            "managedAiProvider": "openai",
+            "managedAiModelLabel": "GPT-6 Luna",
+            "managedAiCreditBurnAmount": 1,
+            "managedAiDailyPromptLimit": 20,
+            "managedAiDailyPromptsUsedBeforeBurn": 3,
+            "managedAiBillingDeferred": true,
+            "creditSnapshot": { "balance": 19 },
+            "managedAiCredit": { "promptId": "prompt" },
+        });
+
+        let mut direct = shared.clone();
+        stamp_own_credential_job_metadata(&mut direct, false);
+        assert_eq!(
+            direct,
+            json!({
+                "agent": { "handle": "helper" },
+                "aiAccessMode": "byoc",
+                "managedAiUsed": false,
+            })
+        );
+
+        // An ambient evaluation's job keeps the deferral flag, cleared.
+        let mut ambient = shared;
+        stamp_own_credential_job_metadata(&mut ambient, true);
+        assert_eq!(
+            ambient,
+            json!({
+                "agent": { "handle": "helper" },
+                "aiAccessMode": "byoc",
+                "managedAiUsed": false,
+                "managedAiBillingDeferred": false,
+            })
+        );
+    }
+
+    #[test]
+    fn mixed_runs_split_by_whether_their_target_has_a_credential() {
+        let target = |credential_id: Option<Uuid>| AgentTarget {
+            handle: "agent".to_string(),
+            agent_id: None,
+            credential_id,
+            runtime_id: None,
+            display_name: None,
+            description: None,
+            avatar_seed: None,
+        };
+        let (managed, own_key, other_managed) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let runs = vec![
+            (managed, target(None)),
+            (own_key, target(Some(Uuid::new_v4()))),
+            (other_managed, target(None)),
+        ];
+
+        assert_eq!(
+            split_run_ids_by_credential(&runs),
+            (vec![managed, other_managed], vec![own_key])
+        );
     }
 
     #[test]
