@@ -913,7 +913,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
         line("browser_then_build"),
         "- `browser_then_build`: the same, and Octo then makes or changes something in this space \
          (a page, a map, a table). So is research whose answer ends in a page (a comparison, \
-         prices, a route), from the first message; news stays `direct`: the browser can't search. So is a page or change asked for with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says."
+         prices, a route), from the first message. So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says."
     );
     let reply = section
         .lines()
@@ -2587,7 +2587,7 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
     let build = rule("browser_then_build");
     assert!(
         build.ends_with(
-            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message; news stays `direct`: the browser can't search. So is a page or change asked for with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says."
+            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message. So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says."
         ),
         "{build}"
     );
@@ -3759,33 +3759,45 @@ fn assert_the_routing_step_reads(section: &str, request: &str) {
     assert!(routes.contains(section), "{request}: {routes}");
 }
 
-/// A page or change asked for with values this chat's replies said weren't found or confirmed
-/// goes to the browser first. In a local test (Nov 9), "Put the hours and the metro route on a
-/// small page I can share." went `direct` after three replies that found neither, its summary
-/// saying the page would state that the hours and the route were not confirmed: the line that
-/// keeps a page made only from what this chat found and confirmed with the building turn read as
-/// met by a page that says so. The `browser_then_build` line now names that page itself, beside
-/// the line it was read against, which stays. An unedited earlier copy is upgraded.
+/// A page, or a change to one, asked for with values this chat's replies said weren't found or
+/// confirmed goes to the browser first. In a local test (Nov 9), "Put the hours and the metro
+/// route on a small page I can share." went `direct` after three replies that found neither, its
+/// summary saying the page would state that the hours and the route were not confirmed: the line
+/// that keeps a page made only from what this chat found and confirmed with the building turn
+/// read as met by a page that says so. The `browser_then_build` line now names that page itself,
+/// beside the line it was read against, which stays. It names a page and a change to one, never a
+/// map's: a map's skill looks up its own places, and a map's reply often names a place it didn't
+/// find. In a local test (Nov 10), "Add a note to day 1: book the <castle> tickets ahead." came
+/// right after a map reply that said the castle's listing wasn't found; a note in the person's
+/// own words, and a place added to a map, stay `direct` (`required`). An unedited earlier copy is
+/// upgraded.
 #[test]
 fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
     let section = routing_section(BROWSER_SKILL);
-    let rule = "So is a page or change asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.";
+    let rule = "So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.";
     let build = section
         .lines()
         .find(|line| line.starts_with("- `browser_then_build`:"))
         .expect("the build line");
     assert!(build.contains(rule), "{build}");
-    // The line it was read against stays, a line of its own after the build line.
+    // The line it was read against stays, a line of its own after the build line, and so do a
+    // map and a change in the person's own words.
     assert!(
         section.contains(
             "So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color), and for a page or change made only from what this chat found and confirmed."
         ),
         "{section}"
     );
+    // No other sentence sends a change asked for with such values to the browser: a map's
+    // change is the map's own.
+    assert_eq!(section.matches("weren't found or confirmed").count(), 1);
     for request in [
         "Put the hours and the metro route on a small page I can share.",
         "Put the hours and the ticket rules on a small page I can share.",
         "Make a small page with the 24-hour ticket's price and where to buy it.",
+        "Add a note to day 1: book the Asinelli Tower climb ahead.",
+        "Add the Asinelli Tower to day 2.",
+        "Add a note under the hours: ask at the desk whether the dinosaur gallery needs a ticket.",
     ] {
         assert_the_routing_step_reads(section, request);
     }
@@ -3799,14 +3811,17 @@ fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
-/// News put on a page stays with the building turn, which finds it: Instafy's browser has no web
-/// search, so a browser part sent to find today's news has nothing to start from. Other research
-/// that ends in a page (a comparison, prices, a route) still goes to the browser from the first
-/// message, and news answered in a reply stays `direct` as any research answered in a reply does.
-/// Checking the person's own account is work on a website, which the browser does with their
-/// sign-in: no search reaches it. The routing step reads the whole section for each.
+/// News put on a page is research whose answer ends in a page, and goes to the browser first as a
+/// comparison does. Instafy's browser has no web search, but it opens the company's own site and
+/// its news pages, while a `direct` page is a change of files whose building turn can't ask for
+/// the browser (`browser_choice_applies`), and on an AI with no web search of its own it reads
+/// only pages whose addresses it already knows. It stays so until research that ends in a page
+/// searches before the browser, which no routing input says a run can do yet. News answered in a
+/// reply stays `direct`, as any research answered in a reply does. Checking the person's own
+/// account is work on a website, which the browser does with their sign-in: no search reaches it.
+/// The routing step reads the whole section for each.
 #[test]
-fn news_on_a_page_stays_direct_and_the_persons_account_is_the_browsers() {
+fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     let section = routing_section(BROWSER_SKILL);
     let line = |start: &str| {
         section
@@ -3816,10 +3831,12 @@ fn news_on_a_page_stays_direct_and_the_persons_account_is_the_browsers() {
     };
     assert!(
         line("- `browser_then_build`:").contains(
-            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message; news stays `direct`: the browser can't search."
+            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message. So is a page, or a change to one,"
         ),
         "{section}"
     );
+    // No sentence keeps news put on a page apart from the rest of that research.
+    assert!(!section.contains("news"), "{section}");
     assert!(
         line("- `browser`:").contains(
             "the work happens on a website (use a site, sign in, check their account, send a form, press its buttons)"
@@ -3832,9 +3849,13 @@ fn news_on_a_page_stays_direct_and_the_persons_account_is_the_browsers() {
         ),
         "{section}"
     );
-    // The browser skill says the same of its browser: a search engine only when the person
-    // named one.
-    assert!(BROWSER_SKILL.contains("Instafy's browser has no web search"));
+    // With no web search, that browser starts from the official site of what the task names.
+    for words in [
+        "else the official site of what the task names and its links and search box.",
+        "Instafy's browser has no web search: open a search engine only when the person named one.",
+    ] {
+        assert!(BROWSER_SKILL.contains(words), "{words}");
+    }
     for request in [
         "What's the news about Airbus today? Put it on a small page I can share.",
         "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
@@ -3843,9 +3864,7 @@ fn news_on_a_page_stays_direct_and_the_persons_account_is_the_browsers() {
         assert_the_routing_step_reads(section, request);
     }
     let previous = include_str!("legacy/browser-automation-v43.md");
-    for added in ["news stays `direct`", "check their account"] {
-        assert!(!previous.contains(added), "{added}");
-    }
+    assert!(!previous.contains("check their account"));
 }
 
 /// The section says only what the routing step's own instructions don't: that the step can send

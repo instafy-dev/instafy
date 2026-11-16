@@ -1422,8 +1422,12 @@ a space whose copy of the skill lacks it keeps today's routes. Research whose
 answer ends in a page (a comparison, prices, a route) is `browser_then_build`
 from the first message too, while research answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
-itself. So does news, also when it goes on a page: Instafy's browser has no
-web search to find it with. A change that needs what a web page says is `browser_then_build` too:
+itself. News put on a page is research that ends in a page too, until such
+research searches the web before the browser: Instafy's browser has no web
+search, but it opens the company's own site, while a building turn that must
+make a page can't ask for the browser and, on an AI with no web search of its
+own, reads only pages whose addresses it already knows. A change that needs
+what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,
 Nov 7). A map ("on a map") stays with Octo, since a map's skill finds and
@@ -1433,12 +1437,16 @@ the chat already found and confirmed, each a change of files, in a line of
 their own: as the last sentences of the `browser_then_build` line they read as
 more of its rules, and a note the person wrote for a map went to the browser,
 read two sites nobody asked for and gained a sentence the person didn't write
-(a local test, Nov 8). A page or change asked for with values the chat's
-replies said weren't found or confirmed, such as a route, is
+(a local test, Nov 8). A page, or a change to one, asked for with values the
+chat's replies said weren't found or confirmed, such as a route, is
 `browser_then_build`, its browser part looking again first: asked for after
 three replies that found neither its hours nor its route, a page to share once
 stayed with Octo, read as made only from what the chat found and confirmed
-because it would say so (a local test, Nov 9). A comparison that named no site to use first once stayed with
+because it would say so (a local test, Nov 9). A map's change isn't one of
+them: a map's skill looks up its own places, and a map's reply often names a
+place it didn't find, so a place added to a map, and a note in the person's
+own words, stay with Octo also then (a local test, Nov 10, sent a note about a
+castle whose listing the map's reply said wasn't found). A comparison that named no site to use first once stayed with
 Octo too, under a rule written for maps, and its building turn, which must
 change files and so cannot ask for the browser, met a maker's robots.txt and
 no search key (a local test, Nov 6). A message that carries on the chat's

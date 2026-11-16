@@ -1236,9 +1236,9 @@ mod tests {
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "9e1d58dd91a149320411e661e024b9654d724a37802c661d5fe89b86df6af9be";
+            "b41ed00a2081ef12c66fde53e6093a0fdb6bb4d110b10fca935fce8bc9882b2a";
         const CASE_PROMPTS_SHA256: &str =
-            "abd9ebbac00576e3255eca694c8a9f1661b317f38dead3ea0eb3bf7e3986d8be";
+            "a4746a70f4d257da6fb6820258ae9278350f2dbaa8992664f4efc578159d992e";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1349,10 +1349,12 @@ mod tests {
     /// every earlier case about the same few places, products and sites. The cases from
     /// `news-today` on are these, each with the route its rule gives, and each case's routing
     /// input reads that rule. Eight of them are lookups that a search for fresh information
-    /// changes: news, a recent result and opening hours answered in a reply, news put on a page,
-    /// a trip on a map, a comparison page (`browser_then_build` until research pages search
-    /// before the browser), an order in the person's own account and a site opened in the
-    /// browser.
+    /// changes: news, a recent result and opening hours answered in a reply, news put on a page
+    /// and a comparison page (both `browser_then_build` until research pages search before the
+    /// browser), a trip on a map, an order in the person's own account and a site opened in the
+    /// browser. Where two rules could both be read as a case's, the case says which one decides:
+    /// a note in the person's own words, and a place added to a map, after replies that said
+    /// something wasn't found.
     #[test]
     fn every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own() {
         let cases = shipped();
@@ -1384,17 +1386,12 @@ mod tests {
                 &["browser-named-then-page"],
             ),
             (
-                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message;",
+                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
                 "browser_then_build",
-                &["comparison-page-watches"],
+                &["comparison-page-watches", "news-then-page"],
             ),
             (
-                "news stays `direct`: the browser can't search.",
-                "direct",
-                &["news-then-page"],
-            ),
-            (
-                "So is a page or change asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.",
+                "So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.",
                 "browser_then_build",
                 &[
                     "page-with-a-value-the-browser-did-not-confirm",
@@ -1419,12 +1416,16 @@ mod tests {
             (
                 "- Stay `direct` (`required`) for a map,",
                 "direct",
-                &["trip-on-a-map"],
+                &["trip-on-a-map", "sight-a-map-did-not-find-on-a-day"],
             ),
             (
                 "for a change in the person's own words to a page or map here (a note, a name, a color)",
                 "direct",
-                &["note-in-own-words-on-a-map"],
+                &[
+                    "note-in-own-words-on-a-map",
+                    "note-on-a-sight-a-map-did-not-find",
+                    "note-in-own-words-on-a-page-about-an-unconfirmed-value",
+                ],
             ),
             (
                 "and for a page or change made only from what this chat found and confirmed.",
@@ -1512,7 +1513,10 @@ mod tests {
             }
         }
         // A page asked for with a value a reply here said wasn't confirmed reads that reply, in
-        // a chat with a browser turn and in one without.
+        // a chat with a browser turn and in one without. So do a note in the person's own words
+        // and a place added to a map after a reply that said something wasn't found or
+        // confirmed, which stay `direct` (`required`): the map's skill looks up its own places,
+        // and a note is as the person wrote it.
         for (id, reply) in [
             (
                 "page-with-a-value-the-browser-did-not-confirm",
@@ -1522,9 +1526,29 @@ mod tests {
                 "page-with-a-value-a-reply-did-not-confirm",
                 "I couldn't confirm today's price",
             ),
+            (
+                "note-on-a-sight-a-map-did-not-find",
+                "Not found yet: the Asinelli Tower",
+            ),
+            (
+                "sight-a-map-did-not-find-on-a-day",
+                "Not found yet: the Asinelli Tower",
+            ),
+            (
+                "note-in-own-words-on-a-page-about-an-unconfirmed-value",
+                "I couldn't confirm whether the dinosaur gallery needs a ticket",
+            ),
         ] {
-            let input = routing_input(&case(&cases, id), workspace.path()).unwrap();
+            let case = case(&cases, id);
+            let input = routing_input(&case, workspace.path()).unwrap();
             assert!(input.prompt.contains(reply), "{id}: {}", input.prompt);
+            if case.expect.route == "direct" {
+                assert_eq!(
+                    case.expect.workspace_file_change_requirement,
+                    Some(vec!["required".to_string()]),
+                    "{id}"
+                );
+            }
         }
     }
 }

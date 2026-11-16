@@ -818,6 +818,17 @@ later in the request names what changed: a tool call and its output name each
 other by `call_id`. Every request under its own thread's key goes as it came, and
 the key itself is scoped as every key is.
 
+A ChatGPT login places a request's cache by its `session-id`, not by its key, and
+each routing step is a new thread with a session of its own. So on a ChatGPT login
+a request under a shared start's key also goes as the session that scoped key
+names (the value its body carries as `prompt_cache_key`), so that every chat's
+routing step in a space can be sent where the start before it is held. Its
+`thread-id` and its `x-codex-turn-state` stay its own thread's, and the key stays
+scoped to the space, credential, endpoint and account, so no two spaces share a
+session. On an API key, which places a request by its key, and for a request
+under its own thread's key, the session is the thread's own; a request sent with
+no session gets none.
+
 Only imported Codex Responses requests round-trip `x-codex-turn-state`. The proxy
 returns a signed, bounded, one-hour opaque envelope and accepts it back only for
 the same project, credential, endpoint, account, resolved model and root session.
