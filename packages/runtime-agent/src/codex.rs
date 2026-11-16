@@ -1057,9 +1057,9 @@ pub struct CodexRunOptions {
     /// (`finalization_codex_run_options`), so no search runs that the chat would not show.
     pub disable_native_web_search: bool,
     /// An Instafy AI message's allowance of web searches, which its turn's runs and native helpers
-    /// share (`managed_web_search`): the search tool keeps to it, and the run's `turn.completed`
-    /// reports what its searches cost. None on any other lane: a person's own ChatGPT login
-    /// searches on their own plan.
+    /// share (`managed_web_search`): the search tool keeps to it and counts what its searches
+    /// cost, which the job's completion reports. None on any other lane: a person's own ChatGPT
+    /// login searches on their own plan.
     pub managed_web_search: Option<Arc<crate::managed_web_search::ManagedWebSearch>>,
     pub disable_final_output_json_schema: bool,
     pub final_output_schema: CodexFinalOutputSchema,
@@ -2631,8 +2631,7 @@ impl CodexClient {
             let mut aggregator =
                 CodexEventStreamAdapter::with_turn_start_token_usage(turn_start_token_usage)
                     .for_job(options.job_id)
-                    .in_workspace(self.workspace_dir())
-                    .with_managed_web_search(options.managed_web_search.clone());
+                    .in_workspace(self.workspace_dir());
         let mut events = Vec::new();
 
         if let Some(configured) = session_configured_event {
@@ -5331,9 +5330,6 @@ pub(crate) struct CodexEventStreamAdapter {
     /// projected as a path of it ([`Self::command_folder`]), never as the folder's own path on
     /// this machine.
     workspace: Option<(PathBuf, Option<PathBuf>)>,
-    /// An Instafy AI message's allowance of web searches: what its searches cost since the last
-    /// report goes on the turn's `turn.completed` as `webSearch`.
-    managed_web_search: Option<Arc<crate::managed_web_search::ManagedWebSearch>>,
 }
 
 /// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
@@ -5368,7 +5364,6 @@ impl CodexEventStreamAdapter {
             browser_tried: BrowserTried::default(),
             browser_links: None,
             workspace: None,
-            managed_web_search: None,
         }
     }
 
@@ -5480,15 +5475,6 @@ impl CodexEventStreamAdapter {
     /// Names the job in this adapter's log lines.
     pub(crate) fn for_job(mut self, job_id: Option<uuid::Uuid>) -> Self {
         self.job_id = job_id;
-        self
-    }
-
-    /// Reports what an Instafy AI message's searches cost on the turn's `turn.completed`.
-    pub(crate) fn with_managed_web_search(
-        mut self,
-        managed_web_search: Option<Arc<crate::managed_web_search::ManagedWebSearch>>,
-    ) -> Self {
-        self.managed_web_search = managed_web_search;
         self
     }
 
@@ -5948,16 +5934,6 @@ impl CodexEventStreamAdapter {
                     if let Some(turn_start) = turn_start.filter(|_| usage_reported) {
                         completed["usage"] = json!(token_usage_since(&total, &turn_start));
                         completed["usageScope"] = json!("turn");
-                    }
-                    // What Instafy AI's searches cost since the last report, which the
-                    // controller charges with the turn: the searches each cost the person
-                    // credits, and their tokens are not in `usage`.
-                    if let Some(cost) = self
-                        .managed_web_search
-                        .as_ref()
-                        .and_then(|allowance| allowance.take_unreported())
-                    {
-                        completed["webSearch"] = cost.to_json();
                     }
                     events.push(completed);
                 }
@@ -14382,54 +14358,6 @@ required = true
             completed["threadTotalUsage"],
             json!(usage(150_000, 135_000, 3_000))
         );
-    }
-
-    /// An Instafy AI turn's `turn.completed` reports what its searches cost (`webSearch`), which
-    /// its `usage` leaves out, once: a later run of the job reports only its own. A turn on any
-    /// other lane has no allowance and reports none.
-    #[tokio::test]
-    async fn turn_completed_reports_what_an_instafy_ai_turns_searches_cost() {
-        let allowance = std::sync::Arc::new(crate::managed_web_search::ManagedWebSearch::new(
-            crate::managed_web_search::SEARCHES_PER_MESSAGE,
-        ));
-        crate::managed_web_search::record_searches_for_test(&allowance, 2, 16_824, 782);
-        let start = usage(100_000, 90_000, 2_000);
-        let turn = |adapter: &mut CodexEventStreamAdapter, turn_id: &str| {
-            only_turn_completed(
-                adapter,
-                &[
-                    token_count(
-                        turn_id,
-                        usage(150_000, 135_000, 3_000),
-                        usage(50_000, 45_000, 1_000),
-                    ),
-                    turn_complete(turn_id),
-                ],
-            )
-        };
-        let turn_start = TurnStartTokenUsage::default();
-        start_turn(&turn_start, "turn-1", &start).await;
-        let mut adapter = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start)
-            .with_managed_web_search(Some(allowance.clone()));
-        let completed = turn(&mut adapter, "turn-1");
-        assert_eq!(completed["usage"], json!(usage(50_000, 45_000, 1_000)));
-        assert_eq!(
-            completed["webSearch"],
-            json!({"searches": 2, "input_tokens": 16_824, "cached_input_tokens": 0,
-                   "output_tokens": 782})
-        );
-
-        // The job's next run, which searched nothing: nothing more to charge.
-        let turn_start = TurnStartTokenUsage::default();
-        start_turn(&turn_start, "turn-2", &start).await;
-        let mut again = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start)
-            .with_managed_web_search(Some(allowance));
-        assert!(turn(&mut again, "turn-2").get("webSearch").is_none());
-
-        let turn_start = TurnStartTokenUsage::default();
-        start_turn(&turn_start, "turn-3", &start).await;
-        let mut own_login = CodexEventStreamAdapter::with_turn_start_token_usage(turn_start);
-        assert!(turn(&mut own_login, "turn-3").get("webSearch").is_none());
     }
 
     fn response_usage(turn_id: &str, response_id: &str, usage: Option<TokenUsage>) -> Event {

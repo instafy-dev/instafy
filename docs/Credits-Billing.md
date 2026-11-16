@@ -383,38 +383,49 @@ charges for it, passed through:
   chat's "Searched the web" step names. A query the bridge refused, merged with another or did not
   run, and a search that failed, cost nothing. On a local stack, whose managed lane is a static
   ChatGPT login, a search reports no tokens and costs its price alone.
-- **When it is charged.** With the turn, from the same run log as its tokens: the turn's
-  `turn.completed` carries `webSearch` (`searches`, `input_tokens`, `cached_input_tokens`,
-  `output_tokens`), which the runtime adds up from what the bridge said each search cost (the
-  proxy README's `search_usage`). The completion charges it on the turn's message (its
-  `promptId`), once per turn: a `managed_ai_web_search` row with the key
-  `managed-ai-web-search:{promptId}:{jobId}`, apart from the turn's reserve and adjustment, so a
-  completion settled again writes nothing new. The searches have run, so their cost is owed
-  whatever the balance: a balance that cannot cover them is charged what it holds, and the row
-  records the rest as `cost.unpaidUnits`, as a turn's tokens are settled (an empty balance gets no
-  row, and the controller logs what went unpaid). A turn that is not
-  charged its tokens (a failed turn that left nothing, a turn Instafy started that ended without a
-  reply, a turn the person stopped) is not charged its searches either; a search that worked is a
-  step that worked, so a failed turn that searched is charged. Only a job on the managed lane
-  (`managedAiUsed`) is charged: an own-connection turn of the same message never is, whatever its
-  run log says.
+- **When it is charged.** With the turn's completion, whether the turn succeeded or failed: the
+  runtime adds up what the bridge said each search of the job cost (the proxy README's
+  `search_usage`), over all of the job's runs (a recovery retry's searches are its job's too), and
+  the completion carries it as one `ai/web-search-usage` artifact (`searches`, `input_tokens`,
+  `cached_input_tokens`, `output_tokens`). A turn that searched and then ended in an error or its
+  time limit has no `turn.completed`, so none of its tokens are reconciled, but its searches ran
+  and are charged. The completion charges them on the turn's message (its `promptId`), once per
+  job: a `managed_ai_web_search` row with the key `managed-ai-web-search:{promptId}:{jobId}`,
+  apart from the turn's reserve and adjustment, so a completion settled again writes nothing new.
+  The searches have run, so their cost is owed whatever the balance: a balance that cannot cover
+  them is charged what it holds, and the row records the rest as `cost.unpaidUnits`, as a turn's
+  tokens are settled (an empty balance gets no row, and the controller logs what went unpaid). A
+  turn that costs nothing (one Instafy started that ended without a reply and left nothing, a
+  failed turn that left nothing) is not charged its searches either; a search step is a step that
+  worked, so a turn that searched leaves something. A turn the person stopped sends no
+  completion, so its searches are not charged. Only a job that ran on Instafy AI is charged:
+  `managedAiUsed`, or an ambient evaluation whose charge waits for it to speak
+  (`managedAiBillingDeferred`), whose searches are charged even when it then declines, though its
+  tokens are not. A job on the person's own AI connection never is, whatever its completion
+  says.
 - **In Credits.** The activity log shows the row as "Web search" with its credits, next to the
   turn's own row, and the graph counts it with the AI.
 
 **At most 2 searches a message.** A message's turns run at most 2 searches, or 8 when the person's
-own words in it ask for deeper or more thorough research: its routing step says so
-(`deeperResearch` in its answer; runtime-agent `managed_web_search`). The runtime keeps to it:
+own words in it ask to research in depth or to search further or more thoroughly (a comparison,
+reviews or a page to make do not by themselves): its routing step says so (`deeperResearch` in its
+answer; runtime-agent `managed_web_search`). The runtime keeps to it:
 
 - a search sends only as many of its queries as the message has left, and the model reads that
   only the first of them ran;
 - a search with none left does not run, and the model reads, in place of its results, that the
-  message has used its web searches, to answer from what it found, to read a page whose address it
-  has, and to say what it could not check; and that a message gets more only when the person's own
-  words ask for deeper research;
+  message has already used its web searches, to answer from what it has already found or read, to
+  read a page whose address it has, and to say what it could not check; and that a message gets
+  more only when the person's own words ask for deeper research;
 - a build Instafy starts after the browser (a hand-back) goes on with the allowance of the turn
   whose card it carries on, and a job's later attempt with its earlier attempt's, while the
   runtime that ran them is up; a runtime started since gives the turn a new allowance;
-- a native helper searches from its turn's allowance.
+- a native helper, and a recovery retry of the turn, search from its turn's allowance. A retry
+  that starts afresh does not see what the earlier attempt's searches found, and has none left
+  when that attempt used them;
+- each job of a team plan (each worker, the lead's continuation) has an allowance of its own of 2,
+  since a team's jobs may run on machines of their own: a team plan's message can run 2 searches
+  for each of them.
 
 Searches a call held and did not run go back to the message. The limits are the runtime's own
 (`SEARCHES_PER_MESSAGE` and `SEARCHES_FOR_DEEPER_RESEARCH` in `managed_web_search.rs`).

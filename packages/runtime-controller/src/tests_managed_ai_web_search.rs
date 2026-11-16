@@ -12,11 +12,18 @@ use crate::agent;
 use crate::credits::{charge_managed_ai_web_searches, ManagedAiWebSearchUsage};
 use crate::tests_managed_ai_refund::{
     agent_complete_request, credit_balance, ledger_metadata_by_key, ledger_rows,
-    seed_reserved_managed_ai_prompt, ReservedManagedAiPrompt,
+    post_agent_message, seed_reserved_managed_ai_prompt, ReservedManagedAiPrompt,
 };
 
+/// What the job's two web searches cost, as its completion carries it (runtime-agent
+/// `managed_web_search`): two searches that read 16,824 tokens of pages and wrote 782.
+fn two_searches() -> serde_json::Value {
+    json!({"kind": "ai/web-search-usage", "searches": 2, "input_tokens": 16824,
+           "cached_input_tokens": 0, "output_tokens": 782})
+}
+
 /// The turn's run log as its runtime reports it: 3,000 output tokens (2 credits against the
-/// 1-credit reserve) and, beside them, what its two web searches cost.
+/// 1-credit reserve), and what its two web searches cost.
 fn completion_with_two_searches(fixture: &ReservedManagedAiPrompt) -> serde_json::Value {
     json!({
         "job_id": fixture.job_id,
@@ -28,11 +35,37 @@ fn completion_with_two_searches(fixture: &ReservedManagedAiPrompt) -> serde_json
                 "type": "turn.completed",
                 "usageScope": "turn",
                 "usage": {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 3000},
-                "webSearch": {"searches": 2, "input_tokens": 16824, "cached_input_tokens": 0,
-                              "output_tokens": 782},
             }],
-        }],
+        }, two_searches()],
     })
+}
+
+/// The step the room shows for a search that ran, as the runtime streams it.
+fn search_step(fixture: &ReservedManagedAiPrompt) -> serde_json::Value {
+    json!({
+        "job_id": fixture.job_id,
+        "content": "Web search completed: \"Kunsthistorisches Museum opening hours\"",
+        "message_type": "web_search",
+        "metadata": {
+            "kind": "codex_web_search",
+            "itemId": "ws_1",
+            "eventType": "item.completed",
+            "query": "Kunsthistorisches Museum opening hours",
+            "status": "completed",
+        },
+    })
+}
+
+/// The web search rows of the fixture's project.
+async fn web_search_rows(
+    fixture_pool: &crate::config::PgPool,
+    project_id: &uuid::Uuid,
+) -> anyhow::Result<Vec<(String, i32, Option<String>)>> {
+    Ok(ledger_rows(fixture_pool, project_id)
+        .await?
+        .into_iter()
+        .filter(|(reason, _, _)| reason == "managed_ai_web_search")
+        .collect())
 }
 
 async fn complete(
@@ -187,6 +220,102 @@ async fn an_own_connections_web_searches_cost_no_credits() -> anyhow::Result<()>
             "{rows:?}"
         );
         assert_eq!(credit_balance(&pool, &org_id).await?, reserved_balance);
+        anyhow::Ok(())
+    })
+    .await
+}
+
+/// A turn that searched and then ended in an error (or its time limit) has no `turn.completed`,
+/// so nothing of its tokens is reconciled; its searches ran and OpenAI billed them, so they are
+/// charged all the same, from the job's report of what they cost. The search step is a step that
+/// worked, so the turn keeps its reserve too.
+#[tokio::test]
+async fn a_failed_turns_web_searches_are_charged() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("web-search-failed").await? else {
+        eprintln!("skipping failed turn web search test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let step = post_agent_message(&fixture, search_step(&fixture)).await;
+    let pool = fixture.pool.clone();
+    let (org_id, project_id, prompt_id, job_id) = (
+        fixture.org_id,
+        fixture.project_id,
+        fixture.prompt_id,
+        fixture.job_id,
+    );
+    let reserved_balance = fixture.reserved_balance;
+    let body = json!({
+        "job_id": fixture.job_id,
+        "outcome": "failed",
+        "error_message": "stream disconnected before completion: error sending request for url (http://proxy:8789/v1/responses)",
+        // The run log of the events streamed so far: the search, and no turn.completed.
+        "artifacts": [{
+            "kind": "codex/run-log",
+            "events": [{"type": "item.completed",
+                        "item": {"id": "ws_1", "type": "web_search",
+                                 "query": "Kunsthistorisches Museum opening hours"}}],
+        }, two_searches()],
+    });
+    let status = complete(&fixture, body).await;
+    with_cleanup(fixture, async move {
+        assert_eq!(step?, StatusCode::OK);
+        assert_eq!(status?, StatusCode::OK);
+        let key = format!("managed-ai-web-search:{prompt_id}:{job_id}");
+        assert_eq!(
+            web_search_rows(&pool, &project_id).await?,
+            vec![("managed_ai_web_search".to_string(), -23, Some(key))]
+        );
+        assert_eq!(credit_balance(&pool, &org_id).await?, reserved_balance - 23);
+        anyhow::Ok(())
+    })
+    .await
+}
+
+/// An ambient evaluation on Instafy AI is billed only once it speaks, and one that declines costs
+/// nothing for its tokens. Its web searches ran on the platform's key all the same, so they are
+/// charged even when it then declined: no search is free.
+#[tokio::test]
+async fn a_declined_evaluations_web_searches_are_charged() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("web-search-declined").await? else {
+        eprintln!("skipping declined evaluation web search test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    // As dispatch leaves a skill-mode ambient evaluation on Instafy AI: its billing waits for it
+    // to speak, so it is not marked used.
+    fixture
+        .pool
+        .get()
+        .await?
+        .execute(
+            "update agent_jobs
+                set payload = jsonb_set(payload, '{metadata}', payload -> 'metadata' || $2::jsonb)
+              where id = $1",
+            &[
+                &fixture.job_id,
+                &tokio_postgres::types::Json(json!({
+                    "managedAiUsed": false,
+                    "managedAiBillingDeferred": true,
+                    "groupParticipation": {
+                        "decision": "agent_evaluation",
+                        "reason": "skill_mode_ambient",
+                        "enforcedBy": "runtime-controller",
+                    },
+                })),
+            ],
+        )
+        .await?;
+    let pool = fixture.pool.clone();
+    let (project_id, prompt_id, job_id) = (fixture.project_id, fixture.prompt_id, fixture.job_id);
+    let mut body = completion_with_two_searches(&fixture);
+    body["summary"] = json!("NO_RESPONSE");
+    let status = complete(&fixture, body).await;
+    with_cleanup(fixture, async move {
+        assert_eq!(status?, StatusCode::OK);
+        let key = format!("managed-ai-web-search:{prompt_id}:{job_id}");
+        assert_eq!(
+            web_search_rows(&pool, &project_id).await?,
+            vec![("managed_ai_web_search".to_string(), -23, Some(key))]
+        );
         anyhow::Ok(())
     })
     .await

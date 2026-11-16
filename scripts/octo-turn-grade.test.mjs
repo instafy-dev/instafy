@@ -496,6 +496,22 @@ test("credits are checked against the tokens at the ledger's own rates", () => {
   assert.throws(() => creditsQuery("x' or 1=1 --", SENT));
 });
 
+test("a turn's web searches are part of what it cost, and of what its tokens are checked against", () => {
+  // Instafy AI's searches are a ledger row of their own ("Web search"): the query counts them in
+  // what the turn was charged, and says how many credits they were.
+  const query = creditsQuery(PROJECT, SENT);
+  assert.match(query, /'managed_ai_web_search'/);
+  assert.match(query, /'webSearch'/);
+  const pricing = { billingUnitsPerUsd: 100, inputUsdMicrosPer1k: 1250, cachedInputUsdMicrosPer1k: 125, outputUsdMicrosPer1k: 10000 };
+  const turn = [job({ commands: BUILD_COMMANDS })];
+  // 95 credits for the tokens (above), and 23 for two searches.
+  const evidence = (charged) => ({ sentAt: SENT, jobs: turn, ui: OPENED_UI, credits: { charged, webSearch: 23, entries: 3, pricing } });
+  assert.equal(byId(gradeCase(TABLE_CASE, evidence(118)), "credits_match_tokens").ok, true);
+  assert.match(byId(gradeCase(TABLE_CASE, evidence(118)), "credits_match_tokens").detail, /23 for web searches/);
+  assert.equal(byId(gradeCase(TABLE_CASE, evidence(95)), "credits_match_tokens").ok, false, "the searches were not charged");
+  assert.deepEqual(caseMetrics(evidence(118)).credits, { charged: 118, webSearch: 23, expected: 118, tolerance: 15, perMillionInput: 97.6 });
+});
+
 // ---------------------------------------------------------------------------------------------------------------
 // Collection, cases, run files.
 

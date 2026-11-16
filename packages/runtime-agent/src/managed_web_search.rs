@@ -8,14 +8,17 @@
 //!   when its routing step read the person's own words as asking for deeper research
 //!   (`deeperResearch`). A build Instafy starts after the browser (a hand-back) goes on with the
 //!   allowance of the turn whose card it carries on, and a job's later attempt with its earlier
-//!   attempt's, so the message as a whole keeps to it.
+//!   attempt's, so the message as a whole keeps to it. Each job of a team plan (a worker, the
+//!   lead's continuation) has an allowance of its own: a team's jobs may run on machines of their
+//!   own, and this one knows only its own jobs.
 //! - The AI's search tool is wrapped ([`install`]): a call runs only as many of its queries as
 //!   are left, and says so, and a call with none left does not run: the model reads
 //!   [`limit_line`] in its place.
 //! - What the bridge says each search cost (its `search_usage` entry: one search per query it
-//!   searched, and the tokens of its request) is added up, and the run's `turn.completed`
-//!   reports it as `webSearch` ([`ManagedWebSearch::take_unreported`]), which the controller
-//!   charges with the turn.
+//!   searched, and the tokens of its request) is added up over the job's runs: its first, a
+//!   recovery retry, one that ended in an error or its time limit. The job's completion carries
+//!   it, whether the job succeeded or failed, as one [`WEB_SEARCH_USAGE_ARTIFACT`]
+//!   ([`usage_artifact_of_job`]), which the controller charges on the job's message.
 //!
 //! A person's own ChatGPT login searches on their own plan: it has no allowance here, and none of
 //! its searches is reported or charged.
@@ -55,15 +58,18 @@ const SEARCH_TOOL_NAME: &str = "run";
 /// The search bridge's `results` entries this reads (openai-proxy-server `search_bridge.rs`).
 const SEARCH_USAGE: &str = "search_usage";
 const SEARCHED_QUERIES: &str = "searched_queries";
+/// The kind of the artifact a job's completion carries with what its web searches cost
+/// (runtime-controller `extract_web_search_usage_from_artifacts`).
+pub(crate) const WEB_SEARCH_USAGE_ARTIFACT: &str = "ai/web-search-usage";
 
 /// What searches cost, as the search bridge reports it: how many ran, and their requests' tokens
 /// (the search content among the input).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SearchCost {
-    pub(crate) searches: u64,
-    pub(crate) input_tokens: u64,
-    pub(crate) cached_input_tokens: u64,
-    pub(crate) output_tokens: u64,
+pub struct SearchCost {
+    pub searches: u64,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 impl SearchCost {
@@ -76,10 +82,10 @@ impl SearchCost {
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
     }
 
-    /// The run log's `webSearch`, which the controller charges (runtime-controller
-    /// `extract_turn_usage_from_artifacts`).
-    pub(crate) fn to_json(self) -> JsonValue {
+    /// The job's [`WEB_SEARCH_USAGE_ARTIFACT`], which the controller charges.
+    fn to_artifact(self) -> JsonValue {
         json!({
+            "kind": WEB_SEARCH_USAGE_ARTIFACT,
             "searches": self.searches,
             "input_tokens": self.input_tokens,
             "cached_input_tokens": self.cached_input_tokens,
@@ -172,9 +178,9 @@ impl ManagedWebSearch {
         }
     }
 
-    /// What the searches since the last report cost, which the run's `turn.completed` reports;
-    /// None when none ran.
-    pub(crate) fn take_unreported(&self) -> Option<SearchCost> {
+    /// What the searches since the last report cost, which the job's completion reports
+    /// ([`usage_artifact_of_job`]); None when none ran.
+    pub fn take_unreported(&self) -> Option<SearchCost> {
         let cost = std::mem::take(&mut self.state.lock().unreported);
         (cost != SearchCost::default()).then_some(cost)
     }
@@ -234,7 +240,22 @@ pub(crate) fn allowance_for_job(
     allowance
 }
 
-/// What the model reads in place of a search when its message has none left.
+/// What `job_id`'s web searches cost since the last report, as the artifact its completion
+/// carries ([`WEB_SEARCH_USAGE_ARTIFACT`]); None when the job has no allowance on this runtime or
+/// searched nothing since. Taking it reports it: a later call answers only what was searched
+/// after.
+pub(crate) fn usage_artifact_of_job(job_id: Uuid) -> Option<JsonValue> {
+    let allowance = REMEMBERED
+        .lock()
+        .iter()
+        .find(|(job, _)| *job == job_id)
+        .map(|(_, allowance)| allowance.clone())?;
+    allowance.take_unreported().map(SearchCost::to_artifact)
+}
+
+/// What the model reads in place of a search when its message has none left. It may be a run
+/// that starts afresh after an earlier one of the same message used them (a recovery retry), so
+/// it does not say that their results are at hand.
 pub(crate) fn limit_line(limit: u32) -> String {
     let more = if limit < SEARCHES_FOR_DEEPER_RESEARCH {
         " A message gets more only when the person's own words in it ask for deeper research."
@@ -242,7 +263,7 @@ pub(crate) fn limit_line(limit: u32) -> String {
         ""
     };
     format!(
-        "Not searched: this message has used its {limit} web searches. Answer from what the searches and the pages you read found, read a page whose address you have with `instafy web read`, and say plainly what you could not check.{more}"
+        "Not searched: this message has already used its {limit} web searches. Answer from what you have already found or read, read a page whose address you have with `instafy web read`, and say plainly what you could not check.{more}"
     )
 }
 
@@ -680,6 +701,26 @@ mod tests {
         assert_eq!(unknown_card.hold(4), 2);
     }
 
+    /// A job's completion takes what its searches cost since the last report, once, as the
+    /// artifact the controller charges; a job with no allowance here, or that searched nothing
+    /// since, has none.
+    #[test]
+    fn a_jobs_report_takes_what_its_searches_cost_once() {
+        let job = Uuid::new_v4();
+        let allowance = allowance_for_job(job, None, SEARCHES_PER_MESSAGE);
+        assert_eq!(usage_artifact_of_job(job), None, "nothing searched yet");
+        record_searches_for_test(&allowance, 2, 16_824, 782);
+        assert_eq!(
+            usage_artifact_of_job(job),
+            Some(
+                json!({"kind": "ai/web-search-usage", "searches": 2, "input_tokens": 16_824,
+                        "cached_input_tokens": 0, "output_tokens": 782})
+            )
+        );
+        assert_eq!(usage_artifact_of_job(job), None, "reported once");
+        assert_eq!(usage_artifact_of_job(Uuid::new_v4()), None);
+    }
+
     /// Kept to an allowance, the search extension keeps all it registers: its thread and config
     /// contributors as they are, and its tools behind the allowance. Codex's extension registers
     /// nothing else; a bump that makes it register more fails here, so the wrapper takes that too.
@@ -722,12 +763,16 @@ mod tests {
 
     /// The line the model reads names the allowance, says how to answer without more searches,
     /// and that only the person's own words get more; it names no price, provider or tool of
-    /// the search.
+    /// the search. A run that starts afresh after an earlier one used the searches (a recovery
+    /// retry) has none of their results, so the line never says it has.
     #[test]
     fn the_limit_line_says_what_to_do_in_plain_words() {
         assert_eq!(
             limit_line(SEARCHES_PER_MESSAGE),
-            "Not searched: this message has used its 2 web searches. Answer from what the searches and the pages you read found, read a page whose address you have with `instafy web read`, and say plainly what you could not check. A message gets more only when the person's own words in it ask for deeper research."
+            "Not searched: this message has already used its 2 web searches. Answer from what you have already found or read, read a page whose address you have with `instafy web read`, and say plainly what you could not check. A message gets more only when the person's own words in it ask for deeper research."
+        );
+        assert!(
+            !limit_line(SEARCHES_PER_MESSAGE).contains("the searches and the pages you read found")
         );
         assert!(!limit_line(SEARCHES_FOR_DEEPER_RESEARCH).contains("deeper research"));
         assert_eq!(

@@ -33,7 +33,7 @@ const FINISHED_CALL_ID: &str = "call-local-finished";
 const SEARCH_STEPS_FILE: &str = "search-steps.json";
 /// What a managed run reads when its message has no web search left, and under a search that
 /// ran only some of its queries (runtime-agent `managed_web_search`).
-const SEARCH_LIMIT_LINE: &str = "Not searched: this message has used its 2 web searches.";
+const SEARCH_LIMIT_LINE: &str = "Not searched: this message has already used its 2 web searches.";
 const SEARCH_FEWER_LINE: &str = "Only the first query of this search ran";
 const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
@@ -1941,6 +1941,8 @@ async fn isolated_retry_child() -> Result<()> {
     });
     let started = Instant::now();
     let task_usage = TaskUsage::default();
+    let allowance = (scenario == "native_search_managed_allowance")
+        .then(|| Arc::new(runtime_agent::managed_web_search::ManagedWebSearch::new(2)));
     let mut retry_started = None;
     let mut observe_retry = |event: &Value| -> Result<()> {
         if event["type"] == "stream.retry" {
@@ -1974,8 +1976,7 @@ async fn isolated_retry_child() -> Result<()> {
                 },
                 disable_native_web_search: scenario == "native_search_managed_finalization",
                 // Its message's allowance, as the job processor gives a managed run's turn.
-                managed_web_search: (scenario == "native_search_managed_allowance")
-                    .then(|| Arc::new(runtime_agent::managed_web_search::ManagedWebSearch::new(2))),
+                managed_web_search: allowance.clone(),
                 disable_final_output_json_schema: true,
                 allow_plain_text_final_fallback: true,
                 suppress_contextual_instructions: true,
@@ -2079,26 +2080,33 @@ async fn isolated_retry_child() -> Result<()> {
     ) {
         let output = result?;
         assert_eq!(output.final_json["summary"], FINAL_TEXT);
-        // What the message's two searches cost reaches the controller on the turn's
-        // `turn.completed`, as the bridge reported it, for the third that did not run nothing.
-        let completed = output
-            .events
-            .iter()
-            .filter(|event| event["type"] == "turn.completed")
-            .collect::<Vec<_>>();
-        let searched = scenario == "native_search_managed_allowance"
+        // What the message's two searches cost, as the bridge reported it, for the third that
+        // did not run nothing: the allowance holds it for the job's completion, which reports
+        // it to the controller (`ai/web-search-usage`). The turn's own events carry none of it.
+        let searched = allowance.is_some()
             && output
                 .events
                 .iter()
                 .any(|event| event["item"]["type"] == "web_search");
         assert_eq!(
-            completed
+            allowance
+                .as_ref()
+                .and_then(|allowance| allowance.take_unreported())
+                .map(|cost| (
+                    cost.searches,
+                    cost.input_tokens,
+                    cost.cached_input_tokens,
+                    cost.output_tokens
+                )),
+            searched.then_some((2, 2000, 0, 20)),
+            "{scenario}"
+        );
+        assert!(
+            output
+                .events
                 .iter()
-                .map(|event| event.get("webSearch").cloned())
-                .collect::<Vec<_>>(),
-            vec![searched.then(|| json!({"searches": 2, "input_tokens": 2000,
-                "cached_input_tokens": 0, "output_tokens": 20}))],
-            "{scenario}: {completed:?}"
+                .all(|event| event.get("webSearch").is_none()),
+            "{scenario}"
         );
         // The room's search steps (a search that ended with words), for the parent to hold
         // against the searches the proxy saw.

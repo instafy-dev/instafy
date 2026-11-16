@@ -571,6 +571,7 @@ fn expected_answer(case: &Case) -> Value {
         "requiresContextLookup": false,
         "requiresCommandExecution": false,
         "workspaceFileChangeRequirement": requirement,
+        "deeperResearch": case.expect.deeper_research,
         "observationCommands": [],
         "workerQuestionReply": null
     })

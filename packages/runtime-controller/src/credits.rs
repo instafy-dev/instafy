@@ -511,8 +511,13 @@ pub(crate) fn calculate_managed_ai_usage_charge(
 /// of its own that Credits names "Web search".
 pub(crate) const MANAGED_AI_WEB_SEARCH_REASON: &str = "managed_ai_web_search";
 
-/// What an Instafy AI turn's web searches cost, as its runtime reports them
-/// (`webSearch` on the turn's `turn.completed`): how many ran, and their
+/// The kind of the artifact an Instafy AI job's completion carries with what
+/// its web searches cost (runtime-agent `managed_web_search`), whether the job
+/// succeeded or failed.
+pub(crate) const MANAGED_AI_WEB_SEARCH_USAGE_ARTIFACT: &str = "ai/web-search-usage";
+
+/// What an Instafy AI job's web searches cost, as its runtime reports them
+/// ([`MANAGED_AI_WEB_SEARCH_USAGE_ARTIFACT`]): how many ran, and their
 /// requests' tokens, the search content among the input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ManagedAiWebSearchUsage {
