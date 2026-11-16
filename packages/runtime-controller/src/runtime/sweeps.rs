@@ -860,6 +860,7 @@ pub(crate) async fn refund_managed_ai_reserve_for_expired_job(
             &org_id,
             None,
             &prompt_id,
+            job_id,
             refund_reason,
         )
         .await

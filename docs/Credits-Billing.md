@@ -287,9 +287,11 @@ The controller now reserves units at prompt dispatch and then reconciles the fin
 
 A message to several agents, some on Instafy AI and some on the person's own AI connection (an agent saved with its own key or login), holds one reserve and one daily prompt slot, and only its Instafy AI turns settle that reserve or give it back. Dispatch marks the prompt managed, and stamps the managed markers (`aiAccessMode: managed`, `managedAiUsed` and the reserve's trace, `managedAiCredit`) only on the jobs and runs of the targets without a credential. An own-connection target's job and run get `aiAccessMode: byoc`, `managedAiUsed: false` and none of the reserve's markers, as in a message with no Instafy AI target. Completion reconciliation, the failed-turn refunds and the expiry sweep read those markers per job, so an own-connection turn is billed by that account and never in credits, whichever reply ends first: its tokens never measure the prompt's charge, its failure gives nothing of Instafy AI's back, and its reply is worded as the person's own connection's.
 
+When several of a message's agents answer on Instafy AI, the message is charged every one of their replies' tokens. The first of their turns to settle settles against the reserve under the prompt's adjustment key (`managed-ai-adjustment:{promptId}`), and the reserve row records that turn (`settledJobId`) and its cost. Each later Instafy AI turn of the message is charged its whole cost under a key of its own (`managed-ai-adjustment:{promptId}:{jobId}`). Every adjustment names its turn (`jobId`) and the message's reserve (`reserveIdempotencyKey`), and the Credits log adds a message's rows up into its one row. The reserve and the daily prompt slot come back only with the last of the message's Instafy AI turns to end, when none answered. While another of them is still queued or running, or once one has answered, a refused or empty turn gives nothing back. A queued turn that no runtime has held in a deleted space does not count, since it never runs. One message's settlements and refunds take turns on its prompt row (`select … for update`), so exactly one settlement goes against the reserve, and none races a refund.
+
 That usage is the `turn.completed` event at the end of the turn's Codex run log, so every turn that runs to its end, with a reply or a failure, is settled from its own tokens, short or long (a failed one may then be given back: "Failed turns" below). A turn the person stops is not: it sends no usage, and costs its reserve ("Stopped turns" below). The runtime cuts a long run log down to its first and last events within the completion payload's limit of 80 entries per list, which keeps that last event. (A runtime older than this keeps only the first 80 events of a long log, so a turn of more than 80 events reaches the controller without its usage and costs only its reserve.)
 
-Reconciliation never holds a turn's reply back. The completion first commits and publishes the reply and the run's end, and then lets the conversation's next queued send dispatch, which reserves its own credits; after a plan worker's turn that drain waits until the lead's continuation is queued. The completion then writes Home's rows, reconciles in a transaction of its own, and only after that queues a plan lead's continuation and announces `credits.updated`; its response waits for all of it. An attempt fails when the reconciliation returns an error (the org lookup, a ledger write) or when any statement in it failed, even one that was only logged (a ledger reference, the run's credit trace): Postgres turns `COMMIT` on such an aborted transaction into a rollback without an error, so the controller checks the transaction before it commits. A failed attempt is logged as an error, rolled back whole and tried once more, right away; the adjustment row is idempotent per prompt, so a retry never charges twice. A reconciliation whose second attempt fails too no longer fails the completion: the run keeps its reply, the reserve stands as the charge, the controller logs the failure as an error, and nothing retries it later.
+Reconciliation never holds a turn's reply back. The completion first commits and publishes the reply and the run's end, and then lets the conversation's next queued send dispatch, which reserves its own credits; after a plan worker's turn that drain waits until the lead's continuation is queued. The completion then writes Home's rows, reconciles in a transaction of its own, and only after that queues a plan lead's continuation and announces `credits.updated`; its response waits for all of it. An attempt fails when the reconciliation returns an error (the org lookup, a ledger write) or when any statement in it failed, even one that was only logged (a ledger reference, the run's credit trace): Postgres turns `COMMIT` on such an aborted transaction into a rollback without an error, so the controller checks the transaction before it commits. A failed attempt is logged as an error, rolled back whole and tried once more, right away; the adjustment row is idempotent per turn (the prompt's key for the turn that settled its reserve, the turn's own for any later one), so a retry never charges twice. A reconciliation whose second attempt fails too no longer fails the completion: the run keeps its reply, the reserve stands as the charge, the controller logs the failure as an error, and nothing retries it later.
 
 A multi-agent planning turn becomes terminal when the controller dispatches or refuses its plan,
 before the runtime submits its completion receipt. The controller accepts that receipt once from
@@ -844,9 +846,10 @@ records which jobs run on the platform key and which tokens they hold:
 - `GET /credits/status` — current team credit balance/limit.
 - `GET /credits/ledger` — recent burn/refill events. An Instafy AI turn's web searches are a
   `managed_ai_web_search` row of their own (`metadata.promptId`, `jobId`, `webSearch.searches` and
-  `cost`). An Instafy AI turn's rows (its
-  `managed_ai_prompt` reserve, `managed_ai_adjustment` and `managed_ai_refund`, which share the
-  turn's `metadata.promptId`) also carry `chatName`, the title of the chat the turn was sent in,
+  `cost`). An Instafy AI turn's rows (its `managed_ai_prompt` reserve, `managed_ai_adjustment`
+  rows, one per reply of a message to several Instafy AI agents, and `managed_ai_refund`, which
+  share the turn's `metadata.promptId`) also carry `chatName`, the title of the chat the turn was
+  sent in,
   when the viewer may open that chat by Home's rule (a space of theirs, and a chat that is not
   private or that they created or take part in). Other rows, and a turn in a chat they may not
   open, carry none. With `chatName`, a turn in a space other than the one asked about
@@ -873,8 +876,8 @@ Required envs (GitHub secrets/vars or local env):
   be at any hour: a day that starts at or above the limit tops up at its first dip below it, so
   the line names no hour. The graph's key calls every credit that came in "Added": a top-up, a
   starting balance or a refund.
-- The log shows one row per Instafy AI turn: its reserve, adjustment and refund added up, at the
-  time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
+- The log shows one row per Instafy AI turn: its reserve, adjustments (one per reply of a message
+  to several Instafy AI agents) and refund added up, at the time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
   chat. A turn from another space names that space beside its time (`spaceName`), since chats in
   two spaces can share a name. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
   is a row of its own ("Daily top-up", "Starting balance", "Hosted machine time", and "Web search" for an Instafy AI
@@ -887,7 +890,8 @@ Required envs (GitHub secrets/vars or local env):
 - The log shows the newest 8 rows; Show more reveals the rest of the 100 ledger rows the panel
   loads, 20 at a time, and moves focus to the first row it revealed. A turn whose reserve is
   older than those 100 rows has no row either: its later rows alone would show the wrong amount
-  (a refunded turn as "+1 credit"). An adjustment's `cost.reservedUnits` and a refund say that
-  the turn had a reserve.
+  (a refunded turn as "+1 credit"). An adjustment's `cost.reservedUnits`, the reserve an
+  adjustment names (`reserveIdempotencyKey`, as a later reply's adjustment in a message to
+  several agents does) and a refund say that the turn had a reserve.
 - Checkout/portal actions call `/billing/checkout` with `action=checkout|portal`.
 - Low-balance copy should direct users to upgrade/refill via the billing flow.
