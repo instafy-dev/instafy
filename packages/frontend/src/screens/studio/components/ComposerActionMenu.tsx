@@ -69,6 +69,7 @@ function ActionRow({
   testId,
   disabled = false,
   hoverTitle,
+  wrapTitle = false,
 }: {
   icon: ReactNode;
   title: string;
@@ -82,6 +83,8 @@ function ActionRow({
    * even when the action itself is disabled.
    */
   hoverTitle?: string;
+  /** Wrap a long title rather than cutting it to one line. */
+  wrapTitle?: boolean;
 }) {
   const row = (
     <StudioMenuAction
@@ -90,7 +93,7 @@ function ActionRow({
       isDisabled={disabled}
       data-testid={testId}
     >
-      <MenuItemContent start={icon} end={end} description={description}>
+      <MenuItemContent start={icon} end={end} description={description} wrapTitle={wrapTitle}>
         {title}
       </MenuItemContent>
     </StudioMenuAction>
@@ -478,6 +481,8 @@ export function ComposerActionMenu({
                       disabled={Boolean(row.disabledReason)}
                       hoverTitle={row.disabledReason ?? undefined}
                       testId={row.testId}
+                      // "Claude Code for the next message" is cut short at the menu's width.
+                      wrapTitle
                     />
                     {row.disabledReason && row.action ? (
                       <ActionRow

@@ -193,10 +193,10 @@ describe("Claude Code in Your AI", () => {
     });
     await render();
     expect(text("credentials-claude-code-path")).toBe("Not found");
+    // Nothing to consent to before a program is found, so the row doesn't ask for it.
     expect(text("credentials-claude-code-status")).toBe(
-      "Off. Choose Use for my messages to turn it on for this computer.",
+      "Off. Choose Find or Locate… to pick the claude program, then Use for my messages.",
     );
-    // Nothing to consent to before a program is found.
     expect(button("credentials-claude-code-enable")?.disabled).toBe(true);
 
     await press("credentials-claude-code-detect");
@@ -204,6 +204,9 @@ describe("Claude Code in Your AI", () => {
       expect.objectContaining({ extensionId: "claude-code", method: "detect", controllerUrl: CONTROLLER_URL }),
     );
     expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
+    expect(text("credentials-claude-code-status")).toBe(
+      "Off. Choose Use for my messages to turn it on for this computer.",
+    );
     expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
     expect(button("credentials-claude-code-enable")?.disabled).toBe(false);
 
@@ -214,6 +217,8 @@ describe("Claude Code in Your AI", () => {
   });
 
   it("shows the one-time note once it is on, until it is read", async () => {
+    // This computer's runtime found no Claude plan sign-in.
+    fetchRuntimeStatus.mockResolvedValue(statusAnswer({ ...READY, planSignIn: false }));
     await render();
     expect(text("credentials-claude-code-first-use")).toContain(
       "Sign in to Claude Code on this computer first: run claude in a terminal once.",
@@ -223,6 +228,20 @@ describe("Claude Code in Your AI", () => {
     expect(window.localStorage.getItem(CLAUDE_CODE_FIRST_USE_NOTE_STORAGE_KEY)).toBe("1");
     await render();
     expect(text("credentials-claude-code-first-use")).toBeNull();
+  });
+
+  it("leaves the note out once this computer's runtime found the Claude plan sign-in it asks for", async () => {
+    // Before the runtime has reported, the note shows; not beside "Ready" for someone signed in.
+    fetchRuntimeStatus.mockResolvedValue(statusAnswer(null));
+    await render();
+    expect(text("credentials-claude-code-first-use")).not.toBeNull();
+
+    fetchRuntimeStatus.mockResolvedValue(statusAnswer(READY));
+    await render();
+    expect(text("credentials-claude-code-status")).toBe("Ready on this computer.");
+    expect(text("credentials-claude-code-first-use")).toBeNull();
+    // Not read, only not needed: it isn't marked as read.
+    expect(window.localStorage.getItem(CLAUDE_CODE_FIRST_USE_NOTE_STORAGE_KEY)).toBeNull();
   });
 
   it("turns it off, and says what Desktop refused in Desktop's own words", async () => {
@@ -496,5 +515,265 @@ describe("Claude Code in Your AI", () => {
     );
     expect(button("credentials-claude-code-disable")).toBeNull();
     expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
+  });
+
+  // Turning it on alters the running runtime's grant, so Desktop replaces that
+  // runtime before it answers (docs/Local-Engine-Turns.md 4.3); the new one is
+  // listed only once it has registered with the controller.
+  describe("while Desktop replaces this computer's runtime after a change", () => {
+    const replacementId = (n: number) => `aaaaaaaa-bbbb-4ccc-8ddd-${String(n).padStart(12, "0")}`;
+    const NEW_RUNTIME_ID = replacementId(1);
+    const STATUS = "credentials-claude-code-status";
+    let replacements = 0;
+
+    function listing(runtimeId: string, claudeCode: ControllerRuntimeClaudeCode | null): FetchRuntimeStatusResult {
+      return {
+        runtimes: [{ runtimeId, status: "online", claudeCode } as never],
+        preferredRuntimeId: null,
+        claudeCodeLane: true,
+      };
+    }
+
+    async function wait(ms: number) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+        // Let the read the last timer started finish before the test looks.
+        for (let i = 0; i < 5; i += 1) {
+          await vi.advanceTimersByTimeAsync(0);
+        }
+      });
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      replacements = 0;
+      desktopStatus = { supported: true, found: true, consented: false, path: CLAUDE };
+      // The running runtime was started with no grant: listed, reporting nothing.
+      fetchRuntimeStatus.mockResolvedValue(listing(RUNTIME_ID, null));
+      invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+        if (options.method === "status") return desktopStatus;
+        if (options.method === "enable") {
+          // Desktop records the consent, and has replaced the runtime when it answers.
+          desktopStatus = { ...desktopStatus, consented: true };
+          if (desktopRuntime.running) {
+            replacements += 1;
+            desktopRuntime = { running: true, projectId: PROJECT_ID, runtimeId: replacementId(replacements) };
+          }
+          return desktopStatus;
+        }
+        throw new Error("unexpected");
+      });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("says it is checking this computer, then the new runtime's readiness, and stops reading", async () => {
+      await render();
+      expect(text(STATUS)).toBe("Off. Choose Use for my messages to turn it on for this computer.");
+
+      await press("credentials-claude-code-enable");
+      // Not "Start this space on this computer": the space runs, on a runtime not listed yet.
+      expect(text(STATUS)).toBe("Checking this computer…");
+      // Nor the sign-in note yet: the new runtime may report the sign-in it asks for.
+      expect(text("credentials-claude-code-first-use")).toBeNull();
+      await wait(1_000);
+      expect(text(STATUS)).toBe("Checking this computer…");
+
+      fetchRuntimeStatus.mockResolvedValue(listing(NEW_RUNTIME_ID, READY));
+      await wait(2_000);
+      expect(text(STATUS)).toBe("Ready on this computer.");
+      expect(text("credentials-claude-code-first-use")).toBeNull();
+      const reads = fetchRuntimeStatus.mock.calls.length;
+      await wait(60_000);
+      expect(fetchRuntimeStatus.mock.calls.length).toBe(reads);
+      expect(text(STATUS)).toBe("Ready on this computer.");
+    });
+
+    it("checks a runtime started since the row last read, as one started while Your AI is open", async () => {
+      // The row read when this computer ran no runtime.
+      desktopRuntime = { running: false };
+      Object.assign(window, { __INSTAFY_ACTIVE_PROJECT_ID__: PROJECT_ID });
+      fetchRuntimeStatus.mockResolvedValue(statusAnswer(null, { listed: false }));
+      await render();
+      expect(text(STATUS)).toBe("Off. Choose Use for my messages to turn it on for this computer.");
+
+      // The space starts on this computer, and nothing makes the row read again.
+      desktopRuntime = { running: true, projectId: PROJECT_ID, runtimeId: RUNTIME_ID };
+      fetchRuntimeStatus.mockResolvedValue(listing(RUNTIME_ID, null));
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe("Checking this computer…");
+
+      fetchRuntimeStatus.mockResolvedValue(listing(NEW_RUNTIME_ID, READY));
+      await wait(1_000);
+      expect(text(STATUS)).toBe("Ready on this computer.");
+    });
+
+    it("goes on checking through a later action that replaces nothing, until the new runtime is listed", async () => {
+      await render();
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe("Checking this computer…");
+
+      // Find while it checks: Desktop keeps the runtime it just started.
+      invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+        if (options.method === "status") return desktopStatus;
+        if (options.method === "detect") return desktopStatus;
+        throw new Error("unexpected");
+      });
+      await press("credentials-claude-code-detect");
+      expect(text(STATUS)).toBe("Checking this computer…");
+
+      fetchRuntimeStatus.mockResolvedValue(listing(NEW_RUNTIME_ID, READY));
+      await wait(1_000);
+      expect(text(STATUS)).toBe("Ready on this computer.");
+    });
+
+    it("goes on checking after a change Desktop refused, while the new runtime registers", async () => {
+      await render();
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe("Checking this computer…");
+
+      // Locate while it checks, and the person keeps the work going.
+      invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+        if (options.method === "status") return desktopStatus;
+        if (options.method === "locate") throw new Error(NOT_MADE);
+        throw new Error("unexpected");
+      });
+      await press("credentials-claude-code-locate");
+      expect(text("credentials-claude-code-error")).toBe(
+        "Instafy is still working on this computer, so that change was not made.",
+      );
+      expect(text(STATUS)).toBe("Checking this computer…");
+
+      fetchRuntimeStatus.mockResolvedValue(listing(NEW_RUNTIME_ID, READY));
+      await wait(1_000);
+      expect(text(STATUS)).toBe("Ready on this computer.");
+    });
+
+    it("doesn't wait when a read after the change fails but Desktop kept its runtime", async () => {
+      invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+        if (options.method === "status") return desktopStatus;
+        if (options.method === "enable") {
+          desktopStatus = { ...desktopStatus, consented: true };
+          return desktopStatus;
+        }
+        throw new Error("unexpected");
+      });
+      await render();
+      const before = fetchRuntimeStatus.mock.calls.length;
+      fetchRuntimeStatus.mockRejectedValueOnce(new Error("offline"));
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).not.toBe("Checking this computer…");
+      await wait(60_000);
+      expect(fetchRuntimeStatus.mock.calls.length - before).toBe(1);
+    });
+
+    it("stops after about 30 seconds when no new runtime is listed", async () => {
+      await render();
+      const before = fetchRuntimeStatus.mock.calls.length;
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe("Checking this computer…");
+      await wait(29_000);
+      expect(text(STATUS)).toBe("Checking this computer…");
+      await wait(1_000);
+      expect(text(STATUS)).toBe("Start this space on this computer to check it here.");
+      // The read with Desktop's answer, then one after each wait.
+      expect(fetchRuntimeStatus.mock.calls.length - before).toBe(1 + 7);
+      await wait(60_000);
+      expect(fetchRuntimeStatus.mock.calls.length - before).toBe(1 + 7);
+    });
+
+    it("doesn't wait when Desktop kept its runtime, as it keeps a Personal Browser one", async () => {
+      invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+        if (options.method === "status") return desktopStatus;
+        if (options.method === "enable") {
+          desktopStatus = { ...desktopStatus, consented: true };
+          return desktopStatus;
+        }
+        throw new Error("unexpected");
+      });
+      await render();
+      const before = fetchRuntimeStatus.mock.calls.length;
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe(
+        "Claude Code isn't ready on this computer yet. It's checked again when this space starts.",
+      );
+      await wait(60_000);
+      expect(fetchRuntimeStatus.mock.calls.length - before).toBe(1);
+    });
+
+    it("doesn't wait when the runtime Desktop was to start in its place didn't start", async () => {
+      invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+        if (options.method === "status") return desktopStatus;
+        if (options.method === "enable") {
+          // The change was made, and the replacement didn't start.
+          desktopStatus = { ...desktopStatus, consented: true };
+          desktopRuntime = { running: false };
+          return desktopStatus;
+        }
+        throw new Error("unexpected");
+      });
+      Object.assign(window, { __INSTAFY_ACTIVE_PROJECT_ID__: PROJECT_ID });
+      await render();
+      const before = fetchRuntimeStatus.mock.calls.length;
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe("Start this space on this computer to check it here.");
+      await wait(60_000);
+      expect(fetchRuntimeStatus.mock.calls.length - before).toBe(1);
+    });
+
+    it("reads once when this computer runs no runtime, since nothing starts until the space does", async () => {
+      desktopRuntime = { running: false };
+      Object.assign(window, { __INSTAFY_ACTIVE_PROJECT_ID__: PROJECT_ID });
+      fetchRuntimeStatus.mockResolvedValue(statusAnswer(null, { listed: false }));
+      await render();
+      const before = fetchRuntimeStatus.mock.calls.length;
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe("Start this space on this computer to check it here.");
+      await wait(60_000);
+      expect(fetchRuntimeStatus.mock.calls.length - before).toBe(1);
+    });
+
+    it("ends the reads when the row goes away, or another action begins", async () => {
+      await render();
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe("Checking this computer…");
+      // Turn off while it checks: that change leaves it off, so nothing more is read for the first one.
+      invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+        if (options.method === "status") return desktopStatus;
+        if (options.method === "disable") {
+          desktopStatus = { ...desktopStatus, consented: false };
+          return desktopStatus;
+        }
+        throw new Error("unexpected");
+      });
+      await press("credentials-claude-code-disable");
+      expect(text(STATUS)).toBe("Off. Choose Use for my messages to turn it on for this computer.");
+      const afterOff = fetchRuntimeStatus.mock.calls.length;
+      await wait(60_000);
+      expect(fetchRuntimeStatus.mock.calls.length).toBe(afterOff);
+
+      // Unmounted while checking: no read after it.
+      desktopStatus = { ...desktopStatus, consented: false };
+      invokeDesktopExtension.mockImplementation(async (options: { method: string }) => {
+        if (options.method === "status") return desktopStatus;
+        if (options.method === "enable") {
+          desktopStatus = { ...desktopStatus, consented: true };
+          replacements += 1;
+          desktopRuntime = { running: true, projectId: PROJECT_ID, runtimeId: replacementId(replacements) };
+          return desktopStatus;
+        }
+        throw new Error("unexpected");
+      });
+      await render();
+      await press("credentials-claude-code-enable");
+      expect(text(STATUS)).toBe("Checking this computer…");
+      await act(async () => root.unmount());
+      const atUnmount = fetchRuntimeStatus.mock.calls.length;
+      await wait(60_000);
+      expect(fetchRuntimeStatus.mock.calls.length).toBe(atUnmount);
+      root = createRoot(container);
+    });
   });
 });
