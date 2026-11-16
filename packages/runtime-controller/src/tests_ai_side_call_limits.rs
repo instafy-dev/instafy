@@ -179,7 +179,9 @@ where
 
 /// `count` side calls of `action` that `user_id` made `seconds_ago`, as the
 /// controller records them: closed receipts, and the calls added to their
-/// minute's row.
+/// minute's row. Any prune deletes receipts older than ten minutes, so calls
+/// that only fill the hour are seeded as a minute row alone
+/// (`seed_side_call_minute`).
 async fn seed_side_calls(
     pool: &PgPool,
     user_id: Uuid,
@@ -256,23 +258,20 @@ fn assert_waits(refused: &Value, expected: std::ops::RangeInclusive<i64>) {
 /// A minute's refusal for calls seeded five seconds ago: its oldest call
 /// leaves the minute about 55 seconds later.
 const MINUTE_WAIT: std::ops::RangeInclusive<i64> = 45..=55;
-/// An hour's refusal for calls seeded ten minutes ago: their minute's row
-/// stops counting 3,660 seconds after the minute began, so 3,000 to 3,060
-/// seconds later.
-const HOUR_WAIT: std::ops::RangeInclusive<i64> = 2_990..=3_060;
+/// An hour's refusal for calls in a minute row seeded to begin ten minutes
+/// ago: the row stops counting 3,660 seconds after it began, so 3,060 seconds
+/// after the seed, less the seconds the test took. An hour that stopped
+/// counting a row 3,600 seconds after it began would wait 3,000.
+const HOUR_WAIT: std::ops::RangeInclusive<i64> = 3_050..=3_060;
 
-/// Waits for the background mark of a side call that the provider answered.
-async fn wait_until_marked_used(pool: &PgPool, connection_id: Uuid) -> anyhow::Result<()> {
-    wait_until(
-        "an answered call to mark its connection used",
-        || async move {
-            sql_one(
-                pool,
-                "select last_used_at is not null from user_credentials where id = $1",
-                &[&connection_id],
-            )
-            .await
-        },
+/// Whether the connection `connection_id` was marked used. The proxy's lease
+/// of the credential marks it; the stub proxies here lease nothing, so a
+/// mark could only come from the side call itself.
+async fn marked_used(pool: &PgPool, connection_id: Uuid) -> anyhow::Result<bool> {
+    sql_one(
+        pool,
+        "select last_used_at is not null from user_credentials where id = $1",
+        &[&connection_id],
     )
     .await
 }
@@ -297,8 +296,9 @@ async fn wait_until_blocked_by(pool: &PgPool, holder_pid: i32) -> anyhow::Result
 /// Each kind of side call reaches the provider until its minute, or its hour,
 /// holds its limit, and then answers 429 with that window, and the wait the
 /// window's oldest counted calls set, before the provider is called. The call
-/// that got through is counted on the connection it ran on, closed, added to
-/// its minute's row, and marks that connection used.
+/// that got through is counted on the connection it ran on, closed and added
+/// to its minute's row, and leaves marking the connection used to the
+/// proxy's lease.
 #[tokio::test]
 async fn side_calls_count_in_their_minute_and_hour_before_the_provider() -> anyhow::Result<()> {
     let pool =
@@ -317,11 +317,11 @@ async fn side_calls_count_in_their_minute_and_hour_before_the_provider() -> anyh
 
     let mut answered_calls = 0;
     for kind in Kind::all() {
-        // Seeded a few seconds ago, the calls fill the minute; ten minutes
-        // ago, only the hour.
-        for (limit, window_seconds, seconds_ago, wait) in [
-            (kind.per_minute, MINUTE_SECONDS, 5, MINUTE_WAIT),
-            (kind.per_hour, HOUR_SECONDS, 10 * 60, HOUR_WAIT),
+        // Calls a few seconds ago, with their receipts, fill the minute; a
+        // minute row that began ten minutes ago, only the hour.
+        for (limit, window_seconds, minute_full, wait) in [
+            (kind.per_minute, MINUTE_SECONDS, true, MINUTE_WAIT),
+            (kind.per_hour, HOUR_SECONDS, false, HOUR_WAIT),
         ] {
             let owner = Uuid::new_v4();
             with_space(&pool, &[owner], |space| {
@@ -329,7 +329,15 @@ async fn side_calls_count_in_their_minute_and_hour_before_the_provider() -> anyh
                 async move {
                     let token = user_token(config, space.owner);
                     let (uri, body) = kind.request(space.project_id);
-                    seed_side_calls(pool, space.owner, kind.action, limit - 1, seconds_ago).await?;
+                    let seeded_receipts = if minute_full {
+                        seed_side_calls(pool, space.owner, kind.action, limit - 1, 5).await?;
+                        limit - 1
+                    } else {
+                        let calls = i32::try_from(limit - 1)?;
+                        seed_side_call_minute(pool, space.owner, kind.action, calls, 10 * 60)
+                            .await?;
+                        0
+                    };
 
                     let (status, answered) =
                         send(app, &token, "POST", &uri, Some(body.clone())).await?;
@@ -358,15 +366,25 @@ async fn side_calls_count_in_their_minute_and_hour_before_the_provider() -> anyh
                         (row.get(0), row.get(1))
                     };
                     assert_eq!(on_connection, 1, "the call counts on its connection");
-                    assert_eq!(closed, limit, "a side call's receipt is closed");
+                    assert_eq!(
+                        closed,
+                        seeded_receipts + 1,
+                        "a side call's receipt is closed"
+                    );
                     assert_eq!(minute_calls(pool, space.owner, kind.action).await?, limit);
-                    wait_until_marked_used(pool, space.connection_id).await?;
 
                     let (status, refused) = send(app, &token, "POST", &uri, Some(body)).await?;
                     assert_limited(status, &refused, kind.code, limit, window_seconds);
                     assert_waits(&refused, wait);
-                    assert_eq!(receipts(pool, space.owner, kind.action).await?, limit);
+                    assert_eq!(
+                        receipts(pool, space.owner, kind.action).await?,
+                        seeded_receipts + 1
+                    );
                     assert_eq!(minute_calls(pool, space.owner, kind.action).await?, limit);
+                    assert!(
+                        !marked_used(pool, space.connection_id).await?,
+                        "the side call marked its connection used itself"
+                    );
                     Ok(())
                 }
             })
@@ -548,7 +566,8 @@ async fn refused_side_calls_do_not_wait_for_a_lock() -> anyhow::Result<()> {
         async move {
             // Each kind's hour is used, and another request holds both locks.
             for kind in Kind::all() {
-                seed_side_calls(pool, space.owner, kind.action, kind.per_hour, 10 * 60).await?;
+                let calls = i32::try_from(kind.per_hour)?;
+                seed_side_call_minute(pool, space.owner, kind.action, calls, 10 * 60).await?;
             }
             let mut holder = pool.get().await?;
             let holding = holder.transaction().await?;
@@ -663,7 +682,6 @@ async fn a_side_call_that_waited_for_the_lock_counts_again() -> anyhow::Result<(
                             json!("Quarterly report"),
                             "{answered}"
                         );
-                        wait_until_marked_used(pool, space.connection_id).await?;
                     } else {
                         assert_limited(
                             status,
@@ -764,12 +782,69 @@ async fn a_refusal_waits_for_the_window_that_has_room_last() -> anyhow::Result<(
     Ok(())
 }
 
+/// The hour sums whole per-minute rows. A row counts until an hour after its
+/// minute ended, since calls late in its minute are still in the hour: a row
+/// that began 3,630 seconds ago fills the hour alone for 30 more seconds.
+/// When the hour holds more than its limit, as after a limit is lowered, the
+/// wait is read from the newest row that brings it to the limit, not the
+/// oldest.
+#[tokio::test]
+async fn the_hours_wait_is_read_from_its_minute_rows() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("the_hours_wait_is_read_from_its_minute_rows").await?;
+    let proxy = MockServer::start_async().await;
+    let answers = proxy
+        .mock_async(|when, then| {
+            when.method(POST).path("/v1/responses");
+            then.status(200).json_body(provider_answer());
+        })
+        .await;
+    let config = config("ai-side-call-limits", Some(proxy.base_url()));
+    let app =
+        crate::credentials::router().with_state(build_test_state(pool.clone(), config.clone()));
+
+    for kind in Kind::all() {
+        // Rows of (calls, seconds since the row began).
+        for (rows, wait) in [
+            (vec![(kind.per_hour, HOUR_SECONDS + 30)], 20..=30),
+            (
+                vec![
+                    (kind.per_hour / 2, 50 * MINUTE_SECONDS),
+                    (kind.per_hour, 10 * MINUTE_SECONDS),
+                ],
+                HOUR_WAIT,
+            ),
+        ] {
+            let owner = Uuid::new_v4();
+            with_space(&pool, &[owner], |space| {
+                let (app, pool, config, kind) = (&app, &pool, &config, &kind);
+                async move {
+                    for (calls, seconds_ago) in rows {
+                        let calls = i32::try_from(calls)?;
+                        seed_side_call_minute(pool, space.owner, kind.action, calls, seconds_ago)
+                            .await?;
+                    }
+                    let token = user_token(config, space.owner);
+                    let (uri, body) = kind.request(space.project_id);
+                    let (status, refused) = send(app, &token, "POST", &uri, Some(body)).await?;
+                    assert_limited(status, &refused, kind.code, kind.per_hour, HOUR_SECONDS);
+                    assert_waits(&refused, wait);
+                    assert_eq!(receipts(pool, space.owner, kind.action).await?, 0);
+                    Ok(())
+                }
+            })
+            .await?;
+        }
+    }
+    assert_eq!(answers.hits_async().await, 0);
+    Ok(())
+}
+
 /// A provider that is slow to answer must not hold a database connection: on
 /// a pool of one, a side call gives its slot back before the provider is
 /// called, or every other request waits behind the provider. The call is
 /// counted by then. Once the provider answers, the call answers without
-/// taking a connection again, though every one is taken; it marks its
-/// connection used in the background once one is free.
+/// taking a connection again, though every one is taken, and leaves marking
+/// the connection used to the proxy's lease.
 #[tokio::test]
 async fn a_side_call_needs_no_pool_slot_once_it_reaches_the_provider() -> anyhow::Result<()> {
     let pool = require_origin_test_pool_with_max_size(
@@ -826,7 +901,10 @@ async fn a_side_call_needs_no_pool_slot_once_it_reaches_the_provider() -> anyhow
                     json!("Quarterly report"),
                     "{answered}"
                 );
-                wait_until_marked_used(pool, space.connection_id).await?;
+                assert!(
+                    !marked_used(pool, space.connection_id).await?,
+                    "the side call marked its connection used itself"
+                );
                 Ok(())
             }
         })

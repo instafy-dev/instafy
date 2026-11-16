@@ -254,11 +254,12 @@ request the counts already refuse is answered before it waits for that lock. Win
   the hour from per-minute rows in `ai_side_call_minutes`: a row counts until an hour after its
   minute ended, so the hour can refuse up to a minute early. Each kind of call counts under a lock
   of its own per person, so a completion never waits behind a title or a connection save. The
-  call returns its database connection before the provider answers and takes none to answer: it
-  marks the connection used in the background, at most once a minute. A refused completion shows
-  nothing and a refused title leaves the chat its fallback name, with no error; that Studio page
-  then sends that kind of call for that person again only after `retryAfterSeconds`. It drops a
-  wait that has grown past an hour because the computer's clock moved back.
+  call returns its database connection before the provider answers and takes none to answer. The
+  connection is marked used when the proxy leases its credential, a lease the proxy keeps up to a
+  minute. A refused completion shows nothing and a refused title leaves the chat its fallback
+  name, with no error; that Studio page then sends that kind of call for that person again only
+  after `retryAfterSeconds`. It drops a wait that has grown past an hour because the computer's
+  clock moved back.
 
 A refused request is refused before the provider or OpenAI is called, and records nothing. The
 exception is a ChatGPT login whose connection can no longer be saved when it completes, because
