@@ -306,8 +306,8 @@ export async function runSharedBrowserStepTimeFixture() {
   const neverEnding = [];
   // The listing page's script, held while `holdListingScript` is set.
   const heldScripts = [];
-  // When the first request for each page whose connection is cut came.
-  const firstCut = new Map();
+  // When each request for a page whose connection is cut came, by its path.
+  const cutAt = new Map();
   let holdListingScript = true;
   try {
     const requests = [];
@@ -358,8 +358,9 @@ export async function runSharedBrowserStepTimeFixture() {
         return;
       }
       if (url.pathname === "/cut/reader" || url.pathname === "/cut/always") {
-        if (!firstCut.has(url.pathname)) firstCut.set(url.pathname, Date.now());
-        if (url.pathname === "/cut/always" || Date.now() - firstCut.get(url.pathname) < CUT_MS) {
+        const times = cutAt.get(url.pathname) ?? [];
+        cutAt.set(url.pathname, [...times, Date.now()]);
+        if (url.pathname === "/cut/always" || Date.now() - (times[0] ?? Date.now()) < CUT_MS) {
           request.socket.destroy();
           return;
         }
@@ -828,7 +829,9 @@ export async function runSharedBrowserStepTimeFixture() {
     const alwaysCutMs = Math.round(alwaysCut.wallMs);
     assert.equal(alwaysCut.code, 1, `A load cut every time opened: ${alwaysCut.stdout}`);
     assert.match(alwaysCut.stderr, /net::ERR_(?:EMPTY_RESPONSE|CONNECTION_CLOSED|CONNECTION_RESET)/u, alwaysCut.stderr);
-    assert.ok(requests.filter((line) => line === "GET /cut/always").length >= 2, `The browser's reload was not waited for: ${requests.join(", ")}`);
+    // It waited for the browser's reload, a second after the first try.
+    const alwaysCutTimes = cutAt.get("/cut/always");
+    assert.ok(alwaysCutTimes.at(-1) - alwaysCutTimes[0] >= CUT_MS, `The browser's reload was not waited for: ${alwaysCutTimes.map((at) => at - alwaysCutTimes[0]).join(", ")} ms`);
     assert.ok(alwaysCut.wallMs < CUT_ANSWER_MS, `It failed once the reload was cut too (${alwaysCutMs} ms)`);
     assert.doesNotMatch(runPage.url(), /\/cut\/always/u, "The tab ended on the page cut every time");
     assert.equal(prompts.length, promptsBeforeForm + 1, "Nothing asked for the cut loads");
