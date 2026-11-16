@@ -235,4 +235,32 @@ describe("chatTranscriptCopy", () => {
     const opened = revealCanonicalMessageTarget(rows, collapsed, "stop-1");
     expect(formatConversationTranscript(opened)).toBe("User: Plan 3 days in Seville.\n\nAssistant: Stopped this run.");
   });
+
+  // A failed turn's row shows a plain sentence, the service's words one
+  // press away in Details: the copy carries what the chat shows.
+  it("copies a failed turn as the chat words it, never the service's raw sentence", () => {
+    const raw = "You\u2019ve hit your usage limit. Try again at Nov 14th, 2026 11:03 PM.";
+    const failure = createMessage({
+      id: "failure-1",
+      content: raw,
+      timestamp: 2,
+      messageType: "error",
+      metadata: { source: "agent", outcome: "failed", messageType: "error", jobId: "job-1", runId: "run-1", aiAccessMode: "managed" },
+    });
+    const messages = [
+      createMessage({ id: "user-1", role: "user", content: "Fill in what's still missing.", timestamp: 1 }),
+      failure,
+    ];
+    const shown =
+      "Instafy AI is unavailable right now: it has reached its usage limit, so this turn stopped. This is on Instafy's side, not your credits or your plan. Try again later.";
+    const collapsed = collapseLifecycleMessages(messages);
+    const rows = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage));
+    const transcript = formatConversationTranscript(rows);
+    expect(transcript).toBe(`User: Fill in what's still missing.\n\nAssistant: ${shown}`);
+    expect(transcript).not.toContain("hit your usage limit");
+    // The message on its own, as Copy message has it.
+    expect(resolveCopyableMessageContent(failure)).toBe(shown);
+    // A reply that only quotes such words is no failure: it is copied as written.
+    expect(resolveCopyableMessageContent(createMessage({ id: "reply", content: raw }))).toBe(raw);
+  });
 });

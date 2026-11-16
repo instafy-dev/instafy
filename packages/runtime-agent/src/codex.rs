@@ -3007,7 +3007,7 @@ impl CodexClient {
             }
         }) {
             return Err(CodexExecutionError {
-                message,
+                message: crate::usage_limit_reset::usage_limit_reset_in_utc(message),
                 codex_error_info: error_info,
             }.into());
         }
@@ -5989,7 +5989,7 @@ impl CodexEventStreamAdapter {
             })],
             EventMsg::Error(error) => vec![json!({
                 "type": "error",
-                "message": error.message,
+                "message": crate::usage_limit_reset::usage_limit_reset_in_utc(error.message.clone()),
             })],
             EventMsg::StreamError(error) => {
                 let reason = stream_error_reason(error);
@@ -11595,6 +11595,38 @@ required = true
         );
         // a run whose workspace is not known says nothing of the folder
         assert_eq!(CodexEventStreamAdapter::default().command_folder(ws), None);
+    }
+
+    #[test]
+    fn a_usage_limits_error_names_its_reset_as_the_moment_in_utc() {
+        // Codex words the reset in this machine's clock; the chat gets the moment in UTC, which
+        // Studio says in each reader's own clock (`usage_limit_reset`).
+        let local = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2026, 11, 14, 23, 3, 0)
+            .earliest()
+            .unwrap();
+        let message = format!(
+            "You\u{2019}ve hit your usage limit. Try again at {}.",
+            local.format("%b %-dth, %Y %-I:%M %p")
+        );
+        let projected = CodexEventStreamAdapter::default().collect(&Event {
+            id: "evt_error".to_string(),
+            msg: EventMsg::Error(codex_protocol::protocol::ErrorEvent {
+                message,
+                codex_error_info: Some(CodexErrorInfo::UsageLimitExceeded),
+                misalignment: None,
+            }),
+        });
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0]["type"], "error");
+        assert_eq!(
+            projected[0]["message"],
+            format!(
+                "You\u{2019}ve hit your usage limit. Try again at {}.",
+                local
+                    .with_timezone(&chrono::Utc)
+                    .format("%Y-%m-%d %H:%M UTC")
+            )
+        );
     }
 
     #[test]

@@ -161,6 +161,13 @@ describe("Claude Code turn wording", () => {
       `${base} at 5pm (America/Los_Angeles).`,
     );
     expect(sentence("Usage limit reached, resets in 3 hours")).toBe(`${base} in 3 hours.`);
+    // The moment the runtime adds in UTC reads in the reader's own clock, never as UTC.
+    const utc = sentence("Claude AI usage limit reached\nThe limit resets at 2026-11-14 23:03 UTC.");
+    expect(utc).not.toContain("UTC");
+    expect(utc).toMatch(new RegExp(`^${base} at .+\\.$`, "u"));
+    expect(utc).toContain(
+      new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(Date.UTC(2026, 10, 14, 23, 3))),
+    );
     // No time, a time that names the plumbing, or one too long: the plain sentence.
     expect(sentence("Usage limit reached.")).toBe(EXPECTED.plan_limit);
     expect(sentence("limit reached, resets 2pm {\"type\":\"rate_limit\"}")).toBe(EXPECTED.plan_limit);

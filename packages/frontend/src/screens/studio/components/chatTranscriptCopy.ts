@@ -1,3 +1,4 @@
+import { hasFailedRunMetadata, resolveRunFailurePresentation } from "../../../conversations/runFailurePresentation";
 import type { ChatMessage, ChatMessageFileChange } from "../types";
 import { readRowStopNotice, rowWentOnFromStop } from "./chatMessagePresentation";
 
@@ -27,6 +28,23 @@ function normalizeMessageType(message: ChatMessage): string {
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value.replace(/\r\n/g, "\n").trim() : "";
+}
+
+/**
+ * A message's words as the chat shows them. A failed turn shows a plain
+ * sentence ("Instafy AI is unavailable right now: …"), with the service's
+ * own words one press away in Details: a copy carries that sentence too,
+ * never the raw text it stands for.
+ */
+function chatWords(message: ChatMessage): string {
+  if (message.role === "assistant" && (normalizeMessageType(message) === "error" || hasFailedRunMetadata(message.metadata))) {
+    const failure = resolveRunFailurePresentation({ metadata: message.metadata, content: message.content, assumeFailed: true });
+    const sentence = normalizeText(failure?.friendlyText);
+    if (sentence) {
+      return sentence;
+    }
+  }
+  return normalizeText(message.content);
 }
 
 function coerceThreadMessages(rawThreadMessages: unknown): ChatMessage[] {
@@ -118,7 +136,7 @@ function resolveThreadSummary(threadMessages: ChatMessage[]): string {
     if (!latestFileSummary) {
       latestFileSummary = formatFileChangeSummary(candidate.files);
     }
-    const content = normalizeText(candidate.content);
+    const content = chatWords(candidate);
     if (!content) {
       continue;
     }
@@ -136,7 +154,7 @@ function resolveThreadSummary(threadMessages: ChatMessage[]): string {
 }
 
 export function resolveCopyableMessageContent(message: ChatMessage): string {
-  const directContent = normalizeText(message.content);
+  const directContent = chatWords(message);
   if (directContent) {
     return directContent;
   }

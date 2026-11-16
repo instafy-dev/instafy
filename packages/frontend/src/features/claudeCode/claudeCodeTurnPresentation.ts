@@ -3,6 +3,7 @@ import type {
   TurnEngineFailureInput,
   TurnEngineTurnOwner,
 } from "../frontendFeatureModule";
+import { usageLimitResetTimeForReader } from "../../conversations/usageLimitReset";
 import { CLAUDE_CODE_TURN_ENGINE_ID } from "./claudeCodeComposer";
 
 /**
@@ -186,14 +187,23 @@ export function readClaudeCodeFailureCode(metadata: Record<string, unknown>): Cl
 }
 
 const MAX_RESET_TIME_LENGTH = 48;
+// "The limit resets at 2026-11-14 23:03 UTC.": the moment the runtime adds (runtime-agent `classify_failure`).
+const RESET_IN_UTC_PATTERN = /\bresets?\s+(?:at\s+)?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\s*UTC\b/i;
 // "resets 2pm", "will reset at 5pm (America/Los_Angeles).", "resets in 3 hours".
 const RESET_TIME_PATTERN = /\bresets?\s+(?:at\s+)?((?:in\s+)?\d[^\n]*?)\s*(?:\.(?:\s|$)|$)/im;
 
-/** When the plan's limit resets, as the failure's own text says it, or null. */
+/**
+ * When the plan's limit resets, or null: the moment the runtime names in UTC,
+ * in the reader's own clock, else the time as the failure's own text says it.
+ */
 export function readClaudeCodeResetTime(
   rawText: string,
   readsPlainly: (text: string) => boolean,
 ): string | null {
+  const moment = usageLimitResetTimeForReader(RESET_IN_UTC_PATTERN.exec(rawText)?.[0] ?? "");
+  if (moment) {
+    return moment;
+  }
   const time = RESET_TIME_PATTERN.exec(rawText)?.[1]?.trim() ?? "";
   if (!time || time.length > MAX_RESET_TIME_LENGTH || !readsPlainly(time)) {
     return null;

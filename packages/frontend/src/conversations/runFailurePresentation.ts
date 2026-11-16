@@ -11,6 +11,7 @@ import { isPersonRuntimeStopReason } from "../runtime/unexpectedHostedRuntimeRec
 import { resolveProxyUpstreamErrorGuidance } from "../screens/studio/components/proxyError";
 import type { ChatMessage } from "../screens/studio/types";
 import type { ControllerRuntimeStatusEntry } from "../services/runtimeController/runtimes";
+import { usageLimitResetTimeForReader } from "./usageLimitReset";
 
 /**
  * Presentation helpers for failed agent runs.
@@ -541,19 +542,32 @@ const PROVIDER_USAGE_LIMIT_PATTERNS = [/hit your usage limit/i, /\busage_limit_r
 // The time the provider names for the window to reopen.
 const USAGE_LIMIT_RESET_PATTERN = /try again at\s+([^\n]+?)\.?\s*$/im;
 
-const MANAGED_AI_USAGE_LIMIT_FRIENDLY_TEXT =
-  "Instafy AI is unavailable right now: it has reached its usage limit, so this turn stopped. This is on Instafy's side, not your credits or your plan. Try again later.";
+const MANAGED_AI_USAGE_LIMIT_SENTENCE =
+  "Instafy AI is unavailable right now: it has reached its usage limit, so this turn stopped. This is on Instafy's side, not your credits or your plan.";
 
+/**
+ * When to come back is the one thing such a row has to say. Once the runtime
+ * names the moment in UTC (usageLimitReset.ts), every copy says it in the
+ * reader's own clock. A time the service wrote in its machine's clock alone
+ * (an older runtime) is no moment: only the person's own AI shows it, as the
+ * service wrote it.
+ */
 function providerUsageLimitFriendlyText(
   rawText: string,
   metadata: Record<string, unknown> | null,
 ): string {
   const accessMode = normalizedStringField(metadata, "aiAccessMode");
+  const resetTime = usageLimitResetTimeForReader(rawText);
   if (accessMode === "managed") {
-    return MANAGED_AI_USAGE_LIMIT_FRIENDLY_TEXT;
+    return `${MANAGED_AI_USAGE_LIMIT_SENTENCE} ${resetTime ? `Try again after ${resetTime}.` : "Try again later."}`;
   }
   if (accessMode !== "byoc") {
-    return RUN_FAILURE_FRIENDLY_TEXT.provider_usage_limit;
+    return resetTime
+      ? `The AI account for this turn has reached its usage limit, so it stopped. Try again after ${resetTime}, or connect another AI.`
+      : RUN_FAILURE_FRIENDLY_TEXT.provider_usage_limit;
+  }
+  if (resetTime) {
+    return `Your AI account has reached its usage limit, so this turn stopped. Try again after ${resetTime}, or connect another AI.`;
   }
   const resetsAt = USAGE_LIMIT_RESET_PATTERN.exec(rawText)?.[1]?.trim() ?? "";
   return resetsAt
