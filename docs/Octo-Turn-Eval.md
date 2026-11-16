@@ -201,7 +201,10 @@ job's own parser, as the job then acts on it. The cases are in
 history entries the runtime receives), the expected route and why. A case can also list the
 `workspaceFileChangeRequirement` values it accepts, what the routing preflight says the turn after it must change:
 after a Stop and an Undo, "keep going" must not require a change. Whether that turn then leaves the undone change
-alone, only a real turn shows.
+alone, only a real turn shows. Every rule of the browser skill's routing section also has a case on a subject the
+recorded tests never used, written for the check (`every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own`
+names which), so a rule that holds only for the few places, products and sites those tests were about shows: a rule
+added to the section adds its case there.
 
 ```bash
 # Offline, no model: every case builds and goes once through the routing preflight to a stand-in model.

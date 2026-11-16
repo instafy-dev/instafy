@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -92,6 +92,8 @@ impl Drop for EnvGuard {
 struct Upstream {
     /// Each request's body, byte for byte as it arrived.
     bodies: Arc<Mutex<Vec<Bytes>>>,
+    /// Each request's `session-id`, by which a ChatGPT login places its cache.
+    sessions: Arc<Mutex<Vec<Option<String>>>>,
     /// Whether it refuses every request, as an upstream refuses one it can't take.
     refuses: Arc<AtomicBool>,
 }
@@ -100,14 +102,25 @@ impl Upstream {
     fn take(&self) -> Vec<Bytes> {
         std::mem::take(&mut *self.bodies.lock().unwrap())
     }
+
+    fn take_sessions(&self) -> Vec<Option<String>> {
+        std::mem::take(&mut *self.sessions.lock().unwrap())
+    }
 }
 
 async fn upstream(
     State(state): State<Upstream>,
     OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     state.bodies.lock().unwrap().push(body.clone());
+    state.sessions.lock().unwrap().push(
+        headers
+            .get("session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+    );
     let payload: Value = serde_json::from_slice(&body).unwrap_or_default();
     if state.refuses.load(Ordering::SeqCst) {
         return (
@@ -460,6 +473,22 @@ async fn every_chats_routing_step_reaches_the_upstream_alike_up_to_the_persons_w
             forwarded["prompt_cache_key"],
             parsed(&bodies[1])["prompt_cache_key"]
         );
+        // A ChatGPT login places a request's cache by its `session-id`: the two chats' routing
+        // steps, each a thread of its own, name the one session their shared key is. An API
+        // key, which places a request by its key, gets each thread's own session.
+        let sessions = state.take_sessions();
+        let key = forwarded["prompt_cache_key"].as_str();
+        if name == "a ChatGPT login" {
+            ensure!(
+                sessions[0].as_deref() == key && sessions[1] == sessions[0],
+                "{name}: the routing steps went upstream as the sessions {sessions:?}, under the key {key:?}"
+            );
+        } else {
+            ensure!(
+                sessions[0].is_some() && sessions[1].is_some() && sessions[0] != sessions[1],
+                "{name}: the routing steps went upstream as the sessions {sessions:?}"
+            );
+        }
     }
     // Each credential's (and so each space's) starts stay apart, as their keys do.
     ensure!(
@@ -525,6 +554,13 @@ async fn a_turn_under_its_own_threads_key_goes_upstream_as_it_came() -> Result<(
         ensure!(
             input[1..] == forwarded_as_sent(&sent)[..],
             "{name}: a building turn's items did not go as they came: {input:#?}"
+        );
+        // Its session is its own thread's, as its key is.
+        let sessions = state.take_sessions();
+        ensure!(
+            sessions.len() == 1 && sessions[0].as_deref() == forwarded["prompt_cache_key"].as_str(),
+            "{name}: a building turn went upstream as the session {sessions:?}, under the key {}",
+            forwarded["prompt_cache_key"]
         );
     }
     Ok(())
