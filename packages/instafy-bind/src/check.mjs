@@ -9,8 +9,9 @@
 // they could not add, and that line must not pass the check. An item is missing only when no file of the site names
 // it: one whose words a script holds where the check cannot place them, or that a script fetches from another site, is
 // one its files can't tell about, which it looks for on the page as drawn (checkReport). On a page of options it also
-// checks the values and where each row comes from (below). A source line drawn by hand (an element with the class
-// "trust") links the page its fact was read on, unless it says it is not checked: written as plain text, a page to
+// checks the values, where each row comes from and, on a comparison, that a sort says something under its title
+// (below). A source line drawn by hand (an element with the class "trust") links the page its fact was read on,
+// unless it says it is not checked: written as plain text, a page to
 // share once gave its sources as two lines nobody could open, where site.trust(fact) would have linked each. So does a
 // fact site.trust draws: one with its source and no page draws a line that links nothing. The check names only a line
 // it can tell links nothing: one with something in it the check cannot read (a name, a function of the page's own) may
@@ -566,7 +567,9 @@ export function checkSite(dir, expect = []) {
 // unknown"), never as within the limit. A row of a comparison is a candidate a page read names (a value's or a
 // "sources" page), or only a search result ("found": its site, drawn "Not checked"). A page the person asked for from
 // what Octo knows, with nothing looked up ("from": "memory"), cites no page at all: each value reads "<value>, not
-// checked". These rules read the data the same way site.js and the compare starter draw it.
+// checked". The line under a comparison's title names the option each "sort" entry puts first, so two or more options
+// with no entry that decides anything, while a column reads as a number in every row, are asked for one per criterion.
+// These rules read the data the same way site.js and the compare starter draw it.
 
 /** A value that only says nothing is known: blank, dashes, "?", "n/a", "unknown", "TBD" (site.js: no value). */
 export const NO_VALUE = /^(?:[\s\-\u2010-\u2015?.\u00b7\u2026/]*|n\s*\/\s*a|unknown|tb[ad])$/i;
@@ -813,7 +816,46 @@ export function checkValues(dir) {
       }
     }
   }
+  // the line under a comparison's title comes from its sorts, where the compare starter's own app.js draws it
+  const numbers = OWN_LEDE.test(app) ? unsortedNumbers(data, liveRecords(root)).map((c) => c.label) : [];
+  if (numbers.length) {
+    problems.push(`the sort: no "sort" entry decides anything, so nothing is said under the title. Add a "sort" entry, with "dir", for each of the person's criteria that is a number here (${listed(numbers)}): the page then names the option each puts first under its title ("Lowest price: Option B"), and under 5 options the rows keep their order.`);
+  }
   return { checked: true, problems, notes };
+}
+
+/** A price whose source dates it ("asof") over 30 days ago may have changed (site.old), so no sort names it first. */
+const OLD_PRICE_MS = 30 * 86400000;
+
+/** The line under a comparison's title is the compare starter's own (its verdict): it names the option a "sort" entry
+ *  puts first when every row shows a number for that column, a fresh one for a price, and they are not all the same.
+ *  Two builds wrote every column of a comparison as text and no "sort", and their pages said nothing there although
+ *  each row had a price and a weight (a local test, Nov 9). The numbers are read as the page reads them (site.known):
+ *  a value with its source, or an estimate, by its "n" or else the first number in its text ("From €619" is 619,
+ *  "1.3kg" 1.3); for a price, what a check read first. With two or more options and no entry that decides anything:
+ *  the columns an entry would decide on, [{key, label}], in the page's order; else []. Which of them are the person's
+ *  criteria, and which way each goes, is the build's to say. */
+export function unsortedNumbers(data, records = new Map()) {
+  if (!isOptionsData(data) || !Array.isArray(data.columns) || fromMemory(data)) return [];
+  const items = data.items.filter((item) => item && typeof item === "object");
+  if (items.length < 2) return [];
+  // the page draws its first 5 columns, and an entry sorts by one of them
+  const columns = data.columns.slice(0, 5).filter((c) => c && typeof c === "object" && c.key);
+  const numberOf = (item, col) => {
+    const fact = item.facts?.[col.key];
+    if (col.type !== "price") return knownNumber(fact);
+    const read = liveValue(records.get(item.ref), col.key);
+    if (read != null) return read;
+    const asof = Date.parse(fact?.asof ?? "");
+    return Number.isFinite(asof) && Date.now() - asof > OLD_PRICE_MS ? null : knownNumber(fact);
+  };
+  const decides = (col) => {
+    const values = items.map((item) => numberOf(item, col));
+    return values.every((n) => n != null) && new Set(values).size > 1;
+  };
+  const sorts = Array.isArray(data.sort) ? data.sort : [];
+  if (sorts.some((s) => s && typeof s === "object" && columns.some((c) => c.key === s.key && decides(c)))) return [];
+  return columns.filter(decides).map((c) => ({ key: c.key, label: String(c.label || c.key) }));
 }
 
 /** The page's title for its card: data.json's "title", else the title its script gives site.head, else its HTML's

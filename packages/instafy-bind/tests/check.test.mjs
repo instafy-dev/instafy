@@ -901,6 +901,83 @@ test("a filter without a label fails the check: the page would have nothing to c
   }
 });
 
+// The line under a comparison's title names the option each "sort" entry puts first. Two builds of a comparison of
+// three laptops wrote every column as text and no "sort", and the page said nothing under its title, although every row
+// had its starting price ("From €619") and its weight ("1.3kg"). With two or more options and no entry that decides
+// anything, the check names the columns the page reads as a number in every row, for an entry with its "dir" for each
+// of the person's criteria among them; which those are is the build's to say.
+test("check asks a comparison whose sorts decide nothing for an entry per criterion that is a number, and names those columns", () => {
+  const at = (v, page, extra = {}) => ({ v, src: "Maker", url: `https://maker.example/${page}`, date: "2026-11-09", ...extra });
+  const unread = { note: "two independent reviews not found" };
+  const laptops = () => ({
+    title: "Three laptops",
+    columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "weight", label: "Weight", type: "text" },
+      { key: "price", label: "Starting price", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" },
+      // a sixth column is not drawn, so no sort is by it
+      { key: "screen", label: "Screen", type: "text" }],
+    items: [
+      { ref: "laptop:12", name: "Maker Laptop 12", facts: { cpu: at("Chip 3", "12?tab=specs"), battery: at("50 Wh", "12?tab=specs"), weight: at("1.3kg", "12?tab=specs"),
+        price: at("From €619", "12/configure"), reviews: unread, screen: at("12.2 in", "12?tab=specs") } },
+      { ref: "laptop:13-pro", name: "Maker Laptop 13 Pro", facts: { cpu: at("Chip Ultra 5", "13pro?tab=specs"), battery: at("74 Wh", "13pro?tab=specs"),
+        weight: at("1.4 kg", "13pro?tab=specs"), price: at("€1,349", "13pro/configure"), reviews: at("Review One · Review Two", "13pro/reviews"), screen: at("13.5 in", "13pro?tab=specs") } },
+      { ref: "laptop:16", name: "Maker Laptop 16", facts: { cpu: at("Chip AI 300", "16?tab=specs"), battery: at("85 Wh", "16?tab=specs"), weight: at("2.1 or 2.4 kg", "16?tab=specs"),
+        price: at("From €1,409", "16/configure"), reviews: unread, screen: at("16 in", "16?tab=specs") } },
+    ],
+  });
+  const expect = "Maker Laptop 12, Maker Laptop 13 Pro, Maker Laptop 16";
+  const asked = 'the sort: no "sort" entry decides anything, so nothing is said under the title. Add a "sort" entry, with "dir", for each of the person\'s criteria that is a number here (CPU, Battery, Weight and Starting price): the page then names the option each puts first under its title ("Lowest price: Option B"), and under 5 options the rows keep their order.';
+  const dir = optionsSite("compare", laptops);
+  const file = path.join(dir, "data.json");
+  const write = (data) => fs.writeFileSync(file, JSON.stringify(data, null, 2));
+  try {
+    assert.deepEqual(checkValues(dir).problems, [asked]);
+    const out = run("check", dir, "--expect", expect);
+    assert.equal(out.status, 1, out.stdout);
+    assert.match(out.stdout, /^VALUES: 1 value\(s\) to fix in data\.json:$/m);
+    assert.ok(out.stdout.split("\n").includes(`- ${asked}`), out.stdout);
+    assert.match(out.stdout, /3 of 3 expected item\(s\) shown/);
+    assert.deepEqual(JSON.parse(run("check", dir, "--expect", expect, "--json").stdout).values.problems, [asked]);
+
+    // an entry decides nothing when a row lacks its value, when the rows all show the same, or for a price its source
+    // dates over 30 days ago: the page would still say nothing there
+    const lacking = { ...laptops(), sort: [{ key: "reviews", label: "Most reviews", dir: "desc" }] };
+    write(lacking);
+    assert.deepEqual(checkValues(dir).problems, [asked]);
+    const same = laptops();
+    for (const i of same.items) i.facts.battery = at("60 Wh", "specs");
+    write({ ...same, sort: [{ key: "battery", label: "Battery, largest first", dir: "desc" }] });
+    assert.deepEqual(checkValues(dir).problems, [asked.replace("CPU, Battery, Weight", "CPU, Weight")]);
+    const old = laptops();
+    old.columns[3].type = "price";
+    old.items[0].facts.price = at("From €619", "12/configure", { asof: "2026-01-05" });
+    write({ ...old, sort: [{ key: "price", label: "Starting price, low to high", dir: "asc" }] });
+    assert.deepEqual(checkValues(dir).problems, [asked.replace(", Weight and Starting price", " and Weight")]);
+
+    // an entry for each of the person's criteria that is a number (the price and the weight): the line names the
+    // cheapest and the lightest, the check passes, and no entry is asked for the CPU
+    write({ ...laptops(), sort: [{ key: "price", label: "Starting price, low to high", dir: "asc" }, { key: "weight", label: "Weight, light first", dir: "asc" }] });
+    assert.deepEqual(checkValues(dir).problems, []);
+    assert.equal(run("check", dir, "--expect", expect).status, 0);
+    // one entry that decides is enough
+    write({ ...laptops(), sort: [{ key: "reviews", dir: "desc" }, { key: "weight", dir: "asc" }] });
+    assert.deepEqual(checkValues(dir).problems, []);
+
+    // nothing to decide between: one option, or no column a number in every row
+    write({ ...laptops(), items: laptops().items.slice(0, 1) });
+    assert.deepEqual(checkValues(dir).problems, []);
+    const words = laptops();
+    for (const i of words.items) for (const key of ["cpu", "battery", "weight", "price"]) i.facts[key] = { note: "not found on maker.example's page" };
+    write(words);
+    assert.deepEqual(checkValues(dir).problems, []);
+    // a page made before keeps its own app.js, which draws no such line
+    write(laptops());
+    fs.writeFileSync(path.join(dir, "app.js"), 'site.start({ data: "data.json", render: function (data) { site.head(data); } });\n');
+    assert.deepEqual(checkValues(dir).problems, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // A page is served from its own folder, as its card serves it. A new chat's page loaded another chat's page's files
 // ("../framework-laptops/site.js"): served on its own it could not load them, and it changed whenever that page did.
 // The check fails a page that loads a file from outside its folder (an element's src, srcset or a <link>'s href, a

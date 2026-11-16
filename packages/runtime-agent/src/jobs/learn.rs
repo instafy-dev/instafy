@@ -454,6 +454,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before the card command of a page with no builder skill took no `--serve-cmd` (it said
     // "The serve command is the builder skill's.").
     include_str!("legacy/interactive-artifacts-v17.md"),
+    // From before a comparison got a `sort` entry for each of the person's criteria that is a
+    // number, so the line under its title names the option each puts first (its sort counted as
+    // one nobody asked for).
+    include_str!("legacy/interactive-artifacts-v19.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),

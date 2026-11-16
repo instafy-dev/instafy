@@ -1105,3 +1105,38 @@ fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
         assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{relative}");
     }
 }
+
+/// The line under a comparison's title names the option each `sort` entry puts first, and two
+/// builds wrote no `sort`, so their pages said nothing there: the hub counted every sort as one
+/// "nobody asked for". A comparison still gets an entry, with `dir`, for each of the person's
+/// criteria that is a number (`instafy bind check` asks for one in the same words), and under 5
+/// options that only writes the line. The rule for every other sort stays. An unedited hub from
+/// before is upgraded, and an edited one is kept.
+#[test]
+fn a_comparison_gets_a_sort_for_each_criterion_that_is_a_number() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let previous = include_str!("legacy/interactive-artifacts-v19.md");
+    let rule = "A comparison still gets a `sort` entry, with `dir`, for each of the person's criteria that is a number: under 5 options it only writes the line under the title (\"Lowest price: Option B\").";
+    assert!(flat(hub).contains(rule), "{hub}");
+    assert!(!flat(previous).contains(rule), "new in this version");
+    for kept in [hub, previous] {
+        assert!(flat(kept).contains(
+            "no search, filter or sort nobody asked for, and no sort by a value no row has."
+        ));
+    }
+    assert!(hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES, "{} bytes", hub.len());
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+    let edited = format!("{previous}\nLocal page preference.\n");
+    fs::write(&path, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}

@@ -212,7 +212,10 @@ in a string or a comment), to draw with `site.h` (text as text) and `site.trust(
 page. A comparison the compare starter draws writes the line under its title itself, so a `lede` in its `data.json`
 is not read as the page's words, and the check notes that it isn't drawn. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
 value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
-it was read (`src`, `url`, `date`), and a filter applied without `site.byFilter`; and it notes the rows the filter
+it was read (`src`, `url`, `date`), a filter applied without `site.byFilter`, and a comparison of two or more options
+whose `sort` decides nothing while a column reads as a number in every row (the line under its title names the
+option each `sort` entry puts first: the check names those columns, for an entry with its `dir` for each of the
+person's criteria among them); and it notes the rows the filter
 lists apart because their value is unknown (`site.within` never counts an unknown value as within a limit). A row of a
 comparison must say where it comes from, by its data, never its words: a value or a `sources` entry cites an https
 page that was read, or, when only a search result names it, `found` names that result's site (`"reviews.example.net"`;
