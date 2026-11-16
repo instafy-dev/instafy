@@ -8774,7 +8774,7 @@ impl JobProcessor {
                 &mut outcome.summary,
                 &output.browser_not_given,
                 &output.browser_pages,
-                output.browser_tried.known(),
+                &output.browser_tried,
             );
         }
         apply_terminal_shared_browser_summary(
@@ -9571,10 +9571,7 @@ impl JobProcessor {
                     &retry_output.browser_not_given,
                     &retry_output.browser_pages,
                     // What the first attempt's steps tried, the turn tried.
-                    output
-                        .browser_tried
-                        .with(&retry_output.browser_tried)
-                        .known(),
+                    &output.browser_tried.with(&retry_output.browser_tried),
                 );
             }
             apply_terminal_shared_browser_summary(
@@ -16744,12 +16741,7 @@ pub async fn end_browser_turn_answer(
         .cloned()
         .collect();
     let tried = answer.tried.with(&second.tried);
-    browser_hand_back::leave_out_addresses_never_opened(
-        summary,
-        &not_given,
-        &opened,
-        tried.known(),
-    );
+    browser_hand_back::leave_out_addresses_never_opened(summary, &not_given, &opened, &tried);
     let mut ended = BrowserTurnEnd {
         artifacts: second.artifacts,
         messages: second.messages,
@@ -16814,7 +16806,7 @@ pub async fn end_browser_turn_answer(
                             &mut written,
                             &not_given,
                             &opened,
-                            tried.known(),
+                            &tried,
                         );
                         lines = browser_hand_back::finding_lines_of(&written).map(|lines| {
                             let closing = browser_hand_back::closing_lines_of(&written);
@@ -16865,7 +16857,7 @@ pub async fn end_browser_turn_answer(
                 summary,
                 &[not_given.as_slice(), read.not_given.as_slice()].concat(),
                 &[opened.as_slice(), read.pages.as_slice()].concat(),
-                tried.with(&read.tried).known(),
+                &tried.with(&read.tried),
             );
             ended.artifacts.extend(read.artifacts);
             ended.messages.extend(read.messages);
@@ -16956,7 +16948,7 @@ async fn read_the_unread_pages(
         summary,
         &turn.not_given,
         &turn.pages,
-        turn.tried.known(),
+        &turn.tried,
     );
     let pages = browser_hand_back::take_unread_pages(summary);
     let canceled = turn
@@ -31106,10 +31098,10 @@ mod tests {
             &mut summary,
             &["https://unnamed.example/".to_string()],
             &["https://visit.example/en".to_string()],
-            &[
+            &crate::codex::BrowserTried::from(vec![
                 "https://unnamed.example/".to_string(),
                 "https://visit.example/en".to_string(),
-            ],
+            ]),
         );
         let mut fallback = None;
         apply_terminal_shared_browser_summary(

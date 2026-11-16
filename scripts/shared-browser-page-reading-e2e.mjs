@@ -54,15 +54,17 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    is named by its role and label, or the first words a person sees on it
 //    when it has no role or says it has none),
 //    with no wait and no call log, and a cover that goes within a moment is
-//    waited for.
+//    waited for. A plain link under a cookie notice is no click to refuse: its
+//    address opens in the same tab, as a navigate step to it does, and the
+//    step says so.
 // 9. A cookie notice is never the person's step. A notice's accept is never
 //    listed, as a button, a link, an "Allow all" or an "Agree and close": a
 //    reading counts it among the controls it leaves out, so no step can press
 //    it, while a limited accept, a notice's settings and a button a page
 //    dresses up beside it stay listed; the action policy's refusal of an
 //    accept keeps its words. A click under a notice the browser could not
-//    decline is refused in words that say where to go instead, never to pause
-//    on it, and a pause on a notice's buttons is refused as one on anything
+//    decline never pauses on it (a plain link's address opens instead), and a
+//    pause on a notice's buttons is refused as one on anything
 //    but fields is, in the chat's own tab and in Octo's own: nothing is
 //    outlined or pressed. Under a bar whose only button accepts, which covers
 //    nothing, the planner's own button works with no prompt.
@@ -106,8 +108,10 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // refusals are its words.
 const actionPolicyModule = createRequire(import.meta.url)(path.join(repositoryRoot, "packages/browser-action-policy/actionPolicy.js"));
 // What a cookie notice the browser could not decline tells Octo when a click
-// under it was kept from its control.
-const NOTICE_WORDS = "A cookie notice covers this page, and the browser could not decline it. Open a link under it by its address, or the official site of the place or service the task is about.";
+// under it was kept from its control: a button's, as a plain link's address
+// opens instead (COVERED_LINK_WORDS).
+const NOTICE_WORDS = "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site's home page, its address with no path, always opens.";
+const COVERED_LINK_WORDS = (label) => `A cookie notice covers "${label}", so its address was opened in this tab instead.`;
 // What the action policy answers a press of a notice's accept a step still
 // reaches: the Personal Browser's policy gives the same.
 const ACCEPT_WORDS = "Octo never accepts cookies, so nothing was pressed. Carry on under the notice from a fresh snapshot. If it covers what you need, open that link by its address, or another official source.";
@@ -318,10 +322,12 @@ const POLICY = `<h1>Your account</h1><p>Signed in as Ana.</p><p><a href="/readin
 const CHECKOUT = `<p>Total 140 euros</p><form method="post" action="/pay">
 <iframe src="{frame}/card" title="Secure card payment input frame" width="420" height="60"></iframe><button>Pay</button></form>`;
 // A tourism site's consent notice over the whole page, with an accept and its
-// settings and no reject button, and a cover that is no notice (a loading
-// screen). `live.hideOnScroll()` makes the cover go 300 ms after the page
-// scrolls, as a toast that fades once the page moves does.
-const NOTICE = `<h1>Visit the city</h1><p style="margin-top:1200px"><a href="/reading/visit" id="attractions">Attractions</a></p>
+// settings and no reject button, over a link and a button of the page's own,
+// and a cover that is no notice (a loading screen). `live.hideOnScroll()`
+// makes the cover go 300 ms after the page scrolls, as a toast that fades once
+// the page moves does.
+const NOTICE = `<h1>Visit the city</h1><p style="margin-top:1200px"><a href="/reading/visit" id="attractions">Attractions</a>
+<button type="button" onclick="window.pressed = 'map'">Show the map</button></p>
 <div id="consent-backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.4)"><div role="dialog" aria-label="Your privacy" style="margin:80px auto;width:320px;padding:16px;background:#fff">
 <p>We and our partners store and read data on your device.</p>
 <button type="button" onclick="window.consentAnswer = 'settings'">Learn more</button> <button type="button" onclick="window.consentAnswer = 'accepted'">Agree and close</button>
@@ -965,12 +971,13 @@ export async function runSharedBrowserPageReadingFixture() {
     reading = await read("/reading/notice");
     assert.equal(await consentAnswer(), null, "a notice with no reject button was answered");
     assert.equal(reading.activity.declined, undefined);
-    // d. A click under that notice is refused at once in words, with no wait
-    // and no call log; the notice is left up, and nothing is opened.
+    // d. A click on a button under that notice is refused at once in words,
+    // with no wait and no call log; the notice is left up, and nothing is
+    // opened or pressed.
     requests.length = 0;
     promptsBeforeBanner = prompts.length;
     let clickStarted = Date.now();
-    const underNotice = await runTool("POST", "/v1/click", { index: control(reading, "Attractions").index, snapshotId: reading.snapshotId });
+    const underNotice = await runTool("POST", "/v1/click", { index: control(reading, "Show the map").index, snapshotId: reading.snapshotId });
     measurements.coveredClickMs = Date.now() - clickStarted;
     assert.equal(underNotice.code, 1, underNotice.stdout);
     assert.ok(underNotice.stderr.includes(NOTICE_WORDS), underNotice.stderr);
@@ -978,9 +985,28 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.doesNotMatch(underNotice.stderr, /Call log|Timeout|intercepts pointer events/u);
     assert.ok(measurements.coveredClickMs < 8_000, `the covered click waited ${measurements.coveredClickMs} ms`);
     assert.equal(await consentAnswer(), null);
+    assert.equal(await runPage.evaluate(() => window.pressed ?? null), null, "the button under the notice was pressed");
     assert.equal(new URL(runPage.url()).pathname, "/reading/notice");
     assert.deepEqual(requests, [], "the covered click opened something");
     assert.equal(prompts.length, promptsBeforeBanner);
+    // A plain link under it is no click to refuse: its address opens in the
+    // same tab, as a navigate step to it does, at once and with no prompt
+    // under routine browsing, and the result says so. Told to open such a
+    // link by its address, a turn wrote that address into its own "stopped"
+    // line and never opened it. The notice is never answered.
+    const actionsBeforeLink = fs.readFileSync(actionsPath, "utf8").length;
+    clickStarted = Date.now();
+    const linkUnderNotice = await ok("POST", "/v1/click", { index: control(reading, "Attractions").index, snapshotId: reading.snapshotId });
+    measurements.coveredLinkMs = Date.now() - clickStarted;
+    assert.equal(new URL(linkUnderNotice.url).pathname, "/reading/visit", "the covered link's address did not open");
+    assert.equal(new URL(runPage.url()).pathname, "/reading/visit", "the covered link's address opened elsewhere than its tab");
+    assert.equal(linkUnderNotice.done, COVERED_LINK_WORDS("Attractions"));
+    assert.equal(linkUnderNotice.activity.step, "navigate");
+    assert.match(linkUnderNotice.visibleText, /Plan your visit/u);
+    assert.deepEqual(requests, [`GET ${sites().site}/reading/visit`], "the covered link opened something else");
+    assert.match(fs.readFileSync(actionsPath, "utf8").slice(actionsBeforeLink), /"type":"navigate","label":"Go to [^"]*\/reading\/visit"/u);
+    assert.equal(prompts.length, promptsBeforeBanner, "the covered link's address asked");
+    assert.ok(measurements.coveredLinkMs < 8_000, `the covered link waited ${measurements.coveredLinkMs} ms`);
     // e. Any other cover says what to do, in words of its own.
     reading = await read("/reading/covered");
     const underCover = await runTool("POST", "/v1/click", { index: control(reading, "All lines").index, snapshotId: reading.snapshotId });
@@ -1042,14 +1068,16 @@ export async function runSharedBrowserPageReadingFixture() {
       assert.ok(reading.omittedControls >= 1, `${address}: the accept left out is not counted`);
       assert.equal(await consentAnswer(), null, `${address}: the notice was answered`);
     }
-    // b. A click under a notice the browser could not decline is refused in
-    // words that say where to go instead, never to pause on it.
+    // b. A click under a notice the browser could not decline never pauses on
+    // it: a plain link's address opens instead, and nothing of the notice is
+    // pressed or opened.
     reading = await read("/reading/cookie-notice");
-    const covered = await runTool("POST", "/v1/click", { index: control(reading, "Plan a journey").index, snapshotId: reading.snapshotId });
-    assert.equal(covered.code, 1, covered.stdout);
-    assert.ok(covered.stderr.includes(NOTICE_WORDS), covered.stderr);
-    assert.doesNotMatch(covered.stderr, /pause on|request_human_input/u);
-    assert.equal(await consentAnswer(), null, "the notice was answered");
+    requests.length = 0;
+    const covered = await ok("POST", "/v1/click", { index: control(reading, "Plan a journey").index, snapshotId: reading.snapshotId });
+    assert.equal(new URL(covered.url).pathname, "/reading/visit");
+    assert.equal(covered.done, COVERED_LINK_WORDS("Plan a journey"));
+    assert.doesNotMatch(JSON.stringify(covered), /pause on|request_human_input/u);
+    assert.deepEqual(requests, [`GET ${sites().site}/reading/visit`], "the notice's settings or accept were opened");
     // c. A pause on a notice's buttons is refused as a pause on anything but
     // fields is: nothing is outlined, published or pressed, in the chat's own
     // tab and in Octo's own, whose words never send the turn to move the
@@ -1249,8 +1277,8 @@ export async function runSharedBrowserPageReadingFixture() {
         "a long page's text says where it is cut and how far to scroll, and scrolling reads all of it within the reading's cap, past a skip link and a pinned header, on a plain-text page and in a long paragraph; a view out of reach says so; past 200 controls those scrolled past are left out and counted, past 600 matches too, and a closed list's options never crowd out a form",
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
-        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
-        "a cookie notice is never the person's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline says where to go instead and never to pause on it; a pause on a notice's buttons is refused as one on anything but fields, outlining, publishing and pressing nothing, in the chat's own tab and in Octo's own; under a bar whose only button accepts the planner's own button works with no prompt",
+        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so, a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
+        "a cookie notice is never the person's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's buttons is refused as one on anything but fields, outlining, publishing and pressing nothing, in the chat's own tab and in Octo's own; under a bar whose only button accepts the planner's own button works with no prompt",
         "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
       ],
       limitations: [

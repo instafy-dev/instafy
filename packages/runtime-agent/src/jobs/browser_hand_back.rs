@@ -74,6 +74,7 @@
 use serde_json::{Value as JsonValue, json};
 
 use super::{JobExecution, JobMessage};
+use crate::codex::BrowserTried;
 use crate::controller::LeaseJob;
 
 /// What one prompt section can add. The controller keeps a hand-back's record
@@ -1024,16 +1025,57 @@ fn site_and_page(raw: &str) -> Option<(Option<String>, String)> {
 /// a finding line that names it would take it out of ([`take_unread_pages`]). Told only
 /// "undefined" of such a refusal, a comparison's browser part wrote the address as `no-page`,
 /// and its page said Tom's Hardware "had no page at the address checked" (a local test, Nov 7).
+///
+/// Nor does a `no-page` stand for an address whose page the turn read at another address:
+/// pages are compared by where the tab ended. An open that asked for it and left its tab on
+/// another page (`BrowserTried::ended_at`: a redirect, or the browser's own reload of a load the
+/// network cut) read its page there, when the answer gives what that page showed (a finding line
+/// with its address and no stop). A shop's product address that led to its page at another
+/// address got `no-page` beside the facts read on that page, and the reply and the page said the
+/// product's page "wasn't there" (a local test, Nov 10). A `no-page` at the address where a tab
+/// ended stays, in the turn's own words about a page it opened, and so does one whose open ended
+/// on a page the answer gives nothing of, such as a page that says the product is gone.
 pub(super) fn leave_out_addresses_never_opened(
     summary: &mut String,
     not_given: &[String],
     opened: &[String],
-    tried: &[String],
+    tried: &BrowserTried,
 ) {
+    // Whether a full address is one of these pages: a path among them is that page on any site.
+    let among = |pages: &[(Option<String>, String)], site: &str, page: &str| {
+        pages.iter().any(|(listed_site, listed_page)| {
+            listed_page == page
+                && listed_site
+                    .as_ref()
+                    .is_none_or(|listed_site| listed_site == site)
+        })
+    };
+    // The pages the answer gives what they showed: a finding line with an address and no stop.
+    let read: Vec<(Option<String>, String)> = summary
+        .lines()
+        .filter_map(json_object_line)
+        .filter(|object| stop_of(object).is_none())
+        .filter_map(|object| site_and_page(object.get("url")?.as_str()?))
+        .collect();
+    // The pages an open asked for whose tab ended on another page, which the answer read.
+    let read_elsewhere: Vec<(Option<String>, String)> = tried
+        .ended_at()
+        .iter()
+        .filter_map(|(asked, ended)| {
+            let asked = site_and_page(asked)?;
+            let (Some(ended_site), ended_page) = site_and_page(ended)? else {
+                return None;
+            };
+            let same =
+                asked.1 == ended_page && asked.0.as_ref().is_none_or(|site| *site == ended_site);
+            (!same && among(&read, &ended_site, &ended_page)).then_some(asked)
+        })
+        .collect();
     // With no address its steps tried known, a stop is left out only for a refusal as not
-    // given.
+    // given, or a page read at another address.
+    let tried = tried.known();
     let steps_known = !tried.is_empty();
-    if not_given.is_empty() && !steps_known {
+    if not_given.is_empty() && !steps_known && read_elsewhere.is_empty() {
         return;
     }
     let comparable = |addresses: &[String]| -> Vec<String> {
@@ -1067,19 +1109,23 @@ pub(super) fn leave_out_addresses_never_opened(
             if refused.contains(&as_written) {
                 return true;
             }
+            let full = match site_and_page(url) {
+                Some((Some(site), page)) => Some((site, page)),
+                _ => None,
+            };
+            // Read at another address: it was there.
+            if stop.trim().eq_ignore_ascii_case(NO_PAGE_STOP)
+                && full
+                    .as_ref()
+                    .is_some_and(|(site, page)| among(&read_elsewhere, site, page))
+            {
+                return true;
+            }
             if !steps_known || stop.trim().eq_ignore_ascii_case(LINK_ONLY_STOP) {
                 return false;
             }
             // Untried: a full address that is the page of no step.
-            match site_and_page(url) {
-                Some((Some(site), page)) => !stepped.iter().any(|(stepped_site, stepped_page)| {
-                    *stepped_page == page
-                        && stepped_site
-                            .as_ref()
-                            .is_none_or(|stepped_site| *stepped_site == site)
-                }),
-                _ => false,
-            }
+            full.is_some_and(|(site, page)| !among(&stepped, &site, &page))
         })
     };
     if summary.lines().any(|line| never_opened(line)) {
@@ -1366,7 +1412,7 @@ const STOP_WORDS: [(&str, &str); 11] = [
     ("download", "was a file to download"),
     ("secret", "showed private details, so Octo stopped there"),
     (LINK_ONLY_STOP, "is on a site Octo only links to"),
-    ("no-page", "wasn't at the address Octo tried"),
+    (NO_PAGE_STOP, "wasn't at the address Octo tried"),
     ("timed-out", "didn't answer in time"),
     (
         "covered",
@@ -1376,6 +1422,9 @@ const STOP_WORDS: [(&str, &str); 11] = [
 /// The stop of a page on a site Octo only links to: the one stop a turn gives without trying
 /// the address ([`leave_out_addresses_never_opened`]).
 const LINK_ONLY_STOP: &str = "link-only";
+/// The stop of an address with no page, which no page the turn read at another address has
+/// ([`leave_out_addresses_never_opened`]).
+const NO_PAGE_STOP: &str = "no-page";
 /// The plain words of `blocked` and of any other stop, which the controller reads as `blocked`.
 const OTHER_STOP_WORDS: &str = "couldn't be read";
 
@@ -1733,6 +1782,11 @@ mod tests {
             "../../../runtime-controller/src/browser_hand_back_fixtures.json"
         ))
         .expect("fixtures")
+    }
+
+    /// What a turn's steps tried, all of them known, with no open's tab ending elsewhere.
+    fn steps_tried(addresses: &[String]) -> BrowserTried {
+        BrowserTried::from(addresses.to_vec())
     }
 
     fn fenced_data(section: &str) -> JsonValue {
@@ -3289,7 +3343,7 @@ mod tests {
             &mut summary,
             &refused,
             &["https://www.notebookcheck.net/".to_string()],
-            &tried,
+            &steps_tried(&tried),
         );
         assert_eq!(
             summary,
@@ -3314,16 +3368,26 @@ mod tests {
         // an address with a fragment or a closing slash is the same address.
         for opened in [format!("{search}#results"), format!("{search}/")] {
             let mut summary = answer.clone();
-            leave_out_addresses_never_opened(&mut summary, &refused, &[opened.clone()], &tried);
+            leave_out_addresses_never_opened(
+                &mut summary,
+                &refused,
+                &[opened.clone()],
+                &steps_tried(&tried),
+            );
             assert_eq!(summary, answer, "{opened}");
         }
         let read =
             format!("{{\"url\":\"{search}\",\"title\":\"Search\",\"facts\":[\"No results.\"]}}");
         let mut summary = read.clone();
-        leave_out_addresses_never_opened(&mut summary, &refused, &[], &tried);
+        leave_out_addresses_never_opened(&mut summary, &refused, &[], &steps_tried(&tried));
         assert_eq!(summary, read);
         let mut summary = answer.replace(search, &format!("{search}#top"));
-        leave_out_addresses_never_opened(&mut summary, &[format!("{search}/")], &[], &tried);
+        leave_out_addresses_never_opened(
+            &mut summary,
+            &[format!("{search}/")],
+            &[],
+            &steps_tried(&tried),
+        );
         assert!(
             !summary.contains(&format!("\"url\":\"{search}#top\"")),
             "{summary}"
@@ -3331,7 +3395,7 @@ mod tests {
         assert!(summary.contains("notebookcheck"), "{summary}");
         // Nothing refused: nothing changes.
         let mut summary = answer.clone();
-        leave_out_addresses_never_opened(&mut summary, &[], &[], &[]);
+        leave_out_addresses_never_opened(&mut summary, &[], &[], &BrowserTried::default());
         assert_eq!(summary, answer);
     }
 
@@ -3378,7 +3442,7 @@ mod tests {
         ]
         .map(str::to_string);
         let mut summary = answer.clone();
-        leave_out_addresses_never_opened(&mut summary, &[], &pages, &tried);
+        leave_out_addresses_never_opened(&mut summary, &[], &pages, &steps_tried(&tried));
         assert_eq!(
             summary,
             answer.replace(&format!("{}\n", line(untried, "no-page")), "")
@@ -3389,7 +3453,12 @@ mod tests {
 
         // A page reached by a link is one of the turn's pages though no step asked for it.
         let mut summary = line(pressed, "paywall");
-        leave_out_addresses_never_opened(&mut summary, &[], &[pressed.to_string()], &[]);
+        leave_out_addresses_never_opened(
+            &mut summary,
+            &[],
+            &[pressed.to_string()],
+            &BrowserTried::default(),
+        );
         assert_eq!(summary, line(pressed, "paywall"));
         // A site Octo only links to is never tried: its stop stays, any other goes.
         let mut summary = format!(
@@ -3397,13 +3466,13 @@ mod tests {
             line(untried, "LINK-ONLY"),
             line(unreachable, "robots")
         );
-        leave_out_addresses_never_opened(&mut summary, &[], &pages, &pages);
+        leave_out_addresses_never_opened(&mut summary, &[], &pages, &steps_tried(&pages));
         assert_eq!(summary, line(untried, "LINK-ONLY"));
         // The pages its steps left a tab on do not say what else they tried: with that not
         // known, as after a press on a page reading the turn was not given, nothing is left
         // out for being untried.
         let mut summary = answer.clone();
-        leave_out_addresses_never_opened(&mut summary, &[], &pages, &[]);
+        leave_out_addresses_never_opened(&mut summary, &[], &pages, &BrowserTried::default());
         assert_eq!(summary, answer);
         // An address refused because nothing gave it still has no finding, tried as it was.
         let mut summary = format!("{}\n{}", line(untried, "no-page"), line(opened, "no-page"));
@@ -3411,7 +3480,7 @@ mod tests {
             &mut summary,
             &[untried.to_string()],
             &pages,
-            &[untried.to_string()],
+            &steps_tried(&[untried.to_string()]),
         );
         assert_eq!(summary, line(opened, "no-page"));
         // Only a refusal as not given is known: just that address's stop is left out.
@@ -3420,12 +3489,103 @@ mod tests {
             line(untried, "no-page"),
             line(unreachable, "robots")
         );
-        leave_out_addresses_never_opened(&mut summary, &[untried.to_string()], &[], &[]);
+        leave_out_addresses_never_opened(
+            &mut summary,
+            &[untried.to_string()],
+            &[],
+            &BrowserTried::default(),
+        );
         assert_eq!(summary, line(unreachable, "robots"));
         // The turn's steps are not known: nothing is left out.
         let mut summary = answer.clone();
-        leave_out_addresses_never_opened(&mut summary, &[], &[], &[]);
+        leave_out_addresses_never_opened(&mut summary, &[], &[], &BrowserTried::default());
         assert_eq!(summary, answer);
+    }
+
+    /// A `no-page` at an address whose page the turn read at another address is no finding:
+    /// pages are compared by where the tab ended. A shop's product address whose redirect led to
+    /// its page at another address got `no-page` beside the facts read on that page, and the
+    /// reply and the page said the product's page "wasn't there" (a local test, Nov 10). A
+    /// `no-page` where a tab ended, another stop at the asked address, another page of its site,
+    /// an open that ended on the page it asked for, and one whose page the answer gives nothing
+    /// of (a redirect to a page that says the product is gone) leave the turn's words as they
+    /// are.
+    #[test]
+    fn a_no_page_line_for_a_page_read_at_its_other_address_is_no_finding() {
+        let asked = "https://shop.example/products/reader";
+        let read = "https://ereader.shop.example/en/products/reader";
+        let line = |url: &str, stop: &str| format!("{{\"url\":\"{url}\",\"stopped\":\"{stop}\"}}");
+        let fact =
+            format!("{{\"url\":\"{read}\",\"title\":\"Reader\",\"facts\":[\"A 6-inch screen.\"]}}");
+        let mut tried = steps_tried(&[asked.to_string(), read.to_string()]);
+        tried.keep_ended(asked.to_string(), read.to_string());
+        let opened = [read.to_string()];
+        // However the turn wrote the address it asked for.
+        for written in [
+            asked,
+            "http://www.shop.example/products/reader/",
+            "https://Shop.Example/products/reader#specs",
+        ] {
+            let mut summary = format!(
+                "Read the reader's page.\n{fact}\n{}",
+                line(written, "no-page")
+            );
+            leave_out_addresses_never_opened(&mut summary, &[], &opened, &tried);
+            assert_eq!(
+                summary,
+                format!("Read the reader's page.\n{fact}"),
+                "{written}"
+            );
+        }
+        // Known though the addresses the steps tried are not, and asked for as a path on its
+        // tab's own site.
+        for (asked, written) in [
+            (asked, asked),
+            ("/products/reader", "https://shop.example/products/reader"),
+        ] {
+            let mut ended = BrowserTried::default();
+            ended.keep_ended(asked.to_string(), read.to_string());
+            let mut summary = format!("{fact}\n{}", line(written, "no-page"));
+            leave_out_addresses_never_opened(&mut summary, &[], &[], &ended);
+            assert_eq!(summary, fact, "{asked}");
+        }
+        // These stay: a `no-page` where the tab ended, a stop that is no `no-page`, another page
+        // or query of the site, and an open whose tab ended on the page it asked for. (The
+        // addresses the steps tried are not known here, so none goes for being untried.)
+        let colour = "https://shop.example/products/colour";
+        let stays = [
+            fact.clone(),
+            format!(
+                "{{\"url\":\"{colour}\",\"title\":\"Colour\",\"facts\":[\"A colour screen.\"]}}"
+            ),
+            line(read, "no-page"),
+            line(asked, "timed-out"),
+            line(asked, "login"),
+            line("https://shop.example/products/reader-plus", "no-page"),
+            line("https://shop.example/products/reader?ref=menu", "no-page"),
+            line(colour, "no-page"),
+        ]
+        .join("\n");
+        let mut ended = BrowserTried::default();
+        ended.keep_ended(asked.to_string(), read.to_string());
+        ended.keep_ended(
+            format!("{colour}/"),
+            "https://www.shop.example/products/colour#specs".to_string(),
+        );
+        let mut summary = stays.clone();
+        leave_out_addresses_never_opened(&mut summary, &[], &opened, &ended);
+        assert_eq!(summary, stays);
+        // And so does one whose page the answer gives nothing of: the tab ended on a page it
+        // read no fact of, or stopped at.
+        for other in [
+            "Read nothing of the reader.".to_string(),
+            line(read, "login"),
+        ] {
+            let summary_before = format!("{other}\n{}", line(asked, "no-page"));
+            let mut summary = summary_before.clone();
+            leave_out_addresses_never_opened(&mut summary, &[], &opened, &ended);
+            assert_eq!(summary, summary_before, "{other}");
+        }
     }
 
     /// A step's address and a finding's are compared as pages, not as text: `http` or `https`,
@@ -3459,7 +3619,7 @@ mod tests {
         ]
         .join("\n");
         let mut summary = format!("{stays}\n{goes}");
-        leave_out_addresses_never_opened(&mut summary, &[], &[], &tried);
+        leave_out_addresses_never_opened(&mut summary, &[], &[], &steps_tried(&tried));
         assert_eq!(summary, stays);
     }
 

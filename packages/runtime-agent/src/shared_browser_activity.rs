@@ -287,6 +287,29 @@ pub(crate) fn step_tried_addresses(
     asked.into_iter().chain(reported).collect()
 }
 
+/// Where a `navigate` or `open_tab` left its tab for the address it asked for: that address, as
+/// the step wrote it, and the page the browser said the step left the tab on
+/// ([`step_page_address`]). A redirect, or the browser's own reload of a load the network cut,
+/// leaves the tab at another address of the page it asked for, and the turn read the page there.
+/// None for a step that left no tab on a page, and for any other step. Kept so that no finding
+/// of a browser turn says there was no page at an address whose page it read
+/// (`jobs::browser_hand_back::leave_out_addresses_never_opened`), never projected into a message.
+pub(crate) fn step_ended_at(
+    tool: &str,
+    arguments: Option<&JsonValue>,
+    payload: Option<&JsonValue>,
+) -> Option<(String, String)> {
+    if !matches!(tool, "navigate" | "open_tab") {
+        return None;
+    }
+    let asked = arguments?.get("url")?.as_str()?.trim();
+    if asked.is_empty() {
+        return None;
+    }
+    let ended = step_page_address(tool, arguments, payload)?;
+    Some((asked.to_string(), ended))
+}
+
 /// The links a page's reading listed: the reading's id, and each link's index with its
 /// address. Kept only so that a step that presses one has tried the link's own address
 /// ([`pressed_link`]), never projected into a message.
@@ -471,6 +494,39 @@ mod tests {
                 Some(&json!({ "activity": { "step": "snapshot", "url": "about:blank" } }))
             )
             .is_empty()
+        );
+    }
+
+    /// An open names where its tab ended for the address it asked for: a shop's product address
+    /// whose redirect led to its page at another address (a local test, Nov 10). A step that left
+    /// no tab on a page, a look and any other step name none.
+    #[test]
+    fn an_open_names_where_its_tab_ended_for_the_address_it_asked_for() {
+        let asked = json!({ "url": " https://shop.example/products/reader?ref=menu " });
+        let ended = json!({ "activity": {
+            "step": "navigate",
+            "url": "https://ereader.shop.example/en/products/reader?ref=menu#specs"
+        } });
+        for tool in ["navigate", "open_tab"] {
+            assert_eq!(
+                step_ended_at(tool, Some(&asked), Some(&ended)),
+                Some((
+                    "https://shop.example/products/reader?ref=menu".to_string(),
+                    "https://ereader.shop.example/en/products/reader?ref=menu".to_string()
+                )),
+                "{tool}"
+            );
+        }
+        let failed =
+            json!({ "error": { "reason": "Instafy's browser couldn't reach that site." } });
+        let looked = json!({ "activity": { "step": "status", "url": "https://shop.example/" } });
+        assert_eq!(step_ended_at("navigate", Some(&asked), Some(&failed)), None);
+        assert_eq!(step_ended_at("navigate", Some(&asked), Some(&looked)), None);
+        assert_eq!(step_ended_at("navigate", Some(&asked), None), None);
+        assert_eq!(step_ended_at("click", Some(&asked), Some(&ended)), None);
+        assert_eq!(
+            step_ended_at("navigate", Some(&json!({ "url": " " })), Some(&ended)),
+            None
         );
     }
 
