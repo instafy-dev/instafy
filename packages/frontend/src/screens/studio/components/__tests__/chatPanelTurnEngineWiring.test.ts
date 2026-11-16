@@ -138,6 +138,14 @@ describe("ChatPanel's turn-engine wiring", () => {
     expect(callArguments(chatPanel, "useChatSubmitFlow")).toContain("consumeTurnEngineChoice,");
   });
 
+  it("folds a new chat's getting-started card while an engine is chosen, so it never offers to connect an AI for it", () => {
+    expect(callArguments(chatPanel, "useChatGettingStartedState")).toContain("turnEngineChosen,");
+    expect(chatPanel.indexOf("const turnEngineChosen = ")).toBeGreaterThan(-1);
+    expect(chatPanel.indexOf("const turnEngineChosen = ")).toBeLessThan(
+      chatPanel.indexOf("} = useChatGettingStartedState({"),
+    );
+  });
+
   it("leaves a dictated turn in the composer while an engine is chosen, for the person's own Send", () => {
     expect(chatPanel).toContain("const turnEngineChosen = pendingTurnEngineId !== null;");
     expect(callArguments(chatPanel, "useChatVoiceComposerController")).toContain(

@@ -105,6 +105,21 @@ describe("ComposerActionMenu turn-engine rows", () => {
     expect(find("mock-dialog-trigger")?.getAttribute("data-open")).toBe("false");
   });
 
+  it("wraps the engine's title instead of cutting it short, and leaves other rows as they are", async () => {
+    await renderMenu([row()]);
+    const titleOf = (testId: string, title: string) =>
+      [...(find(testId)?.querySelectorAll("span") ?? [])].find((span) => span.textContent === title) ?? null;
+    const engineTitle = titleOf("composer-action-menu-claude-code", "Claude Code for the next message");
+    expect(engineTitle?.className).toContain("whitespace-normal");
+    expect(engineTitle?.className).not.toContain("truncate");
+    // Another row with a line under its title keeps its one-line title.
+    const newTab = find("composer-action-menu-open-new-browser");
+    const newTabTitle = [...(newTab?.querySelectorAll("span") ?? [])].find((span) =>
+      span.className.split(" ").includes("truncate"),
+    );
+    expect(newTabTitle).toBeTruthy();
+  });
+
   it("marks the engine chosen for the next message", async () => {
     await renderMenu([row({ pending: true })]);
     expect(find("composer-action-menu-claude-code")?.textContent).toContain("Next");
