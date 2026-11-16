@@ -84,10 +84,7 @@ pub(super) async fn search(
     }
     let credential_id = match lane {
         SearchLane::Own { credential_id } => credential_id,
-        SearchLane::Managed => {
-            let leased = state.lease_for_lane(UpstreamLane::Platform).await?.leased;
-            return managed_search(&state, claims.as_ref(), &payload, leased).await;
-        }
+        SearchLane::Managed => return managed_search(&state, claims.as_ref(), &payload).await,
     };
     let mut leased = state
         .lease_for_lane(UpstreamLane::Byo { credential_id })
@@ -231,8 +228,9 @@ async fn managed_search(
     state: &ProxyState,
     claims: Option<&ProxyClaims>,
     payload: &Value,
-    mut leased: LeasedCredentials,
 ) -> Result<Response, AppError> {
+    let request = SearchRequest::read(payload).map_err(AppError::bad_request)?;
+    let mut leased = state.lease_for_lane(UpstreamLane::Platform).await?.leased;
     if leased.credentials.is_chatgpt() {
         // A model request on this login may have refreshed it. This route
         // does not renew it.
@@ -262,7 +260,6 @@ async fn managed_search(
         }
         _ => return Err(unavailable()),
     };
-    let request = SearchRequest::read(payload).map_err(AppError::bad_request)?;
     let plan = request.plan(&[leased.credentials.bearer()]);
     let transport = ModelTransportConfig::from_env().map_err(AppError::internal)?;
     // No alternate host or redirect may acquire the platform's credentials.

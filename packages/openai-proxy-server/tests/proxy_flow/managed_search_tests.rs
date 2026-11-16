@@ -181,6 +181,18 @@ async fn managed_search_on_an_api_key_runs_hosted_search_on_the_platform_key() -
             .collect::<Vec<_>>(),
         [MANAGED_AI_CREDENTIAL_ID]
     );
+
+    // A request codex never sends is refused before anything is leased.
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(true, true),
+        "/v1/alpha/search",
+        json!({"id": "session-ref", "model": "gpt-6-luna", "commands": []}),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(controller.leases.lock().unwrap().len(), 1);
+    assert_eq!(responses_requests(&upstream).len(), 2);
     Ok(())
 }
 
