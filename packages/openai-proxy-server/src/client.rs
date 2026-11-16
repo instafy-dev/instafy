@@ -1609,7 +1609,7 @@ async fn read_chatgpt_stream(
     read_chatgpt_stream_text(&text)
 }
 
-async fn read_model_body(
+pub(crate) async fn read_model_body(
     mut response: reqwest::Response,
     mut usage_attempt: Option<&mut UsageAttempt>,
     max_response_bytes: usize,

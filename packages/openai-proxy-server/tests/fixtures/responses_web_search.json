@@ -1,0 +1,90 @@
+{
+  "id": "resp_0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "object": "response",
+  "created_at": 1763287323,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "gpt-6-luna",
+  "output": [
+    {
+      "id": "rs_0f1e2d3c4b5a69788796a5b4c3d2e1f1",
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "id": "ws_0f1e2d3c4b5a69788796a5b4c3d2e1f2",
+      "type": "web_search_call",
+      "status": "completed",
+      "action": {
+        "type": "search",
+        "query": "Example Reader 7 weight",
+        "queries": [
+          "Example Reader 7 weight"
+        ]
+      }
+    },
+    {
+      "id": "msg_0f1e2d3c4b5a69788796a5b4c3d2e1f3",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "The Example Reader 7 weighs 174 g and has a 7-inch screen ([example.com](https://www.example.com/readers/reader-7?utm_source=openai)). A review from 3 November 2026 found its battery lasted about five weeks of daily reading ([reviews.example.org](https://reviews.example.org/reader-7-review?utm_source=openai)).",
+          "logprobs": [],
+          "annotations": [
+            {
+              "type": "url_citation",
+              "start_index": 58,
+              "end_index": 133,
+              "url": "https://www.example.com/readers/reader-7?utm_source=openai",
+              "title": "Example Reader 7 | Example Store"
+            },
+            {
+              "type": "url_citation",
+              "start_index": 224,
+              "end_index": 310,
+              "url": "https://reviews.example.org/reader-7-review?utm_source=openai",
+              "title": "Example Reader 7 review"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "reasoning": {
+    "effort": "low",
+    "summary": null
+  },
+  "service_tier": "default",
+  "store": false,
+  "tool_choice": "required",
+  "tools": [
+    {
+      "type": "web_search",
+      "search_context_size": "medium",
+      "user_location": null,
+      "filters": null
+    }
+  ],
+  "max_tool_calls": 1,
+  "usage": {
+    "input_tokens": 8412,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 391,
+    "output_tokens_details": {
+      "reasoning_tokens": 192
+    },
+    "total_tokens": 8803
+  },
+  "tool_usage": {
+    "web_search": {
+      "num_requests": 1
+    }
+  }
+}

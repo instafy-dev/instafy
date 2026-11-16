@@ -594,6 +594,36 @@ async fn spawn_stack_with_service_tier_endpoints(
     proxy: StackProxy<'_>,
     service_tier_endpoints: Option<&str>,
 ) -> Result<Stack> {
+    spawn_stack_with_settings(
+        managed_key,
+        pinned_model,
+        require_credential_claim,
+        proxy,
+        &[(
+            "PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS",
+            service_tier_endpoints,
+        )],
+    )
+    .await
+}
+
+/// The proxy settings a stack sets: each is unset unless a caller of
+/// [`spawn_stack_with_settings`] names it.
+const STACK_SETTINGS: [&str; 3] = [
+    "PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS",
+    "PROXY_MANAGED_NATIVE_WEB_SEARCH",
+    "PROXY_MANAGED_WEB_SEARCH_MODEL",
+];
+
+/// As [`spawn_stack`], with the proxy settings in `settings` (from
+/// [`STACK_SETTINGS`]) set to their values.
+async fn spawn_stack_with_settings(
+    managed_key: Option<&str>,
+    pinned_model: Option<&str>,
+    require_credential_claim: bool,
+    proxy: StackProxy<'_>,
+    settings: &[(&str, Option<&str>)],
+) -> Result<Stack> {
     let upstream = UpstreamStub::default();
     let (upstream_addr, upstream_guard) = spawn_router(
         Router::new()
@@ -660,7 +690,7 @@ async fn spawn_stack_with_service_tier_endpoints(
     };
     let controller_base_url = format!("http://{controller_addr}");
     let chatgpt_endpoint = format!("http://{upstream_addr}{UPSTREAM_CHATGPT_PATH}");
-    let env = vec![
+    let mut env = vec![
         EnvGuard::set("CODEX_PROXY_CHATGPT_ENDPOINT", Some(&chatgpt_endpoint)),
         EnvGuard::set("PROXY_PINNED_MODEL", static_pinned_model),
         EnvGuard::set(
@@ -676,11 +706,14 @@ async fn spawn_stack_with_service_tier_endpoints(
             "PROXY_REQUIRE_CREDENTIAL_CLAIM",
             require_credential_claim.then_some("1"),
         ),
-        EnvGuard::set(
-            "PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS",
-            service_tier_endpoints,
-        ),
     ];
+    for name in STACK_SETTINGS {
+        let value = settings
+            .iter()
+            .find(|(setting, _)| *setting == name)
+            .and_then(|(_, value)| *value);
+        env.push(EnvGuard::set(name, value));
+    }
     let (proxy_addr, proxy_guard) = spawn_proxy(static_credentials).await?;
 
     Ok((
@@ -4673,3 +4706,6 @@ async fn chat_upstream_partial_usage_keeps_completed_stream_and_exact_chat_round
 
 #[path = "proxy_flow/native_search_tests.rs"]
 mod native_search_tests;
+
+#[path = "proxy_flow/managed_search_tests.rs"]
+mod managed_search_tests;
