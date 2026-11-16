@@ -3152,7 +3152,7 @@ fn check_browser_turns_go_on_past_a_page(harness: &Harness) -> Result<()> {
             let text = instructions_text(request);
             for words in [
                 "A failed or refused page ends that page, not the task: go on to the next source in this turn",
-                "It ends that page, not the task: go on to the next source in this turn.",
+                "It ends that page, not the task: go on to the next source in this turn, as \"Finding a page\" says.",
                 "- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action.",
                 "If the page or indexed target set changes, take another snapshot instead of retrying a stale target.",
             ] {
@@ -3163,10 +3163,11 @@ fn check_browser_turns_go_on_past_a_page(harness: &Harness) -> Result<()> {
                 "{label}#{index} reads a stale target or a changed page as final"
             );
             // Its browser skill's "Finding a page" says what comes next, on a new thread and a
-            // restored one; its reply rules no longer say it a third way.
+            // restored one, in one list for every way a page ends; its reply rules no longer say
+            // it a third way.
             let input = input_text(request);
             ensure!(
-                input.contains("A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn."),
+                input.contains("A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task."),
                 "{label}#{index} never read what comes after a failed page"
             );
             ensure!(

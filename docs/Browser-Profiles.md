@@ -28,11 +28,13 @@ cannot import either profile.
 
 ## Opening and continuing a browser task from Chat
 
-Octo opens Instafy's browser on its own whenever a web page would help: to look
-something up, to check a page, or to walk the person through a provider's screens.
-Every interactive Chat turn carries that rule, whichever skills it loaded. When an
-interactive browser is not attached to the turn, Octo returns an **Open browser and
-continue** card. In the desktop app, for a person on their own AI connection, Studio
+Octo opens Instafy's browser on its own when a page needs it: one that
+`instafy web read` can't read (it needs JavaScript or a sign-in), one the person
+wants to see, or a provider's screens to walk the person through. Any other public
+page is read with `instafy web read`, with no card. Every interactive Chat turn
+carries that rule, whichever skills it loaded, and the browser skill and the skill
+router say the same. When an interactive browser is not attached to the turn, Octo
+returns an **Open browser and continue** card. In the desktop app, for a person on their own AI connection, Studio
 presses it by itself once the turn is finished, in the browser on this device. In a space
 whose controller policy covers it, Studio also presses it by itself for Instafy's browser
 on the conversation's own machine, which starts that browser on demand, on the web as in

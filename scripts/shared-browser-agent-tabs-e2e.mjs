@@ -502,7 +502,7 @@ export async function runSharedBrowserAgentTabsFixture() {
     // before.
     for (const address of ["/reviews/guessed", "/reviews/gone", "/reviews/empty-guessed", "/reviews/empty-gone"]) {
       await refused(
-        /This address has no page\. Open a link from a page you read, or that site's own search\./u,
+        /This address has no page\. Go on in this turn as "Finding a page" says\./u,
         "POST", "/v1/tabs/open", { url: `${sources.origin}${address}` }, ["allow_origin"],
       );
       assert.ok(sources.requests.includes(`GET ${address}`), "The site was asked");
@@ -516,7 +516,7 @@ export async function runSharedBrowserAgentTabsFixture() {
     // not-found page's load and settles while its guard still holds, so what
     // the page sends is stopped before it leaves the browser, and the step
     // fails. Its line says either why it stopped.
-    const sentOn = /This address has no page\. Open a link from a page you read, or that site's own search\.|led to Nike, which is link-only/u;
+    const sentOn = /This address has no page\. Go on in this turn as "Finding a page" says\.|led to Nike, which is link-only/u;
     for (const address of ["/reviews/moved-on", "/reviews/sent-on", "/reviews/sent-on-soon"]) {
       const linkOnlyAsked = linkOnly.requests.length;
       await refused(sentOn, "POST", "/v1/tabs/open", { url: `${sources.origin}${address}` }, ["allow_origin"]);
@@ -686,11 +686,11 @@ export async function runSharedBrowserAgentTabsFixture() {
       initiatorUserId: authority.initiatorUserId, browserPageId: runPageId,
       addresses: [givenKey(`${reviewsSite}/laptops/named`), givenSiteKey(reviewsSite)],
     });
-    const madeUp = `No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open ${reviewsSite}/ and follow its links to the page, or use the site's own search.`;
+    const madeUp = `No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given, and this site's home page, ${reviewsSite}/, always opens. Go on in this turn as "Finding a page" says.`;
     // A site nobody gave, a search engine's say: never its root.
     const nobodyGave = await refused(/./u, "POST", "/v1/navigate", { url: "https://www.search.test/maps" }, []);
     assert.ok(
-      nobodyGave.includes("A site's home page, its address with no path, always opens.") &&
+      nobodyGave.includes(`Octo opens only addresses it was given, and a site's home page always opens. Go on in this turn as "Finding a page" says.`) &&
         !nobodyGave.includes("search.test"),
       `/v1/navigate: ${nobodyGave}`,
     );

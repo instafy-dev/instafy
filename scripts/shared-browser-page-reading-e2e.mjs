@@ -110,7 +110,7 @@ const actionPolicyModule = createRequire(import.meta.url)(path.join(repositoryRo
 // What a cookie notice the browser could not decline tells Octo when a click
 // under it was kept from its control: a button's, as a plain link's address
 // opens instead (COVERED_LINK_WORDS).
-const NOTICE_WORDS = "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site's home page, its address with no path, always opens.";
+const NOTICE_WORDS = 'A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site\'s home page, its address with no path, always opens. Go on in this turn as "Finding a page" says.';
 const COVERED_LINK_WORDS = (label) => `A cookie notice covers "${label}", so its address was opened in this tab instead.`;
 // What the action policy answers a press of a notice's accept a step still
 // reaches: the Personal Browser's policy gives the same.

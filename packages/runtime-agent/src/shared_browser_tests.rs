@@ -3461,7 +3461,7 @@ async fn a_failed_step_with_facts_still_tells_the_model_what_failed() {
 #[tokio::test]
 async fn no_failed_step_reads_as_undefined() {
     use std::os::unix::process::ExitStatusExt;
-    let refused = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open https://www.tomshardware.com/ and follow its links to the page, or use the site's own search.";
+    let refused = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given, and this site's home page, https://www.tomshardware.com/, always opens. Go on in this turn as \"Finding a page\" says.";
     let failed = |stderr: &str, stdout: &str, exit: i32| {
         failed_call_result(&controller_failure(
             std::process::ExitStatus::from_raw(exit << 8),
@@ -3514,10 +3514,22 @@ async fn no_failed_step_reads_as_undefined() {
     ] {
         let view = model_view(result).await;
         let structured = view.structured.expect("r.structuredContent");
-        assert!(structured.contains(words), "{structured}");
         let structured: JsonValue = serde_json::from_str(&structured).expect("JSON");
-        assert!(structured["error"]["reason"].is_string(), "{structured}");
-        assert!(view.direct.contains(words), "{}", view.direct);
+        assert!(
+            structured["error"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(words)),
+            "{structured}"
+        );
+        // A call made outside a cell reads the structured content alone, as JSON, so the words'
+        // own quotes come escaped there.
+        let escaped = serde_json::to_string(words).expect("JSON string");
+        let escaped = &escaped[1..escaped.len() - 1];
+        assert!(
+            view.direct.contains(words) || view.direct.contains(escaped),
+            "{}",
+            view.direct
+        );
     }
     // Nothing beyond the step's own words: the refusal of an address nothing gave is read by
     // those words, as the run's steps read it, by the address the step asked for.
@@ -3544,7 +3556,7 @@ async fn no_failed_step_reads_as_undefined() {
     );
     // The words are the controller's own refusal's.
     assert!(SHARED_BROWSER_SCRIPT.contains(&format!(
-        "so it was not opened and gets no finding line: {ADDRESS_NOT_GIVEN_WORDS}."
+        "so it was not opened and gets no finding line: {ADDRESS_NOT_GIVEN_WORDS}, and "
     )));
 }
 
@@ -3659,12 +3671,14 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
 /// `an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten_minutes`).
 #[test]
 fn a_site_that_did_not_answer_says_not_to_open_it_again() {
-    let next = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
     let source = SHARED_BROWSER_SCRIPT
         .lines()
         .find(|line| line.starts_with("const UNANSWERED_NEXT_SOURCE = "))
         .expect("the next-source hint");
-    assert_eq!(source, format!("const UNANSWERED_NEXT_SOURCE = {next:?};"));
+    assert_eq!(
+        source,
+        "const UNANSWERED_NEXT_SOURCE = `Don't open this address again in this turn. ${NEXT_SOURCE}`;"
+    );
     for message in ["UNANSWERED_PAGE_MESSAGE", "UNANSWERED_LOADED_PAGE_MESSAGE"] {
         let line = SHARED_BROWSER_SCRIPT
             .lines()
@@ -3678,6 +3692,105 @@ fn a_site_that_did_not_answer_says_not_to_open_it_again() {
         );
     }
     assert!(!SHARED_BROWSER_SCRIPT.contains("Open the place's own site now"));
+}
+
+/// Every step that ends a page or an address (a link-only site, a cookie notice the browser
+/// could not decline, an address with no page, one that did not answer or was read only as its
+/// time ran out, one nobody gave, a page that keeps changing) says where to go next with one
+/// generic fact, the same in the Shared Browser's own steps and in runtime-agent's: the browser
+/// skill's "Finding a page" says which source comes next. Each once named its own next source
+/// (the maker's, venue's, shop's, operator's or reviewer's own site, the operator's journey
+/// planner, a planner or search page on the same site), the lists disagreed, and what a kind of
+/// task reads first is a skill's judgement. Each step keeps only its facts: nothing under a
+/// cookie notice was clicked (a plain link under it opens its own address instead), and a site's
+/// home page always opens.
+#[test]
+fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
+    let next = next_source!();
+    assert_eq!(next, "Go on in this turn as \"Finding a page\" says.");
+    assert!(SHARED_BROWSER_SCRIPT.contains(&format!("const NEXT_SOURCE = '{next}';")));
+    for (name, uses) in [
+        ("SEND_PAGE_HINT", "const SEND_PAGE_HINT = `${NEXT_SOURCE} "),
+        (
+            "CONSENT_COVER_MESSAGE",
+            "const CONSENT_COVER_MESSAGE = `A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. ${HOME_PAGE_OPENS} ${NEXT_SOURCE}`;",
+        ),
+        (
+            "NoPageError",
+            "super(`This address has no page. ${NEXT_SOURCE}`);",
+        ),
+        (
+            "UNANSWERED_NEXT_SOURCE",
+            "const UNANSWERED_NEXT_SOURCE = `Don't open this address again in this turn. ${NEXT_SOURCE}`;",
+        ),
+        (
+            "OPENED_LATE_NEXT_SOURCE",
+            "const OPENED_LATE_NEXT_SOURCE = `If this page doesn't show what you need, don't open it again in this turn. ${NEXT_SOURCE}`;",
+        ),
+        (
+            "refuseUngivenAddress",
+            "Octo opens only addresses it was given, and ${home} always opens. ${NEXT_SOURCE}`,",
+        ),
+    ] {
+        assert_eq!(SHARED_BROWSER_SCRIPT.matches(uses).count(), 1, "{name}");
+    }
+    assert!(
+        PAGE_KEEPS_CHANGING_MESSAGE
+            .ends_with(&format!("That ends this page, not the task. {next}"))
+    );
+    // No step names a source of its own any more.
+    let steps: Vec<&str> = SHARED_BROWSER_SCRIPT
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("//"))
+        .collect();
+    for source in [
+        "maker's",
+        "venue's",
+        "reviewer's",
+        "operator's own site",
+        "journey planner",
+        "another official source",
+        "the place or service the task is about",
+        "Open a link from a page you read",
+        "follow its links to the page",
+    ] {
+        assert!(!steps.iter().any(|line| line.contains(source)), "{source}");
+        assert!(!PAGE_KEEPS_CHANGING_MESSAGE.contains(source), "{source}");
+    }
+    assert!(!PAGE_KEEPS_CHANGING_MESSAGE.contains("a planner"));
+    // The skill's one list, which the steps point to.
+    let skill = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md"
+    ));
+    let finding = &skill[skill.find("## Finding a page").expect("section")..];
+    let finding = &finding[..finding.find("\n## ").expect("next section")];
+    assert!(finding.contains(
+        "- A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source."
+    ));
+    // The list sends a page that ended to its site's home page only where that page opens: a
+    // link-only site refuses every address, its root too, a site the person declined is not
+    // asked for again in the run, and a search engine opens only when someone named it, so a
+    // refused results page nobody gave goes on to the official site, not to that engine's
+    // search box. That a home page always opens is said only by the refusal of an address
+    // nobody gave and a cookie notice's over a control, both of an address the browser's rule
+    // never refuses (a site's root).
+    assert!(!finding.contains("always opens"), "{finding}");
+    let said: Vec<&str> = SHARED_BROWSER_SCRIPT
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .filter(|line| line.contains("always opens"))
+        .collect();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(
+        said.iter()
+            .any(|line| line.contains("const HOME_PAGE_OPENS = "))
+    );
+    assert!(said.iter().any(|line| {
+        line.contains("Octo opens only addresses it was given, and ${home} always opens.")
+    }));
+    assert!(SHARED_BROWSER_SCRIPT.contains("is link-only: Octo never opens it, in any tab."));
 }
 
 /// The chat's browser turns, one run each, as runtime-agent holds them: the
@@ -3749,8 +3862,8 @@ async fn an_address_that_did_not_answer_is_not_opened_again_in_that_chat_for_ten
             .count()
     };
     let opened_tabs = || std::fs::read_to_string(&fixture.opened_tabs).unwrap_or_default();
-    let did_not_answer = "The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
-    let refused = "This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again. Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+    let did_not_answer = "The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. Don't open this address again in this turn. Go on in this turn as \"Finding a page\" says.";
+    let refused = "This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again. Don't open this address again in this turn. Go on in this turn as \"Finding a page\" says.";
     let failure = |output: &Output| {
         assert!(!output.status.success());
         String::from_utf8_lossy(&output.stderr).into_owned()
@@ -3951,19 +4064,18 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
 }
 
 /// The words an address no message and no page gave is refused with, on a site the chat was
-/// given: back to that site's root, links and search.
+/// given: that site's home page, by its address, always opens, and the next source is the one
+/// the browser skill's "Finding a page" names.
 fn made_up_address_words(site: &str) -> String {
     format!(
-        "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Open {site}/ and follow its links to the page, or use the site's own search."
+        "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given, and this site's home page, {site}/, always opens. Go on in this turn as \"Finding a page\" says."
     )
 }
 
 /// The words an address no message and no page gave is refused with, on a site the chat was
-/// not given: only that a site's home page always opens, naming no site, never the refused
-/// site's root. Which site to open is the browser skill's "Finding a page": told to open the
-/// official site of what the task names, a turn tried a path it made up on a bookshop's site and
-/// ended without the opening hours its home page showed (a local test, Nov 9).
-const MADE_UP_ON_A_SITE_NOBODY_GAVE: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. A site's home page, its address with no path, always opens.";
+/// not given: a site's home page always opens, never by the refused site's address, and the
+/// next source is the one "Finding a page" names.
+const MADE_UP_ON_A_SITE_NOBODY_GAVE: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given, and a site's home page always opens. Go on in this turn as \"Finding a page\" says.";
 
 /// A page gives the addresses its text spells out, read as a task's are: with
 /// a scheme or without, and with a parenthesis of its own
@@ -4839,13 +4951,15 @@ async fn a_page_that_keeps_changing_ends_that_page_not_the_run() {
         second_words.contains("This page keeps changing"),
         "{second_words}"
     );
-    // It sends the turn to the site's own page for the task, one link away,
-    // before the next source: a turn told only "the next source" went back to
-    // a site that had not answered, while the planner's own page held still.
+    // It sends the turn on as "Finding a page" says, whose list puts a link on a
+    // page read and the site's own menu before any other source: a turn told
+    // only "the next source" went back to a site that had not answered, while
+    // the planner's own page held still.
     assert!(
-        second_words.contains(
-            "That ends this page, not the task: open this site's own page for it from a link here (its menu: a planner, a search page), else the next source in this turn."
-        ),
+        second_words.contains(&format!(
+            "That ends this page, not the task. {}",
+            next_source!()
+        )),
         "{second_words}"
     );
     assert!(
@@ -10027,7 +10141,7 @@ fn a_turns_first_open_tab_opens_its_page_in_the_chats_own_tab() {
 #[test]
 fn an_address_with_no_page_fails_its_navigate_and_open_tab() {
     const NO_PAGE: &str =
-        "This address has no page. Open a link from a page you read, or that site's own search.";
+        "This address has no page. Go on in this turn as \"Finding a page\" says.";
     let arguments = json!({ "url": "https://example.test/reviews/guessed" });
     let body = arguments.to_string();
     for status in ["404", "410"] {
@@ -12132,10 +12246,10 @@ fn octo_never_opens_or_reads_a_link_only_site_on_the_page_the_person_chose() {
 /// A local test, Nov 1: a comparison's browser turn read the maker's home page,
 /// tried a search engine for reviews, and replied 3.7 s after the refusal,
 /// which said only "Give the person the plain link". A refused address ends
-/// that address, not the task: the refusal sends the turn on to the maker's,
-/// venue's or reviewer's own site, and gives the person the link only when
-/// they asked for that site. Nothing is opened or asked, the refusal does not
-/// end the run, and the next source opens in the same run.
+/// that address, not the task: the refusal sends the turn on as the browser
+/// skill's "Finding a page" says, and gives the person the link only when they
+/// asked for that site. Nothing is opened or asked, the refusal does not end
+/// the run, and the next source opens in the same run.
 #[test]
 fn a_refused_search_the_turn_chose_goes_on_to_the_next_source() {
     let fixture = EmbeddedControllerFixture::new().with_site_policy();
@@ -12150,7 +12264,7 @@ fn a_refused_search_the_turn_chose_goes_on_to_the_next_source() {
     let error = failure_of(&refused);
     for words in [
         "is link-only: Octo never opens it, in any tab. Nothing was opened.",
-        "Go on with the maker's, venue's or reviewer's own site; give the person this link only if they asked for this site",
+        "Go on in this turn as \"Finding a page\" says. Give the person this link only if they asked for this site",
         "Send page to Octo",
     ] {
         assert!(error.contains(words), "{words}: {error}");
@@ -13764,7 +13878,7 @@ fn a_covered_click_is_refused_at_once_in_words() {
     for (mode, words) in [
         (
             "click-covered-by-notice",
-            "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site's home page, its address with no path, always opens.",
+            "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site's home page, its address with no path, always opens. Go on in this turn as \"Finding a page\" says.",
         ),
         (
             "click-covered",

@@ -502,7 +502,7 @@ Two steps never ask, in Ask too:
   step at once, in words: a cookie or consent notice says
   "A cookie notice covers this page, and the browser could not decline it, so
   nothing was clicked. A site's home page, its address with no path, always
-  opens." (it may have no reject button, sit on a page the browser presses
+  opens. Go on in this turn as "Finding a page" says." (it may have no reject button, sit on a page the browser presses
   nothing on, or have come after the page was read, which the next look
   declines when it can), never to pause on it and naming no site (which site
   to open next is the browser skill's "Finding a page"). A plain link under
@@ -965,6 +965,14 @@ runtime's own skills that build, run commands or plan a team
 (`SHELL_TURN_SKILLS`). Every other skill its words route loads, one the space
 added or imported included; a skill it cannot use takes no routing place from
 one it can, and it reads no skills index, since it cannot open a skill file.
+The browser skill's own topics are routed as a selected skill's children are,
+though the skill itself takes no routing place: `instafy-comparing` (which
+items, each one's own page, its values and the reviews asked for, and what a
+value nobody found says) and `instafy-getting-around` (a route from the
+operator's journey planner, and what its finding and a page built from it say)
+load whole when the request names their topic. Both hang under the browser,
+research and page skills, so a building turn whose words select one of those
+gets them too, and they never take a page builder's place.
 Its browser skill counts against the snapshot's budget as much as a routed
 skill does, so those keep their room beside it. Nor is it told how to run a
 command, change a file, or start a team plan or a goal, since a browser turn's
@@ -984,7 +992,9 @@ that drives a browser keeps in mind) is in its
 `references/learning-and-local-browsers.md`.
 Most browser turns resume their chat's browser thread instead, which loads no
 snapshot, and a browser turn cannot read a skill file, so such a turn is given
-the skill's "Finding a page" section again, from the space's own copy. A chat's
+the skill's "Finding a page" section again, from the space's own copy, and the
+skills its words route, as a fresh thread's snapshot would carry them: each
+whole, but for the sections and fields a turn with no shell leaves out. A chat's
 browser thread holds only its browser turns: each starts from what it is asked
 (the person's words or a card's task), and a new or lost browser thread is
 given the chat's earlier browser turns and, of the building turns, only the
@@ -1012,26 +1022,39 @@ the turn started). The
 `instafy-web-research` skill points to (a research turn without the browser
 skill prints just that section with one command), says how direct readers find a
 page: an address the person or a skill gave, a link on a page read (its links
-printed with its text), or the official site's home page (for reviews, a
-reviewer's own site). Available native search is preferred for discovery;
-search-engine pages are not categorically blocked, while their access refusals
-and browser permissions still apply. Never invent a page path. A turn using
-CLI search opens the result's page too, by the research skill's "Searching"; a
-missing page's own site search; a page
-that fails (busy, blank or an
-error page such as a 504) sends the turn to the place's own site at once, in the
-same turn, and then to another official source; facts from a place's
-own page, and a route from the operator's journey planner with its stations
-chosen, for the day and time the person travels (a daytime hour when they gave
-none) and saying which, not a listing or a kiosk page; a comparison's models,
-those a page's menu names included, each read on
-its own page. A cookie banner is the browser's own: it declines one with its
+printed with its text), or the official site of what the task names, its links
+and its own search box. Available native search is preferred for discovery
+where a turn has it; Instafy's browser has no web search, and opens a search
+engine only when the person named one. Never invent a page path. A turn using
+CLI search opens the result's page too, by the research skill's "Searching". A
+page that ends without what the turn needs (it has no page, fails, is refused or
+covered, or keeps changing) ends that page, not the task: the turn goes on in
+the same turn, never to the same address, to a link on a page it read, then to
+that site's home page, menu and search box (unless the site didn't answer, is
+closed to Octo because it is link-only or the person declined it, or is a search
+engine nobody named), then to the official site of what the task names, then to
+another official source. Only the browser's own refusals (an address nobody gave,
+and a control under a cookie notice) say that a site's home page always opens.
+Every browser step that ends a page says only its own
+facts and points to that one list ("Go on in this turn as "Finding a page"
+says."), where each once named a next source of its own. Facts come from a
+place's own page, not a listing or a kiosk page, and a page's own tab or link
+for a value is read before the value is called not found. How a finding's fact
+is written is said there too: under a page read that states it, in a few words,
+saying which of its values the turn chose, not the page; a value a page doesn't
+give goes in the missing line, by name. A route, from the operator's journey planner with
+its stations chosen, for the day and time the person travels (a daytime hour
+when they gave none) and saying which, is `instafy-getting-around`'s; a
+comparison's models, those a page's menu names included, each read on its own
+page, and its reviews, from each reviewer's own site, are `instafy-comparing`'s.
+A cookie banner is the browser's own: it declines one with its
 own reject button before Octo reads the page (above). A sign-in, a bot check,
 a paywall or a refused read ends that page, never the task: nothing a turn carries tells it to stop there, so neither a card's
 task nor the reply rules end the research after a failed page. A browser turn's
 own run text says the same: a failed or refused page ends that page, not the
-task, so the turn goes on to the next source in the same turn and says in plain
-words what did not work only when nothing is left to try. The research and comparison evals
+task, so the turn goes on to the next source in the same turn, as "Finding a
+page" says; what its reply says when nothing is left to try is `AGENTS.md`'s
+"Replies". The research and comparison evals
 (`packages/instafy-bind/tests/web-research-eval.test.mjs`,
 `packages/instafy-cli/test/web-compare-eval.spec.ts`) grade these rules on
 fixture sites.
@@ -1135,10 +1158,10 @@ Browser has tabs of its own (see Personal-Browser.md).
   link, form or activation key leading to that site before any prompt, and a
   redirect one of Octo's steps causes is stopped by the step's request guard
   before the request leaves the browser. Such a refusal ends that address, not
-  the task: it tells Octo to go on with the maker's, venue's or reviewer's own
-  site, and to give the person the plain link (they may open it and use **Send
-  page to Octo**) only when they asked for that site, so a search engine the
-  turn chose itself leads on to the next source. A copy nested in another wrapper (a
+  the task: it tells Octo to go on in the same turn as the browser skill's
+  "Finding a page" says, and to give the person the plain link (they may open
+  it and use **Send page to Octo**) only when they asked for that site, so a
+  search engine the turn chose itself leads on to the next source. A copy nested in another wrapper (a
   translator's copy of an archive's copy) counts, and so does an answer that
   says it is a copy of a link-only site (an archive's Memento
   `Link: <…>; rel="original"`, which names the page even at a short address
@@ -1567,11 +1590,12 @@ a page that had loaded: while it waited, Instafy's browser could not be reached
 by the next step, and it would have landed after the step ended. So the step
 opened nothing, and it fails with "The site did not answer in time, so nothing
 was opened and the page is still blank." (or "…and the tab still shows the page
-it showed before."), followed by "Don't open this address again in this turn:
-open the venue's, shop's or operator's own site now, else another official
-source.": never the blank page's "Call navigate", which sent Octo to load the
-same site again, nor "Open the place's own site now", which a turn read as the
-site that had just failed and opened again, nor the page the tab still shows,
+it showed before."), followed by "Don't open this address again in this turn.
+Go on in this turn as "Finding a page" says.", whose one list of next sources
+skips a site that didn't answer: never the blank page's "Call navigate", which
+sent Octo to load the same site again, nor "Open the place's own site now",
+which a turn read as the site that had just failed and opened again, nor the
+page the tab still shows,
 which was read as that step's page, nor the click's
 own timeout. Its line reads as the step it tried ("Tried opening <site>" for a
 navigation). The address the load asked for (and the one a redirect led it to,
@@ -1610,20 +1634,19 @@ a `url` and no `stopped`), so a runtime that started again still opens them. No
 reply gives an address by its words: a turn's findings listed an article
 address it made up as stopped. Any other is refused at once, before any prompt
 or load, with "No message and no page Octo read gave this address, so it was
-not opened and gets no finding line: Octo opens only addresses it was given."
-and where to go instead: "Open <the site> and follow its links to the page, or
-use the site's own search." only on a site the chat was given (the person's
-messages or the task named an address on it, or the site's name alone, or the
-chat's browser turns read a page on it past its root, which opens without
-anyone giving it; a page's link or text gives its address, never its site),
-and otherwise only that "A site's home page, its address with no path, always
-opens.", naming no site: which site to open is the browser skill's "Finding a
-page". Told instead to open the official site of what the task names, a turn
-tried a path it made up on a bookshop's site and ended without the opening
-hours its home page showed.
-Sent to the root of whatever site it refused, a route question opened a search
-engine nobody named and asked the person to let it send a search, which they
-refused. runtime-agent reads the
+not opened and gets no finding line: Octo opens only addresses it was given",
+then that a home page always opens: "this site's home page, <the site>/, always
+opens" only on a site the chat was given (the person's messages or the task
+named an address on it, or the site's name alone, or the chat's browser turns
+read a page on it past its root, which opens without anyone giving it; a page's
+link or text gives its address, never its site), and otherwise "a site's home
+page always opens", which names no site; then "Go on in this turn as "Finding a
+page" says." Told instead to open the official site of what the task names, a
+turn tried a path it made up on a bookshop's site and ended without the opening
+hours its home page showed. Sent to the root of whatever site it refused, a
+route question opened a search engine nobody named and asked the person to let
+it send a search, which they refused: the browser skill opens a search engine
+only when the person named one. runtime-agent reads the
 refusal by those words, the only thing its result says: the browser never
 opened such an address, so it leaves out a finding line, of any pass of the
 turn, that gives it as a page that stopped the turn, unless a step opened it.
@@ -1846,12 +1869,13 @@ which a file to download (downloads are blocked) or a replaced navigation
 ends with, says the page stopped loading before it opened; any other code says
 only that the page didn't load, so no reason claims the site was unreachable
 when it answered. The browser policy and the
-`instafy-browser-automation` skill tell Octo to give the person that reason in
-plain words and never to paste a raw error code into a reply. A `navigate` or
+`AGENTS.md`'s "Replies", which every browser turn reads, tell Octo to give the
+person that reason in plain words and never to paste a raw error code into a
+reply. A `navigate` or
 `open_tab` whose site answers 404 or 410 for the page it loads (the tab's own
 document, after any redirects) fails as soon as that answer comes, without
-waiting for the not-found page to load: "This address has no page. Open a link
-from a page you read, or that site's own search." The same answer with no page
+waiting for the not-found page to load: "This address has no page. Go on in
+this turn as "Finding a page" says." The same answer with no page
 at all, whose load Chromium fails itself
 (`net::ERR_HTTP_RESPONSE_CODE_FAILURE`), fails the same way. The not-found
 page stops loading, and settles as any page a step loads does, while the
@@ -3170,11 +3194,15 @@ unless the policy is `"covered"`.
   says it to its later turns ("I didn't find a metro route."), and "Finished
   in the browser." only when they give none of these. Told only that line, the person never read that a journey
   planner "did not display a route result". The building turn cannot open the
-  browser, so the browser turn reads what the request needs before it ends:
-  each item's own page from the links it read and, for reviews, each
-  reviewer's own site, by an observed address, the site's search box or other
-  permitted discovery. A browser turn has no provider-hosted search tool;
-  "Finding a page" describes how to continue with its available browser.
+  browser, so the browser turn reads what the request needs before it ends, as
+  "Finding a page" and the topic skills its words route say (a comparison's
+  items and each reviewer's own site are `instafy-comparing`'s). A browser turn
+  has no provider-hosted search tool, and its part says so. Its unread line
+  names a page by its own address, or as a tab or link on a page it read, named
+  with that page; a page it has neither for (a review no page it read links to)
+  is a value it didn't find, for its missing line: a comparison's first answer
+  named such reviews as unread, and its second pass tried a search engine's
+  results page twice, which the browser refused.
   Right before the request it reads its part
   of it in plain words: the reading, every page the request needs, while what
   the request asks Octo to make is the building turn's part, from its finding
@@ -3207,14 +3235,15 @@ unless the policy is `"covered"`.
   what it didn't find there, even of a page it read: beside "unless a page you
   read says so", findings quoted as page data read as such a page.
   Wherever a building turn reads findings (its hand-back, the browser turns
-  since its last turn and its replay of the chat), it is also told that a
-  route ends at the stop its finding names, and, unless the person named that
-  stop or a finding says the place's own page names it, that the page says
-  it's Octo's pick and that the walk from it to the place isn't checked:
-  builds read only the findings, and a planner's finding that left both out
-  left the page people share without them. A stop the person named is never
-  called Octo's pick, and the page made to share a route was first built from
-  the chat's replay, after a browser part that opened no page. A browser
+  since its last turn and its replay of the chat), it is also told to say,
+  where it uses a fact, what its finding says the fact doesn't confirm (a value
+  Octo chose, not the page, and what it leaves out): builds read only the
+  findings, and a planner's finding that left a route's end stop and the walk
+  from it out left the page people share without them. What a route's limits
+  are (its end stop, Octo's pick unless the person or the place's own page named
+  it, and the walk from it, not checked) is `instafy-getting-around`'s, which a
+  build whose words name a route carries. The page made to share a route was
+  first built from the chat's replay, after a browser part that opened no page. A browser
   turn that used the browser and wrote no
   finding line would leave a later building turn nothing of the pages it read,
   and one that continues a building card would hand nothing back: it gets the

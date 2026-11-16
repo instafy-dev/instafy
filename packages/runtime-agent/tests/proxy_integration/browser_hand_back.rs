@@ -60,10 +60,13 @@ const NOT_FOUND_LINE: &str = "\n- `notFound` says what Octo looked for and didn'
 const NOT_FOUND: &str = "\"notFound\": [\n    \"I didn't find warranty\"\n  ]";
 /// What a hand-back read before of a fact that said a value was not found on a page.
 const OLD_NOT_FOUND_LINE: &str = "A \"not found\" fact means Octo didn't find it there";
-/// What a hand-back says of a route a finding gives (runtime-agent `jobs/browser_hand_back.rs`):
-/// a page people share showed a route to a stop Octo chose without saying so, or that the walk
-/// from it to the shop wasn't checked. A stop the person named is no pick of Octo's.
-const ROUTE_LINE: &str = "\n- A route ends at the stop its finding names. Unless the person named that stop or a finding says the place's own page names it, say on the page that it's Octo's pick and that the walk from it to the place isn't checked.\n";
+/// What a hand-back says of the limits a finding names (runtime-agent
+/// `jobs/browser_hand_back.rs`, `FINDING_LIMITS_LINE`): a page people share showed a route to a
+/// stop Octo chose without saying so, or that the walk from it to the shop wasn't checked. A
+/// value filled in on a form is Octo's pick, and the fact only for it, unless the person or the
+/// own page of what they asked about gave it; what a route's limits are is
+/// `instafy-getting-around`'s, and the line names no topic.
+const ROUTE_LINE: &str = "\n- Where you use a fact, say with it what its finding says it doesn't confirm: a value Octo chose, not the page, and what it leaves out. Unless the person gave it or a finding says the own page of what they asked about names it, a value filled in on a page's form (an option, a day, a time) is Octo's pick and the fact is only for it: say both where you use it.\n";
 /// How a turn that may change files reads a public page (`AGENTS.md`'s "Reading the web", given
 /// with the lane to a turn that runs without that file): a build once read a shop's site with
 /// python's `urllib`.
