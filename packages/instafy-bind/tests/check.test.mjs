@@ -835,6 +835,8 @@ test("check notes an \"unchecked\" entry that names what the page already names 
     // the cheat sheet's own footer entry, beside a column no row has: what the reader can do, kept as it is
     const trains = {
       title: "Two trains",
+      // the fare is a number in every row, so it has its sort (the line under the title names the cheaper)
+      sort: [{ key: "fare", label: "Fare, low to high", dir: "asc" }],
       columns: [{ key: "fare", label: "Fare", type: "price" }, { key: "times", label: "Train times", type: "text" }],
       items: [["a", "Express A", "NT$ 300"], ["b", "Local B", "NT$ 200"]].map(([ref, name, fare]) => ({
         ref: `train:${ref}`, name,
@@ -982,6 +984,130 @@ test("a filter without a label fails the check: the page would have nothing to c
   const dir = optionsSite("compare", (data) => ({ ...data, filter: { key: "price", max: 140 } }));
   try {
     assert.deepEqual(checkValues(dir).problems, ['the filter has no "label" (what the person asked for: "€600 or less").']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The line under a comparison's title names the option each "sort" entry puts first. Two builds of a comparison of
+// three laptops wrote every column as text and no "sort", and the page said nothing under its title, although every row
+// had its starting price ("From €619") and its weight ("1.3kg"). With two or more options, a column that would say
+// something there, and no entry by a column that reads as a number, the check names the columns that do, for an entry
+// with its "dir" for each that is an amount the person compares by. A number in a name reads as one too ("Chip Ultra 5"
+// is 5), so which columns are amounts is the build's to say, and an entry by any column that reads as a number settles
+// it: had only an entry that decides something now settled it, a comparison whose amounts each lack a value in some row
+// could pass only by an entry for its chips, and its page would name the "highest CPU" by the digits in their names.
+test("check asks a comparison with no sort by a number for an entry per amount the person compares by, and names the columns that read as one", () => {
+  const at = (v, page, extra = {}) => ({ v, src: "Maker", url: `https://maker.example/${page}`, date: "2026-11-09", ...extra });
+  const unread = { note: "two independent reviews not found" };
+  const laptops = () => ({
+    title: "Three laptops",
+    columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "weight", label: "Weight", type: "text" },
+      { key: "price", label: "Starting price", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" },
+      // a sixth column is not drawn, so no sort is by it
+      { key: "screen", label: "Screen", type: "text" }],
+    items: [
+      { ref: "laptop:12", name: "Maker Laptop 12", facts: { cpu: at("Chip 3", "12?tab=specs"), battery: at("50 Wh", "12?tab=specs"), weight: at("1.3kg", "12?tab=specs"),
+        price: at("From €619", "12/configure"), reviews: unread, screen: at("12.2 in", "12?tab=specs") } },
+      { ref: "laptop:13-pro", name: "Maker Laptop 13 Pro", facts: { cpu: at("Chip Ultra 5", "13pro?tab=specs"), battery: at("74 Wh", "13pro?tab=specs"),
+        weight: at("1.4 kg", "13pro?tab=specs"), price: at("€1,349", "13pro/configure"), reviews: at("Review One · Review Two", "13pro/reviews"), screen: at("13.5 in", "13pro?tab=specs") } },
+      { ref: "laptop:16", name: "Maker Laptop 16", facts: { cpu: at("Chip AI 300", "16?tab=specs"), battery: at("85 Wh", "16?tab=specs"), weight: at("2.1 or 2.4 kg", "16?tab=specs"),
+        price: at("From €1,409", "16/configure"), reviews: unread, screen: at("16 in", "16?tab=specs") } },
+    ],
+  });
+  const expect = "Maker Laptop 12, Maker Laptop 13 Pro, Maker Laptop 16";
+  const asked = (columns) => `the sort: no "sort" entry is by a column that reads as a number, so nothing is said under the title. Of the columns that do (${columns}), add an entry, with "dir", for each that is an amount the person compares by (a price, a weight, a size): once every row shows its value, the page names the option it puts first under its title ("Lowest price: Option B"), and under 5 options no row moves. A number in a name (a chip, a model, a version) is no amount: if no column is one, add none, and nothing is said there.`;
+  const all = asked("CPU, Battery, Weight and Starting price");
+  const notFound = (what) => ({ note: `${what} not found on maker.example's page` });
+  const price = { key: "price", label: "Starting price, low to high", dir: "asc" };
+  const weight = { key: "weight", label: "Weight, light first", dir: "asc" };
+  const battery = { key: "battery", label: "Battery, largest first", dir: "desc" };
+  const dir = optionsSite("compare", laptops);
+  const file = path.join(dir, "data.json");
+  const write = (data) => fs.writeFileSync(file, JSON.stringify(data, null, 2));
+  try {
+    assert.deepEqual(checkValues(dir).problems, [all]);
+    const out = run("check", dir, "--expect", expect);
+    assert.equal(out.status, 1, out.stdout);
+    assert.match(out.stdout, /^VALUES: 1 value\(s\) to fix in data\.json:$/m);
+    assert.ok(out.stdout.split("\n").includes(`- ${all}`), out.stdout);
+    assert.match(out.stdout, /3 of 3 expected item\(s\) shown/);
+    assert.deepEqual(JSON.parse(run("check", dir, "--expect", expect, "--json").stdout).values.problems, [all]);
+
+    // an entry by a column no row shows a number for never says anything, nor does one by a column the page doesn't
+    // draw: still asked
+    write({ ...laptops(), sort: [{ key: "reviews", label: "Most reviews", dir: "desc" }] });
+    assert.deepEqual(checkValues(dir).problems, [all]);
+    write({ ...laptops(), sort: [{ key: "screen", label: "Screen, largest first", dir: "desc" }] });
+    assert.deepEqual(checkValues(dir).problems, [all]);
+
+    // an entry for each amount the person compares by (the price and the weight): the line names the cheapest and the
+    // lightest, the check passes, and no entry is asked for the CPU
+    write({ ...laptops(), sort: [price, weight] });
+    assert.deepEqual(checkValues(dir).problems, []);
+    assert.equal(run("check", dir, "--expect", expect).status, 0);
+    // one entry by a number is enough
+    write({ ...laptops(), sort: [{ key: "reviews", dir: "desc" }, { key: "weight", dir: "asc" }] });
+    assert.deepEqual(checkValues(dir).problems, []);
+
+    // the person's amounts each lack a value in some row, and only the chips' names read as a number in every row: the
+    // check names the amounts too, and their entries settle it, though nothing is said under the title until the values
+    // are found. No entry is asked for the chips.
+    const gaps = laptops();
+    for (const i of gaps.items) i.facts.battery = notFound("battery");
+    gaps.items[0].facts.price = notFound("price");
+    gaps.items[1].facts.weight = notFound("weight");
+    write(gaps);
+    assert.deepEqual(checkValues(dir).problems, [asked("CPU, Weight and Starting price")]);
+    write({ ...gaps, sort: [price, weight] });
+    assert.deepEqual(checkValues(dir).problems, []);
+    // so does an entry whose rows all show the same, or one by a price whose source dates it over 30 days ago: the page
+    // says nothing there until a row differs or a check reads the price again
+    const same = laptops();
+    for (const i of same.items) i.facts.battery = at("60 Wh", "specs");
+    write({ ...same, sort: [battery] });
+    assert.deepEqual(checkValues(dir).problems, []);
+    const old = laptops();
+    old.columns[3].type = "price";
+    for (const i of old.items) i.facts.price = { ...i.facts.price, asof: "2026-01-05" };
+    write({ ...old, sort: [price] });
+    assert.deepEqual(checkValues(dir).problems, []);
+
+    // under a stated limit the line speaks of the rows the page draws first: those within it (and any it can't place)
+    const limited = () => {
+      const data = laptops();
+      data.columns[3].type = "price";
+      data.filter = { key: "price", max: 1400, label: "€1,400 or less", rest: "over €1,400" };
+      return data;
+    };
+    // the 16 is over the limit: an entry by a column only it shows a number for says nothing on the page as first drawn
+    const beyond = limited();
+    for (const i of beyond.items.slice(0, 2)) i.facts.battery = notFound("battery");
+    write({ ...beyond, sort: [battery] });
+    assert.deepEqual(checkValues(dir).problems, [asked("CPU, Weight and Starting price")]);
+    // and a column that differs only by that row asks for nothing: no column decides between the rows drawn (the other
+    // two, whose prices are unknown, so the page draws them apart)
+    const tie = limited();
+    for (const i of tie.items.slice(0, 2)) {
+      for (const key of ["cpu", "weight", "price"]) i.facts[key] = notFound(key);
+      i.facts.battery = at("60 Wh", "specs");
+    }
+    write(tie);
+    assert.deepEqual(checkValues(dir).problems, []);
+    write({ ...tie, filter: undefined });
+    assert.deepEqual(checkValues(dir).problems, [all]);
+
+    // nothing to decide between: one option, or no column a number in every row
+    write({ ...laptops(), items: laptops().items.slice(0, 1) });
+    assert.deepEqual(checkValues(dir).problems, []);
+    const words = laptops();
+    for (const i of words.items) for (const key of ["cpu", "battery", "weight", "price"]) i.facts[key] = notFound(key);
+    write(words);
+    assert.deepEqual(checkValues(dir).problems, []);
+    // a page made before keeps its own app.js, which draws no such line
+    write(laptops());
+    fs.writeFileSync(path.join(dir, "app.js"), 'site.start({ data: "data.json", render: function (data) { site.head(data); } });\n');
+    assert.deepEqual(checkValues(dir).problems, []);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

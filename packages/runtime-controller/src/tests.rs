@@ -82,6 +82,8 @@ mod conversation_notification_http_tests;
 #[path = "notification_conversation_read_tests.rs"]
 mod notification_conversation_read_tests;
 
+#[path = "managed_ai_mixed_dispatch_tests.rs"]
+mod managed_ai_mixed_dispatch_tests;
 #[path = "multi_agent_settings/tests.rs"]
 mod multi_agent_settings_tests;
 #[path = "org_accent_tests.rs"]

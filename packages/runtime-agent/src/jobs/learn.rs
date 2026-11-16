@@ -471,9 +471,13 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // looked, also of a value only Octo's browser looked for), and prices and reviews per item
     // were the research skill's "Comparing items".
     include_str!("legacy/interactive-artifacts-v18.md"),
+    // From before a comparison got a `sort` entry for each amount the person compares by, so the
+    // line under its title names the option each puts first (its sort counted as one nobody asked
+    // for).
+    include_str!("legacy/interactive-artifacts-v20.md"),
     // From before `AGENTS.md`'s "Replies" said, for every turn, what to do with a choice the
     // request leaves open (it said "Never stop to ask before building").
-    include_str!("legacy/interactive-artifacts-v19.md"),
+    include_str!("legacy/interactive-artifacts-v21.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -2643,7 +2647,7 @@ mod tests {
         let previous = include_str!("legacy/agents-doc-v20.md");
         assert!(flat(previous).contains("in Instafy's browser's findings. When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load."));
         assert!(!previous.contains("short question"));
-        let previous_hub = include_str!("legacy/interactive-artifacts-v19.md");
+        let previous_hub = include_str!("legacy/interactive-artifacts-v21.md");
         assert!(previous_hub.contains(
             "Never stop to ask before building: a vague ask gets sensible defaults, stated in the reply."
         ));

@@ -218,7 +218,10 @@ export function referencePage(kase, readAt, { key }) {
     lede: key
       ? "The Brightvac Q5 (399 EUR) and the Brightvac S8 (549 EUR) are 600 EUR or less; the Brightvac S8 Pro's price is unknown."
       : "The Brightvac Q5 (399 EUR) is 600 EUR or less; the prices of the Brightvac S8 and the Brightvac S8 Pro are unknown.",
-    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }],
+    // an entry for each amount the ask compares by (price, suction and battery), as the page skill says: with one
+    // price unknown, the suction and the battery say what the cells decide under the title
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }, { key: "suction", label: "Suction, strongest first", dir: "desc" },
+      { key: "battery", label: "Battery, longest first", dir: "desc" }],
     columns: [
       { key: "price", label: "Price", type: "price" },
       { key: "suction", label: "Suction", type: "number" },
@@ -521,12 +524,14 @@ export function gradeCompare(transcript, kase = CASE) {
   // A stated limit counts only prices the page shows: the starter's filter, unknown prices listed apart, and no
   // sentence calls an item without a price within it.
   const values = built ? checkValues(transcript.site) : { notes: [], problems: [] };
+  // what the check asks of the page's sorts is graded on its own, whatever the columns it names are called
+  const sortProblem = (p) => p.startsWith("the sort:");
   const listed = /can show: (.*?)\. The page lists them apart/.exec(values.notes.join(" "));
   const apart = listed ? listed[1].split(", ").map((name) => name.toLowerCase()) : [];
   const limitWords = /under 600|600 eur or less|€600 or less|within (the|your) (limit|budget)/i;
   check("limit_never_counts_unknown", [
     ...(data.filter && data.filter.key === priceKey && Number(data.filter.max) === kase.limit.max ? [] : ["the page has no filter for the stated limit"]),
-    ...values.problems.filter((p) => /filter/.test(p)),
+    ...values.problems.filter((p) => !sortProblem(p) && /filter/.test(p)),
     ...unknown.filter((item) => !apart.includes(item.name.toLowerCase())).map((item) => `${item.name} is not listed apart as price unknown`),
     ...items.filter((item) => !unknown.includes(item) && apart.includes(item.name.toLowerCase())).map((item) => `${item.name} is listed apart although its price was read`),
     ...[...sentences(replyLines), ...sentences(data.lede)].filter((s) => limitWords.test(s) && !/unknown|no price/i.test(s))
@@ -542,7 +547,7 @@ export function gradeCompare(transcript, kase = CASE) {
   // Every value names the page it was read on and the day; none is a dash; each page was read this turn.
   const today = findings[0] ? findings[0].readAt.slice(0, 10) : null;
   check("values_cited", [
-    ...values.problems.filter((p) => !/filter/.test(p) && !rowProblems.includes(p)),
+    ...values.problems.filter((p) => !sortProblem(p) && !/filter/.test(p) && !rowProblems.includes(p)),
     ...(data.items || []).flatMap((row) => Object.entries(row.facts || {}).flatMap(([key, fact]) => {
       if (!fact || fact.v == null || fact.est) return [];
       const problems = [];
@@ -551,6 +556,9 @@ export function gradeCompare(transcript, kase = CASE) {
       return problems;
     })),
   ]);
+
+  // The page sorts by an amount the ask compares by, so the line under its title says what the cells decide.
+  check("sorts_by_amounts", values.problems.filter(sortProblem));
 
   // The usual web-research rules, on this ask.
   const linkOnlyText = [kase.linkOnly.title, kase.linkOnly.snippet].map((text) => text.toLowerCase());
@@ -637,6 +645,11 @@ export const BREAKERS = [
   }), ["limit_never_counts_unknown"]],
   ["says every product is under the limit", (t, _k, edit) => edit(t, (data) => { data.lede = "All three are 600 EUR or less."; }), ["limit_never_counts_unknown"]],
   ["has no filter for the stated limit", (t, _k, edit) => edit(t, (data) => { delete data.filter; }), ["limit_never_counts_unknown"]],
+  ["keeps no sort, so nothing is said under the title", (t, _k, edit) => edit(t, (data) => { delete data.sort; }), ["sorts_by_amounts"]],
+  ["keeps no sort, and a column it would name is called a filter", (t, _k, edit) => edit(t, (data) => {
+    delete data.sort;
+    data.columns.find((c) => c.key === "suction").label = "Suction (HEPA filter)";
+  }), ["sorts_by_amounts"]],
   ["cites a value to a page it did not read", (t, k, edit) => edit(t, (data) => { row(data, k, "s8-pro").facts.suction.url = k.reviews.find((r) => r.model).url; }), ["values_cited"]],
   ["keeps a value without its page", (t, k, edit) => edit(t, (data) => { delete row(data, k, "s8").facts.battery.url; }), ["values_cited"]],
   ["reads the link-only shop", (t, k) => ({ ...t, reads: [...t.reads, { url: k.linkOnly.url, status: "stopped", code: "link_only" }] }), ["link_only_links_only"]],
