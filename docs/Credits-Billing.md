@@ -876,8 +876,8 @@ Required envs (GitHub secrets/vars or local env):
   be at any hour: a day that starts at or above the limit tops up at its first dip below it, so
   the line names no hour. The graph's key calls every credit that came in "Added": a top-up, a
   starting balance or a refund.
-- The log shows one row per Instafy AI turn: its reserve, adjustments (one per reply of a message
-  to several Instafy AI agents) and refund added up, at the time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
+- The log shows one row per Instafy AI turn: its reserve, adjustments and refund added up, at the
+  time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
   chat. A turn from another space names that space beside its time (`spaceName`), since chats in
   two spaces can share a name. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
   is a row of its own ("Daily top-up", "Starting balance", "Hosted machine time", and "Web search" for an Instafy AI
