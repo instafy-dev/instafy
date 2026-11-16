@@ -67,7 +67,7 @@ const OLD_NOT_FOUND_LINE: &str = "A \"not found\" fact means Octo didn't find it
 /// own page of what they asked about gave it; what a route's limits are is
 /// `instafy-getting-around`'s, and the line names no topic.
 const ROUTE_LINE: &str = "\n- Where you use a fact, say with it what its finding says it doesn't confirm: a value Octo chose, not the page, and what it leaves out. Unless the person gave it or a finding says the own page of what they asked about names it, a value filled in on a page's form (an option, a day, a time) is Octo's pick and the fact is only for it: say both where you use it.\n";
-/// How a turn that may change files reads a public page (`AGENTS.md`'s "Responsiveness", given
+/// How a turn that may change files reads a public page (`AGENTS.md`'s "Reading the web", given
 /// with the lane to a turn that runs without that file): a build once read a shop's site with
 /// python's `urllib`.
 const READ_A_PUBLIC_PAGE: &str = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.\n";

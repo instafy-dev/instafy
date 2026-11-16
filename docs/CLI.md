@@ -799,11 +799,13 @@ mode is not built yet. Also `bind init`, `doctor`, `try`, `command` and `confirm
 
 `instafy web read <url…> --json` reads 1 to 6 public web pages for an agent that needs facts with their source. It
 is plain HTTP: no browser, no JavaScript, no cookies and no login. It is the light, polite reader; which sources to
-read, how many and how to cite them is decided by skills, not by this command. A space's `AGENTS.md` tells a turn to
-read a public page only with it or a reading command a skill names, never with curl, wget, python, node or another
-script, so robots.txt, the budgets and Details apply to each read; running those to build or check the space's own
-pages stays fine. A turn that may change files and runs without that file (a required change, a turn on a restored
-thread, a lookup of another chat) is given the same line with its instructions, as it is given the file's "Replies".
+read, how many and how to cite them is decided by skills, not by this command. A space's `AGENTS.md`, in its section
+"Reading the web", tells a turn to read a public page only with it or a reading command a skill names, never with
+curl, wget, python, node or another script, so robots.txt, the budgets and Details apply to each read; running those
+to build or check the space's own pages stays fine. A turn that may change files and runs without that file (a
+required change, a turn on a restored thread, a lookup of another chat) is given that section with its instructions,
+as it is given the file's "Replies": the space's own section, or the one Instafy ships now when the space's copy is
+one Instafy shipped, of any version, or one it edited that still says the rule word for word.
 
 ```bash
 instafy web read https://example.org/opening-hours --json
