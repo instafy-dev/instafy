@@ -802,9 +802,10 @@ test("compare: a sort by a column no row has a value for is left out", async () 
 
 // Two builds of a comparison of three laptops wrote every column as text and no "sort", so the page said nothing under
 // its title, although every row had its starting price ("From €619") and its weight ("1.3kg"). `instafy bind check`
-// names the columns the page reads as a number in every row; with an entry for each of the person's criteria among
-// them, the line names the cheapest and the lightest, read as a sort reads them: the first number in each value.
-test("compare: with an entry for each criterion that is a number, the line under the title names the cheapest and the lightest", async () => {
+// names the columns that read as a number; with an entry for each amount the person compares by among them, the line
+// names the cheapest and the lightest, read as a sort reads them: the first number in each value. Under 5 options no
+// row moves, and a phone shows the first entry's value on each row.
+test("compare: with an entry for each amount the person compares by, the line under the title names the cheapest and the lightest", async () => {
   const at = (v, page) => ({ v, src: "Maker", url: `https://maker.example/${page}`, date: DAY });
   const built = () => ({
     title: "Three laptops",
@@ -819,7 +820,7 @@ test("compare: with an entry for each criterion that is a number, the line under
         reviews: { note: "two independent reviews not found" } }),
     ],
   });
-  // as built: nothing under the title, and the check names the columns that are a number in every row
+  // as built: nothing under the title, and the check names the columns that read as a number
   const asBuilt = await draw("compare", built());
   const site = asBuilt.site;
   let document = asBuilt.document;
@@ -832,7 +833,7 @@ test("compare: with an entry for each criterion that is a number, the line under
     assert.equal(knownNumber(at(v, "specs")), n, v);
   }
 
-  // an entry for the price and one for the weight, the person's criteria: the CPU's number is no criterion
+  // an entry for the price and one for the weight, the amounts the person compares by: the CPU's number is a name's
   const sorted = { ...built(), sort: [{ key: "price", label: "Starting price, low to high", dir: "asc" }, { key: "weight", label: "Weight, light first", dir: "asc" }] };
   assert.deepEqual(unsortedNumbers(sorted), []);
   for (const width of [1280, 375]) {
@@ -842,6 +843,8 @@ test("compare: with an entry for each criterion that is a number, the line under
     // three options keep the order they were written in
     assert.deepEqual(rows(document).within, ["option:13-pro", "option:12", "option:16"], `${width}px`);
   }
+  // a phone's row shows the first entry's value beside its name, so the skill's "no row moves" is all a sort does there
+  assert.deepEqual(document.querySelectorAll(".sortv").map((el) => el.textContent.split(" · ")[0]), ["€1,349", "From €619", "From €1,409"]);
   // the cheapest and the lightest apart
   const lighter = structuredClone(sorted);
   lighter.items[0].facts.weight = at("1.2kg", "13pro?tab=specs");

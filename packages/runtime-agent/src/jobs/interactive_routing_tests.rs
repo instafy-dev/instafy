@@ -1149,19 +1149,22 @@ fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
 
 /// The line under a comparison's title names the option each `sort` entry puts first, and two
 /// builds wrote no `sort`, so their pages said nothing there: the hub counted every sort as one
-/// "nobody asked for". A comparison still gets an entry, with `dir`, for each of the person's
-/// criteria that is a number (`instafy bind check` asks for one in the same words), and under 5
-/// options that only writes the line. The rule for every other sort stays. An unedited hub from
-/// before is upgraded, and an edited one is kept.
+/// "nobody asked for". A comparison still gets an entry, with `dir`, for each amount the person
+/// compares by, never for a number in a name: a chip's name reads as a number too ("Chip Ultra 7
+/// 155H" is 7155), so an entry by it would name the "highest CPU" for no reason. `instafy bind
+/// check` asks in the same words. Under 5 options no row moves, and a phone shows the first
+/// entry's value on each row, so the hub never says the entry "only writes the line". The rule
+/// for every other sort stays. An unedited hub from before is upgraded, and an edited one is kept.
 #[test]
-fn a_comparison_gets_a_sort_for_each_criterion_that_is_a_number() {
+fn a_comparison_gets_a_sort_for_each_amount_the_person_compares_by() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     let previous = include_str!("legacy/interactive-artifacts-v20.md");
-    let rule = "A comparison still gets a `sort` entry, with `dir`, for each of the person's criteria that is a number: under 5 options it only writes the line under the title (\"Lowest price: Option B\").";
+    let rule = "A comparison still gets a `sort` entry, with `dir`, for each amount the person compares by (a price, a weight, a size), the main one first, never for a number in a name (a chip, a model, a version): under 5 options no row moves, the page names the option each puts first under its title (\"Lowest price: Option B\"), and a phone shows the first one's value on each row.";
     assert!(flat(hub).contains(rule), "{hub}");
     assert!(!flat(previous).contains(rule), "new in this version");
+    assert!(!flat(hub).contains("only writes the line"), "{hub}");
     for kept in [hub, previous] {
         assert!(flat(kept).contains(
             "no search, filter or sort nobody asked for, and no sort by a value no row has."
