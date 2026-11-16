@@ -2457,6 +2457,40 @@
       "why": "Words like \"browser\", \"compare\" and \"map\" inside text to translate ask for no page and no browser."
     },
     {
+      "id": "price-added-to-a-page-a-reply-did-not-confirm",
+      "history": [
+        {
+          "role": "user",
+          "content": "How much is a 24-hour ticket for Copenhagen's buses and metro?",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't confirm today's price: the operator's fare page didn't load for me, and the figures I found elsewhere were from last year. The ticket covers buses, the metro and harbour buses in the zones you choose.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:02:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Make a small page with where to buy the 24-hour ticket.",
+          "runId": "run-2",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small page with where to buy the 24-hour ticket, from the operator's ticket page, checked 16 Nov: its app, the ticket machines at metro stations and convenience shops. It leaves out the price, which I couldn't confirm. People in this space can open it; ask me for a public link if you want to share it outside.",
+          "runId": "run-2",
+          "createdAt": "2026-11-16T09:04:00.000Z"
+        }
+      ],
+      "message": "Add the 24-hour ticket's price to the page.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The page here leaves out the price this chat's replies said wasn't confirmed, and the person asks for it: a change to a page asked for with that value, so the browser reads the price first, and Octo then adds it."
+    },
+    {
       "id": "note-on-a-sight-a-map-did-not-find",
       "history": [
         {

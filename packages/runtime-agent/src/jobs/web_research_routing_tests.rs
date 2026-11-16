@@ -3795,6 +3795,7 @@ fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
         "Put the hours and the metro route on a small page I can share.",
         "Put the hours and the ticket rules on a small page I can share.",
         "Make a small page with the 24-hour ticket's price and where to buy it.",
+        "Add the 24-hour ticket's price to the page.",
         "Add a note to day 1: book the Asinelli Tower climb ahead.",
         "Add the Asinelli Tower to day 2.",
         "Add a note under the hours: ask at the desk whether the dinosaur gallery needs a ticket.",

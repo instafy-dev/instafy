@@ -1238,7 +1238,7 @@ mod tests {
         const SHARED_START_SHA256: &str =
             "b41ed00a2081ef12c66fde53e6093a0fdb6bb4d110b10fca935fce8bc9882b2a";
         const CASE_PROMPTS_SHA256: &str =
-            "a4746a70f4d257da6fb6820258ae9278350f2dbaa8992664f4efc578159d992e";
+            "4cb58a76798c5c3424fef4e75c109a02076f836b053e04a6b2a1475a2d973bfe";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1396,6 +1396,7 @@ mod tests {
                 &[
                     "page-with-a-value-the-browser-did-not-confirm",
                     "page-with-a-value-a-reply-did-not-confirm",
+                    "price-added-to-a-page-a-reply-did-not-confirm",
                 ],
             ),
             (
@@ -1512,11 +1513,11 @@ mod tests {
                 assert!(!words.contains(subject), "{}: {subject}", case.id);
             }
         }
-        // A page asked for with a value a reply here said wasn't confirmed reads that reply, in
-        // a chat with a browser turn and in one without. So do a note in the person's own words
-        // and a place added to a map after a reply that said something wasn't found or
-        // confirmed, which stay `direct` (`required`): the map's skill looks up its own places,
-        // and a note is as the person wrote it.
+        // A page, or a change to one, asked for with a value a reply here said wasn't confirmed
+        // reads that reply, in a chat with a browser turn and in one without. So do a note in the
+        // person's own words and a place added to a map after a reply that said something wasn't
+        // found or confirmed, which stay `direct` (`required`): the map's skill looks up its own
+        // places, and a note is as the person wrote it.
         for (id, reply) in [
             (
                 "page-with-a-value-the-browser-did-not-confirm",
@@ -1525,6 +1526,10 @@ mod tests {
             (
                 "page-with-a-value-a-reply-did-not-confirm",
                 "I couldn't confirm today's price",
+            ),
+            (
+                "price-added-to-a-page-a-reply-did-not-confirm",
+                "It leaves out the price, which I couldn't confirm.",
             ),
             (
                 "note-on-a-sight-a-map-did-not-find",
