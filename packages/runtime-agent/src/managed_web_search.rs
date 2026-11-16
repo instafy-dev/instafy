@@ -680,6 +680,46 @@ mod tests {
         assert_eq!(unknown_card.hold(4), 2);
     }
 
+    /// Kept to an allowance, the search extension keeps all it registers: its thread and config
+    /// contributors as they are, and its tools behind the allowance. Codex's extension registers
+    /// nothing else; a bump that makes it register more fails here, so the wrapper takes that too.
+    #[test]
+    fn the_search_extension_keeps_all_it_registers_behind_the_allowance() {
+        let auth = || {
+            codex_login::AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key(
+                "inert",
+            ))
+        };
+        let counts = |registry: &codex_extension_api::ExtensionRegistry<Config>| {
+            [
+                registry.thread_lifecycle_contributors().len(),
+                registry.config_contributors().len(),
+                registry.tool_contributors().len(),
+                registry.turn_lifecycle_contributors().len(),
+                registry.token_usage_contributors().len(),
+                registry.skill_invocation_contributors().len(),
+                registry.context_contributors().len(),
+                registry.mcp_server_contributors().len(),
+                registry.turn_input_contributors().len(),
+                registry.message_lifecycle_contributors().len(),
+                registry.model_request_contributors().len(),
+                registry.tool_lifecycle_contributors().len(),
+                registry.turn_item_contributors().len(),
+            ]
+        };
+        let mut codex = ExtensionRegistryBuilder::new();
+        codex_web_search_extension::install(&mut codex, auth());
+        let codex = codex.build();
+        assert_eq!(counts(&codex), [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut kept = ExtensionRegistryBuilder::new();
+        install(
+            &mut kept,
+            auth(),
+            Some(Arc::new(ManagedWebSearch::new(SEARCHES_PER_MESSAGE))),
+        );
+        assert_eq!(counts(&kept.build()), counts(&codex));
+    }
+
     /// The line the model reads names the allowance, says how to answer without more searches,
     /// and that only the person's own words get more; it names no price, provider or tool of
     /// the search.

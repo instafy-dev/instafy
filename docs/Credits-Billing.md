@@ -391,7 +391,8 @@ charges for it, passed through:
   `managed-ai-web-search:{promptId}:{jobId}`, apart from the turn's reserve and adjustment, so a
   completion settled again writes nothing new. The searches have run, so their cost is owed
   whatever the balance: a balance that cannot cover them is charged what it holds, and the row
-  records the rest as `cost.unpaidUnits`, as a turn's tokens are settled. A turn that is not
+  records the rest as `cost.unpaidUnits`, as a turn's tokens are settled (an empty balance gets no
+  row, and the controller logs what went unpaid). A turn that is not
   charged its tokens (a failed turn that left nothing, a turn Instafy started that ended without a
   reply, a turn the person stopped) is not charged its searches either; a search that worked is a
   step that worked, so a failed turn that searched is charged. Only a job on the managed lane
@@ -410,17 +411,19 @@ own words in it ask for deeper or more thorough research: its routing step says 
   message has used its web searches, to answer from what it found, to read a page whose address it
   has, and to say what it could not check; and that a message gets more only when the person's own
   words ask for deeper research;
-- a build Instafy starts after the browser (a hand-back) goes on with the allowance of the
-  message whose card it carries on, and a job's later attempt with its earlier attempt's, while
-  the runtime that ran them is up; a runtime started since gives the turn a new allowance;
+- a build Instafy starts after the browser (a hand-back) goes on with the allowance of the turn
+  whose card it carries on, and a job's later attempt with its earlier attempt's, while the
+  runtime that ran them is up; a runtime started since gives the turn a new allowance;
 - a native helper searches from its turn's allowance.
 
 Searches a call held and did not run go back to the message. The limits are the runtime's own
 (`SEARCHES_PER_MESSAGE` and `SEARCHES_FOR_DEEPER_RESEARCH` in `managed_web_search.rs`).
 
 **Turning it on.** OpenAI bills the platform key for each search, and each costs the person
-credits, so turn search on in production only with a controller and runtimes that charge it (this
-change). To turn it on in a test environment:
+credits. A controller or runtime from before the per-search charge lets searches run uncharged and
+without the allowance, and a proxy from before it reports no tokens, so searches cost their price
+alone: update all three before turning search on in production. To turn it on in a test
+environment:
 
 1. **The proxy first.** Set `PROXY_MANAGED_NATIVE_WEB_SEARCH=true` where the proxies that serve
    managed runs read their environment (both runtime compose files pass it through,
