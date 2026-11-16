@@ -953,11 +953,13 @@ fn a_browser_turn_that_hands_back_reads_its_part_right_before_the_request() {
 /// under the page as where it looked, comparison turns wrote that no review "was visible in the
 /// portion read" and that a Specs page "did not show an estimated runtime", and the builds said
 /// the pages "didn't identify reviews" and "don't give runtime estimates" (a local test, Nov 9).
-/// Every browser turn reads it right after its finding lines: a question's turn answers the
-/// person, and later turns read its findings. One whose findings go back to the building turn
-/// then names such a value in its missing line, before its unread line. Each fact carries what it
-/// doesn't confirm, since later turns read only these lines. A turn that hands nothing back is
-/// told nothing of a missing line or of an unread line.
+/// Every browser turn reads it right after its finding lines, and names such a value in its
+/// missing line: a question's turn answers the person, and later turns read its findings and
+/// that line. One whose findings go back to the building turn writes it before its unread line.
+/// Each fact says which of its values the turn chose, since later turns read only these lines,
+/// and nothing of what a page leaves out: told that a fact carries that, a comparison's browser
+/// part wrote "weight and price are not stated in the page text" beside its missing line (a local
+/// test, Nov 10). A turn that hands nothing back is told nothing of an unread line.
 #[test]
 fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_a_page() {
     let tmp = space();
@@ -976,8 +978,7 @@ fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_
     };
     let request = "Add each laptop's warranty from its own page.";
     let limits = "Octo's later turns read only these lines, never your reply's words, so a fact \
-                  carries what it doesn't confirm: which of its values you chose, not the page, \
-                  and what it leaves out.";
+                  says which of its values you chose, not the page.";
     let search = "A value you looked for and didn't find is no fact of any page, and counts as not \
                   found only once you searched the whole text a step returned for it in the \
                   script that ran that step, never by printing the text (a long printed result is \
@@ -996,6 +997,9 @@ fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_
         "runtime not found on this page",
         "Before a value goes under a page as not found",
         "never as a fact under a page",
+        // the findings' own rule; a route's limits stay the browser skill's ("Finding a page")
+        "a fact carries what it doesn't confirm",
+        "not the page, and what it leaves out",
     ];
 
     let (hand_back, _) = prompt_for_request(tmp.path(), request, routed(true), None);
@@ -1013,14 +1017,14 @@ fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_
     }
 
     let (other, _) = prompt_for_request(tmp.path(), request, routed(false), None);
-    for line in [limits, search] {
+    for line in [limits, search, missing] {
         assert_eq!(other.matches(line).count(), 1, "{line}\n{other}");
     }
-    assert!(
-        other.find(limits).unwrap() < other.find(search).unwrap(),
-        "{other}"
-    );
-    for line in [missing, unread, tab].into_iter().chain(old) {
+    let at = |line: &str| other.find(line).unwrap_or_else(|| panic!("{line}"));
+    assert!(at(limits) < at(search), "{other}");
+    assert!(at(search) < at(missing), "{other}");
+    assert!(at(missing) < at("\n\nLatest user request:\n"), "{other}");
+    for line in [unread, tab].into_iter().chain(old) {
         assert!(!other.contains(line), "{line}\n{other}");
     }
 }

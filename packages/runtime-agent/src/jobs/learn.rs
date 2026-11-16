@@ -161,6 +161,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a reply that changed nothing said what it checked and why, under a rule of its
     // own.
     include_str!("legacy/agents-doc-v18.md"),
+    // From before a reply never said a site or page lacks what it didn't find there, even of a page
+    // it read.
+    include_str!("legacy/agents-doc-v19.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -389,6 +392,9 @@ const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
     // From before a comparison's line under its title came from its own sorts and cells (it asked
     // for a lede with "the biggest unknown").
     include_str!("legacy/bound-sites-cheatsheet-v5.md"),
+    // From before a comparison named what each row is still missing once, in its footer, not
+    // under its title.
+    include_str!("legacy/bound-sites-cheatsheet-v6.md"),
 ];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
@@ -2580,7 +2586,7 @@ mod tests {
     }
 
     /// A reply states only what a page read in its turn says, else "not checked"; it never says a site or
-    /// page lacks something (a place, stop, route or time), or that a page didn't load, unless a page says so,
+    /// page lacks something (a place, stop, route or time), or that a page didn't load,
     /// and says which page it didn't reach ("the planner itself didn't load in the page", of a planner whose
     /// own page the turn never opened); and it names only steps its turn started ("I'm sending Instafy's
     /// browser…" with no browser card is a promise nobody keeps). `AGENTS.md` is what web turns carry, and a
@@ -2601,7 +2607,7 @@ mod tests {
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
             "A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.",
-            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load, unless a page you read says so.",
+            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
         ] {
@@ -2640,6 +2646,39 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
         }
+    }
+
+    /// A value Octo looked for and didn't find is said where Octo looked, never as something a
+    /// site or page lacks, with no exception for a page it read: a comparison's browser part wrote
+    /// "The Kobo product pages show no weight or price in the text I read." of pages it had read,
+    /// and its findings said "weight and price are not stated in the page text" (a local test,
+    /// Nov 10). Read beside "unless a page you read says so", a page that doesn't show a value
+    /// reads as one that says it lacks it, and a finding quoted as page data reads as a page. A
+    /// page that does say so gives a fact, which the rule's first sentence already allows. A
+    /// browser turn reads "Replies" too. The copy from before is upgraded.
+    #[test]
+    fn a_reply_never_says_a_page_lacks_what_octo_didnt_find_on_it() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        let replies = doc
+            .split("## Replies")
+            .nth(1)
+            .and_then(|rest| rest.split("## ").next())
+            .expect("Replies section");
+        let rule = "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load.";
+        assert!(replies.contains(rule), "{replies}");
+        assert!(!doc.contains("unless a page you read says so"), "{doc}");
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+
+        let previous = include_str!("legacy/agents-doc-v19.md");
+        assert!(
+            flat(previous).contains("lacks it or didn't load, unless a page you read says so.")
+        );
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A tip no page gave ("Arrive near opening time for a quieter visit.") went on a page as plain

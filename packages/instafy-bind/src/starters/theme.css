@@ -205,6 +205,9 @@ html[data-host-title="shown"] .title {
 .stack.tight { gap: var(--if-s1); }
 .notes { display: flex; flex-direction: column; gap: var(--if-s2); }
 .notes ul { padding-left: var(--if-s4); }
+/* an entry of "Still to confirm" ("Option B: Weight (not found · checked 17 Oct on maker.com ↗), Price") wraps
+   inside the page */
+.notes li { overflow-wrap: anywhere; }
 .name { font-size: 14px; line-height: 20px; font-weight: 500; color: var(--if-fg); }
 .cap { font-size: 12px; line-height: 16px; color: var(--if-muted); }
 .num { font-variant-numeric: tabular-nums; }
@@ -305,8 +308,6 @@ html[data-host-title="shown"] .title {
 @media (min-width: 360px) { .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 /* one column when a value or its source line would wrap in two (site.js measures the drawn lines) */
 .facts.is-one { grid-template-columns: minmax(0, 1fr); }
-/* a line of what is still missing ("Still missing for Option B: Weight, Price") wraps inside the page */
-.not-found { overflow-wrap: anywhere; }
 .facts > div { min-width: 0; }
 .facts dt { font-size: 12px; line-height: 16px; color: var(--if-muted); }
 .facts dd { font-size: 14px; line-height: 20px; font-weight: 500; color: var(--if-fg); }
