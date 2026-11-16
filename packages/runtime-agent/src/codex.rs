@@ -1048,6 +1048,10 @@ pub struct CodexRunOptions {
     /// get it as `TZ` ([`give_commands_the_client_timezone`]), and this process keeps its own.
     pub client_timezone: Option<String>,
     pub disable_shell_tool: bool,
+    /// A run that never uses the AI's own web search, whatever the job's grant: one whose events
+    /// never reach the chat as steps, such as the pass that only recovers a turn's missing answer
+    /// (`finalization_codex_run_options`), so no search runs that the chat would not show.
+    pub disable_native_web_search: bool,
     pub disable_final_output_json_schema: bool,
     pub final_output_schema: CodexFinalOutputSchema,
     pub expect_browser_session: bool,
@@ -2244,6 +2248,7 @@ impl CodexClient {
             &mut config,
             bounded,
             options.final_output_schema != CodexFinalOutputSchema::RoutingPreflight
+                && !options.disable_native_web_search
                 && options
                     .proxy_auth
                     .as_ref()
@@ -6374,25 +6379,48 @@ const MAX_WEB_SEARCH_PAGES: usize = 10;
 const MAX_WEB_SEARCH_PAGE_URL_CHARS: usize = 2048;
 const MAX_WEB_SEARCH_PAGE_TITLE_CHARS: usize = 200;
 
-/// The room's step for a search the AI ran with its own web search, the way a person's own ChatGPT
-/// login or the proxy's search for a managed run answers it: the words it searched for and the
-/// pages the search returned, each a public web address and its title, which Details lists. Only
-/// a search is a step: opening or finding in a page, and the search tool's other commands, end
-/// with no words, so no step shows for them, since they may not have run (the proxy runs only
-/// searches for a managed run). Nothing else of the search is kept: not what it wrote, a snippet,
-/// or the tool's name.
+/// The `results` entry with which the proxy's search bridge names the queries it searched for a
+/// managed run, as it sent them (`{"type": "searched_queries", "queries": [...]}`,
+/// openai-proxy-server `search_bridge.rs`). Codex hands `results` to its clients, never to the
+/// model.
+const SEARCHED_QUERIES: &str = "searched_queries";
+
+/// The room's step for a search the AI ran with its own web search: the words searched for and
+/// the pages the search returned, each a public web address and its title, which Details lists.
+/// For a managed run the proxy's search bridge says which queries it searched, as it sent them,
+/// and only those are the step's words: not an e-mail address it took out, a query it refused, a
+/// repeat or one past its limit, an image query or any other command, none of which it runs, nor
+/// one whose search failed. A call it searched nothing for is no step. A person's own ChatGPT
+/// login searches the AI's words as they are, so without that report the step names the words of
+/// a search, and opening or finding in a page, and the tool's other commands, show no step.
+/// Nothing else of the search is kept: not what it wrote, a snippet, or the tool's name.
 fn web_search_step(search: &codex_protocol::protocol::WebSearchEndEvent) -> JsonValue {
     let ended = json!({ "id": search.call_id, "type": "web_search", "status": "completed" });
-    let codex_protocol::models::WebSearchAction::Search { query, queries } = &search.action else {
-        return ended;
-    };
-    let asked: Vec<&String> = match queries {
-        Some(queries) if !queries.is_empty() => queries.iter().collect(),
-        _ => query.iter().collect(),
+    let results = search.results.as_deref().unwrap_or_default();
+    let report = results
+        .iter()
+        .find(|result| result.get("type").and_then(JsonValue::as_str) == Some(SEARCHED_QUERIES));
+    let searched: Vec<&str> = match (report, &search.action) {
+        (Some(report), _) => report
+            .get("queries")
+            .and_then(JsonValue::as_array)
+            .map(|queries| queries.iter().filter_map(JsonValue::as_str).collect())
+            .unwrap_or_default(),
+        (
+            None,
+            codex_protocol::models::WebSearchAction::Search {
+                queries: Some(queries),
+                ..
+            },
+        ) if !queries.is_empty() => queries.iter().map(String::as_str).collect(),
+        (None, codex_protocol::models::WebSearchAction::Search { query, .. }) => {
+            query.iter().map(String::as_str).collect()
+        }
+        (None, _) => return ended,
     };
     let mut words: Vec<String> = Vec::new();
-    for asked in asked {
-        let line = plain_line(asked, MAX_WEB_SEARCH_QUERY_CHARS);
+    for searched in searched {
+        let line = plain_line(searched, MAX_WEB_SEARCH_QUERY_CHARS);
         if !line.is_empty() && !words.contains(&line) && words.len() < MAX_WEB_SEARCH_QUERIES {
             words.push(line);
         }
@@ -6401,7 +6429,7 @@ fn web_search_step(search: &codex_protocol::protocol::WebSearchEndEvent) -> Json
         return ended;
     }
     let mut pages: Vec<JsonValue> = Vec::new();
-    for result in search.results.iter().flatten() {
+    for result in results {
         if pages.len() >= MAX_WEB_SEARCH_PAGES {
             break;
         }
@@ -12175,6 +12203,85 @@ required = true
                     "item": {"id": "search-1", "type": "web_search", "status": "completed"},
                 })],
                 "{action}"
+            );
+        }
+    }
+
+    /// The proxy searches for a managed run (Instafy AI) with its search bridge, which runs only
+    /// clean, distinct search queries, at most 4, and says which it sent in `results`
+    /// (`searched_queries`, openai-proxy-server `search_bridge.rs`). The room's step names those
+    /// words and counts them, never the words the AI asked for: not an e-mail address the
+    /// bridge took out, a query it refused as key-like, a repeat or one past its limit. A call the
+    /// bridge searched nothing for (only images, or only pages to open) is no step.
+    #[test]
+    fn a_managed_search_step_names_only_what_the_proxy_searched() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        // The bridge's own test request (`codex_request`), which it plans as two searches.
+        let asked = json!({"type": "search", "queries": [
+            "reader weight", "return policy ana@example.com", "password: hunter2",
+            "reader  weight", "fifth query",
+        ]});
+        let answered = json!([
+            {"type": "searched_queries", "queries": ["reader weight", "return policy"]},
+            {"type": "text_result", "url": "https://www.example.com/readers/reader-7?utm_source=openai",
+             "title": "Example Reader 7 | Example Store"},
+        ]);
+        let projected = adapter.collect(&web_search_end(asked, Some(answered)));
+        assert_eq!(
+            projected,
+            vec![json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "search-1",
+                    "type": "web_search",
+                    "query": "reader weight · return policy",
+                    "queries": ["reader weight", "return policy"],
+                    "pages": [{"url": "https://www.example.com/readers/reader-7?utm_source=openai",
+                               "title": "Example Reader 7 | Example Store"}],
+                    "status": "completed",
+                }
+            })]
+        );
+        let stored = projected[0].to_string();
+        for absent in [
+            "ana@example.com",
+            "hunter2",
+            "fifth query",
+            "searched_queries",
+        ] {
+            assert!(!stored.contains(absent), "{absent} in {stored}");
+        }
+
+        // Codex reports a call with only image queries as a search, which the bridge does not
+        // run; nor does it open pages. Nothing searched, no step, whatever the AI asked for.
+        let nothing = json!([{"type": "searched_queries", "queries": []}]);
+        for (asked, answered) in [
+            (
+                json!({"type": "search", "queries": ["reader 7 photo", "reader 7 box"]}),
+                nothing.clone(),
+            ),
+            (
+                json!({"type": "search", "query": "reader 7 photo"}),
+                nothing.clone(),
+            ),
+            (
+                json!({"type": "open_page", "url": "https://www.example.org/page"}),
+                nothing,
+            ),
+            // A report that names no list of queries searched nothing either.
+            (
+                json!({"type": "search", "query": "reader weight"}),
+                json!([{"type": "searched_queries", "queries": "reader weight"},
+                       {"type": "text_result", "url": "https://www.example.org/page"}]),
+            ),
+        ] {
+            assert_eq!(
+                adapter.collect(&web_search_end(asked.clone(), Some(answered))),
+                vec![json!({
+                    "type": "item.completed",
+                    "item": {"id": "search-1", "type": "web_search", "status": "completed"},
+                })],
+                "{asked}"
             );
         }
     }

@@ -79,8 +79,10 @@ const WEB_READ: BuiltinLabel = BuiltinLabel {
     live: "Reading pages",
     done: counted("read a page", "read {n} pages", "read pages"),
 };
-// `instafy web search`: the room keeps its query and count, never its results (codex.rs).
-const WEB_SEARCH_COMMAND: BuiltinLabel = BuiltinLabel {
+// Every web search: `instafy web search`, whose query and count the room keeps and never its
+// results, and the AI's own search ([`web_search_activity`]). One label, so Studio, which counts a
+// turn's steps by their label's key, says a turn that used both searched the web once, counted.
+const WEB_SEARCH: BuiltinLabel = BuiltinLabel {
     key: "instafy/web-search",
     role: ActivityRole::Content,
     live: "Searching the web",
@@ -159,16 +161,6 @@ const CLONE: BuiltinLabel = BuiltinLabel {
     role: ActivityRole::Content,
     live: "Copying a repository",
     done: single("copied a repository"),
-};
-const WEB_SEARCH: BuiltinLabel = BuiltinLabel {
-    key: "builtin/web-search",
-    role: ActivityRole::Content,
-    live: "Searching the web",
-    done: counted(
-        "searched the web",
-        "searched the web {n} times",
-        "searched the web",
-    ),
 };
 const FILE_EDIT: BuiltinLabel = BuiltinLabel {
     key: "builtin/edit",
@@ -757,7 +749,7 @@ impl<'a> Matcher<'a> {
                     .count() as u64;
                 return Some(Found::builtin(&WEB_READ, (urls > 0).then_some(urls)));
             }
-            ("web", Some("search")) => &WEB_SEARCH_COMMAND,
+            ("web", Some("search")) => &WEB_SEARCH,
             ("preview", Some("open")) => &PREVIEW_OPEN,
             ("preview", Some("check")) => &PREVIEW_CHECK,
             ("preview", Some("close")) => &PREVIEW_CLOSE,
@@ -1543,8 +1535,8 @@ pub fn command_activity(argv: Option<&JsonValue>, command: &str) -> Option<JsonV
     activity
 }
 
-/// A web search: "Searching the web", then "searched the web", or "searched the web 3 times" for
-/// a step that ran `searches` searches at once.
+/// A search the AI ran with its own web search, labelled as `instafy web search` is: "searched the
+/// web", or "searched the web 3 times" for a step that ran `searches` searches at once.
 pub fn web_search_activity(searches: usize) -> Option<JsonValue> {
     let count = u64::try_from(searches).ok().filter(|count| *count > 0);
     activity_json(vec![Found::builtin(&WEB_SEARCH, count.or(Some(1)))])
@@ -2180,6 +2172,19 @@ mod tests {
         assert_eq!(twice["done"]["other"], json!("searched the web {n} times"));
     }
 
+    /// Every web search is one label, `instafy web search` and the AI's own search alike: Studio
+    /// counts a turn's steps by their label's key, so a turn that used both says it searched the
+    /// web once, counted ("Searched the web 3 times"), never "searched the web" twice on one line.
+    #[test]
+    fn every_web_search_is_one_label() {
+        let command = label(&[], "instafy web search ramen").expect("label");
+        let integrated = web_search_activity(2).expect("label");
+        for field in ["v", "key", "role", "live", "done"] {
+            assert_eq!(integrated[field], command[field], "{field}");
+        }
+        assert_eq!(integrated["count"], json!(2));
+    }
+
     #[test]
     fn preview_open_is_quiet() {
         let activity = label(
@@ -2562,7 +2567,7 @@ mod tests {
         }
         assert_eq!(
             web_search_activity(1).unwrap()["key"],
-            json!("builtin/web-search")
+            json!("instafy/web-search")
         );
         assert_eq!(web_search_activity(1).unwrap()["count"], json!(1));
         assert_eq!(web_search_activity(0).unwrap()["count"], json!(1));

@@ -612,24 +612,33 @@ in it counts.
 
 ## Web searches
 
-A search the AI runs with its own web search (OpenAI's, which Codex calls with its search tool:
-a person's own ChatGPT login, or Instafy AI where the proxy searches for it) is one search step:
-"Searching the web", then "searched the web" on the turn's line, or "searched the web 3 times"
-for a step that searched three queries at once. runtime-agent makes it from Codex's search event
-(`codex.rs`, `web_search_step`): a `web_search` item with the words searched for (`query`, the
-queries joined with ` · `, and each of them in `queries`), and `pages`, the pages the search
-returned, each an http(s) address of a public site and its title on one line. An address with a
-user name, a port of its own, an IP address or a machine on a local network is left out, and so
-is everything else of the search: what it wrote, snippets, and the name of the tool. Details shows
-the words on the step's row and the pages behind its chevron, linked to each page.
+A search the AI runs with its own web search (OpenAI's, which Codex calls with its search tool: a
+person's own ChatGPT login, or Instafy AI where the proxy searches for it) is one search step,
+which shows once the search ends: "searched the web" on the turn's line, or "searched the web 3
+times" for a step that searched three queries at once. It shares its label with `instafy web
+search`, so a turn that used both says so once, counted. Codex names a search's words only when it
+ends, so no step shows while a search runs, and the line reads "Thinking…". runtime-agent makes the
+step from Codex's search event (`codex.rs`, `web_search_step`): a `web_search` item with the words
+searched for (`query`, the queries joined with ` · `, and each of them in `queries`), and `pages`,
+the pages the search returned, each an http(s) address of a public site and its title on one line.
+An address with a user name, a port of its own, an IP address or a machine on a local network is
+left out, and so is everything else of the search: what it wrote, snippets, and the name of the
+tool. Details shows the words on the step's row and the pages behind its chevron, linked to each
+page.
 
 Only a search is a step. Opening a page or finding text in one with the search tool, and its
 other commands, end with no words and no pages, so no step shows for them: the proxy runs only
 searches for Instafy AI, so such a call may have run nothing. A search's start names only its
 call, for the run log's timings, and a search the provider refused never ends, so no step shows
-for it either. The words are the ones the AI wrote: for Instafy AI the proxy takes e-mail
-addresses and long numbers out of a query before it searches, and refuses one that looks like a
-key (see the proxy README), so Details may show words that never reached the search.
+for it either.
+
+Whose words the step shows depends on who searched. A person's own ChatGPT login searches the words
+the AI wrote, as they are, so those are the step's. For Instafy AI the proxy's search bridge says
+which queries it searched, as it sent them (`searched_queries` in the answer's `results`, which
+Codex never gives the model; see the proxy README), and the step shows those and counts them: it
+takes e-mail addresses and long numbers out of a query, does not send one that looks like a key, a
+repeat or more than 4, and runs no image or other command. A query it did not search, or whose
+search failed, is not shown, and a call it searched nothing for is no step.
 
 ## Browser steps
 

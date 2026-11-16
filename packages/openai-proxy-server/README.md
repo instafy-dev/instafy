@@ -238,11 +238,15 @@ platform credential:
   searched across the whole web.
 - The answer is codex's `SearchResponse`. `output` gives what the search wrote for each query
   inside `<untrusted_page_content viewer="provider search" read_at="…">`, with the pages it cites,
-  and says what was removed, refused or not run; `results` lists the cited pages
-  (`type: "text_result"`, `url`, `title`); `encrypted_output` is `null`. Only public web pages are
-  cited: http(s) on the default ports, without a user name, a private, local or reserved host, or
-  a fragment, and percent-encoded, so no address can close the wrapper. Hidden characters in what
-  the search wrote become spaces, and a tag of the wrapper's name in it is defused.
+  and says what was removed, refused or not run; `encrypted_output` is `null`. `results`, which
+  codex hands to its clients and never to the model, starts with
+  `{"type": "searched_queries", "queries": […]}`: the queries that searched, as they were sent
+  (not one refused, repeated, past the limit or not run, nor one whose search failed), which the
+  chat shows in place of the words codex asked for, then lists the cited pages
+  (`type: "text_result"`, `url`, `title`). Only public web pages are cited: http(s) on the
+  default ports, without a user name, a private, local or reserved host, or a fragment, and
+  percent-encoded, so no address can close the wrapper. Hidden characters in what the search
+  wrote become spaces, and a tag of the wrapper's name in it is defused.
 - A query whose search fails is told in `output`. When every search fails, the route answers with
   the first failure, redacted like any upstream failure. Nothing is retried here: codex owns
   retries.

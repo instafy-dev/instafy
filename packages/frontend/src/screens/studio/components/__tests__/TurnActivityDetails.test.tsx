@@ -295,7 +295,7 @@ describe("TurnActivityDetails", () => {
   describe("a web search", () => {
     const SEARCHED = {
       v: 1,
-      key: "builtin/web-search",
+      key: "instafy/web-search",
       role: "content",
       live: "Searching the web",
       done: { one: "searched the web", other: "searched the web {n} times", some: "searched the web" },

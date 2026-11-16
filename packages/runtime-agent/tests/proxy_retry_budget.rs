@@ -561,7 +561,13 @@ async fn responses(
         // So does an ordinary turn whose config asks for web search.
         "native_search_authorized" | "native_search_custom_provider" | "native_search_managed" => {
             if ordinal == 1 && offers_standalone_web_search(&body) {
-                let commands = json!({"search_query":[{"q":"local fixture source"}]});
+                // A managed run's search goes through the proxy's search bridge, which sends no
+                // query that looks like a key: the AI asks for one, and the room never names it.
+                let commands = if state.scenario == "native_search_managed" {
+                    json!({"search_query":[{"q":"local fixture source"},{"q":"password: hunter2"}]})
+                } else {
+                    json!({"search_query":[{"q":"local fixture source"}]})
+                };
                 return sse(if offers_namespaced_tool(&body, "web", "run") {
                     json!({"type":"function_call", "call_id":"local-search",
                         "namespace":"web", "name":"run", "arguments":commands.to_string()})
@@ -579,7 +585,10 @@ async fn responses(
             }
             return answer(FINAL_TEXT);
         }
-        "web_search_requested" | "native_search_routing" | "native_search_managed_routing" => {
+        "web_search_requested"
+        | "native_search_routing"
+        | "native_search_managed_routing"
+        | "native_search_managed_finalization" => {
             return answer(FINAL_TEXT);
         }
         "tool_once" => {
@@ -640,8 +649,15 @@ async fn native_search(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     state.search_requests.lock().unwrap().push(body);
-    Json(json!({"output":SEARCH_TEXT, "results":[{"url":"https://example.invalid/source"}]}))
-        .into_response()
+    let page = json!({"url":"https://example.invalid/source"});
+    // For a managed run the proxy's search bridge answers, and names the queries it searched
+    // (openai-proxy-server `search_bridge.rs`): here the first, as the second looks like a key.
+    let results = if managed_native_search_grant(&state.scenario) {
+        json!([{"type":"searched_queries","queries":["local fixture source"]}, page])
+    } else {
+        json!([page])
+    };
+    Json(json!({"output":SEARCH_TEXT, "results":results})).into_response()
 }
 
 /// A completed call of the command tool the request offers, code mode's `exec` or else
@@ -1467,6 +1483,14 @@ scenario_test!(
     "native_search_managed_routing",
     1
 );
+// The pass that only recovers a turn's missing answer runs with `disable_native_web_search`, as
+// `finalization_codex_run_options` sets it: nothing of its run reaches the chat, so it never
+// searches, whatever the job's grant.
+scenario_test!(
+    the_finalization_pass_cannot_use_a_managed_runs_native_search_grant,
+    "native_search_managed_finalization",
+    1
+);
 scenario_test!(
     personal_browser_cannot_use_the_jobs_native_search_grant,
     "personal_browser_native_search",
@@ -1680,6 +1704,7 @@ fn has_native_search_grant(scenario: &str) -> bool {
             | "native_search_routing"
             | "native_search_managed"
             | "native_search_managed_routing"
+            | "native_search_managed_finalization"
             | "personal_browser_native_search"
     )
 }
@@ -1688,7 +1713,9 @@ fn has_native_search_grant(scenario: &str) -> bool {
 fn managed_native_search_grant(scenario: &str) -> bool {
     matches!(
         scenario,
-        "native_search_managed" | "native_search_managed_routing"
+        "native_search_managed"
+            | "native_search_managed_routing"
+            | "native_search_managed_finalization"
     )
 }
 
@@ -1851,6 +1878,7 @@ async fn isolated_retry_child() -> Result<()> {
                 } else {
                     Default::default()
                 },
+                disable_native_web_search: scenario == "native_search_managed_finalization",
                 disable_final_output_json_schema: true,
                 allow_plain_text_final_fallback: true,
                 suppress_contextual_instructions: true,
@@ -1948,6 +1976,7 @@ async fn isolated_retry_child() -> Result<()> {
             | "native_search_routing"
             | "native_search_managed"
             | "native_search_managed_routing"
+            | "native_search_managed_finalization"
             | "personal_browser_native_search"
     ) {
         let output = result?;

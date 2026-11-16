@@ -8299,6 +8299,9 @@ impl JobProcessor {
             job_id: Some(job.id),
             client_timezone: extract_client_timezone(job.payload.get("metadata")),
             disable_shell_tool: bounded_execution,
+            // The turn's steps reach the chat, so it may search when the job's grant lets it
+            // (`codex.rs`): never in a routing step or a browser or granted turn.
+            disable_native_web_search: false,
             disable_final_output_json_schema: final_output_mode.disable_final_output_json_schema(),
             final_output_schema,
             // Browser-mode is a runtime capability (VNC + headed Chromium via CDP), not inferred
@@ -16777,6 +16780,9 @@ fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOp
     let mut options = first_attempt.clone();
     options.require_first_tool_call = false;
     options.disable_shell_tool = true;
+    // It only recovers prose, and nothing of its run reaches the chat as a step, so it never
+    // searches the web: a search there would run, and cost, with nothing to show for it.
+    options.disable_native_web_search = true;
     options.disable_final_output_json_schema = true;
     options.allow_plain_text_final_fallback = false;
     options.reasoning_effort = Some(ReasoningEffort::Low);
@@ -23543,6 +23549,9 @@ mod tests {
 
         let finalization = finalization_codex_run_options(&resumed);
         assert!(finalization.input_images.is_empty());
+        // Nothing of its run reaches the chat, so it never searches the web, whatever the grant.
+        assert!(!resumed.disable_native_web_search);
+        assert!(finalization.disable_native_web_search);
         assert!(!finalization.persist_conversation_thread);
         assert!(finalization.provider_conversation_state.is_none());
     }
@@ -40301,7 +40310,8 @@ mod tests {
             first["pages"],
             json!([{"url": "https://www.parquesdesintra.pt/en/belem", "title": "Belém Tower | Opening hours"}])
         );
-        assert_eq!(first["activity"]["key"], json!("builtin/web-search"));
+        // The label of every web search, `instafy web search` too (`activity_labels.rs`).
+        assert_eq!(first["activity"]["key"], json!("instafy/web-search"));
         assert_eq!(first["activity"]["live"], json!("Searching the web"));
         assert_eq!(first["activity"]["done"]["one"], json!("searched the web"));
         assert_eq!(first["activity"]["count"], json!(1));
@@ -40322,6 +40332,63 @@ mod tests {
         }
     }
 
+    /// Instafy AI searches through the proxy's search bridge, which says which queries it sent
+    /// (`searched_queries`): the room's step names and counts those, as they were searched, and a
+    /// call the bridge searched nothing for (only images here) is no step, whatever the AI asked.
+    #[test]
+    fn a_managed_search_is_counted_by_what_the_proxy_searched() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::Event;
+
+        let mut adapter = CodexEventStreamAdapter::default();
+        let mut events = Vec::new();
+        for (call, action, results) in [
+            (
+                "search-1",
+                json!({"type": "search", "queries": [
+                    "kobo clara bw weight", "kobo clara bw price ana@example.com", "password: hunter2",
+                ]}),
+                json!([
+                    {"type": "searched_queries", "queries": ["kobo clara bw weight", "kobo clara bw price"]},
+                    {"type": "text_result", "url": "https://www.kobo.com/gb/en/p/kobo-clara-bw",
+                     "title": "Kobo Clara BW"},
+                ]),
+            ),
+            (
+                "images-1",
+                json!({"type": "search", "query": "kobo clara bw photo"}),
+                json!([{"type": "searched_queries", "queries": []}]),
+            ),
+        ] {
+            events.extend(
+                adapter.collect(&Event {
+                    id: "turn-1".into(),
+                    msg: serde_json::from_value(json!({
+                        "type": "web_search_end", "call_id": call, "query": "ignored",
+                        "action": action, "results": results,
+                    }))
+                    .unwrap(),
+                }),
+            );
+        }
+        let messages = extract_codex_messages(&events);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert_eq!(
+            messages[0].content,
+            "Web search completed: \"kobo clara bw weight · kobo clara bw price\""
+        );
+        let metadata = messages[0].metadata.as_ref().unwrap();
+        assert_eq!(metadata["activity"]["count"], json!(2));
+        assert_eq!(
+            metadata["pages"],
+            json!([{"url": "https://www.kobo.com/gb/en/p/kobo-clara-bw", "title": "Kobo Clara BW"}])
+        );
+        let stored = metadata.to_string();
+        for absent in ["ana@example.com", "hunter2", "photo", "searched_queries"] {
+            assert!(!stored.contains(absent), "{absent} in {stored}");
+        }
+    }
+
     /// A search step that failed reads as one that was tried, not as one that searched.
     #[test]
     fn a_failed_web_search_step_reads_as_tried() {
@@ -40333,7 +40400,7 @@ mod tests {
         assert_eq!(messages[0].content, "Web search failed: \"vitest config\"");
         let metadata = messages[0].metadata.as_ref().unwrap();
         assert_eq!(metadata["status"], json!("failed"));
-        assert_eq!(metadata["activity"]["key"], json!("builtin/web-search"));
+        assert_eq!(metadata["activity"]["key"], json!("instafy/web-search"));
     }
 
     #[test]
@@ -40395,7 +40462,7 @@ mod tests {
         );
         assert_eq!(
             activity(4).expect("search")["key"],
-            json!("builtin/web-search")
+            json!("instafy/web-search")
         );
         let edit = activity(5).expect("edit");
         assert_eq!(edit["key"], json!("builtin/edit"));

@@ -372,16 +372,20 @@ production until the per-search charge ships. To turn them on in a test environm
    restart them. On an API key, check once that the managed model can search:
    `openai-proxy search-probe --model <MANAGED_AI_MODEL_ID>` where the key is (one billed search).
 2. **Then the controller.** Set `MANAGED_AI_NATIVE_WEB_SEARCH=true` in its environment and
-   restart it. Its log says the switch is on. Jobs leased from then on get search.
+   restart it; with several controller nodes, set it the same on every one of them (each reads
+   it at its own startup, and decides from it every grant it leases or renews). Its log says the
+   switch is on. Jobs leased from then on get search.
 3. **Check one turn.** Ask Instafy AI something that needs today's information. The turn's line
-   says it searched the web, its Details list the words it searched for and the pages each search
+   says it searched the web, its Details list the words each search sent and the pages it
    returned, and the proxy logs one `[proxy] managed web search {…}` line per search.
 
 To turn search off at once, turn the proxy's switch off: it refuses every managed search with
 403 `native_web_search_unavailable`. Turning the controller's off only stops new grants: a job
 that started with search loses it at its next renewal, and the runtime then stops that job rather
-than change its tools in the middle of a turn. With only the controller's on, the proxy refuses
-each search the AI tries, and the turn goes on without it.
+than change its tools in the middle of a turn. The same happens while controller nodes disagree:
+a job that started with search is stopped when a node with the switch off renews its grant, so
+change every node together. With only the controller's on, the proxy refuses each search the AI
+tries, and the turn goes on without it.
 
 ### Failed turns
 

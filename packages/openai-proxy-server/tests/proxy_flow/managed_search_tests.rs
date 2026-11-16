@@ -129,9 +129,12 @@ async fn managed_search_on_an_api_key_runs_hosted_search_on_the_platform_key() -
     ] {
         assert!(output.contains(told), "{told}\n---\n{output}");
     }
+    // The queries as they were searched, the e-mail address taken out, for
+    // the chat to show, then the pages cited.
     assert_eq!(
         answer["results"],
         json!([
+            {"type": "searched_queries", "queries": ["Example Reader 7 weight", "Example Reader 7 review"]},
             {"type": "text_result", "url": "https://www.example.com/readers/reader-7?utm_source=openai", "title": "Example Reader 7 | Example Store"},
             {"type": "text_result", "url": "https://reviews.example.org/reader-7-review?utm_source=openai", "title": "Example Reader 7 review"},
         ])
@@ -250,7 +253,10 @@ async fn managed_search_on_a_static_chatgpt_login_searches_each_clean_query_as_t
     assert_eq!(answer["encrypted_output"], Value::Null);
     assert_eq!(
         answer["results"],
-        json!([{"type": "text_result", "url": "https://example.org/source", "title": null}])
+        json!([
+            {"type": "searched_queries", "queries": ["Example Reader 7 weight", "Example Reader 7 review"]},
+            {"type": "text_result", "url": "https://example.org/source", "title": null},
+        ])
     );
     Ok(())
 }
@@ -320,7 +326,11 @@ async fn sends_no_query_that_looks_like_a_key(proxy: StackProxy<'_>) -> Result<(
         )));
     }
     assert!(!output.contains(MANAGED_STUB_KEY) && !output.contains("hunter2"));
-    assert_eq!(answer["results"], json!([]));
+    // Nothing was searched, so the chat shows no search, and no refused word.
+    assert_eq!(
+        answer["results"],
+        json!([{"type": "searched_queries", "queries": []}])
+    );
     assert!(upstream.bodies.lock().unwrap().is_empty());
     Ok(())
 }
@@ -377,6 +387,10 @@ async fn managed_search_failures_are_redacted_told_and_never_retried() -> Result
     );
     assert_eq!(output.matches("</untrusted_page_content>").count(), 1);
     assert!(!output.contains("private-query"));
+    // Only the search that answered counts as searched.
+    let results = &serde_json::from_str::<Value>(&body)?["results"];
+    assert_eq!(results[0]["type"], "searched_queries");
+    assert_eq!(results[0]["queries"].as_array().map(Vec::len), Some(1));
     assert_eq!(responses_requests(&upstream).len(), 4, "no retry");
     Ok(())
 }
