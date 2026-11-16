@@ -322,7 +322,7 @@ function OtherStepRow({ step, times = 1 }: { step: TurnStep; times?: number }) {
                 target="_blank"
                 rel="noopener noreferrer nofollow"
                 title={page.url}
-                className="min-w-0 truncate py-0.5 text-slate-700 underline-offset-2 hover:underline pointer-coarse:py-3 dark:text-slate-200"
+                className="min-w-0 truncate py-0.5 text-slate-700 underline-offset-2 hover:underline pointer-coarse:py-3.5 dark:text-slate-200"
               >
                 {page.title ?? page.host}
               </a>
