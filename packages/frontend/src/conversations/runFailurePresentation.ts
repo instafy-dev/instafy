@@ -274,8 +274,8 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<Exclude<RunFailureKind, "turn_engine">, 
 
 // Words and marks that name the plumbing. A raw failure reason that uses one
 // stays behind Details, and the failure block says the plain sentence instead.
-// (The controller's own sentences, such as a team's cloud runtimes staying
-// busy, are written for the person and still show.)
+// (The controller's own sentences, such as all hosted machines for this team
+// staying in use, are written for the person and still show.)
 const TECHNICAL_FAILURE_WORDS =
   /\b(?:codex|workspace|requests?|providers?|upstream|credentials?|preflight|mcp|json|https?|url|proxy|stderr|stdout|exit (?:code|status)|status \d{3})\b|[`{}<>]|::/i;
 

@@ -308,7 +308,7 @@ describe("useChatSubmitFlow on the Browser tab with only a blank tab", () => {
     expect(await submit(options)).toBe(false);
     expect(options.performSubmit).not.toHaveBeenCalled();
     expect(statusMessages(options)).toEqual([
-      "Shared Browser is visible, but its agent runtime isn't ready yet. Wait for it to come up before sending this task.",
+      "Shared Browser is visible, but the machine it runs on isn't ready yet. Send this task once it is.",
     ]);
   });
 

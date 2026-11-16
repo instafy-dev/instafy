@@ -54,7 +54,7 @@ describe("Settings diagnostics", () => {
     await openTools();
     expect(document.querySelector("details")?.open).toBe(true);
     expect(document.querySelector('[aria-label="Diagnostics"]')).not.toBeNull();
-    await click("View runtime logs");
+    await click("View machine logs");
     expect(mocks.onShowLogs).toHaveBeenCalledOnce();
     expect(document.querySelector('[aria-label="Diagnostics"]')).toBeNull();
   });

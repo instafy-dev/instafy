@@ -5,6 +5,7 @@ import { Button } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import type { StudioNavItem, StudioPanel } from "../types";
 
 type StudioSidebarMorePanelsProps = {
@@ -80,8 +81,10 @@ export function StudioSidebarMorePanels({
     return null;
   }
 
+  // The sidebar's quiet divider sets these setup pages apart from the daily
+  // tools above them, in the expanded sidebar, the collapsed rail and on phones.
   return (
-    <li>
+    <li className={`border-t border-slate-200/70 pt-1 ${DARK_DIVIDER_BORDER_CLASS}`}>
       <div className="space-y-1">
         {showInlineMoreItems ? (
           <ul className="space-y-1" aria-label="More panels">

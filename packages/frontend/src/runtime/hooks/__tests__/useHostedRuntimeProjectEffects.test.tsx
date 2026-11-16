@@ -48,6 +48,8 @@ describe("opening a space does not start its machine", () => {
   let root: Root;
   const ensureHostedRuntime = vi.fn(async () => true);
   const dispatch = vi.fn();
+  const showStatus = vi.fn();
+  const setPreferredRuntime = vi.fn<(runtimeId: string | null) => Promise<boolean>>(async () => true);
   const noop = () => {};
 
   // The two hooks useHostedRuntimePolicy composes, in the same order, so the
@@ -114,8 +116,8 @@ describe("opening a space does not start its machine", () => {
       resolvedPreferredRuntimeId: preferredEntry?.runtimeId ?? null,
       preferredRuntimeEntry: preferredEntry,
       refreshRuntimeStatuses: async () => {},
-      setPreferredRuntime: async () => true,
-      showStatus: noop,
+      setPreferredRuntime,
+      showStatus,
       previousPreferredRuntimeIdRef,
       runtimeOfflineAlertRef,
       autoEnsureHostedRef,
@@ -149,6 +151,8 @@ describe("opening a space does not start its machine", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     ensureHostedRuntime.mockClear();
     dispatch.mockClear();
+    showStatus.mockClear();
+    setPreferredRuntime.mockClear();
     clearHolds();
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -218,5 +222,26 @@ describe("opening a space does not start its machine", () => {
 
     expect(ensureHostedRuntime).not.toHaveBeenCalled();
     expect(isRestoredAwaitingIntent(SPACE_A)).toBe(true);
+  });
+
+  it("offers the best available machine once when the selected machine is offline", async () => {
+    const props = { projectId: SPACE_A, statuses: [hostedEntry("stopped")], statusesResolved: true, preferred: true };
+    await render(props);
+    await render({ ...props, statuses: [hostedEntry("stopped")] });
+
+    const offers = showStatus.mock.calls.filter(
+      ([, , , options]) => (options as { actionLabel?: string } | undefined)?.actionLabel === "Use best available",
+    );
+    expect(offers).toHaveLength(1);
+    const [message, intent, , options] = offers[0]!;
+    expect(message).toBe("The selected machine is offline. Use the best available one instead?");
+    expect(message).not.toMatch(/runtime/i);
+    expect(intent).toBe("warning");
+
+    // The answer clears the space's selection, as "Use best available" does in Machines.
+    await act(async () => {
+      (options as { onAction?: () => void }).onAction?.();
+    });
+    expect(setPreferredRuntime).toHaveBeenCalledWith(null);
   });
 });

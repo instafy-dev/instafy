@@ -82,7 +82,7 @@ function ActivityRow({
       {entry.isPrivate ? (
         <>
           <Lock
-            className="h-3 w-3 flex-none text-slate-400 dark:text-slate-500"
+            className="h-3 w-3 flex-none text-slate-600 dark:text-slate-400"
             aria-hidden="true"
           />
           <span className="sr-only">private</span>
@@ -97,8 +97,8 @@ function ActivityRow({
           <Text
             as="span"
             variant="caption"
-            tone="inherit"
-            className="flex-none text-xxs font-medium text-emerald-600 dark:text-emerald-400"
+            tone="success"
+            className="flex-none text-xxs font-medium"
           >
             now
           </Text>
@@ -229,7 +229,7 @@ export function AgentProfileCardContent({
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {pinnedRuntimeId ? (
-                <Badge size="xs" className="shrink-0 text-slate-600">
+                <Badge size="xs" className="shrink-0">
                   Pinned
                 </Badge>
               ) : null}
@@ -250,7 +250,7 @@ export function AgentProfileCardContent({
       </div>
       {currentBio?.profile?.bio ? (
         <div className="space-y-1" data-testid="agent-profile-about">
-          <Text as="div" variant="label" tone="subtle">About</Text>
+          <Text as="div" variant="label" tone="muted">About</Text>
           <Text as="p" variant="body" tone="secondary" className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{currentBio.profile.bio}</Text>
         </div>
       ) : currentBio?.error ? (
@@ -260,7 +260,7 @@ export function AgentProfileCardContent({
         </div>
       ) : profileKey && !currentBio ? <Text as="p" variant="caption" tone="muted" role="status">Loading profile…</Text> : null}
       <div className="space-y-1" data-testid="agent-profile-activity">
-        <Text as="div" variant="label" tone="subtle">
+        <Text as="div" variant="label" tone="muted">
           Active in
         </Text>
         {activity.entries.length === 0 ? (
@@ -293,8 +293,8 @@ export function AgentProfileCardContent({
           content edge inside a card this small. */}
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-2">
-          <Text as="div" variant="label" tone="subtle">
-            Runtime
+          <Text as="div" variant="label" tone="muted">
+            Machine
           </Text>
           <Text
             as="div"

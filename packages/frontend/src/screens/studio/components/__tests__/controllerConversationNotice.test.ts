@@ -48,7 +48,7 @@ describe("controllerConversationNotice", () => {
     });
 
     expect(resolveControllerConversationNoticeContent(message)).toBe(
-      "Workspace startup failed. Open Machines to reconnect Instafy Cloud.",
+      "Workspace startup failed. Open Machines to reconnect this space's machine.",
     );
     expect(resolveControllerConversationNoticeLabel(message)).toBe("Workspace unavailable");
   });
@@ -99,7 +99,7 @@ describe("controllerConversationNotice", () => {
     });
 
     expect(resolveControllerConversationNoticeContent(message)).toBe(
-      "Workspace startup failed. Open Machines to reconnect Instafy Cloud.",
+      "Workspace startup failed. Open Machines to reconnect this space's machine.",
     );
   });
 
@@ -130,11 +130,11 @@ describe("controllerConversationNotice", () => {
     for (const message of [withCode, textOnly]) {
       const content = resolveControllerConversationNoticeContent(message);
       expect(content).toBe(
-        "Waiting for a free cloud runtime. All of this team’s cloud runtimes are in use; stop one in Machines and this request will send.",
+        "Waiting for a free hosted machine. All of this team’s hosted machines are in use; stop one in Machines and this request will send.",
       );
       // The runtime holding the slot can be in this same space.
       expect(content).not.toMatch(/space/);
-      expect(resolveControllerConversationNoticeLabel(message)).toBe("Waiting for a runtime");
+      expect(resolveControllerConversationNoticeLabel(message)).toBe("Waiting for a machine");
       // Stopping the blocker is the fix, so the card keeps its button.
       expect(resolveControllerConversationNoticeAction(message)).toEqual({ label: "Open Machines", kind: "open_machines" });
     }
@@ -152,7 +152,7 @@ describe("controllerConversationNotice", () => {
     });
 
     expect(resolveControllerConversationNoticeContent(message)).toBe(
-      "No runtime is connected for this space. Open Machines to start Instafy Cloud.",
+      "No machine is connected to this space. Open Machines to start one.",
     );
   });
 
@@ -308,6 +308,107 @@ describe("controllerConversationNotice", () => {
       );
       expect(content).not.toContain("Runtime button by the composer");
     }
+  });
+
+  it("calls what agents work on a machine, never a runtime or Instafy Cloud", () => {
+    // docs/Runtime-Machines.md, "The model": a machine, or a hosted machine.
+    for (const details of [
+      { reason: "runtime_not_ready", detail: "status=stopped" },
+      { reason: "runtime_not_ready", detail: "status=starting" },
+      { reason: "runtime_not_ready", reconnect: { status: "failed", code: "runtime_limit_reached" } },
+      { reason: "runtime_unavailable" },
+      { reason: "runtime_inspection_failed" },
+      { reason: "something_unmapped" },
+    ]) {
+      const message = makeMessage({
+        content: "Runtime is unavailable.",
+        metadata: { source: "controller", kind: "runtime_alert", details },
+      });
+      for (const text of [
+        resolveControllerConversationNoticeContent(message),
+        resolveControllerConversationNoticeContent(message, { canChangeSpace: false }),
+        resolveControllerConversationNoticeLabel(message),
+      ]) {
+        expect(text).not.toMatch(/runtime|instafy cloud/i);
+      }
+    }
+  });
+
+  describe("for a reader who can only view the space", () => {
+    // Machines offers them no start (MachinesPanel) and refuses them every
+    // machine control (RuntimeOperationsProvider), and the controller takes no
+    // message from them, so their notice says what happened and asks nothing.
+    const writer = { canChangeSpace: true };
+    const viewer = { canChangeSpace: false };
+    const notice = (details: Record<string, unknown>) =>
+      makeMessage({
+        content: "Runtime is unavailable.",
+        metadata: { source: "controller", kind: "runtime_alert", details },
+      });
+    const cases: Array<[details: Record<string, unknown>, writerText: string, viewerText: string]> = [
+      [
+        { reason: "runtime_unavailable" },
+        "No machine is connected to this space. Open Machines to start one.",
+        "No machine is connected to this space.",
+      ],
+      [
+        { reason: "runtime_not_ready", reconnect: { status: "failed" } },
+        "Workspace startup failed. Open Machines to reconnect this space's machine.",
+        "Workspace startup failed.",
+      ],
+      [
+        { reason: "runtime_not_ready", reconnect: { status: "failed", code: "runtime_limit_reached" } },
+        "Waiting for a free hosted machine. All of this team’s hosted machines are in use; stop one in Machines and this request will send.",
+        "Waiting for a free hosted machine. All of this team’s hosted machines are in use.",
+      ],
+      [
+        { reason: "runtime_inspection_failed" },
+        "Instafy couldn't check this space's machine. Open Machines to inspect or reconnect it.",
+        "Instafy couldn't check this space's machine.",
+      ],
+      [
+        { reason: "something_unmapped" },
+        "Instafy couldn't reach this space's machine. Open Machines to inspect or reconnect it.",
+        "Instafy couldn't reach this space's machine.",
+      ],
+      [
+        { reason: "runtime_not_ready", detail: "status=starting, lastSeen=unknown" },
+        "Starting the workspace. Your queued request will continue automatically.",
+        "Starting the workspace. The queued request will continue automatically.",
+      ],
+    ];
+
+    it("keeps the instruction for a person who can change the space", () => {
+      for (const [details, writerText] of cases) {
+        const message = notice(details);
+        expect(resolveControllerConversationNoticeContent(message, writer)).toBe(writerText);
+        // Without the provider (a thread preview), the card reads as it did.
+        expect(resolveControllerConversationNoticeContent(message)).toBe(writerText);
+        expect(resolveControllerConversationNoticeContent(message, null)).toBe(writerText);
+      }
+    });
+
+    it("says what happened without an instruction they can't follow", () => {
+      for (const [details, , viewerText] of cases) {
+        const message = notice(details);
+        expect(resolveControllerConversationNoticeContent(message, viewer)).toBe(viewerText);
+        expect(viewerText).not.toMatch(/Machines/);
+        expect(viewerText).not.toMatch(/\byour\b/i);
+        // The button stays: opening Machines to look is something a viewer
+        // can do.
+        expect(resolveControllerConversationNoticeAction(message, viewer)).toEqual(
+          resolveControllerConversationNoticeAction(message, writer),
+        );
+      }
+    });
+
+    it("keeps the controller's own sentence for a scheduled run", () => {
+      const message = notice({ reason: "automation_launch_failed", failureCode: "insufficient_credits" });
+      const stored = "This scheduled run couldn't start: this team is out of credits for today";
+      const withContent = { ...message, content: stored };
+      expect(resolveControllerConversationNoticeContent(withContent, viewer)).toBe(stored);
+      expect(resolveControllerConversationNoticeContent(withContent, writer)).toBe(stored);
+    });
   });
 
   describe("per-cause actions", () => {

@@ -28,6 +28,8 @@ import {
   runtimeControllerEnabled,
 } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { textTones } from "../../../styles/typography";
+import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import {
   normalizeCustomAgentAvatarSrc,
 } from "../../../utils/agentAvatar";
@@ -141,6 +143,14 @@ const AI_MANAGER_ROW_CLASS_NAME =
   "rounded-none border-0 px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-900/45";
 const AI_MANAGER_ICON_CLASS_NAME =
   "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600 dark:bg-slate-900 dark:text-slate-300";
+// A page's name inside a sentence, pressed like a link, as on Secrets. It keeps
+// the sentence's own size and line height, and the preflight leaves buttons on
+// the default cursor.
+const PAGE_LINK_CLASS_NAME = [
+  textTones.accent,
+  "cursor-pointer rounded-sm font-medium underline underline-offset-2 hover:text-primary-700 dark:hover:text-primary-300",
+  "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950",
+].join(" ");
 type CredentialTestFeedbackStatus = "ok" | "fail" | "needs_reconnect";
 type CredentialTestFeedback = {
   status: CredentialTestFeedbackStatus;
@@ -151,7 +161,8 @@ type CredentialTestFeedback = {
 function formatAiModeErrorDetail(raw: string | null | undefined): string {
   const normalized = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
   if (!normalized) {
-    return "AI runtime status is unavailable right now.";
+    // Nothing says why the check failed, so this claims no more than that.
+    return "Instafy couldn't check its AI service right now.";
   }
 
   const lowered = normalized.toLowerCase();
@@ -160,7 +171,7 @@ function formatAiModeErrorDetail(raw: string | null | undefined): string {
     lowered.includes("connection refused") ||
     lowered.includes("/healthz")
   ) {
-    return "Instafy can't reach the AI runtime right now.";
+    return "Instafy can't reach its AI service right now.";
   }
 
   const compact = normalized.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -322,6 +333,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     return () => { mounted.current = false; };
   }, []);
   const { showStatus } = useStatus();
+  const { openPanelTab, requestUrlPush } = useWorkspaceTabs();
+  const openSecrets = useCallback(() => {
+    requestUrlPush();
+    openPanelTab("secrets", { activate: true });
+  }, [openPanelTab, requestUrlPush]);
 
   const [credentials, setCredentials] = useState<ControllerCredentialListItem[]>([]);
   const [agents, setAgents] = useState<ControllerAgentProfile[]>([]);
@@ -1689,7 +1705,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                     <StudioMenuItem id="remove" isDisabled={testPending}>
                                       <MenuItemContent
                                         start={<Trash aria-hidden="true" />}
-                                        textClassName="text-rose-600 dark:text-rose-300"
+                                        textClassName={textTones.danger}
                                       >
                                         Remove…
                                       </MenuItemContent>
@@ -1735,6 +1751,16 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                   onChoose={(step) => openConnectModalAtStep(step, { returnOnBack: true })}
                   testIdPrefix="credentials-provider-choice"
                 />
+                {/* After the providers, so it never reads as one of them. Not
+                    "other services": an AI not listed here would not answer from Secrets. */}
+                <Text as="p" variant="caption" tone="muted" className="px-1" data-testid="credentials-secrets-pointer">
+                  Keys and tokens your agents' commands need, like <span className="font-mono">GITHUB_TOKEN</span>,
+                  go in{" "}
+                  <button type="button" className={PAGE_LINK_CLASS_NAME} onClick={openSecrets}
+                    data-testid="credentials-secrets-pointer-link">
+                    Secrets
+                  </button>.
+                </Text>
               </section>
             ) : null}
           </div>
@@ -1865,7 +1891,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                     <StudioMenuItem id="delete">
                                       <MenuItemContent
                                         start={<Trash aria-hidden="true" />}
-                                        textClassName="text-rose-600 dark:text-rose-300"
+                                        textClassName={textTones.danger}
                                       >
                                         Delete…
                                       </MenuItemContent>

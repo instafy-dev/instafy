@@ -28,6 +28,12 @@ export type SettingsCategory = {
   children?: SettingsCategory[];
 };
 
+// A danger row's colour, marked important: each row brings its own grey
+// (Button's tone, the title's, the menu row's), and the stylesheet orders some
+// of them after it. rose-700 reads 5.5:1 on the slate-100 selected or hovered
+// row, where rose-600 read 4.1:1; rose-300 at least 5.9:1 on a hovered dark row.
+const DANGER_NAV_TEXT_CLASS = "!text-rose-700 dark:!text-rose-300";
+
 interface SettingsShellProps {
   title: string;
   titleVisibility?: "auto" | "always" | "desktop";
@@ -174,15 +180,13 @@ export function SettingsShell({
                 data-testid={category.testId ?? `settings-category-${category.id}`}
                 aria-current={active ? (category.children?.length ? "location" : "page") : undefined}
                 titleClassName={category.danger
-                  ? "!text-rose-600 dark:!text-rose-400"
+                  ? DANGER_NAV_TEXT_CLASS
                   : pickerListRowTextClassName(active)}
                 surface={active ? "selected" : "interactive"}
                 density="compact"
                 className={[
                   "min-h-10 pointer-coarse:min-h-11",
-                  category.danger && !active
-                    ? "text-rose-600 dark:text-rose-400"
-                    : "",
+                  category.danger ? DANGER_NAV_TEXT_CLASS : "",
                 ]
                   .filter(Boolean)
                   .join(" ")}
@@ -486,7 +490,7 @@ function SettingsCategoryPicker({
                 <StudioMenuItem key={item.id} id={item.id} textValue={item.label}
                   data-testid={item.testId ?? `settings-category-${parent ? `${parent.id}-` : ""}${item.id}`}
                   isDisabled={item.disabled || parent?.disabled}
-                  className={`min-h-11 ${item.danger ? "text-rose-600 dark:text-rose-400" : ""}`}>
+                  className={`min-h-11 ${item.danger ? DANGER_NAV_TEXT_CLASS : ""}`}>
                   <span className="flex min-w-0 items-center gap-2">
                     {Icon ? <Icon className="h-4 w-4 shrink-0" aria-hidden={true} /> : null}
                     <span className="truncate">{item.label}</span>

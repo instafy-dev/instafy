@@ -111,10 +111,70 @@ describe("useDesktopRuntimeEnsure", () => {
     expect(outcome).toBe(false);
     expect(requestDesktop).not.toHaveBeenCalled();
     const [message, intent, , options] = showStatus.mock.calls[0] ?? [];
-    expect(message).toContain("No self-hosted machine is registered");
+    // The controller lists only the viewer's own self-hosted machines, so a
+    // teammate's may be connected: the toast speaks of the viewer's own.
+    expect(message).toBe("You haven't connected a machine of your own to this space yet.");
     expect(intent).toBe("warning");
     (options as { onAction?: () => void } | undefined)?.onAction?.();
     expect(onShowSelfHostHelp).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["an active tunnel", { runtime: {}, tunnel: { runtimeId: "runtime-local-1", status: "active" } }, "Your machine is online."],
+    ["a refreshing tunnel", { runtime: {}, tunnel: { runtimeId: "runtime-local-1", status: "refreshing" } }, "Refreshing your machine's tunnel…"],
+    ["no tunnel yet", { runtime: {}, tunnel: null }, "Waiting for your machine to reconnect…"],
+    ["no answer", null, "Couldn't reconnect your machine."],
+  ] as const)("names the viewer's own machine, never a runtime, after %s", async (_label, answer, expected) => {
+    requestDesktop.mockResolvedValue(answer);
+    await act(async () => {
+      root.render(createElement(Harness, { runtimeStatuses: [localRuntime()] }));
+    });
+    await act(async () => {
+      await ensure?.();
+    });
+
+    const messages = showStatus.mock.calls.map(([message]) => message);
+    expect(messages).toEqual([expected]);
+    expect(messages.join(" ")).not.toMatch(/runtime|desktop/i);
+  });
+
+  it("names the machine when the request fails", async () => {
+    requestDesktop.mockRejectedValue(new Error("tunnel broker unavailable"));
+    await act(async () => {
+      root.render(createElement(Harness, { runtimeStatuses: [localRuntime()] }));
+    });
+    await act(async () => {
+      await ensure?.();
+    });
+
+    expect(showStatus).toHaveBeenCalledWith(
+      "Couldn't reconnect your machine: tunnel broker unavailable",
+      "error",
+      5000,
+    );
+  });
+
+  it("names the viewer's own machine when it can't reconnect one at all", async () => {
+    function Disabled() {
+      ensure = useDesktopRuntimeEnsure({
+        enabled: false,
+        projectId: "project-1",
+        runtimeStatuses: [localRuntime()],
+        dispatch: vi.fn(),
+        refreshRuntimeStatuses: async () => {},
+        showStatus,
+      }).ensureDesktopRuntime;
+      return null;
+    }
+    await act(async () => {
+      root.render(createElement(Disabled));
+    });
+    await act(async () => {
+      await ensure?.();
+    });
+
+    expect(requestDesktop).not.toHaveBeenCalled();
+    expect(showStatus).toHaveBeenCalledWith("Can't reconnect your machine right now.", "warning", 4000);
   });
 
   it("ignores cloud runtimes when looking for the local machine", async () => {

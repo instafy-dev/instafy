@@ -20,7 +20,9 @@ async function mountUsageRates(page: Page, options: { containerWidth?: number } 
     },
     {
       key: "hosted-runtime",
-      label: "Hosted runtime",
+      // CreditsPanel's row for the hosted machine rate when the policy lists
+      // no rate per provider.
+      label: "Hosted machines",
       rate: {
         reason: "hosted_runtime",
         enabled: false,
@@ -139,7 +141,7 @@ test.describe("credits usage responsive layout", () => {
     // A service that costs nothing a minute is no rate, and a person pays in
     // credits, never in dollars per million tokens.
     await expect(activeServices).not.toContainText("Not metered");
-    await expect(activeServices).not.toContainText("Hosted runtime");
+    await expect(activeServices).not.toContainText("Hosted machines");
     await expect(promptUsage).toContainText("Reserve");
     await expect(promptUsage).toContainText("From 12 credits a message");
     await expect(promptUsage).not.toContainText("/1M");

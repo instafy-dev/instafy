@@ -119,7 +119,7 @@ describe("automation activity and thread navigation", () => {
       ["automation-timezone-input", "Timezone"],
       ["automation-prompt-input", "Prompt"],
       ["automation-runat-input", "Run at"],
-      ["automation-runtime-provider-input", "Runtime provider (optional)"],
+      ["automation-runtime-provider-input", "Machine provider (optional)"],
     ]) {
       const control = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-testid="${testId}"]`);
       expect(control?.labels?.[0]?.textContent).toBe(label);
@@ -133,6 +133,92 @@ describe("automation activity and thread navigation", () => {
     expect([...weeklySchedule!.querySelectorAll("button")].map(button => button.getAttribute("aria-label"))).toEqual([
       "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
     ]);
+  });
+
+  // Settings review, Nov 16: the editor's "Runtime" choice read Auto, Cloud and
+  // Existing, the provider field showed "instafy_cloud", and a row said "Auto".
+  it("names the machine an automation runs on in machine words, and saves the same modes", async () => {
+    mocks.list.mockResolvedValue([
+      automation,
+      { ...automation, id: "automation-b", name: "Hosted check", runtimeMode: "hosted", conversationId: "thread-b",
+        createdAt: "2026-09-08T08:00:00Z" },
+      { ...automation, id: "automation-c", name: "Space check", runtimeMode: "existing", conversationId: "thread-c",
+        createdAt: "2026-09-08T07:00:00Z" },
+    ]);
+    await render();
+    const row = (id: string) => container.querySelector(`[data-testid="automation-row-${id}"]`)?.textContent ?? "";
+    expect(row("automation-a")).toContain("Once · Any machine");
+    expect(row("automation-b")).toContain("Once · Hosted machine");
+    // "existing" runs on the machine selected in Machines while the controller
+    // holds that selection, and otherwise where the space's work goes.
+    expect(row("automation-c")).toContain("Once · Default machine");
+
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="automations-create-button"]')!.click());
+    const machine = [...document.querySelectorAll('[role="radiogroup"]')].find((group) => group.textContent?.startsWith("Machine"));
+    expect(machine?.textContent).toBe("MachineAnyHostedDefault");
+    const provider = document.querySelector<HTMLInputElement>('[data-testid="automation-runtime-provider-input"]')!;
+    expect(provider.placeholder).toBe("");
+    expect(document.body.textContent).not.toMatch(/runtime|Cloud|Existing|instafy_cloud/i);
+
+    await act(async () => machine!.querySelector<HTMLInputElement>('input[type="radio"][value="existing"]')!.click());
+    await act(async () => {
+      for (const [testId, value, element] of [
+        ["automation-name-input", "Space check", HTMLInputElement],
+        ["automation-prompt-input", "Review the latest changes", HTMLTextAreaElement],
+      ] as const) {
+        const field = document.querySelector(`[data-testid="${testId}"]`)!;
+        Object.getOwnPropertyDescriptor(element.prototype, "value")!.set!.call(field, value);
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="automation-save-button"]')!.click());
+    expect(mocks.create.mock.calls[0][0]).toMatchObject({ runtimeMode: "existing", runtimeProvider: null });
+  });
+
+  // "Selected" read as the radio's own state ("Selected, radio button") and
+  // promised a pin the controller does not keep.
+  it("gives the third machine choice an accessible name that says what it does", async () => {
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="automations-create-button"]')!.click());
+    const machine = [...document.querySelectorAll('[role="radiogroup"]')].find((group) => group.textContent?.startsWith("Machine"))!;
+    const radio = (value: string) => machine.querySelector<HTMLInputElement>(`input[type="radio"][value="${value}"]`)!;
+    const name = radio("existing").getAttribute("aria-label");
+    expect(name).toBe(
+      "Default machine: the one selected in Machines when it runs, or the space's default when none is",
+    );
+    expect(radio("existing").hasAttribute("aria-labelledby")).toBe(false);
+    // It starts with the visible label, so a voice command for "Default" finds it.
+    expect(name?.startsWith(radio("existing").closest("label")?.textContent ?? "-")).toBe(true);
+    expect(name).not.toMatch(/\b(?:selected machine|pinned|runtime)\b/i);
+    // The other two are named by their own visible words.
+    expect(radio("auto").hasAttribute("aria-label")).toBe(false);
+    expect(radio("hosted").hasAttribute("aria-label")).toBe(false);
+  });
+
+  // An auto automation that names a provider takes only that provider's
+  // machines (select_viable_runtime_id), and a self-hosted one fails on the
+  // same row with "…this schedule is pinned to a self-hosted machine…".
+  it("names the provider's machine on the row when an automation names one", async () => {
+    const at = (minute: number) => `2026-09-08T08:${String(minute).padStart(2, "0")}:00Z`;
+    mocks.list.mockResolvedValue([
+      { ...automation, id: "self-hosted", runtimeMode: "auto", runtimeProvider: "self_hosted", createdAt: at(5) },
+      { ...automation, id: "self-hosted-dash", runtimeMode: "auto", runtimeProvider: "Self-Hosted", createdAt: at(4) },
+      { ...automation, id: "instafy-cloud", runtimeMode: "auto", runtimeProvider: "instafy-cloud", createdAt: at(3) },
+      { ...automation, id: "other-provider", runtimeMode: "hosted", runtimeProvider: "lima-box", createdAt: at(2) },
+      { ...automation, id: "cloud-family", runtimeMode: "auto", runtimeProvider: "instafy-cloud-large", createdAt: at(1) },
+      // Existing reads no provider, so the row does not name one.
+      { ...automation, id: "existing-with-provider", runtimeMode: "existing", runtimeProvider: "self_hosted", createdAt: at(0) },
+    ]);
+    await render();
+    const row = (id: string) => container.querySelector(`[data-testid="automation-row-${id}"]`)?.textContent ?? "";
+    expect(row("self-hosted")).toContain("Once · Self-hosted machine");
+    expect(row("self-hosted")).not.toContain("Any machine");
+    expect(row("self-hosted-dash")).toContain("Once · Self-hosted machine");
+    expect(row("instafy-cloud")).toContain("Once · Hosted machine");
+    expect(row("other-provider")).toContain("Once · lima-box machine");
+    expect(row("cloud-family")).toContain("Once · instafy-cloud-large machine");
+    expect(row("existing-with-provider")).toContain("Once · Default machine");
+    expect(container.textContent).not.toContain("Any machine");
   });
 
   it("keeps checkbox and weekday choices local until Save, then sends their explicit values", async () => {

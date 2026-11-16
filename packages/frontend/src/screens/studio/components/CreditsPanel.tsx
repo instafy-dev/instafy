@@ -16,20 +16,26 @@ import {
   requestPlanChange,
 } from "../../../credits/checkoutService";
 import {
+  HOSTED_MACHINE_SINGULAR,
+  HOSTED_MACHINES_PLURAL,
   LIVE_ACCESS_PLURAL,
   LIVE_ACCESS_SINGULAR,
+  LIVE_CONNECTION_SINGULAR,
   LIVE_CONNECTIONS_PLURAL,
+  OWN_AI_CONNECTION_CREDITS_LINE,
 } from "../../../credits/usageLabels";
 import { CREDITS_UPDATED_EVENT, useCredits } from "../../../credits/useCredits";
 import { isPersonalOrgName } from "../../../org/orgNaming";
 import { useProjects } from "../../../projects/useProjects";
 import { useStatus } from "../../../status/useStatus";
+import { textTones } from "../../../styles/typography";
 import { CreditActivityChart, type CreditActivityRange } from "./CreditActivityChart";
 import {
   CreditsUsageRates,
   formatCreditsPerMinute,
   formatIntervalSeconds,
   formatUnits,
+  isMeteredRate,
   unitFor,
 } from "./CreditsUsageRates";
 import { SettingsShell, type SettingsCategory } from "./SettingsShell";
@@ -69,6 +75,18 @@ function formatEstimateSeconds(seconds: number): string {
     return "0m";
   }
   return formatIntervalSeconds(seconds);
+}
+
+/** "1 hosted machine", "3 hosted machines". */
+function formatCount(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+/** "a", "a and b", "a, b and c". */
+function joinWithAnd(items: readonly string[]): string {
+  return items.length < 2
+    ? items.join("")
+    : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
 export function CreditsPanel() {
@@ -193,14 +211,14 @@ export function CreditsPanel() {
       rows.push(
         ...hostedRuntimeProviderRates.map((provider) => ({
           key: `hosted-${provider.providerId}`,
-          label: `Hosted runtime (${provider.displayName})`,
+          label: `Hosted machine (${provider.displayName})`,
           rate: provider,
         })),
       );
     } else {
       rows.push({
         key: "hosted-runtimes",
-        label: "Hosted runtimes",
+        label: "Hosted machines",
         rate: policy.usage.hostedRuntime,
       });
     }
@@ -208,22 +226,38 @@ export function CreditsPanel() {
     return rows;
   }, [hostedRuntimeProviderRates, policy]);
 
+  // The cheapest metered hosted machine's rate. A Boost machine costs twice
+  // its type's rate (runtime/sizes.rs), so the Usage line says "from".
   const hostedRuntimeEstimate = useMemo(() => {
-    const enabledProviders = hostedRuntimeProviderRates.filter(
-      (provider) => provider.enabled && provider.creditsPerMinute > 0,
-    );
-    if (enabledProviders.length === 0) {
-      return { enabled: false as const, range: null as null | [number, number], creditsPerMinute: 0 };
-    }
-    const values = enabledProviders.map((provider) => provider.creditsPerMinute);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    return {
-      enabled: true as const,
-      range: min === max ? null : ([min, max] as [number, number]),
-      creditsPerMinute: min,
-    };
+    const rates = hostedRuntimeProviderRates
+      .filter((provider) => isMeteredRate(provider))
+      .map((provider) => provider.creditsPerMinute);
+    return rates.length === 0
+      ? { enabled: false as const, creditsPerMinute: 0 }
+      : { enabled: true as const, creditsPerMinute: Math.min(...rates) };
   }, [hostedRuntimeProviderRates]);
+
+  // What the balance pays for, named only where the policy meters it: hosted
+  // machine time and live access cost nothing until the operator sets a rate
+  // (docs/Credits-Billing.md). The same in a team's space and a person's own:
+  // credits.rs burns the space's org balance either way.
+  const hostedMachinesMetered = usageRateRows.some(
+    ({ key, rate }) => key !== "tunnels" && isMeteredRate(rate),
+  );
+  const liveAccessMetered = usageRateRows.some(
+    ({ key, rate }) => key === "tunnels" && isMeteredRate(rate),
+  );
+  const balancePaysFor = [
+    managedAiUsage?.enabled ? `${managedAiUsage.label?.trim() || "Instafy AI"} messages` : null,
+    hostedMachinesMetered ? "hosted machine time" : null,
+    liveAccessMetered ? "live access" : null,
+  ].filter((item): item is string => item !== null);
+  const balanceSpendLine = [
+    balancePaysFor.length > 0 ? `This balance pays for ${joinWithAnd(balancePaysFor)}.` : null,
+    OWN_AI_CONNECTION_CREDITS_LINE,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   const refreshPolicy = useCallback(
     async (options?: { force?: boolean; notifyOnError?: boolean }) => {
@@ -294,7 +328,7 @@ export function CreditsPanel() {
       return "Activity";
     }
     if (normalized === "hosted_runtime") {
-      return "Hosted runtime";
+      return "Hosted machine time";
     }
     if (normalized === "tunnel_grant") {
       return `${LIVE_ACCESS_SINGULAR} usage`;
@@ -553,7 +587,11 @@ export function CreditsPanel() {
     }
     const plan = planCatalog.find((entry) => entry.id === (target ?? subscriptionPlanId)) ?? null;
     const message = plan
-      ? `You're on ${plan.name}! ${plan.creditLimit} credits/day · ${plan.maxActiveTunnels} ${LIVE_CONNECTIONS_PLURAL} · ${plan.maxActiveHostedRuntimes} hosted runtimes.`
+      ? `You're on ${plan.name}! ${plan.creditLimit} credits/day · ${formatCount(
+          plan.maxActiveTunnels,
+          LIVE_CONNECTION_SINGULAR,
+          LIVE_CONNECTIONS_PLURAL,
+        )} · ${formatCount(plan.maxActiveHostedRuntimes, HOSTED_MACHINE_SINGULAR, HOSTED_MACHINES_PLURAL)}.`
       : "You're all set — your new plan is active.";
     showStatus(message, "success", 8000, { forceVisible: true, id: "billing-checkout-success" });
     setActivation(null);
@@ -921,15 +959,11 @@ export function CreditsPanel() {
               {/* How long the balance runs a hosted machine, only when one costs something. */}
               {hostedRuntimeEstimate.enabled ? (
                 <Text variant="caption" tone="muted">
-                  {`At ${formatCreditsPerMinute(hostedRuntimeEstimate.creditsPerMinute)} credits/min per hosted runtime` +
-                    (hostedRuntimeEstimate.range
-                      ? ` (varies by type: ${formatCreditsPerMinute(hostedRuntimeEstimate.range[0])}–${formatCreditsPerMinute(
-                          hostedRuntimeEstimate.range[1],
-                        )}), `
-                      : ", ") +
-                    `your current balance covers ~${formatEstimateSeconds(
-                      (creditBalance / hostedRuntimeEstimate.creditsPerMinute) * 60,
-                    )} for one active hosted runtime.`}
+                  {`Hosted machine time costs from ${formatCreditsPerMinute(
+                    hostedRuntimeEstimate.creditsPerMinute,
+                  )} credits/min, so your current balance runs one hosted machine for up to ~${formatEstimateSeconds(
+                    (creditBalance / hostedRuntimeEstimate.creditsPerMinute) * 60,
+                  )}.`}
                 </Text>
               ) : null}
             </div>
@@ -963,10 +997,14 @@ export function CreditsPanel() {
                 ? "Your balance tops back up daily (UTC) to the selected plan limit. Limits shown below are defaults; overrides may apply."
                 : "Your shared balance tops back up daily (UTC) to the selected plan limit. Limits shown below are defaults; team-specific overrides may apply."}
             </Text>
+            {/* Says the balance pays for them only where the policy meters them.
+                The size is the smallest in runtime/sizes.rs (Standard; Boost is
+                4 CPU · 8 GB), the catalog ensure.rs sets every hosted
+                machine's CPU and memory limits from. */}
             <Text variant="caption" tone="muted" data-testid="billing-hosted-runtime-definition">
-              "Hosted runtimes" are cloud machines (2 CPU · 4 GB · Node, Python, browsers) that run
-              from this credit balance while active and pause when idle. Your own machine, connected
-              via the desktop agent, is always free and unlimited.
+              Hosted machines are cloud computers (from 2 CPU · 4 GB) that pause when idle.
+              {hostedMachinesMetered ? " This balance pays for their time while they run." : null}{" "}
+              Your own machine, connected via the desktop agent, is always free and unlimited.
             </Text>
           </div>
           <div className="grid gap-3 lg:grid-cols-2">
@@ -1018,8 +1056,9 @@ export function CreditsPanel() {
                       {plan.description}
                     </Text>
                     <Text variant="caption" tone="muted" className="mt-2">
-                      {formatUnits(plan.creditLimit, unitLabel)}/day · {plan.maxActiveTunnels}{" "}
-                      {LIVE_CONNECTIONS_PLURAL} · {plan.maxActiveHostedRuntimes} hosted runtimes
+                      {formatUnits(plan.creditLimit, unitLabel)}/day ·{" "}
+                      {formatCount(plan.maxActiveTunnels, LIVE_CONNECTION_SINGULAR, LIVE_CONNECTIONS_PLURAL)} ·{" "}
+                      {formatCount(plan.maxActiveHostedRuntimes, HOSTED_MACHINE_SINGULAR, HOSTED_MACHINES_PLURAL)}
                     </Text>
                   </Card>
                 </Button>
@@ -1093,11 +1132,10 @@ export function CreditsPanel() {
               <Heading level={3} variant="subtitle">
                 Recent balance activity
               </Heading>
-              {personal ? null : (
-                <Text variant="caption" tone="muted">
-                  AI, runtime, and live access spend all land in this shared ledger.
-                </Text>
-              )}
+              {/* Shown in a person's own space too: nothing in it is a team's. */}
+              <Text variant="caption" tone="muted" data-testid="credits-balance-spend-line">
+                {balanceSpendLine}
+              </Text>
             </div>
             <div className="flex items-center gap-2">
               {activityView === "graph" ? (
@@ -1137,7 +1175,9 @@ export function CreditsPanel() {
           ) : (
             <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
               {recentActivity.map((row, index) => {
-                const deltaClass = row.delta >= 0 ? "text-primary-600" : "text-rose-600";
+                // A spend takes the danger text in both themes: rose-600 alone
+                // read 4.5:1 on the white card but 3.7:1 on the dark one.
+                const deltaClass = row.delta >= 0 ? textTones.info : textTones.danger;
                 const takesFocus = index === activityFocusRow;
                 return (
                   <div

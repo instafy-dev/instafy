@@ -1299,7 +1299,7 @@ export function LegacyChangesDrawer({
         ) : (
           <div className="flex h-full flex-col gap-2 overflow-hidden px-4 py-4">
             {workspaceIssue && hasUsableSnapshot ? (
-              <Text variant="caption" tone="subtle" data-testid="source-control-stale-notice">
+              <Text variant="caption" tone="muted" data-testid="source-control-stale-notice">
                 Showing previously loaded changes and versions.
               </Text>
             ) : null}
@@ -1614,7 +1614,7 @@ export function LegacyChangesDrawer({
                                     tone="muted"
                                   >
                                     <NavArrowRight
-                                      className={`h-4 w-4 shrink-0 text-slate-400 transition-transform dark:text-slate-500 ${
+                                      className={`h-4 w-4 shrink-0 text-slate-500 transition-transform dark:text-slate-500 ${
                                         expanded ? "rotate-90" : ""
                                       }`}
                                       aria-hidden="true"

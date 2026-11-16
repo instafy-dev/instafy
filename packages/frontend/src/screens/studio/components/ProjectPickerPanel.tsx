@@ -409,7 +409,7 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
       {isLargeScreen ? (
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
-            <Text variant="overline" tone="subtle">
+            <Text variant="overline" tone="muted">
               Spaces
             </Text>
             <Heading level={2}>{selectedOrgLabel}</Heading>
@@ -657,7 +657,7 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
                 title={project.name}
                 titleEnd={
                   isActive ? (
-                    <Badge size="xs" className="shrink-0 border-primary-200 bg-primary-100 text-primary-700">
+                    <Badge size="xs" tone="info" className="shrink-0">
                       Active
                     </Badge>
                   ) : null
@@ -761,7 +761,7 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
           >
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <Text variant="overline" tone="subtle">
+                <Text variant="overline" tone="muted">
                   New space
                 </Text>
                 <Heading level={2}>Create a space</Heading>

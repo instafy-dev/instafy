@@ -1,8 +1,13 @@
 import type { ComponentProps } from "react";
 import { LIST_ROW_FOCUS_RING, LIST_ROW_SURFACE_BASE, listRowSurfaceToneClassName } from "../../../components/listRowStyles";
 import { Badge } from "../../../components/Badge";
+import { textTones } from "../../../styles/typography";
+import { SEMANTIC_TONE_CLASSES } from "../../../theme/semanticTones";
 import type { WorkspaceGitReviewEntry } from "../../../workspace/gitReviewTypes";
 
+// Each letter is text on a list row: 4.5:1 on white, on the slate-50 hover and
+// on the slate-100 selected row. rose-600, emerald-600, sky-600 and slate-500
+// read 4.1, 3.3, 3.6 and 2.8:1 on the selected row.
 export function getStatusBadge(
   rawCode: string,
 ): { label: string; title: string; className: string; tone: ComponentProps<typeof Badge>["tone"] } | null {
@@ -15,7 +20,7 @@ export function getStatusBadge(
     return {
       label: "!",
       title: "Merge conflict",
-      className: "text-rose-600 dark:text-rose-300",
+      className: SEMANTIC_TONE_CLASSES.danger.text,
       tone: "danger",
     };
   }
@@ -24,7 +29,7 @@ export function getStatusBadge(
     return {
       label: "U",
       title: "Untracked",
-      className: "text-emerald-600 dark:text-emerald-300",
+      className: SEMANTIC_TONE_CLASSES.success.text,
       tone: "success",
     };
   }
@@ -33,7 +38,7 @@ export function getStatusBadge(
     return {
       label: "A",
       title: "Added",
-      className: "text-emerald-600 dark:text-emerald-300",
+      className: SEMANTIC_TONE_CLASSES.success.text,
       tone: "success",
     };
   }
@@ -42,7 +47,7 @@ export function getStatusBadge(
     return {
       label: "D",
       title: "Deleted",
-      className: "text-rose-600 dark:text-rose-300",
+      className: SEMANTIC_TONE_CLASSES.danger.text,
       tone: "danger",
     };
   }
@@ -60,7 +65,7 @@ export function getStatusBadge(
     return {
       label: "M",
       title: "Modified",
-      className: "text-sky-600 dark:text-sky-300",
+      className: "text-sky-700 dark:text-sky-300",
       tone: "neutral",
     };
   }
@@ -68,7 +73,7 @@ export function getStatusBadge(
   return {
     label: code,
     title: "Change",
-    className: "text-slate-500 dark:text-slate-300",
+    className: textTones.secondary,
     tone: "neutral",
   };
 }

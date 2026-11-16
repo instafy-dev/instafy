@@ -11,7 +11,7 @@ limit_waits.rs, stop.rs, provider.rs),
 Two user-facing concepts, deliberately no size matrix:
 
 - **Hosted machine** — a small cloud computer per project. Pauses when
-  unused, keeps project files and caches, wakes when you write in the chat.
+  unused, keeps project files and caches, wakes when someone writes in the chat.
 - **Your machine** — the desktop runtime agent; free, unlimited, offered at
   every ceiling (RAM, credits, capacity, repo size).
 
@@ -140,7 +140,7 @@ time a space becomes the active one the frontend holds its auto-ensure
 (`markRestoredAwaitingIntent`, set in the project-change layout effect of
 `useHostedRuntimeProjectEffects.ts`). The hold lifts on the first intent in
 that space: clicking into or typing in the composer, Send, or an explicit
-Start or Reconnect. Focus reaching the composer on its own does not count.
+Start, Reconnect or Try again. Focus reaching the composer on its own does not count.
 The Machines panel only reads status. One exception remains: the shared
 browser dock still asks for a machine itself when it connects without one. In
 a space the browser-host policy covers, that request is the space's own machine
@@ -173,7 +173,7 @@ The tab that makes a Stop or Remove holds the space the same way when that
 leaves it no live hosted machine, and a Machines-panel takeover holds the
 blocker's space, the one whose machine it stops. Unlike the hold on opening a
 space, this one survives writing in the composer: it lifts only when someone
-in that tab asks for a machine there with Send, Start or Reconnect. It also
+in that tab asks for a machine there with Send, Start, Reconnect or Try again. It also
 stays when the stop answered a 5xx or nothing at all, either of which can
 follow a stop the controller committed, and a failed stop lifts it only when
 the controller refused the request with a 4xx (see "Cleanup after a failed
@@ -241,7 +241,7 @@ launch was requested after that stop, when the tab heard the stop's own
 `runtime.stopped`, when a hold set since the machine came up already stands
 for it, or while a request for a machine is under way. Each hold lifts as it
 always does: the idle pause on writing in the chat, Send or Start, the Stop on
-Send, Start or Reconnect. A Remove counts only when a status read lands during
+Send, Start, Reconnect or Try again. A Remove counts only when a status read lands during
 its release: once released, the removed runtime leaves the status, and its
 loss is recovered as before. A controller from before the field reports none,
 and every automatic start goes on as before.
@@ -261,7 +261,7 @@ Sweep stops publish `runtime.stopped` with a `reason`, once the stop is
 done. A person's Stop, Remove or takeover publishes it as soon as its
 quarantine commits (see "Starting a machine on intent" above).
 
-- `idle` — pause; explained toast; wakes when you write in the chat.
+- `idle` — pause; explained toast; wakes when someone writes in the chat.
 - `credits_exhausted` — no auto-restart (held like an idle pause); toast
   links to credits. The ensure precheck (402 `insufficient_credits`) prevents
   launching a machine the first billing bucket would kill.
@@ -483,14 +483,14 @@ presses Start, so the controller retries for them (`runtime/limit_waits.rs`):
   (failed run, conversation message, refund of an unused managed-AI reserve).
   The conversation gets the refusal's own message only when it is one the
   studio already shows people (out of credits); any other refusal's text is
-  operator detail, so it gets a plain "a cloud runtime could not be started
+  operator detail, so it gets a plain "Instafy couldn't start a hosted machine
   for this space" reason and the refusal goes to the controller log. A
   recorded request that cannot be replayed at all fails its work the same
   way. When that fails the last waiting workers of a multi-agent plan, the
   lead their failure queues fails with the same reason too, since the wait
   that would start it is over. Conflicts, throttling and 5xx keep backing off.
 - Work that has waited on the limit for 30 minutes fails with a reason in
-  the conversation ("every cloud runtime in this team stayed busy for 30
+  the conversation ("all hosted machines for this team stayed in use for 30
   minutes...") and a Try again, its run fails, and the managed-AI reserve of
   a job no runtime ever leased is refunded, so a message that never ran costs
   nothing (a job that was leased may have called the model, so its charge

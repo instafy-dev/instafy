@@ -300,14 +300,15 @@ export function CreditActivityChart({
 
   return (
     <div className="space-y-3" data-testid="credit-activity-graph">
-      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600 dark:text-slate-400">
         <span className="inline-flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COLORS.ai }} />
           AI
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COLORS.runtime }} />
-          Hosted runtime
+          {/* The name the Activity log gives these rows (CreditsPanel). */}
+          Hosted machine time
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COLORS.tunnel }} />
@@ -315,7 +316,8 @@ export function CreditActivityChart({
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COLORS.other }} />
-          Other burn
+          {/* Every other credit that went out. */}
+          Other spending
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: COLORS.refill }} />

@@ -1,19 +1,25 @@
 import { CheckCircle, MinusCircle, WarningTriangle, XmarkCircle } from "iconoir-react";
 import { IconButton, type ButtonProps } from "../components/Button";
 import { Spinner } from "../components/Spinner";
+import { textTones } from "../styles/typography";
+import { SEMANTIC_TONE_CLASSES } from "../theme/semanticTones";
 import type { ExtensionStatusTone } from "./providerStatusPresentation";
 
+// A status word and its icon take the shared semantic tones, measured in both
+// themes by theme/__tests__/semanticTones.test.ts; idle and loading words take
+// the muted grey. On the white list the 500 steps they replace read 1.9 to
+// 3.8:1 and the idle slate-400 2.2:1.
 function providerStatusToneClassName(tone: ExtensionStatusTone) {
   if (tone === "ready") {
-    return "text-emerald-500 dark:text-emerald-300";
+    return SEMANTIC_TONE_CLASSES.success.text;
   }
   if (tone === "attention") {
-    return "text-secondary-500 dark:text-secondary-300";
+    return SEMANTIC_TONE_CLASSES.warning.text;
   }
   if (tone === "error") {
-    return "text-rose-500 dark:text-rose-300";
+    return SEMANTIC_TONE_CLASSES.danger.text;
   }
-  return "text-slate-400 dark:text-slate-500";
+  return textTones.muted;
 }
 
 function ProviderStatusIcon({ tone }: { tone: ExtensionStatusTone }) {
@@ -21,17 +27,17 @@ function ProviderStatusIcon({ tone }: { tone: ExtensionStatusTone }) {
     return <Spinner aria-hidden="true" tone="slate" size="xs" />;
   }
   if (tone === "ready") {
-    return <CheckCircle className="h-4 w-4 text-emerald-500 dark:text-emerald-300" aria-hidden="true" />;
+    return <CheckCircle className={`h-4 w-4 ${SEMANTIC_TONE_CLASSES.success.icon}`} aria-hidden="true" />;
   }
   if (tone === "attention") {
     return (
-      <WarningTriangle className="h-4 w-4 text-secondary-500 dark:text-secondary-300" aria-hidden="true" />
+      <WarningTriangle className={`h-4 w-4 ${SEMANTIC_TONE_CLASSES.warning.icon}`} aria-hidden="true" />
     );
   }
   if (tone === "error") {
-    return <XmarkCircle className="h-4 w-4 text-rose-500 dark:text-rose-300" aria-hidden="true" />;
+    return <XmarkCircle className={`h-4 w-4 ${SEMANTIC_TONE_CLASSES.danger.icon}`} aria-hidden="true" />;
   }
-  return <MinusCircle className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />;
+  return <MinusCircle className={`h-4 w-4 ${textTones.muted}`} aria-hidden="true" />;
 }
 
 export function ProviderStatusIndicator({

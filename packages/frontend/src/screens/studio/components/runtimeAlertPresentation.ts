@@ -107,6 +107,7 @@ export function isRuntimeAlertSupersededByStart(input: {
 export interface AgentWaitingRuntimeLimit {
   limitReached: boolean;
   blockerProjectLabel: string | null;
+  /** The blocking machine's own name, which the waiting line does not use. */
   blockerRuntimeLabel: string | null;
 }
 
@@ -131,18 +132,22 @@ export function resolveAgentWaitingActivityCopy(input: {
   }
 
   // The runtime slot wall must out-rank every generic waiting phrase: a
-  // message queued behind runtime_limit_reached will not send until the
-  // blocking runtime stops, and "Starting…" reads as progress
-  // where there is none. The controller keeps retrying the launch and takes
-  // over the blocking runtime once it has been idle for a couple of minutes;
-  // after 30 minutes it gives up and fails the message with a reason
-  // (runtime/limit_waits.rs), which is the bound this copy promises.
+  // message queued behind runtime_limit_reached will not send until a hosted
+  // machine is free, and "Starting…" reads as progress where there is none.
+  // It opens as the chat's "Waiting for a machine" card does, in the words the
+  // controller stores for it (RUNTIME_LIMIT_WAIT_MESSAGE), so the two read as
+  // one wait. The controller keeps retrying the launch; after 30 minutes it
+  // gives up and fails the message with a reason (runtime/limit_waits.rs),
+  // which is the bound this copy promises. It names the blocker's space when
+  // the refusal does, and no place otherwise: the machine holding the slot can
+  // be in this same space. It does not promise that an idle machine is taken
+  // over either: the controller never takes one from this same space, and the
+  // takeover can be turned off (RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS).
   if (input.runtimeLimit?.limitReached && (input.workspaceStarting || input.queued)) {
-    const blocker =
-      input.runtimeLimit.blockerProjectLabel ??
-      input.runtimeLimit.blockerRuntimeLabel;
-    const where = blocker ? `"${blocker}"` : "another project";
-    const label = `Your cloud runtime is busy in ${where}. Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.`;
+    // A machine's own name is no place to stop it in, so only a space is named.
+    const space = input.runtimeLimit.blockerProjectLabel;
+    const where = space ? `"${space}"` : "Machines";
+    const label = `Waiting for a free hosted machine. Stop one in ${where} and this message sends. It waits up to 30 minutes.`;
     // A notice to read, not a status line: the typing row lets it wrap.
     return { label, ariaLabel: label, isRuntimeBusyNotice: true };
   }

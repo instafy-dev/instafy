@@ -22,6 +22,7 @@ import {
   pickerListRowTextClassName,
 } from "../components/listRowStyles";
 import { DARK_DIVIDER_BORDER_CLASS } from "../theme/darkSurfaces";
+import { SEMANTIC_TONE_CLASSES } from "../theme/semanticTones";
 import { controllerClient } from "../sdk/instafy";
 import { useStartConversationThread } from "./useStartConversationThread";
 import { useWorkspaceUi } from "./useWorkspace";
@@ -839,7 +840,7 @@ export function ConversationHistoryTab({
                                 <StudioMenuItem id="delete">
                                   <MenuItemContent
                                     start={<Trash aria-hidden="true" />}
-                                    textClassName="text-rose-600 dark:text-rose-300"
+                                    textClassName={SEMANTIC_TONE_CLASSES.danger.text}
                                   >
                                     Delete…
                                   </MenuItemContent>

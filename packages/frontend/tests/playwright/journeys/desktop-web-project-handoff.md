@@ -15,14 +15,14 @@ The UI should always make the current source and any connected local working cop
 3. Desktop opens the same project id and can start a Desktop runtime.
 4. Files materialize under the Desktop runtime workspace root, `<desktop workspace root>/<project_id>/` by default, or in the user's linked folder when one is bound (see Folder Binding below).
 5. Connections must show the canonical source and the Desktop working-copy path when available.
-   - In the UI this is the `Project files` panel: `Stored in Instafy. Desktop and runtimes work on synced copies.` plus a `Copy on <hostname>` chip with the path when a local workspace presence is registered and not expired/offline.
+   - In the UI this is the `Space files` panel: `Stored in Instafy. Machines work on synced copies.` plus a `Copy on <hostname>` chip with the path when a local workspace presence is registered and not expired/offline.
    - The Desktop runtime supervisor (`@instafy/desktop-runtime-agent`) registers/heartbeats/unregisters that presence with the controller (`PUT/POST/DELETE /projects/:id/workspaces/local`). The `instafy` CLI runtime does not register presence yet (known follow-up).
 6. The app must not imply that a GitHub checkout or arbitrary local folder is the source of truth unless the project is explicitly local-canonical.
    - Note: there is currently no frontend-visible per-project flag for local-canonical mode (origin `mode: desktop` is also used for synced Desktop working copies), so the panel must not derive a "your computer is the source" claim from origin mode alone.
 
 ## Folder Binding (Desktop)
 
-1. In Connections → Project files, Desktop users can choose a folder on this computer for the space (`Choose folder…`).
+1. In Connections → Space files, Desktop users can choose a folder on this computer for the space (`Choose folder…`).
 2. An empty folder is accepted and onboarded: the runtime clones the canonical repo into it on next start (requires the controller to advertise a public git remote, see Sync Expectations).
 3. A folder previously linked to the same space (`.instafy/space.json` with a matching `spaceId`) is adopted as-is.
 4. A folder with other content — foreign files, another space's manifest — is rejected with a clear reason. Nothing is mixed, adopted, or overwritten silently.

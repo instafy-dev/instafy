@@ -2,7 +2,7 @@ import type { EditorConfig, LexicalNode, NodeKey, SerializedTextNode } from "lex
 import { TextNode } from "lexical";
 
 export const AGENT_MENTION_CLASS =
-  "inline-flex items-center rounded-full px-2 py-0.5 font-semibold leading-none ring-1 align-baseline bg-secondary-50 text-secondary-700 ring-secondary-200 dark:bg-secondary-500/15 dark:text-secondary-200 dark:ring-secondary-500/30";
+  "inline-flex items-center rounded-full px-2 py-0.5 font-semibold leading-none ring-1 align-baseline bg-secondary-50 text-secondary-800 ring-secondary-200 dark:bg-secondary-500/15 dark:text-secondary-200 dark:ring-secondary-500/30";
 
 export type SerializedAgentMentionNode = SerializedTextNode & {
   type: "agent-mention";

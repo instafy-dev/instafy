@@ -34,6 +34,12 @@ const mocks = vi.hoisted(() => ({
   showStatus: vi.fn(),
   testCredential: vi.fn(),
   updateAgent: vi.fn(),
+  openPanelTab: vi.fn(),
+  requestUrlPush: vi.fn(),
+}));
+
+vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
+  useWorkspaceTabs: () => ({ openPanelTab: mocks.openPanelTab, requestUrlPush: mocks.requestUrlPush }),
 }));
 
 vi.mock("../../../../providers/AuthProvider", () => ({
@@ -164,6 +170,8 @@ describe("CredentialsSettingsCard", () => {
     mocks.showStatus.mockReset();
     mocks.testCredential.mockReset();
     mocks.updateAgent.mockReset();
+    mocks.openPanelTab.mockReset();
+    mocks.requestUrlPush.mockReset();
 
     mocks.listCredentials.mockResolvedValue({
       success: true,
@@ -362,6 +370,33 @@ describe("CredentialsSettingsCard", () => {
     const saved = container.querySelector('[data-testid="credentials-connection-row-cred-old"]')!;
     const choice = container.querySelector('[data-testid="credentials-provider-choice-openai"]')!;
     expect(saved.compareDocumentPosition(choice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([
+    ["can't reach it", "proxy request failed: connection refused", "Instafy can't reach its AI service right now."],
+    ["gives no reason", " ", "Instafy couldn't check its AI service right now."],
+  ])("calls the AI service a service, not a runtime, when the check %s", async (_case, error, detail) => {
+    mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, success: false, managedAi: null, error });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    const summary = container.querySelector('[data-testid="credentials-ai-mode-summary"]');
+    expect(summary?.textContent).toContain("Could not check the default connection.");
+    expect(summary?.textContent).toContain(detail);
+    expect(summary?.textContent).not.toMatch(/runtime/i);
+  });
+
+  it("points keys for agents' commands to Secrets, after the providers, and opens Secrets", async () => {
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    const pointer = container.querySelector('[data-testid="credentials-secrets-pointer"]')!;
+    expect(pointer.textContent).toBe("Keys and tokens your agents' commands need, like GITHUB_TOKEN, go in Secrets.");
+    const lastProvider = container.querySelector('[data-testid="credentials-provider-choice-gemini"]')!;
+    expect(lastProvider.compareDocumentPosition(pointer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(pointer.closest('[aria-label="Available AI connections"]')).toBeNull();
+    await act(async () => pointer.querySelector<HTMLButtonElement>('[data-testid="credentials-secrets-pointer-link"]')!.click());
+    expect(mocks.requestUrlPush).toHaveBeenCalledOnce();
+    expect(mocks.openPanelTab).toHaveBeenCalledExactlyOnceWith("secrets", { activate: true });
+
+    await act(async () => { root.render(<CredentialsSettingsCard section="agents" />); await flush(); });
+    expect(container.querySelector('[data-testid="credentials-secrets-pointer"]')).toBeNull();
   });
 
   it("does not label managed AI unavailable while requirements are still loading", async () => {

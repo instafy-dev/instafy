@@ -3,12 +3,6 @@ import type { ControllerTunnelGrant } from "../sdk/instafy";
 import type { RuntimeStatusState } from "./runtimeLabels";
 import { Spinner } from "../components/Spinner";
 
-export const RUNTIME_BADGE_CLASSES: Record<"neutral" | "warning" | "danger", string> = {
-  neutral: "bg-slate-100 text-slate-600",
-  warning: "bg-secondary-100 text-secondary-700",
-  danger: "bg-rose-100 text-rose-700",
-};
-
 export function tunnelGrantIsActive(
   grant: ControllerTunnelGrant | null | undefined,
 ): boolean {

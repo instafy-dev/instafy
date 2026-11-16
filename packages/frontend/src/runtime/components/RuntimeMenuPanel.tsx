@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Play, Refresh, Xmark } from "iconoir-react";
 import type { RuntimeMenuOption } from "../useRuntimeMenu";
+import { hostedMachineOwnName } from "../runtimeLabels";
 import { RuntimeMenuOptionsList } from "./RuntimeMenuOptionsList";
 import type { TunnelCopyMode } from "./RuntimeTunnelDetails";
 import {
@@ -15,8 +16,22 @@ import {
 import { useStudioNavigation } from "../../navigation/useStudioNavigation";
 import { Button, IconButton } from "../../components/Button";
 import { InlineNotice } from "../../components/InlineNotice";
-import { Spinner } from "../../components/Spinner";
 import { Text } from "../../components/Text";
+
+/** Instafy's hosted machine: the provider the hosted start asks for. */
+function isHostedMachineOption(option: RuntimeMenuOption): boolean {
+  const provider = (option.provider ?? "").trim().toLowerCase();
+  return provider === "instafy-cloud" || provider === "instafy_cloud";
+}
+
+/**
+ * The controller's refusal when this server has no hosted provider
+ * (`provider '…' is not configured on this controller`). It is the server's
+ * setup, the same for every space on it, so another try fails the same way
+ * until whoever runs the server changes it. hostedBrowserViewState reads the
+ * browser's own request the same way.
+ */
+const HOSTED_PROVIDER_NOT_CONFIGURED = /provider\s+['"][^'"]+['"]\s+is not configured/i;
 
 /**
  * Studio destination for the blocking space's Machines panel. A panel
@@ -66,6 +81,10 @@ interface RuntimeMenuPanelProps {
   runtimeOptions: RuntimeMenuOption[];
   selectedRuntimeId: string | null;
   onSelectOption: (runtimeId: string | null) => void;
+  /**
+   * Before the space's chosen machine, above the list. It is the machine a
+   * row calls "Selected machine" (pinning is an agent's, on the Machines page).
+   */
   selectionPinnedPrefix?: string;
   onTerminateRuntime?: (runtimeId: string | null) => void;
   onRemoveRuntime?: (runtimeId: string | null) => void;
@@ -74,6 +93,11 @@ interface RuntimeMenuPanelProps {
   onCopyTunnel?: (mode: TunnelCopyMode, runtimeId?: string | null) => void;
   listClassName?: string;
   emptyStateMessage?: string;
+  /**
+   * What a machine is for, under the empty message (page-style hosts). The
+   * panel adds what starts a hosted machine only while it offers to start one.
+   */
+  emptyStateDetail?: string;
   /** Option whose details start expanded (page-style hosts). */
   defaultExpandedOptionId?: string | null;
   /** Extra host content rendered inside an option's expanded details. */
@@ -89,7 +113,7 @@ export function RuntimeMenuPanel({
   runtimeEnsureError,
   runtimeEnsureLimit = null,
   connectionWarning,
-  title = "Runtimes",
+  title = "Machines",
   showHeader = true,
   onClose,
   onRetryHosted,
@@ -99,14 +123,15 @@ export function RuntimeMenuPanel({
   runtimeOptions,
   selectedRuntimeId,
   onSelectOption,
-  selectionPinnedPrefix = "Pinned to",
+  selectionPinnedPrefix = "Selected machine:",
   onTerminateRuntime,
   onRemoveRuntime,
   onStartRuntime,
   onShowSelfHostHelp,
   onCopyTunnel,
   listClassName = "mt-2 max-h-60 overflow-auto",
-  emptyStateMessage = "No runtimes available yet.",
+  emptyStateMessage = "No machine is connected to this space yet.",
+  emptyStateDetail,
   defaultExpandedOptionId = null,
   renderOptionExtras,
   sparklineVariant = "compact",
@@ -157,9 +182,7 @@ export function RuntimeMenuPanel({
       return runtimeOptions;
     }
     return runtimeOptions.map((option) => {
-      const provider = (option.provider ?? "").trim().toLowerCase();
-      const isHostedCloud = provider === "instafy-cloud" || provider === "instafy_cloud";
-      if (!isHostedCloud || option.state === "online" || option.state === "idle" || option.state === "booting") {
+      if (!isHostedMachineOption(option) || option.state === "online" || option.state === "idle" || option.state === "booting") {
         return option;
       }
       return {
@@ -185,21 +208,39 @@ export function RuntimeMenuPanel({
   const hasTakeoverBlocker = Boolean(limitDetails.blockerRuntimeId);
   const blockerProjectLabel =
     limitDetails.blockerProjectLabel ?? limitDetails.blockerProjectId;
-  const blockerRuntimeLabel =
-    limitDetails.blockerRuntimeLabel ?? limitDetails.blockerRuntimeId;
+  // The blocker is a hosted machine. Only a name of its own gets a line: the
+  // generic one (the stored "Hosted Runtime", or no name) would only repeat
+  // the summary, which already names the blocker's space.
+  const blockerMachineName = hostedMachineOwnName(limitDetails.blockerRuntimeLabel);
+  // The limit is the team's (the controller counts the organization's hosted
+  // machines), so a personal space reads it as its Personal team's.
   const runtimeSlotSummary =
     typeof limitDetails.activeCount === "number" &&
     typeof limitDetails.maxActiveCount === "number"
-      ? `${limitDetails.activeCount}/${limitDetails.maxActiveCount} Instafy Cloud runtimes are in use.`
-      : "All Instafy Cloud runtime slots are in use.";
+      ? `${limitDetails.activeCount}/${limitDetails.maxActiveCount} hosted machines for this team are in use.`
+      : "All hosted machines for this team are in use.";
+  // A refusal before launch (a limit, capacity, credits) leaves no hosted
+  // machine in the space, so the retry names one only when the list shows it.
+  const showsHostedMachine = displayedRuntimeOptions.some(isHostedMachineOption);
+  // A server without the hosted provider refuses every try the same way: the
+  // warning says who can change that and offers no retry.
+  const hostedProviderMissing =
+    !limitReached && HOSTED_PROVIDER_NOT_CONFIGURED.test(displayedRuntimeEnsureError ?? "");
+  const offersHostedRetry = Boolean(onRetryHosted) && !hostedProviderMissing;
   const errorHeadline = limitReached
-    ? "Instafy Cloud runtime limit reached"
-    : "Instafy Cloud could not start the hosted runtime";
+    ? "Hosted machine limit reached"
+    : "Instafy couldn't start a hosted machine";
   const errorSummary = limitReached
     ? blockerProjectLabel
-      ? `${runtimeSlotSummary} The blocker is in space "${blockerProjectLabel}".`
+      ? `${runtimeSlotSummary} The blocking machine is in the space "${blockerProjectLabel}".`
       : runtimeSlotSummary
-    : "Retry to request another hosted runtime. Open details if you need the provider error.";
+    : hostedProviderMissing
+      ? "This server isn't set up to start hosted machines. Ask whoever runs this Instafy server to set it up."
+      : offersHostedRetry
+        ? showsHostedMachine
+          ? "Reconnect to try again, or view details to see the error."
+          : "Try again, or view details to see the error."
+        : "View details to see the error.";
   const pinnedRuntimeLabel = selectedRuntimeId
     ? displayedRuntimeOptions.find((option) => option.id === selectedRuntimeId)?.label ??
       selectedRuntimeId
@@ -230,7 +271,7 @@ export function RuntimeMenuPanel({
       const result = await onTakeOverHostedRuntimeLimit();
       if (result === false) {
         setRuntimeActionError(
-          "Runtime takeover did not complete. Open details or retry after cleanup.",
+          "A hosted machine didn't start for this space yet. View details, or try again in a moment.",
         );
       }
     } catch (error) {
@@ -242,7 +283,7 @@ export function RuntimeMenuPanel({
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
-      setRuntimeActionError(`Unable to take over runtime: ${message}`);
+      setRuntimeActionError(`Couldn't stop the blocking machine: ${message}`);
     }
   };
   const handleRetryHosted = async () => {
@@ -254,17 +295,35 @@ export function RuntimeMenuPanel({
       if (result === false) {
         setRuntimeActionError(
           limitReached
-            ? "Runtime is still at limit. Stop a stale runtime or retry after cleanup."
-            : "Runtime retry did not complete. Open details or try again.",
+            ? "All hosted machines for this team are still in use. Stop one you no longer need, then try again."
+            : "The hosted machine still didn't start. View details, or try again.",
         );
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setRuntimeActionError(`Unable to retry runtime: ${message}`);
+      setRuntimeActionError(`Couldn't start a hosted machine: ${message}`);
     } finally {
       setRetryingHostedLocally(false);
     }
   };
+  const managesMachines = interactionMode === "manage";
+  // The panel offers to start a hosted machine only with a handler for it and
+  // while no failure is shown; the warning above then offers its own retry.
+  const offersHostedStart = !displayedRuntimeEnsureError && Boolean(onRetryHosted);
+  // The control pressed here waits with isPending, which keeps keyboard focus
+  // on it (Button.tsx). A takeover, or a start asked for anywhere else,
+  // disables it instead.
+  const hostedStartBlocked =
+    !retryingHostedLocally && (hostedRuntimeTakeoverInProgress || hostedRuntimeEnsuring);
+  // Said only beside that offer, so a host without hosted machines never names them.
+  const emptyStateDetailText = [
+    emptyStateDetail,
+    offersHostedStart
+      ? "Instafy starts a hosted machine for this space when you message an agent."
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div>
@@ -278,7 +337,7 @@ export function RuntimeMenuPanel({
               variant="ghost"
               size="sm"
               onPress={onClose}
-              aria-label="Close runtimes menu"
+              aria-label="Close machine menu"
               tone="neutral"
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
@@ -297,13 +356,13 @@ export function RuntimeMenuPanel({
             </Text>
             {limitReached ? (
               <>
-                {blockerProjectLabel ? (
+                {blockerProjectLabel && blockerMachineName ? (
                   <Text as="p" variant="bodyCompact" tone="secondary" className="mt-1">
-                    Blocking runtime: {blockerRuntimeLabel ?? "active runtime"}.
+                    Blocking machine: {blockerMachineName}.
                   </Text>
                 ) : null}
                 <Text as="p" variant="bodyCompact" tone="secondary" className="mt-1">
-                  Stop a stale runtime or retry after cleanup. Stopping a blocker can interrupt work on that runtime.
+                  Stop a hosted machine you no longer need, then try again. Stopping the blocking machine can interrupt work on it.
                 </Text>
               </>
             ) : null}
@@ -340,32 +399,38 @@ export function RuntimeMenuPanel({
                 {displayedRuntimeEnsureError}
               </Text>
             ) : null}
-            {onRetryHosted ? (
+            {offersHostedRetry ? (
               <Button
                 onPress={handleRetryHosted}
                 variant="primary"
                 preset="inline"
-                isDisabled={hostedRuntimeTakeoverInProgress || retryHostedPending}
+                icon={<Refresh className="h-3.5 w-3.5" aria-hidden="true" />}
+                isPending={retryingHostedLocally}
+                isDisabled={hostedStartBlocked}
                 fullWidth
                 className="mt-3"
                 data-testid="runtime-reconnect-cloud"
               >
-                {retryHostedPending ? (
-                  <span className="inline-flex items-center gap-1.5">
-                    <Spinner
-                      tone="slate"
-                      size="xs"
-                      className="border-white/40 border-t-white"
-                      aria-hidden="true"
-                    />
-                    Reconnecting Instafy Cloud…
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5">
-                    <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
-                    Reconnect Instafy Cloud
-                  </span>
-                )}
+                {showsHostedMachine
+                  ? retryHostedPending
+                    ? "Reconnecting the hosted machine…"
+                    : "Reconnect the hosted machine"
+                  : retryHostedPending
+                    ? "Starting a hosted machine…"
+                    : "Try again"}
+              </Button>
+            ) : null}
+            {hostedProviderMissing && onShowSelfHostHelp ? (
+              // In place of a retry that would fail the same way: the host's
+              // dialog for connecting a machine of one's own.
+              <Button
+                onPress={() => onShowSelfHostHelp()}
+                variant="secondary"
+                preset="inline"
+                className="mt-3"
+                data-testid="runtime-connect-own-machine"
+              >
+                Connect your own machine
               </Button>
             ) : null}
             {runtimeActionError ? (
@@ -409,7 +474,7 @@ export function RuntimeMenuPanel({
         >
           <div>
             <Text as="p" variant="bodyStrong" tone="primary">
-              Live runtime status is temporarily stale
+              Machine status may be out of date
             </Text>
             <Text as="p" variant="bodyCompact" tone="secondary">
               {connectionWarning}
@@ -434,11 +499,13 @@ export function RuntimeMenuPanel({
         </div>
       ) : null}
       {primaryRestartOption && onStartRuntime ? (
+        // The Machines page keeps Start in the shared neutral tone, at the
+        // width of its label (docs/Settings-UI.md); the menu keeps its bar.
         <Button
           onPress={() => onStartRuntime(primaryRestartOption.id)}
-          variant="primary"
+          variant={managesMachines ? "secondary" : "primary"}
           preset="inline"
-          fullWidth
+          fullWidth={!managesMachines}
           className="mt-3"
           data-testid="runtime-start-existing"
         >
@@ -466,34 +533,51 @@ export function RuntimeMenuPanel({
           headerActions={headerActions}
           interactionMode={interactionMode}
         />
+      ) : managesMachines ? (
+        // Plain page content, flush with the page heading: what a machine is
+        // for, what starts one, and a neutral Start sized to its label.
+        <div className="mt-2">
+          <Text as="p" variant="bodyStrong" tone="primary">
+            {emptyStateMessage}
+          </Text>
+          {emptyStateDetailText ? (
+            <Text as="p" variant="bodyCompact" tone="secondary" className="mt-1">
+              {emptyStateDetailText}
+            </Text>
+          ) : null}
+          {offersHostedStart ? (
+            <Button
+              onPress={handleRetryHosted}
+              variant="secondary"
+              preset="inline"
+              icon={<Play className="h-3.5 w-3.5" aria-hidden="true" />}
+              isPending={retryingHostedLocally}
+              isDisabled={hostedStartBlocked}
+              className="mt-3"
+              data-testid="runtime-start-cloud"
+            >
+              {retryHostedPending ? "Starting a hosted machine…" : "Start one now"}
+            </Button>
+          ) : null}
+        </div>
       ) : (
         <div className="mt-2 px-2.5 py-3">
           <Text as="p" variant="bodyCompact" tone="secondary">
             {emptyStateMessage}
           </Text>
-          {!displayedRuntimeEnsureError && onRetryHosted ? (
+          {offersHostedStart ? (
             <Button
               onPress={handleRetryHosted}
               variant="primary"
               preset="inline"
-              isDisabled={hostedRuntimeTakeoverInProgress || retryHostedPending}
+              icon={<Play className="h-3.5 w-3.5" aria-hidden="true" />}
+              isPending={retryingHostedLocally}
+              isDisabled={hostedStartBlocked}
               fullWidth
               className="mt-3"
               data-testid="runtime-start-cloud"
             >
-              {retryHostedPending ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <Spinner
-                    tone="slate"
-                    size="xs"
-                    className="border-white/40 border-t-white"
-                    aria-hidden="true"
-                  />
-                  Starting Instafy Cloud…
-                </span>
-              ) : (
-                "Start Instafy Cloud"
-              )}
+              {retryHostedPending ? "Starting a hosted machine…" : "Start a hosted machine"}
             </Button>
           ) : null}
         </div>

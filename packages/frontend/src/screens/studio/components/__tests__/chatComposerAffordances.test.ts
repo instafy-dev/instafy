@@ -37,7 +37,7 @@ describe("resolveChatComposerAffordances", () => {
   it("allows queued text to be sent through the durable controller path while runtime is offline", () => {
     expect(
       resolveAffordances({
-        queueStatusLabel: "Runtime offline",
+        queueStatusLabel: "Machine not ready",
         totalQueuedCount: 1,
       }).queueCanSendNow,
     ).toBe(true);
@@ -47,7 +47,7 @@ describe("resolveChatComposerAffordances", () => {
     expect(
       resolveAffordances({
         activeConversationControllerId: null,
-        queueStatusLabel: "Runtime offline",
+        queueStatusLabel: "Machine not ready",
         totalQueuedCount: 1,
       }).queueCanSendNow,
     ).toBe(false);
@@ -57,7 +57,7 @@ describe("resolveChatComposerAffordances", () => {
     expect(
       resolveAffordances({
         runtimeControllerEnabled: false,
-        queueStatusLabel: "Runtime offline",
+        queueStatusLabel: "Machine not ready",
         totalQueuedCount: 1,
       }).queueCanSendNow,
     ).toBe(false);

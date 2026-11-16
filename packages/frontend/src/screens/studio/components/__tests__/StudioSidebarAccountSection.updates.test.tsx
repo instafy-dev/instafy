@@ -4,6 +4,7 @@ import { act, createRef, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppUpdatePresentation } from "../../../../updates/releaseMetadata";
+import { textTones } from "../../../../styles/typography";
 import { StudioSidebarAccountSection } from "../StudioSidebarAccountSection";
 
 function presentation(
@@ -231,6 +232,26 @@ describe("StudioSidebarAccountSection update indicator", () => {
     expect(settings?.textContent).toBe("Your settings");
     await act(async () => settings?.click());
     expect(onOpenProfileSettings).toHaveBeenCalledOnce();
+  });
+
+  it("keeps faint greys for icons, so every word in the account menu reads at the muted tone or stronger", async () => {
+    await renderAccount({ showLabels: true, updatePresentation: presentation("attention"), profileMenuOpen: true });
+    const label = [...document.body.querySelectorAll("p")].find((node) => node.textContent === "Signed in");
+    expect([...label!.classList]).toEqual(expect.arrayContaining(textTones.muted.split(" ")));
+    const faint = [...document.body.querySelectorAll("*")].filter((node) =>
+      node.classList.contains("text-slate-400") || node.classList.contains("text-slate-500"));
+    expect(faint.length).toBeGreaterThan(0);
+    expect(faint.filter((node) => node.textContent?.trim())).toEqual([]);
+  });
+
+  it("titles each truncated identity line with its full text", async () => {
+    await renderAccount({ showLabels: true, updatePresentation: presentation("neutral"), profileMenuOpen: true });
+    for (const text of ["Example User", "user@example.com"]) {
+      // The expanded sidebar button and the open menu each show the line.
+      const lines = [...document.body.querySelectorAll<HTMLElement>(".truncate")].filter((node) => node.textContent === text);
+      expect(lines).toHaveLength(2);
+      for (const line of lines) expect(line.title).toBe(text);
+    }
   });
 
   it("keeps developer tools out of the account menu", async () => {

@@ -12,6 +12,7 @@ import { extractAgentIdentityFromMetadata, resolveObservedAgentIdentity } from "
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
 import { Text } from "../../../components/Text";
+import { SEMANTIC_TONE_CLASSES } from "../../../theme/semanticTones";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
 import { useTurnEngineSpeakerLine } from "./RunFailureNotice";
 import type { ChatMessage } from "../types";
@@ -37,8 +38,8 @@ export function SpeakerStatusMarkerLabel({ marker }: { marker: SpeakerStatusMark
       data-testid="chat-speaker-run-status"
       className={`inline-flex min-w-0 flex-none items-center gap-1 text-xxs font-semibold ${
         marker.tone === "danger"
-          ? "text-rose-600 dark:text-rose-300"
-          : "text-secondary-700 dark:text-secondary-200"
+          ? SEMANTIC_TONE_CLASSES.danger.text
+          : "text-secondary-800 dark:text-secondary-200"
       }`}
     >
       <WarningTriangle aria-hidden="true" className="h-3 w-3 flex-none" />

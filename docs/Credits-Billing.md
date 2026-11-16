@@ -35,7 +35,7 @@ The plan catalog is stored in Postgres (`billing_plans`) and seeded via `supabas
 - **pro**: 10 active tunnels (default), 3 active Instafy Cloud runtimes
 - **scale**: 25 active tunnels, 8 active Instafy Cloud runtimes
 
-The runtime limits come from `supabase/migrations/20260000000045_fundable_runtime_concurrency.sql`. When a space is refused by the limit, the controller hands it an idle runtime from another space in the same team; see `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` in the controller README. A message queued behind the limit is retried in the background and sends once a runtime is free; after 30 minutes on the limit it fails with a reason and its managed-AI reserve is refunded (see [Runtime Machines](Runtime-Machines.md#waiting-on-the-runtime-limit)).
+The runtime limits come from `supabase/migrations/20260000000045_fundable_runtime_concurrency.sql`. When a space is refused by the limit, the controller hands it an idle runtime from another space in the same team; see `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` in the controller README. A message queued behind the limit is retried in the background and sends once a hosted machine is free; after 30 minutes on the limit it fails with a reason and its managed-AI reserve is refunded (see [Runtime Machines](Runtime-Machines.md#waiting-on-the-runtime-limit)).
 
 Limits are overrideable per team through a protected server-side administration path. Never expose
 service-role credentials to the browser.
@@ -55,7 +55,7 @@ Instafy Cloud runtimes (provider `instafy-cloud`) can burn credits while a runti
 - Set `HOSTED_RUNTIME_CREDIT_BURN_AMOUNT` and `HOSTED_RUNTIME_CREDIT_BURN_INTERVAL_SECONDS`
 - When a burn fails due to insufficient credits, the controller stops the runtime and releases it via the provider.
 
-Note: the controller defaults `HOSTED_RUNTIME_CREDIT_BURN_AMOUNT=0`, so hosted runtime metering is disabled until you configure these env vars (the Credits panel will show `0 credits/min` and “Not metered”).
+Note: the controller defaults `HOSTED_RUNTIME_CREDIT_BURN_AMOUNT=0`, so hosted runtime metering is disabled until you configure these env vars. Until then the Credits panel leaves hosted machines out of Usage and out of its line on what spends credits, which names only what the policy meters (`isMeteredRate`: enabled and above 0 credits a minute).
 
 You can also override hosted runtime metering per runtime type via
 `runtime_providers.metadata.billing` (controller reads `creditBurnAmount` plus
@@ -280,6 +280,8 @@ turns, from the `platformLane` object on the proxy's `/healthz` (see the proxy R
 controller's lease or the proxy's static credentials, with their kind and pinned model.
 
 The controller now reserves units at prompt dispatch and then reconciles the final charge after completion from actual input/cached/output token usage. Cached tokens are a subset of the reported input tokens, so only the uncached remainder is billed at the input rate and the cached prefix is billed once at the cached rate. The shared ledger keeps both the usage metadata and any follow-up adjustment row when the final charge differs from the reserve.
+
+A message to several agents, some on Instafy AI and some on the person's own AI connection (an agent saved with its own key or login), holds one reserve and one daily prompt slot, and only its Instafy AI turns settle that reserve or give it back. Dispatch marks the prompt managed, and stamps the managed markers (`aiAccessMode: managed`, `managedAiUsed` and the reserve's trace, `managedAiCredit`) only on the jobs and runs of the targets without a credential. An own-connection target's job and run get `aiAccessMode: byoc`, `managedAiUsed: false` and none of the reserve's markers, as in a message with no Instafy AI target. Completion reconciliation, the failed-turn refunds and the expiry sweep read those markers per job, so an own-connection turn is billed by that account and never in credits, whichever reply ends first: its tokens never measure the prompt's charge, its failure gives nothing of Instafy AI's back, and its reply is worded as the person's own connection's.
 
 That usage is the `turn.completed` event at the end of the turn's Codex run log, so every turn that runs to its end, with a reply or a failure, is settled from its own tokens, short or long (a failed one may then be given back: "Failed turns" below). A turn the person stops is not: it sends no usage, and costs its reserve ("Stopped turns" below). The runtime cuts a long run log down to its first and last events within the completion payload's limit of 80 entries per list, which keeps that last event. (A runtime older than this keeps only the first 80 events of a long log, so a turn of more than 80 events reaches the controller without its usage and costs only its reserve.)
 
@@ -795,7 +797,7 @@ Required envs (GitHub secrets/vars or local env):
   time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
   chat. A turn from another space names that space beside its time (`spaceName`), since chats in
   two spaces can share a name. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
-  is a row of its own ("Daily top-up", "Starting balance", "Hosted runtime"). A row shows its name,
+  is a row of its own ("Daily top-up", "Starting balance", "Hosted machine time"). A row shows its name,
   its time and its amount ("1 credit", "14 credits"), never the model, the AI vendor, a token count
   or an id: the ledger keeps those in each row's metadata. The Usage section says what a message
   costs in credits ("From 1 credit a message", then what it used) and lists only a service that

@@ -37,6 +37,7 @@ import { ConversationQuickTabs } from "../../../workspace/ConversationQuickTabs"
 import { WorkspaceTabs } from "../../../workspace/WorkspaceTabs";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { useConversations } from "../../../conversations/ConversationsProvider";
+import { isDefaultConversationTitle } from "../../../conversations/conversationAutoTitle";
 import {
   desktopSpeechTunnelBridgeAvailable,
   readDesktopSpeechTunnelStatus,
@@ -151,6 +152,11 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
   const returnConversation = conversationWorkspace && !conversationsSpaceRemoved
     && activeWorkspaceTab?.kind !== "conversation" && !activeWorkspaceTab?.workspaceOwner
     ? conversations.find(conversation => conversation.localId === activeConversationId && conversation.lifecycleStatus !== "deleted") : null;
+  // An untitled chat is called "New chat", the name of the command that starts
+  // a chat, so the way back to it says where it goes instead of that name.
+  const returnTitle = returnConversation && !isDefaultConversationTitle(returnConversation.title)
+    ? returnConversation.title.trim() || null : null;
+  const returnLabel = returnTitle ? `Back to ${returnTitle}` : "Back to chat";
   const parentConversation = useMemo(() => {
     const parentId = activeConversation?.parentConversationId?.trim() ?? "";
     if (!parentId) {
@@ -546,8 +552,8 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
           ) : projectNameLabel}</div>
           {participantsControl}
           {returnConversation ? <Button variant="ghost" size="sm" className="min-w-0 max-w-60 gap-1.5"
-            aria-label={`Return to ${returnConversation.title}`} onPress={() => { requestUrlPush(); openConversationTab(returnConversation.localId, { restoreWorkspace: true }); }}>
-            <NavArrowLeft className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="truncate">{returnConversation.title}</span>
+            aria-label={returnLabel} title={returnLabel} onPress={() => { requestUrlPush(); openConversationTab(returnConversation.localId, { restoreWorkspace: true }); }}>
+            <NavArrowLeft className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="truncate">{returnTitle ?? returnLabel}</span>
           </Button> : null}
           {shouldShowNewChat && !showConversationQuickTabs ? <StudioNewChatButton /> : null}
         </div>

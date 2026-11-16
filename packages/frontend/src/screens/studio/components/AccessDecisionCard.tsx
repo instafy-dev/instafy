@@ -8,13 +8,14 @@ const ACCESS_CARD_BASE_CLASS_NAME =
   "relative w-full max-w-[min(100%,42rem)] min-w-0 overflow-hidden border-slate-200/70 p-5 text-sm dark:border-white/10 sm:p-6";
 
 const ACCESS_CARD_DECISION_CLASS_NAME =
-  "bg-[radial-gradient(circle_at_8%_0%,rgba(37,99,235,0.13),transparent_35%),linear-gradient(145deg,rgba(255,255,255,0.96),rgba(248,250,252,0.88))] shadow-card-lg dark:bg-[radial-gradient(circle_at_10%_0%,rgba(59,130,246,0.2),transparent_34%),linear-gradient(145deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025))] dark:shadow-modal";
+  "bg-[radial-gradient(circle_at_8%_0%,rgba(37,99,235,0.06),transparent_35%),linear-gradient(145deg,rgba(255,255,255,0.96),rgba(248,250,252,0.88))] shadow-card-lg dark:bg-[radial-gradient(circle_at_10%_0%,rgba(59,130,246,0.2),transparent_34%),linear-gradient(145deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025))] dark:shadow-modal";
 
 const ACCESS_CARD_RESOLVED_CLASS_NAME =
   "bg-white/92 shadow-none dark:bg-white/[0.05] dark:shadow-none";
 
-export const ACCESS_SECTION_LABEL_CLASS_NAME =
-  "text-xxs tracking-[0.18em] text-slate-500 dark:text-slate-400";
+// Size and tracking only: AccessSectionLabel's tone owns the colour, and a
+// grey here fought it (slate-500 painted in light and dark alike).
+export const ACCESS_SECTION_LABEL_CLASS_NAME = "text-xxs tracking-[0.18em]";
 
 function joinClassNames(...values: Array<string | undefined | null | false>) {
   return values.filter(Boolean).join(" ");
@@ -100,7 +101,7 @@ export function AccessSectionLabel({ children, className }: { children: ReactNod
     <Text
       as="div"
       variant="overline"
-      tone="subtle"
+      tone="muted"
       className={joinClassNames(ACCESS_SECTION_LABEL_CLASS_NAME, className)}
     >
       {children}

@@ -420,7 +420,7 @@ export function ProjectLauncher({
                 Public repos import without login. For private repos, connect GitHub (device code) and keep this page open.
               </Text>
               {githubDeviceAuthError ? (
-                <Text as="p" variant="caption" tone="inherit" className="text-rose-600 dark:text-rose-300">
+                <Text as="p" variant="caption" tone="danger">
                   {githubDeviceAuthError}
                 </Text>
               ) : null}
@@ -482,9 +482,9 @@ export function ProjectLauncher({
                             <span>Waiting for you to finish login…</span>
                           </>
                         ) : githubDeviceAuthSession.status === "failed" ? (
-                          <span className="text-rose-600 dark:text-rose-400">
+                          <Text as="span" variant="caption" tone="danger">
                             {githubDeviceAuthSession.error ?? "GitHub device login failed."}
-                          </span>
+                          </Text>
                         ) : null}
                       </div>
                       {githubDeviceAuthSession.status === "failed" ? (
@@ -539,7 +539,7 @@ export function ProjectLauncher({
                 </div>
               )}
               {githubImportError ? (
-                <Text as="p" variant="caption" tone="inherit" className="break-words text-rose-600 dark:text-rose-300">
+                <Text as="p" variant="caption" tone="danger" className="break-words">
                   {githubImportError}
                 </Text>
               ) : null}
@@ -550,10 +550,10 @@ export function ProjectLauncher({
             <Text
               as="p"
               variant="caption"
-              tone="inherit"
+              tone="danger"
               role="alert"
               data-testid="project-launcher-error"
-              className="break-words text-rose-600 dark:text-rose-300"
+              className="break-words"
             >
               {createError}
             </Text>

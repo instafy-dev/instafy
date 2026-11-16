@@ -139,7 +139,7 @@ describe("chatSubmitPreflight", () => {
 
     expect(params.recoverRuntime).toHaveBeenCalledTimes(1);
     expect(params.showStatus).toHaveBeenCalledWith(
-      "Starting runtime… Send images once it is ready.",
+      "This space's machine isn't ready yet. Send images once it is.",
       "info",
       4000,
     );
@@ -161,7 +161,7 @@ describe("chatSubmitPreflight", () => {
     expect(params.queueCurrentMessage).toHaveBeenCalledWith("editor-state");
     expect(params.clearQueuedComposerDraft).toHaveBeenCalledTimes(1);
     expect(params.showStatus).toHaveBeenCalledWith(
-      "Runtime control is unavailable right now.",
+      "Machine controls are unavailable right now.",
       "warning",
       4000,
     );

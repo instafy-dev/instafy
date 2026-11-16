@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { resolveControllerConversationNoticeContent } from "../controllerConversationNotice";
 import {
   isRecoverableRuntimeStartAlert,
   isRuntimeAlertSupersededByStart,
@@ -15,6 +16,21 @@ describe("isRecoverableRuntimeStartAlert", () => {
         "Runtime agent has not connected yet. Start the runtime so queued jobs can proceed.",
       ),
     ).toBe(true);
+  });
+
+  // What the controller stores for a notice that is not a start in progress
+  // (runtime_alert_fallback_message and RUNTIME_LIMIT_WAIT_MESSAGE in
+  // dispatch.rs). A notice with no status is read by its text alone.
+  it("reads the controller's stored terminal sentences as terminal", () => {
+    for (const stored of [
+      "Workspace startup failed. Open Machines to reconnect this space's machine.",
+      "No machine is connected to this space. Open Machines to start one.",
+      "Instafy couldn't check this space's machine. Open Machines to inspect or reconnect it.",
+      "Instafy couldn't reach this space's machine. Open Machines to inspect or reconnect it.",
+      "Waiting for a free hosted machine. All of this team’s hosted machines are in use; stop one in Machines and this request will send.",
+    ]) {
+      expect(isRecoverableRuntimeStartAlert({ reason: "runtime_not_ready" }, stored), stored).toBe(false);
+    }
   });
 });
 
@@ -159,9 +175,38 @@ describe("resolveAgentWaitingActivityCopy runtime slot wall", () => {
         blockerRuntimeLabel: null,
       },
     });
-    expect(copy.label).toContain('"My other app"');
-    expect(copy.label).toContain("Stop it there");
+    expect(copy.label).toBe(
+      'Waiting for a free hosted machine. Stop one in "My other app" and this message sends. It waits up to 30 minutes.',
+    );
     expect(copy.label).not.toContain("Starting");
+  });
+
+  // The chat's "Waiting for a machine" card opens with the same sentence, in
+  // the words the controller stores for it (RUNTIME_LIMIT_WAIT_MESSAGE).
+  it("opens with the sentence of the chat's card and says machine, never runtime", () => {
+    const card = resolveControllerConversationNoticeContent({
+      id: "limit-wait",
+      role: "assistant",
+      content: "",
+      timestamp: 0,
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: { reason: "runtime_not_ready", reconnect: { status: "failed", code: "runtime_limit_reached" } },
+      },
+    });
+    const cardOpening = card.slice(0, card.indexOf(".") + 1);
+    expect(cardOpening).toBe("Waiting for a free hosted machine.");
+    for (const blockerProjectLabel of ["My other app", null]) {
+      const copy = resolveAgentWaitingActivityCopy({
+        displayNames: ["Octo"],
+        workspaceStarting: true,
+        queued: true,
+        runtimeLimit: { limitReached: true, blockerProjectLabel, blockerRuntimeLabel: "Hosted Runtime" },
+      });
+      expect(copy.label.startsWith(cardOpening)).toBe(true);
+      expect(copy.label).not.toMatch(/runtime|instafy cloud|project/i);
+    }
   });
 
   it("promises the send with the controller's give-up bound", () => {
@@ -175,23 +220,30 @@ describe("resolveAgentWaitingActivityCopy runtime slot wall", () => {
         blockerRuntimeLabel: null,
       },
     });
-    expect(copy.label).toContain("sends once a runtime is free");
+    expect(copy.label).toContain("this message sends");
     expect(copy.label).toContain("waits up to 30 minutes");
     expect(copy.ariaLabel).toBe(copy.label);
   });
 
-  it("falls back to a generic location when the blocker is unnamed", () => {
-    const copy = resolveAgentWaitingActivityCopy({
-      displayNames: ["Octo"],
-      workspaceStarting: false,
-      queued: true,
-      runtimeLimit: {
-        limitReached: true,
-        blockerProjectLabel: null,
-        blockerRuntimeLabel: null,
-      },
-    });
-    expect(copy.label).toContain("another project");
+  // The machine holding the slot can be in this same space, so an unnamed
+  // blocker gets no place, and a machine's own name is no place to stop it in.
+  it("points to Machines when the blocker's space is unnamed", () => {
+    for (const blockerRuntimeLabel of [null, "Hosted Runtime"]) {
+      const copy = resolveAgentWaitingActivityCopy({
+        displayNames: ["Octo"],
+        workspaceStarting: false,
+        queued: true,
+        runtimeLimit: {
+          limitReached: true,
+          blockerProjectLabel: null,
+          blockerRuntimeLabel,
+        },
+      });
+      expect(copy.label).toBe(
+        "Waiting for a free hosted machine. Stop one in Machines and this message sends. It waits up to 30 minutes.",
+      );
+      expect(copy.label).not.toContain("another");
+    }
   });
 
   it("keeps the ordinary copy when no limit is reached", () => {

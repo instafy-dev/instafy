@@ -307,7 +307,7 @@ export function RuntimeMenuOptionsList({
   className = "mt-1 max-h-64 overflow-auto",
   optionClassName = DEFAULT_OPTION_CLASS,
   selectedOptionClassName = "bg-slate-100 text-slate-900",
-  emptyStateMessage = "No runtimes connected.",
+  emptyStateMessage = "No machine is connected to this space yet.",
   onCopyTunnel,
   copyDisabled = false,
   defaultExpandedOptionId = null,
@@ -590,10 +590,10 @@ export function RuntimeMenuOptionsList({
                   size="sm"
                   tone="neutral"
                   className="shrink-0"
-                  aria-label={isExpanded ? "Hide runtime details" : "Show runtime details"}
+                  aria-label={isExpanded ? "Hide machine details" : "Show machine details"}
                   aria-expanded={isExpanded}
                   aria-controls={detailsId}
-                  title={isExpanded ? "Hide runtime details" : "Show runtime details"}
+                  title={isExpanded ? "Hide machine details" : "Show machine details"}
                   onPress={toggleDetails}
                 >
                   {disclosureIcon}
@@ -657,10 +657,10 @@ export function RuntimeMenuOptionsList({
                         label="Image"
                         value={runtimeImageValue}
                         mono
-                        copyLabel="Copy runtime image"
+                        copyLabel="Copy image"
                         copyTestId={option.id ? `runtime-copy-image-${option.id}` : undefined}
                         onCopy={() => {
-                          copyWithFeedback(runtimeImageValue, "Runtime image copied");
+                          copyWithFeedback(runtimeImageValue, "Image copied");
                         }}
                       />
                     ) : null}
