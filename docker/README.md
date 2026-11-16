@@ -111,6 +111,19 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   `build:image:*` commands build only the named service. Commands ending in `:push` require
   an explicit reviewed destination tag and are release operations; no build command pushes
   implicitly.
+- The controller reaches the origin of a person's own self-hosted runtime (Desktop,
+  `instafy runtime`, a runtime container they run themselves) only at public addresses by default.
+  If such runtimes live on the controller's own machine or private network, set
+  `SELF_HOSTED_ORIGIN_NETWORKS=private` on the controller. Without it the controller refuses to
+  relay to their origins (`403`), GitHub imports into them fail with `403` and the memory
+  bootstrap answers `ok: false`. Registration refuses their private-network endpoints, so such a
+  runtime fails to register and keeps retrying instead of starting (loopback stays registrable but
+  is never relayed). Proxy settings in the controller's environment no longer apply to requests to
+  these origins. Provider-managed runtimes, the origin gateway (`HOSTED_ORIGIN_ENDPOINT`) and
+  tunnels issued under `TUNNEL_DOMAIN` at their default port (443/80) are not affected; a tunnel
+  broker whose `PUBLIC_INGRESS_PORT` is another port issues tunnel URLs that are held like any
+  other endpoint. See
+  [Origin network boundary](../docs/Self-Hosted-Runtime-Security.md#origin-network-boundary).
 - Use your own infrastructure tooling to provision the controller/proxy, optional warm pool, and
   Git-canonical services.
 - Supply server-only Supabase and proxy credentials through your orchestrator's secret store.

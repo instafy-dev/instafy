@@ -39,7 +39,7 @@ use crate::integrations::{
     ProjectIntegrationUpsert,
 };
 use crate::origins::{
-    acquire_fresh_lease, load_origin_by_id, release_lease, renew_long_lease,
+    acquire_fresh_lease, load_origin_by_id, origin_request_client, release_lease, renew_long_lease,
     resolve_accessible_origin_for_protocol_with_hosted_fallback,
     resolve_origin_proxy_upstream_endpoint, LeaseAcquireOutcome, WorkspaceOriginRecord,
 };
@@ -2107,8 +2107,9 @@ async fn query_prepared_origin_apply_status(
         .is_none()
         .then_some(idempotency_key);
     let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
+    let origin_client = origin_request_client(state, &origin, &origin_base).await?;
     lookup_origin_apply_status(
-        &state.http_client,
+        &origin_client,
         &origin_base,
         host_override.as_deref(),
         &scoped_token,
@@ -2335,6 +2336,7 @@ async fn import_github_zip_and_apply(
     let manifest_json = serde_json::to_vec(&manifest)
         .map_err(|error| internal_error(format!("failed to encode origin manifest: {error}")))?;
     let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
+    let origin_client = origin_request_client(state, &origin, &origin_base).await?;
     let apply_url = format!("{}/apply", origin_base.trim_end_matches('/'));
     let mut first_token = Some(first_token);
     let mint = || match first_token.take() {
@@ -2354,7 +2356,7 @@ async fn import_github_zip_and_apply(
         }),
     };
     let (status, response_body) = post_import_apply(
-        &state.http_client,
+        &origin_client,
         &apply_url,
         host_override.as_deref(),
         mint,
@@ -2448,7 +2450,7 @@ async fn import_github_zip_and_apply(
         None,
     )?;
     let synced_rev = sync_origin_git_after_apply(
-        &state.http_client,
+        &origin_client,
         &origin_base,
         host_override.as_deref(),
         &sync_token,
@@ -2494,12 +2496,13 @@ async fn resume_applied_github_import(
         None,
     )?;
     let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
+    let origin_client = origin_request_client(state, &origin, &origin_base).await?;
     let commit_message = format!(
         "instafy: import {canonical_repo}@{}",
         &applied.source_revision[..12.min(applied.source_revision.len())]
     );
     let synced_rev = sync_origin_git_after_apply(
-        &state.http_client,
+        &origin_client,
         &origin_base,
         host_override.as_deref(),
         &scoped_token,
@@ -5639,6 +5642,155 @@ mod tests {
         match outcome {
             Ok(result) => result.and(cleanup),
             Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// The import's status lookup goes through the controller's origin network
+    /// boundary: a private self-hosted runtime's origin, or one no runtime
+    /// registered, is reached only at a public address, and no origin's
+    /// redirect is followed. Needs `TEST_DATABASE_URL` (`pnpm test:controller`).
+    mod origin_network_boundary {
+        use super::super::{
+            query_prepared_origin_apply_status, GithubImportPreparedState, ORIGIN_APPLY_KEY_VERSION,
+        };
+        use crate::config::SelfHostedOriginNetworks;
+        use crate::origin_network::test_support::ScriptedLookup;
+        use crate::tests::origin_network_boundary_tests::{
+            insert_origin, insert_project, insert_runtime, NOT_PUBLIC,
+        };
+        use crate::tests::{
+            build_app_config, build_test_state, require_origin_test_pool, sql,
+            test_origin_private_key, test_origin_public_key,
+        };
+        use axum::http::StatusCode;
+        use httpmock::MockServer;
+        use uuid::Uuid;
+
+        async fn status_lookup(
+            state: &crate::state::AppState,
+            project_id: &Uuid,
+            user_id: &Uuid,
+            origin_id: &Uuid,
+        ) -> Result<(), (StatusCode, String)> {
+            let prepared = GithubImportPreparedState {
+                origin_id: origin_id.to_string(),
+                source_revision: "0123456789012345678901234567890123456789".to_string(),
+                auth_mode: "public".to_string(),
+                persistent_connection: false,
+                user_oauth_fallback_enabled: false,
+                integration_updated_at: None,
+                origin_apply_key_version: Some(ORIGIN_APPLY_KEY_VERSION),
+            };
+            query_prepared_origin_apply_status(
+                state,
+                project_id,
+                user_id,
+                &Uuid::new_v4(),
+                "octocat/hello-world",
+                None,
+                "github-import-v1:origin-network",
+                &prepared,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|(status, axum::Json(error))| (status, error.message))
+        }
+
+        #[tokio::test]
+        async fn the_import_status_lookup_reaches_a_held_origin_only_at_a_public_address(
+        ) -> anyhow::Result<()> {
+            let pool = require_origin_test_pool(
+                "the_import_status_lookup_reaches_a_held_origin_only_at_a_public_address",
+            )
+            .await?;
+            let held_server = MockServer::start_async().await;
+            let held_status = held_server
+                .mock_async(|_when, then| {
+                    then.status(404);
+                })
+                .await;
+            let port = held_server.port();
+            let user_id = Uuid::new_v4();
+            let project_id = insert_project(&pool, Some(&user_id)).await?;
+            // No runtime registered it, so it counts as self-hosted.
+            let unbound = insert_origin(
+                &pool,
+                &project_id,
+                None,
+                &format!("http://127.0.0.1:{port}"),
+            )
+            .await?;
+            // A private self-hosted runtime registered it, at a name.
+            let self_hosted =
+                insert_runtime(&pool, &project_id, "self-hosted", Some(&user_id)).await?;
+            let named = insert_origin(
+                &pool,
+                &project_id,
+                Some(&self_hosted),
+                &format!("http://localhost:{port}"),
+            )
+            .await?;
+
+            let mut config = build_app_config(
+                test_origin_private_key(),
+                test_origin_public_key(),
+                "origin-network-import",
+            );
+            config.self_hosted_origin_networks = SelfHostedOriginNetworks::Public;
+            let mut state = build_test_state(pool.clone(), config.clone());
+            state.public_origins = ScriptedLookup::always("localhost", &["127.0.0.1"]).network();
+            for origin_id in [unbound, named] {
+                let (status, message) = status_lookup(&state, &project_id, &user_id, &origin_id)
+                    .await
+                    .expect_err("refused");
+                assert_eq!(status, StatusCode::FORBIDDEN, "{message}");
+                assert!(message.contains(NOT_PUBLIC), "{message}");
+            }
+            assert_eq!(held_status.hits_async().await, 0);
+
+            // A managed runtime's origin is the operator's own and is reached,
+            // but the redirect it answers with is not followed.
+            let elsewhere = MockServer::start_async().await;
+            let landed = elsewhere
+                .mock_async(|_when, then| {
+                    then.status(200)
+                        .json_body(serde_json::json!({ "status": "missing" }));
+                })
+                .await;
+            let managed_server = MockServer::start_async().await;
+            let redirected = managed_server
+                .mock_async(|when, then| {
+                    when.method(httpmock::Method::POST).path("/apply/status");
+                    then.status(307)
+                        .header("location", elsewhere.url("/apply/status"));
+                })
+                .await;
+            let managed = insert_runtime(&pool, &project_id, "instafy-cloud", None).await?;
+            let managed_origin = insert_origin(
+                &pool,
+                &project_id,
+                Some(&managed),
+                &managed_server.base_url(),
+            )
+            .await?;
+            let (status, message) = status_lookup(&state, &project_id, &user_id, &managed_origin)
+                .await
+                .expect_err("a redirect is not an answer");
+            assert_ne!(status, StatusCode::FORBIDDEN, "{message}");
+            assert_eq!(redirected.hits_async().await, 1);
+            assert_eq!(landed.hits_async().await, 0);
+
+            // With private networks allowed, the held origin is reached.
+            config.self_hosted_origin_networks = SelfHostedOriginNetworks::Private;
+            let private = build_test_state(pool.clone(), config);
+            status_lookup(&private, &project_id, &user_id, &unbound)
+                .await
+                .map_err(|(status, message)| anyhow::anyhow!("{status}: {message}"))?;
+            assert!(held_status.hits_async().await > 0);
+
+            sql(&pool, "delete from projects where id = $1", &[&project_id]).await?;
+            sql(&pool, "delete from auth.users where id = $1", &[&user_id]).await?;
+            Ok(())
         }
     }
 }
