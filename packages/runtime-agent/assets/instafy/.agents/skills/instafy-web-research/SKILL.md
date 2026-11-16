@@ -11,7 +11,7 @@ no_shell_omits: Readers, Guided mode, Finding sources, Searching, Into pages and
 
 Never prune: yes
 
-Read permitted source content this turn; trace facts to their sources. Find pages, mark what is not checked and pick the names to compare as "Finding a page" in `instafy-browser-automation` says.
+Read permitted source content this turn; trace facts to their sources. Find pages and mark what is not checked as "Finding a page" in `instafy-browser-automation` says; compare items as `instafy-comparing` says.
 
 ## Provider-hosted retrieval
 
@@ -90,15 +90,6 @@ These are Instafy CLI search rules; provider-hosted retrieval is described above
 
 - Facts that matter (price, opening hours, address, dates and times) need two independent sources, or one official source: the venue's, operator's, shop's or authority's own page.
 - When sources disagree, say so, show both with their dates and prefer the official one.
-
-## Comparing items
-
-Say per item what you found:
-
-- Name: the exact model and generation its official page gives, else the page naming it.
-- Price: the maker's or shop's page. Missing or refused: say where/why, then try an allowed shop. Still none: "price unknown", with a page the person can send to Octo. Never remember or guess a price.
-- Requested reviews: that many per exact model, from independent publishers, not its maker/shops or a sibling model. Short: "<item>: 1 of 2 reviews found", in the reply and on the page, citing only those reviews.
-- A limit ("under €600"): an item with no price read this turn is listed as "price unknown", never as within it.
 
 ## Stops
 

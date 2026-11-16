@@ -317,15 +317,23 @@ function linkOnlyCopyOf(headers, rawUrl) {
 
 const LIST_UNAVAILABLE_MESSAGE =
   "The link-only site list is unavailable, so Octo opens, reads and does nothing in any tab. Nothing was opened, read or done.";
-// A refused address ends that address, not the task: a search engine or a
-// listing the turn chose itself leads on to the source's own site, and only a
-// site the person asked for is theirs to open.
-const SEND_PAGE_HINT =
-  'Go on with the maker\'s, venue\'s or reviewer\'s own site; give the person this link only if they asked for this site: they may open it themselves and, if they want Octo to see it, use "Send page to Octo".';
-// What a refusal that sends Octo elsewhere says of where it may go: a fact of
-// the browser's, never a site. An address no message or page gave is refused,
-// and a site's root never is (refuseUngivenAddress); which site to open next
-// is the browser skill's "Finding a page". Told only to open the official site
+// Where a step that ends a page or an address sends Octo next: one fact, the
+// same for every way a page ends (a link-only site, a cookie notice over it, an
+// address with no page, one that did not answer or that nobody gave, and a page
+// that keeps changing, runtime-agent's `shared_browser::NEXT_SOURCE`), while the
+// browser skill's "Finding a page" says which source comes next. Each of these
+// once named a next source of its own (the maker's, venue's, shop's, operator's
+// or reviewer's own site, a journey planner), the lists disagreed, and what a
+// kind of task reads first is a skill's judgement, not the browser's.
+const NEXT_SOURCE = 'Go on in this turn as "Finding a page" says.';
+// A refused address ends that address, not the task, and only a site the
+// person asked for is theirs to open.
+const SEND_PAGE_HINT = `${NEXT_SOURCE} Give the person this link only if they asked for this site: they may open it themselves and, if they want Octo to see it, use "Send page to Octo".`;
+// What a cookie notice's refusal says of where Octo may go: a fact of the
+// browser's, never a site, beside the step fact that points to "Finding a
+// page" (NEXT_SOURCE). A site's root is never refused as an address nobody
+// gave (refuseUngivenAddress, whose refusal says so in its own words); which
+// site to open next is "Finding a page". Told only to open the official site
 // of what the task names, a turn tried a path it made up on a bookshop's site,
 // was refused, and ended without the opening hours it was asked for, which the
 // bookshop's home page showed (a local test, Nov 9).
@@ -3693,7 +3701,7 @@ const COVER_LOOK_MS = 100;
 // (CoveredByNotice). Told to open such a link by its address, a turn wrote
 // the address of a tourism site's listing into its own "stopped" line and
 // never opened it (a local test, Nov 9).
-const CONSENT_COVER_MESSAGE = `A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. ${HOME_PAGE_OPENS}`;
+const CONSENT_COVER_MESSAGE = `A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. ${HOME_PAGE_OPENS} ${NEXT_SOURCE}`;
 // What a click a cookie notice keeps from its control throws (refuseCovered),
 // in the notice's words. The click step catches it for a plain link and opens
 // the link's address instead (openCoveredLink).
@@ -4562,7 +4570,7 @@ function animationsSettledInPage(request) {
 const NO_PAGE_STATUSES = new Set([404, 410]);
 class NoPageError extends Error {
   constructor() {
-    super("This address has no page. Open a link from a page you read, or that site's own search.");
+    super(`This address has no page. ${NEXT_SOURCE}`);
   }
 }
 
@@ -5731,7 +5739,7 @@ const BUSY_PAGE_MESSAGE = "The page is still busy, so it could not be read yet. 
 // in the same turn (the browser skill's "Finding a page"), never to the same
 // address again: a turn read "the place's own site" as the one that had just
 // failed, and opened it a second time.
-const UNANSWERED_NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+const UNANSWERED_NEXT_SOURCE = `Don't open this address again in this turn. ${NEXT_SOURCE}`;
 // What a navigate or open_tab adds whose page answered and was read only as
 // the step's time ran out: the page may hold the answer, so it is kept, and
 // its address is refused for the rest of the turn (refuseUnansweredAddress),
@@ -5739,7 +5747,7 @@ const UNANSWERED_NEXT_SOURCE = "Don't open this address again in this turn: open
 // chat's next turns as one that did not answer. A turn told only to check what
 // the step did read a tourism site twice at 20 seconds each and never tried
 // the bookshop's own site.
-const OPENED_LATE_NEXT_SOURCE = "If this page doesn't show what you need, don't open it again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+const OPENED_LATE_NEXT_SOURCE = `If this page doesn't show what you need, don't open it again in this turn. ${NEXT_SOURCE}`;
 const OPENED_LATE_AGAIN_MESSAGE = `This address was still loading after ${STEP_TIME_MS / 1000} seconds earlier in this turn, so it was not opened again. ${UNANSWERED_NEXT_SOURCE}`;
 const UNANSWERED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the page is still blank. ${UNANSWERED_NEXT_SOURCE}`;
 const UNANSWERED_LOADED_PAGE_MESSAGE = `The site did not answer in time, so nothing was opened and the tab still shows the page it showed before. ${UNANSWERED_NEXT_SOURCE}`;
@@ -5825,26 +5833,27 @@ function refuseUnansweredAddress(url) {
 // address its text spells out), refused at once, before anything asks or loads. A turn opened two article
 // addresses it guessed on a reviewer's site, one of which waited 20 seconds
 // for nothing. The site's root, and an address on no public site (left to the
-// browser's own network rules), always go on. The refusal says where to go
-// instead: that site's root, links and search when the chat was given the
-// site (siteGiven: a message or the task named it, or a page read there past
-// its root), else only that a site's home page always opens (HOME_PAGE_OPENS),
-// naming no site: which one is the browser skill's "Finding a page". Sent to
-// the root of any site it refused, a route question opened a search engine
-// nobody named and asked the person to let it send a search, which they
-// refused (a local test, Nov 8). A refused address was never opened, so the
-// turn writes no finding line for it: runtime-agent reads the refusal by its
-// words (`shared_browser::address_not_given`) and leaves out one it wrote
-// anyway.
+// browser's own network rules), always go on, and the refusal says so: it names
+// the site's root when the chat was given the site (siteGiven: a message or the
+// task named it, or a page read there past its root), and never the root of a
+// site nobody gave. Sent to the root of any site it refused, a route question
+// opened a search engine nobody named and asked the person to let it send a
+// search, which they refused (a local test, Nov 8); a guessed path on a site
+// nobody gave, told only of the generic way on, ended the turn with no hours,
+// though the bookshop's home page would have opened (a local test, Nov 9).
+// Where to go next is the generic step fact (NEXT_SOURCE). A refused address
+// was never opened, so the turn writes no finding line for it: runtime-agent
+// reads the refusal by its words (`shared_browser::address_not_given`) and
+// leaves out one it wrote anyway.
 function refuseUngivenAddress(url) {
   if (!actionPolicy.isPublicHost(new URL(url).hostname) || !approvalProtocol.addressNotGiven(url)) {
     return;
   }
-  const wayOn = approvalProtocol.siteGiven(url)
-    ? `Open ${new URL(url).origin}/ and follow its links to the page, or use the site's own search.`
-    : HOME_PAGE_OPENS;
+  const home = approvalProtocol.siteGiven(url)
+    ? `this site's home page, ${new URL(url).origin}/,`
+    : "a site's home page";
   throw new Error(
-    `No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. ${wayOn}`,
+    `No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given, and ${home} always opens. ${NEXT_SOURCE}`,
   );
 }
 

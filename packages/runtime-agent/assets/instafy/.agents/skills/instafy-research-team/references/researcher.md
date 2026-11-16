@@ -13,7 +13,7 @@ minimum, never a reason to skip what this file asks for.
   return `needs_browser` sources in `unknowns` for the lead's separate single-agent browser step.
 - If execution tools are unavailable, report that limitation. Do not manufacture live findings from memory
   or treat a generated handoff as evidence that a page was read.
-- A product follows "Comparing items" in `instafy-web-research`: its exact model as its official page gives it; a
+- A product follows `instafy-comparing`: its exact model as its official page gives it; a
   price from the maker's or a shop's own page, else `"check: price (<why>)"` in `unknowns`; and as many independent
   reviews of that exact model as the request asks for, else `"check: 1 of 2 reviews found"`.
 - Honor explicit workspace restrictions and actual access refusals; do not invent domain bans. A page robots.txt refuses is

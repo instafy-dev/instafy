@@ -65,6 +65,8 @@ pub const BOUND_SITES_RELATIVE_PATH: &str = ".agents/skills/instafy-bound-sites/
 pub const BOUND_SITES_CHEATSHEET_RELATIVE_PATH: &str =
     ".agents/skills/instafy-bound-sites/references/cheatsheet.md";
 pub const WEB_RESEARCH_RELATIVE_PATH: &str = ".agents/skills/instafy-web-research/SKILL.md";
+pub const COMPARING_RELATIVE_PATH: &str = ".agents/skills/instafy-comparing/SKILL.md";
+pub const GETTING_AROUND_RELATIVE_PATH: &str = ".agents/skills/instafy-getting-around/SKILL.md";
 pub const WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH: &str =
     ".agents/skills/instafy-web-research/references/link-only-sites.json";
 pub const INTERACTIVE_ARTIFACTS_RELATIVE_PATH: &str =
@@ -460,6 +462,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before the card command of a page with no builder skill took no `--serve-cmd` (it said
     // "The serve command is the builder skill's.").
     include_str!("legacy/interactive-artifacts-v17.md"),
+    // From before a value nobody found was said as `instafy-comparing` says (it said where Octo
+    // looked, also of a value only Octo's browser looked for), and prices and reviews per item
+    // were the research skill's "Comparing items".
+    include_str!("legacy/interactive-artifacts-v18.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -478,6 +484,9 @@ const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-researcher-v3.md"),
     // Before removing Instafy-owned domain restrictions.
     include_str!("legacy/research-team-researcher-v4.md"),
+    // From before a product followed `instafy-comparing`, not the research skill's "Comparing
+    // items".
+    include_str!("legacy/research-team-researcher-v5.md"),
 ];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -628,6 +637,11 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // From before a route's line said what to choose in a planner with no page to read first,
     // and a core rule said that a form isn't sent until its button is pressed.
     include_str!("legacy/browser-automation-v41.md"),
+    // From before routes and comparing moved into `instafy-getting-around` and
+    // `instafy-comparing`, "Finding a page" gave one list of where to go when a page ends and
+    // said how to write a finding's fact, a search engine was opened only when the person named
+    // one, and the skill was for a page that needs the browser, not every page that would help.
+    include_str!("legacy/browser-automation-v42.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -693,7 +707,22 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v16.md"),
     // Before native retrieval on verified onboarded ChatGPT connections.
     include_str!("legacy/web-research-v17.md"),
+    // From before comparing items moved into `instafy-comparing`.
+    include_str!("legacy/web-research-v18.md"),
 ];
+/// How Octo compares items, for every reader and browser: which items, each one's own page, its
+/// values and the reviews asked for, and what a value nobody found says. A topic of the browser,
+/// research and page skills, under them in the skills tree.
+const COMPARING_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-comparing/SKILL.md"
+));
+/// How Octo finds and gives a route between places, for every reader and browser. A topic of the
+/// browser, research and page skills, under them in the skills tree.
+const GETTING_AROUND_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-getting-around/SKILL.md"
+));
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
@@ -844,6 +873,8 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     let bound_sites_path = workspace_dir.join(BOUND_SITES_RELATIVE_PATH);
     let bound_sites_cheatsheet_path = workspace_dir.join(BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
     let web_research_path = workspace_dir.join(WEB_RESEARCH_RELATIVE_PATH);
+    let comparing_path = workspace_dir.join(COMPARING_RELATIVE_PATH);
+    let getting_around_path = workspace_dir.join(GETTING_AROUND_RELATIVE_PATH);
     let web_research_link_only_path = workspace_dir.join(WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH);
     let interactive_artifacts_path = workspace_dir.join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
     let research_team_path = workspace_dir.join(RESEARCH_TEAM_RELATIVE_PATH);
@@ -1113,6 +1144,13 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
             LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES,
             WEB_RESEARCH_LINK_ONLY_TEMPLATE,
         ),
+        // New in every space, and an edited copy is kept: there is no earlier copy yet.
+        (&comparing_path, &[] as &[&str], COMPARING_TEMPLATE),
+        (
+            &getting_around_path,
+            &[] as &[&str],
+            GETTING_AROUND_TEMPLATE,
+        ),
     ] {
         if upgrade_bundled_skill(workspace_dir, path, legacy, current) {
             wrote_any = true;
@@ -1258,6 +1296,8 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
         WEB_RESEARCH_RELATIVE_PATH,
         WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH,
+        COMPARING_RELATIVE_PATH,
+        GETTING_AROUND_RELATIVE_PATH,
         INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
         RESEARCH_TEAM_RELATIVE_PATH,
         RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,

@@ -595,7 +595,7 @@ export async function runSharedBrowserAllowedStepFixture() {
       ["the page's own time picker", "picker", 'Something else on the page covers "Plan your journey" (<div role="dialog"> named "Choose a time"), so nothing was clicked. Take a fresh snapshot and try once more.'],
       ["a carousel's slide", "slide", 'Something else on the page covers "Plan your journey" (<a> named "Night service"), so nothing was clicked. Take a fresh snapshot and try once more.'],
       ["a banner with no name", "banner", 'Something else on the page covers "Plan your journey" (<div> named "Subscribe"), so nothing was clicked. Take a fresh snapshot and try once more.'],
-      ["a cookie notice", "cookies", "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site's home page, its address with no path, always opens."],
+      ["a cookie notice", "cookies", 'A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. A site\'s home page, its address with no path, always opens. Go on in this turn as "Finding a page" says.'],
     ]) {
       await check(`a button under ${name}`, async () => {
         freshRun();

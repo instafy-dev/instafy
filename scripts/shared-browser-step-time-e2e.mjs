@@ -132,8 +132,10 @@ const HIDDEN = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link
 const BUSY_MESSAGE = "The page is still busy, so it could not be read yet. Take a snapshot in a moment.";
 // What a load answers whose site sent nothing back before the step stopped
 // waiting for it, from a blank tab and from a page that had loaded: nothing was
-// opened, and Octo goes to the next source in the same turn.
-const NEXT_SOURCE = "Don't open this address again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+// opened, and Octo goes to the next source in the same turn, as the browser
+// skill's "Finding a page" says.
+const FINDING_A_PAGE = 'Go on in this turn as "Finding a page" says.';
+const NEXT_SOURCE = `Don't open this address again in this turn. ${FINDING_A_PAGE}`;
 // What a step answers whose page was still busy when its time ran out: the
 // same as a site that sent nothing, so the turn goes to the next source.
 const BUSY_UNANSWERED_MESSAGE = `The site did not answer in time, so nothing on its page could be read. ${NEXT_SOURCE}`;
@@ -155,13 +157,13 @@ const SLOW_LISTING = `<!doctype html><html lang="en"><head><meta charset="utf-8"
 <p><a href="/places/tower">The tower</a></p><script src="/listing-script"></script><p>More places.</p></body></html>`;
 // What a navigate or open_tab adds whose page was read only as its time ran
 // out, and what they answer for that page's address for the rest of the turn.
-const OPENED_LATE_NEXT_SOURCE = "If this page doesn't show what you need, don't open it again in this turn: open the venue's, shop's or operator's own site now, else another official source.";
+const OPENED_LATE_NEXT_SOURCE = `If this page doesn't show what you need, don't open it again in this turn. ${FINDING_A_PAGE}`;
 const OPENED_LATE_AGAIN_MESSAGE = `This address was still loading after 20 seconds earlier in this turn, so it was not opened again. ${NEXT_SOURCE}`;
 // How long a step whose site did not answer may take past its time: stopping
 // the load and ending its guards, never a read of the page while it waits.
 const UNANSWERED_ANSWER_MS = 5_000;
 // What a navigation answers when the site says the address has no page.
-const NO_PAGE_MESSAGE = "This address has no page. Open a link from a page you read, or that site's own search.";
+const NO_PAGE_MESSAGE = `This address has no page. ${FINDING_A_PAGE}`;
 // How long a shop's server cuts the connection of every request for its page
 // after the first one: Chromium's own quick retry comes within it, and its
 // reload of a page the network cut, a second after its error page, after it.
