@@ -22,12 +22,32 @@ export const CLAUDE_CODE_FIRST_USE_NOTE_STORAGE_KEY = "instafy.claudeCode.firstU
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * A change that leaves Claude Code on alters the running runtime's grant, so
+ * Desktop replaces that runtime before it answers (docs/Local-Engine-Turns.md
+ * 4.3), and the new one is listed only once it has registered with the
+ * controller. The waits between the reads that look for it: about 30 s in all.
+ */
+export const CLAUDE_CODE_SETTLE_DELAYS_MS = [1_000, 2_000, 3_000, 4_000, 5_000, 7_000, 8_000] as const;
+
 type Readings = {
   desktop: ClaudeCodeDesktopStatus;
   /** The space Desktop runs a runtime for here, or none. */
   runtimeListed: boolean;
   capability: ControllerRuntimeClaudeCode | null;
 };
+
+/** What one read found about this computer's runtime. */
+type RuntimeReading = {
+  runtimeId: string | null;
+  listed: boolean;
+  hasCapability: boolean;
+};
+
+/** A runtime other than the one before the change is listed, with what it reported. */
+function replacedRuntimeListed(reading: RuntimeReading | undefined, previousRuntimeId: string): boolean {
+  return Boolean(reading && reading.listed && reading.hasCapability && reading.runtimeId !== previousRuntimeId);
+}
 
 /**
  * The space whose status says whether Claude Code turns are on for this
@@ -59,14 +79,18 @@ function writeFirstUseNoteRead(): void {
   }
 }
 
-/** What the row says about this computer's Claude Code once it is on. */
-function readinessSentence(readings: Readings): string {
+/**
+ * What the row says about this computer's Claude Code once it is on. While
+ * Desktop replaces the runtime after a change (`settling`), a runtime not yet
+ * listed, or listed without what it reports, is still being checked.
+ */
+function readinessSentence(readings: Readings, settling: boolean): string {
   if (!readings.runtimeListed) {
-    return COPY.notRunning;
+    return settling ? COPY.checking : COPY.notRunning;
   }
   const capability = readings.capability;
   if (!capability) {
-    return COPY.notReadyYet;
+    return settling ? COPY.checking : COPY.notReadyYet;
   }
   if (capability.ready) {
     return COPY.ready;
@@ -151,25 +175,34 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
   const [pendingAction, setPendingAction] = useState<ClaudeCodeDesktopAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [firstUseNoteRead, setFirstUseNoteRead] = useState(readFirstUseNoteRead);
+  const [settling, setSettling] = useState(false);
   const generationRef = useRef(0);
+  /** Bumped to stop the reads after a change: by the next action, or unmounting. */
+  const settleTokenRef = useRef(0);
+  /**
+   * While the row waits for a runtime Desktop started in place of another:
+   * that other runtime's id. A later action that replaces nothing, or that
+   * Desktop refused, leaves the wait to go on from it.
+   */
+  const waitingPastRef = useRef<string | null>(null);
   const latestRef = useRef({ fetchRuntimeStatus, resolveControllerUrl });
   latestRef.current = { fetchRuntimeStatus, resolveControllerUrl };
 
-  const refresh = useCallback(async (desktopAnswer?: ClaudeCodeDesktopStatus) => {
+  const refresh = useCallback(async (desktopAnswer?: ClaudeCodeDesktopStatus): Promise<RuntimeReading | undefined> => {
     const generation = ++generationRef.current;
     if (!claudeCodeDesktopHostAvailable()) {
       setReadings(null);
-      return;
+      return undefined;
     }
     const desktop =
       desktopAnswer ??
       (await readClaudeCodeDesktopStatus(await latestRef.current.resolveControllerUrl().catch(() => null)));
     if (generation !== generationRef.current) {
-      return;
+      return undefined;
     }
     if (!desktop?.supported) {
       setReadings(null);
-      return;
+      return undefined;
     }
     const runtime = await readThisComputerRuntime();
     const projectId = runtime?.projectId ?? openSpaceId();
@@ -177,17 +210,17 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
       ? await latestRef.current.fetchRuntimeStatus({ projectId, quietOnAbort: true }).catch(() => null)
       : null;
     if (generation !== generationRef.current) {
-      return;
+      return undefined;
     }
     // Only for a person the lane covers; a status that could not be read
     // keeps what the row last showed.
     if (!status) {
       setReadings((current) => (current ? { ...current, desktop } : null));
-      return;
+      return undefined;
     }
     if (status.claudeCodeLane !== true) {
       setReadings(null);
-      return;
+      return undefined;
     }
     const entry = runtime
       ? status.runtimes.find((candidate) => candidate.runtimeId === runtime.runtimeId) ?? null
@@ -197,14 +230,51 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
       runtimeListed: entry !== null,
       capability: entry?.claudeCode ?? null,
     });
+    return { runtimeId: runtime?.runtimeId ?? null, listed: entry !== null, hasCapability: Boolean(entry?.claudeCode) };
   }, []);
 
   useEffect(() => {
     void refresh();
     return () => {
       generationRef.current += 1;
+      settleTokenRef.current += 1;
     };
   }, [refresh]);
+
+  /**
+   * After a change for which Desktop started a runtime in place of
+   * `previousRuntimeId`: read again until the new one is listed with what it
+   * reported, for about 30 s at most. It ends early when Desktop runs none,
+   * which has nothing to report, or runs the replaced one again. Another
+   * action, or unmounting, stops it; the next action may go on from it.
+   */
+  const readUntilReplaced = useCallback(
+    async (token: number, previousRuntimeId: string, first: RuntimeReading | undefined) => {
+      let reading = first;
+      for (const delay of CLAUDE_CODE_SETTLE_DELAYS_MS) {
+        if (token !== settleTokenRef.current) {
+          return;
+        }
+        if (
+          replacedRuntimeListed(reading, previousRuntimeId) ||
+          reading?.runtimeId === null ||
+          reading?.runtimeId === previousRuntimeId
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (token !== settleTokenRef.current) {
+          return;
+        }
+        reading = await refresh();
+      }
+      if (token === settleTokenRef.current) {
+        waitingPastRef.current = null;
+        setSettling(false);
+      }
+    },
+    [refresh],
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -219,22 +289,53 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
     async (action: ClaudeCodeDesktopAction) => {
       setPendingAction(action);
       setActionError(null);
+      // Stops the reads of an earlier change; this action goes on from it, or ends it.
+      const token = ++settleTokenRef.current;
+      const waitingPast = waitingPastRef.current;
       try {
         const controllerUrl = await latestRef.current.resolveControllerUrl().catch(() => null);
+        // The runtime this change may replace: the one an earlier change's
+        // wait looks past, else the one Desktop runs now, read now (the
+        // row's last read may be older than a start made since).
+        const previousRuntimeId =
+          waitingPast ?? (await readThisComputerRuntime().catch(() => null))?.runtimeId ?? null;
         const answer = await invokeClaudeCodeDesktopAction(action, controllerUrl);
-        await refresh(answer);
+        // When Desktop answers, it has already replaced a running runtime
+        // whose grant the change altered, and a replacement always has a new
+        // id (4.3). The same id means it kept that runtime, such as a
+        // Personal Browser one or one whose grant didn't change; none means
+        // nothing runs, or the replacement didn't start. Either way there is
+        // nothing new to wait for.
+        const currentRuntimeId = answer.consented
+          ? (await readThisComputerRuntime().catch(() => null))?.runtimeId ?? null
+          : null;
+        const replaced = previousRuntimeId !== null && currentRuntimeId !== null && currentRuntimeId !== previousRuntimeId;
+        waitingPastRef.current = replaced ? previousRuntimeId : null;
+        setSettling(replaced);
+        const reading = await refresh(answer);
+        if (replaced && previousRuntimeId !== null) {
+          void readUntilReplaced(token, previousRuntimeId, reading);
+        }
       } catch (error) {
+        const resumeToken = ++settleTokenRef.current;
         const words = error instanceof ClaudeCodeDesktopActionError ? error.message : "";
         setActionError(words || COPY.actionFailed);
         // A refused change may have been put back after another read began
         // (a focus while Desktop asked, say): read the status again, so the
         // row never shows that change beside the words that say it wasn't made.
-        void refresh();
+        // A runtime an earlier change started may still be registering: go on
+        // waiting for it.
+        if (waitingPast !== null) {
+          void refresh().then((reading) => readUntilReplaced(resumeToken, waitingPast, reading));
+        } else {
+          setSettling(false);
+          void refresh();
+        }
       } finally {
         setPendingAction(null);
       }
     },
-    [refresh],
+    [readUntilReplaced, refresh],
   );
 
   if (!readings) {
@@ -248,7 +349,12 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
   // sentence ("Your login shell sets … Fix it, then choose Find.") no longer
   // describes the shell, and its step is done: the candidate says what is left.
   const problem = candidate?.renewsInUse ? null : inUseProblemSentence(desktop);
-  const showFirstUseNote = desktop.consented && !firstUseNoteRead;
+  // The note asks for a sign-in. A Claude plan sign-in, the one kind this
+  // computer's runtime reports (2.10), shows Claude Code is signed in, so the
+  // note is left out while one is reported, and while the row checks a new
+  // runtime, which may report one. Other sign-ins still see it until it is read.
+  const showFirstUseNote =
+    desktop.consented && !firstUseNoteRead && capability?.planSignIn !== true && !settling;
   const actionButton = (
     action: ClaudeCodeDesktopAction,
     label: string,
@@ -294,7 +400,13 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
               {claudeCodeSignInLine(capability?.planSignIn === true)}
             </Text>
             <Text as="div" variant="caption" tone="muted" data-testid="credentials-claude-code-status" role="status">
-              {problem ?? (desktop.consented ? readinessSentence(readings) : COPY.off)}
+              {problem ??
+                (desktop.consented
+                  ? readinessSentence(readings, settling)
+                  : // Use for my messages consents to a program found: before one is, it can't be chosen.
+                    desktop.found
+                    ? COPY.off
+                    : COPY.offNotFound)}
             </Text>
             {desktop.consented && !problem ? (
               <Text as="div" variant="caption" tone="muted">
