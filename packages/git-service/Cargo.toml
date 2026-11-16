@@ -19,6 +19,7 @@ default = ["server"]
 # The git-edge and git-shard services. Without it the crate is only the
 # repository push policy (`policy`), which origin-http-server shares.
 server = [
+  "dep:aws-lc-rs",
   "dep:axum",
   "dep:base64",
   "dep:bytes",
@@ -45,7 +46,9 @@ axum = { version = "0.7", features = ["json", "http1", "tokio", "macros"], optio
 base64 = { version = "0.21", optional = true }
 bytes = { version = "1", optional = true }
 futures-util = { version = "0.3", optional = true }
-jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"], optional = true }
+# Only the aws_lc_rs backend may be on: with rust_crypto as well it still
+# builds, but every sign and verify panics.
+jsonwebtoken = { version = "10.4", default-features = false, features = ["use_pem", "aws_lc_rs"], optional = true }
 reqwest = { version = "0.11", features = ["json", "stream"], optional = true }
 runtime-contracts = { path = "../runtime-contracts", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -59,3 +62,18 @@ tower-http = { version = "0.5", features = ["trace"], optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# jsonwebtoken's aws-lc backend needs NASM to build on x86_64 Windows unless
+# its prebuilt objects are allowed. runtime-agent gets this through rustls.
+aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"], optional = true }
+
+[dev-dependencies]
+# Throwaway Ed25519 keys for the JWKS test, which exists only with `server`,
+# where jsonwebtoken already links it as its crypto backend.
+aws-lc-rs = "1.18"
+
+[target.'cfg(windows)'.dev-dependencies]
+# Test builds without `server` still build it, so they need the prebuilt
+# NASM objects on x86_64 Windows too.
+aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"] }

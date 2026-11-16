@@ -14,11 +14,18 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 uuid = { version = "1", features = ["v4", "serde"] }
 axum = { version = "0.7", features = ["json"] }
 futures-util = "0.3"
-jsonwebtoken = "9"
+# Only the aws_lc_rs backend may be on: with rust_crypto as well it still
+# builds, but every sign and verify panics.
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 httpdate = "1"
 ring = "0.17"
 regex = "1"
+
+[target.'cfg(windows)'.dependencies]
+# jsonwebtoken's aws-lc backend needs NASM to build on x86_64 Windows unless
+# its prebuilt objects are allowed. runtime-agent gets this through rustls.
+aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"] }
 
 [dev-dependencies]
 serial_test = "2"
