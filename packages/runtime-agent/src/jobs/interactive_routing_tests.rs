@@ -1161,7 +1161,11 @@ fn a_comparison_gets_a_sort_for_each_criterion_that_is_a_number() {
             "no search, filter or sort nobody asked for, and no sort by a value no row has."
         ));
     }
-    assert!(hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES, "{} bytes", hub.len());
+    assert!(
+        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        hub.len()
+    );
 
     let tmp = tempdir().unwrap();
     let root = tmp.path();
