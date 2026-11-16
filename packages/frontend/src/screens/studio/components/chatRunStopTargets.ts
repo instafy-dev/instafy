@@ -4,8 +4,11 @@ import { wasRunStartedByPromptSentFromThisPage } from "../../../conversations/se
 import type { ControllerConversationStopResult } from "../../../services/runtimeController/conversationStop";
 import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
+import { isAutomaticRetryPending } from "./automaticRetryFold";
 import { isBrowserNoticePrompt } from "./browserHandBack";
+import { browserRequestFromMessage, browserRequestKey } from "./browserRequest";
 import { extractAgentIdentityFromMetadata } from "./chatAssistantIdentity";
+import { readPendingHandBack } from "./chatMessagePresentation";
 import { resolveExpectedSteerJobId, resolveSteerableComposerRuns } from "./composerSendMode";
 
 export type ChatRunStopTarget = {
@@ -68,6 +71,35 @@ export function chatRunStopFollowOnTargets(
     message.role === "user" && (isBrowserNoticePrompt(message) || readRunFailureRetryOf(message) !== null));
   return targets.filter((target) => prompts.some((prompt) =>
     promptRunId(prompt) === target.runId || wasRunStartedByPromptSentFromThisPage(prompt, [target.runId, target.jobId])));
+}
+
+/**
+ * Whether the chat's newest message is between two of its parts, the next of
+ * which goes on by itself, so Stop stays meanwhile (useChatRunStop's
+ * `between`): Studio is opening a browser card, a browser turn's hand-back to
+ * the building turn is due or on its way, or the newest row stands in for a
+ * turn that has shown nothing yet: a routed card's browser turn, or the
+ * building turn it was handed to (routedBrowserFold.ts), a hand-back's turn,
+ * or Instafy's own retry of a failed turn. Only the newest row counts, as for
+ * the typing row: the fold keeps a routed card's key once its turn has shown
+ * something (the chat takes the card out then), so a key alone is no gap.
+ */
+export function chatRunStopBetweenParts(chat: {
+  /** Studio is opening a browser card by itself. */
+  browserCardOpening: boolean;
+  /** A browser turn's hand-back to the building turn is due or on its way (useBrowserHandBack). */
+  handBackDue: boolean;
+  /** The chat's newest row, as the transcript shows it. */
+  newestRow: ChatMessage | null | undefined;
+  /** The routed cards the fold keeps as standing in for their turn (routedBrowserFold.ts, `waitingCardKeys`). */
+  routedWaitingKeys: ReadonlySet<string>;
+}): boolean {
+  if (chat.browserCardOpening || chat.handBackDue) return true;
+  const row = chat.newestRow;
+  if (!row) return false;
+  if (readPendingHandBack(row) || isAutomaticRetryPending(row)) return true;
+  return row.role === "assistant" && browserRequestFromMessage(row)?.routed === true &&
+    chat.routedWaitingKeys.has(browserRequestKey(row));
 }
 
 export function groupChatRunStopTargets(targets: readonly ChatRunStopTarget[]) {

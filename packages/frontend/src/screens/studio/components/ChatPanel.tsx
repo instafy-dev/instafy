@@ -141,7 +141,7 @@ import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import { useChatRunStop } from "./useChatRunStop";
-import { chatRunStopFollowOnTargets, resolveChatRunStopTargets } from "./chatRunStopTargets";
+import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, resolveChatRunStopTargets } from "./chatRunStopTargets";
 import { ChatRunStopNoticeProvider } from "./ChatRunStopNotice";
 import { useChatRunStopContinuation } from "./useChatRunStopContinuation";
 import {
@@ -351,13 +351,11 @@ import {
 import {
   collapseLifecycleMessages,
   extractAgentJobId,
-  readPendingHandBack,
   runMatchesThreadJobId,
   shouldDisplayChatMessage,
   shouldDisplayJobThreadMessage,
   synthesizeAgentJobThreadMessages,
 } from "./chatMessagePresentation";
-import { isAutomaticRetryPending } from "./automaticRetryFold";
 import { resolveAgentWaitingActivityCopy } from "./runtimeAlertPresentation";
 import {
   formatPromptContextModeLabel,
@@ -6034,9 +6032,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // itself: Studio is opening a browser card or its turn has not started, a
   // browser turn's hand-back to the building turn is due or on its way, or
   // Instafy is trying a failed turn again. Stop stays through it.
-  const newestDisplayedRow = displayedMessages[displayedMessages.length - 1];
-  const stopBetweenParts = browserCardOpeningNow || routedBrowserWaiting.size > 0 || browserHandBack.due ||
-    Boolean(newestDisplayedRow && (readPendingHandBack(newestDisplayedRow) || isAutomaticRetryPending(newestDisplayedRow)));
+  const stopBetweenParts = chatRunStopBetweenParts({
+    browserCardOpening: browserCardOpeningNow,
+    handBackDue: browserHandBack.due,
+    newestRow: displayedMessages[displayedMessages.length - 1],
+    routedWaitingKeys: routedBrowserWaiting,
+  });
   const stopFollowOnTargets = useMemo(() => chatRunStopFollowOnTargets(stopTargets, messages), [messages, stopTargets]);
   const runStop = useChatRunStop({
     conversationId: stopConversationId,

@@ -49,6 +49,8 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   `Stopping…` and stops that next part as it starts: only a turn that carries the message on by
   itself (a card's continuation, a hand-back, a retry), never a message someone sends meanwhile, and
   with the same question first as any Stop of someone else's turn. When nothing more comes, it lets go.
+  Only the chat's newest row counts, as for the typing row: once a message has its answer, nothing
+  it went through keeps Stop (`chatRunStopBetweenParts`).
   `Waiting for you` shows at once, and goes at once when the person
   answered. The typing row before the turn's own line uses the same rule and says `Starting…`
   until then (a run held for an approval, and a long context rewrite, say so instead), and a
