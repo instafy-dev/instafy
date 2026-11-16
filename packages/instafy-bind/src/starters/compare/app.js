@@ -31,7 +31,7 @@
  *                          something its link doesn't.
  *   unchecked: ["what was not checked", …]     listed once in the footer, after each row's missing values, on an
  *                          empty page too: only what no cell says, since the footer names those from the cells itself
- *                          (`instafy bind check` lists an entry that names a column a row is missing)
+ *                          (`instafy bind check` fails an entry that names a column no row has a value for)
  *   from: "memory"         only when the person asked for the page from what Octo knows, with nothing looked up: each
  *                          fact is just {"v"} (or a {"note"}), with no "src", "url" or "date", and no store or filter
  *                          (`instafy bind check` fails them), and reads "<value>, not checked", as a ranked row's value
