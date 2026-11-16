@@ -10,7 +10,9 @@
 //! are counted from `user_credentials.created_at`, revoked ones included,
 //! which holds because only the controller writes that table. Tests,
 //! ChatGPT-login starts and side calls leave receipts in
-//! `ai_connection_attempts`.
+//! `ai_connection_attempts`. Side calls come at typing speed, so their hour is
+//! counted from per-minute rows in `ai_side_call_minutes`, at most 61 per
+//! person and kind, and only their minute from receipts.
 //!
 //! A person's connection actions serialize on their person lock. ChatGPT-login
 //! starts also take one global lock, always after the person lock, so no two
@@ -22,7 +24,8 @@
 //! OpenAI. A request the counts already refuse is refused before it waits
 //! for a lock, so a flood of refused requests cannot queue on one while each
 //! holds a pooled connection. The same counts, taken again under the lock,
-//! decide the requests that get that far.
+//! decide the requests that get that far. A side call first tries its lock
+//! without waiting and, when it gets it, counts once.
 //!
 //! Windows end at `statement_timestamp()`. Each count is a statement of its
 //! own, so a count taken under a lock reads the time after any wait for it.
@@ -73,14 +76,20 @@ impl AiConnectionLimits {
     /// key costs a new connection and a test: tests stay several times new
     /// connections.
     ///
-    /// Typing never meets the side-call limits. The Studio editor asks for a
-    /// completion at every pause in typing longer than about 170 ms, and the
+    /// The side-call limits are sized from typing. The Studio editor asks for
+    /// a completion at every pause in typing longer than about 170 ms, and the
     /// composer's ghost text, when a person turns it on, at every pause longer
     /// than 80 ms: a few a second while someone types, and up to about seven
-    /// for a fast typist in the composer. Ten a second for a whole minute, and
-    /// an hour that averages more than one and a half a second, stay above
-    /// that. A chat asks for one title when its first message is sent, and a
-    /// Studio that loads chats still under a default name asks again for each.
+    /// for a fast typist in the composer. Every request counts, also one the
+    /// editor cancels at the next keystroke, and the editor and the composer
+    /// share one allowance. The minute allows ten a second, so no burst of
+    /// typing meets it. The hour bounds abuse more than typing: it allows a
+    /// little over one and a half a second averaged over the hour, which typing
+    /// with ordinary breaks stays under, but a little over half an hour of
+    /// unbroken typing at three a second fills it, and completions then pause
+    /// until the hour has room again. A chat asks for one title when its first
+    /// message is sent, and a Studio that loads chats still under a default
+    /// name asks again for each.
     pub(crate) const FOR_EVERYONE: Self = Self {
         new_connections_per_hour: 20,
         tests_per_hour: 60,
@@ -110,9 +119,11 @@ const ACTION_CONVERSATION_TITLE: &str = "conversation_title";
 const CODEX_DEVICE_AUTH_LOCK_KEY: &str = "ai-connections:codex-device-auth";
 /// Receipts are kept a day, well past the longest window counted here.
 const RECEIPT_RETENTION_SECONDS: i64 = 24 * 60 * 60;
-/// Side calls come at typing speed, so theirs are kept only two hours, past
-/// the hour that counts them.
-const SIDE_CALL_RECEIPT_RETENTION_SECONDS: i64 = 2 * HOUR_SECONDS;
+/// Side calls come at typing speed and their receipts count only the minute,
+/// so they are kept ten minutes.
+const SIDE_CALL_RECEIPT_RETENTION_SECONDS: i64 = 10 * MINUTE_SECONDS;
+/// Per-minute side-call rows are kept two hours, past the hour they count in.
+const SIDE_CALL_MINUTE_RETENTION_SECONDS: i64 = 2 * HOUR_SECONDS;
 /// Each kind of receipt the retention loop prunes, and how long it keeps it.
 const RECEIPT_RETENTION: [(&str, i64); 4] = [
     (ACTION_CREDENTIAL_TEST, RECEIPT_RETENTION_SECONDS),
@@ -149,29 +160,40 @@ const PERSON_NEW_CONNECTIONS: &str = "select created_at
        from public.user_credentials
       where user_id = $3
         and created_at > statement_timestamp() - $2::bigint * interval '1 second'";
-/// A person's side calls of one kind in both its windows, in one statement
-/// since they come at typing speed: $1 and $2 the short window's limit and
-/// length in seconds, $3 and $4 the long one's, $5 the person and $6 the
-/// action. A window's wait, until its limit-th newest call leaves it, is
-/// read only once the window is full.
-const PERSON_SIDE_CALLS: &str = "with recent as (
+/// A person's side calls of one kind in both its windows, in one statement:
+/// $1 and $2 the minute's limit and length in seconds, $3 the hour's limit,
+/// $4 how far back a per-minute row counts, the hour's length plus the minute
+/// the row spans, $5 the person and $6 the action.
+///
+/// The minute counts receipts, at most its limit of them. The hour sums at
+/// most 61 per-minute rows; a row counts while any of its minute is in the
+/// hour, so the hour may count calls up to a minute older than an exact count
+/// would. A window's wait is read only once the window is full: the minute's
+/// until its limit-th newest receipt leaves it, the hour's until the minute
+/// that holds its limit-th newest call stops counting.
+const PERSON_SIDE_CALLS: &str = "with minute_calls as (
        select created_at
          from public.ai_connection_attempts
         where user_id = $5
           and action = $6
-          and created_at > statement_timestamp() - $4::bigint * interval '1 second'
+          and created_at > statement_timestamp() - $2::bigint * interval '1 second'
+     ), hour_minutes as (
+       select minute_start,
+              calls,
+              sum(calls) over (order by minute_start desc) as calls_since
+         from public.ai_side_call_minutes
+        where user_id = $5
+          and action = $6
+          and minute_start > statement_timestamp() - $4::bigint * interval '1 second'
      ), used as (
-       select count(*) filter (
-                where created_at > statement_timestamp() - $2::bigint * interval '1 second'
-              )::bigint as short_used,
-              count(*)::bigint as long_used
-         from recent
+       select (select count(*) from minute_calls)::bigint as short_used,
+              (select coalesce(sum(calls), 0) from hour_minutes)::bigint as long_used
      )
      select short_used,
             long_used,
             case when short_used >= $1::bigint then
               greatest(1, ceil(extract(epoch from (
-                (select created_at from recent
+                (select created_at from minute_calls
                   order by created_at desc
                   offset greatest($1::bigint - 1, 0) limit 1)
                 + $2::bigint * interval '1 second' - statement_timestamp()
@@ -179,13 +201,28 @@ const PERSON_SIDE_CALLS: &str = "with recent as (
             end as short_retry_after_seconds,
             case when long_used >= $3::bigint then
               greatest(1, ceil(extract(epoch from (
-                (select created_at from recent
-                  order by created_at desc
-                  offset greatest($3::bigint - 1, 0) limit 1)
+                (select minute_start from hour_minutes
+                  where calls_since >= $3::bigint
+                  order by minute_start desc
+                  limit 1)
                 + $4::bigint * interval '1 second' - statement_timestamp()
               ))))::bigint
             end as long_retry_after_seconds
        from used";
+/// Records a side call: its receipt, closed at once, and one more call in its
+/// minute's row. $1 the person, $2 the action, $3 the connection it ran on.
+const RECORD_SIDE_CALL: &str = "with receipt as (
+       insert into public.ai_connection_attempts
+         (user_id, action, credential_id, completed_at)
+       values ($1, $2, $3, clock_timestamp())
+       returning user_id, action, created_at
+     )
+     insert into public.ai_side_call_minutes as minutes
+       (user_id, action, minute_start, calls)
+     select user_id, action, date_trunc('minute', created_at), 1
+       from receipt
+     on conflict (user_id, action, minute_start)
+       do update set calls = minutes.calls + 1";
 
 /// A per-person limit, as its refusal names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -347,6 +384,22 @@ async fn advisory_lock(
         .await
         .map_err(|error| database_error("failed to serialize AI connection limits", error))?;
     Ok(())
+}
+
+/// Takes the lock `key` names until the transaction ends when it is free, and
+/// says whether it did, without waiting for it.
+async fn try_advisory_lock(
+    transaction: &Transaction<'_>,
+    key: &str,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let row = transaction
+        .query_one(
+            "select pg_try_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&key],
+        )
+        .await
+        .map_err(|error| database_error("failed to serialize AI connection limits", error))?;
+    Ok(row.get(0))
 }
 
 /// Serializes one person's AI-connection actions until the transaction ends.
@@ -524,6 +577,8 @@ async fn refuse_side_call_over_limits(
     limits: &AiConnectionLimits,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let [minute, hour] = call.windows(limits);
+    // A per-minute row counts while any of its minute is in the hour.
+    let hour_reach_seconds = hour.seconds + MINUTE_SECONDS;
     let row = transaction
         .query_one(
             PERSON_SIDE_CALLS,
@@ -531,7 +586,7 @@ async fn refuse_side_call_over_limits(
                 &minute.limit,
                 &minute.seconds,
                 &hour.limit,
-                &hour.seconds,
+                &hour_reach_seconds,
                 &user_id,
                 &call.action(),
             ],
@@ -558,7 +613,12 @@ async fn refuse_side_call_over_limits(
 /// Records a side call on `credential_id` before it reaches the provider, or
 /// refuses it once the person's minute or hour of that kind is full. The
 /// caller commits right after, so the lock is released before the provider
-/// is called. A person already at a limit is refused before the lock.
+/// is called.
+///
+/// The lock is tried first without waiting: a call that gets it counts once.
+/// One that finds another call of the same person's holding it counts before
+/// it waits, so a call already over a limit is refused without queueing, and
+/// counts again once it holds the lock.
 ///
 /// A side call has nothing pending once it is recorded, so its receipt is
 /// closed at once and never counts among pending ChatGPT logins.
@@ -569,14 +629,15 @@ pub(crate) async fn record_side_call(
     call: SideCall,
     limits: &AiConnectionLimits,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
-    refuse_side_call_over_limits(transaction, user_id, call, limits).await?;
-    advisory_lock(transaction, &call.lock_key(user_id)).await?;
+    let lock_key = call.lock_key(user_id);
+    if !try_advisory_lock(transaction, &lock_key).await? {
+        refuse_side_call_over_limits(transaction, user_id, call, limits).await?;
+        advisory_lock(transaction, &lock_key).await?;
+    }
     refuse_side_call_over_limits(transaction, user_id, call, limits).await?;
     transaction
         .execute(
-            "insert into public.ai_connection_attempts
-               (user_id, action, credential_id, completed_at)
-             values ($1, $2, $3, clock_timestamp())",
+            RECORD_SIDE_CALL,
             &[&user_id, &call.action(), &credential_id],
         )
         .await
@@ -823,9 +884,10 @@ pub(crate) async fn finish_codex_device_auth(pool: &PgPool, user_id: Uuid, sessi
     }
 }
 
-/// Deletes receipts past their retention, a day or, for side calls, two
-/// hours, in bounded batches per action so each one is a short range of the
-/// (action, created_at) index.
+/// Deletes receipts past their retention, a day or, for side calls, ten
+/// minutes, in bounded batches per action so each one is a short range of the
+/// (action, created_at) index; then side-call minute rows older than two
+/// hours. Returns how many rows of both it deleted.
 pub(crate) async fn prune_ai_connection_attempts(pool: &PgPool) -> anyhow::Result<u64> {
     let connection = pool
         .get()
@@ -854,8 +916,30 @@ pub(crate) async fn prune_ai_connection_attempts(pool: &PgPool) -> anyhow::Resul
             }
         }
     }
+    for _ in 0..PRUNE_MAX_BATCHES_PER_RUN {
+        let deleted = connection
+            .execute(
+                "delete from public.ai_side_call_minutes
+                  where ctid in (
+                    select ctid
+                      from public.ai_side_call_minutes
+                     where minute_start < now() - $1::bigint * interval '1 second'
+                     limit $2
+                  )",
+                &[&SIDE_CALL_MINUTE_RETENTION_SECONDS, &PRUNE_BATCH_SIZE],
+            )
+            .await
+            .context("failed to prune ai_side_call_minutes")?;
+        total_deleted += deleted;
+        if deleted < PRUNE_BATCH_SIZE as u64 {
+            break;
+        }
+    }
     if total_deleted > 0 {
-        tracing::info!(deleted = total_deleted, "pruned old ai_connection_attempts");
+        tracing::info!(
+            deleted = total_deleted,
+            "pruned old ai_connection_attempts and ai_side_call_minutes"
+        );
     }
     Ok(total_deleted)
 }
@@ -962,16 +1046,26 @@ mod tests {
     }
 
     #[test]
-    fn the_side_call_limits_stay_above_typing() {
+    fn the_side_call_limits_are_sized_from_typing() {
         let limits = AiConnectionLimits::FOR_EVERYONE;
         assert_eq!(limits.completions_per_minute, 600);
         assert_eq!(limits.completions_per_hour, 6_000);
         assert_eq!(limits.titles_per_minute, 20);
         assert_eq!(limits.titles_per_hour, 200);
-        // The composer asks at every pause longer than 80 ms; the minute holds
-        // ten a second, and the hour more than one and a half a second.
+        // The composer asks at every pause longer than 80 ms, up to about seven
+        // a second: the minute holds ten a second, so no burst meets it.
         assert!(limits.completions_per_minute >= 10 * MINUTE_SECONDS);
+        // The hour holds more than one and a half a second on average, and is
+        // tighter than the minute held for an hour, so it bounds sustained use:
+        // unbroken typing at three a second fills it after a little over half
+        // an hour, as `FOR_EVERYONE` says.
         assert!(2 * limits.completions_per_hour >= 3 * HOUR_SECONDS);
+        assert!(limits.completions_per_hour < 60 * limits.completions_per_minute);
+        let minutes_of_unbroken_typing = limits.completions_per_hour / 3 / MINUTE_SECONDS;
+        assert!(
+            (30..40).contains(&minutes_of_unbroken_typing),
+            "{minutes_of_unbroken_typing} minutes"
+        );
         assert_eq!(
             SideCall::EditorCompletion.windows(&limits),
             [
@@ -1090,17 +1184,20 @@ mod tests {
     }
 
     #[test]
-    fn side_call_receipts_are_pruned_after_two_hours_and_the_rest_after_a_day() {
+    fn side_call_receipts_are_pruned_after_ten_minutes_and_the_rest_after_a_day() {
         assert_eq!(
             RECEIPT_RETENTION,
             [
                 ("credential_test", 86_400),
                 ("codex_device_auth", 86_400),
-                ("editor_completion", 7_200),
-                ("conversation_title", 7_200),
+                ("editor_completion", 600),
+                ("conversation_title", 600),
             ]
         );
-        // Each is kept past the longest window that counts it.
-        assert!(SIDE_CALL_RECEIPT_RETENTION_SECONDS > HOUR_SECONDS);
+        // Each is kept past the longest window that counts it: a side call's
+        // receipts count only its minute, and its minute rows the hour, which
+        // reaches a minute further back.
+        assert!(SIDE_CALL_RECEIPT_RETENTION_SECONDS > MINUTE_SECONDS);
+        assert!(SIDE_CALL_MINUTE_RETENTION_SECONDS > HOUR_SECONDS + MINUTE_SECONDS);
     }
 }

@@ -3,12 +3,13 @@
 -- controller now counts them per person as it counts connection tests
 -- (`ai_connection_limits` in the runtime controller): a receipt for each call
 -- it sends to the proxy, counted under an advisory lock with the database
--- clock in a rolling minute and hour. Their receipts use credential_id for
+-- clock in a rolling minute; the hour is counted from the per-minute rows of
+-- 20261116130600_ai_side_call_minutes. Their receipts use credential_id for
 -- the connection the call ran on.
 --
 -- A side call has nothing pending once it is recorded, so its receipt is
 -- written with completed_at set and never counts as a pending ChatGPT login.
--- The retention loop keeps these receipts two hours.
+-- The retention loop keeps these receipts ten minutes.
 --
 -- Controller only, as before: RLS stays on and no client policy exists.
 set local lock_timeout = '5s';

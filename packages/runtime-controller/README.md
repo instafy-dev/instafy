@@ -239,17 +239,26 @@ request the counts already refuse is answered before it waits for that lock. Win
   `editor_completion_rate_limited`. Conversation titles
   (`POST /projects/:project_id/conversation/title`): 20 per person per minute and 200 per hour,
   HTTP 429 `conversation_title_rate_limited`. Both are answered only by the person's own saved
-  connection, never by Instafy's key, and charge no credits; the limits bound what one account
-  can make the controller, the proxy and that connection do. Typing stays under them: the editor
-  asks at pauses longer than about 170 ms, and the composer's ghost text, when turned on, at
-  pauses longer than 80 ms, about seven a second at most. A call counts once project access and
-  the connection are settled, just before it is sent; a call sent nowhere (an empty prompt, no
-  project access, no saved connection of the person's own) counts nothing. Each kind of call
-  counts under a lock of its own per person, so a completion never waits behind a title or a
-  connection save, and the call returns its database connection before the provider answers.
-  A refused completion shows nothing and a refused title leaves the chat its fallback name, with
-  no error; that Studio page then sends that kind of call for that person again only after
-  `retryAfterSeconds`.
+  connection, never by Instafy's key, and charge no credits; the limits bound the provider calls
+  one account can make through the proxy on its own connection. A refused call, and a call that
+  finds no connection of the person's own, still costs the controller one pooled database
+  transaction. The minute is sized from typing: the editor asks at pauses longer than about
+  170 ms, and the composer's ghost text, when turned on, at pauses longer than 80 ms, about seven
+  a second at most. Every request counts, also one the editor cancels at the next keystroke, and
+  the editor and the composer share one allowance. The hour bounds abuse more than typing: it
+  averages a little over one and a half a second, which typing with ordinary breaks stays under,
+  but a little over half an hour of unbroken typing at three a second fills it, and completions
+  then pause until the hour has room again. A call counts once project access and the connection
+  are settled, just before it is sent; a call sent nowhere (an empty prompt, no project access, no
+  saved connection of the person's own) counts nothing. The minute is counted from receipts and
+  the hour from per-minute rows in `ai_side_call_minutes`: a row counts until an hour after its
+  minute ended, so the hour can refuse up to a minute early. Each kind of call counts under a lock
+  of its own per person, so a completion never waits behind a title or a connection save. The
+  call returns its database connection before the provider answers and takes none to answer: it
+  marks the connection used in the background, at most once a minute. A refused completion shows
+  nothing and a refused title leaves the chat its fallback name, with no error; that Studio page
+  then sends that kind of call for that person again only after `retryAfterSeconds`. It drops a
+  wait that has grown past an hour because the computer's clock moved back.
 
 A refused request is refused before the provider or OpenAI is called, and records nothing. The
 exception is a ChatGPT login whose connection can no longer be saved when it completes, because
@@ -259,18 +268,21 @@ as the clock runs (a pending login that ends early frees its place sooner); the 
 `details.limit` and `details.windowSeconds`. The message gives the wait in seconds up to two
 minutes and in minutes past that, for example `Too many connection tests. Try again in 14 min.`
 Tests, ChatGPT-login starts, inline completions and conversation titles leave receipts in
-`ai_connection_attempts`, which only the controller reads and writes. The retention loop prunes
-completion and title receipts after two hours and the others after a day. The status and cancel
+`ai_connection_attempts`, and completions and titles also add to their minute's row in
+`ai_side_call_minutes`; only the controller reads and writes either table. The retention loop
+prunes completion and title receipts after ten minutes, their minute rows after two hours and the
+other receipts after a day. The status and cancel
 calls of a ChatGPT login stay in the process that started it. The status call makes no database
 call. A cancel also closes the login's receipt; when the database cannot be reached it still
 cancels, and the login still saves nothing.
 
 Apply the migration `20261120193012_ai_connection_attempts` before deploying the controller that
 counts these limits: without its table, connection tests and ChatGPT-login starts fail. Apply
-`20261116120010_ai_connection_attempts_side_calls` before deploying the controller that also
-counts inline completions and conversation titles: until the table takes their receipts, every
-completion and title request fails with HTTP 500, which the Studio shows as no completion and
-the fallback title. Older controllers ignore the table and enforce none of these limits.
+`20261116120010_ai_connection_attempts_side_calls` and `20261116130600_ai_side_call_minutes`
+before deploying the controller that also counts inline completions and conversation titles:
+until the receipts table takes their receipts and the minute table exists, every completion and
+title request fails with HTTP 500, which the Studio shows as no completion and the fallback
+title. Older controllers ignore both tables and enforce none of these limits.
 
 ### Support report conversations
 

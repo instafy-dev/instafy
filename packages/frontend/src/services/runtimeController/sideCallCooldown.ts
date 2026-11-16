@@ -43,7 +43,9 @@ export function sideCallCooldown(
   if (!cooldown) {
     return null;
   }
-  if (cooldown.until <= now) {
+  // A wait longer than the longest window means the clock moved back since
+  // the refusal; asking again costs at most one more refusal.
+  if (cooldown.until <= now || cooldown.until - now > MAX_WAIT_SECONDS * 1000) {
     cooldowns.delete(key);
     return null;
   }

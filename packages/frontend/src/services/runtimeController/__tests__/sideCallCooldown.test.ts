@@ -121,6 +121,15 @@ describe("side calls refused by the per-account limits", () => {
     expect(fetchMock.mock.calls[2][0]).toBe("http://controller.test/projects/project-1/conversation/title");
   });
 
+  it("ask again when the clock moved back further than the hour window", async () => {
+    fetchMock.mockResolvedValueOnce(completionRefused(60)).mockImplementation(async () => completed());
+
+    await askCompletion();
+    vi.setSystemTime(new Date("2026-11-16T10:00:00Z"));
+    await expect(askCompletion()).resolves.toMatchObject({ success: true, completion: " = 1;" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("pause only the person who was refused", async () => {
     fetchMock.mockResolvedValueOnce(completionRefused(30)).mockImplementation(async () => completed());
 

@@ -250,21 +250,27 @@ pub(crate) struct SlowProxy {
 
 impl SlowProxy {
     pub(crate) async fn start() -> anyhow::Result<Self> {
-        async fn answer(
-            axum::extract::State((reached, respond)): axum::extract::State<(
+        Self::start_answering(json!({ "output": [] })).await
+    }
+
+    /// A slow proxy that answers every request with `answer`.
+    pub(crate) async fn start_answering(answer: Value) -> anyhow::Result<Self> {
+        async fn respond_when_let(
+            axum::extract::State((reached, respond, answer)): axum::extract::State<(
                 Arc<Notify>,
                 Arc<Notify>,
+                Arc<Value>,
             )>,
         ) -> axum::Json<Value> {
             reached.notify_one();
             respond.notified().await;
-            axum::Json(json!({ "output": [] }))
+            axum::Json(answer.as_ref().clone())
         }
         let reached = Arc::new(Notify::new());
         let respond = Arc::new(Notify::new());
         let app = axum::Router::new()
-            .route("/v1/responses", axum::routing::post(answer))
-            .with_state((reached.clone(), respond.clone()));
+            .route("/v1/responses", axum::routing::post(respond_when_let))
+            .with_state((reached.clone(), respond.clone(), Arc::new(answer)));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", listener.local_addr()?);
         let server = spawn_aborting(async move {
@@ -533,7 +539,7 @@ async fn is_open(pool: &PgPool, user_id: Uuid, session_id: Uuid) -> anyhow::Resu
 
 /// Polls `check` every 100 ms for up to 30 s. A ChatGPT poller looks at its
 /// login a poll interval after it starts, then every ten seconds.
-async fn wait_until<F, Fut>(what: &str, mut check: F) -> anyhow::Result<()>
+pub(crate) async fn wait_until<F, Fut>(what: &str, mut check: F) -> anyhow::Result<()>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<bool>>,

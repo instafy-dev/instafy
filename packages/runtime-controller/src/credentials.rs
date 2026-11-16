@@ -1347,7 +1347,7 @@ async fn request_project_editor_completion(
     .await;
 
     if response.completion.is_some() {
-        mark_side_call_credential_used(&state, credential.credential_id, "inline completion").await;
+        mark_side_call_credential_used(&state, credential.credential_id, "inline completion");
     }
 
     Ok(Json(response))
@@ -1430,33 +1430,48 @@ async fn request_project_conversation_title(
         generate_conversation_title_via_proxy(&state, &project_id, &credential, &message).await;
 
     if response.title.is_some() {
-        mark_side_call_credential_used(&state, credential.credential_id, "conversation title")
-            .await;
+        mark_side_call_credential_used(&state, credential.credential_id, "conversation title");
     }
 
     Ok(Json(response))
 }
 
-/// Marks a connection used after a side call it answered. Best effort: the
-/// answer is already in hand, so a busy pool or a failed update must not turn
-/// it into an error.
-async fn mark_side_call_credential_used(state: &AppState, credential_id: Uuid, call: &str) {
-    match state.pool.get().await {
-        Ok(connection) => {
-            if let Err(error) = connection
-                .execute(
-                    "update user_credentials set last_used_at = now(), updated_at = now() where id = $1",
-                    &[&credential_id],
-                )
-                .await
-            {
-                tracing::warn!(?error, call, "failed to update side call credential last_used_at");
+/// Marks a connection used after a side call it answered, in the background,
+/// so the answer neither waits for a pooled connection nor fails with the
+/// update. Side calls come at typing speed, so the mark moves at most once a
+/// minute.
+fn mark_side_call_credential_used(state: &AppState, credential_id: Uuid, call: &'static str) {
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        match pool.get().await {
+            Ok(connection) => {
+                if let Err(error) = connection
+                    .execute(
+                        "update user_credentials
+                            set last_used_at = now(), updated_at = now()
+                          where id = $1
+                            and (last_used_at is null
+                                 or last_used_at < now() - interval '1 minute')",
+                        &[&credential_id],
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        ?error,
+                        call,
+                        "failed to update side call credential last_used_at"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    call,
+                    "no connection to update side call credential last_used_at"
+                );
             }
         }
-        Err(error) => {
-            tracing::warn!(%error, call, "no connection to update side call credential last_used_at");
-        }
-    }
+    });
 }
 
 async fn resolve_editor_completion_credential(
