@@ -835,6 +835,8 @@ test("check notes an \"unchecked\" entry that names what the page already names 
     // the cheat sheet's own footer entry, beside a column no row has: what the reader can do, kept as it is
     const trains = {
       title: "Two trains",
+      // the fare is a number in every row, so it has its sort (the line under the title names the cheaper)
+      sort: [{ key: "fare", label: "Fare, low to high", dir: "asc" }],
       columns: [{ key: "fare", label: "Fare", type: "price" }, { key: "times", label: "Train times", type: "text" }],
       items: [["a", "Express A", "NT$ 300"], ["b", "Local B", "NT$ 200"]].map(([ref, name, fare]) => ({
         ref: `train:${ref}`, name,
