@@ -1016,10 +1016,12 @@ engine only when the person named one. Never invent a page path. A turn using
 CLI search opens the result's page too, by the research skill's "Searching". A
 page that ends without what the turn needs (it has no page, fails, is refused or
 covered, or keeps changing) ends that page, not the task: the turn goes on in
-the same turn, never to the same address, to a link on a page it read, then,
-unless that site didn't answer, to its home page (which always opens), menu and
-own search box, then to the official site of what the task names, then to
-another official source. Every browser step that ends a page says only its own
+the same turn, never to the same address, to a link on a page it read, then to
+that site's home page, menu and search box (unless the site didn't answer, is
+closed to Octo because it is link-only or the person declined it, or is a search
+engine nobody named), then to the official site of what the task names, then to
+another official source. Only the refusal of an address nobody gave says that a
+site's home page always opens: it is the one place that is true. Every browser step that ends a page says only its own
 facts and points to that one list ("Go on in this turn as "Finding a page"
 says."), where each once named a next source of its own. Facts come from a
 place's own page, not a listing or a kiosk page, and a page's own tab or link

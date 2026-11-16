@@ -3,7 +3,7 @@ name: instafy-getting-around
 description: Get from one place to another: a route or public transport from the operator's own journey planner, and what a route's finding and a page built from it say.
 context_kind: workflow
 context_parent: instafy-browser-automation, instafy-web-research, instafy-interactive-artifacts
-routing_keywords: get there, getting there, how to get to, how do i get to, directions to, route to, route from, metro route, tram route, bus route, train route, walking route, journey planner, public transport, metro, subway, tram, ferry
+routing_keywords: get there, getting there, get from, how to get to, how do i get to, how do i get from, how can i get to, how can i get from, how to reach, how do i reach, how can i reach, directions, route to, route from, metro route, tram route, bus route, train route, walking route, walk from, way from, journey planner, public transport, public transit, timetable, bus, metro, subway, underground, u-bahn, s-bahn, tram, ferry, train from, train to, trains from, trains to, next train, by train
 ---
 
 # Getting around

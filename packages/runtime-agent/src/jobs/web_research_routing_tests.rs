@@ -561,7 +561,7 @@ fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let failed = "- A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then, unless that site didn't answer, its home page (a home page always opens), menu and own search box; then the official site of what the task names; then another official source.";
+    let failed = "- A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source.";
     assert_eq!(
         section.matches("- A page that").count(),
         1,
@@ -1737,7 +1737,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "Open an address the person or a skill gave, or a link on a page you read (print a page's links with its text), else the official site of what the task names and its links and search box.",
         "Prefer available native search for discovery; never invent a page path.",
         "A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task.",
-        "a link on a page you read; then, unless that site didn't answer, its home page (a home page always opens), menu and own search box; then the official site of what the task names; then another official source.",
+        "a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source.",
         "A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page",
     ] {
         assert!(carried.contains(needle), "{needle}");
@@ -3355,5 +3355,370 @@ fn provider_retrieval_keeps_direct_reader_restrictions_and_survives_skill_filter
         fs::write(&skill, &edited).unwrap();
         learn::ensure_project_memory_scaffold(tmp.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), edited);
+    }
+}
+
+/// A browser turn on a restored thread, for `request`: its prompt.
+fn restored_browser_prompt(tmp: &std::path::Path, request: &str, metadata: JsonValue) -> String {
+    let processor = test_job_processor(tmp);
+    let project_id = Uuid::new_v4();
+    let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+    job.project_id = Some(project_id);
+    let state = json!({
+        "defaultThreadId": "existing-thread",
+        "sharedBrowserThreadId": "existing-browser-thread",
+        "historyReplayRequired": false,
+    });
+    let (prompt, _, metrics) = processor
+        .build_prompt_with_text(
+            &project_id,
+            &job,
+            tmp,
+            request,
+            true,
+            Some(&state),
+            &[],
+            None,
+            None,
+        )
+        .expect("prompt should build");
+    assert_eq!(metrics["promptMode"], "stateful_compact");
+    prompt
+}
+
+/// A topic skill reaches a browser turn only when its words name it, while a route's and a review's how-to were
+/// the browser skill's own lines and reached every browser turn. So each topic skill's keywords say how people
+/// ask, not only the words of the requests its lines came from: a bus, the next train from one town to another,
+/// directions, the way from one place to another, how to reach a place, how long a walk takes; a review, what
+/// reviewers say, which of two is better, the difference between two. Asked "Which bus goes from the airport to the city centre?" or "Find two
+/// reviews of …", a browser turn carried neither skill, and with no web search it had only the maker's site left
+/// for a review (a local test, Nov 16). A fresh browser turn and one on a restored thread carry the skill its words
+/// name and not the other; words that name neither carry neither. A building turn routes a topic only under the
+/// skill its words route, so a coding request's ("Add a bus to the event system", "Review the changes") routes
+/// none.
+#[test]
+fn everyday_words_bring_the_topic_skills_to_every_browser_turn() {
+    const ROUTES: &str = "instafy-getting-around";
+    const COMPARING: &str = "instafy-comparing";
+    let tmp = scaffolded_space();
+    let heading = |id: &str| format!("## Context: {id} (.agents/skills/{id}/SKILL.md)");
+    let given = |id: &str| {
+        format!("From `{id}` (`.agents/skills/{id}/SKILL.md`; this thread may predate it):\n")
+    };
+    let cases: &[(&str, Option<&str>)] = &[
+        (
+            "Which bus goes from the airport to the city centre?",
+            Some(ROUTES),
+        ),
+        (
+            "When is the next train from the capital to the coast on Sunday morning?",
+            Some(ROUTES),
+        ),
+        (
+            "How can I reach the old library from the main station?",
+            Some(ROUTES),
+        ),
+        (
+            "What's the best way from the airport to the old town?",
+            Some(ROUTES),
+        ),
+        (
+            "How do I get from the airport to the old town?",
+            Some(ROUTES),
+        ),
+        (
+            "Find directions from my hotel to the stadium.",
+            Some(ROUTES),
+        ),
+        ("Which U-Bahn line goes to the museum?", Some(ROUTES)),
+        (
+            "How long does it take to walk from the station to the castle?",
+            Some(ROUTES),
+        ),
+        (
+            "Is there a night bus back to the hotel after the concert?",
+            Some(ROUTES),
+        ),
+        ("Find two reviews of this e-reader.", Some(COMPARING)),
+        ("What do reviewers say about this laptop?", Some(COMPARING)),
+        (
+            "Put a price and a review link for each on the page",
+            Some(COMPARING),
+        ),
+        (
+            "This e-reader or that one: which is better for reading at night?",
+            Some(COMPARING),
+        ),
+        (
+            "What's the difference between the two models?",
+            Some(COMPARING),
+        ),
+        ("Sign in to GitHub and open my notifications", None),
+        ("Fill in what's still missing.", None),
+        (
+            "Open the bookshop's website and find its opening hours.",
+            None,
+        ),
+    ];
+    for (request, topic) in cases {
+        for transport in ["shared", "desktop-personal"] {
+            let metadata = json!({ "browserTransport": transport });
+            let fresh = fresh_prompt(tmp.path(), request, metadata.clone());
+            let restored = restored_browser_prompt(tmp.path(), request, metadata);
+            for id in [ROUTES, COMPARING] {
+                let named = *topic == Some(id);
+                assert_eq!(
+                    fresh.contains(&heading(id)),
+                    named,
+                    "{transport}: {request}: {id}"
+                );
+                assert_eq!(
+                    restored.contains(&given(id)),
+                    named,
+                    "{transport}: {request}: {id} on a restored thread"
+                );
+            }
+        }
+    }
+    // A building turn whose words route the browser, research or page skill gets the topic under it.
+    let contexts = build_top_level_context_nodes(tmp.path());
+    for (prompt, topic) in [
+        (
+            "Put a price and a review link for each on the page",
+            COMPARING,
+        ),
+        ("Add the bus times from the airport to the page", ROUTES),
+    ] {
+        assert!(
+            routed(&contexts, prompt).iter().any(|id| id == topic),
+            "{prompt}"
+        );
+    }
+    for prompt in [
+        "Add a bus to the event system that publishes messages",
+        "Review the changes in this branch and fix any bugs",
+        "How do I get the user's id from the session?",
+        "What's the difference between these two functions?",
+    ] {
+        let ids = routed(&contexts, prompt);
+        for topic in [ROUTES, COMPARING] {
+            assert!(!ids.iter().any(|id| id == topic), "{prompt}: {ids:?}");
+        }
+    }
+}
+
+/// The rule every interactive turn carries on when to open Instafy's browser names the pages the browser skill and
+/// the router name: one `instafy web read` says `needs_browser` for, one the person wants to see, or a provider's
+/// screens to walk them through. It said "Whenever a web page would help", against the skill's "`instafy web read`
+/// … reads the rest, with no card", so a turn read two rules for one page.
+#[test]
+fn the_browser_rule_and_the_skills_name_the_same_pages_for_the_browser() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let rule = flat(BROWSER_CHOICE_CONTRACT);
+    assert!(
+        rule.contains(
+            "- Open Instafy's browser yourself when a page needs it (`instafy web read` says `needs_browser`, the person wants to see it, or you walk the person through a provider's screens), without asking in chat first"
+        ),
+        "{rule}"
+    );
+    assert!(flat(BROWSER_SKILL).contains(
+        "a page `instafy web read` says `needs_browser` for, a site's screens to walk them through or use, or a page they want to see. `instafy web read <url…> --json` reads the rest, with no card."
+    ));
+    assert!(flat(ROUTER_SKILL).contains("A page with neither is read with `instafy web read`"));
+    for text in [&rule, &flat(BROWSER_SKILL), &flat(ROUTER_SKILL)] {
+        assert!(
+            !text
+                .to_lowercase()
+                .contains("whenever a web page would help"),
+            "{text}"
+        );
+        assert!(!text.contains("answer as well without a page"), "{text}");
+    }
+}
+
+/// A topic skill has a room of its own in a turn's snapshot. Taken from the shared room, the two topics and their
+/// index lines left the skills loaded last, the router last of all, without theirs: a lookup's build lost the
+/// router's "Answer from memory only when no page can be read", and so did a coding request's, by the index lines
+/// alone (a local test, Nov 16).
+#[test]
+fn the_topic_skills_take_no_room_from_the_skills_loaded_after_them() {
+    let tmp = scaffolded_space();
+    let last =
+        "Answer from memory only when no page can be read, and then say no live browsing was used.";
+    assert!(ROUTER_SKILL.trim_end().ends_with(last));
+    for (request, topic) in [
+        (
+            "Look up the specs of the e-reader",
+            Some("instafy-comparing"),
+        ),
+        (
+            "Add the metro route from the station to the bookshop to the page",
+            Some("instafy-getting-around"),
+        ),
+        ("Add a route for /api/users to the Express server", None),
+    ] {
+        let prompt = fresh_prompt(tmp.path(), request, json!({}));
+        assert!(prompt.contains(last), "{request}");
+        if let Some(topic) = topic {
+            let loaded = format!("## Context: {topic} (.agents/skills/{topic}/SKILL.md)");
+            assert!(prompt.contains(&loaded), "{request}");
+        }
+    }
+}
+
+/// A topic skill draws on the topic skills' own room first, then on the shared one, as any skill its words route
+/// does: a space's own topic as large as that room, loaded first, leaves the bundled topic its words also route its
+/// place in the snapshot.
+#[test]
+fn a_topic_past_the_topic_room_draws_on_the_shared_room() {
+    let tmp = scaffolded_space();
+    let dir = tmp
+        .path()
+        .join(learn::SKILLS_ROOT_RELATIVE_PATH)
+        .join("space-crossing-notes");
+    fs::create_dir_all(&dir).unwrap();
+    let rows = "- Each harbour boat's own page lists its crossings.\n".repeat(320);
+    fs::write(
+        dir.join("SKILL.md"),
+        format!(
+            "---\nname: space-crossing-notes\ndescription: Notes for this space.\ncontext_kind: workflow\ncontext_parent: instafy-interactive-artifacts\nrouting_keywords: harbour boats\n---\n\n# Harbour boats\n\n{rows}"
+        ),
+    )
+    .unwrap();
+    let contexts = build_top_level_context_nodes(tmp.path());
+    let request = "Compare the harbour boats on a page";
+    let ids = routed(&contexts, request);
+    for id in ["space-crossing-notes", "instafy-comparing"] {
+        assert!(ids.iter().any(|routed| routed == id), "{id}: {ids:?}");
+    }
+    let prompt = fresh_prompt(tmp.path(), request, json!({}));
+    let own = prompt
+        .find("## Context: space-crossing-notes (")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    let comparing = prompt
+        .find("## Context: instafy-comparing (")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    assert!(
+        own < comparing,
+        "the space's topic scores higher and loads first"
+    );
+    assert!(prompt[own..comparing].contains("[truncated]"));
+    let (_, body) = skill_routing::split_front_matter(COMPARING_SKILL);
+    assert!(
+        prompt[comparing..].contains(body.trim_end()),
+        "the bundled topic loads whole"
+    );
+}
+
+/// A browser turn on a restored thread is given the skills its words route up to the room a routed skill has, and
+/// one cut there is marked `[truncated]`, as the snapshot marks it: given half a rule with no mark, a turn acts on
+/// it as the whole. A skill that fits is not marked.
+#[test]
+fn a_skill_cut_for_a_restored_browser_turn_is_marked() {
+    let tmp = scaffolded_space();
+    let dir = tmp
+        .path()
+        .join(learn::SKILLS_ROOT_RELATIVE_PATH)
+        .join("space-harbour-notes");
+    fs::create_dir_all(&dir).unwrap();
+    let rows = "- The harbour boats' own page lists each crossing and its pier.\n".repeat(300);
+    fs::write(
+        dir.join("SKILL.md"),
+        format!(
+            "---\nname: space-harbour-notes\ndescription: How the harbour boats run.\ncontext_kind: workflow\ncontext_parent: instafy-browser-automation\nrouting_keywords: harbour boats\n---\n\n# Harbour notes\n\n{rows}"
+        ),
+    )
+    .unwrap();
+    let prompt = restored_browser_prompt(
+        tmp.path(),
+        "When do the harbour boats leave?",
+        json!({ "browserTransport": "shared" }),
+    );
+    let start = prompt
+        .find("From `space-harbour-notes`")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    let section = &prompt[start..];
+    let end = section[1..]
+        .find("\nFrom `")
+        .map_or(section.len(), |at| at + 1);
+    let section = &section[..end];
+    assert!(section.trim_end().ends_with("[truncated]"), "{section}");
+    assert!(
+        section.len() < PROJECT_MEMORY_MAX_FILE_BYTES + 200,
+        "{}",
+        section.len()
+    );
+
+    let prompt = restored_browser_prompt(
+        tmp.path(),
+        "Which bus goes from the airport to the city centre?",
+        json!({ "browserTransport": "shared" }),
+    );
+    assert!(prompt.contains("From `instafy-getting-around`"), "{prompt}");
+    assert!(!prompt.contains("[truncated]"), "{prompt}");
+}
+
+/// Comparing took the browser skill's place among a comparison page's skills ("Make a page comparing … with each
+/// one's warranty." routed the page and browser skills, and routes the page and comparing skills now), so a direct
+/// change was named no reader for the pages comparing names. A skill under the browser or research skill brings the
+/// research skill's `instafy web read` line to a direct change; a turn on a restored thread, which can ask for the
+/// browser, is named the skills as before. A route asked for with no browser, page or research word routes no skill
+/// for a building turn, as "Find the metro route to the bookshop" routed none before: a walking route routed the
+/// browser skill only by "walk the person through a site" in its description, which the route skill's own "walk"
+/// now shares. A browser turn carries the route skill for both.
+#[test]
+fn a_direct_change_named_a_topic_skill_is_pointed_to_web_read() {
+    let tmp = scaffolded_space();
+    let contexts = build_top_level_context_nodes(tmp.path());
+    let request =
+        "Make a page comparing the three e-readers side by side, with each one's warranty.";
+    let ids = routed(&contexts, request);
+    for id in ["instafy-interactive-artifacts", "instafy-comparing"] {
+        assert!(ids.iter().any(|routed| routed == id), "{id}: {ids:?}");
+    }
+    let direct = format_skill_hints(tmp.path(), request, DIRECT_WRITE_SKILL_HINTS_LEAD)
+        .expect("a direct change gets hints");
+    assert_eq!(
+        direct.skills,
+        [
+            "instafy-comparing",
+            "instafy-interactive-artifacts",
+            RESEARCH
+        ]
+    );
+    assert!(
+        direct.text.contains(&format!(
+            "- `{RESEARCH}`: `instafy web read <url…> --json --find '<terms>'`:"
+        )),
+        "{}",
+        direct.text
+    );
+    let restored = format_skill_hints(tmp.path(), request, RESTORED_SKILL_HINTS_LEAD)
+        .expect("a restored thread gets hints");
+    assert_eq!(
+        restored.skills,
+        ["instafy-comparing", "instafy-interactive-artifacts"]
+    );
+    // A direct change none of whose skills hangs under a reader is named none.
+    let page = "Add a dark mode toggle to the dashboard";
+    if let Some(hints) = format_skill_hints(tmp.path(), page, DIRECT_WRITE_SKILL_HINTS_LEAD) {
+        assert!(
+            !hints.skills.iter().any(|id| id == RESEARCH),
+            "{:?}",
+            hints.skills
+        );
+    }
+    for request in [
+        "Find the walking route from the cathedral to the castle.",
+        "Find the metro route to the bookshop for Monday morning.",
+    ] {
+        assert!(routed(&contexts, request).is_empty(), "{request}");
+        let browser = fresh_prompt(tmp.path(), request, json!({ "browserTransport": "shared" }));
+        assert!(
+            browser.contains(
+                "## Context: instafy-getting-around (.agents/skills/instafy-getting-around/SKILL.md)"
+            ),
+            "{request}"
+        );
     }
 }

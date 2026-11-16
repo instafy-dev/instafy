@@ -3,7 +3,7 @@ name: instafy-comparing
 description: Compare products or options side by side: which items, each one's own page, its values and the reviews asked for, and what a value nobody found says.
 context_kind: workflow
 context_parent: instafy-browser-automation, instafy-web-research, instafy-interactive-artifacts
-routing_keywords: compare, comparing, comparison, versus, side by side, which to buy, which one to buy, specs, specifications, warranty, independent reviews, reviews each, reviews of each
+routing_keywords: compare, comparing, comparison, versus, side by side, which to buy, which one to buy, which is better, better than, difference between, specs, specifications, warranty, review, reviewer, independent reviews, reviews each, reviews of each
 ---
 
 # Comparing items

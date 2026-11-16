@@ -1592,9 +1592,14 @@ fn not_found_words(record: &serde_json::Map<String, JsonValue>) -> Vec<String> {
 /// the turn chose, and the page people share said neither that the stop was Octo's pick nor that
 /// the walk to the shop wasn't checked, though the turn's own words to the build said both:
 /// builds read only the findings, and this finding left its limits out (a local test, Nov 9).
-/// What a route's limits are, and how a page built from a route says them, is
-/// `instafy-getting-around`'s: this line names no topic.
-pub(super) const FINDING_LIMITS_LINE: &str = "Where you use a fact, say with it what its finding says it doesn't confirm: a value Octo chose, not the page, and what it leaves out.";
+/// So a value filled in on a page's form is Octo's pick, and the fact only for it, even when its
+/// finding leaves that out, unless the person gave it or a finding says the own page of what they
+/// asked about names it: what a route's line said of its end stop, said of any form. A build's
+/// words often name no topic ("Make that into a page I can share."), so a topic skill's own
+/// lines (`instafy-getting-around`'s, of a route's end stop and the walk from it) reach only the
+/// builds that route it: this line names no topic.
+pub(super) const FINDING_LIMITS_LINE: &str = "Where you use a fact, say with it what its finding says it doesn't confirm: a value Octo chose, not the page, and what it leaves out. \
+Unless the person gave it or a finding says the own page of what they asked about names it, a value filled in on a page's form (an option, a day, a time) is Octo's pick and the fact is only for it: say both where you use it.";
 
 /// The browser turns of this chat since the building thread's last turn, as
 /// the controller lists them at lease (`browser_turns_since`): what each was
@@ -2240,7 +2245,10 @@ mod tests {
         assert!(
             section.contains(
                 "\n- Where you use a fact, say with it what its finding says it doesn't confirm: a \
-                 value Octo chose, not the page, and what it leaves out.\n"
+                 value Octo chose, not the page, and what it leaves out. Unless the person gave it \
+                 or a finding says the own page of what they asked about names it, a value filled \
+                 in on a page's form (an option, a day, a time) is Octo's pick and the fact is \
+                 only for it: say both where you use it.\n"
             ),
             "{section}"
         );
@@ -2423,11 +2431,18 @@ mod tests {
     /// chat's replay carries the line (`conversation_context::browser_runs_note`), as the
     /// section since the building thread's last turn does. What a route's limits are, and how a
     /// page says them, is `instafy-getting-around`'s, which a build whose words name a route
-    /// carries: the line names no topic.
+    /// carries: the line names no topic. A build whose words name none ("Make that into a page I
+    /// can share.") is still told, of any form, what the route's line said of its end stop: a
+    /// value filled in on a page's form is Octo's pick, and the fact only for it, unless the
+    /// person gave it or a finding says the own page of what they asked about names it, even
+    /// when its finding left that out.
     #[test]
     fn a_build_after_a_browser_part_says_whose_pick_a_routes_end_stop_is() {
         let route = "\n- Where you use a fact, say with it what its finding says it doesn't \
-                     confirm: a value Octo chose, not the page, and what it leaves out.\n";
+                     confirm: a value Octo chose, not the page, and what it leaves out. Unless the \
+                     person gave it or a finding says the own page of what they asked about names \
+                     it, a value filled in on a page's form (an option, a day, a time) is Octo's \
+                     pick and the fact is only for it: say both where you use it.\n";
         assert_eq!(format!("\n- {FINDING_LIMITS_LINE}\n"), route);
         assert!(
             !FINDING_LIMITS_LINE.contains("route"),

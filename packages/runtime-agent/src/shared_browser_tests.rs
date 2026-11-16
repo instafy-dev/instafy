@@ -3766,8 +3766,24 @@ fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
     let finding = &skill[skill.find("## Finding a page").expect("section")..];
     let finding = &finding[..finding.find("\n## ").expect("next section")];
     assert!(finding.contains(
-        "- A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then, unless that site didn't answer, its home page (a home page always opens), menu and own search box; then the official site of what the task names; then another official source."
+        "- A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source."
     ));
+    // The list sends a page that ended to its site's home page only where that page opens: a
+    // link-only site refuses every address, its root too, a site the person declined is not
+    // asked for again in the run, and a search engine opens only when someone named it, so a
+    // refused results page nobody gave goes on to the official site, not to that engine's
+    // search box. That a home page always opens is said only by the refusal of an address
+    // nobody gave, the one place it is true.
+    assert!(!finding.contains("always opens"), "{finding}");
+    assert_eq!(
+        SHARED_BROWSER_SCRIPT
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains("always opens"))
+            .count(),
+        1
+    );
+    assert!(SHARED_BROWSER_SCRIPT.contains("is link-only: Octo never opens it, in any tab."));
 }
 
 /// The chat's browser turns, one run each, as runtime-agent holds them: the
