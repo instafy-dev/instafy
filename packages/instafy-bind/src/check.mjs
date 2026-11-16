@@ -868,7 +868,7 @@ export function checkValues(dir) {
   // the line under a comparison's title comes from its sorts, where the compare starter's own app.js draws it
   const numbers = OWN_LEDE.test(app) ? unsortedNumbers(data, liveRecords(root)).map((c) => c.label) : [];
   if (numbers.length) {
-    problems.push(`the sort: no "sort" entry is by a column that reads as a number, so nothing is said under the title. Of the columns that do (${listed(numbers)}), add an entry, with "dir", for each that is an amount the person compares by (a price, a weight, a size): the page then names the option each puts first under its title ("Lowest price: Option B"), and under 5 options no row moves. A number in a name (a chip, a model, a version) is no amount: if no column is one, add none, and nothing is said there.`);
+    problems.push(`the sort: no "sort" entry is by a column that reads as a number, so nothing is said under the title. Of the columns that do (${listed(numbers)}), add an entry, with "dir", for each that is an amount the person compares by (a price, a weight, a size): once every row shows its value, the page names the option it puts first under its title ("Lowest price: Option B"), and under 5 options no row moves. A number in a name (a chip, a model, a version) is no amount: if no column is one, add none, and nothing is said there.`);
   }
   return { checked: true, problems, notes };
 }

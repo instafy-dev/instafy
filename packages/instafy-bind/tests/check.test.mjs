@@ -1016,7 +1016,7 @@ test("check asks a comparison with no sort by a number for an entry per amount t
     ],
   });
   const expect = "Maker Laptop 12, Maker Laptop 13 Pro, Maker Laptop 16";
-  const asked = (columns) => `the sort: no "sort" entry is by a column that reads as a number, so nothing is said under the title. Of the columns that do (${columns}), add an entry, with "dir", for each that is an amount the person compares by (a price, a weight, a size): the page then names the option each puts first under its title ("Lowest price: Option B"), and under 5 options no row moves. A number in a name (a chip, a model, a version) is no amount: if no column is one, add none, and nothing is said there.`;
+  const asked = (columns) => `the sort: no "sort" entry is by a column that reads as a number, so nothing is said under the title. Of the columns that do (${columns}), add an entry, with "dir", for each that is an amount the person compares by (a price, a weight, a size): once every row shows its value, the page names the option it puts first under its title ("Lowest price: Option B"), and under 5 options no row moves. A number in a name (a chip, a model, a version) is no amount: if no column is one, add none, and nothing is said there.`;
   const all = asked("CPU, Battery, Weight and Starting price");
   const notFound = (what) => ({ note: `${what} not found on maker.example's page` });
   const price = { key: "price", label: "Starting price, low to high", dir: "asc" };
