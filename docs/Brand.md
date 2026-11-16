@@ -199,9 +199,9 @@ is printed: the 20px thread stack, the conversation roster, a phone's header.
   profile cards), a quiet AI chip follows an AI's name: `AiTag`
   (`packages/frontend/src/components/AiTag.tsx`), 10px, medium weight, slate
   on a faint fill, with a small radius: the studio's quiet tag
-  (`QUIET_TAG_CLASS`), the one the drawer already uses for a runtime's kind.
-  The drawer's section for agents is headed AI (Runtimes & AI while it groups
-  them by runtime). The chip never appears in thread rows or inside a
+  (`QUIET_TAG_CLASS`), the one the drawer already uses for a machine's kind.
+  The drawer's section for agents is headed AI (Machines & AI while it groups
+  them by machine). The chip never appears in thread rows or inside a
   sentence. The chip's comma is for screen readers only, so a row reads
   "Pia, AI", and an AI face or control that has an accessible name of its
   own adds ", AI" to it (`formatAiAccessibleName`: "View profile for
@@ -418,7 +418,7 @@ Detached nodes follow the terminal
 direction of their tentacles instead of hanging below them like fixed weights.
 The attachment points remain pinned, and each loop returns to the exact static
 geometry. Do not add continuous waving, whole-mark bobbing, or a second recovery
-stroke. Waiting for a runtime, requesting approval, compacting context,
+stroke. Waiting for a machine, requesting approval, compacting context,
 finalizing, and completed messages remain still.
 
 Motion is product state, not a second logo variant. Favicons, OAuth badges,

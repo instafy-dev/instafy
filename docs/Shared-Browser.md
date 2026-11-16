@@ -3368,7 +3368,7 @@ takes longer than the grace a picture on its way has (1.5 s).
 | off | "Instafy's browser is off." | Open browser | Off |
 | failed | "Instafy's browser did not open. Try again." | Try again | Off |
 | failed (machine) | "This space's machine did not start. Try again." | Try again | Off |
-| blocked | its own: turned off for this space, ask a space builder, the machine must restart, or "Instafy's browser stopped and did not start again. Restart this space's machine to open it." | none | Off |
+| blocked | its own: turned off for this space, ask a space builder, the machine must restart, "Instafy's browser stopped and did not start again. Restart this space's machine to open it.", or, on a server with no hosted machine provider, "Instafy's browser runs on a hosted machine. This server isn't set up to start one. Ask whoever runs this Instafy server to set it up." | none | Off |
 
 Off covers a machine or browser that stopped, a browser that started again
 while the view reconnected, and a machine without its browser. A view is

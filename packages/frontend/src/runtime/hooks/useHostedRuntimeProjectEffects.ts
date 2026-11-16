@@ -188,12 +188,15 @@ export function useHostedRuntimeProjectEffects({
     if (entry.health === "offline") {
       if (runtimeOfflineAlertRef.current !== preferredRuntimeId) {
         runtimeOfflineAlertRef.current = preferredRuntimeId;
+        // Only someone who can change the space gets here (the policy passes
+        // runtimeControllerEnabled with write access), so the offer is theirs.
+        // It may also be offline when the space opens, so "is", not "went".
         showStatus(
-          "Preferred runtime went offline. Switch back to Auto (best available)?",
+          "The selected machine is offline. Use the best available one instead?",
           "warning",
           8000,
           {
-            actionLabel: "Switch to auto",
+            actionLabel: "Use best available",
             onAction: () => {
               void setPreferredRuntime(null);
             },

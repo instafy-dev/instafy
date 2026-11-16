@@ -1394,7 +1394,7 @@ export function FilesPanel({
       throw new Error("Missing active file.");
     }
     if (!runtimeReady) {
-      throw new Error("Runtime not ready yet.");
+      throw new Error("This space's machine isn't ready yet.");
     }
     if (workspaceWritesBlocked) throw new Error("Workspace is unavailable. Your edits are kept here.");
     if (projectWriteDisabled) {
@@ -1836,7 +1836,7 @@ export function FilesPanel({
         ) : null}
 
         {workspaceIssue && rootEntries.length > 0 ? (
-          <Text variant="caption" tone="subtle" className="mt-2" data-testid="files-stale-notice">
+          <Text variant="caption" tone="muted" className="mt-2" data-testid="files-stale-notice">
             Showing previously loaded files.
           </Text>
         ) : null}
@@ -1896,7 +1896,14 @@ export function FilesPanel({
                             <span className="text-xs text-rose-500" role="img" aria-label="Unsaved changes">●</span>
                           ) : null}
                         </div>
-                        <Text as="p" variant="caption" tone="subtle" className="w-full break-words">
+                        {/* Muted at rest; on the open file's or a hovered row's slate-100,
+                            where slate-600 reads 4.4:1, a step darker. */}
+                        <Text
+                          as="p"
+                          variant="caption"
+                          tone={activePath === entry.path ? "secondary" : "muted"}
+                          className="w-full break-words group-hover:text-slate-700 group-data-[hovered]:text-slate-700"
+                        >
                           {entry.path}
                         </Text>
                       </Button>
@@ -2385,7 +2392,7 @@ export function FilesPanel({
       case "unsupported":
         return (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
-            <Badge size="sm" className="px-4 py-2 text-sm text-slate-600">
+            <Badge size="sm" className="px-4 py-2 text-sm">
               {viewerState.entry?.mimeType ?? "Unsupported file type"}
             </Badge>
             <Text as="p" variant="body" tone="muted" className="max-w-sm">
@@ -2511,7 +2518,7 @@ export function FilesPanel({
       <div className="flex h-full flex-col text-sm text-slate-600 dark:text-slate-300">
         {explorerToolbar}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
-          <Text variant="body" tone="subtle" className="max-w-[22rem]">
+          <Text variant="body" tone="muted" className="max-w-[22rem]">
             Connect the runtime controller to browse space files.
           </Text>
           <div className="flex flex-wrap justify-center gap-2">
@@ -2537,7 +2544,7 @@ export function FilesPanel({
       <div className="flex h-full flex-col text-sm text-slate-600 dark:text-slate-300">
         {explorerToolbar}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
-          <Text variant="body" tone="subtle" className="max-w-[22rem]">
+          <Text variant="body" tone="muted" className="max-w-[22rem]">
             Select or create a space to view its files.
           </Text>
           <div className="flex flex-wrap justify-center gap-2">

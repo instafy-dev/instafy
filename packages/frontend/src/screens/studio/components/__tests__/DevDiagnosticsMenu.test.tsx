@@ -16,7 +16,6 @@ vi.mock("../../../../status/useStatus", () => ({
 // exercise.
 vi.mock("../../../../runtime/runtimeMenuShared", () => ({
   RuntimeStateIndicator: () => null,
-  RUNTIME_BADGE_CLASSES: { neutral: "", warning: "", danger: "" },
   formatTunnelLabel: () => "tunnel.example.dev",
 }));
 vi.mock("../../../../runtime/runtimeLabels", () => ({
@@ -92,7 +91,7 @@ describe("DevDiagnosticsMenu", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps quiet defaults: no Empty labels, no runtimes section, no migration note", async () => {
+  it("keeps quiet defaults: no Empty labels, no machines section, no migration note", async () => {
     await act(async () => {
       root.render(
         <DevDiagnosticsMenu {...baseProps} onShowAppLogs={() => {}} hasAppLogs={false} />,
@@ -100,7 +99,7 @@ describe("DevDiagnosticsMenu", () => {
     });
 
     expect(container.textContent).not.toContain("Empty");
-    expect(container.textContent).not.toContain("Runtimes");
+    expect(container.textContent).not.toContain("Machines");
     expect(container.textContent).not.toContain("No runtimes detected");
     expect(container.textContent).not.toContain("now live in");
     expect(container.textContent).not.toContain("Supabase URL");
@@ -134,7 +133,7 @@ describe("DevDiagnosticsMenu", () => {
     );
   });
 
-  it("renders runtime cards with a working tunnel copy control", async () => {
+  it("renders machine cards with a working tunnel copy control", async () => {
     const onCopyTunnel = vi.fn();
     await act(async () => {
       root.render(
@@ -146,7 +145,8 @@ describe("DevDiagnosticsMenu", () => {
       );
     });
 
-    expect(container.textContent).toContain("Runtimes");
+    expect(container.textContent).toContain("Machines");
+    expect(container.textContent).not.toContain("Runtimes");
     expect(container.textContent).toContain("Desktop runtime");
     // No permanent placeholder for missing tunnel metadata.
     expect(container.textContent).not.toContain("Tunnel metadata unavailable");

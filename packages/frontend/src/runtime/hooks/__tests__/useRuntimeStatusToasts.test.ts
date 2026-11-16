@@ -173,9 +173,11 @@ describe("local runtime status toasts", () => {
     const message = formatLocalRuntimeOfflineMessage("CLI Runtime Dogfood");
 
     expect(message).toContain("CLI Runtime Dogfood");
-    expect(message).toContain("appears offline");
+    expect(message).toContain("is offline");
     expect(message).not.toContain("Instafy Cloud");
     expect(message).not.toContain("Falling back");
+    // The machine's own name may say runtime; the sentence never does.
+    expect(message.replace("CLI Runtime Dogfood", "")).not.toMatch(/runtime/i);
   });
 
   it("does not show offline or back-online toasts for a transient workspace status blip", async () => {
@@ -225,7 +227,7 @@ describe("local runtime status toasts", () => {
     });
 
     const call = showStatus.mock.calls.find(
-      ([message]) => typeof message === "string" && message.includes("appears offline"),
+      ([message]) => typeof message === "string" && message.includes("is offline"),
     );
     expect(call).toBeDefined();
     const options = call?.[3] as { actionLabel?: string; onAction?: () => void } | undefined;
@@ -249,7 +251,7 @@ describe("local runtime status toasts", () => {
     });
 
     expect(showStatus).toHaveBeenCalledWith(
-      "CLI Runtime Dogfood appears offline. Reconnect it or select another runtime if work stalls.",
+      "CLI Runtime Dogfood is offline. Agents can work on it again once it's back online.",
       "warning",
       6000,
       { actionLabel: "How to reconnect", onAction: undefined },

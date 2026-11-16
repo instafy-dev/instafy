@@ -51,7 +51,7 @@ export function ChatActionCard({
         {overline ? (
           <div className="flex items-center gap-2">
             {icon}
-            <Text variant="label" tone="subtle">
+            <Text variant="label" tone="muted">
               {overline}
             </Text>
           </div>

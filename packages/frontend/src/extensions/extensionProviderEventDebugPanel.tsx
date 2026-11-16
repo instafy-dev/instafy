@@ -86,11 +86,11 @@ export function ExtensionProviderEventDebugPanel({
                 className="flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-300"
                 data-testid={`provider-event-log-entry-${index}`}
               >
-                <Badge size="xs" className="text-slate-600">
+                <Badge size="xs">
                   {formatProviderEventReactionLabel(entry.reaction)}
                 </Badge>
                 {entry.count > 1 ? (
-                  <Badge size="xs" className="text-slate-600">
+                  <Badge size="xs">
                     {entry.count}x
                   </Badge>
                 ) : null}

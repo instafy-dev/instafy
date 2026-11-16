@@ -3,7 +3,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { textTones } from "../../../../styles/typography";
+import { SEMANTIC_TONE_CLASSES } from "../../../../theme/semanticTones";
 import type { ChatMessage } from "../../types";
+import { resolveTimelineStatusBadge } from "../chatMessageDetailHelpers";
 import { TimelineEntry } from "../ChatTimelineEntry";
 
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus() {} }) }));
@@ -197,5 +200,100 @@ describe("a turn's usage row in the run trace", () => {
     );
     expect(container.querySelector('[data-testid="timeline-usage-model"]')).toBeNull();
     expect(container.textContent).toContain("Input 1200");
+  });
+});
+
+// A status chip's colour comes from Badge's tone. Colour classes passed as
+// className lost to Badge's neutral fill, border and text (Tailwind orders
+// utilities that set the same property by name), so every chip read grey.
+describe("a timeline row's status chip", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  const classesOf = (element: Element | null | undefined) =>
+    (element?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
+  const greys = (classes: string[]) => classes.filter((name) => /^(?:dark:)?(?:bg|text|border)-slate-/.test(name));
+
+  async function renderToolCall(status: string) {
+    const message: ChatMessage = {
+      id: `tool-${status}`,
+      role: "assistant",
+      authorId: null,
+      content: "Searched the docs",
+      timestamp: 0,
+      files: null,
+      messageType: "mcp_tool_call",
+      metadata: { source: "agent", jobId: JOB_ID, messageType: "mcp_tool_call", details: { status } },
+    };
+    await act(async () => {
+      root.render(
+        <TimelineEntry
+          message={message}
+          conversationMessages={[message]}
+          details={(message.metadata?.details as Record<string, unknown>) ?? null}
+          metadataRecord={message.metadata ?? null}
+          MessageContent={MessageContent}
+          ChatFileChangeList={() => null}
+        />,
+      );
+    });
+  }
+
+  it("paints a failed call in the danger tone, with no grey of Badge's own left", async () => {
+    await renderToolCall("failed");
+    const chip = Array.from(container.querySelectorAll("span")).find((node) => node.textContent === "Failed");
+    const classes = classesOf(chip);
+    const danger = SEMANTIC_TONE_CLASSES.danger;
+    expect(classes).toEqual(expect.arrayContaining(`${danger.surface} ${danger.text}`.split(" ")));
+    expect(greys(classes)).toEqual([]);
+  });
+
+  it("paints a running call in the info tone", async () => {
+    await renderToolCall("in_progress");
+    const chip = container.querySelector(".sr-only")?.parentElement;
+    expect(chip?.textContent).toBe("In progress");
+    const classes = classesOf(chip);
+    const info = SEMANTIC_TONE_CLASSES.info;
+    expect(classes).toEqual(expect.arrayContaining(`${info.surface} ${info.text}`.split(" ")));
+    expect(greys(classes)).toEqual([]);
+  });
+
+  it("labels the row in the muted grey, which reads at 4.5:1, not the subtle one", async () => {
+    await renderToolCall("failed");
+    const heading = Array.from(container.querySelectorAll("p")).find((node) => node.textContent === "Tool call");
+    expect(classesOf(heading)).toEqual(expect.arrayContaining(textTones.muted.split(" ")));
+    expect(classesOf(heading)).not.toEqual(expect.arrayContaining(textTones.subtle.split(" ")));
+  });
+
+  it("gives every status a tone and keeps className to layout", () => {
+    const cases: [string, string, string, string][] = [
+      ["mcp_tool_call", "failed", "Failed", "danger"],
+      ["status", "completed", "Completed", "info"],
+      ["status", "in_progress", "In progress", "info"],
+      ["status", "queued", "Queued", "neutral"],
+      ["reasoning", "running", "Thinking", "info"],
+      ["runtime_switch", "in_progress", "Switching", "info"],
+      ["local_capability_result", "started", "", "info"],
+    ];
+    for (const [messageType, status, label, tone] of cases) {
+      const badge = resolveTimelineStatusBadge(messageType, status);
+      expect(badge, `${messageType} ${status}`).toMatchObject({ label, tone });
+      expect(badge?.className ?? "", `${messageType} ${status}`).not.toMatch(/(?:^|\s)(?:dark:)?(?:bg|text|border)-/);
+    }
   });
 });

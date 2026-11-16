@@ -75,8 +75,8 @@ Logs, metadata, screenshots, token files, environment files, and full diagnostic
 attached automatically. Optional attachment files must be explicitly selected by the user and
 remain within the active workspace.
 
-Studio follows the same boundary. The issue dialog always previews the space/conversation/runtime
-context and screenshots that will be sent. App/runtime logs and browser, build, release, and page
+Studio follows the same boundary. The issue dialog always previews the space, conversation and machine
+context and screenshots that will be sent. App and machine logs and browser, build, release, and page
 metadata are behind an **Include diagnostics** checkbox that is off by default. The signed-in
 account identity and email snapshot are attached to the support case for ownership/contact and are
 disclosed separately from diagnostics. Page metadata removes URL query parameters and fragments,

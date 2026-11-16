@@ -1,9 +1,19 @@
 import type { ReactNode } from "react";
 import { CheckCircle, InfoCircle, WarningTriangle } from "iconoir-react";
 import { Text } from "./Text";
+import type { TextTone } from "../styles/typography";
 import { SEMANTIC_TONE_CLASSES, type SemanticTone } from "../theme/semanticTones";
 
 export type InlineNoticeTone = SemanticTone;
+
+// Warnings keep the semantic icon and surface with neutral prose
+// (docs/Settings-UI.md).
+const PROSE_TONES = {
+  info: { title: "info", body: "info" },
+  success: { title: "success", body: "success" },
+  warning: { title: "primary", body: "secondary" },
+  danger: { title: "danger", body: "danger" },
+} as const satisfies Record<InlineNoticeTone, { title: TextTone; body: TextTone }>;
 
 export type InlineNoticeProps = {
   tone?: InlineNoticeTone;
@@ -55,8 +65,8 @@ export function InlineNotice({
       {appearance !== "bar" ? <Icon className={["mt-0.5 h-4 w-4 shrink-0", SEMANTIC_TONE_CLASSES[tone].icon].join(" ")} aria-hidden="true" /> : null}
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
         <div className="min-w-0 flex-1 basis-48 space-y-0.5">
-          {title ? <Text variant="bodyStrong" tone={tone}>{title}</Text> : null}
-          <Text as="div" variant={density === "compact" ? "caption" : "bodyCompact"} tone={tone} className="[overflow-wrap:anywhere]">
+          {title ? <Text variant="bodyStrong" tone={PROSE_TONES[tone].title}>{title}</Text> : null}
+          <Text as="div" variant={density === "compact" ? "caption" : "bodyCompact"} tone={PROSE_TONES[tone].body} className="[overflow-wrap:anywhere]">
             {children}
           </Text>
         </div>

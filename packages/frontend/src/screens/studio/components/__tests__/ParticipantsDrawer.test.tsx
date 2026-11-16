@@ -573,7 +573,7 @@ describe("ParticipantsDrawer", () => {
     expect(footer?.textContent).not.toContain("online");
     const section = container.querySelector('section[aria-label="AI"]');
     expect(section?.firstElementChild?.textContent).toBe("AI");
-    expect(section?.textContent).not.toContain("Runtimes & AI");
+    expect(section?.textContent).not.toContain("Machines & AI");
   });
 
   it("hosts the conversation's assistant switch and the manage-agents door", async () => {
@@ -712,7 +712,7 @@ describe("ParticipantsDrawer", () => {
     // Grouped by runtime, the heading keeps the AI word (docs/Brand.md, "One
     // rule for faces").
     const section = container.querySelector('section[aria-label="AI"]');
-    expect(section?.firstElementChild?.textContent).toBe("Runtimes & AI");
+    expect(section?.firstElementChild?.textContent).toBe("Machines & AI");
     const text = section?.textContent ?? "";
     expect(text).toContain("Instafy Cloud");
     expect(text).toContain("Shared · 2");

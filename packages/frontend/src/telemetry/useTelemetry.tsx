@@ -125,9 +125,11 @@ export function useTelemetry() {
         }
 
         if (reason === "no_runtime_connected") {
+          // Doesn't promise a start in Machines, which offers none to a
+          // viewer (MachinesPanel).
           message =
             providedMessage ??
-            "No runtime is connected. Open Machines to start one and process queued jobs.";
+            "No machine is connected to this space, so queued requests can't run yet.";
           intent = "error";
           toastOptions = {
             actionLabel: "Open Machines",
@@ -138,7 +140,7 @@ export function useTelemetry() {
         } else {
           message =
             providedMessage ??
-            "Unable to verify runtime availability. Check the controller logs and ensure the runtime agent is running.";
+            "Instafy couldn't check whether this space's machine is available. Check the controller logs and make sure the runtime agent is running.";
           intent = "warning";
         }
         if (detail && shouldIncludeTelemetryDetails() && !message.includes(detail)) {

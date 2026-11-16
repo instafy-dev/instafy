@@ -16,6 +16,7 @@ import { AiFace } from "../../../components/AiFace";
 import { formatAiAccessibleName } from "../../../components/AiTag";
 import { AI_TILE_SHAPE_CLASS } from "../../../components/OctoCoin";
 import { Spinner } from "../../../components/Spinner";
+import { SEMANTIC_TONE_CLASSES } from "../../../theme/semanticTones";
 import { aiFaceKey, stackAiFaces } from "../../../utils/aiFace";
 import type { ChatMessage, ChatMessageCommitRange,
   ChatMessageFileChange, ChatMessageUnsavedReason } from "../types";
@@ -121,16 +122,18 @@ function resolveTerminalStatusMarker(tone: ThreadSpineTone, isCompleted: boolean
   if (!isCompleted) {
     return null;
   }
+  // The shared icon tones read at 3:1 on white, slate-50 and a hovered row in
+  // both themes; sand-500 read 1.9:1 on white.
   if (tone === "danger") {
     return {
       label: "Run failed",
-      iconClassName: "text-rose-500 dark:text-rose-300",
+      iconClassName: SEMANTIC_TONE_CLASSES.danger.icon,
     };
   }
   if (tone === "warning") {
     return {
       label: "Run needs attention",
-      iconClassName: "text-secondary-500 dark:text-secondary-300",
+      iconClassName: SEMANTIC_TONE_CLASSES.warning.icon,
     };
   }
   return null;
@@ -207,7 +210,7 @@ function AgentThreadBranchRowEntry({
             <BranchParticipantAvatar key={aiFaceKey(participant)} participant={participant} />
           ))}
           {participants.more > 0 ? (
-            <span aria-hidden="true" className="pl-1 text-xxs font-medium text-slate-500 dark:text-slate-400">
+            <span aria-hidden="true" className="pl-1 text-xxs font-medium text-slate-600 dark:text-slate-400">
               +{participants.more}
             </span>
           ) : null}
@@ -773,7 +776,7 @@ export function AgentJobThreadPreviewLayout({
             >
               <NavArrowRight
                 className={`h-3 w-3 transition-transform ${
-                  expanded ? "rotate-90 text-slate-600 dark:text-slate-200" : "text-slate-400"
+                  expanded ? "rotate-90 text-slate-600 dark:text-slate-200" : "text-slate-600 dark:text-slate-400"
                 }`}
                 aria-hidden="true"
               />
@@ -801,7 +804,7 @@ export function AgentJobThreadPreviewLayout({
                     <span
                       className={
                         item.completed
-                          ? "line-through text-slate-400 dark:text-slate-500"
+                          ? "line-through text-slate-600 dark:text-slate-400"
                           : "text-slate-600 dark:text-slate-200"
                       }
                     >
@@ -855,7 +858,7 @@ export function AgentJobThreadPreviewLayout({
               renderUpdate={renderUpdate}
             />
             {attempt.failureText ? (
-              <p className="whitespace-pre-wrap break-words text-xs text-slate-500 dark:text-slate-400">
+              <p className="whitespace-pre-wrap break-words text-xs text-slate-600 dark:text-slate-400">
                 {attempt.failureText}
               </p>
             ) : null}
@@ -920,7 +923,7 @@ export function AgentJobThreadPreviewLayout({
               {ownerBadge ? (
                 <span
                   data-testid="agent-thread-owner-badge"
-                  className="inline-flex max-w-28 items-center text-xxs font-medium leading-none text-slate-500 dark:text-slate-400"
+                  className="inline-flex max-w-28 items-center text-xxs font-medium leading-none text-slate-600 dark:text-slate-400"
                   title={ownerBadge}
                 >
                   <span className="truncate">{ownerBadge}</span>

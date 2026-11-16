@@ -75,7 +75,8 @@ function ImagePreviewDialog({ image, onClose }: { image: ImagePreview; onClose: 
       <StudioDialogFooter padding="default" className={immersive ? "chat-image-preview-mobile-footer" : undefined}>
         <div className="chat-image-preview-controls" role="group" aria-label="Image zoom controls">
           <span id={zoomDescriptionId} className="sr-only">{viewport.ready ? `Current zoom: ${viewport.zoomPercent}%` : "Image loading"}</span>
-          <IconButton variant="ghost" tone={viewport.canZoomOut ? "neutral" : "muted"} size="sm" aria-label="Zoom out" title="Zoom out (−)"
+          {/* A zoom limit stays focusable (aria-disabled) and fades as a disabled button does. */}
+          <IconButton variant="ghost" tone="neutral" size="sm" className="aria-disabled:opacity-60" aria-label="Zoom out" title="Zoom out (−)"
             data-testid="chat-image-zoom-out" aria-disabled={!viewport.canZoomOut}
             onPress={() => { if (viewport.canZoomOut) viewport.zoomOut(); }}>
             <Minus className="h-4 w-4" aria-hidden="true" />
@@ -85,7 +86,7 @@ function ImagePreviewDialog({ image, onClose }: { image: ImagePreview; onClose: 
             data-testid="chat-image-actual-size" onPress={viewport.actualSize} aria-disabled={!viewport.ready}>
             <span className="w-12 tabular-nums">{viewport.ready ? `${viewport.zoomPercent}%` : "…"}</span>
           </Button>
-          <IconButton variant="ghost" tone={viewport.canZoomIn ? "neutral" : "muted"} size="sm" aria-label="Zoom in" title="Zoom in (+)"
+          <IconButton variant="ghost" tone="neutral" size="sm" className="aria-disabled:opacity-60" aria-label="Zoom in" title="Zoom in (+)"
             data-testid="chat-image-zoom-in" aria-disabled={!viewport.canZoomIn}
             onPress={() => { if (viewport.canZoomIn) viewport.zoomIn(); }}>
             <Plus className="h-4 w-4" aria-hidden="true" />

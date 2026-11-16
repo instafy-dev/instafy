@@ -14,6 +14,7 @@ import { Badge } from "../../../components/Badge";
 import { Text } from "../../../components/Text";
 import { StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { useGatedInterval } from "../../../runtime/pollingGate";
+import { SEMANTIC_TONE_CLASSES } from "../../../theme/semanticTones";
 import { browserShareClient, publishLocalBrowserTab, type BrowserShare, type LocalTabPublication, type BrowserShareAudience, type BrowserSharePerson, type BrowserShareViewer } from "../../../services/runtimeController/browserShares";
 
 
@@ -163,7 +164,7 @@ function ParticipantTakeBack({ requestId, controlId, revoke }: { requestId?: str
     dialogAriaLabel="Take back control" modalClassName="!max-w-sm" dialogClassName="p-5" data-browser-session-safe-zone="true">
     <h2 className="text-base font-semibold">Take back control?</h2>
     <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">Another participant is using your tab. They can keep watching when you take back control.</p>
-    {error ? <p role="alert" className="mt-3 text-sm text-rose-600">{error}</p> : null}
+    {error ? <p role="alert" className={`mt-3 text-sm ${SEMANTIC_TONE_CLASSES.danger.text}`}>{error}</p> : null}
     <div className="mt-5 flex justify-end gap-2">
       <Button className="min-h-10 pointer-coarse:min-h-11" variant="ghost" isDisabled={busy} onPress={dismiss}>Keep watching</Button>
       <Button className="min-h-10 pointer-coarse:min-h-11" isDisabled={busy} onPress={() => void takeBack()}>{busy ? "Taking back…" : "Take back"}</Button>

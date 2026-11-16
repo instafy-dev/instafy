@@ -197,7 +197,7 @@ export function TimelineEntry({
                 <ClipboardCheck className="h-4 w-4 text-slate-500" aria-hidden="true" />
               ) : null}
               {heading && messageType !== "command_execution" && messageType !== "todo_list" ? (
-                <Text variant="overline" tone="subtle">
+                <Text variant="overline" tone="muted">
                   {heading}
                 </Text>
               ) : null}
@@ -213,7 +213,7 @@ export function TimelineEntry({
             ) : null}
           </div>
           {statusBadge ? (
-            <Badge size="xs" className={statusBadge.className}>
+            <Badge size="xs" tone={statusBadge.tone} className={statusBadge.className}>
               {statusBadge.showSpinner ? (
                 <>
                   <Spinner aria-hidden="true" tone="primary" size="xs" />
@@ -257,7 +257,7 @@ export function TimelineEntry({
               aria-label={planExpanded ? "Hide plan details" : "Show plan details"}
             >
               <NavArrowRight
-                className={`h-3 w-3 transition-transform ${planExpanded ? "rotate-90 text-slate-600" : "text-slate-400"}`}
+                className={`h-3 w-3 transition-transform ${planExpanded ? "rotate-90 text-slate-600" : "text-slate-500 dark:text-slate-400"}`}
                 aria-hidden="true"
               />
             </Button>
@@ -297,8 +297,8 @@ export function TimelineEntry({
       {isPlanMessage && !planExpanded && todoItems.length > 0 ? (
         <div className="mt-3 space-y-1 text-xs text-slate-600">
           {completedSteps.length > 0 ? (
-            <Text as="p" variant="caption" tone="subtle" className="flex items-start gap-2">
-              <Check className="ml-[-2px] mr-[-2px] h-4 w-4 flex-shrink-0 text-slate-400" aria-hidden="true" />
+            <Text as="p" variant="caption" tone="muted" className="flex items-start gap-2">
+              <Check className="ml-[-2px] mr-[-2px] h-4 w-4 flex-shrink-0" aria-hidden="true" />
               <span>
                 Step {completedSteps[completedSteps.length - 1].index + 1} -{" "}
                 {truncate(completedSteps[completedSteps.length - 1].text, 70)}
@@ -329,7 +329,7 @@ export function TimelineEntry({
                 }`}
                 aria-hidden="true"
               />
-              <span className={item.completed ? "line-through text-slate-400" : "text-slate-600"}>{item.text}</span>
+              <span className={item.completed ? "line-through text-slate-600 dark:text-slate-400" : "text-slate-600"}>{item.text}</span>
             </li>
           ))}
         </ul>
@@ -337,33 +337,33 @@ export function TimelineEntry({
       {usage && (!isPlanMessage || planExpanded) ? (
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
           {usage.model ? (
-            <Badge size="xs" className="max-w-full break-all text-slate-600" data-testid="timeline-usage-model">
+            <Badge size="xs" className="max-w-full break-all" data-testid="timeline-usage-model">
               Model {usage.model}
             </Badge>
           ) : null}
-          <Badge size="xs" className="text-slate-600">
+          <Badge size="xs">
             Input {usage.inputTokens}
           </Badge>
-          <Badge size="xs" className="text-slate-600">
+          <Badge size="xs">
             Cached {usage.cachedInputTokens}
           </Badge>
-          <Badge size="xs" className="text-slate-600">
+          <Badge size="xs">
             Output {usage.outputTokens}
           </Badge>
           {usage.context ? (
-            <Badge size="xs" className="text-slate-600">
+            <Badge size="xs">
               {formatPromptContextModeLabel(usage.context)}
             </Badge>
           ) : null}
           {usage.context?.estimatedPromptTokens !== null &&
           usage.context?.estimatedPromptTokens !== undefined ? (
-            <Badge size="xs" className="text-slate-600">
+            <Badge size="xs">
               Prompt {formatTokenCountLabel(usage.context.estimatedPromptTokens)}
             </Badge>
           ) : null}
           {usage.context?.estimatedPromptUsagePercent !== null &&
           usage.context?.estimatedPromptUsagePercent !== undefined ? (
-            <Badge size="xs" className="text-slate-600">
+            <Badge size="xs">
               {usage.context.estimatedPromptUsagePercent}% window
             </Badge>
           ) : null}

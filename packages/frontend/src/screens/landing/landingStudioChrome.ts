@@ -303,7 +303,7 @@ export const FILE_RAIL_DIVIDER = "mx-0.5 h-4 w-px shrink-0 self-center bg-slate-
 export const DIFF_CARD = "mt-2 overflow-hidden rounded-xl border border-slate-200/70 bg-white/75 shadow-sm shadow-slate-900/5 dark:border-white/[0.08] dark:bg-white/[0.035] dark:shadow-none";
 export const DIFF_CARD_HEADER = "flex items-center justify-between gap-3 px-3 py-1.5";
 // ChatFileChangeList.tsx:39-44 resolveChangeMeta("changed") and 50-57 ("created").
-export const DIFF_BADGE_UPDATED = "shrink-0 rounded-full border border-secondary-200/80 bg-secondary-50/80 px-2 py-0.5 text-3xs font-medium text-secondary-700 dark:border-secondary-400/25 dark:bg-secondary-400/[0.07] dark:text-secondary-200/85";
+export const DIFF_BADGE_UPDATED = "shrink-0 rounded-full border border-secondary-200/80 bg-secondary-50/80 px-2 py-0.5 text-3xs font-medium text-secondary-800 dark:border-secondary-400/25 dark:bg-secondary-400/[0.07] dark:text-secondary-200/85";
 export const DIFF_BADGE_CREATED = "shrink-0 rounded-full border border-primary-200/80 bg-primary-50/80 px-2 py-0.5 text-3xs font-medium text-primary-700 dark:border-primary-400/25 dark:bg-primary-400/[0.07] dark:text-primary-200/85";
 export const DIFF_FILENAME = "min-w-0 truncate font-mono text-xs text-slate-700 dark:text-slate-300";
 export const DIFF_GLYPHS = "flex shrink-0 items-center gap-1 text-slate-400 dark:text-slate-500";

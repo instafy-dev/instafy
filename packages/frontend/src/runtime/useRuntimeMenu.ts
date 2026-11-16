@@ -260,8 +260,8 @@ export function useRuntimeMenuOptions(): RuntimeMenuData & {
   const missingRuntimeOption: RuntimeMenuOption = useMemo(
     () => ({
       id: null,
-      label: "Missing runtime",
-      detail: "No runtime available",
+      label: "Missing machine",
+      detail: "No machine available",
       state: "offline" as RuntimeStatusState,
       badge: { text: "Missing", tone: "danger" },
       isSessionOverride: false,
@@ -309,7 +309,7 @@ export function useRuntimeMenuOptions(): RuntimeMenuData & {
     () => ({
       id: null,
       label: runtimeAutoOptionLabel(),
-      detail: "Let Instafy pick the healthiest runtime",
+      detail: "Let Instafy pick the healthiest machine",
       state: aggregateState,
       badge: offlineBadge ?? degradedBadge,
       isSessionOverride: false,

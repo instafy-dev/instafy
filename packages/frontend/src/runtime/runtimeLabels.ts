@@ -46,18 +46,34 @@ function readNumber(value: unknown): number | null {
   return value;
 }
 
+/** What lists, pickers and rows call a hosted machine with no name of its own. */
+const HOSTED_MACHINE_NAME = "Instafy Cloud";
+/** And a self-hosted one (Instafy Desktop's, or one started with the CLI). */
+const SELF_HOSTED_MACHINE_NAME = "Self-hosted machine";
+
 function formatProviderName(raw: string | null | undefined): string | null {
   if (!raw || raw.trim().length === 0) {
     return null;
   }
   const normalized = raw.trim().toLowerCase();
   if (normalized === "instafy-cloud" || normalized === "instafy_cloud") {
-    return "Instafy Cloud";
+    return HOSTED_MACHINE_NAME;
   }
   if (normalized === "self-hosted" || normalized === "self_hosted") {
-    return "Team runtime";
+    return SELF_HOSTED_MACHINE_NAME;
   }
   return raw.trim();
+}
+
+/** A machine with no name of its own, named for its provider. */
+function unnamedMachineLabel(providerLabel: string | null): string {
+  if (!providerLabel) {
+    return "Machine";
+  }
+  if (providerLabel === HOSTED_MACHINE_NAME || providerLabel === SELF_HOSTED_MACHINE_NAME) {
+    return providerLabel;
+  }
+  return `${providerLabel} machine`;
 }
 
 export interface TunnelEntitlementDetails {
@@ -154,7 +170,6 @@ export function getRuntimeLabel(
   /** The latest person's stop known in the space (useHostedRuntimeStopAtMs). */
   hostedRuntimeStopAtMs: number | null = null
 ): RuntimeLabelInfo {
-  const baseTypeName = "Instafy Runtime";
   const runtimeDisplayNameCandidate =
     typeof entry.displayName === "string" && entry.displayName.trim().length > 0
       ? entry.displayName.trim()
@@ -208,7 +223,7 @@ export function getRuntimeLabel(
   let label: string;
 
   if (isMyDevice) {
-    label = runtimeDisplayName ?? "My Device";
+    label = runtimeDisplayName ?? "Your machine";
     if (localWorkspace?.hostname && localWorkspace.hostname !== label) {
       detailParts.push(localWorkspace.hostname);
     }
@@ -228,12 +243,15 @@ export function getRuntimeLabel(
   } else if (runtimeDisplayName) {
     label = runtimeDisplayName;
   } else if (entry.isLocal) {
-    label = hostname ? `Team runtime (${hostname})` : providerLabel ?? "Team runtime";
+    const machineName = providerLabel
+      ? unnamedMachineLabel(providerLabel)
+      : SELF_HOSTED_MACHINE_NAME;
+    label = hostname ? `${machineName} (${hostname})` : machineName;
     if (hostname) {
       detailParts.push(hostname);
     }
   } else {
-    label = providerLabel ? `${providerLabel} runtime` : baseTypeName;
+    label = unnamedMachineLabel(providerLabel);
     if (originEndpoint) {
       detailParts.push(originEndpoint);
     } else if (entry.endpointUrl) {
@@ -347,6 +365,19 @@ function extractHostname(endpointUrl: string | null | undefined): string | null 
 
 export function runtimeAutoOptionLabel(): string {
   return "Auto (best available)";
+}
+
+/**
+ * A hosted machine's own name, or null when it has only the generic one.
+ * Studio names the space's own machine "Hosted Runtime", a name the
+ * controller looks it up by, so the name stays stored and only reads
+ * differently: like no name at all, "Instafy Cloud" or "Instafy Cloud
+ * runtime", it is no name of the machine's own. A sentence that names a
+ * hosted machine (the blocking machine of a limit, say) then says "a hosted
+ * machine", not the name its row shows.
+ */
+export function hostedMachineOwnName(displayName: string | null | undefined): string | null {
+  return normalizeRuntimeDisplayName(displayName?.trim() || null, HOSTED_MACHINE_NAME);
 }
 
 function normalizeRuntimeDisplayName(

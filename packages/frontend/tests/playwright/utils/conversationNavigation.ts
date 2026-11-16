@@ -31,7 +31,7 @@ export async function selectConversation(page: Page, conversationId: string) {
 export async function returnToConversation(page: Page) {
   if (await page.getByTestId("chat-input").isVisible()) return;
   const resume = page.getByTestId("home-resume-conversation");
-  const returnButton = page.getByRole("button", { name: /^Return to / });
+  const returnButton = page.getByRole("navigation", { name: /(?:workspace|Team) navigation$/ }).getByRole("button", { name: /^Back to / });
   if (await resume.isVisible()) await resume.click();
   else if (await returnButton.isVisible()) await returnButton.click();
   else await selectConversation(page, await activeConversationId(page));

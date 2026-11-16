@@ -16,7 +16,7 @@ export function TemplateToolCallDetails({ info }: { info: TemplateToolCallInfo }
     <div className="mt-3 space-y-3">
       {selection ? (
         <Surface tone="muted" radius="xl" shadow="none" className="px-4 py-3 shadow-inner">
-          <Text variant="overline" tone="subtle" className="tracking-[0.18em]">
+          <Text variant="overline" tone="muted" className="tracking-[0.18em]">
             Selected template
           </Text>
           <Text variant="bodyStrong" tone="primary" className="mt-2">
@@ -53,10 +53,10 @@ export function TemplateToolCallDetails({ info }: { info: TemplateToolCallInfo }
       {alternatives.length > 0 ? (
         <Surface tone="default" radius="xl" shadow="none" className="px-4 py-3">
           <div className="flex items-center justify-between gap-3">
-            <Text variant="overline" tone="subtle" className="tracking-[0.18em]">
+            <Text variant="overline" tone="muted" className="tracking-[0.18em]">
               Other matches
             </Text>
-            <Text as="span" variant="overline" tone="subtle">
+            <Text as="span" variant="overline" tone="muted">
               {otherCount} shown
             </Text>
           </div>

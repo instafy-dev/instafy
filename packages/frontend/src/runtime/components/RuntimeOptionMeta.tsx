@@ -12,12 +12,6 @@ interface RuntimeOptionMetaProps {
   showRuntimeIdBadge?: boolean;
 }
 
-const toneClassName: Record<"neutral" | "warning" | "danger", string> = {
-  neutral: "bg-slate-100 text-slate-600",
-  warning: "bg-secondary-100 text-secondary-700",
-  danger: "bg-rose-100 text-rose-700",
-};
-
 export function RuntimeOptionMeta({
   option,
   className,
@@ -48,20 +42,17 @@ export function RuntimeOptionMeta({
           {option.label}
         </Text>
         {showProviderBadge && providerBadge ? (
-          <Badge size="xs" className="border-transparent bg-slate-100 text-slate-700">
+          <Badge size="xs" className="border-transparent">
             {providerBadge}
           </Badge>
         ) : null}
         {option.badge ? (
-          <Badge
-            size="xs"
-            className={`border-transparent ${toneClassName[option.badge.tone ?? "neutral"]}`}
-          >
+          <Badge size="xs" tone={option.badge.tone ?? "neutral"}>
             {option.badge.text}
           </Badge>
         ) : null}
         {showSessionBadge && option.isSessionOverride ? (
-          <Badge size="xs" className="border-transparent bg-slate-100 text-slate-600">
+          <Badge size="xs" className="border-transparent">
             Session
           </Badge>
         ) : null}

@@ -46,6 +46,9 @@ describe("describeProjectMemoryBootstrapResult", () => {
     expect(
       describeProjectMemoryBootstrapResult(result({ reason: "no-origin" }), "refresh-defaults")?.intent,
     ).toBe("warning");
+    expect(
+      describeProjectMemoryBootstrapResult(result({ reason: "no-origin" }), "refresh-defaults")?.message,
+    ).toBe("Start or connect a machine for this space before refreshing defaults.");
   });
 
   it("leaves unknown reasons to the caller's error path", () => {

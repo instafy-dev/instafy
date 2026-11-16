@@ -93,7 +93,7 @@ for (const hasTouch of [false, true]) {
           await expect(managedMachine).toHaveAttribute("aria-expanded", "true");
           await activate(managedMachine);
           await expect(managedMachine).toHaveAttribute("aria-expanded", "false");
-          await expect(machineHeader.getByText("Pinned to Review machine")).toHaveCount(0);
+          await expect(machineHeader.getByText("Selected machine: Review machine")).toHaveCount(0);
           await activate(managedMachine);
           const selectMachine = machineHeader.getByRole("button", { name: "Use this machine", exact: true });
           await expect(selectMachine).toHaveCSS("font-size", "14px");
@@ -108,7 +108,7 @@ for (const hasTouch of [false, true]) {
           await expect(machineHeader.getByRole("button", { name: "Selected machine", exact: true })).toHaveCount(0);
           await expect(machineHeader.getByText("Selected machine", { exact: true })).toBeVisible();
           await expect(managedMachine).toBeFocused();
-          await expect(machineHeader.getByText("Pinned to Review machine")).toBeVisible();
+          await expect(machineHeader.getByText("Selected machine: Review machine")).toBeVisible();
           await expect(managedMachine.locator('[title="Selected"]')).toBeVisible();
           await expect(managedMachine).not.toHaveAttribute("aria-pressed");
           const moreActions = machineHeader.getByRole("button", { name: "More actions for Review machine", exact: true });
@@ -124,7 +124,7 @@ for (const hasTouch of [false, true]) {
 
           // Selection owns the full row, including the separate disclosure.
           const selectedSurface = reviewMachine.locator("..");
-          const disclosure = selectedSurface.getByRole("button", { name: "Hide runtime details", exact: true });
+          const disclosure = selectedSurface.getByRole("button", { name: "Hide machine details", exact: true });
           const surfaceBounds = (await selectedSurface.boundingBox())!;
           const disclosureBounds = (await disclosure.boundingBox())!;
           expect(disclosureBounds.x + disclosureBounds.width).toBeLessThanOrEqual(surfaceBounds.x + surfaceBounds.width);
@@ -141,8 +141,8 @@ for (const hasTouch of [false, true]) {
           ]) {
             await expect(control).toHaveCSS("color", neutralColor);
           }
-          const close = machineList.getByRole("button", { name: "Close runtimes menu", exact: true });
-          const copy = machineHeader.getByRole("button", { name: "Copy runtime image", exact: true });
+          const close = machineList.getByRole("button", { name: "Close machine menu", exact: true });
+          const copy = machineHeader.getByRole("button", { name: "Copy image", exact: true });
           const iconControls = [close, copy, moreActions, disclosure,
             machineHeader.getByRole("button", { name: "Start Review machine", exact: true }),
             machineHeader.getByRole("button", { name: "Stop Running machine", exact: true })];
@@ -177,8 +177,8 @@ for (const hasTouch of [false, true]) {
           }
           await expect(details).toHaveCSS("color", secondaryColor);
           const recovery = page.getByRole("region", { name: "Runtime recovery actions", exact: true });
-          await expect(recovery.getByText("Instafy Cloud runtime limit reached", { exact: true })).toHaveCSS("color", primaryColor);
-          const warningCopy = recovery.getByText("Stop a stale runtime or retry after cleanup.", { exact: false });
+          await expect(recovery.getByText("Hosted machine limit reached", { exact: true })).toHaveCSS("color", primaryColor);
+          const warningCopy = recovery.getByText("Stop a hosted machine you no longer need, then try again.", { exact: false });
           await expect(warningCopy).toHaveCSS("font-size", "14px");
           await expect(warningCopy).toHaveCSS("color", secondaryColor);
           const a = (await details.boundingBox())!;
@@ -206,7 +206,7 @@ for (const hasTouch of [false, true]) {
           await activate(stop);
           const failure = page.getByTestId("runtime-action-error");
           await expect(failure).toHaveAttribute("role", "alert");
-          await expect(failure).toContainText("Runtime takeover did not complete.");
+          await expect(failure).toContainText("A hosted machine didn't start for this space yet.");
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
           await failure.scrollIntoViewIfNeeded();
           await page.screenshot({ path: testInfo.outputPath(`${mode.toLowerCase()}-recovery-failure.png`) });

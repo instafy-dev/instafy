@@ -5,7 +5,7 @@ import type { NotificationInboxItem } from "../../sdk/instafy";
 import { isHiddenByPresentation } from "./components/chatMessageMetadata";
 
 export type HomeAttentionKind = "running" | "queued" | "reply";
-export type HomeFailureStatusLabel = "Run failed" | "Runtime unavailable" | "Automation failed" | "Credits exhausted";
+export type HomeFailureStatusLabel = "Run failed" | "Machine unavailable" | "Automation failed" | "Credits exhausted";
 
 /** Only structured types/codes identify a failure; preview text is user content. */
 export function homeFailureStatusLabel(
@@ -20,13 +20,13 @@ export function homeFailureStatusLabel(
     case "error":
     case "run.failed":
     case "automation.failed":
-      if (code === "runtime_unavailable" || code === "self_hosted_runtime_offline") return "Runtime unavailable";
+      if (code === "runtime_unavailable" || code === "self_hosted_runtime_offline") return "Machine unavailable";
       if (code === "insufficient_credits") return "Credits exhausted";
       return messageType?.trim().toLowerCase() === "automation.failed" ? "Automation failed" : "Run failed";
     case "credit.exhausted":
       return "Credits exhausted";
     case "runtime_alert":
-      return code === "runtime_unavailable" ? "Runtime unavailable" : undefined;
+      return code === "runtime_unavailable" ? "Machine unavailable" : undefined;
     default:
       return undefined;
   }
@@ -214,7 +214,7 @@ export function buildHomeAttentionEntries({
       registerConversation(
         conversation,
         "queued",
-        `${currentSpaceName} · waiting for a runtime`,
+        `${currentSpaceName} · waiting for a machine`,
         null,
         getConversationPreview(conversation),
       );

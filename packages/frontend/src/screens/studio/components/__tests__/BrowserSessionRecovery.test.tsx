@@ -62,12 +62,16 @@ describe("browser recovery presentation", () => {
   });
 
   it.each(["overlay", "compact"] as const)("preserves runtime-limit consent and busy actions in %s", async presentation => {
-    const runtimeLimit = { summary: "All 2 Instafy Cloud runtimes for this team are in use.",
+    const runtimeLimit = { summary: "All 2 hosted machines for this team are in use.",
       blockerProjectCopy: "“Team research machine” is running in “Long-running research space”.", busy: false, onTakeOver: takeOver };
     await render({ presentation, runtimeLimit });
     expect(takeOver).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Hosted machine limit reached");
     expect(container.textContent).toContain(runtimeLimit.blockerProjectCopy);
-    expect(container.textContent).toContain("This can interrupt work running there.");
+    expect(container.textContent).toContain(
+      "Stop it to open Shared Browser here. This can interrupt work running there.",
+    );
+    expect(container.textContent).not.toMatch(/runtime|slot/i);
     await act(async () => button("Stop and open here")!.click());
     expect(takeOver).toHaveBeenCalledOnce();
     await act(async () => button("Try again")!.click());
@@ -81,9 +85,10 @@ describe("browser recovery presentation", () => {
   });
 
   it("offers only retry when no runtime takeover is available", async () => {
-    await render({ runtimeLimit: { summary: "All Instafy Cloud runtime slots are in use.", busy: false } });
+    await render({ runtimeLimit: { summary: "All hosted machines for this team are in use.", busy: false } });
     expect(button("Stop and open here")).toBeUndefined();
-    expect(container.textContent).toContain("Stop another cloud runtime, then try again.");
+    expect(container.textContent).toContain("Stop a hosted machine you no longer need, then try again.");
+    expect(container.textContent).not.toMatch(/runtime/i);
     expect(container.querySelectorAll("button")).toHaveLength(1);
   });
 

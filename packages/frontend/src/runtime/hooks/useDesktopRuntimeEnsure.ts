@@ -35,9 +35,13 @@ export function useDesktopRuntimeEnsure({
   );
 
   const ensureDesktopRuntime = useCallback(async () => {
+    // The machine is the viewer's own: the controller lists a self-hosted
+    // machine (Instafy Desktop's, or one started with the CLI) only to the
+    // person who connected it, so these say "your machine", as Desktop's
+    // row does.
     if (!enabled || !projectId) {
       showStatus(
-        "Desktop runtime requests are unavailable right now.",
+        "Can't reconnect your machine right now.",
         "warning",
         4000,
       );
@@ -47,8 +51,10 @@ export function useDesktopRuntimeEnsure({
       return true;
     }
     if (!localRuntimeId) {
+      // Only the viewer's own are listed, so a teammate's machine in this
+      // space may still be connected: this says none of theirs is.
       showStatus(
-        "No self-hosted machine is registered for this space yet.",
+        "You haven't connected a machine of your own to this space yet.",
         "warning",
         5000,
         onShowSelfHostHelp
@@ -67,11 +73,9 @@ export function useDesktopRuntimeEnsure({
         idleTtlSeconds: controllerClient.core.runtimeIdleTtlSecondsDefault,
       });
       if (!result) {
-        showStatus(
-          "Unable to reach your desktop runtime. Make sure the Instafy desktop agent is running.",
-          "error",
-          5000,
-        );
+        // No result is a missing session or an answer without a machine, not
+        // the machine's own state, so this says no more than that.
+        showStatus("Couldn't reconnect your machine.", "error", 5000);
         return false;
       }
       if (result.tunnel?.runtimeId) {
@@ -80,12 +84,12 @@ export function useDesktopRuntimeEnsure({
       await refreshRuntimeStatuses();
       const tunnelStatus = result.tunnel?.status?.toLowerCase() ?? "requested";
       if (tunnelStatus === "active") {
-        showStatus("Desktop runtime is online.", "success", 3200);
+        showStatus("Your machine is online.", "success", 3200);
       } else if (tunnelStatus === "refreshing") {
-        showStatus("Refreshing desktop tunnel credentials…", "info", 3200);
+        showStatus("Refreshing your machine's tunnel…", "info", 3200);
       } else {
         showStatus(
-          "Desktop runtime requested. Waiting for your agent to connect…",
+          "Waiting for your machine to reconnect…",
           "info",
           4000,
         );
@@ -93,7 +97,7 @@ export function useDesktopRuntimeEnsure({
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      showStatus(`Failed to connect desktop runtime: ${message}`, "error", 5000);
+      showStatus(`Couldn't reconnect your machine: ${message}`, "error", 5000);
       return false;
     } finally {
       setDesktopRuntimeEnsuring(false);

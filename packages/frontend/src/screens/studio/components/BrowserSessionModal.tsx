@@ -20,6 +20,7 @@ import {
   type RuntimeSharedBrowserApprovalRequest,
 } from "../../../sdk/instafy";
 import { beginBrowserRuntimeClaim } from "../../../runtime/browserRuntimeClaimRegistry";
+import { hostedMachineOwnName } from "../../../runtime/runtimeLabels";
 import {
   hostedRuntimeLimitDetailsFromError,
   parseHostedRuntimeLimitError,
@@ -1130,21 +1131,24 @@ export function BrowserSessionModal({
   // Instafy's browser on the space's own machine never takes over another
   // machine's slot, so attach mode has no limit takeover.
   const limitReached = !attachMode && limitDetails.limitReached;
-  const blockerRuntimeLabel =
-    limitDetails.blockerRuntimeLabel ?? "Active runtime";
+  // The blocker is a hosted machine. It is quoted by a name of its own; with
+  // only the generic one (the stored "Hosted Runtime", or no name) it is "a
+  // hosted machine".
+  const blockerMachineName = hostedMachineOwnName(limitDetails.blockerRuntimeLabel);
+  const blockerMachineCopy = blockerMachineName ? `“${blockerMachineName}”` : "A hosted machine";
   const blockerProjectLabel = limitDetails.blockerProjectLabel?.trim() || null;
   const blockerProjectCopy = blockerProjectLabel
-    ? `“${blockerRuntimeLabel}” is running in “${blockerProjectLabel}”.`
+    ? `${blockerMachineCopy} is running in “${blockerProjectLabel}”.`
     : limitDetails.blockerProjectId
-      ? `“${blockerRuntimeLabel}” is running in another space.`
+      ? `${blockerMachineCopy} is running in another space.`
       : null;
   const runtimeSlotSummary =
     typeof limitDetails.activeCount === "number" &&
     typeof limitDetails.maxActiveCount === "number"
       ? limitDetails.maxActiveCount === 1
-        ? "The team's Instafy Cloud runtime is already in use."
-        : `All ${limitDetails.maxActiveCount} Instafy Cloud runtimes for this team are in use.`
-      : "All Instafy Cloud runtime slots are in use.";
+        ? "This team's hosted machine is already in use."
+        : `All ${limitDetails.maxActiveCount} hosted machines for this team are in use.`
+      : "All hosted machines for this team are in use.";
   const hasTakeoverBlocker = !attachMode && Boolean(limitDetails.blockerRuntimeId);
   const setContainerElement = useCallback((node: HTMLDivElement | null) => {
     containerRef.current = node;
@@ -1669,8 +1673,8 @@ export function BrowserSessionModal({
       fail(
         "notice",
         message
-          ? `Unable to stop the blocking runtime. ${message}`
-          : "Unable to stop the blocking runtime.",
+          ? `Couldn't stop the blocking machine. ${message}`
+          : "Couldn't stop the blocking machine.",
       );
       setRuntimeLimitDetails(null);
     } finally {
@@ -1919,7 +1923,7 @@ export function BrowserSessionModal({
         // Studio opened this by itself, or it reconnects by itself: it never
         // ensures a browser runtime.
         releaseBrowserRuntimeClaim();
-        fail("off", "no browser runtime is running; nothing starts one by itself");
+        fail("off", "no machine with a browser is running; nothing starts one by itself");
         return;
       }
 
@@ -2101,14 +2105,14 @@ export function BrowserSessionModal({
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
-          fail("failed", message || "Unable to start a runtime for the browser session.");
+          fail("failed", message || "Couldn't start a hosted machine for Shared Browser.");
           setRuntimeLimitDetails(hostedRuntimeLimitDetailsFromError(err));
           return;
         }
       }
 
       if (!runtimeId) {
-        fail("failed", "Browser session is unavailable (runtime id missing).");
+        fail("failed", "Browser session is unavailable (machine id missing).");
         return;
       }
 
@@ -2139,7 +2143,7 @@ export function BrowserSessionModal({
         return;
       }
       if (!originId) {
-        fail("failed", "Browser session is unavailable (runtime origin not ready yet).");
+        fail("failed", "Browser session is unavailable (its machine isn't ready yet).");
         return;
       }
       // The machine started again under a new origin: the connection this
@@ -2662,7 +2666,7 @@ export function BrowserSessionModal({
       setStatus("error");
       setFailure({
         kind: "notice",
-        reason: "This runtime's RFB renderer is available only to the current controller. Request control to view and interact with it.",
+        reason: "This browser shows its page only to the person in control. Take control to see and use it.",
       });
       return;
     }
@@ -2677,7 +2681,7 @@ export function BrowserSessionModal({
         kind: "notice",
         reason: sharedBrowserCapabilitiesUnsupported
           ? "This Shared Browser viewer requires a newer version of Instafy."
-          : "This Shared Browser runtime does not provide a safe view-only renderer.",
+          : "This Shared Browser doesn't offer a safe view-only mode.",
       });
     }
   }, [

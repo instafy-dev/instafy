@@ -10,7 +10,7 @@ This package wraps the Instafy Studio web app in an Electron shell.
 - **Managed transcription install**: on a clean machine, Desktop now auto-installs `uv`, Python, and the transcription runtime into Instafy-managed app data the first time the opted-in local voice host needs them. Desktop now also ships the pinned `uv` installer inside the app bundle, then keeps that installer plus the uv package cache inside the same speech-home so repairs and reinstalls stay app-owned instead of leaning on global caches. The in-app `Repair Desktop host` action remains as the explicit fallback if that managed setup ever drifts.
 - **Managed transcription removal**: when Desktop hosting is turned off, the same shared speech card now offers `Remove downloaded runtime` so users can delete the managed uv/Python/whisper/ffmpeg toolchain from Instafy app data instead of leaving it behind.
 - **Local voice host smoke**: `pnpm --filter @instafy/desktop-app smoke:voice:host` now proves that launching Desktop is enough to bring the local speech host online.
-- **Self-hosted runtime**: the “Self-host a runtime” help dialog includes a start/stop button when running inside the desktop app.
+- **Self-hosted runtime**: the “Connect your own machine” help dialog includes a start/stop button when running inside the desktop app.
   - The first time you start a runtime, the app may prompt you to select the `runtime-agent` binary (or set `INSTAFY_RUNTIME_AGENT_BIN`).
 
 ## Location permission

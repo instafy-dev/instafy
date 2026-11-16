@@ -676,7 +676,7 @@ export function ParticipantsDrawer({
         <Text
           as="div"
           variant="caption"
-          tone="subtle"
+          tone="muted"
           className="px-4 pb-1 text-xxs max-[899px]:text-xs pointer-coarse:text-xs"
           data-testid="participants-drawer-summary"
         >
@@ -701,7 +701,7 @@ export function ParticipantsDrawer({
             <Text
               as="div"
               variant="caption"
-              tone="subtle"
+              tone="muted"
               className="pb-1 pt-2.5 text-xxs max-[899px]:text-xs pointer-coarse:text-xs font-medium"
             >
               People
@@ -712,7 +712,7 @@ export function ParticipantsDrawer({
                 projectId={projectId}
                 userId={human.userId}
                 displayName={human.label}
-                className="flex min-h-11 w-full items-center gap-2.5 rounded-lg py-1.5 text-left hover:bg-slate-100 dark:hover:bg-white/[0.06]"
+                className="group/participant flex min-h-11 w-full items-center gap-2.5 rounded-lg py-1.5 text-left hover:bg-slate-100 dark:hover:bg-white/[0.06]"
               >
                 <HumanAvatar userId={human.userId} displayName={human.label} className="h-7 w-7 text-xxs max-[899px]:text-xs pointer-coarse:text-xs" />
                 <Text
@@ -723,7 +723,9 @@ export function ParticipantsDrawer({
                 >
                   {human.label}
                   {human.isSelf ? (
-                    <span className="ml-1.5 font-normal text-slate-400 dark:text-slate-500">
+                    // Muted grey, a step darker on the row's slate-100 hover,
+                    // where slate-600 reads 4.4:1.
+                    <span className="ml-1.5 font-normal text-slate-600 group-hover/participant:text-slate-700 dark:text-slate-400">
                       you
                     </span>
                   ) : null}
@@ -741,10 +743,10 @@ export function ParticipantsDrawer({
             <Text
               as="div"
               variant="caption"
-              tone="subtle"
+              tone="muted"
               className="border-t border-slate-200/70 pb-1 pt-2.5 text-xxs max-[899px]:text-xs pointer-coarse:text-xs font-medium dark:border-[color:var(--color-studio-dark-divider)]"
             >
-              {showGroupHeaders ? "Runtimes & AI" : "AI"}
+              {showGroupHeaders ? "Machines & AI" : "AI"}
             </Text>
             {runtimeGroups.map((group) => (
               <div key={group.key}>

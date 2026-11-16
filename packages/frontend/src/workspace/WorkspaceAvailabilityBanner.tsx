@@ -18,7 +18,7 @@ export function WorkspaceAvailabilityBanner() {
     : "Can’t reach workspace files. Retrying…";
   return <div className="flex shrink-0 items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-1 text-sm text-slate-700 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200" data-testid="workspace-availability-banner">
     <p role="status" className="min-w-0 flex-1">{checking ? "Checking workspace connection…" : message}</p>
-    <Button data-testid="workspace-availability-retry" variant="text" tone="muted" size="sm" className="shrink-0" isPending={checking} onPress={retry}
+    <Button data-testid="workspace-availability-retry" variant="ghost" tone="muted" preset="inline" className="shrink-0" isPending={checking} onPress={retry}
       onFocus={() => { retryHadFocus.current = true; }}
       onBlur={(event) => { if (event.currentTarget.isConnected) retryHadFocus.current = false; }}>
       Retry

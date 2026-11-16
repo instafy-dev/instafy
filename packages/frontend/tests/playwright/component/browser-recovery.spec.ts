@@ -142,7 +142,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(retry).toBeDisabled();
       await page.evaluate(() => window.__browserRecoveryReview.finishStop(true));
       await expect(page.getByTestId("browser-session-error-notice")).toBeVisible();
-      await expect(page.locator("[data-debug-reason]")).toHaveAttribute("data-debug-reason", /Unable to stop the blocking runtime/);
+      await expect(page.locator("[data-debug-reason]")).toHaveAttribute("data-debug-reason", /Couldn't stop the blocking machine/);
       await inside(page.getByTestId("browser-session-error-retry"), stage);
       await noHorizontalOverflow(page);
       expect(errors).toEqual([]);

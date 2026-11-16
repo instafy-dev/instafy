@@ -305,7 +305,7 @@ export function HostExtensionHealthSummary({
         {summary.text}
       </Text>
       {freshnessLabel ? (
-        <Text variant="caption" tone="subtle">
+        <Text variant="caption" tone="muted">
           {freshnessLabel}
         </Text>
       ) : null}
