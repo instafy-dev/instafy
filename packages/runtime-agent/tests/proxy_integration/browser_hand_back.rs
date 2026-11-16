@@ -64,7 +64,7 @@ const OLD_NOT_FOUND_LINE: &str = "A \"not found\" fact means Octo didn't find it
 /// a page people share showed a route to a stop Octo chose without saying so, or that the walk
 /// from it to the shop wasn't checked. A stop the person named is no pick of Octo's.
 const ROUTE_LINE: &str = "\n- A route ends at the stop its finding names. Unless the person named that stop or a finding says the place's own page names it, say on the page that it's Octo's pick and that the walk from it to the place isn't checked.\n";
-/// How a turn that may change files reads a public page (`AGENTS.md`'s "Responsiveness", given
+/// How a turn that may change files reads a public page (`AGENTS.md`'s "Reading the web", given
 /// with the lane to a turn that runs without that file): a build once read a shop's site with
 /// python's `urllib`.
 const READ_A_PUBLIC_PAGE: &str = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.\n";

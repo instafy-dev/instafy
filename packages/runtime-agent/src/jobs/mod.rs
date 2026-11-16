@@ -2515,39 +2515,34 @@ fn pinned_skill_section(workspace_dir: &Path, pinned: &PinnedSkill) -> Option<St
     ))
 }
 
-/// `AGENTS.md`'s rule for reading a public page, in its "Responsiveness", word for word. A turn
-/// that may change files and runs without that file (a required change, a turn on a restored
-/// thread, a lookup of another chat: `broad_contextual_instruction_suppression_reason`) is given
-/// it with its lane when the space's own copy says it ([`pinned_public_page_rule`]), as it is
-/// given that copy's "Replies" ([`pinned_replies_section`]). Given "Replies" alone, a required
-/// change's build listed its tools, then read a shop's site twice with python's `urllib`: no
-/// robots.txt, budget or pacing, and Details showed only "Ran a command" (a local test, Nov 8). A
-/// browser turn has no shell and is never given it.
-const PUBLIC_PAGE_RULE: &str = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.\n";
+/// `AGENTS.md`'s section on how a turn reads a public page: with `instafy web read` or a reading
+/// command a skill names, never a script. A turn that may change files and runs without that file
+/// (a required change, a turn on a restored thread, a lookup of another chat:
+/// `broad_contextual_instruction_suppression_reason`) is given it with its lane, from the space's
+/// own copy, as it is given that copy's "Replies" ([`pinned_agents_doc_section`]). Given "Replies"
+/// alone, a required change's build listed its tools, then read a shop's site twice with python's
+/// `urllib`: no robots.txt, budget or pacing, and Details showed only "Ran a command" (a local
+/// test, Nov 8). The rule was once a line of "Responsiveness" that the runtime kept a copy of, word
+/// for word, to find it there; as a section of its own it is found by its heading, in a team's own
+/// words too. A browser turn has no shell and is never given it.
+const READING_THE_WEB_SECTION: &str = "## Reading the web";
 
-/// [`PUBLIC_PAGE_RULE`] when the space's own `AGENTS.md` says it. None when it doesn't: a copy the
-/// space edited, or a team's own, is the space's.
-fn pinned_public_page_rule(workspace_dir: &Path) -> Option<&'static str> {
-    let (text, _) = read_text_file_lossy_truncated(
-        workspace_dir,
-        &workspace_dir.join(learn::AGENTS_DOC_FILENAME),
-        PROJECT_MEMORY_MAX_FILE_BYTES,
-    )?;
-    text.contains(PUBLIC_PAGE_RULE).then_some(PUBLIC_PAGE_RULE)
+/// A section of the space's own `AGENTS.md` under `heading`, for a turn that runs without that
+/// file: Codex leaves it out of a focused turn and withdraws it from a turn on a restored thread
+/// ("The previously provided AGENTS.md instructions no longer apply"). None when the space's copy
+/// has no such section: a copy the space edited, or a team's own, is the space's.
+fn pinned_agents_doc_section(workspace_dir: &Path, heading: &str) -> Option<String> {
+    let section = workspace_file_section(workspace_dir, learn::AGENTS_DOC_FILENAME, heading)?;
+    Some(format!(
+        "\nFrom `{}` (this thread may predate it):\n{section}\n",
+        learn::AGENTS_DOC_FILENAME
+    ))
 }
 
 /// `AGENTS.md`'s replies guide ([`BROWSER_TURN_REPLIES_SECTION`]), from the space's own copy,
 /// for a browser turn on a restored thread. None when the space's copy has no such section.
 fn pinned_replies_section(workspace_dir: &Path) -> Option<String> {
-    let section = workspace_file_section(
-        workspace_dir,
-        learn::AGENTS_DOC_FILENAME,
-        BROWSER_TURN_REPLIES_SECTION,
-    )?;
-    Some(format!(
-        "\nFrom `{}` (this thread may predate it):\n{section}\n",
-        learn::AGENTS_DOC_FILENAME
-    ))
+    pinned_agents_doc_section(workspace_dir, BROWSER_TURN_REPLIES_SECTION)
 }
 
 /// The section of a file in the space under `heading`, a line of its own, up to the next
@@ -11396,8 +11391,8 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             // a turn on a restored thread) also runs without the space's `AGENTS.md`
             // (`broad_contextual_instruction_suppression_reason`; a restored thread is told "The
             // previously provided AGENTS.md instructions no longer apply"). From the space's own
-            // copy, it is given the file's rule for reading a public page with the lane
-            // ([`pinned_public_page_rule`]), and its "Replies", the guide the reply line names, as
+            // copy, it is given the file's section on reading the web with the lane
+            // ([`READING_THE_WEB_SECTION`]), and its "Replies", the guide the reply line names, as
             // a browser turn on a restored thread is.
             let without_agents_md = stateful_thread_restored
                 || direct_workspace_file_change
@@ -11410,23 +11405,26 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     "\nDirect workspace-change invariants:\n\
                 - Use workspace-relative paths only. Never write outside the active workspace.\n",
                     page_rule.as_str(),
-                    without_agents_md
-                        .then(|| pinned_public_page_rule(workspace_dir))
-                        .flatten()
-                        .unwrap_or_default(),
                     "- Do not create submodules or gitlinks unless the user explicitly asked for one.\n\
                 - Imported or nested repositories are ordinary directories unless the user explicitly asks to preserve nested Git metadata.\n\
                 - Keep the final summary short: what changed and important caveats.\n",
                 ]
                 .concat(),
             );
-            if without_agents_md && let Some(section) = pinned_replies_section(workspace_dir) {
-                append_prompt_section(
-                    &mut prompt,
-                    &mut prompt_section_metrics,
-                    "pinnedRepliesSection",
-                    &section,
-                );
+            if without_agents_md {
+                for (name, heading) in [
+                    ("pinnedReadingTheWebSection", READING_THE_WEB_SECTION),
+                    ("pinnedRepliesSection", BROWSER_TURN_REPLIES_SECTION),
+                ] {
+                    if let Some(section) = pinned_agents_doc_section(workspace_dir, heading) {
+                        append_prompt_section(
+                            &mut prompt,
+                            &mut prompt_section_metrics,
+                            name,
+                            &section,
+                        );
+                    }
+                }
             }
         } else if stateful_thread_restored && !multi_agent_planning_turn {
             append_prompt_section(
@@ -11735,7 +11733,10 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             } else {
                 "- For browser/UI tasks, use this turn's browser tools when it has them and report observed page output.\n"
             },
-            "- Ask for clarification if you lack enough information to act.\n",
+            // When to ask the person and when to choose is one rule, in `AGENTS.md`'s "Replies",
+            // which this turn reads in its snapshot: "Ask for clarification if you lack enough
+            // information to act." here pulled against the page skill's "Never stop to ask before
+            // building".
             ]
             .concat());
             record_prompt_section_metric(
@@ -24691,9 +24692,9 @@ mod tests {
     /// a page turn said "The page is open in Studio" when only its card was
     /// posted. A turn that is given no `AGENTS.md` (one on a restored thread, a
     /// required change's first attempt, one that looks up another chat) is
-    /// given that section with the lane, and the file's rule for reading a
-    /// public page: a required change's build that read only "Replies" read a
-    /// shop's site twice with python's `urllib` (a local test, Nov 8). A reply
+    /// given that section with the lane, and the file's section on reading the
+    /// web: a required change's build that read only "Replies" read a shop's
+    /// site twice with python's `urllib` (a local test, Nov 8). A reply
     /// that changes nothing follows that section's one rule: a turn that also
     /// read that such a reply doesn't satisfy a required change, and was asked
     /// to end it with a line of the runtime's, answered correctly that the
@@ -24716,6 +24717,8 @@ mod tests {
                             apply; never with curl, wget, python, node or another script. \
                             Running those to build or check this space's own pages is fine.\n";
         assert!(agents_doc[..start].contains(reading_rule));
+        let reading_heading = format!("\n{READING_THE_WEB_SECTION}\n");
+        assert!(agents_doc[..start].contains(&reading_heading));
         let restored_state =
             json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
         // (a required change, a restored thread, a lookup of another chat). A lookup's thread
@@ -24815,41 +24818,76 @@ mod tests {
                 pinned,
                 "{case}"
             );
-            // Given with the lane, it is that section alone (a new thread's snapshot holds the
-            // whole file).
+            // Given with the lane, it is those two sections alone (a new thread's snapshot holds
+            // the whole file).
             assert_eq!(prompt.contains("## Responsiveness"), !pinned, "{case}");
+            assert_eq!(
+                prompt.contains(&format!(
+                    "From `AGENTS.md` (this thread may predate it):\n{READING_THE_WEB_SECTION}\n\n{reading_rule}"
+                )),
+                pinned,
+                "{case}"
+            );
+            assert_eq!(
+                metrics["promptSections"]["pinnedReadingTheWebSection"]["chars"]
+                    .as_u64()
+                    .is_some_and(|chars| chars > 0),
+                pinned,
+                "{case}"
+            );
             // Every such turn reads how to read a public page, once: in its snapshot, or with the
-            // lane when the file is left out.
+            // lane when the file is left out, and nothing else in the turn says it.
             assert_eq!(prompt.matches(reading_rule).count(), 1, "{case}");
+            assert_eq!(prompt.matches(&reading_heading).count(), 1, "{case}");
         }
         // A team's own `AGENTS.md` that reads pages another way is the space's: a required
-        // change is given its "Replies" and no other rule for reading a page.
+        // change is given its own words for reading a page, under the same heading, and its
+        // "Replies".
+        let team_rule = "- Read pages as this team's guide says.\n";
         fs::write(
             tmp.path().join(learn::AGENTS_DOC_FILENAME),
-            agents_doc.replace(reading_rule, "- Read pages as this team's guide says.\n"),
+            agents_doc.replace(reading_rule, team_rule),
         )
         .unwrap();
-        let mut job = test_lease_job(Some("feature"), json!({ "metadata": {} }));
-        job.project_id = Some(project_id);
-        let mut preflight =
-            test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
-        preflight.workspace_file_change_requirement = WorkspaceFileChangeRequirement::Required;
-        let job = job_with_agent_routing_preflight(&job, &preflight);
-        let (prompt, _, _) = processor
-            .build_prompt_with_text(
-                &project_id,
-                &job,
-                tmp.path(),
-                "Put the hours on a small page I can share.",
-                true,
-                None,
-                &[],
-                None,
-                None,
-            )
-            .expect("prompt should build");
+        let required_change = || {
+            let mut job = test_lease_job(Some("feature"), json!({ "metadata": {} }));
+            job.project_id = Some(project_id);
+            let mut preflight =
+                test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
+            preflight.workspace_file_change_requirement = WorkspaceFileChangeRequirement::Required;
+            let job = job_with_agent_routing_preflight(&job, &preflight);
+            processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Put the hours on a small page I can share.",
+                    true,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build")
+                .0
+        };
+        let prompt = required_change();
         assert!(prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n"));
+        assert!(
+            prompt.contains(&format!("{reading_heading}\n{team_rule}")),
+            "{prompt}"
+        );
         assert!(!prompt.contains("Read a public page only with"), "{prompt}");
+        // One with no such section (a team's own file, or a copy from before the rule had a
+        // section of its own that the space edited) gives nothing for it.
+        fs::write(
+            tmp.path().join(learn::AGENTS_DOC_FILENAME),
+            agents_doc.replace(&reading_heading, "\n"),
+        )
+        .unwrap();
+        let prompt = required_change();
+        assert!(prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n"));
+        assert!(!prompt.contains(READING_THE_WEB_SECTION), "{prompt}");
         // The retry of a file-changing turn ends the same way.
         let retry =
             codex_plain_write_task_retry_prompt("Put the hours on a small page I can share.");
@@ -24858,6 +24896,135 @@ mod tests {
         ));
         assert!(!retry.contains("plain-text summary"));
         assert!(!retry.contains("no warranted edits is a valid result"));
+    }
+
+    /// What a reply says when it didn't find something, when nothing needed changing, and when the
+    /// request leaves a choice open is one rule each, a line of `AGENTS.md`'s "Replies". Every
+    /// turn that reads that guide reads each rule once: a reply-only or building turn in its
+    /// snapshot, one that runs without the file with its lane, and a browser turn, fresh or on a
+    /// restored thread, in the section it is given. Nothing else in the turn says them again: a
+    /// reply-only turn read "Ask for clarification if you lack enough information to act." and a
+    /// page's build "Never stop to ask before building", two rules that pulled different ways.
+    #[test]
+    fn every_turn_that_replies_reads_each_reply_rule_once() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let agents_doc = fs::read_to_string(tmp.path().join(learn::AGENTS_DOC_FILENAME)).unwrap();
+        let rule = |start: &str| {
+            let line = agents_doc
+                .lines()
+                .find(|line| line.starts_with(start))
+                .unwrap_or_else(|| panic!("{start}"));
+            format!("{line}\n")
+        };
+        let rules = [
+            rule("- When you didn't find something,"),
+            rule("- When nothing needed changing,"),
+            rule("- A choice the request leaves open"),
+        ];
+        let restored_state = json!({
+            "defaultThreadId": "existing-thread",
+            "threadId": "existing-thread",
+            "sharedBrowserThreadId": "existing-browser-thread",
+            "historyReplayRequired": false,
+        });
+        let routed = |requirement: WorkspaceFileChangeRequirement, lookup: bool| {
+            let mut preflight =
+                test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, lookup, false);
+            preflight.workspace_file_change_requirement = requirement;
+            preflight
+        };
+        // A request whose words load the page skill, which said when to ask too.
+        let request = "Put the hours and the metro route on a small page I can share.";
+        for (case, metadata, preflight, restored) in [
+            ("reply-only", json!({}), None, false),
+            (
+                "building",
+                json!({}),
+                Some(routed(WorkspaceFileChangeRequirement::Conditional, false)),
+                false,
+            ),
+            (
+                "required change",
+                json!({}),
+                Some(routed(WorkspaceFileChangeRequirement::Required, false)),
+                false,
+            ),
+            (
+                "building, restored",
+                json!({}),
+                Some(routed(WorkspaceFileChangeRequirement::Conditional, false)),
+                true,
+            ),
+            (
+                "required change that looks up another chat",
+                json!({}),
+                Some(routed(WorkspaceFileChangeRequirement::Required, true)),
+                false,
+            ),
+            (
+                "shared browser",
+                json!({"browserTransport": "shared"}),
+                None,
+                false,
+            ),
+            (
+                "shared browser, restored",
+                json!({"browserTransport": "shared"}),
+                None,
+                true,
+            ),
+            (
+                "personal browser",
+                json!({"browserTransport": "desktop-personal"}),
+                None,
+                false,
+            ),
+            (
+                "personal browser, restored",
+                json!({"browserTransport": "desktop-personal"}),
+                None,
+                true,
+            ),
+        ] {
+            let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+            job.project_id = Some(project_id);
+            if let Some(preflight) = preflight.as_ref() {
+                job = job_with_agent_routing_preflight(&job, preflight);
+            }
+            let (prompt, _, _) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    request,
+                    true,
+                    restored.then_some(&restored_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            for rule in &rules {
+                assert_eq!(prompt.matches(rule.as_str()).count(), 1, "{case}: {rule}");
+            }
+            for elsewhere in [
+                "Ask for clarification",
+                "stop to ask",
+                "unless a page you read says so",
+            ] {
+                assert!(!prompt.contains(elsewhere), "{case}: {elsewhere}");
+            }
+            if case == "reply-only" || case == "building" {
+                // The page skill is in this turn's snapshot.
+                assert!(
+                    prompt.contains("## Context: instafy-interactive-artifacts ("),
+                    "{case}"
+                );
+            }
+        }
     }
 
     /// "keep going" answered after a look the routing step did not count, and

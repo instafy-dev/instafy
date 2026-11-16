@@ -47,12 +47,10 @@ const FIRST_PROMPT_WORKSPACE_LINES: &[&str] = &[
     "retrieve it (do not guess) via `instafy history messages`",
     "When the request depends on observable workspace, runtime, repo, process, or server state",
     "Active conversation goal:",
-    // A turn with no shell has no skill import, no environment and no workspace of its own, and
-    // a reading turn asks nothing first.
+    // A turn with no shell has no skill import, no environment and no workspace of its own.
     "do a skills preflight: check installed skills first",
     "The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`",
     "You are running in this space's workspace, so it is up.",
-    "- Ask for clarification if you lack enough information to act.",
 ];
 
 /// What a restored thread's reminder says about them.

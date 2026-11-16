@@ -2053,10 +2053,9 @@ fn a_browser_turn_on_a_restored_thread_is_given_the_replies_guide() {
             prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n"),
             "{transport}"
         );
-        assert!(
-            !prompt.contains("## Responsiveness"),
-            "{transport}: only the section"
-        );
+        for other in ["## Responsiveness", "## Reading the web"] {
+            assert!(!prompt.contains(other), "{transport}: only the section");
+        }
         assert!(
             metrics["promptSections"]["pinnedRepliesSection"]["chars"]
                 .as_u64()

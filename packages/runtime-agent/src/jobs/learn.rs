@@ -161,6 +161,10 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // From before a reply that changed nothing said what it checked and why, under a rule of its
     // own.
     include_str!("legacy/agents-doc-v18.md"),
+    // From before what a reply didn't find, and a choice its request left open, had a rule each
+    // in "Replies", and the rule for reading a public page was a section of its own ("Reading the
+    // web") rather than a line of "Responsiveness".
+    include_str!("legacy/agents-doc-v20.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -454,6 +458,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before the card command of a page with no builder skill took no `--serve-cmd` (it said
     // "The serve command is the builder skill's.").
     include_str!("legacy/interactive-artifacts-v17.md"),
+    // From before `AGENTS.md`'s "Replies" said, for every turn, what to do with a choice the
+    // request leaves open (it said "Never stop to ask before building").
+    include_str!("legacy/interactive-artifacts-v19.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -2515,15 +2522,106 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
+    /// Three things a reply says had more than one rule, which pulled different ways: what it
+    /// didn't find ("say where you looked", while a build was told to use the words Octo's
+    /// browser's findings give, "I didn't find the warranty", as they are), a change that
+    /// wasn't needed, and when to ask the person (every reply-only turn read "Ask for
+    /// clarification if you lack enough information to act.", and a page's build "Never stop to
+    /// ask before building"). Each is one rule now, a line of its own in "Replies", which every
+    /// turn that replies to the person reads, and neither the runtime's words nor the page skill
+    /// says it again. The copies from before are upgraded.
+    #[test]
+    fn the_replies_guide_says_each_of_its_three_rules_once() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let replies = AGENTS_DOC_TEMPLATE
+            .split("\n## Replies\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("Replies section");
+        let lines: Vec<&str> = replies
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect();
+        let only = |words: &str| {
+            let found: Vec<&&str> = lines.iter().filter(|line| line.contains(words)).collect();
+            assert_eq!(found.len(), 1, "{words}: {found:?}");
+            assert_eq!(
+                AGENTS_DOC_TEMPLATE.matches(words).count(),
+                found[0].matches(words).count(),
+                "{words}: only in its own line"
+            );
+            found[0].to_string()
+        };
+        let not_found = only("didn't find");
+        assert!(
+            not_found.starts_with("- When you didn't find something, say where you looked"),
+            "{not_found}"
+        );
+        // A value the person's turn looked for itself names where; what Octo's browser didn't
+        // find is said in its findings' own words, which name no page.
+        assert!(
+            not_found.contains(
+                "What Instafy's browser's findings say it didn't find, say in their words, naming no page (\"I didn't find the warranty\")."
+            ),
+            "{not_found}"
+        );
+        assert!(
+            not_found.ends_with("Never say a site or page lacks it or didn't load."),
+            "{not_found}"
+        );
+        assert_eq!(
+            only("nothing needed changing"),
+            "- When nothing needed changing, say what you checked and why."
+        );
+        let clarifying = only("short question");
+        assert!(
+            clarifying.starts_with("- A choice the request leaves open (dates, a currency, which models) is yours: make a sensible one and say it in the reply, without stopping to ask."),
+            "{clarifying}"
+        );
+        assert!(
+            clarifying.ends_with("Ask one short question only when no choice would serve them, such as which of their own things they mean."),
+            "{clarifying}"
+        );
+        assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
+
+        // The page skill no longer says when to ask: the rule is the one in "Replies".
+        assert!(
+            !INTERACTIVE_ARTIFACTS_TEMPLATE.contains("stop to ask"),
+            "{INTERACTIVE_ARTIFACTS_TEMPLATE}"
+        );
+
+        let previous = include_str!("legacy/agents-doc-v20.md");
+        assert!(flat(previous).contains("or which page you didn't reach, never that a site or page lacks it or didn't load, unless a page you read says so."));
+        assert!(!previous.contains("short question"));
+        let previous_hub = include_str!("legacy/interactive-artifacts-v19.md");
+        assert!(previous_hub.contains(
+            "Never stop to ask before building: a vague ask gets sensible defaults, stated in the reply."
+        ));
+        let workspace = tempdir().expect("workspace");
+        let agents = workspace.path().join(AGENTS_DOC_FILENAME);
+        let hub = workspace.path().join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+        ensure_project_memory_scaffold(workspace.path());
+        fs::write(&agents, previous).unwrap();
+        fs::write(&hub, previous_hub).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&agents).unwrap(), AGENTS_DOC_TEMPLATE);
+        assert_eq!(
+            fs::read_to_string(&hub).unwrap(),
+            INTERACTIVE_ARTIFACTS_TEMPLATE
+        );
+    }
+
     /// A building turn listed its tools, then read a shop's site twice with python's `urllib`:
     /// no robots.txt, budget or pacing, and Details showed only "Ran a command" (a local test,
     /// Nov 8). The research skill says never to fetch pages with curl, wget or ad-hoc scripts,
-    /// but a turn that doesn't load it never reads that. `AGENTS.md`'s "Responsiveness" says it
-    /// in one line: a public page is read with `instafy web read` or a reading command a skill
-    /// names, never with a script, while running one to build or check the space's own pages
-    /// stays fine. A turn that may change files and runs without the file (that build was a
-    /// required change) is given the same line with its lane (`jobs::PUBLIC_PAGE_RULE`); a
-    /// browser turn, which has no shell, reads only "Replies". The copy from before is upgraded.
+    /// but a turn that doesn't load it never reads that. `AGENTS.md` says it in one line, in a
+    /// section of its own, "Reading the web": a public page is read with `instafy web read` or a
+    /// reading command a skill names, never with a script, while running one to build or check
+    /// the space's own pages stays fine. A turn that may change files and runs without the file
+    /// (that build was a required change) is given that section with its lane, by its heading
+    /// (`jobs::READING_THE_WEB_SECTION`), as it is given "Replies"; it was a line of
+    /// "Responsiveness", which the runtime found by a copy of its words. A browser turn, which has
+    /// no shell, reads only "Replies". The copies from before are upgraded.
     #[test]
     fn agents_doc_says_a_turn_reads_a_public_page_only_with_instafys_reader() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2536,19 +2634,31 @@ mod tests {
                 .expect("section")
         };
         let rule = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
-        assert!(section("## Responsiveness").contains(rule), "{doc}");
-        assert!(!section("## Replies").contains("instafy web read"), "{doc}");
-        // The lane's copy is the file's line, word for word.
-        assert!(AGENTS_DOC_TEMPLATE.contains(super::super::PUBLIC_PAGE_RULE));
+        let heading = super::super::READING_THE_WEB_SECTION;
+        assert!(
+            AGENTS_DOC_TEMPLATE.contains(&format!("\n{heading}\n")),
+            "{AGENTS_DOC_TEMPLATE}"
+        );
+        assert_eq!(section(heading).trim(), rule, "{doc}");
+        assert_eq!(doc.matches("instafy web read").count(), 1, "{doc}");
+        assert!(
+            !section("## Responsiveness").contains("public page"),
+            "{doc}"
+        );
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
 
-        let previous = include_str!("legacy/agents-doc-v17.md");
-        assert!(!flat(previous).contains("instafy web read"));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        let before_the_rule = include_str!("legacy/agents-doc-v17.md");
+        assert!(!flat(before_the_rule).contains("instafy web read"));
+        let before_its_section = include_str!("legacy/agents-doc-v20.md");
+        assert!(!before_its_section.contains(heading));
+        assert!(flat(before_its_section).contains(rule));
+        for previous in [before_the_rule, before_its_section] {
+            let workspace = tempdir().expect("workspace");
+            let path = workspace.path().join(AGENTS_DOC_FILENAME);
+            fs::write(&path, previous).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        }
     }
 
     /// A reply named its turn's check ("JSON validation passed."), its browser's own tab ("I couldn't
@@ -2580,7 +2690,7 @@ mod tests {
     }
 
     /// A reply states only what a page read in its turn says, else "not checked"; it never says a site or
-    /// page lacks something (a place, stop, route or time), or that a page didn't load, unless a page says so,
+    /// page lacks something (a place, stop, route or time), or that a page didn't load,
     /// and says which page it didn't reach ("the planner itself didn't load in the page", of a planner whose
     /// own page the turn never opened); and it names only steps its turn started ("I'm sending Instafy's
     /// browser…" with no browser card is a promise nobody keeps). `AGENTS.md` is what web turns carry, and a
@@ -2601,7 +2711,8 @@ mod tests {
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
             "A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.",
-            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load, unless a page you read says so.",
+            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach.",
+            "Never say a site or page lacks it or didn't load.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
         ] {

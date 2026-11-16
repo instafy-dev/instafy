@@ -1184,6 +1184,53 @@ mod tests {
         );
     }
 
+    /// The routing step reads the routing sections of the browser and collaboration skills, never
+    /// `AGENTS.md` or the rest of a skill: what replies say (a rule of "Replies"), how a turn reads
+    /// the web, and when a page's build asks the person change no route. Every case's routing
+    /// input stays byte for byte the same when the space's `AGENTS.md` is a team's own and the
+    /// page skill says the opposite of what it says.
+    #[test]
+    fn the_routing_input_reads_neither_agents_md_nor_the_page_skills_rules() {
+        let cases = shipped();
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let inputs = || {
+            cases
+                .iter()
+                .map(|case| {
+                    let input = routing_input(case, workspace.path()).unwrap();
+                    (case.id.clone(), input.shared_start, input.prompt)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = inputs();
+        assert_eq!(before.len(), cases.len());
+
+        std::fs::write(
+            workspace.path().join(learn::AGENTS_DOC_FILENAME),
+            "# Team notes\n\n## Reading the web\n\n- Read pages any way.\n\n## Replies\n\n- Ask before every choice.\n",
+        )
+        .unwrap();
+        let hub = workspace
+            .path()
+            .join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+        let text = std::fs::read_to_string(&hub).unwrap();
+        let (front, body) = super::super::skill_routing::split_front_matter(&text);
+        assert!(!front.is_empty() && body.contains("## 1. Pick the builder"));
+        std::fs::write(
+            &hub,
+            format!("{front}\n# Interactive artifacts\n\nAlways stop to ask before building.\n"),
+        )
+        .unwrap();
+        let after = inputs();
+        for ((id, start_before, prompt_before), (_, start_after, prompt_after)) in
+            before.iter().zip(&after)
+        {
+            assert_eq!(start_before, start_after, "{id}: the shared start");
+            assert_eq!(prompt_before, prompt_after, "{id}: the prompt");
+        }
+    }
+
     /// The routing input is the job's, reading the browser skill's routing section from the
     /// space's own copy: the copy this checkout ships, and a changed one when it changes.
     #[test]
