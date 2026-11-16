@@ -272,7 +272,7 @@ describe("ProjectProviderBindingsCard", () => {
       await Promise.resolve();
     });
 
-    expect(window.confirm).toHaveBeenCalledWith("Revoke project access for demo?");
+    expect(window.confirm).toHaveBeenCalledWith("Revoke provider access for demo?");
     expect(revokeProjectProviderBindingMock).toHaveBeenCalledWith({
       projectId: "project-1",
       providerId: "demo",
@@ -302,15 +302,18 @@ describe("ProjectProviderBindingsCard", () => {
     });
 
     expect(container.textContent).toContain("Connections");
-    expect(container.textContent).toContain("Project files");
+    expect(container.textContent).toContain("Files, providers, and local hardware for this space.");
+    expect(container.textContent).toContain("Space files");
     expect(container.textContent).toContain(
-      "Stored in Instafy. Desktop and runtimes work on synced copies.",
+      "Stored in Instafy. Machines work on synced copies.",
     );
     expect(container.textContent).toContain("Copy on Taylor MacBook");
     expect(container.textContent).toContain("/home/example/.instafy/workspace/project-1");
-    expect(container.textContent).toContain("Project providers");
+    expect(container.textContent).toContain("Providers");
+    expect(container.textContent).toContain("No providers yet.");
     expect(container.textContent).toContain("Local hardware");
-    expect(container.textContent).toContain("Current host");
+    expect(container.textContent).toContain("Serial devices this machine can probe on demand.");
+    expect(container.textContent).toContain("Current machine");
     expect(container.textContent).toContain("Taylor MacBook");
     expect(container.textContent).toContain("Grants apply to Taylor MacBook.");
     const openDesktopLink = container.querySelector<HTMLAnchorElement>(
@@ -399,7 +402,7 @@ describe("ProjectProviderBindingsCard", () => {
     expect(container.querySelector('[data-testid="project-workspace-source-panel"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="project-provider-bindings-panel"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="project-hardware-bindings-panel"]')).not.toBeNull();
-    expect(container.textContent).toContain("Project providers");
+    expect(container.textContent).toContain("Providers");
     expect(container.textContent).toContain("Local hardware");
     expect(container.textContent).toContain("Taylor MacBook");
     expect(container.textContent).not.toContain("Storage: .instafy/providers/demo/");
@@ -415,8 +418,10 @@ describe("ProjectProviderBindingsCard", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("1 provider · 2 runtime hosts");
-    expect(container.textContent).toContain("Saved on this host");
+    expect(container.textContent).toContain("1 provider · 2 machines");
+    expect(container.textContent).toContain("Saved on this machine");
+    expect(container.textContent).toContain("Other machines");
+    expect(container.textContent).toContain("Machine id: runtime-workshop");
     expect(
       container.querySelector('[data-testid="project-hardware-host-group-runtime-local"]'),
     ).not.toBeNull();
@@ -443,7 +448,7 @@ describe("ProjectProviderBindingsCard", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("No local runtime connected");
+    expect(container.textContent).toContain("No local machine connected");
     expect(container.textContent).toContain("No local copy connected");
     expect(container.textContent).toContain("Open Desktop or connect the CLI to grant hardware.");
     expect(
@@ -500,10 +505,67 @@ describe("ProjectProviderBindingsCard", () => {
     expect(container.textContent).toContain("Linked folder");
     expect(container.textContent).toContain("/home/example/Projects/demo");
     expect(showStatusMock).toHaveBeenCalledWith(
-      "Folder linked. The local runtime will use it for this space's files.",
+      "Folder linked. This computer will use it for this space's files.",
       "success",
       4000,
     );
+  });
+
+  it("asks for a restart only while this space runs on this computer, and says when a reset applies", async () => {
+    const selectProjectWorkspaceFolder = vi.fn().mockResolvedValue({
+      ok: true,
+      path: "/home/example/Projects/demo",
+      state: "linked",
+      runtimeRestartRequired: true,
+    });
+    window.instafyDesktop = {
+      notify: vi.fn(),
+      selectProjectWorkspaceFolder,
+      getProjectWorkspaceBinding: vi.fn().mockResolvedValue({
+        path: null,
+        defaultPath: "/home/example/.instafy/workspace/project-1",
+      }),
+      clearProjectWorkspaceBinding: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    readProjectProviderBindingStoreMock.mockResolvedValue({ version: 1, bindings: {} });
+    readProjectHardwareBindingStoreMock.mockResolvedValue({ version: 1, bindings: {} });
+
+    await act(async () => {
+      root.render(<ProjectProviderBindingsCard projectId="project-1" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      container
+        .querySelector('[data-testid="project-workspace-folder-choose"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(showStatusMock).toHaveBeenCalledWith(
+      "Folder linked. Restart this space on this computer to start using it.",
+      "success",
+      8000,
+      expect.objectContaining({ actionLabel: "Machine controls" }),
+    );
+
+    await act(async () => {
+      container
+        .querySelector('[data-testid="project-workspace-folder-reset"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(showStatusMock).toHaveBeenCalledWith(
+      "Reset to the managed folder. It applies the next time this space starts on this computer.",
+      "info",
+      8000,
+      expect.objectContaining({ actionLabel: "Machine controls" }),
+    );
+    expect(container.textContent).toContain("Managed folder on this computer");
   });
 
   it("surfaces folder conflicts from the Desktop bridge as warnings", async () => {
@@ -736,7 +798,7 @@ describe("ProjectProviderBindingsCard", () => {
       container.querySelector('[data-testid="project-hardware-binding-hardware.serial-runtime-local"]'),
     ).not.toBeNull();
     expect(container.querySelector('[data-testid="project-access-subnav"]')).toBeNull();
-    expect(container.textContent).toContain("1 provider · 1 runtime host");
+    expect(container.textContent).toContain("1 provider · 1 machine");
 
     await act(async () => {
       container

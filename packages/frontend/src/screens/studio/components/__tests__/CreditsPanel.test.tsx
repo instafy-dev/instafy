@@ -55,6 +55,8 @@ describe("Credits display choices", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
   const radio = (testId: string) => container.querySelector<HTMLInputElement>(`[data-testid="${testId}"] input[type="radio"]`)!;
+  const spendLine = () => container.querySelector('[data-testid="credits-balance-spend-line"]')?.textContent;
+  const OWN_AI_LINE = "Messages answered by your own AI connection use that account, not credits.";
   it("uses labelled exclusive choices for amounts, activity view and graph range without changing billing", async () => {
     await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
     expect(container.querySelector('[role="radiogroup"][aria-label="Credit display units"]')).not.toBeNull();
@@ -186,6 +188,7 @@ describe("Credits display choices", () => {
   // A local test, in a space of the person's own: "Team credits", "Shared
   // team balance" and "AI, runtime, and live access spend all land in this
   // shared ledger". Nobody shares that balance. A team's space keeps its words.
+  // The line under Activity names no team now, so both kinds of space show it.
   it("says Credits and Balance in a personal space, with no team, shared ledger or live access", async () => {
     mocks.projectList = [{ id: "project-a", orgName: "Personal" }];
     mocks.ledger = [{ delta: -1, reason: "managed_ai_prompt", metadata: null, createdAt: "2026-10-29T09:00:00Z" }];
@@ -193,12 +196,17 @@ describe("Credits display choices", () => {
     expect(container.querySelector('[data-testid="settings-title"]')?.textContent).toBe("Credits");
     expect(container.querySelector('[data-testid="credits-balance-label"]')?.textContent).toBe("Balance");
     expect(container.textContent).toContain("Recent balance activity");
+    expect(spendLine()).toBe(OWN_AI_LINE);
     expect(container.textContent).not.toMatch(/team|shared|ledger|live access/i);
     // Plans and Usage say whose balance it is the same way (a plan made for
     // teams still says so).
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-plans"]')!.click());
     expect(container.textContent).toContain("Your balance tops back up daily (UTC) to the selected plan limit.");
     expect(container.textContent).not.toMatch(/shared|team-specific|your team/i);
+    // No policy says hosted machines cost anything here, so the line does not.
+    expect(container.querySelector('[data-testid="billing-hosted-runtime-definition"]')?.textContent).toBe(
+      "Hosted machines are cloud computers (from 2 CPU · 4 GB) that pause when idle. Your own machine, connected via the desktop agent, is always free and unlimited.",
+    );
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
     expect(container.textContent).toContain("Everything below uses the same balance.");
     expect(container.textContent).not.toMatch(/team|shared|live access/i);
@@ -209,7 +217,8 @@ describe("Credits display choices", () => {
     await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
     expect(container.querySelector('[data-testid="settings-title"]')?.textContent).toBe("Team credits");
     expect(container.querySelector('[data-testid="credits-balance-label"]')?.textContent).toBe("Shared team balance");
-    expect(container.textContent).toContain("AI, runtime, and live access spend all land in this shared ledger.");
+    expect(spendLine()).toBe(OWN_AI_LINE);
+    expect(container.textContent).not.toMatch(/ledger|runtime/i);
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-plans"]')!.click());
     expect(container.textContent).toContain("Your shared balance tops back up daily (UTC)");
     expect(container.textContent).toContain("team-specific overrides may apply.");
@@ -236,7 +245,7 @@ describe("Credits display choices", () => {
     } });
     await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
-    // Only what costs something a minute is a rate: hosted runtimes cost nothing here.
+    // Only what costs something a minute is a rate: hosted machines cost nothing here.
     const services = [...container.querySelectorAll('[data-testid="credits-active-services-mobile"] > div')]
       .map((row) => row.textContent);
     expect(services).toEqual([expect.stringMatching(/^Live accessMetered/)]);
@@ -272,6 +281,79 @@ describe("Credits display choices", () => {
     expect(container.querySelector('[data-testid="credits-balance-label"]')?.textContent).toBe("Balance");
     expect(text).toContain("once a day");
     expect(text).not.toMatch(/\/1M|metering is currently disabled|If you plan for|0 credits\/min|Not metered|Billing interval|Active services/);
+  });
+
+  // Settings review, Nov 16: Credits said "runtime" for hosted machines and
+  // "ledger" for the balance, and nothing on it said whether a message the
+  // person's own AI connection answers costs credits (it costs none:
+  // dispatch.rs reserves credits only for an Instafy AI turn).
+  it("names what the balance pays for in machine words, and that an own AI connection costs no credits", async () => {
+    mocks.controllerEnabled = true;
+    const metered = (reason: string) => ({ reason, enabled: true, amount: 10, intervalSeconds: 480, creditsPerMinute: 1.25 });
+    mocks.fetchCreditPolicy.mockResolvedValue({ success: true, policy: {
+      display: { unitLabel: "credits", currency: "USD", unitsPerUsd: 1000 },
+      refill: { kind: "daily", timezone: "UTC" },
+      plans: [],
+      usage: {
+        tunnel: metered("tunnel_grant"),
+        hostedRuntime: metered("hosted_runtime"),
+        hostedRuntimeProviders: [{ providerId: "instafy-cloud", displayName: "Instafy Cloud", enabled: true, amount: 10,
+          intervalSeconds: 480, creditsPerMinute: 1.25 }],
+        managedAi: { reason: "managed_ai_prompt", enabled: true, label: "Instafy AI", provider: "openai", creditsPerPrompt: 1,
+          dailyPromptLimit: 0, modelLabel: "GPT-6 Luna", inputUsdMicrosPer1k: 100, cachedInputUsdMicrosPer1k: 10, outputUsdMicrosPer1k: 500 },
+      },
+    } });
+    mocks.ledger = [{ delta: -10, reason: "hosted_runtime", metadata: null, createdAt: "2026-11-16T09:00:00Z" }];
+    await act(async () => root.render(<MemoryRouter><CreditsPanel /></MemoryRouter>));
+    expect(spendLine()).toBe(`This balance pays for Instafy AI messages, hosted machine time and live access. ${OWN_AI_LINE}`);
+    expect(container.querySelector('[data-testid="credit-ledger-entry"] p')?.textContent).toBe("Hosted machine time");
+    expect(container.textContent).not.toMatch(/ledger|runtime/i);
+    // The graph's key said "Hosted runtime" and "Other burn": it names the
+    // log's rows the log's way.
+    await act(async () => radio("credits-activity-view-graph").click());
+    expect(container.querySelector('[data-testid="credit-activity-graph"] > div')?.textContent).toBe(
+      "AIHosted machine timeLive accessOther spendingAdded",
+    );
+    expect(container.textContent).not.toMatch(/ledger|runtime|burn/i);
+
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-usage"]')!.click());
+    const services = [...container.querySelectorAll('[data-testid="credits-active-services-mobile"] > div')]
+      .map((row) => row.textContent);
+    expect(services).toEqual([
+      expect.stringMatching(/^Live accessMetered/),
+      expect.stringMatching(/^Hosted machine \(Instafy Cloud\)Metered/),
+    ]);
+    // 1,000 credits at 1.25 a minute; a Boost machine costs twice that.
+    expect(container.textContent).toContain(
+      "Hosted machine time costs from 1.25 credits/min, so your current balance runs one hosted machine for up to ~13.3h.",
+    );
+    expect(container.textContent).toContain(OWN_AI_LINE);
+    expect(container.textContent).not.toMatch(/ledger|runtime/i);
+
+    // The plans' own descriptions come from credits/plans.ts; the lines this
+    // panel writes say hosted machines, one or more. A hosted machine is at
+    // least the Standard size in runtime/sizes.rs.
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="section-plans"]')!.click());
+    expect(container.querySelector('[data-testid="billing-hosted-runtime-definition"]')?.textContent).toBe(
+      "Hosted machines are cloud computers (from 2 CPU · 4 GB) that pause when idle. This balance pays for their time while they run. Your own machine, connected via the desktop agent, is always free and unlimited.",
+    );
+    expect(container.querySelector('[data-testid="billing-plan-starter"]')?.textContent).toContain(
+      "200 credits/day · 3 live connections · 1 hosted machine",
+    );
+    expect(container.querySelector('[data-testid="billing-plan-pro"]')?.textContent).toContain(
+      "2,000 credits/day · 10 live connections · 3 hosted machines",
+    );
+    // Settings review, Nov 16: Starter promised "~2h/day of runtime credits"
+    // (hosted machine time costs nothing until an operator sets a rate) and
+    // Starter and Pro said "Bring your own AI credentials for now" next to
+    // Instafy AI. A description repeats none of the figures under it, which
+    // come from the controller's plan catalog.
+    const paragraphs = (id: string) =>
+      [...container.querySelectorAll(`[data-testid="billing-plan-${id}"] p`)].map((p) => p.textContent);
+    expect(paragraphs("starter")).toContain("Try Instafy.");
+    expect(paragraphs("pro")).toContain("More credits and higher limits.");
+    expect(paragraphs("scale")).toContain("For teams that need more hosted machines and live connections at once.");
+    expect(container.textContent).not.toMatch(/runtime|~2h|Bring your own|credentials/i);
   });
 
   // Local drive 3: Activity showed only the newest 8 rows, with no way to see more.

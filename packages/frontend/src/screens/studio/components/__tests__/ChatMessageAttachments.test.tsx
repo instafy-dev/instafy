@@ -427,6 +427,10 @@ describe("chat message attachments", () => {
     const findButton = (name: string) => Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent === name);
     expect(document.querySelector('[data-testid="chat-file-attachment-content"]')?.textContent).toBe(firstPage);
     expect(findButton("Previous")?.getAttribute("aria-disabled")).toBe("true");
+    // The unavailable end keeps the available one's colours and fades as a
+    // disabled button does: the muted grey read too close to the neutral one.
+    expect([...findButton("Previous")!.classList]).toContain("aria-disabled:opacity-60");
+    expect(findButton("Previous")?.className).toBe(findButton("Next")?.className);
     await act(async () => findButton("Next")?.click());
     expect(document.querySelector('[data-testid="chat-file-attachment-content"]')?.textContent).toBe("🐙tail");
     expect(findButton("Next")?.getAttribute("aria-disabled")).toBe("true");

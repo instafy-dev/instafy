@@ -285,7 +285,7 @@ function ComposerContextToken({ icon, label, cancelLabel, onCancel, testId }: {
 }) {
   return (
     <div className="flex min-w-0 max-w-full" data-testid={`${testId}-token`}>
-      <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-slate-100 py-0.5 pl-2.5 pr-0.5 text-slate-600 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-300">
+      <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-slate-100 py-0.5 pl-2.5 pr-0.5 text-slate-700 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-300">
         <span className="flex flex-none [&>svg]:h-3.5 [&>svg]:w-3.5">{icon}</span>
         <Text as="span" variant="caption" tone="inherit" className="truncate">{label}</Text>
         <IconButton
@@ -1238,6 +1238,7 @@ export function ChatComposerSurface({
                       type="button"
                       preset="inline"
                       variant="ghost"
+                      tone="muted"
                       aria-controls={goalDetailsId}
                       aria-expanded={goalDetailsExpanded}
                       onClick={toggleGoalDetails}
@@ -1248,7 +1249,9 @@ export function ChatComposerSurface({
                         <Text as="span" variant="bodyStrong" tone="secondary" className="block truncate">
                           {activeGoal.objective}
                         </Text>
-                        <Text as="span" variant="caption" tone="muted" className="block truncate">
+                        {/* Follows the button's muted tone, which darkens on its
+                            slate-100 hover where plain muted text reads 4.39:1. */}
+                        <Text as="span" variant="caption" tone="inherit" className="block truncate">
                           {goalDetail}
                         </Text>
                         {activeGoalHealth && activeGoalHealth.turnCount > 0 ? (

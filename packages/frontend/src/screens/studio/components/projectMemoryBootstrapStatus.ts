@@ -63,7 +63,7 @@ export function describeProjectMemoryBootstrapResult(
       return skills
         ? null
         : {
-            message: "Start or connect a runtime before refreshing defaults.",
+            message: "Start or connect a machine for this space before refreshing defaults.",
             intent: "warning",
             duration: 3500,
             committed: false,

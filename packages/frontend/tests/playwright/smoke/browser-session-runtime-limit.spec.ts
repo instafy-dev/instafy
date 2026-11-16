@@ -213,13 +213,13 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     expect(viewportChannelSpread).toBeLessThanOrEqual(16);
     await expect(limitCard).toHaveCSS("background-color", "rgb(255, 255, 255)");
     await expect(notice).toBeVisible();
-    await expect(notice.getByText("Cloud runtime already in use", { exact: true })).toBeVisible();
+    await expect(notice.getByText("Hosted machine limit reached", { exact: true })).toBeVisible();
     expect(viewportOnlyRequested).toBe(true);
     await expect(
-      notice.getByText("All 2 Instafy Cloud runtimes for this team are in use."),
+      notice.getByText("All 2 hosted machines for this team are in use."),
     ).toBeVisible();
     await expect(
-      notice.getByText('“Hosted Runtime” is running in “Other Project”.'),
+      notice.getByText("A hosted machine is running in “Other Project”."),
     ).toBeVisible();
     await expect(notice).not.toContainText("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     await expect(notice).not.toContainText("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
@@ -293,12 +293,12 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     expect(viewportColors.backgroundLuminance).toBeLessThan(0.04);
     expect(viewportChannelSpread).toBeLessThanOrEqual(16);
     await expect(card).toBeVisible();
-    await expect(notice.getByText("Cloud runtime already in use", { exact: true })).toBeVisible();
+    await expect(notice.getByText("Hosted machine limit reached", { exact: true })).toBeVisible();
     await expect(
-      notice.getByText("All 2 Instafy Cloud runtimes for this team are in use."),
+      notice.getByText("All 2 hosted machines for this team are in use."),
     ).toBeVisible();
     await expect(
-      notice.getByText('“Hosted Runtime” is running in another space.'),
+      notice.getByText("A hosted machine is running in another space."),
     ).toBeVisible();
     await expect(notice).not.toContainText(LIMIT_MESSAGE);
     await expect(notice).not.toContainText("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
@@ -442,7 +442,7 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     await expect(
       page
         .getByTestId("browser-session-modal")
-        .getByText("Cloud runtime already in use", { exact: true }),
+        .getByText("Hosted machine limit reached", { exact: true }),
     ).toHaveCount(0);
   });
 
@@ -830,7 +830,7 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     await openBrowserSession(page);
 
     const modal = page.getByTestId("browser-session-modal");
-    await expect(modal.getByText("Cloud runtime already in use", { exact: true })).toBeVisible();
+    await expect(modal.getByText("Hosted machine limit reached", { exact: true })).toBeVisible();
     await expect(
       modal.getByRole("button", { name: "Stop and open here", exact: true }),
     ).toBeVisible();
@@ -982,7 +982,7 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     await expect(panel).toBeVisible();
     await expect(stage).toBeVisible();
     await expect(collapsedCard).toHaveCount(0);
-    await expect(panel.getByText("Cloud runtime already in use", { exact: true })).toBeVisible();
+    await expect(panel.getByText("Hosted machine limit reached", { exact: true })).toBeVisible();
     await expect(browserTab).toHaveAttribute("aria-selected", "true");
 
     const stageBox = await stage.boundingBox();
@@ -1039,7 +1039,7 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     const chatTab = page.getByTestId("conversation-subtab-chat");
     await expect(modal).toBeVisible({ timeout: 20_000 });
     await expect(collapsedCard).toHaveCount(0);
-    await expect(modal.getByText("Cloud runtime already in use", { exact: true })).toBeVisible();
+    await expect(modal.getByText("Hosted machine limit reached", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Browser session" })).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Browser session" })).toBeVisible();
     await expect(browserTab).toHaveAttribute("aria-selected", "true");
@@ -1094,7 +1094,7 @@ test.describe.serial("Browser session runtime limit guidance", () => {
     await expect(modal).toBeVisible({ timeout: 20_000 });
     await expect(collapsedCard).toHaveCount(0);
     await expect(inlineStage).toBeVisible();
-    await expect(modal.getByText("Cloud runtime already in use", { exact: true })).toBeVisible();
+    await expect(modal.getByText("Hosted machine limit reached", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Browser session" })).toHaveCount(0);
     await expect(page.getByTestId("conversation-subtabs")).toBeVisible();
     await expect(page.getByTestId("conversation-subtab-browser")).toHaveAttribute(

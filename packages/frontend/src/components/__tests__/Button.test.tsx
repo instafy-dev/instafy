@@ -3,6 +3,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { Button, IconButton, type ButtonProps } from "../Button";
+import { textTones } from "../../styles/typography";
 
 const Glyph = () => <svg data-testid="glyph" aria-hidden="true" />;
 
@@ -87,6 +88,14 @@ describe("Button", () => {
 
     const flat = await render(<Button variant={variant} elevation="none">Cancel</Button>);
     expect([...flat.classList]).toEqual(classes);
+  });
+
+  it.each(["ghost", "outline", "text"] as const)("never draws a muted %s action fainter than muted text", async (variant) => {
+    const button = await render(<Button variant={variant} tone="muted">Retry</Button>);
+    const classes = [...button.classList];
+    expect(classes).toEqual(expect.arrayContaining(textTones.muted.split(" ")));
+    // slate-400 and slate-500 stay for icons and decoration.
+    expect(classes.filter((name) => /^text-slate-(?:50|[1-5]00)$/.test(name))).toEqual([]);
   });
 
   it("renders the icon before the label while idle", async () => {

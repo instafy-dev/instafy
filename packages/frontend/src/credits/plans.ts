@@ -13,12 +13,18 @@ export interface BillingPlanDefinition {
   highlight?: string;
 }
 
+// A description shows on its plan's card in Credits > Plans, above the plan's
+// credits a day, live connections and hosted machines. Those come from the
+// controller's plan catalog (billing_plans, which an operator can change), so
+// a description repeats none of them. It names no hosted machine hours either
+// (their rate is 0 until an operator sets one), and nothing about how AI is
+// paid for: Instafy AI, where it is on, spends credits on every plan, and a
+// person's own AI connection spends none.
 export const BILLING_PLANS: BillingPlanDefinition[] = [
   {
     id: "starter",
     name: "Starter",
-    description:
-      "Try Instafy with 3 live connections + 1 hosted machine (~2h/day of runtime credits). Bring your own AI credentials for now.",
+    description: "Try Instafy.",
     creditLimit: 200,
     maxActiveTunnels: 3,
     maxActiveHostedRuntimes: 1,
@@ -30,8 +36,7 @@ export const BILLING_PLANS: BillingPlanDefinition[] = [
   {
     id: "pro",
     name: "Pro",
-    description:
-      "More credits + higher limits (up to 10 live connections + 3 hosted machines). Bring your own AI credentials for now.",
+    description: "More credits and higher limits.",
     creditLimit: 2000,
     maxActiveTunnels: 10,
     maxActiveHostedRuntimes: 3,
@@ -43,7 +48,7 @@ export const BILLING_PLANS: BillingPlanDefinition[] = [
   {
     id: "scale",
     name: "Scale",
-    description: "For teams that need higher concurrency (up to 25 live connections + 8 hosted machines).",
+    description: "For teams that need more hosted machines and live connections at once.",
     creditLimit: 10000,
     maxActiveTunnels: 25,
     maxActiveHostedRuntimes: 8,

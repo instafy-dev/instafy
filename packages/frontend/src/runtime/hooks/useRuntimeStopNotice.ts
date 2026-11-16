@@ -83,15 +83,19 @@ export function useRuntimeStopNotice({
       if (reclaimed) {
         // Whether to hold this machine is the recovery listener's call (it
         // knows about this tab's queued work); this only explains the stop.
+        // The slot went to another space of the space's team (a Personal
+        // team for a personal space). Viewers get this notice too and cannot
+        // start the machine, so whoever writes is "someone".
         showStatus(
-          "This space's cloud runtime was paused so another space in your team could use it. Your files are kept, and it starts again when you write in the chat and a runtime is free.",
+          "This space's hosted machine was paused to make room for another space in this team. Your files are kept, and it starts again when someone writes in the chat and a hosted machine is free.",
           "info",
           8000,
           { id: "runtime-paused-reclaimed", forceVisible: true },
         );
       } else if (reason === "idle") {
+        // Viewers get this too, and cannot write: "someone", as above.
         showStatus(
-          "Hosted machine paused after inactivity. Your files and caches are kept, and it wakes when you write in the chat.",
+          "Hosted machine paused after inactivity. Your files and caches are kept, and it wakes when someone writes in the chat.",
           "info",
           8000,
           { id: "runtime-paused-idle", forceVisible: true },

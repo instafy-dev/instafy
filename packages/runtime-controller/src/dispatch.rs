@@ -5001,36 +5001,42 @@ fn runtime_alert_message(
     runtime_alert_fallback_message(reason, terminal_alert)
 }
 
-/// Mirrors the Studio's wording in `controllerConversationNotice.ts`. It does
-/// not name a count: plans allow different numbers of runtimes, and the
-/// refusal's counts are only in its prose, so a number here would be wrong
-/// for every plan but one. Nor does it say where the busy runtimes are: the
-/// one holding the slot can be in this same space, such as its standard
-/// runtime while its Webdev runtime waits to start.
-const RUNTIME_LIMIT_WAIT_MESSAGE: &str = "Waiting for a free cloud runtime. All of this team\u{2019}s cloud runtimes are in use; stop one in Machines and this request will send.";
+/// Word for word what the Studio shows for it (`controllerConversationNotice.ts`).
+/// It does not name a count: plans allow different numbers of hosted
+/// machines, and the refusal's counts are only in its prose, so a number here
+/// would be wrong for every plan but one. Nor does it say where the busy
+/// machines are: the one holding the slot can be in this same space, such as
+/// its standard runtime while its Webdev runtime waits to start.
+const RUNTIME_LIMIT_WAIT_MESSAGE: &str = "Waiting for a free hosted machine. All of this team\u{2019}s hosted machines are in use; stop one in Machines and this request will send.";
 
 /// These sentences name the surface the reader can actually reach. They used to
 /// say "the Runtime button by the composer"; that button's only renderer lost
 /// its last importer and has since been deleted, so the copy was pointing at a
 /// control that no longer exists. Machines is where runtimes live now.
-/// The frontend mirrors these in `controllerConversationNotice.ts` and renders
-/// an "Open Machines" action beside them.
+/// The Studio rewords these notices from their metadata in
+/// `controllerConversationNotice.ts` and renders an "Open Machines" action
+/// beside them, but the CLI and the conversation history show the text stored
+/// here, so each says word for word what the Studio shows; keep the two in
+/// step. The Studio still reads a notice's stored text when its metadata has no
+/// status (`isRecoverableRuntimeStartAlert`), and takes "connecting", "is
+/// starting", "still starting" or "has not connected yet" there for a start in
+/// progress, so a terminal sentence must not use them.
 fn runtime_alert_fallback_message(reason: &str, terminal_alert: bool) -> &'static str {
     match reason {
         "runtime_not_ready" if terminal_alert => {
-            "Workspace startup failed. Open Machines to reconnect Instafy Cloud."
+            "Workspace startup failed. Open Machines to reconnect this space's machine."
         }
         "runtime_not_ready" => {
             "Starting the workspace. Your queued request will continue automatically."
         }
         "runtime_unavailable" => {
-            "No runtime is connected for this space. Open Machines to start Instafy Cloud."
+            "No machine is connected to this space. Open Machines to start one."
         }
         "runtime_inspection_failed" => {
-            "The workspace runtime could not be verified. Open Machines to inspect or reconnect it."
+            "Instafy couldn't check this space's machine. Open Machines to inspect or reconnect it."
         }
         _ => {
-            "The workspace runtime could not be reached. Open Machines to inspect or reconnect it."
+            "Instafy couldn't reach this space's machine. Open Machines to inspect or reconnect it."
         }
     }
 }
@@ -7068,12 +7074,14 @@ mod tests {
         // Word for word what the Studio shows for it, apostrophe included.
         assert_eq!(
             message,
-            "Waiting for a free cloud runtime. All of this team\u{2019}s cloud runtimes are in use; stop one in Machines and this request will send."
+            "Waiting for a free hosted machine. All of this team\u{2019}s hosted machines are in use; stop one in Machines and this request will send."
         );
-        // A plan with more than one runtime reads the same text, so it must
-        // not claim the team has exactly one.
-        assert!(!message.contains("one runtime"), "{message}");
-        // The runtime holding the slot can be in this same space, so the text
+        // A plan with more than one hosted machine reads the same text, so it
+        // must not claim the team has exactly one.
+        for one in ["one machine", "one hosted machine", "one runtime"] {
+            assert!(!message.contains(one), "{message}");
+        }
+        // The machine holding the slot can be in this same space, so the text
         // must not place it in another one.
         assert!(!message.contains("space"), "{message}");
 
@@ -7081,17 +7089,53 @@ mod tests {
         let other = json!({ "status": "failed", "code": "provider_launch_failed" });
         assert_eq!(
             runtime_alert_message("runtime_not_ready", true, Some(&other)),
-            "Workspace startup failed. Open Machines to reconnect Instafy Cloud."
+            "Workspace startup failed. Open Machines to reconnect this space's machine."
         );
         assert_eq!(
             runtime_alert_message("runtime_not_ready", true, None),
-            "Workspace startup failed. Open Machines to reconnect Instafy Cloud."
+            "Workspace startup failed. Open Machines to reconnect this space's machine."
         );
         // The limit code only rewords a not-ready runtime.
         assert_eq!(
             runtime_alert_message("runtime_unavailable", true, Some(&limit)),
             runtime_alert_fallback_message("runtime_unavailable", true)
         );
+    }
+
+    /// The CLI and the conversation history show the stored text, so it says
+    /// what the Studio says: a machine (docs/Runtime-Machines.md, "The model"),
+    /// never a runtime or Instafy Cloud. The Studio reads the stored text of a
+    /// notice without a status for a start in progress, so a terminal notice
+    /// must not use the words it looks for (`isRecoverableRuntimeStartAlert`).
+    #[test]
+    fn stored_runtime_alerts_say_machine_and_terminal_ones_never_read_as_starting() {
+        let limit = json!({ "status": "failed", "code": "runtime_limit_reached" });
+        let terminal = [
+            runtime_alert_message("runtime_not_ready", true, Some(&limit)),
+            runtime_alert_fallback_message("runtime_not_ready", true),
+            runtime_alert_fallback_message("runtime_unavailable", true),
+            runtime_alert_fallback_message("runtime_inspection_failed", true),
+            runtime_alert_fallback_message("unexpected_runtime_error", true),
+        ];
+        for message in terminal {
+            let lower = message.to_lowercase();
+            for word in [
+                "connecting",
+                "is starting",
+                "still starting",
+                "has not connected yet",
+            ] {
+                assert!(!lower.contains(word), "{message} reads as starting");
+            }
+        }
+        for message in terminal
+            .into_iter()
+            .chain([runtime_alert_fallback_message("runtime_not_ready", false)])
+        {
+            let lower = message.to_lowercase();
+            assert!(!lower.contains("runtime"), "{message}");
+            assert!(!lower.contains("instafy cloud"), "{message}");
+        }
     }
 
     #[test]

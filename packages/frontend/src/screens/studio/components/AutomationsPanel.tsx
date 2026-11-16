@@ -29,6 +29,7 @@ import {
   type ControllerAutomationStatus,
 } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { textTones } from "../../../styles/typography";
 import { useProjects } from "../../../projects/useProjects";
 import { useAuth } from "../../../providers/AuthProvider";
 import { ControllerApiError } from "../../../services/runtimeController/core";
@@ -69,6 +70,64 @@ const WEEK_DAYS: Array<{ code: string; label: string; name: string }> = [
   { code: "sa", label: "Sa", name: "Saturday" },
   { code: "su", label: "Su", name: "Sunday" },
 ];
+
+// The machine an automation runs on (its runtime mode): the editor's
+// "Machine" choice and the automation's row. In automations.rs, auto takes a
+// machine already running for the space, of the automation's provider when it
+// names one; with none running it starts one of that provider or of the
+// default one (a self-hosted one cannot be started, so that run fails).
+// Hosted starts or reuses a machine of that provider or of the default one,
+// and refuses a self-hosted provider. Existing names no machine and reads no
+// provider: dispatch.rs gives the run the controller's runtime preference, the
+// machine selected in Machines ("Use this machine"; the owner's own selection
+// comes first). The controller keeps that selection only in memory, so a
+// restart loses it, and clears it when its machine is removed or found
+// unavailable; without one the run is queued unpinned and the space's default
+// machine may be started for it. So the choice is "Default": not "Selected",
+// which a screen reader announces like the radio's own state and which
+// promised a pin that does not hold, nor "Like chat", since the Studio names a
+// machine for a chat message itself (a ready one when none is selected). The
+// choices stay one or two words: three to a row fit a 320px phone's editor,
+// about 72px a label.
+const MACHINE_LABELS: Record<
+  ControllerAutomationRuntimeMode,
+  { choice: string; row: string; ariaLabel?: string }
+> = {
+  auto: { choice: "Any", row: "Any machine" },
+  hosted: { choice: "Hosted", row: "Hosted machine" },
+  existing: {
+    choice: "Default",
+    row: "Default machine",
+    ariaLabel:
+      "Default machine: the one selected in Machines when it runs, or the space's default when none is",
+  },
+};
+
+/**
+ * The machine an automation's row names. Auto and hosted take only machines
+ * of the automation's provider when it names one (select_viable_runtime_id and
+ * ensure_runtime_for_automation in automations.rs), so the provider names the
+ * machine; existing never reads it. Provider ids compare as the controller's
+ * provider_id_key does; "Hosted machine" is only the canonical Instafy Cloud
+ * id, since a configured provider may take an instafy-cloud-* name.
+ */
+function automationMachineRowLabel(
+  automation: Pick<ControllerAutomation, "runtimeMode" | "runtimeProvider">,
+): string {
+  const labels = MACHINE_LABELS[automation.runtimeMode] ?? MACHINE_LABELS.auto;
+  const provider = automation.runtimeProvider?.trim() ?? "";
+  if (automation.runtimeMode === "existing" || !provider) {
+    return labels.row;
+  }
+  const providerKey = provider.toLowerCase().replace(/[\s_-]+/g, "_").replace(/^_+|_+$/g, "");
+  if (providerKey === "self_hosted") {
+    return "Self-hosted machine";
+  }
+  if (providerKey === "instafy_cloud") {
+    return "Hosted machine";
+  }
+  return `${provider} machine`;
+}
 
 function localTimezone(): string {
   try {
@@ -461,14 +520,18 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
           />
 
           <SegmentedControl<ControllerAutomationRuntimeMode>
-            label="Runtime"
+            label="Machine"
             isDisabled={saving}
             value={draft.runtimeMode}
             onChange={(value) => setDraft((prev) => ({ ...prev, runtimeMode: value }))}
             options={[
-              { value: "auto", label: "Auto" },
-              { value: "hosted", label: "Cloud" },
-              { value: "existing", label: "Existing" },
+              { value: "auto", label: MACHINE_LABELS.auto.choice },
+              { value: "hosted", label: MACHINE_LABELS.hosted.choice },
+              {
+                value: "existing",
+                label: MACHINE_LABELS.existing.choice,
+                ariaLabel: MACHINE_LABELS.existing.ariaLabel,
+              },
             ]}
           />
         </div>
@@ -559,12 +622,11 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
         )}
 
         <div className="grid gap-3 md:grid-cols-2">
-          <Field label="Runtime provider (optional)" htmlFor={`${fieldId}-provider`}>
+          <Field label="Machine provider (optional)" htmlFor={`${fieldId}-provider`}>
             <Input
               id={`${fieldId}-provider`}
               value={draft.runtimeProvider}
               onChange={(e) => setDraft((prev) => ({ ...prev, runtimeProvider: e.target.value }))}
-              placeholder="instafy_cloud"
               data-testid="automation-runtime-provider-input"
             />
           </Field>
@@ -648,7 +710,7 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
               const schedule = formatSchedule(automation);
               const mutedMetaParts = [
                 schedule,
-                automation.runtimeMode === "hosted" ? "Cloud" : automation.runtimeMode === "existing" ? "Existing" : "Auto",
+                automationMachineRowLabel(automation),
                 automation.silentWhenNothingToReport ? "Findings only" : null,
               ].filter(Boolean);
 
@@ -754,11 +816,13 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
                                 </>
                               ) : null}
                               <StudioMenuSeparator />
-                              <StudioMenuItem
-                                id="delete"
-                                className="text-rose-600 dark:text-rose-400"
-                              >
-                                <MenuItemContent start={<Trash className="h-4 w-4" aria-hidden={true} />}>
+                              {/* The word takes the danger colour itself: on the
+                                  item, the menu row's own grey painted over it. */}
+                              <StudioMenuItem id="delete">
+                                <MenuItemContent
+                                  start={<Trash className="h-4 w-4" aria-hidden={true} />}
+                                  textClassName={textTones.danger}
+                                >
                                   Delete
                                 </MenuItemContent>
                               </StudioMenuItem>

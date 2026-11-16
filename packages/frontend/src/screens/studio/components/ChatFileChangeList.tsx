@@ -43,7 +43,7 @@ import {
   unsavedWorkPlacementFor,
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
-import { pageFolderOf, useChatSite, useChatSiteSettled, type ChatSite } from "./chatSiteContext";
+import { pageFolderOf, useChatSite, useChatSiteSettled, useChatSiteSoFar, type ChatSite } from "./chatSiteContext";
 import { normalizeUndonePath, useChatLaterChanges } from "./chatLaterChanges";
 import { isFolderRevertablePath, runtimeFolderOriginId, undoFolderRuntimeId } from "./unsavedChangeRevert";
 
@@ -73,13 +73,13 @@ function resolveChangeMeta(changeType: ChatMessageFileChangeType): { label: stri
       return {
         label: "Updated",
         badgeClass:
-          "border-secondary-200/80 bg-secondary-50/80 text-secondary-700 dark:border-secondary-400/25 dark:bg-secondary-400/[0.07] dark:text-secondary-200/85",
+          "border-secondary-200/80 bg-secondary-50/80 text-secondary-800 dark:border-secondary-400/25 dark:bg-secondary-400/[0.07] dark:text-secondary-200/85",
       };
     default:
       return {
         label: "Updated",
         badgeClass:
-          "border-slate-200/70 bg-slate-100/80 text-slate-600 dark:border-white/[0.08] dark:bg-white/[0.045] dark:text-slate-300",
+          "border-slate-200/70 bg-slate-100/80 text-slate-700 dark:border-white/[0.08] dark:bg-white/[0.045] dark:text-slate-300",
       };
   }
 }
@@ -152,11 +152,11 @@ const actionUndoChipClass = `${chipBaseClass} border-transparent font-medium tex
 // The save state reads as glyph + words, not a pill; it is a button only so
 // touch and keyboard users can open the reason the hover title gives.
 const unsavedStateClass =
-  "inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-xs font-medium text-secondary-700 transition hover:bg-secondary-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:text-secondary-200 dark:hover:bg-secondary-400/[0.08] dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950";
+  "inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-xs font-medium text-secondary-800 transition hover:bg-secondary-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:text-secondary-200 dark:hover:bg-secondary-400/[0.08] dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950";
 const chipFileClass = `${chipBaseClass} border-slate-200/70 bg-white/75 font-mono text-slate-700 hover:border-slate-400/70 hover:bg-slate-100 hover:text-slate-900 dark:border-white/[0.09] dark:bg-white/[0.045] dark:text-slate-200 dark:hover:border-white/[0.16] dark:hover:bg-white/[0.10]`;
 const chipFileActiveClass = `${chipBaseClass} border-primary-300/70 bg-primary-50/70 font-mono text-primary-800 hover:border-primary-300 hover:bg-primary-50 dark:border-primary-300/50 dark:bg-primary-300/[0.16] dark:text-primary-200 dark:hover:bg-primary-300/[0.20]`;
-const chipFileRevertedClass = `${chipBaseClass} border-slate-200/70 bg-transparent font-mono text-slate-500 hover:border-slate-300 hover:bg-slate-50 dark:border-white/[0.07] dark:text-slate-400 dark:hover:bg-white/[0.05]`;
-const chipFileRevertedActiveClass = `${chipBaseClass} border-slate-300 bg-slate-100/80 font-mono text-slate-600 hover:bg-slate-100 dark:border-white/[0.14] dark:bg-white/[0.07] dark:text-slate-300 dark:hover:bg-white/[0.09]`;
+const chipFileRevertedClass = `${chipBaseClass} border-slate-200/70 bg-transparent font-mono text-slate-600 hover:border-slate-300 hover:bg-slate-50 dark:border-white/[0.07] dark:text-slate-400 dark:hover:bg-white/[0.05]`;
+const chipFileRevertedActiveClass = `${chipBaseClass} border-slate-300 bg-slate-100/80 font-mono text-slate-700 hover:bg-slate-100 dark:border-white/[0.14] dark:bg-white/[0.07] dark:text-slate-300 dark:hover:bg-white/[0.09]`;
 
 function LineDelta({ added, removed }: { added: number; removed: number }) {
   if (added === 0 && removed === 0) {
@@ -424,6 +424,7 @@ export function ChatFileChangeList({
   const chatSiteOrPending = useChatSite();
   const chatSite = chatSiteOrPending ?? null;
   const chatSiteSettled = useChatSiteSettled();
+  const chatSiteSoFar = useChatSiteSoFar();
   // The turn that made the site: the one that opened its card, or the chat's
   // first change. A later turn whose files are all new (a page added, a list
   // written) changed the site.
@@ -583,6 +584,19 @@ export function ChatFileChangeList({
   const pageWordsPending = pageOfTheFiles !== null &&
     (chatSiteOrPending === undefined ||
       (!chatSiteSettled && (!chatSite?.pageTitles.has(pageOfTheFiles) || createdByOrderAlone)));
+  // The words that row will most likely show, from the history loaded so far:
+  // its placeholder takes their width, so the row keeps its size when they
+  // come and nothing beside it moves. Never shown, and only for a page whose
+  // title is in, never "a page".
+  const likelySite = chatSiteOrPending === undefined ? chatSiteSoFar : chatSite;
+  const likelyWords = pageWordsPending && pageOfTheFiles !== null && likelySite?.pageTitles.has(pageOfTheFiles)
+    ? siteChangeLabel(
+        likelySite,
+        madeSite,
+        madeSite || likelySite.firstChangeAt == null || messageTimestamp == null || messageTimestamp <= likelySite.firstChangeAt,
+        files,
+      )
+    : null;
   // The chat's site can show up after these files did (a later turn opened its
   // card): its files then fold behind the site's line, unless the person opened them.
   // So do the files of a change that is undone, behind "Undone", before the row
@@ -608,6 +622,8 @@ export function ChatFileChangeList({
     }
     return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(pendingCount)}${notSavedSuffix}`;
   })();
+
+  const likelyLabel = likelyWords ? `${likelyWords}${notSavedCount > 0 ? ` · ${notSavedCount} not saved` : ""}` : null;
 
   // Reverted files have nothing left to save, so the state follows the actions.
   const unsavedNote =
@@ -892,7 +908,7 @@ export function ChatFileChangeList({
         return;
       }
       if (!runtimeReady) {
-        showStatus("Runtime not ready yet.", "error", 4000);
+        showStatus("This space's machine isn't ready yet.", "error", 4000);
         return;
       }
       if (gitSupported === false) {
@@ -1579,8 +1595,10 @@ export function ChatFileChangeList({
   // The chat's history is still coming in, and a card in it may name these
   // files' page or site: the row waits for it rather than read one way, then
   // another.
-  // A page's row keeps its place meanwhile, without words (below).
-  if (chatSiteOrPending === undefined && !pageWordsPending) {
+  // A page's row keeps its place meanwhile, without words (below). A row
+  // whose files were undone reads "Undone" (or how many were) whatever the
+  // cards say, so it shows at once, with the rows beside it.
+  if (chatSiteOrPending === undefined && !pageWordsPending && revertedCount === 0) {
     return null;
   }
 
@@ -1607,10 +1625,23 @@ export function ChatFileChangeList({
               {pageWordsPending ? (
                 <>
                   <span className="sr-only">Loading…</span>
-                  <span
-                    className="h-2 w-28 shrink-0 animate-pulse rounded-full bg-slate-200 dark:bg-white/[0.10]"
-                    aria-hidden="true"
-                  />
+                  {likelyLabel ? (
+                    // As wide as the words will be: the pulse lies over them,
+                    // drawn unseen (and read by no one) until they come.
+                    <span
+                      className="relative truncate before:invisible before:content-[attr(data-words)]"
+                      data-words={likelyLabel}
+                      aria-hidden="true"
+                      data-testid="chat-file-change-pending-words"
+                    >
+                      <span className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 animate-pulse rounded-full bg-slate-200 dark:bg-white/[0.10]" />
+                    </span>
+                  ) : (
+                    <span
+                      className="h-2 w-28 shrink-0 animate-pulse rounded-full bg-slate-200 dark:bg-white/[0.10]"
+                      aria-hidden="true"
+                    />
+                  )}
                 </>
               ) : (
                 <span className="truncate">{compactSummaryLabel}</span>
@@ -1917,7 +1948,7 @@ export function ChatFileChangeList({
                   onPress={() => openDiff()}
                   isDisabled={!canOpenExternalDiff}
                 >
-                  <OpenNewWindow className="h-3 w-3 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+                  <OpenNewWindow className="h-3 w-3 text-slate-600 dark:text-slate-400" aria-hidden="true" />
                 </IconButton>
                 {!isReverted && projectWriteEnabled && !savesAreVersions ? (
                   <>
@@ -1950,14 +1981,14 @@ export function ChatFileChangeList({
                 {stat?.kind === "ready" ? (
                   previewMode === "content" ? (
                     <div className="max-h-56 overflow-auto">
-                      <div className="border-b border-slate-200/70 px-3 py-2 text-xxs font-medium uppercase tracking-[0.08em] text-slate-500 dark:border-white/[0.06] dark:text-slate-400">
+                      <div className="border-b border-slate-200/70 px-3 py-2 text-xxs font-medium uppercase tracking-[0.08em] text-slate-600 dark:border-white/[0.06] dark:text-slate-400">
                         Current file contents
                       </div>
                       <pre className="overflow-x-auto px-3 py-2 whitespace-pre-wrap break-words text-slate-700 dark:text-slate-300">
                         {stat.diffPreview.length > 0 ? stat.diffPreview : "No preview available."}
                       </pre>
                       {stat.truncated ? (
-                        <div className="border-t border-slate-200/70 px-3 py-2 text-xs text-slate-500 dark:border-white/[0.06] dark:text-slate-400">
+                        <div className="border-t border-slate-200/70 px-3 py-2 text-xs text-slate-600 dark:border-white/[0.06] dark:text-slate-400">
                           File preview truncated.
                         </div>
                       ) : null}
@@ -1987,16 +2018,16 @@ export function ChatFileChangeList({
                             );
                           })
                         ) : (
-                          <div className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
+                          <div className="px-3 py-2 text-xs text-slate-600 dark:text-slate-400">
                             No diff available.
                           </div>
                         )}
                         {stat.truncated ? (
-                          <div className="px-3 py-1 text-xs text-slate-500 dark:text-slate-400">…</div>
+                          <div className="px-3 py-1 text-xs text-slate-600 dark:text-slate-400">…</div>
                         ) : null}
                       </div>
                       {stat.truncated ? (
-                        <div className="flex items-center justify-between gap-3 border-t border-slate-200/70 px-3 py-2 text-xs text-slate-500 dark:border-white/[0.06] dark:text-slate-300">
+                        <div className="flex items-center justify-between gap-3 border-t border-slate-200/70 px-3 py-2 text-xs text-slate-600 dark:border-white/[0.06] dark:text-slate-300">
                           <span>Diff preview truncated.</span>
                           <button
                             type="button"
@@ -2010,7 +2041,7 @@ export function ChatFileChangeList({
                     </>
                   )
                 ) : (
-                  <div className="px-3 py-2 text-xs text-slate-500 dark:text-slate-200/80">
+                  <div className="px-3 py-2 text-xs text-slate-600 dark:text-slate-200/80">
                     {stat?.kind === "loading"
                       ? "Loading diff…"
                       : stat?.kind === "unsupported"
@@ -2044,7 +2075,7 @@ export function ChatFileChangeList({
             </h2>
             <p
               role="status"
-              className="mt-2 text-sm text-slate-500 dark:text-slate-400"
+              className="mt-2 text-sm text-slate-600 dark:text-slate-400"
               data-testid="chat-file-change-revert-scope"
             >
               {revertScopeMessage}

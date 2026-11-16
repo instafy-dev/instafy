@@ -1851,7 +1851,7 @@ const MessageContentBody = memo(function MessageContentBody({
               ]
                 .filter(Boolean)
                 .join(" ")}
-              aria-label={`Workstream references: ${teamFlow.references.length} lane${teamFlow.references.length === 1 ? "" : "s"}`}
+              aria-label={`${teamFlow.references.length} referenced workstream${teamFlow.references.length === 1 ? "" : "s"}`}
             >
               <span
                 className="inline-flex min-w-0 items-center gap-1 rounded-full bg-slate-50 px-2 py-1 font-medium text-slate-500 ring-1 ring-inset ring-slate-200 dark:bg-slate-900/60 dark:text-slate-300 dark:ring-slate-700"

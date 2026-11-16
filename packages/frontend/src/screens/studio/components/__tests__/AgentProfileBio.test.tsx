@@ -86,6 +86,14 @@ describe("agent public About", () => {
     expect(tag?.previousElementSibling?.textContent).toBe("Updated Helper");
   });
 
+  it("names the section for the agent's machine Machine, never Runtime", async () => {
+    mocks.read.mockResolvedValue({ success: true, value: publicProfile });
+    await act(async () => root.render(card()));
+    const labels = Array.from(container.querySelectorAll("div")).map((node) => node.textContent?.trim());
+    expect(labels).toContain("Machine");
+    expect(container.textContent).not.toMatch(/runtime/i);
+  });
+
   it("does not reuse an old bio when a request fails or the agent changes", async () => {
     mocks.read.mockResolvedValueOnce({ success: true, value: { ...publicProfile, bio: "Old bio" } });
     await act(async () => root.render(card()));

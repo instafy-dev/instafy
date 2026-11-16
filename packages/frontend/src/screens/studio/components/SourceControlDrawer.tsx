@@ -97,7 +97,10 @@ export function SourceControlDrawer({
   }, []);
 
   if (kind === "history") {
-    const probeFailed = openProbe !== null && !openProbe.answered && openProbe.originId === versioning.originId;
+    // A probe asked before the space's origin loaded asked nothing: History
+    // waits for the origin, and the probe that comes with it.
+    const probeFailed = openProbe !== null && openProbe.originId !== null && !openProbe.answered &&
+      openProbe.originId === versioning.originId;
     return (
       <HistoryDrawer
         headerPortalTarget={headerPortalTarget}

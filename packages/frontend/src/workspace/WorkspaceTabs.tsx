@@ -69,7 +69,7 @@ function getWorkspaceTabBaseClassName(showBaseline: boolean): string {
 
 function getInactiveWorkspaceTabClassName(showBaseline: boolean): string {
   return showBaseline
-    ? `!bg-transparent !border-transparent text-slate-500 hover:text-slate-900 data-[hovered]:text-slate-900 dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 ${DARK_RAIL_HOVER_CLASS}`
+    ? `!bg-transparent !border-transparent text-slate-600 hover:text-slate-900 data-[hovered]:text-slate-900 dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 ${DARK_RAIL_HOVER_CLASS}`
     : `!bg-transparent text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 hover:border-slate-200/70 data-[hovered]:bg-slate-100/80 data-[hovered]:border-slate-200/70 dark:text-slate-300 dark:hover:text-slate-50 dark:hover:border-[color:var(--color-studio-dark-panel-border)] dark:data-[hovered]:border-[color:var(--color-studio-dark-panel-border)] ${DARK_RAIL_HOVER_CLASS}`;
 }
 
@@ -554,8 +554,10 @@ export function WorkspaceTabs({
                 </StudioMenuItem>
                 {menuTab?.kind === "conversation" ? <>
                 <StudioMenuSeparator />
+                {/* Important, or the menu row's own text-slate-600, which the
+                    stylesheet orders after text-rose-*, paints Delete grey. */}
                 <StudioMenuItem
-                  className="justify-start gap-2 pointer-coarse:min-h-11 text-rose-600 hover:text-rose-700 dark:text-rose-300 dark:hover:text-rose-200"
+                  className="justify-start gap-2 pointer-coarse:min-h-11 !text-rose-700 hover:!text-rose-800 dark:!text-rose-300 dark:hover:!text-rose-200"
                   onAction={handleConversationMenuDelete}
                   id="delete"
                   textValue="Delete…"

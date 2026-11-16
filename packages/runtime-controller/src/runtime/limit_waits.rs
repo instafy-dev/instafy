@@ -71,14 +71,17 @@ const MAX_RECORDED_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_RECORDED_ERROR_CHARS: usize = 500;
 
 /// The message a job gets when it waited out the whole window on the limit.
-pub(super) const LIMIT_WAIT_EXPIRED_MESSAGE: &str = "This message didn't start: every cloud runtime in this team stayed busy for 30 minutes. Stop a runtime you aren't using, then send it again.";
+/// It ends the wait the chat announced (`RUNTIME_LIMIT_WAIT_MESSAGE` in
+/// dispatch.rs, `resolveAgentWaitingActivityCopy` in the Studio) in the same
+/// words: the team's hosted machines are in use; stop one in Machines.
+pub(super) const LIMIT_WAIT_EXPIRED_MESSAGE: &str = "This message didn't start: all hosted machines for this team stayed in use for 30 minutes. In Machines, stop one you no longer need, then send it again.";
 /// The message when the last retry failed for a reason other than the limit.
-pub(super) const LIMIT_WAIT_EXPIRED_OTHER_MESSAGE: &str = "This message didn't start: no cloud runtime could be started for this space within 30 minutes. Send it again to retry.";
+pub(super) const LIMIT_WAIT_EXPIRED_OTHER_MESSAGE: &str = "This message didn't start: Instafy couldn't start a hosted machine for this space within 30 minutes. Send it again to retry.";
 /// The message when a retry was refused for a reason waiting cannot fix and
 /// the refusal's own text is not written for the person who sent the work
 /// (see [`refusal_message`]), or when the recorded request could not be
 /// replayed at all.
-pub(super) const LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE: &str = "This message didn't start: a cloud runtime could not be started for this space. Send it again to retry.";
+pub(super) const LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE: &str = "This message didn't start: Instafy couldn't start a hosted machine for this space. Send it again to retry.";
 /// Refusal codes whose message is written for the person who sent the work:
 /// the studio shows exactly these verbatim when its own ensure is refused
 /// (`useHostedRuntimeEnsure`). Any other refusal's text is operator detail
@@ -1260,6 +1263,42 @@ mod policy_tests {
         assert_eq!(
             refusal_message(&long).chars().count(),
             MAX_RECORDED_ERROR_CHARS
+        );
+    }
+
+    /// The Studio shows a give-up reason word for word only while it reads
+    /// plainly: no plumbing word such as "workspace", "request" or "provider",
+    /// and at most 240 characters (`inlineGenericFailureText` in
+    /// runFailurePresentation.ts). It says machine, as the Studio does
+    /// (docs/Runtime-Machines.md, "The model"), and a give-up keeps the
+    /// 30 minutes the Studio's waiting line promises.
+    #[test]
+    fn give_up_reasons_say_hosted_machine_and_read_plainly() {
+        for message in [
+            LIMIT_WAIT_EXPIRED_MESSAGE,
+            LIMIT_WAIT_EXPIRED_OTHER_MESSAGE,
+            LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE,
+        ] {
+            let lower = message.to_lowercase();
+            assert!(lower.contains("hosted machine"), "{message}");
+            for word in [
+                "runtime",
+                "cloud",
+                "project",
+                "workspace",
+                "request",
+                "provider",
+            ] {
+                assert!(!lower.contains(word), "{message}");
+            }
+            assert!(message.chars().count() <= 240, "{message}");
+        }
+        for message in [LIMIT_WAIT_EXPIRED_MESSAGE, LIMIT_WAIT_EXPIRED_OTHER_MESSAGE] {
+            assert!(message.contains("30 minutes"), "{message}");
+        }
+        assert!(
+            LIMIT_WAIT_EXPIRED_MESSAGE.contains("stop one"),
+            "{LIMIT_WAIT_EXPIRED_MESSAGE}"
         );
     }
 

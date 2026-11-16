@@ -11,6 +11,7 @@ import { isPersonRuntimeStopReason } from "../runtime/unexpectedHostedRuntimeRec
 import { resolveProxyUpstreamErrorGuidance } from "../screens/studio/components/proxyError";
 import type { ChatMessage } from "../screens/studio/types";
 import type { ControllerRuntimeStatusEntry } from "../services/runtimeController/runtimes";
+import { usageLimitResetTimeForReader } from "./usageLimitReset";
 
 /**
  * Presentation helpers for failed agent runs.
@@ -274,8 +275,8 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<Exclude<RunFailureKind, "turn_engine">, 
 
 // Words and marks that name the plumbing. A raw failure reason that uses one
 // stays behind Details, and the failure block says the plain sentence instead.
-// (The controller's own sentences, such as a team's cloud runtimes staying
-// busy, are written for the person and still show.)
+// (The controller's own sentences, such as all hosted machines for this team
+// staying in use, are written for the person and still show.)
 const TECHNICAL_FAILURE_WORDS =
   /\b(?:codex|workspace|requests?|providers?|upstream|credentials?|preflight|mcp|json|https?|url|proxy|stderr|stdout|exit (?:code|status)|status \d{3})\b|[`{}<>]|::/i;
 
@@ -390,6 +391,44 @@ function turnEngineFailurePresentation(
       resendLabel: presentation.resendLabel,
     },
   };
+}
+
+/**
+ * The status entry of the runtime that ran a turn, as the turn's final
+ * message names it (`runtimePreference`, which the controller copies from
+ * the job), when the viewer has that entry.
+ */
+export function runtimeEntryOfTurn(
+  message: Pick<ChatMessage, "metadata">,
+  runtimeStatuses: readonly ControllerRuntimeStatusEntry[] | null | undefined,
+): ControllerRuntimeStatusEntry | null {
+  const preference = isRecord(message.metadata) ? message.metadata["runtimePreference"] : null;
+  const runtimeId = isRecord(preference) ? preference["runtimeId"] : null;
+  if (typeof runtimeId !== "string" || !runtimeId.trim() || !runtimeStatuses) {
+    return null;
+  }
+  return runtimeStatuses.find((entry) => entry.runtimeId === runtimeId.trim()) ?? null;
+}
+
+/**
+ * The sentence a failed turn's card shows whoever views it, and a copy of
+ * the chat carries. A turn engine's failure reads as its engine words it for
+ * its sender, with what the runtime that ran it says, and for everyone else
+ * only that it couldn't finish on the sender's computer, also when the chat
+ * cannot tell who sent it (docs/Local-Engine-Turns.md 5.5). Any other
+ * failure reads the same for everyone.
+ */
+export function runFailureSentenceForViewer(
+  presentation: RunFailurePresentation,
+  viewer: { owner: TurnEngineTurnOwner | null; runtime: ControllerRuntimeStatusEntry | null },
+): string {
+  const turnEngine = presentation.turnEngine;
+  if (!turnEngine) {
+    return presentation.friendlyText;
+  }
+  return viewer.owner?.isViewer === true
+    ? turnEngine.authorText(viewer.runtime)
+    : turnEngine.teammateText(viewer.owner?.name ?? null);
 }
 
 export const RETRYING_STATUS_DISPLAY_TEXT = "Trying again…";
@@ -541,19 +580,32 @@ const PROVIDER_USAGE_LIMIT_PATTERNS = [/hit your usage limit/i, /\busage_limit_r
 // The time the provider names for the window to reopen.
 const USAGE_LIMIT_RESET_PATTERN = /try again at\s+([^\n]+?)\.?\s*$/im;
 
-const MANAGED_AI_USAGE_LIMIT_FRIENDLY_TEXT =
-  "Instafy AI is unavailable right now: it has reached its usage limit, so this turn stopped. This is on Instafy's side, not your credits or your plan. Try again later.";
+const MANAGED_AI_USAGE_LIMIT_SENTENCE =
+  "Instafy AI is unavailable right now: it has reached its usage limit, so this turn stopped. This is on Instafy's side, not your credits or your plan.";
 
+/**
+ * When to come back is the one thing such a row has to say. Once the runtime
+ * names the moment in UTC (usageLimitReset.ts), every copy says it in the
+ * reader's own clock. A time the service wrote in its machine's clock alone
+ * (an older runtime) is no moment: only the person's own AI shows it, as the
+ * service wrote it.
+ */
 function providerUsageLimitFriendlyText(
   rawText: string,
   metadata: Record<string, unknown> | null,
 ): string {
   const accessMode = normalizedStringField(metadata, "aiAccessMode");
+  const resetTime = usageLimitResetTimeForReader(rawText);
   if (accessMode === "managed") {
-    return MANAGED_AI_USAGE_LIMIT_FRIENDLY_TEXT;
+    return `${MANAGED_AI_USAGE_LIMIT_SENTENCE} ${resetTime ? `Try again after ${resetTime}.` : "Try again later."}`;
   }
   if (accessMode !== "byoc") {
-    return RUN_FAILURE_FRIENDLY_TEXT.provider_usage_limit;
+    return resetTime
+      ? `The AI account for this turn has reached its usage limit, so it stopped. Try again after ${resetTime}, or connect another AI.`
+      : RUN_FAILURE_FRIENDLY_TEXT.provider_usage_limit;
+  }
+  if (resetTime) {
+    return `Your AI account has reached its usage limit, so this turn stopped. Try again after ${resetTime}, or connect another AI.`;
   }
   const resetsAt = USAGE_LIMIT_RESET_PATTERN.exec(rawText)?.[1]?.trim() ?? "";
   return resetsAt

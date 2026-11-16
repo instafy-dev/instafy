@@ -47,15 +47,39 @@ function extractMessageDetails(
   return resolved;
 }
 
-/// Mirrors `runtime_alert_fallback_message` in
-/// packages/runtime-controller/src/dispatch.rs. Both sides used to say "Use the
+/**
+ * Who reads a controller notice. Every participant sees the same card, but
+ * not everyone can act on it: Machines offers someone who can only view the
+ * space no start (MachinesPanel), RuntimeOperationsProvider refuses them every
+ * machine control, and the controller takes no message from them
+ * (`ensure_project_prompt_access`).
+ */
+export type ControllerConversationNoticeReader = {
+  viewerUserId?: string | null;
+  /**
+   * Whether the reader can change this space. Only false changes the
+   * wording: the notice then says what happened, without an instruction to
+   * start, reconnect or stop a machine. Left out (thread previews and tests
+   * mount no ControllerNoticeActionsProvider), it keeps the wording a person
+   * who can change the space reads.
+   */
+  canChangeSpace?: boolean | null;
+};
+
+/// What a person who can change the space reads is what
+/// `runtime_alert_fallback_message` (and RUNTIME_LIMIT_WAIT_MESSAGE) in
+/// packages/runtime-controller/src/dispatch.rs stores, in the Studio's words
+/// for machines; keep the two in step. Someone who can only view the space
+/// reads it without the instruction, which Machines would refuse them; the
+/// stored copy stays the writer's. Both sides used to say "Use the
 /// Runtime button by the composer"; that button's only renderer lost its last
 /// importer and has since been deleted, so the copy pointed at a control that
 /// does not exist. Machines is where runtimes live now, and
 /// `resolveControllerConversationNoticeAction` puts a button on the card.
 function resolveRuntimeAlertContent(
   metadata: Record<string, unknown> | null,
-  legacyContent?: string | null,
+  legacyContent: string | null | undefined,
+  canChangeSpace: boolean,
 ): string {
   const details = extractMessageDetails(metadata);
   const reason = normalizeString(details?.["reason"] ?? metadata?.["reason"]);
@@ -65,21 +89,36 @@ function resolveRuntimeAlertContent(
       if (isRuntimeLimitWaitAlert(details)) {
         // Count-neutral, because plans allow different numbers of runtimes,
         // and place-neutral, because the busy one can be in this same space.
-        // The controller stores this exact text (RUNTIME_LIMIT_WAIT_MESSAGE).
-        return "Waiting for a free cloud runtime. All of this team’s cloud runtimes are in use; stop one in Machines and this request will send.";
+        // The controller stores its own copy (RUNTIME_LIMIT_WAIT_MESSAGE),
+        // which should say the same.
+        return canChangeSpace
+          ? "Waiting for a free hosted machine. All of this team’s hosted machines are in use; stop one in Machines and this request will send."
+          : "Waiting for a free hosted machine. All of this team’s hosted machines are in use.";
       }
-      return isRecoverableRuntimeStartAlert(details, legacyContent)
-        ? "Starting the workspace. Your queued request will continue automatically."
-        : "Workspace startup failed. Open Machines to reconnect Instafy Cloud.";
+      if (isRecoverableRuntimeStartAlert(details, legacyContent)) {
+        // A viewer sent nothing, so the request is not theirs.
+        return canChangeSpace
+          ? "Starting the workspace. Your queued request will continue automatically."
+          : "Starting the workspace. The queued request will continue automatically.";
+      }
+      return canChangeSpace
+        ? "Workspace startup failed. Open Machines to reconnect this space's machine."
+        : "Workspace startup failed.";
     case "runtime_unavailable":
-      return "No runtime is connected for this space. Open Machines to start Instafy Cloud.";
+      return canChangeSpace
+        ? "No machine is connected to this space. Open Machines to start one."
+        : "No machine is connected to this space.";
     case "runtime_inspection_failed":
-      return "The workspace runtime could not be verified. Open Machines to inspect or reconnect it.";
+      return canChangeSpace
+        ? "Instafy couldn't check this space's machine. Open Machines to inspect or reconnect it."
+        : "Instafy couldn't check this space's machine.";
     case "automation_launch_failed":
       // The controller wrote the actual cause into the message.
       return legacyContent?.trim() || "This scheduled run couldn't start.";
     default:
-      return "The workspace runtime could not be reached. Open Machines to inspect or reconnect it.";
+      return canChangeSpace
+        ? "Instafy couldn't reach this space's machine. Open Machines to inspect or reconnect it."
+        : "Instafy couldn't reach this space's machine.";
   }
 }
 
@@ -143,7 +182,7 @@ const ACTION_BY_FAILURE_CODE: Record<string, ControllerConversationNoticeAction 
  */
 export function resolveControllerConversationNoticeAction(
   message: ChatMessage,
-  viewer?: { viewerUserId?: string | null },
+  viewer?: ControllerConversationNoticeReader | null,
 ): ControllerConversationNoticeAction | null {
   if (getControllerConversationNoticeKind(message) !== "runtime_alert") {
     return null;
@@ -283,14 +322,22 @@ export function extractControllerConversationNoticeStatus(message: ChatMessage):
   return kind === "run_cancellation" ? "canceled" : "failed";
 }
 
-export function resolveControllerConversationNoticeContent(message: ChatMessage): string {
+/**
+ * The notice's text for `reader`. A runtime alert tells a reader to start,
+ * reconnect or stop a machine in Machines only when they can change the space
+ * (see ControllerConversationNoticeReader).
+ */
+export function resolveControllerConversationNoticeContent(
+  message: ChatMessage,
+  reader?: ControllerConversationNoticeReader | null,
+): string {
   const kind = getControllerConversationNoticeKind(message);
   if (kind !== "runtime_alert") {
     return message.content;
   }
 
   const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
-  return resolveRuntimeAlertContent(metadata, message.content);
+  return resolveRuntimeAlertContent(metadata, message.content, reader?.canChangeSpace !== false);
 }
 
 export function resolveControllerConversationNoticeLabel(message: ChatMessage): string {
@@ -305,7 +352,7 @@ export function resolveControllerConversationNoticeLabel(message: ChatMessage): 
     return "Scheduled run couldn't start";
   }
   if (isRuntimeLimitWaitAlert(details)) {
-    return "Waiting for a runtime";
+    return "Waiting for a machine";
   }
   return isRecoverableRuntimeStartAlert(details, message.content)
     ? "Workspace starting"

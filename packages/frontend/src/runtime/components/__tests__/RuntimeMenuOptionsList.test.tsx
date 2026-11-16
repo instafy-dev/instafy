@@ -22,7 +22,7 @@ vi.mock("../../../status/useStatus", () => ({
 function hostedOption(overrides: Partial<RuntimeMenuOption> = {}): RuntimeMenuOption {
   return {
     id: "cloud-runtime-1",
-    label: "Instafy Cloud runtime",
+    label: "Instafy Cloud",
     detail: null,
     state: "online",
     badge: null,
@@ -115,7 +115,7 @@ describe("RuntimeMenuOptionsList", () => {
 
   async function expandDetails() {
     const toggle = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Show runtime details"]',
+      'button[aria-label="Show machine details"]',
     );
     expect(toggle).not.toBeNull();
     // The disclosure toggle must not nest inside the header's role="button".
@@ -228,7 +228,7 @@ describe("RuntimeMenuOptionsList", () => {
       });
       const header = container.querySelector<HTMLElement>('[role="button"]')!;
       const actionButton = container.querySelector<HTMLButtonElement>(
-        `button[aria-label="${action} Instafy Cloud runtime"]`,
+        `button[aria-label="${action} Instafy Cloud"]`,
       );
       expect(actionButton).not.toBeNull();
       expect(actionButton?.closest('[role="button"]')).toBeNull();
@@ -281,13 +281,13 @@ describe("RuntimeMenuOptionsList", () => {
     });
 
     expect(onRemoveRuntime).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Remove “Instafy Cloud runtime”?");
+    expect(container.textContent).toContain("Remove “Instafy Cloud”?");
 
     await act(async () => {
       buttonWithText("Cancel")?.click();
     });
     expect(onRemoveRuntime).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain("Remove “Instafy Cloud runtime”?");
+    expect(container.textContent).not.toContain("Remove “Instafy Cloud”?");
 
     await act(async () => {
       buttonWithText("Remove")?.click();
@@ -329,6 +329,33 @@ describe("RuntimeMenuOptionsList", () => {
     );
   });
 
+  it("names the machine image's copy action like its row", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+      configurable: true,
+    });
+    await renderList({
+      options: [hostedOption({ runtimeImage: "ghcr.io/example/agent:1.2.3" })],
+    });
+    await expandDetails();
+
+    const copyButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="runtime-copy-image-cloud-runtime-1"]',
+    );
+    expect(copyButton?.getAttribute("aria-label")).toBe("Copy image");
+    await act(async () => {
+      copyButton?.click();
+    });
+
+    expect(showStatusMock).toHaveBeenCalledWith(
+      "Image copied",
+      "success",
+      expect.any(Number),
+      expect.objectContaining({ presentation: "confirmation" }),
+    );
+    expect(container.textContent).not.toMatch(/runtime/i);
+  });
+
   it("disarms a pending remove confirmation when details collapse", async () => {
     const onRemoveRuntime = vi.fn();
     await renderList({ onRemoveRuntime });
@@ -337,17 +364,17 @@ describe("RuntimeMenuOptionsList", () => {
     await act(async () => {
       buttonWithText("Remove")?.click();
     });
-    expect(container.textContent).toContain("Remove “Instafy Cloud runtime”?");
+    expect(container.textContent).toContain("Remove “Instafy Cloud”?");
 
     const collapse = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Hide runtime details"]',
+      'button[aria-label="Hide machine details"]',
     );
     await act(async () => {
       collapse?.click();
     });
     await expandDetails();
 
-    expect(container.textContent).not.toContain("Remove “Instafy Cloud runtime”?");
+    expect(container.textContent).not.toContain("Remove “Instafy Cloud”?");
     expect(onRemoveRuntime).not.toHaveBeenCalled();
   });
 

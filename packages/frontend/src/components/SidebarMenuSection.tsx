@@ -22,7 +22,7 @@ export function SidebarMenuSection({
   return (
     <section className={className}>
       <div className={[DRAWER_SECTION_HEADER_BASE, headerClassName].filter(Boolean).join(" ")}>
-        <Text as="p" variant="label" tone="subtle" className={DRAWER_SECTION_LABEL_CLASS}>
+        <Text as="p" variant="label" tone="muted" className={DRAWER_SECTION_LABEL_CLASS}>
           {label}
         </Text>
         {actions ? <div className="flex shrink-0 items-center gap-1">{actions}</div> : null}

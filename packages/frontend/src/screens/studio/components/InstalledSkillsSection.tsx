@@ -7,6 +7,7 @@ import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { textTones } from "../../../styles/typography";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 
@@ -279,7 +280,7 @@ export function InstalledSkillsSection({
                               <MenuItemContent start={<NavArrowRight aria-hidden="true" />}>Open skill file</MenuItemContent>
                             </StudioMenuItem>
                             <StudioMenuItem id="uninstall" isDisabled={workspaceUnavailable} textValue="Uninstall skill" data-testid={`skills-uninstall-${skill.slug}`}>
-                              <MenuItemContent start={<Trash aria-hidden="true" />} textClassName="text-rose-600 dark:text-rose-400">Uninstall skill</MenuItemContent>
+                              <MenuItemContent start={<Trash aria-hidden="true" />} textClassName={textTones.danger}>Uninstall skill</MenuItemContent>
                             </StudioMenuItem>
                           </StudioMenu>
                         </StudioPopover>

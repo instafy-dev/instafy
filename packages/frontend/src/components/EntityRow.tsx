@@ -92,7 +92,11 @@ function EntityRowContent({
   contentClassName,
   startClassName,
   endClassName,
-}: Pick<
+  onSelectedSurface = false,
+}: {
+  /** The row sits on the selected slate-100 surface, where muted text reads 4.39:1. */
+  onSelectedSurface?: boolean;
+} & Pick<
   EntityRowProps,
   | "title"
   | "titleEnd"
@@ -140,7 +144,7 @@ function EntityRowContent({
           <Text
             as="span"
             variant="caption"
-            tone="muted"
+            tone={onSelectedSurface ? "secondary" : "muted"}
             className={[
               "block min-w-0 max-w-full truncate",
               ENTITY_ROW_SUBTITLE_CLASSES[density],
@@ -255,6 +259,7 @@ export const EntityRow = forwardRef<HTMLButtonElement, EntityRowProps>(function 
             contentClassName={contentClassName}
             startClassName={startClassName}
             endClassName={endClassName}
+            onSelectedSurface={resolvedSurface === "selected"}
           />
         </Button>
       ) : (
@@ -274,6 +279,7 @@ export const EntityRow = forwardRef<HTMLButtonElement, EntityRowProps>(function 
             contentClassName={contentClassName}
             startClassName={startClassName}
             endClassName={endClassName}
+            onSelectedSurface={resolvedSurface === "selected"}
           />
         </div>
       )}

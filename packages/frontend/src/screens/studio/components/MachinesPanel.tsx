@@ -23,6 +23,7 @@ import {
   useRuntimeMenuOptions,
   type RuntimeMenuOption,
 } from "../../../runtime/useRuntimeMenu";
+import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
 import {
   listMyAgents,
@@ -133,6 +134,12 @@ export function MachinesPanel() {
     refreshRuntimeStatuses,
   } = ops;
   const { activeProjectId } = useProjects();
+  // A viewer can't start a machine (the hosted ensure is off without write
+  // access, as in RuntimeOperationsProvider), so the page neither offers the
+  // hosted start nor says what starts one there.
+  const { canWriteProject, projectCapabilitiesResolved } = useProject();
+  const canStartHostedMachine =
+    projectCapabilitiesResolved !== false && canWriteProject !== false;
 
   // A stats page should stay current: runtime status updates are otherwise
   // event-driven, and a quiet machine emits almost none — leaving the CPU/RAM
@@ -377,7 +384,7 @@ export function MachinesPanel() {
         runtimeEnsureError={runtimeEnsureError}
         runtimeEnsureLimit={runtimeEnsureLimit}
         connectionWarning={null}
-        onRetryHosted={ensureHostedRuntime}
+        onRetryHosted={canStartHostedMachine ? ensureHostedRuntime : undefined}
         hostedRuntimeEnsuring={hostedRuntimeEnsuring}
         onTakeOverHostedRuntimeLimit={takeOverHostedRuntimeLimit}
         hostedRuntimeTakeoverInProgress={hostedRuntimeTakeoverInProgress}
@@ -390,7 +397,8 @@ export function MachinesPanel() {
         onShowSelfHostHelp={showDesktopRuntimeHelp}
         onCopyTunnel={copyTunnelDetails}
         listClassName="mt-2"
-        emptyStateMessage="No machines are connected yet — send an agent a message and the shared cloud runtime boots on demand."
+        emptyStateMessage="No machine is connected to this space yet."
+        emptyStateDetail="Agents do their work on a machine."
         defaultExpandedOptionId={defaultExpandedOptionId}
         renderOptionExtras={renderMachineAgents}
         sparklineVariant="page"

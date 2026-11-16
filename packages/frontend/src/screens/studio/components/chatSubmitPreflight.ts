@@ -484,7 +484,9 @@ export async function runChatSubmitPreflight(
         if (params.runtimeControllerEnabled) {
           params.recoverRuntime();
         }
-        params.showStatus("Starting runtime… Send images once it is ready.", "info", 4000);
+        // Not "starting": recovery may start nothing (no runtime control, an
+        // attempt moments ago, or no hosted machines on offer).
+        params.showStatus("This space's machine isn't ready yet. Send images once it is.", "info", 4000);
         params.focusInput();
         return { status: "handled", submitted: false };
       }
@@ -497,7 +499,7 @@ export async function runChatSubmitPreflight(
       if (params.runtimeControllerEnabled) {
         params.recoverRuntime();
       } else {
-        params.showStatus("Runtime control is unavailable right now.", "warning", 4000);
+        params.showStatus("Machine controls are unavailable right now.", "warning", 4000);
       }
       return queued
         ? { status: "handled", submitted: false, queued: true }

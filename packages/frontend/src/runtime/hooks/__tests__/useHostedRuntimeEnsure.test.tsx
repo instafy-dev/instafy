@@ -122,7 +122,7 @@ describe("useHostedRuntimeEnsure force", () => {
     });
     expect(result).toBe(true);
     expect(ensure).not.toHaveBeenCalled();
-    expect(showStatus).toHaveBeenCalledWith("Instafy Cloud runtime is starting…", "info", 3000);
+    expect(showStatus).toHaveBeenCalledWith("A hosted machine is already starting.", "info", 3000);
   });
 
   it("requests a machine anyway when forced", async () => {
@@ -302,6 +302,21 @@ describe("useHostedRuntimeEnsure force", () => {
     expect(result).toBe(false);
     expect(showStatus).not.toHaveBeenCalled();
     expect(ensure).toHaveBeenCalledTimes(2);
+  });
+
+  it("says the controller's own capacity sentence when the refusal comes without one", async () => {
+    ensure.mockRejectedValue(Object.assign(new Error(""), { code: "platform_at_capacity" }));
+    await act(async () => {
+      await ensureHostedRuntime!({ force: true });
+    });
+
+    // PLATFORM_AT_CAPACITY_MESSAGE in runtime-controller's runtime/ensure.rs.
+    expect(showStatus).toHaveBeenCalledWith(
+      "Instafy is at capacity right now because too many hosted machines are running. Try again in a few minutes.",
+      "warning",
+      8000,
+      expect.objectContaining({ id: "runtime-at-capacity", actionLabel: "How to connect one" }),
+    );
   });
 });
 

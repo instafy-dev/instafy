@@ -40,7 +40,7 @@ function dependencies(memo: string): string[] {
 const MEMOS = [
   ["the transcript", "const groupedMessages = useMemo(() => {", "synthesizeAgentJobThreadMessages("],
   ["the cards a continuation was sent for", "const browserRequestContinued = useMemo(() => {", "browserRequestContinuedKeys("],
-  ["the cards still opening by themselves", "const routedBrowserWaiting = useMemo(() => {", "routedBrowserWaitingKeys("],
+  ["the cards still opening by themselves", "const routedBrowserCards = useMemo(() => {", "resolveRoutedBrowserFold("],
   ["the sites of the cards the person pressed", "const pressedCardSites = useMemo(() => {", "pressedBrowserCardSites("],
 ] as const;
 

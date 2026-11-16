@@ -379,7 +379,7 @@ export function ChatGettingStartedCard({
                           ? "Choose connected AI"
                           : "Connect AI"}
                       </Text>
-                      <Text as="span" variant="caption" tone="inherit" className="mt-0.5 block text-left opacity-80">
+                      <Text as="span" variant="caption" tone="inherit" className="mt-0.5 block text-left opacity-90">
                         {personalAiConnectionState === "needs_default"
                           ? "Select which saved connection Instafy should use."
                           : desktopCodexLoginFound
@@ -452,7 +452,7 @@ export function ChatGettingStartedCard({
               <Text
                 as="p"
                 variant="caption"
-                tone="subtle"
+                tone="muted"
                 className="mt-2.5"
                 data-testid="onboarding-type-hint"
               >
@@ -483,9 +483,9 @@ export function ChatGettingStartedCard({
                 Import a GitHub repo
               </Text>
               <Text as="p" variant="caption" tone="muted" className="mt-1">
-                Paste a repo URL or <code className="rounded bg-slate-100 px-1 py-0.5 text-xxs dark:bg-slate-800">owner/repo</code>.
+                Paste a repo URL or <code className="rounded bg-slate-100 px-1 py-0.5 text-xxs text-slate-700 dark:bg-slate-800 dark:text-slate-200">owner/repo</code>.
                 Files will land under{" "}
-                <code className="break-all rounded bg-slate-100 px-1 py-0.5 text-xxs dark:bg-slate-800">
+                <code className="break-all rounded bg-slate-100 px-1 py-0.5 text-xxs text-slate-700 dark:bg-slate-800 dark:text-slate-200">
                   {deriveGithubImportTargetPath(githubRepoDraft || "owner/repo")}
                 </code>
                 .
@@ -518,7 +518,7 @@ export function ChatGettingStartedCard({
               approve a short code on GitHub. No password is entered here.
             </Text>
             {githubDeviceAuthError ? (
-              <Text as="p" variant="caption" tone="inherit" className="text-xs text-rose-600 dark:text-rose-300">
+              <Text as="p" variant="caption" tone="danger" className="text-xs">
                 {githubDeviceAuthError}
               </Text>
             ) : null}
@@ -616,7 +616,7 @@ export function ChatGettingStartedCard({
               </Button>
             </div>
             {githubImportError ? (
-              <Text as="p" variant="caption" tone="inherit" className="text-xs text-rose-600 dark:text-rose-300">
+              <Text as="p" variant="caption" tone="danger" className="text-xs">
                 {githubImportError}
               </Text>
             ) : null}

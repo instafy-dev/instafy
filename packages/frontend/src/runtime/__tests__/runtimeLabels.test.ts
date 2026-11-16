@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { ControllerRuntimeStatusEntry, ControllerTunnelGrant } from "../../sdk/instafy";
-import { getRuntimeLabel } from "../runtimeLabels";
+import type {
+  ControllerRuntimeStatusEntry,
+  ControllerTunnelGrant,
+  LocalWorkspacePresence,
+} from "../../sdk/instafy";
+import { getRuntimeLabel, hostedMachineOwnName } from "../runtimeLabels";
 import { resolveRuntimeStateStyles } from "../runtimeMenuShared";
 
 /**
@@ -70,6 +74,80 @@ describe("getRuntimeLabel for a stop's release", () => {
     const relaunched = getRuntimeLabel(releasing(2 * 60_000), null, null, Date.now() - 5 * 60_000);
     expect(relaunched.statusState).toBe("booting");
     expect(relaunched.statusBadge).toBeNull();
+  });
+});
+
+describe("machine names in rows", () => {
+  const running = (overrides: Partial<ControllerRuntimeStatusEntry> = {}) =>
+    releasing(10 * 60_000, {
+      status: "ready",
+      health: "online",
+      lastSeenAt: new Date().toISOString(),
+      ...overrides,
+    });
+
+  it("names a hosted machine Instafy Cloud, also under the name Studio stores", () => {
+    for (const displayName of [null, "Hosted Runtime", "Instafy Cloud runtime"]) {
+      const info = getRuntimeLabel(running({ displayName }), null, null, null);
+      expect(info.label).toBe("Instafy Cloud");
+      expect(info.detail ?? "").not.toMatch(/runtime/i);
+    }
+    expect(getRuntimeLabel(running({ displayName: "Browser session" }), null, null, null).label)
+      .toBe("Browser session");
+    // A local stack's hosted machine answers on this computer's address.
+    const onThisComputer = running({
+      displayName: "Hosted Runtime",
+      isLocal: true,
+      endpointUrl: "http://127.0.0.1:4823",
+    });
+    expect(getRuntimeLabel(onThisComputer, null, null, null).label).toBe("Instafy Cloud (127.0.0.1)");
+  });
+
+  it("names other machines without the word runtime", () => {
+    const selfHosted = running({ provider: "self-hosted", displayName: null });
+    expect(getRuntimeLabel(selfHosted, null, null, null).label).toBe("Self-hosted machine");
+    const local = running({
+      provider: "self-hosted",
+      displayName: null,
+      isLocal: true,
+      endpointUrl: "http://studio-box.local:4823",
+    });
+    expect(getRuntimeLabel(local, null, null, null).label).toBe(
+      "Self-hosted machine (studio-box.local)",
+    );
+    expect(getRuntimeLabel(running({ provider: "lima-box" }), null, null, null).label).toBe(
+      "lima-box machine",
+    );
+    expect(getRuntimeLabel(running({ provider: "" }), null, null, null).label).toBe("Machine");
+    const thisComputer: LocalWorkspacePresence = {
+      deviceId: "this-computer",
+      runtimeId: "11111111-1111-4111-8111-111111111111",
+      status: "online",
+    };
+    const mine = getRuntimeLabel(
+      running({ provider: "self-hosted", isLocal: true }),
+      thisComputer,
+      null,
+      null,
+    );
+    expect(mine.label).toBe("Your machine");
+  });
+
+  it("gives a blocking hosted machine's own name, and none for the generic one", () => {
+    for (const generic of [
+      "Hosted Runtime",
+      " hosted runtime ",
+      "Instafy Cloud",
+      "Instafy Cloud runtime",
+      "",
+      "  ",
+      null,
+      undefined,
+    ]) {
+      expect(hostedMachineOwnName(generic)).toBeNull();
+    }
+    expect(hostedMachineOwnName(" Team research machine ")).toBe("Team research machine");
+    expect(hostedMachineOwnName("Browser session")).toBe("Browser session");
   });
 });
 

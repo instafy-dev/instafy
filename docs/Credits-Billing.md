@@ -35,7 +35,7 @@ The plan catalog is stored in Postgres (`billing_plans`) and seeded via `supabas
 - **pro**: 10 active tunnels (default), 3 active Instafy Cloud runtimes
 - **scale**: 25 active tunnels, 8 active Instafy Cloud runtimes
 
-The runtime limits come from `supabase/migrations/20260000000045_fundable_runtime_concurrency.sql`. When a space is refused by the limit, the controller hands it an idle runtime from another space in the same team; see `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` in the controller README. A message queued behind the limit is retried in the background and sends once a runtime is free; after 30 minutes on the limit it fails with a reason and its managed-AI reserve is refunded (see [Runtime Machines](Runtime-Machines.md#waiting-on-the-runtime-limit)).
+The runtime limits come from `supabase/migrations/20260000000045_fundable_runtime_concurrency.sql`. When a space is refused by the limit, the controller hands it an idle runtime from another space in the same team; see `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` in the controller README. A message queued behind the limit is retried in the background and sends once a hosted machine is free; after 30 minutes on the limit it fails with a reason and its managed-AI reserve is refunded (see [Runtime Machines](Runtime-Machines.md#waiting-on-the-runtime-limit)).
 
 Limits are overrideable per team through a protected server-side administration path. Never expose
 service-role credentials to the browser.
@@ -55,7 +55,7 @@ Instafy Cloud runtimes (provider `instafy-cloud`) can burn credits while a runti
 - Set `HOSTED_RUNTIME_CREDIT_BURN_AMOUNT` and `HOSTED_RUNTIME_CREDIT_BURN_INTERVAL_SECONDS`
 - When a burn fails due to insufficient credits, the controller stops the runtime and releases it via the provider.
 
-Note: the controller defaults `HOSTED_RUNTIME_CREDIT_BURN_AMOUNT=0`, so hosted runtime metering is disabled until you configure these env vars (the Credits panel will show `0 credits/min` and “Not metered”).
+Note: the controller defaults `HOSTED_RUNTIME_CREDIT_BURN_AMOUNT=0`, so hosted runtime metering is disabled until you configure these env vars. Until then the Credits panel leaves hosted machines out of Usage and out of its line on what spends credits, which names only what the policy meters (`isMeteredRate`: enabled and above 0 credits a minute).
 
 You can also override hosted runtime metering per runtime type via
 `runtime_providers.metadata.billing` (controller reads `creditBurnAmount` plus
@@ -324,7 +324,10 @@ is refunded anyway, under the rule in "Failed turns" below, which covers every f
 refund row is keyed per prompt, so a completion delivered again, the other rule, or the expiry
 sweep reaching the same prompt, never writes a second one. The Studio tells a managed-AI run that hit the limit that Instafy AI is unavailable
 (`aiAccessMode` on the run's final message), with no "Try again", since a resend before the
-window reopens fails the same way.
+window reopens fails the same way. It says when to come back, in the reader's own clock ("Try
+again after Sun, Nov 15, 12:03 AM."): Codex words the reset in its machine's clock, and the
+runtime passes it on as the moment in UTC (`usage_limit_reset.rs`). A copy of the chat carries
+the same sentence, never the service's own.
 
 Ambient multi-human evaluation turns defer the managed reserve and prompt count until
 the agent actually answers. Telemetry and explicitly hidden progress do not start a
@@ -761,7 +764,7 @@ Required envs (GitHub secrets/vars or local env):
   time it was sent, named by its chat (`chatName`), or "A chat" when the viewer may not open that
   chat. A turn from another space names that space beside its time (`spaceName`), since chats in
   two spaces can share a name. A turn that cost nothing in the end, refunded in full, has no row. Every other ledger row
-  is a row of its own ("Daily top-up", "Starting balance", "Hosted runtime"). A row shows its name,
+  is a row of its own ("Daily top-up", "Starting balance", "Hosted machine time"). A row shows its name,
   its time and its amount ("1 credit", "14 credits"), never the model, the AI vendor, a token count
   or an id: the ledger keeps those in each row's metadata. The Usage section says what a message
   costs in credits ("From 1 credit a message", then what it used) and lists only a service that

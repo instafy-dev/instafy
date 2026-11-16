@@ -325,10 +325,10 @@ describe("provider binding approval flow", () => {
         requiredCapability: "project_content_write",
         timeoutMs: 2_000,
       }),
-    ).rejects.toThrow("Switch to the requested project before approving provider access.");
+    ).rejects.toThrow("Switch to the requested space before approving provider access.");
 
     expect(showStatusMock).toHaveBeenCalledWith(
-      "Switch to the requested project before approving provider access.",
+      "Switch to the requested space before approving provider access.",
       "warning",
       3500,
     );

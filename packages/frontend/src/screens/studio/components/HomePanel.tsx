@@ -25,6 +25,7 @@ import { useAuth } from "../../../providers/AuthProvider";
 import { controllerClient, type NotificationInboxItem } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import { DARK_DIVIDER_BORDER_CLASS, DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
+import { SEMANTIC_TONE_CLASSES } from "../../../theme/semanticTones";
 import { isUUID } from "../../../utils/uuid";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { buildHomeAttentionEntries, type HomeAttentionEntry } from "../homeAttention";
@@ -53,7 +54,8 @@ import { resolveHomeRecentConversationNavigationTarget } from "./homeRecentConve
 // section with rows, never a card inside it (darkSurfaces rule 5). The hover
 // tint lives on the wrapper so it runs edge to edge, dismiss column included.
 const ROW_DIVIDER_CLASS = `border-t border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`;
-const ROW_HOVER_CLASS = `group/row transition-colors hover:bg-slate-100 ${DARK_RAIL_HOVER_CLASS}`;
+// slate-50, not slate-100: a row's muted text keeps 4.5:1 while hovered.
+const ROW_HOVER_CLASS = `group/row transition-colors hover:bg-slate-50 ${DARK_RAIL_HOVER_CLASS}`;
 // 28px = ChatMessageAvatar xs, so a face fills its shell with no slack.
 const ROW_ICON_CLASS = "h-7 w-7 rounded-full";
 // Labels share the rows' 12px inner inset (EntityRow compact px-3).
@@ -201,7 +203,7 @@ function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): stri
     case "running":
       return "Run in progress";
     case "queued":
-      return "Waiting for a runtime";
+      return "Waiting for a machine";
     case "run_finished":
       return "Run finished";
     case "run_stopped":
@@ -698,10 +700,10 @@ export function HomePanel({ canResumeConversation = true, inboxItems: sharedInbo
   return (
     <SettingsShell title="Home" hideTitle testId="home-panel">
       <div className={`${CHAT_COLUMN_CLASS_NAME} @container/home min-w-0 space-y-4`}>
-        {supportError ? <div role="alert" className="flex flex-wrap items-center gap-2 px-3 text-sm text-rose-600 dark:text-rose-300">
+        {supportError ? <div role="alert" className={`flex flex-wrap items-center gap-2 px-3 text-sm ${SEMANTIC_TONE_CLASSES.danger.text}`}>
           <span>{supportError}</span><Button variant="ghost" size="sm" onPress={() => void refreshSupport?.()} isDisabled={supportLoading}>Retry support updates</Button>
         </div> : null}
-        {notifications?.error ? <div role="alert" className="flex flex-wrap items-center gap-2 px-3 text-sm text-rose-600 dark:text-rose-300">
+        {notifications?.error ? <div role="alert" className={`flex flex-wrap items-center gap-2 px-3 text-sm ${SEMANTIC_TONE_CLASSES.danger.text}`}>
           <span>{notifications.error}</span>
           <Button variant="ghost" size="sm" onPress={() => void notifications.refresh()} isDisabled={notifications.loading}>Retry notifications</Button>
         </div> : null}

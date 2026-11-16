@@ -208,8 +208,8 @@ async function expectBrowserReady(page: Page) {
       // The raw reason is kept for runtime debug, not shown on screen.
       const detail = (await modal.getByTestId("browser-session-error-notice").locator("[data-debug-reason]")
         .getAttribute("data-debug-reason", { timeout: 1_000 }).catch(() => ""))?.toLowerCase();
-      const indicators = ["origin not ready", "newer version", "view-only", "failed to fetch", "websocket",
-        "runtime id missing", "token request failed", "endpoint missing", "provider", "capabilities", "screencast",
+      const indicators = ["machine isn't ready", "newer version", "view-only", "failed to fetch", "websocket",
+        "machine id missing", "token request failed", "endpoint missing", "provider", "capabilities", "screencast",
         "cdp", "connect", "timeout", "401", "403", "409", "500", "502", "503"];
       const category = JSON.stringify(indicators.filter(value => detail?.includes(value)));
       if (!reported.has(category) && reported.size < 16) {

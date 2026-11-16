@@ -630,7 +630,7 @@ describe("useChatSendQueueActions", () => {
     // once it gives that turn up; send now takes a failed entry.
     const unsent = createServerItem({
       status: "failed",
-      errorMessage: "Not sent because the runtime was stopped. Send it now if you still need it, or remove it.",
+      errorMessage: "Not sent because the machine was stopped. Send it now if you still need it, or remove it.",
     });
     const options = createOptions({ runtimeReady: true, serverSendQueueItems: [unsent] });
     // A machine that is ready, or comes back, does not send it.

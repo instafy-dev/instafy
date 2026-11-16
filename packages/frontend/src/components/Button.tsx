@@ -49,10 +49,13 @@ const RAISED_CLASSES = {
 
 // Quiet actions select one complete palette rather than competing with the
 // neutral variant through caller classes. Filled variants retain their palette.
+// Muted takes the muted text grey (textTones.muted), so a quiet action never
+// reads fainter than the prose beside it: slate-600 is 4.6:1 on slate-50.
+// Danger starts at rose-700, 5.5:1 on slate-100, where rose-600 reads 4.1:1.
 const TONE_CLASSES: Record<ButtonTone, string> = {
   neutral: "text-slate-700 hover:text-slate-900 data-[hovered]:text-slate-900 data-[pressed]:text-slate-900 dark:text-slate-200 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 dark:data-[pressed]:text-slate-50",
-  muted: "text-slate-500 hover:text-slate-800 data-[hovered]:text-slate-800 data-[pressed]:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100 dark:data-[pressed]:text-slate-50",
-  danger: "text-rose-600 hover:text-rose-700 data-[hovered]:text-rose-700 data-[pressed]:text-rose-800 dark:text-rose-300 dark:hover:text-rose-200 dark:data-[hovered]:text-rose-200 dark:data-[pressed]:text-rose-100",
+  muted: "text-slate-600 hover:text-slate-800 data-[hovered]:text-slate-800 data-[pressed]:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100 dark:data-[pressed]:text-slate-50",
+  danger: "text-rose-700 hover:text-rose-800 data-[hovered]:text-rose-800 data-[pressed]:text-rose-900 dark:text-rose-300 dark:hover:text-rose-200 dark:data-[hovered]:text-rose-200 dark:data-[pressed]:text-rose-100",
   accent: "text-primary-600 hover:text-primary-700 data-[hovered]:text-primary-700 data-[pressed]:text-primary-800 dark:text-primary-300 dark:hover:text-primary-200 dark:data-[hovered]:text-primary-200 dark:data-[pressed]:text-primary-100",
 };
 const QUIET_SURFACE_CLASSES: Record<ButtonTone, string> = {

@@ -9,6 +9,7 @@ import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceStore } from "../../../store";
 import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
 import { spaceDisplayName } from "../../../projects/spaceName";
+import { textTones } from "../../../styles/typography";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsFormActions } from "../../../components/SettingsFormActions";
 
@@ -114,7 +115,7 @@ function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentity
         </IdentityPhotoButton> : <SpaceIdentity name={name} icon={icon} color={color} avatarUrl={avatarUrl} className="!h-16 !w-16 !text-2xl" />}
         <div className="min-w-0 space-y-1">
           <p className="truncate text-sm font-medium">{spaceDisplayName(name)}</p>
-          <p className="text-xs text-slate-500 dark:text-slate-400">PNG, JPEG or WebP, up to 2 MB.</p>
+          <p className={`text-xs ${textTones.muted}`}>PNG, JPEG or WebP, up to 2 MB.</p>
           {canWrite && (imageFile || avatarUrl) ? <Button variant="ghost" size="sm" isDisabled={disabled}
             onPress={() => { setAvatarUrl(null); setImageFile(null); setNotice(null); }} data-testid="space-avatar-remove">Remove picture</Button> : null}
         </div>
@@ -138,10 +139,10 @@ function SpaceIdentityForm({ projectId, name, canWrite, enabled }: SpaceIdentity
         onCancel={() => { setIcon(normalizeSpaceIcon(saved.projectIcon)); setColor(normalizeSpaceColor(saved.projectColor)); setAvatarUrl(normalizeSpaceAvatarUrl(saved.projectAvatarUrl)); setImageFile(null); setError(null); }}
         cancelDisabled={disabled || !dirty}
         secondary={<Button onPress={() => { setIcon(null); setColor(null); setAvatarUrl(null); setImageFile(null); }} isDisabled={disabled || (icon === null && color === null && !avatarUrl && !imageFile)} variant="ghost" size="md" radius="xl">Clear appearance</Button>} />
-      {loading ? <p role="status" className="mt-2 text-xs text-slate-500">Loading appearance…</p> : null}
-      {error ? <p role="alert" className="mt-2 text-sm text-rose-600 dark:text-rose-400">{error}</p> : null}
+      {loading ? <p role="status" className={`mt-2 text-xs ${textTones.muted}`}>Loading appearance…</p> : null}
+      {error ? <p role="alert" className={`mt-2 text-sm ${textTones.danger}`}>{error}</p> : null}
       {loadFailed ? <Button onPress={() => setLoadAttempt((value) => value + 1)} variant="ghost" size="sm">Retry</Button> : null}
-      {notice && !dirty ? <p role="status" className="mt-2 text-xs text-slate-500">{notice}</p> : null}
+      {notice && !dirty ? <p role="status" className={`mt-2 text-xs ${textTones.muted}`}>{notice}</p> : null}
     </div>
   </SettingsSection>;
 }

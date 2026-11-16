@@ -4,6 +4,7 @@ import { buildMarkdownOutlineTree, type MarkdownOutlineItem, type MarkdownOutlin
 import { Button, IconButton } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Spinner } from "../../../components/Spinner";
+import { Text } from "../../../components/Text";
 import { TreeDisclosureButton, TreeRowMarkerSlot } from "../../../components/TreeDisclosureButton";
 import {
   DRAWER_LIST_ROW_TEXT_CLASS,
@@ -314,9 +315,9 @@ export function FilesExplorerTree({
                   ) : markdownOutlineTree.length > 0 ? (
                     renderMarkdownOutlineNodes(markdownOutlineTree)
                   ) : (
-                    <div className="px-2.5 py-1 text-xs text-slate-400 dark:text-slate-500">
+                    <Text as="div" variant="caption" tone="muted" className="px-2.5 py-1">
                       No headings in this file yet.
-                    </div>
+                    </Text>
                   )}
                 </div>
               ) : null}
