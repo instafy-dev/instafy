@@ -214,10 +214,11 @@ inferred from API web-search prices.
 `PROXY_MANAGED_NATIVE_WEB_SEARCH` (off by default) lets a managed run search through
 `POST /v1/alpha/search` when the controller granted its job native search: a job-bound token
 with `native_web_search`, a `run_id` and no `credential_id`. The controller grants native search
-only for a person's own ChatGPT login, so the setting changes nothing until the controller grants
-it to managed runs as well. Turning it off refuses every managed search at once with 403
-`native_web_search_unavailable`. Hosted `web_search` in a model request stays off on the
-platform lane either way.
+to managed runs only with its own `MANAGED_AI_NATIVE_WEB_SEARCH` on (off by default), so a managed
+run searches only with both settings on; `docs/Credits-Billing.md` ("Web search for Instafy AI")
+says how to turn them on in a test environment. Turning the proxy's setting off refuses every
+managed search at once with 403 `native_web_search_unavailable`. Hosted `web_search` in a model
+request stays off on the platform lane either way.
 
 A managed run's search goes through the search bridge, which works the same on either kind of
 platform credential:

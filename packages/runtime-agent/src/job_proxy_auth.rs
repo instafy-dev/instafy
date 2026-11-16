@@ -146,10 +146,15 @@ impl Drop for JobProxyAuthGuard {
 }
 
 impl JobProxyAuth {
-    /// The controller's job-bound grant advertises provider-hosted retrieval. The proxy verifies
-    /// its signature and the stored ChatGPT credential again before forwarding any search tool.
+    /// The controller's job-bound grant advertises provider-hosted retrieval, on one of the two
+    /// lanes the proxy serves it on: a person's own credential, or a managed run (a run id and no
+    /// credential of its own), which the controller grants only with its
+    /// `MANAGED_AI_NATIVE_WEB_SEARCH` switch on. The proxy verifies the signature again, and the
+    /// stored ChatGPT credential or its own `PROXY_MANAGED_NATIVE_WEB_SEARCH` switch, before
+    /// running any search.
     pub(crate) fn allows_native_web_search(&self) -> bool {
-        self.scope.native_web_search && self.scope.credential_id.is_some()
+        self.scope.native_web_search
+            && (self.scope.credential_id.is_some() || self.scope.run_id.is_some())
     }
 
     pub fn new(
@@ -618,15 +623,24 @@ mod tests {
     async fn native_search_uses_only_the_job_grant_and_defaults_off() {
         let fixture = Fixture::new().await;
         assert!(!fixture.auth.allows_native_web_search());
-        for (claim, credential, expected) in [
-            (false, true, false),
-            (true, true, true),
-            (true, false, false),
+        for (claim, credential, run, expected) in [
+            // A person's own credential, as before.
+            (false, true, true, false),
+            (true, true, true, true),
+            (true, true, false, true),
+            // A managed run: the grant decides, on a run with no credential of its own.
+            (false, false, true, false),
+            (true, false, true, true),
+            // A token on neither lane never searches, whatever it claims.
+            (true, false, false, false),
         ] {
             let mut job = fixture.job.clone();
             job.payload = json!({"metadata": {"native_web_search": true, "nativeWebSearch": true}});
             if !credential {
                 job.credential_id = None;
+            }
+            if !run {
+                job.run_id = None;
             }
             let mut grant = envelope(
                 &job,
@@ -646,7 +660,11 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(auth.allows_native_web_search(), expected);
+            assert_eq!(
+                auth.allows_native_web_search(),
+                expected,
+                "claim {claim}, credential {credential}, run {run}"
+            );
         }
     }
 

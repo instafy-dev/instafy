@@ -5503,6 +5503,21 @@ impl CodexEventStreamAdapter {
     }
 
     pub(crate) fn collect(&mut self, event: &Event) -> Vec<JsonValue> {
+        // A search the AI ran with its own web search is the room's search step once it ends:
+        // the words it searched for and the pages the search returned, and nothing else of it.
+        // Its start carries only its id, for the run log's timings (`agent/turn-timings`).
+        match &event.msg {
+            EventMsg::WebSearchBegin(begin) => {
+                return vec![json!({
+                    "type": "item.started",
+                    "item": { "id": begin.call_id, "type": "web_search", "status": "in_progress" },
+                })];
+            }
+            EventMsg::WebSearchEnd(search) => {
+                return vec![json!({ "type": "item.completed", "item": web_search_step(search) })];
+            }
+            _ => {}
+        }
         if let Some(kind) = unprojected_tool_activity_kind(&event.msg) {
             // Observation only: retain no tool arguments, output, paths or identifiers.
             // Consumers can distinguish a tool-free result from work whose detailed
@@ -6258,7 +6273,6 @@ fn code_mode_cell_status(
 
 fn unprojected_tool_activity_kind(event: &EventMsg) -> Option<&'static str> {
     match event {
-        EventMsg::WebSearchBegin(_) | EventMsg::WebSearchEnd(_) => Some("web_search"),
         EventMsg::ImageGenerationBegin(_) | EventMsg::ImageGenerationEnd(_) => {
             Some("image_generation")
         }
@@ -6348,6 +6362,150 @@ fn compact_command_output_for_event(output: &str) -> String {
         "[command output truncated; keeping tail]\n{}",
         tail_chars(output, MAX_COMMAND_OUTPUT_EVENT_CHARS)
     )
+}
+
+/// The longest words of one search, and the most searches of one step, the room keeps. Codex's
+/// search tool takes up to 4 queries in a call.
+const MAX_WEB_SEARCH_QUERY_CHARS: usize = 300;
+const MAX_WEB_SEARCH_QUERIES: usize = 8;
+/// The most pages of one search step the room lists, and the longest address and title it keeps
+/// of each.
+const MAX_WEB_SEARCH_PAGES: usize = 10;
+const MAX_WEB_SEARCH_PAGE_URL_CHARS: usize = 2048;
+const MAX_WEB_SEARCH_PAGE_TITLE_CHARS: usize = 200;
+
+/// The room's step for a search the AI ran with its own web search, the way a person's own ChatGPT
+/// login or the proxy's search for a managed run answers it: the words it searched for and the
+/// pages the search returned, each a public web address and its title, which Details lists. Only
+/// a search is a step: opening or finding in a page, and the search tool's other commands, end
+/// with no words, so no step shows for them, since they may not have run (the proxy runs only
+/// searches for a managed run). Nothing else of the search is kept: not what it wrote, a snippet,
+/// or the tool's name.
+fn web_search_step(search: &codex_protocol::protocol::WebSearchEndEvent) -> JsonValue {
+    let ended = json!({ "id": search.call_id, "type": "web_search", "status": "completed" });
+    let codex_protocol::models::WebSearchAction::Search { query, queries } = &search.action else {
+        return ended;
+    };
+    let asked: Vec<&String> = match queries {
+        Some(queries) if !queries.is_empty() => queries.iter().collect(),
+        _ => query.iter().collect(),
+    };
+    let mut words: Vec<String> = Vec::new();
+    for asked in asked {
+        let line = plain_line(asked, MAX_WEB_SEARCH_QUERY_CHARS);
+        if !line.is_empty() && !words.contains(&line) && words.len() < MAX_WEB_SEARCH_QUERIES {
+            words.push(line);
+        }
+    }
+    if words.is_empty() {
+        return ended;
+    }
+    let mut pages: Vec<JsonValue> = Vec::new();
+    for result in search.results.iter().flatten() {
+        if pages.len() >= MAX_WEB_SEARCH_PAGES {
+            break;
+        }
+        let Some(url) = result
+            .get("url")
+            .and_then(JsonValue::as_str)
+            .and_then(public_page_address)
+        else {
+            continue;
+        };
+        if pages.iter().any(|page| page["url"] == url.as_str()) {
+            continue;
+        }
+        let mut page = json!({ "url": url });
+        if let Some(title) = result
+            .get("title")
+            .and_then(JsonValue::as_str)
+            .map(|title| plain_line(title, MAX_WEB_SEARCH_PAGE_TITLE_CHARS))
+            .filter(|title| !title.is_empty())
+        {
+            page["title"] = json!(title);
+        }
+        pages.push(page);
+    }
+    json!({
+        "id": search.call_id,
+        "type": "web_search",
+        "query": words.join(" · "),
+        "queries": words,
+        "pages": pages,
+        "status": "completed",
+    })
+}
+
+/// A page a search returned that the room may link to: an http(s) address of a public site, on its
+/// default port, without a user name or password, written out the way a browser would (without
+/// its `#` part). An address of a machine on a local network, or an IP address, is left out, as
+/// the proxy leaves them out of the pages a managed search cites.
+fn public_page_address(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > MAX_WEB_SEARCH_PAGE_URL_CHARS {
+        return None;
+    }
+    let mut url = reqwest::Url::parse(raw).ok()?;
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    let local = host.starts_with('[')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || !host.contains('.')
+        || [
+            ".localhost",
+            ".local",
+            ".internal",
+            ".lan",
+            ".home",
+            ".arpa",
+        ]
+        .iter()
+        .any(|suffix| host.ends_with(suffix));
+    if !matches!(url.scheme(), "http" | "https")
+        || local
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    url.set_fragment(None);
+    let address = url.to_string();
+    (address.len() <= MAX_WEB_SEARCH_PAGE_URL_CHARS).then_some(address)
+}
+
+/// One line of text the room shows of what a search named: characters nobody sees taken out,
+/// control characters and runs of white space one space, at most `max_chars` characters.
+fn plain_line(raw: &str, max_chars: usize) -> String {
+    let mut line = String::new();
+    let mut gap = false;
+    for character in raw.chars() {
+        if matches!(
+            character,
+            '\u{00ad}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
+        ) {
+            continue;
+        }
+        if character.is_whitespace() || character.is_control() {
+            gap = !line.is_empty();
+            continue;
+        }
+        if gap {
+            line.push(' ');
+            gap = false;
+        }
+        line.push(character);
+    }
+    line.chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 /// The longest `activity:` line of `instafy web search` that the room keeps.
@@ -11872,6 +12030,167 @@ required = true
         }
     }
 
+    fn web_search_end(action: JsonValue, results: Option<JsonValue>) -> Event {
+        let mut end = json!({
+            "type": "web_search_end", "call_id": "search-1",
+            "query": "codex's own detail", "action": action,
+        });
+        if let Some(results) = results {
+            end["results"] = results;
+        }
+        Event {
+            id: "turn-1".into(),
+            msg: serde_json::from_value(end).expect("valid web search end"),
+        }
+    }
+
+    /// A search the AI ran with its own web search (a person's ChatGPT login, or the proxy's
+    /// search for a managed run) is the room's search step: the words it searched for and the
+    /// pages it returned, and nothing else of the search.
+    #[test]
+    fn a_web_search_is_the_rooms_search_step_with_its_words_and_pages() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let results = json!([
+            {"type": "text_result", "url": "https://www.example.org/readers/reader-7?utm_source=openai",
+             "title": "Example\u{200b} Reader 7 |\n Example Store", "snippet": "private snippet",
+             "ref_id": "turn0search0"},
+            {"type": "text_result", "url": "https://reviews.example.net/reader-7#verdict", "title": " "},
+            {"type": "text_result", "url": "https://www.example.org/readers/reader-7?utm_source=openai"},
+            {"type": "image_result", "image_url": "https://images.example.org/reader.png"},
+        ]);
+        let projected = adapter.collect(&web_search_end(
+            json!({"type": "search", "query": "example reader 7 weight"}),
+            Some(results),
+        ));
+        assert_eq!(
+            projected,
+            vec![json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "search-1",
+                    "type": "web_search",
+                    "query": "example reader 7 weight",
+                    "queries": ["example reader 7 weight"],
+                    "pages": [
+                        {"url": "https://www.example.org/readers/reader-7?utm_source=openai",
+                         "title": "Example Reader 7 | Example Store"},
+                        {"url": "https://reviews.example.net/reader-7"},
+                    ],
+                    "status": "completed",
+                }
+            })]
+        );
+        let stored = projected[0].to_string();
+        for absent in [
+            "private snippet",
+            "turn0search0",
+            "images.example.org",
+            "web.run",
+            "codex",
+        ] {
+            assert!(!stored.contains(absent), "{absent} in {stored}");
+        }
+
+        // Several queries in one call are one step that names each of them once.
+        let projected = adapter.collect(&web_search_end(
+            json!({"type": "search", "queries": ["reader 7 weight", " reader 7  weight", "reader 7 price"]}),
+            None,
+        ));
+        assert_eq!(
+            projected[0]["item"]["query"],
+            json!("reader 7 weight · reader 7 price")
+        );
+        assert_eq!(
+            projected[0]["item"]["queries"],
+            json!(["reader 7 weight", "reader 7 price"])
+        );
+        assert_eq!(projected[0]["item"]["pages"], json!([]));
+    }
+
+    /// A search's start names nothing but its call, for the run log's timings. Only a search is a
+    /// step: opening or finding in a page, and the search tool's other commands, may not have run
+    /// (the proxy runs only searches for a managed run), so they end with no words and no pages,
+    /// as does a search with no words, and the room shows no step for them.
+    #[test]
+    fn a_web_search_that_did_not_search_ends_without_words() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        assert_eq!(
+            adapter.collect(&Event {
+                id: "turn-1".into(),
+                msg: serde_json::from_value(
+                    json!({"type": "web_search_begin", "call_id": "search-1"})
+                )
+                .unwrap(),
+            }),
+            vec![json!({
+                "type": "item.started",
+                "item": {"id": "search-1", "type": "web_search", "status": "in_progress"},
+            })]
+        );
+        let results = Some(json!([{"type": "text_result", "url": "https://www.example.org/page"}]));
+        for action in [
+            json!({"type": "open_page", "url": "https://www.example.org/page"}),
+            json!({"type": "find_in_page", "url": "https://www.example.org/page", "pattern": "weight"}),
+            json!({"type": "other"}),
+            json!({"type": "search"}),
+            json!({"type": "search", "query": " \u{200b} ", "queries": []}),
+        ] {
+            let ended = adapter.collect(&web_search_end(action.clone(), results.clone()));
+            assert_eq!(
+                ended,
+                vec![json!({
+                    "type": "item.completed",
+                    "item": {"id": "search-1", "type": "web_search", "status": "completed"},
+                })],
+                "{action}"
+            );
+        }
+    }
+
+    /// The room links only to public web pages: an address with a user name, of a machine on a
+    /// local network, an IP address, a port of its own or another scheme is left out.
+    #[test]
+    fn a_web_search_step_lists_only_public_pages() {
+        for (raw, kept) in [
+            (
+                "https://www.example.org/a",
+                Some("https://www.example.org/a"),
+            ),
+            ("http://example.org", Some("http://example.org/")),
+            (
+                "HTTPS://WWW.Example.org:443/a#part",
+                Some("https://www.example.org/a"),
+            ),
+            (
+                "https://bücher.example/a b",
+                Some("https://xn--bcher-kva.example/a%20b"),
+            ),
+            ("https://user:pass@www.example.org/a", None),
+            ("https://www.example.org:8443/a", None),
+            ("http://127.0.0.1/admin", None),
+            ("http://[::1]/admin", None),
+            ("http://10.0.0.7/", None),
+            ("http://localhost:3000/", None),
+            ("http://router.local/", None),
+            ("http://intranet/", None),
+            ("http://printer.lan/", None),
+            ("https://metadata.internal/", None),
+            ("javascript:alert(1)", None),
+            ("ftp://files.example.org/a", None),
+            ("file:///etc/passwd", None),
+            ("", None),
+        ] {
+            assert_eq!(public_page_address(raw).as_deref(), kept, "{raw}");
+        }
+        let long = format!(
+            "https://www.example.org/{}",
+            "a".repeat(MAX_WEB_SEARCH_PAGE_URL_CHARS)
+        );
+        assert_eq!(public_page_address(&long), None);
+        assert_eq!(plain_line("  a\u{202e}b\tc\n\nd\u{0007} ", 300), "ab c d");
+        assert_eq!(plain_line("abcdef", 3), "abc");
+    }
+
     #[test]
     fn codex_event_stream_preserves_shell_script_as_one_argv_entry() {
         let mut adapter = CodexEventStreamAdapter::default();
@@ -12829,10 +13148,6 @@ required = true
     #[test]
     fn codex_event_stream_records_content_free_tool_activity() {
         let cases = [
-            (
-                json!({"type": "web_search_begin", "call_id": "private-call"}),
-                "web_search",
-            ),
             (
                 json!({
                     "type": "image_generation_end", "call_id": "private-call",

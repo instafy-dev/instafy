@@ -176,9 +176,49 @@ function stepDescription(step: TurnStep): { detail: string | null; mono: boolean
   }
 }
 
+/** The most pages Details lists under one search, as the runtime keeps them. */
+const MAX_SEARCH_PAGES = 10;
+
+type SearchPage = { url: string; host: string; title: string | null };
+
+/**
+ * The pages a web search returned, as the runtime kept them for its step
+ * (`pages`: a public web address and its title each). Only http(s) addresses
+ * are listed; the room keeps nothing else of a search.
+ */
+function searchPages(step: TurnStep): SearchPage[] {
+  if (step.kind !== "search") {
+    return [];
+  }
+  const details = extractMessageDetails(isRecord(step.message.metadata) ? step.message.metadata : null);
+  const pages = Array.isArray(details?.pages) ? details.pages : [];
+  const listed: SearchPage[] = [];
+  for (const page of pages) {
+    if (listed.length >= MAX_SEARCH_PAGES || !isRecord(page) || typeof page.url !== "string") {
+      continue;
+    }
+    let url: URL;
+    try {
+      url = new URL(page.url);
+    } catch {
+      continue;
+    }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+      continue;
+    }
+    const title = typeof page.title === "string" && page.title.trim() ? page.title.trim() : null;
+    listed.push({ url: url.href, host: displayActivityHost(url.hostname.replace(/^www\./u, "")), title });
+  }
+  return listed;
+}
+
 /** Rows that read the same and hold nothing behind them: one row, with how many times. */
 function sameRow(a: TurnStep, b: TurnStep): boolean {
   if (a.kind === "command" || a.kind !== b.kind || a.state !== b.state || a.label !== b.label) {
+    return false;
+  }
+  // A search's pages are behind its row, so each keeps its own.
+  if (searchPages(a).length > 0 || searchPages(b).length > 0) {
     return false;
   }
   const first = stepDescription(a);
@@ -207,14 +247,17 @@ function readsPageOf(read: TurnStep, step: TurnStep): boolean {
 }
 
 function OtherStepRow({ step, times = 1 }: { step: TurnStep; times?: number }) {
+  const [open, setOpen] = useState(false);
   const { detail, mono } = stepDescription(step);
+  // A web search's pages wait behind a chevron, as a command's output does.
+  const pages = searchPages(step);
   const icon =
     step.kind === "edit" ? (
       <EditPencil aria-hidden="true" className={ICON_CLASS} />
     ) : (
       renderThreadCompactEventIcon(step.kind === "search" ? "search" : "tool", ICON_CLASS)
     );
-  return (
+  const row = (
     <div className={ROW_CLASS} data-testid={`turn-activity-${step.kind}`}>
       {icon}
       <StepLabel text={step.label} />
@@ -239,6 +282,57 @@ function OtherStepRow({ step, times = 1 }: { step: TurnStep; times?: number }) {
         </span>
       ) : null}
       <StepStateGlyph state={step.state} />
+      {pages.length > 0 ? (
+        <IconButton
+          aria-label={open ? "Hide pages" : "Show pages"}
+          aria-expanded={open}
+          variant="ghost"
+          size="xs"
+          radius="full"
+          tone="muted"
+          onPress={() => setOpen((current) => !current)}
+          data-testid="turn-activity-search-pages-toggle"
+          className="flex-none pointer-coarse:h-11 pointer-coarse:w-11"
+        >
+          {open ? (
+            <NavArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
+          ) : (
+            <NavArrowRight aria-hidden="true" className="h-3.5 w-3.5" />
+          )}
+        </IconButton>
+      ) : null}
+    </div>
+  );
+  if (pages.length === 0) {
+    return row;
+  }
+  return (
+    <div className="min-w-0">
+      {row}
+      {open ? (
+        <ul
+          aria-label="Pages the search returned"
+          className="mt-0.5 mb-1.5 min-w-0 space-y-0.5 pl-5"
+          data-testid="turn-activity-search-pages"
+        >
+          {pages.map((page) => (
+            <li key={page.url} className="flex min-w-0 items-center gap-1.5 text-xs">
+              <a
+                href={page.url}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                title={page.url}
+                className="min-w-0 truncate py-0.5 text-slate-700 underline-offset-2 hover:underline pointer-coarse:py-3 dark:text-slate-200"
+              >
+                {page.title ?? page.host}
+              </a>
+              {page.title ? (
+                <span className="flex-none text-xxs text-slate-500 dark:text-slate-400">{page.host}</span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

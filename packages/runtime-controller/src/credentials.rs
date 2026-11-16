@@ -2859,6 +2859,49 @@ fn classify_auth_json(
     ))
 }
 
+/// What a job's proxy grant is decided from: its row's credential, run and
+/// intent, never its payload or client metadata.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NativeSearchJob<'a> {
+    pub(crate) credential_id: Option<&'a Uuid>,
+    pub(crate) run_id: Option<&'a Uuid>,
+    pub(crate) intent: Option<&'a str>,
+}
+
+/// Whether a job's signed proxy grant lets it use the AI's own web search
+/// (`native_web_search`), at its lease and at every renewal. A person's own
+/// credential: only a live ChatGPT login, as before. A managed (Instafy AI)
+/// job: only with `MANAGED_AI_NATIVE_WEB_SEARCH` on
+/// ([`managed_job_allows_native_web_search`]).
+pub(crate) async fn job_allows_native_web_search(
+    client: &Transaction<'_>,
+    config: &crate::config::AppConfig,
+    job: NativeSearchJob<'_>,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    match job.credential_id {
+        Some(_) => credential_allows_native_web_search(client, job.credential_id).await,
+        None => Ok(managed_job_allows_native_web_search(config, job)),
+    }
+}
+
+/// A managed (Instafy AI) job: one with no credential of its own, on a run,
+/// whose intent needs the AI (the predicate its platform job record is
+/// written by), and only with `MANAGED_AI_NATIVE_WEB_SEARCH` on. The proxy
+/// serves its searches only with `PROXY_MANAGED_NATIVE_WEB_SEARCH` on too,
+/// and the runtime never turns search on in a routing step or a browser or
+/// granted turn, whatever the grant says. A job that started with search and
+/// is renewed after the switch went off loses its grant, and the runtime then
+/// stops it rather than going on with a different tool policy.
+pub(crate) fn managed_job_allows_native_web_search(
+    config: &crate::config::AppConfig,
+    job: NativeSearchJob<'_>,
+) -> bool {
+    config.managed_ai_native_web_search
+        && job.credential_id.is_none()
+        && job.run_id.is_some()
+        && crate::dispatch::dispatch_requires_ai_access(job.intent.unwrap_or_default())
+}
+
 /// The stored kind is classified from the onboarded secret, never client metadata.
 /// The proxy additionally checks the resolved material before forwarding hosted search.
 pub(crate) async fn credential_allows_native_web_search(
@@ -3299,6 +3342,56 @@ mod provider_metadata_tests {
             default_model_for_credential(CREDENTIAL_KIND_CODEX_AUTH_JSON, PROVIDER_OPENAI),
             default_chatgpt_model_id()
         );
+    }
+}
+
+#[cfg(test)]
+mod managed_native_search_tests {
+    use super::{managed_job_allows_native_web_search, NativeSearchJob};
+    use uuid::Uuid;
+
+    use crate::tests::build_app_config;
+
+    /// A managed (Instafy AI) job gets the AI's own web search only with the
+    /// switch on, on a run, and only for an intent that runs the AI. A job on
+    /// a person's own credential is never decided here: its live ChatGPT
+    /// login decides it, as before (`job_allows_native_web_search`).
+    #[test]
+    fn a_managed_job_gets_search_only_with_the_switch_on() {
+        let mut config = build_app_config("", "", "");
+        let run = Uuid::new_v4();
+        let credential = Uuid::new_v4();
+        let job = |credential_id, run_id, intent| NativeSearchJob {
+            credential_id,
+            run_id,
+            intent,
+        };
+        let chat = job(None, Some(&run), Some("feature"));
+        assert!(!config.managed_ai_native_web_search, "off by default");
+        assert!(!managed_job_allows_native_web_search(&config, chat));
+
+        config.managed_ai_native_web_search = true;
+        for (case, job, expected) in [
+            ("a chat turn", chat, true),
+            ("a job with no intent", job(None, Some(&run), None), true),
+            ("a job with no run", job(None, None, Some("feature")), false),
+            (
+                "a terminal command, which runs no AI",
+                job(None, Some(&run), Some("terminal_command")),
+                false,
+            ),
+            (
+                "a person's own credential",
+                job(Some(&credential), Some(&run), Some("feature")),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                managed_job_allows_native_web_search(&config, job),
+                expected,
+                "{case}"
+            );
+        }
     }
 }
 

@@ -216,8 +216,9 @@ the platform key, which OpenAI bills at $10 per 1,000 searches plus the search c
 the model's input rate. A static ChatGPT login serving managed runs (a local stack) searches the
 same way through the login's own search, on its allowance. The proxy logs each of these searches
 with its job, model, tokens and billable searches, never its query (see the proxy README), and
-charges no credits for them. The controller grants native search only for a person's own ChatGPT
-login, so no managed run searches this way today.
+charges no credits for them. The controller grants native search to a managed run only with its
+own `MANAGED_AI_NATIVE_WEB_SEARCH` on, so a managed run searches only with both switches on; see
+[Web search for Instafy AI](#web-search-for-instafy-ai).
 Static proxy credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
 The pricing envs are standard-tier rates, so the platform key also serves only OpenAI's standard
@@ -341,6 +342,41 @@ Starter guidance with the current defaults:
   then, but that day's top-up is still to come: the first time a later read or charge finds it
   under the limit, that day, it is topped back up, at whatever hour that is, by however much it
   fell (`attempt_daily_refill` and `daily_window_allows` in `credits.rs`)
+
+### Web search for Instafy AI
+
+Instafy AI (a managed run) searches the web with the AI's own search only when two switches are
+on. Both are off by default, and each is read at startup: a value that is not a boolean (`1/0`,
+`true/false`, `yes/no`, `on/off`) stops the service.
+
+| Switch | Set on | Default | What it does |
+|---|---|---|---|
+| `MANAGED_AI_NATIVE_WEB_SEARCH` | the controller | off | Puts `native_web_search` in the signed proxy grant of a managed job (no credential of its own, on a run, an intent that runs the AI) when it is leased and each time its grant is renewed. The runtime then turns search on for that job's ordinary turns, never for its routing step or a browser or granted turn. |
+| `PROXY_MANAGED_NATIVE_WEB_SEARCH` | every proxy that serves managed runs | off | Lets a run with that grant search through the proxy's search bridge: OpenAI's hosted web search on the platform's API key, or, where the managed lane is a static ChatGPT login (a local stack), that login's own search, on its allowance. Each search is logged (see the proxy README). |
+
+A person's own ChatGPT login is not affected by either switch: its grant follows the live login,
+as before, and its searches run on that person's plan. A person's own API key gets no search.
+
+No credits are charged for these searches yet, and OpenAI bills the platform key for each one
+($10 per 1,000 searches plus the content's tokens at the model's input rate), so leave both off in
+production until the per-search charge ships. To turn them on in a test environment:
+
+1. **The proxy first.** Set `PROXY_MANAGED_NATIVE_WEB_SEARCH=true` where the proxies that serve
+   managed runs read their environment (both runtime compose files pass it through,
+   `docker/docker-compose.runtime.yml` and `docker/docker-compose.runtime.provider.yml`), and
+   restart them. On an API key, check once that the managed model can search:
+   `openai-proxy search-probe --model <MANAGED_AI_MODEL_ID>` where the key is (one billed search).
+2. **Then the controller.** Set `MANAGED_AI_NATIVE_WEB_SEARCH=true` in its environment and
+   restart it. Its log says the switch is on. Jobs leased from then on get search.
+3. **Check one turn.** Ask Instafy AI something that needs today's information. The turn's line
+   says it searched the web, its Details list the words it searched for and the pages each search
+   returned, and the proxy logs one `[proxy] managed web search {…}` line per search.
+
+To turn search off at once, turn the proxy's switch off: it refuses every managed search with
+403 `native_web_search_unavailable`. Turning the controller's off only stops new grants: a job
+that started with search loses it at its next renewal, and the runtime then stops that job rather
+than change its tools in the middle of a turn. With only the controller's on, the proxy refuses
+each search the AI tries, and the turn goes on without it.
 
 ### Failed turns
 

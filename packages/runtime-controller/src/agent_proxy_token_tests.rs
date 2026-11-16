@@ -397,3 +397,108 @@ async fn proxy_token_renewal_preserves_identity_and_rejects_inactive_leases() ->
     user_cleanup?;
     Ok(())
 }
+
+/// A managed (Instafy AI) job's renewed grant carries the AI's own web search
+/// only while `MANAGED_AI_NATIVE_WEB_SEARCH` is on, and only for a job that
+/// runs the AI. A person's own credential is decided as before: by its live
+/// ChatGPT login, whatever the switch says.
+#[tokio::test]
+async fn proxy_token_renewal_grants_managed_search_only_with_the_switch_on() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("managed native search renewal").await?;
+    let project_id = Uuid::new_v4();
+    let owner_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let generation = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let managed_job = Uuid::new_v4();
+    let terminal_job = Uuid::new_v4();
+    let own_job = Uuid::new_v4();
+    let api_key_job = Uuid::new_v4();
+    let login = Uuid::new_v4();
+    let api_key = Uuid::new_v4();
+    let lease_expiry = Utc::now() + Duration::minutes(10);
+
+    let result: anyhow::Result<()> = async {
+        ensure_test_user(&pool, &owner_id).await?;
+        {
+            let connection = pool.get().await?;
+            connection.execute(
+                "insert into projects (id, project_type, status) values ($1, 'customer', 'active')",
+                &[&project_id],
+            ).await?;
+            connection.execute(
+                "insert into runtimes (id, project_id, provider, status, capabilities)
+                 values ($1, $2, 'self-hosted', 'ready', $3)",
+                &[&runtime_id, &project_id, &json!({
+                    "agent": true,
+                    "_instafySelfHostedAccess": {"mode": "private", "ownerUserId": owner_id},
+                    "_instafyRuntimeTokenGeneration": generation,
+                })],
+            ).await?;
+            connection.execute(
+                "insert into runs (id, project_id, run_type, status) values ($1, $2, 'prompt', 'in_progress')",
+                &[&run_id, &project_id],
+            ).await?;
+            for (id, kind) in [(login, "codex_auth_json"), (api_key, "openai_api_key")] {
+                connection.execute(
+                    "insert into user_credentials (id, user_id, kind, nonce_b64, ciphertext_b64)
+                     values ($1, $2, $3, 'inert-nonce', 'inert-ciphertext')",
+                    &[&id, &owner_id, &kind],
+                ).await?;
+            }
+            for (id, credential, intent) in [
+                (managed_job, None, Some("feature")),
+                (terminal_job, None, Some("terminal_command")),
+                (own_job, Some(login), Some("feature")),
+                (api_key_job, Some(api_key), Some("feature")),
+            ] {
+                connection.execute(
+                    "insert into agent_jobs (id, project_id, run_id, credential_id, intent, status,
+                         leased_by_runtime_id, lease_expires_at, leased_at, payload, lease_attempts)
+                     values ($1, $2, $3, $4, $5, 'leased', $6, $7, now(), '{}'::jsonb, 1)",
+                    &[&id, &project_id, &run_id, &credential, &intent, &runtime_id, &lease_expiry],
+                ).await?;
+            }
+        }
+
+        for switch in [false, true] {
+            let mut config = test_config();
+            config.managed_ai_native_web_search = switch;
+            let token = crate::auth::issue_agent_token(&config, &project_id, &runtime_id, None, Some(generation))
+                .map(|minted| minted.token)
+                .map_err(|(status, error)| anyhow::anyhow!("test machine token: {status}: {}", error.0.message))?;
+            let app = super::router().with_state(build_test_state(pool.clone(), config));
+            for (case, job, expected) in [
+                ("a managed chat turn", managed_job, switch),
+                ("a managed terminal command", terminal_job, false),
+                ("a person's own ChatGPT login", own_job, true),
+                ("a person's own API key", api_key_job, false),
+            ] {
+                let (status, response) = renew(&app, &job.to_string(), Some(&token), None).await?;
+                anyhow::ensure!(status == StatusCode::OK, "{case}, switch {switch}: {status}");
+                let envelope: ProxyEnvelopePayload = serde_json::from_value(response)?;
+                let claims = proxy_claims(&envelope)?;
+                anyhow::ensure!(
+                    claims["native_web_search"] == json!(expected),
+                    "{case}, switch {switch}: {claims}"
+                );
+                // The managed lane is the one the proxy knows by its run and no credential.
+                anyhow::ensure!(claims["run_id"] == json!(run_id.to_string()), "{case}");
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    let connection = pool.get().await?;
+    let project_cleanup = connection
+        .execute("delete from projects where id = $1", &[&project_id])
+        .await;
+    let user_cleanup = connection
+        .execute("delete from auth.users where id = $1", &[&owner_id])
+        .await;
+    result?;
+    project_cleanup?;
+    user_cleanup?;
+    Ok(())
+}

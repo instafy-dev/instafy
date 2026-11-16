@@ -1543,9 +1543,11 @@ pub fn command_activity(argv: Option<&JsonValue>, command: &str) -> Option<JsonV
     activity
 }
 
-/// A web search: "Searching the web", then "searched the web".
-pub fn web_search_activity() -> Option<JsonValue> {
-    activity_json(vec![Found::builtin(&WEB_SEARCH, Some(1))])
+/// A web search: "Searching the web", then "searched the web", or "searched the web 3 times" for
+/// a step that ran `searches` searches at once.
+pub fn web_search_activity(searches: usize) -> Option<JsonValue> {
+    let count = u64::try_from(searches).ok().filter(|count| *count > 0);
+    activity_json(vec![Found::builtin(&WEB_SEARCH, count.or(Some(1)))])
 }
 
 /// A file edit touching `paths` distinct files.
@@ -2559,9 +2561,12 @@ mod tests {
             );
         }
         assert_eq!(
-            web_search_activity().unwrap()["key"],
+            web_search_activity(1).unwrap()["key"],
             json!("builtin/web-search")
         );
+        assert_eq!(web_search_activity(1).unwrap()["count"], json!(1));
+        assert_eq!(web_search_activity(0).unwrap()["count"], json!(1));
+        assert_eq!(web_search_activity(3).unwrap()["count"], json!(3));
         assert_eq!(file_change_activity(3).unwrap()["count"], json!(3));
         assert_eq!(
             mcp_tool_activity("instafy_shared_browser").unwrap()["live"],

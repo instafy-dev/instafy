@@ -22082,20 +22082,41 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             if query.is_empty() {
                                 continue;
                             }
+                            let failed =
+                                item.get("status").and_then(JsonValue::as_str) == Some("failed");
+                            // A step that searched several queries at once counts each of
+                            // them ("searched the web 3 times"); its row names them all.
+                            let searches = item
+                                .get("queries")
+                                .and_then(JsonValue::as_array)
+                                .map_or(1, Vec::len);
                             let key = format!("web_search::{item_id}::{query}");
                             let mut metadata = json!({
                                 "kind": "codex_web_search",
                                 "itemId": item_id,
                                 "eventType": event_type,
                                 "query": query,
+                                "status": if failed { "failed" } else { "completed" },
                                 "event": event.clone(),
                             });
-                            if let Some(activity) = activity_labels::web_search_activity() {
+                            // The pages the search returned, which Details lists under it
+                            // (`codex::web_search_step` keeps only public addresses and titles).
+                            if let Some(pages) = item
+                                .get("pages")
+                                .filter(|pages| pages.as_array().is_some_and(|p| !p.is_empty()))
+                            {
+                                metadata["pages"] = pages.clone();
+                            }
+                            if let Some(activity) = activity_labels::web_search_activity(searches) {
                                 metadata["activity"] = activity;
                             }
                             push_message(
                                 key,
-                                format!("Web search completed: \"{query}\""),
+                                if failed {
+                                    format!("Web search failed: \"{query}\"")
+                                } else {
+                                    format!("Web search completed: \"{query}\"")
+                                },
                                 Some("web_search"),
                                 metadata,
                             );
@@ -40210,6 +40231,109 @@ mod tests {
                 assert!(!stored.contains(result_text), "{result_text} in {stored}");
             }
         }
+    }
+
+    /// A search the AI ran with its own web search is one search step in the room: "Searched the
+    /// web" (or "searched the web 2 times" for two queries at once), its words, and the pages it
+    /// returned for Details, and nothing else of the search: not what it wrote, nor a tool's name.
+    #[test]
+    fn an_integrated_web_search_is_the_rooms_search_step_with_its_words_and_pages() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::Event;
+
+        let mut adapter = CodexEventStreamAdapter::default();
+        let mut events = Vec::new();
+        for (call, action, results) in [
+            (
+                "search-1",
+                json!({"type": "search", "query": "Belém Tower opening hours"}),
+                json!([
+                    {"type": "text_result", "url": "https://www.parquesdesintra.pt/en/belem",
+                     "title": "Belém Tower | Opening hours", "snippet": "Open 10:00 to 17:30"},
+                ]),
+            ),
+            (
+                "search-2",
+                json!({"type": "search", "queries": ["Belém Tower tickets", "Jerónimos tickets"]}),
+                json!([]),
+            ),
+            // An open with the search tool may not have run: no step.
+            (
+                "open-1",
+                json!({"type": "open_page", "url": "https://www.parquesdesintra.pt/en/belem"}),
+                json!([{"type": "text_result", "url": "https://www.parquesdesintra.pt/en/belem"}]),
+            ),
+        ] {
+            events.extend(
+                adapter.collect(&Event {
+                    id: "turn-1".into(),
+                    msg: serde_json::from_value(
+                        json!({"type": "web_search_begin", "call_id": call}),
+                    )
+                    .unwrap(),
+                }),
+            );
+            events.extend(
+                adapter.collect(&Event {
+                    id: "turn-1".into(),
+                    msg: serde_json::from_value(json!({
+                        "type": "web_search_end", "call_id": call, "query": "ignored",
+                        "action": action, "results": results,
+                    }))
+                    .unwrap(),
+                }),
+            );
+        }
+        let messages = extract_codex_messages(&events);
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        let metadata = |index: usize| messages[index].metadata.clone().expect("metadata");
+
+        assert_eq!(messages[0].message_type.as_deref(), Some("web_search"));
+        assert_eq!(
+            messages[0].content,
+            "Web search completed: \"Belém Tower opening hours\""
+        );
+        let first = metadata(0);
+        assert_eq!(first["itemId"], json!("search-1"));
+        assert_eq!(first["query"], json!("Belém Tower opening hours"));
+        assert_eq!(first["status"], json!("completed"));
+        assert_eq!(
+            first["pages"],
+            json!([{"url": "https://www.parquesdesintra.pt/en/belem", "title": "Belém Tower | Opening hours"}])
+        );
+        assert_eq!(first["activity"]["key"], json!("builtin/web-search"));
+        assert_eq!(first["activity"]["live"], json!("Searching the web"));
+        assert_eq!(first["activity"]["done"]["one"], json!("searched the web"));
+        assert_eq!(first["activity"]["count"], json!(1));
+
+        let second = metadata(1);
+        assert_eq!(
+            second["query"],
+            json!("Belém Tower tickets · Jerónimos tickets")
+        );
+        assert_eq!(second["activity"]["count"], json!(2));
+        assert!(second.get("pages").is_none(), "{second}");
+
+        let stored =
+            serde_json::to_string(&messages.iter().map(|m| &m.metadata).collect::<Vec<_>>())
+                .unwrap();
+        for absent in ["Open 10:00", "snippet", "web.run", "ignored"] {
+            assert!(!stored.contains(absent), "{absent} in {stored}");
+        }
+    }
+
+    /// A search step that failed reads as one that was tried, not as one that searched.
+    #[test]
+    fn a_failed_web_search_step_reads_as_tried() {
+        let messages = extract_codex_messages(&[json!({
+            "type": "item.completed",
+            "item": {"id": "t_s", "type": "web_search", "query": "vitest config", "status": "failed"}
+        })]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "Web search failed: \"vitest config\"");
+        let metadata = messages[0].metadata.as_ref().unwrap();
+        assert_eq!(metadata["status"], json!("failed"));
+        assert_eq!(metadata["activity"]["key"], json!("builtin/web-search"));
     }
 
     #[test]
