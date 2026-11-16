@@ -283,11 +283,25 @@ impl ResponseContext {
         } else {
             None
         };
+        // A ChatGPT login places a request's cache by its `session-id`, not its
+        // `prompt_cache_key` (Codex keeps the two apart: "ChatGPT derives cache affinity from
+        // the Responses session-id header"). Every request of a shared start comes from a new
+        // thread with a session of its own, so none was sent where the start before it was
+        // held: on a login, such a request names the start's scoped key as its session, as a
+        // thread's own key and session are one value. Its thread and turn state stay its own.
+        let session_id = if credentials.is_chatgpt() && self.shares_start() {
+            self.session_id
+                .as_ref()
+                .and(self.cache_key.as_deref())
+                .map(identity)
+        } else {
+            self.session_id.as_deref().map(identity)
+        };
         ScopedResponseContext {
             controls: self.clone(),
             claims: claims.cloned(),
             cache_key: self.cache_key.as_deref().map(identity),
-            session_id: self.session_id.as_deref().map(identity),
+            session_id,
             thread_id: self.thread_id.as_deref().map(identity),
             turn_state,
             affinity_scope: credentials.is_chatgpt().then_some(affinity_scope).flatten(),
@@ -930,5 +944,75 @@ mod tests {
             bare,
             json!([{"type":"additional_tools","role":"developer","tools":[]}])
         );
+    }
+
+    /// A ChatGPT login places a request's cache by its `session-id`. Two chats' routing steps,
+    /// each a new thread with a session of its own, send their space's shared start under one
+    /// session there, the scoped key their body already carries, so the second is sent where the
+    /// first's start is held. Each keeps its own thread and its own turn state. An API key, which
+    /// places a request by its key, a thread's own key, and another space keep what they had.
+    #[test]
+    fn a_shared_starts_requests_name_one_session_on_a_chatgpt_login() {
+        let codec = Arc::new(AffinityCodec::new("test"));
+        const SHARED: &str = "instafy-shared-start-0123456789abcdef0123456789abcdef";
+        let request = |thread: &str, key: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("session-id", thread.parse().unwrap());
+            headers.insert("thread-id", thread.parse().unwrap());
+            ResponseContext::parse(&json!({"prompt_cache_key": key}), &headers).unwrap()
+        };
+        let sent = |context: &ResponseContext, project: &str, subscription: bool| {
+            let scoped = context.scoped(
+                Some(&claims(project, "credential", "job")),
+                &credentials(subscription),
+                "gpt-6-luna",
+                &codec,
+            );
+            let mut headers = HeaderMap::new();
+            scoped.apply_headers(&mut headers);
+            let mut payload = json!({});
+            scoped.apply_payload(&mut payload, subscription);
+            let header = |name: &str| headers[name].to_str().unwrap().to_owned();
+            (
+                header("session-id"),
+                header("thread-id"),
+                payload["prompt_cache_key"].as_str().unwrap().to_owned(),
+                scoped.affinity_scope,
+            )
+        };
+        let museum = request("019a5d3e-8977-7e02-a9d0-a72dcaa648c1", SHARED);
+        let train = request("019a5d44-0687-7a83-be86-36fa0fb20a3b", SHARED);
+        let (museum_session, museum_thread, museum_key, museum_scope) =
+            sent(&museum, "project", true);
+        let (train_session, train_thread, train_key, train_scope) = sent(&train, "project", true);
+        assert_eq!(museum_key, train_key);
+        assert_eq!(museum_session, museum_key);
+        assert_eq!(train_session, museum_session);
+        assert_ne!(museum_thread, train_thread);
+        // Turn state, which a turn's next request carries back, stays sealed to its own thread.
+        assert_ne!(museum_scope, train_scope);
+        // Another space's routing steps name a session of their own.
+        assert_ne!(sent(&museum, "other-project", true).0, museum_session);
+        // An API key keeps each thread's session; so does a thread under its own key.
+        let (api_museum, ..) = sent(&museum, "project", false);
+        let (api_train, ..) = sent(&train, "project", false);
+        assert_ne!(api_museum, api_train);
+        let own = |thread: &str| sent(&request(thread, thread), "project", true);
+        let (own_session, _, own_key, _) = own("019a5d3e-8977-7e02-a9d0-a72dcaa648c1");
+        assert_eq!(own_session, own_key);
+        assert_ne!(own_session, museum_session);
+        assert_ne!(own("019a5d44-0687-7a83-be86-36fa0fb20a3b").0, own_session);
+        // A request Codex sent with no session gets none.
+        let bare = ResponseContext::parse(&json!({"prompt_cache_key": SHARED}), &HeaderMap::new())
+            .unwrap()
+            .scoped(
+                Some(&claims("project", "credential", "job")),
+                &credentials(true),
+                "gpt-6-luna",
+                &codec,
+            );
+        let mut headers = HeaderMap::new();
+        bare.apply_headers(&mut headers);
+        assert!(headers.get("session-id").is_none());
     }
 }

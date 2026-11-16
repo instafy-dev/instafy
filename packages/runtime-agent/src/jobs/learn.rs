@@ -646,6 +646,12 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // said how to write a finding's fact, a search engine was opened only when the person named
     // one, and the skill was for a page that needs the browser, not every page that would help.
     include_str!("legacy/browser-automation-v42.md"),
+    // From before a page or change asked for with values this chat's replies said weren't found
+    // or confirmed was `browser_then_build`, news put on a page stayed `direct`, checking the
+    // person's own account was work on a website, and the routing section left out what the
+    // routing step's own instructions already say (that the step can route to the browser, that
+    // a message with attachments is never offered it, and that a card hands back to a build).
+    include_str!("legacy/browser-automation-v43.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

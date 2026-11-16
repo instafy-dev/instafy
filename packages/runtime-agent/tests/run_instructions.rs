@@ -1774,8 +1774,8 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "a bare \"keep going\" carries on what a page here left open, and a change that needs a web page browses first",
             ),
             (
-                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
-                "research ending in a page goes to the browser from the first message",
+                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message; news stays `direct`: the browser can't search.",
+                "research ending in a page goes to the browser from the first message, news put on a page stays direct",
             ),
             (
                 "- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color), and for a page or change made only from what this chat found and confirmed.",

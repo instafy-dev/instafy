@@ -984,7 +984,7 @@ mod tests {
             assert!(input.browser_routes_offered, "{}", case.id);
             assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
             assert!(input.prompt.contains(
-                "That browser turn sees only the person's words and this chat's browser turns, with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
+                "A routed browser turn sees only the person's words and this chat's browser turns, with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
             ));
             assert_eq!(
                 input.history_metrics["includedTurns"],
@@ -1080,7 +1080,7 @@ mod tests {
         assert!(input.browser_routes_offered);
         for line in [
             "it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map,",
-            "the building turn reads it and answers with a card naming it, and a change here is built after it,",
+            "the building turn reads it and answers with a card naming it,",
             "the building turn reads first and answers, opening the browser itself if a page needs it.",
         ] {
             assert!(input.prompt.contains(line), "{line}: {}", input.prompt);
@@ -1236,9 +1236,9 @@ mod tests {
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "c902914e76efd97d0029bb0a95ce36e1f03bff0c921b54b53bd11e2b672c3768";
+            "9e1d58dd91a149320411e661e024b9654d724a37802c661d5fe89b86df6af9be";
         const CASE_PROMPTS_SHA256: &str =
-            "c3caf66aeab8ba4a60d9fe615ff6c006dfcccb2e7de136e047fbab8c26362836";
+            "abd9ebbac00576e3255eca694c8a9f1661b317f38dead3ea0eb3bf7e3986d8be";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1342,5 +1342,189 @@ mod tests {
             read_answer(&answer_json("direct", "maybe"), &comparison, &input).route,
             "invalid"
         );
+    }
+
+    /// Every rule of the browser skill's routing section has a case on a subject of its own, so
+    /// a rule that holds only for the recorded tests' subjects shows: the recorded tests sent
+    /// every earlier case about the same few places, products and sites. The cases from
+    /// `news-today` on are these, each with the route its rule gives, and each case's routing
+    /// input reads that rule. Eight of them are lookups that a search for fresh information
+    /// changes: news, a recent result and opening hours answered in a reply, news put on a page,
+    /// a trip on a map, a comparison page (`browser_then_build` until research pages search
+    /// before the browser), an order in the person's own account and a site opened in the
+    /// browser.
+    #[test]
+    fn every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own() {
+        let cases = shipped();
+        let workspace = tempdir().unwrap();
+        prepare_workspace(workspace.path()).unwrap();
+        let section = SHIPPED_BROWSER_SKILL
+            .split_once("\n## Routing preflight\n")
+            .map(|(_, section)| section)
+            .expect("the routing section");
+        let rules: &[(&str, &str, &[&str])] = &[
+            (
+                "the person names Instafy's browser (\"in your browser\")",
+                "browser",
+                &["open-a-site-in-the-browser"],
+            ),
+            (
+                "the work happens on a website (use a site, sign in, check their account, send a form, press its buttons)",
+                "browser",
+                &["metro-planner", "send-a-form-on-a-site", "order-in-account"],
+            ),
+            (
+                "or it carries on browser work this chat started, whether or not that found the answer.",
+                "browser",
+                &["browser-follow-up-tram"],
+            ),
+            (
+                "- `browser_then_build`: the same, and Octo then makes or changes something in this space",
+                "browser_then_build",
+                &["browser-named-then-page"],
+            ),
+            (
+                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message;",
+                "browser_then_build",
+                &["comparison-page-watches"],
+            ),
+            (
+                "news stays `direct`: the browser can't search.",
+                "direct",
+                &["news-then-page"],
+            ),
+            (
+                "So is a page or change asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.",
+                "browser_then_build",
+                &[
+                    "page-with-a-value-the-browser-did-not-confirm",
+                    "page-with-a-value-a-reply-did-not-confirm",
+                ],
+            ),
+            (
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on.",
+                "browser_then_build",
+                &["keep-going-tram-route-open", "keep-going-page-not-made-yet"],
+            ),
+            (
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed",
+                "direct",
+                &["keep-going-nothing-open"],
+            ),
+            (
+                "So is a change that needs what a web page says.",
+                "browser_then_build",
+                &["change-needs-each-makers-page"],
+            ),
+            (
+                "- Stay `direct` (`required`) for a map,",
+                "direct",
+                &["trip-on-a-map"],
+            ),
+            (
+                "for a change in the person's own words to a page or map here (a note, a name, a color)",
+                "direct",
+                &["note-in-own-words-on-a-map"],
+            ),
+            (
+                "and for a page or change made only from what this chat found and confirmed.",
+                "direct",
+                &["page-from-confirmed-hours"],
+            ),
+            (
+                "when the site runs in this space (a preview card)",
+                "direct",
+                &["site-runs-in-this-space"],
+            ),
+            (
+                "or the person says not to use the browser.",
+                "direct",
+                &["says-not-to-use-the-browser"],
+            ),
+            (
+                "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says): the building turn reads it and answers with a card naming it,",
+                "direct",
+                &["needs-a-file-here"],
+            ),
+            (
+                "unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`.",
+                "browser_then_build",
+                &["fill-in-after-browser-work-watches"],
+            ),
+            (
+                "- Research whose answer is a reply (facts, a price, opening hours, reviews) stays `direct` when the message does not name the browser",
+                "direct",
+                &[
+                    "news-today",
+                    "score-last-night",
+                    "hours-sunday",
+                    "translate-words-about-the-browser",
+                ],
+            ),
+        ];
+        let mut covered = HashSet::new();
+        for (rule, route, ids) in rules {
+            assert!(section.contains(rule), "the section says: {rule}");
+            for id in *ids {
+                let case = case(&cases, id);
+                assert_eq!(&case.expect.route, route, "{id}");
+                let input = routing_input(&case, workspace.path()).unwrap();
+                assert!(input.browser_routes_offered, "{id}");
+                assert!(input.prompt.contains(rule), "{id} reads: {rule}");
+                covered.insert(case.id);
+            }
+        }
+        // The cases from `news-today` on are exactly these, and none is about a subject an
+        // earlier case is about.
+        let first = cases
+            .iter()
+            .position(|case| case.id == "news-today")
+            .expect("news-today");
+        let written: HashSet<String> = cases[first..].iter().map(|case| case.id.clone()).collect();
+        assert_eq!(written, covered);
+        for case in &cases[first..] {
+            let words = std::iter::once(case.message.as_str())
+                .chain(
+                    case.history
+                        .iter()
+                        .filter_map(|entry| entry["content"].as_str()),
+                )
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_lowercase();
+            for subject in [
+                "porto",
+                "lello",
+                "bento",
+                "seville",
+                "alcázar",
+                "lisbon",
+                "framework",
+                "kraków",
+                "wawel",
+                "kobo",
+                "amsterdam",
+                "github",
+                "httpbin",
+                "heat pump",
+            ] {
+                assert!(!words.contains(subject), "{}: {subject}", case.id);
+            }
+        }
+        // A page asked for with a value a reply here said wasn't confirmed reads that reply, in
+        // a chat with a browser turn and in one without.
+        for (id, reply) in [
+            (
+                "page-with-a-value-the-browser-did-not-confirm",
+                "I couldn't confirm whether the dinosaur gallery needs a ticket",
+            ),
+            (
+                "page-with-a-value-a-reply-did-not-confirm",
+                "I couldn't confirm today's price",
+            ),
+        ] {
+            let input = routing_input(&case(&cases, id), workspace.path()).unwrap();
+            assert!(input.prompt.contains(reply), "{id}: {}", input.prompt);
+        }
     }
 }
