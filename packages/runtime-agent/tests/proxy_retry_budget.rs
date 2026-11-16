@@ -1952,12 +1952,15 @@ async fn isolated_retry_child() -> Result<()> {
     ) {
         let output = result?;
         assert_eq!(output.final_json["summary"], FINAL_TEXT);
-        // The room's search steps, for the parent to hold against the searches the proxy saw.
+        // The room's search steps (a search that ended with words), for the parent to hold
+        // against the searches the proxy saw.
         let steps = output
             .events
             .iter()
             .filter(|event| {
-                event["type"] == "item.completed" && event["item"]["type"] == "web_search"
+                event["type"] == "item.completed"
+                    && event["item"]["type"] == "web_search"
+                    && event["item"].get("query").is_some()
             })
             .map(|event| event["item"].clone())
             .collect::<Vec<_>>();
