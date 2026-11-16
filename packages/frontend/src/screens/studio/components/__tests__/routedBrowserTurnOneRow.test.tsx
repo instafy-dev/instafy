@@ -17,6 +17,7 @@ import {
 import { BROWSER_BUILD_REQUEST_NOTE_KEY, BROWSER_HAND_BACK_RECORD_KEY } from "../browserHandBack";
 import { resolveTypingAgentLanes, type AssistantTypingAgent } from "../chatAssistantIdentity";
 import { ChatTypingRows } from "../ChatTypingRows";
+import { chatRunStopBetweenParts, resolveChatRunStopTargets } from "../chatRunStopTargets";
 import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJobThreadMessages } from "../chatMessagePresentation";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { resolveRoutedBrowserFold } from "../routedBrowserFold";
@@ -845,5 +846,60 @@ describe("what a routed card covers", () => {
       },
     };
     expect(resolveJobThreadTypingCoverage(ordinary, [routingRun("in_progress")], [ask, ordinary])).toBe("none");
+  });
+});
+
+// Stop at the same moments, as ChatPanel gives it its turns and its gaps
+// (useChatRunStop shows it for a turn it can stop, or between two parts of
+// the message): something to press from the routing step's card until the
+// message has its answer, and nothing once it has, or once nothing more comes.
+describe("Stop through a message sent straight to Instafy's browser", () => {
+  function stopShows(step: Step): { time: string; stop: boolean } {
+    const view = chatPanel(step);
+    const messages = (step.chat ?? CHAT).filter((message) => message.timestamp <= view.now);
+    const between = chatRunStopBetweenParts({
+      browserCardOpening: step.card?.kind === "opening",
+      handBackDue: false,
+      newestRow: view.displayed.at(-1),
+      routedWaitingKeys: view.host.routedWaitingKeys ?? new Set(),
+    });
+    return { time: step.time, stop: resolveChatRunStopTargets(step.runs, messages).length > 0 || between };
+  }
+
+  it("has something to press from the card to the reply, and nothing after it", () => {
+    const opening = { kind: "opening", note: null } as const;
+    expect([
+      { time: "13:07:59.673", runs: [routingRun("in_progress")], card: opening },
+      { time: "13:07:59.693", runs: [], card: opening },
+      { time: "13:08:00.084", runs: [], card: opening },
+      { time: "13:08:00.463", runs: [browserRun("queued")], card: opening },
+      { time: "13:08:00.572", runs: [browserRun("in_progress")], card: { kind: "opened" } },
+      // The card stands in, and its turn's record is gone a moment early.
+      { time: "13:08:00.572", runs: [], card: { kind: "opened" } },
+      { time: "13:08:04.037", runs: [browserRun("in_progress")], card: { kind: "opened" } },
+      { time: "13:08:42.988", runs: [browserRun("in_progress")], card: { kind: "opened" } },
+      // The reply is in and its run ended: the message has its answer.
+      { time: "13:08:43.066", runs: [], card: { kind: "opened" } },
+      // A reload long after.
+      { time: "13:30:00.000", runs: [] },
+    ].map((step) => stopShows(step as Step).stop)).toEqual([true, true, true, true, true, true, true, true, false, false]);
+  });
+
+  it("has something to press through the hand-over to the building turn, and nothing once none comes", () => {
+    const page = (time: string, runs: RunRecord[], chat = PAGE_CHAT) =>
+      stopShows({ chat, cardKey: PAGE_CARD_KEY, time, runs, card: { kind: "opened" } }).stop;
+    expect([
+      page("01:11:40.000", [pageBrowserRun("in_progress")]),
+      page("01:11:46.790", [pageBrowserRun("in_progress")]),
+      // The hand-back is in the chat and its run has no job yet: the card stands for the building turn.
+      page("01:11:46.888", []),
+      page("01:11:47.080", [pageBuildingRun("in_progress")]),
+      page("01:11:51.618", [pageBuildingRun("in_progress")]),
+      // Done, and long after.
+      page("01:12:30.000", []),
+    ]).toEqual([true, true, true, true, true, false]);
+    // No hand-back came, and nothing of the chat runs any more.
+    const noHandBack = PAGE_CHAT.slice(0, 5);
+    expect([page("01:11:47.100", [], noHandBack), page("01:20:00.000", [], noHandBack)]).toEqual([false, false]);
   });
 });
