@@ -84,7 +84,9 @@
 //! the building thread's last turn ([`browser_turns_since`]), each with what
 //! it was asked, its reply with its finding lines put back (at most
 //! [`TURN_REPLY_MAX_CHARS`]), those findings labelled as above, with their
-//! facts, and the values its missing line names (`missing`).
+//! facts, read from the whole reply and within the same bound
+//! (`findingsLeftOut` counts the rest), and the values its missing line names
+//! (`missing`).
 //! The runtime quotes them to a building turn on a restored thread, by their
 //! findings and what they didn't find, never their replies; the hand-back's
 //! own browser turn is in its record, not the list.
@@ -582,13 +584,15 @@ fn finding_chars(finding: &Finding) -> usize {
             .sum::<usize>()
 }
 
-/// The findings that can fit the runtime's section, and how many cannot: the
-/// pages read, in order, while their own characters stay within it, and the
-/// same of the pages that stopped the turn, the first of each always. Each
-/// quotes at least its own characters, so [`fit_the_section`] would leave the
-/// rest out too; leaving them out first keeps fitting cheap however many
-/// lines a reply has.
-fn findings_that_can_fit(findings: Vec<Finding>) -> (Vec<Finding>, usize) {
+/// The findings that can fit `max_chars`, and how many cannot: the pages
+/// read, in order, while their own characters stay within it, and the same of
+/// the pages that stopped the turn, the first of each always. A hand-back's
+/// record fits the runtime's section ([`HAND_BACK_SECTION_MAX_CHARS`]): each
+/// finding quotes at least its own characters, so [`fit_the_section`] would
+/// leave the rest out too, and leaving them out first keeps fitting cheap
+/// however many lines a reply has. A browser turn a building job's lease
+/// lists fits its reply's bound ([`listed_reply`]).
+fn findings_that_can_fit(findings: Vec<Finding>, max_chars: usize) -> (Vec<Finding>, usize) {
     // The characters left for the pages read and for those that stopped the
     // turn: none counted before the first of each.
     let mut room: [Option<usize>; 2] = [None, None];
@@ -598,7 +602,7 @@ fn findings_that_can_fit(findings: Vec<Finding>) -> (Vec<Finding>, usize) {
         .filter(|finding| {
             let room = &mut room[usize::from(finding.stopped.is_some())];
             let chars = finding_chars(finding);
-            let left = room.unwrap_or(HAND_BACK_SECTION_MAX_CHARS);
+            let left = room.unwrap_or(max_chars);
             let fits = room.is_none() || chars <= left;
             *room = Some(if fits { left.saturating_sub(chars) } else { 0 });
             fits
@@ -789,15 +793,44 @@ fn labelled(finding: &Finding, viewer: &str, read_at: &str) -> JsonValue {
     labelled
 }
 
-/// A listed browser turn's findings, labelled as a hand-back's record labels them, each with what
-/// its page showed: the runtime quotes a listed turn by its findings alone, never its reply
-/// (runtime-agent `browser_hand_back::format_browser_turns_since_section`), so a finding without
-/// its facts would leave the building turn only the page's address and title.
-fn labelled_findings(reply: &str, viewer: &str, read_at: &str) -> Vec<JsonValue> {
-    findings_from_reply(reply)
-        .iter()
-        .map(|finding| labelled(finding, viewer, read_at))
-        .collect()
+/// What a building job's lease lists of a browser turn's reply ([`browser_turns_since`]).
+struct ListedReply {
+    /// The reply, bounded ([`bounded_reply`]).
+    reply: String,
+    /// Whether the bound cut it.
+    truncated: bool,
+    /// Its findings, labelled as a hand-back's record labels them, each with what its page
+    /// showed ([`labelled`]).
+    findings: Vec<JsonValue>,
+    /// How many findings its lines give that are not listed (`findingsLeftOut`).
+    findings_left_out: usize,
+    /// The values its missing line names ([`missing_from_reply`]).
+    missing: Vec<String>,
+}
+
+/// A listed browser turn's reply: the runtime quotes a listed turn by its findings alone, never
+/// its reply (runtime-agent `browser_hand_back::format_browser_turns_since_section`), so a finding
+/// without its facts would leave the building turn only the page's address and title. Its
+/// findings and its missing line are read from the whole reply, as a hand-back's record reads
+/// them ([`hand_back_record`]), and the findings keep to the reply's bound themselves
+/// ([`findings_that_can_fit`]): read from the reply as cut, a question's turn answered in finding
+/// lines alone, whose posted words repeat their facts ahead of the lines its note keeps, lost its
+/// last pages' findings and kept its missing line.
+fn listed_reply(reply: &str, viewer: &str, read_at: &str) -> ListedReply {
+    let missing = missing_from_reply(reply);
+    let (findings, findings_left_out) =
+        findings_that_can_fit(findings_from_reply(reply), TURN_REPLY_MAX_CHARS);
+    let (reply, truncated) = bounded_reply(reply);
+    ListedReply {
+        reply,
+        truncated,
+        findings: findings
+            .iter()
+            .map(|finding| labelled(finding, viewer, read_at))
+            .collect(),
+        findings_left_out,
+        missing,
+    }
 }
 
 /// The runtime's key of a page, as a browser step's activity carries it
@@ -920,7 +953,8 @@ pub(crate) fn hand_back_record(
     let findings = findings_from_reply(&reply);
     let (words, reply_truncated) =
         reply_that_can_fit(&words_for_the_building_turn(&reply, &findings));
-    let (findings, findings_left_out) = findings_that_can_fit(findings);
+    let (findings, findings_left_out) =
+        findings_that_can_fit(findings, HAND_BACK_SECTION_MAX_CHARS);
     let findings: Vec<JsonValue> = findings
         .iter()
         .map(|finding| labelled(finding, viewer, &read_at))
@@ -1950,8 +1984,9 @@ pub(crate) fn stamp_lease(
 /// turn, for a building job's lease: what each was asked, its reply with the
 /// findings its runtime moved into Details put back ([`bounded_reply`]),
 /// those findings labelled as the hand-back's record labels them, with what
-/// each page showed ([`labelled_findings`]), and the values its missing line
-/// names (`missing`, [`missing_from_reply`]), oldest first.
+/// each page showed, within the reply's bound and with how many were left out
+/// (`findingsLeftOut`), and the values its missing line names (`missing`),
+/// both read from the whole reply ([`listed_reply`]), oldest first.
 ///
 /// The building thread's last turn is the newest other job of the
 /// conversation that is not a browser turn and saved a provider state, in the
@@ -2175,15 +2210,17 @@ pub(crate) async fn browser_turns_since(
             row.get::<_, Option<String>>("summary"),
         )
         .await?;
-        // What its missing line names, from the whole reply: the note keeps that line after its
-        // finding lines, where the reply's bound would cut it from a long one.
-        let missing = missing_from_reply(&reply);
-        let (reply, truncated) = bounded_reply(&reply);
+        let ListedReply {
+            reply,
+            truncated,
+            mut findings,
+            findings_left_out,
+            missing,
+        } = listed_reply(&reply, viewer, &read_at);
         let request = browser_payload
             .get("prompt_text")
             .and_then(JsonValue::as_str)
             .unwrap_or_default();
-        let mut findings = labelled_findings(&reply, viewer, &read_at);
         let read_times = page_read_times(
             transaction,
             conversation_id,
@@ -2203,6 +2240,9 @@ pub(crate) async fn browser_turns_since(
             "viewer": viewer,
             "outcome": row.get::<_, Option<String>>("outcome"),
         });
+        if findings_left_out > 0 {
+            turn["findingsLeftOut"] = json!(findings_left_out);
+        }
         if !missing.is_empty() {
             turn["missing"] = json!(missing);
         }
@@ -3223,7 +3263,7 @@ missing: weight
         ]
         .join("\n");
         let read_at = "2026-11-10T09:00:00Z";
-        let listed = labelled_findings(&reply, VIEWER_WORKSPACE, read_at);
+        let listed = listed_reply(&reply, VIEWER_WORKSPACE, read_at).findings;
         assert_eq!(listed.len(), 3, "{listed:?}");
         assert_eq!(
             listed[0],
@@ -3254,6 +3294,119 @@ missing: weight
         );
         assert_eq!(record["findings"], json!(listed));
         assert_eq!(record["missing"], json!(["a metro route"]));
+    }
+
+    /// A listed browser turn keeps every finding its lines give and its
+    /// missing line, however long the words posted before them: a question's
+    /// turn answered in finding lines alone posts their facts in words, ahead
+    /// of the lines its note keeps. Read from the reply cut to
+    /// [`TURN_REPLY_MAX_CHARS`], three pages of facts and two missing names
+    /// lost the third page while they kept the names, though a hand-back's
+    /// record of the same reply lists all three. The findings keep to that
+    /// bound themselves, whole and in order, the first page read and the
+    /// first that stopped the turn always, and say how many were left out
+    /// (`findingsLeftOut`), as a hand-back's record does.
+    #[test]
+    fn a_listed_browser_turn_keeps_its_findings_however_long_the_words_before_them() {
+        let read_at = "2026-11-10T09:00:00Z";
+        let fact = |n: usize| format!("Fact {n}: {}", "x".repeat(1_000));
+        let page = |n: usize| {
+            json!({
+                "url": format!("https://review-{n}.example/laptop-12"),
+                "title": format!("Review {n}"),
+                "facts": [fact(n)],
+            })
+            .to_string()
+        };
+        let lines = [
+            page(1),
+            page(2),
+            page(3),
+            json!({"missing": ["warranty", "a second review"]}).to_string(),
+        ]
+        .join("\n");
+        let words = (1..=3)
+            .map(|n| format!("On review-{n}.example: {}.", fact(n)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let reply = reply_with_finding_lines(&words, Some(&lines));
+        assert!(reply.chars().count() > TURN_REPLY_MAX_CHARS);
+        let listed = listed_reply(&reply, VIEWER_WORKSPACE, read_at);
+        let urls = |findings: &[JsonValue]| -> Vec<String> {
+            findings
+                .iter()
+                .map(|finding| finding["url"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert_eq!(
+            urls(&listed.findings),
+            (1..=3)
+                .map(|n| format!("https://review-{n}.example/laptop-12"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(listed.findings[2]["facts"], json!([fact(3)]));
+        assert_eq!(listed.findings_left_out, 0);
+        assert_eq!(listed.missing, ["warranty", "a second review"]);
+        // The reply itself is still bounded.
+        assert!(listed.truncated);
+        assert_eq!(listed.reply.chars().count(), TURN_REPLY_MAX_CHARS);
+        let record = hand_back_record(
+            &Uuid::nil(),
+            &Uuid::nil(),
+            VIEWER_WORKSPACE,
+            DateTime::parse_from_rfc3339(read_at)
+                .unwrap()
+                .with_timezone(&Utc),
+            "",
+            None,
+            &reply,
+        );
+        assert_eq!(record["findings"], json!(listed.findings));
+
+        // Lines over the bound: whole findings in order, within it, the rest
+        // counted, and the first page that stopped the turn still listed.
+        let many = (1..=12)
+            .map(page)
+            .chain([
+                json!({"url": "https://review-13.example/laptop-12", "stopped": "covered"})
+                    .to_string(),
+            ])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let listed = listed_reply(&many, VIEWER_WORKSPACE, read_at);
+        let read: Vec<&JsonValue> = listed
+            .findings
+            .iter()
+            .filter(|finding| finding.get("stopped").is_none())
+            .collect();
+        assert!(!read.is_empty() && read.len() < 12, "{}", read.len());
+        assert_eq!(read[0]["url"], "https://review-1.example/laptop-12");
+        assert_eq!(listed.findings_left_out, 12 - read.len());
+        let own: usize = read
+            .iter()
+            .map(|finding| {
+                ["url", "title"]
+                    .iter()
+                    .map(|key| {
+                        finding[*key]
+                            .as_str()
+                            .map_or(0, |text| text.chars().count())
+                    })
+                    .sum::<usize>()
+                    + finding["facts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(JsonValue::as_str)
+                        .map(|fact| fact.chars().count())
+                        .sum::<usize>()
+            })
+            .sum();
+        assert!(own <= TURN_REPLY_MAX_CHARS, "{own}");
+        assert_eq!(
+            listed.findings.last().map(|finding| &finding["stopped"]),
+            Some(&json!("covered"))
+        );
     }
 
     /// A comparison's browser part opened a review address that got no

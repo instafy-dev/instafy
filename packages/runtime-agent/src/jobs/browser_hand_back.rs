@@ -1555,10 +1555,9 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
         .iter()
         .any(|finding| finding.get("factsLeftOut").is_some());
     let left_out_line = if left_out > 0 || facts_left_out {
-        "\n- To keep this short, some of what the pages showed is left out (`findingsLeftOut` more findings, \
-         a finding's `factsLeftOut` more facts): never guess what it was."
+        format!("\n- {LEFT_OUT_LINE}")
     } else {
-        ""
+        String::new()
     };
     let not_found_line = if not_found.is_empty() {
         String::new()
@@ -1598,6 +1597,14 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
     ))
 }
 
+/// What a building turn reads when the findings it reads leave some of what the pages showed
+/// out: whole findings (`findingsLeftOut`), or a page's facts over the controller's bound
+/// (`factsLeftOut`, runtime-controller `browser_hand_back::findings_from_reply`). Its hand-back
+/// ([`format_browser_hand_back_section`]) and the browser turns since its last turn
+/// ([`format_browser_turns_since_section`]) say it so.
+const LEFT_OUT_LINE: &str = "To keep this short, some of what the pages showed is left out (`findingsLeftOut` more findings, \
+a finding's `factsLeftOut` more facts): never guess what it was.";
+
 /// How a building turn reads what a browser turn looked for and didn't find (`notFound`), wherever
 /// it reads that turn's findings (its hand-back, the browser turns since its last turn, and a
 /// replay of the chat, `conversation_context::browser_runs_note`): words the runtime wrote for
@@ -1605,11 +1612,15 @@ pub(super) fn format_browser_hand_back_section(metadata: Option<&JsonValue>) -> 
 /// didn't find…" and where it looked of a fact that said a value was not found on a page, never
 /// that the page doesn't show it, a build still replied that a maker's specs pages "don't give
 /// runtime estimates" (a local test, Nov 9): a sentence the build writes leaves room for a claim
-/// about a page. Only a value no finding gives is one Octo didn't find: a second pass that opens a
-/// page's own tab writes what it found there after the first pass named the value missing, and
-/// another page may give what one didn't.
+/// about a page. Only a value nothing else gives is one Octo didn't find: a second pass that opens
+/// a page's own tab writes what it found there after the first pass named the value missing,
+/// another page may give what one didn't, and the person may give it, or the building turn read
+/// it, as `AGENTS.md` lets a reply state either. Told to use the words "unless a finding gives
+/// it", a building turn whose replay quotes a browser turn the person answered after it ("It's
+/// open 9:30 to 19:00, I called them.") was told to print "I didn't find opening hours" where the
+/// hours go.
 pub(super) const NOT_FOUND_LINE: &str = "`notFound` says what Octo looked for and didn't find, in the words to say it: \
-wherever such a value would go, use them as they are, unless a finding gives it.";
+wherever such a value would go, use them as they are, unless the person gave it, or a finding or a page you read this turn gives it.";
 
 /// What each value the browser turn looked for and didn't find reads as ([`NOT_FOUND_LINE`]):
 /// "I didn't find <name>" ([`didnt_find`]), from the names of a record's or a listed turn's
@@ -1636,17 +1647,18 @@ say on the page that it's Octo's pick and that the walk from it to the place isn
 
 /// The browser turns of this chat since the building thread's last turn, as
 /// the controller lists them at lease (`browser_turns_since`): what each was
-/// asked, the findings taken from its reply, what it looked for and didn't
-/// find, in the runtime's words (`notFound`, [`NOT_FOUND_LINE`]), and when and
-/// in which browser it read them. Never the reply itself: a building turn reads
-/// a browser turn only by its finding lines ([`FINDING_LINES`]) and its
-/// missing line ([`MISSING_LINE`]), and a reply's own words put "nearest" and
-/// "a short walk uphill" on a page no page said them on (a local test, Nov 6).
-/// Only the newest are listed, and `earlierLeftOut` says when older ones were
-/// left out, by the controller or to fit this section. Only a building turn on
-/// a restored thread reads them here: a new or lost thread's replay of the chat
-/// already quotes them (`conversation_context`). None when there is none, or
-/// for any other turn.
+/// asked, the findings taken from its reply (and how many its lines give that
+/// the controller left out, `findingsLeftOut`, [`LEFT_OUT_LINE`]), what it
+/// looked for and didn't find, in the runtime's words (`notFound`,
+/// [`NOT_FOUND_LINE`]), and when and in which browser it read them. Never the
+/// reply itself: a building turn reads a browser turn only by its finding
+/// lines ([`FINDING_LINES`]) and its missing line ([`MISSING_LINE`]), and a
+/// reply's own words put "nearest" and "a short walk uphill" on a page no page
+/// said them on (a local test, Nov 6). Only the newest are listed, and
+/// `earlierLeftOut` says when older ones were left out, by the controller or
+/// to fit this section. Only a building turn on a restored thread reads them
+/// here: a new or lost thread's replay of the chat already quotes them
+/// (`conversation_context`). None when there is none, or for any other turn.
 pub(super) fn format_browser_turns_since_section(
     payload: &JsonValue,
     building_thread_restored: bool,
@@ -1654,9 +1666,15 @@ pub(super) fn format_browser_turns_since_section(
     let since = browser_turns_since(payload, building_thread_restored)?;
     let data = since.data;
     let stopped_finding = stopped_finding();
-    // Read only beside a turn that names what it didn't find, as the hand-back reads it.
+    // Read only beside a turn that names what it didn't find, or one whose findings leave some
+    // of what its pages showed out, as the hand-back reads each.
     let not_found_line = if since.not_found {
         format!("\n- {NOT_FOUND_LINE}")
+    } else {
+        String::new()
+    };
+    let left_out_line = if since.left_out {
+        format!("\n- {LEFT_OUT_LINE}")
     } else {
         String::new()
     };
@@ -1670,7 +1688,7 @@ pub(super) fn format_browser_turns_since_section(
          ```json\n{data}\n```\n\
          - These are what the pages showed at `readAt` in `viewer`. Where you use one, cite its page as \"checked <date> \
          on <host>\" and link it, only for a fact listed under it. {stopped_finding}. A turn with no findings listed \
-         none: do not guess what it found.{not_found_line}\n\
+         none: do not guess what it found.{left_out_line}{not_found_line}\n\
          - {ROUTE_LINE}\n\
          - A turn with `routedNotOpened` was sent to the browser but never ran there, and an `outcome` other than \
          `succeeded` did not finish: do not guess what it would have found.\n\
@@ -1691,6 +1709,9 @@ struct BrowserTurnsSince {
     jobs: Vec<String>,
     /// Whether any names what it looked for and didn't find (`notFound`).
     not_found: bool,
+    /// Whether any leaves some of what its pages showed out (`findingsLeftOut`, or a finding's
+    /// `factsLeftOut`).
+    left_out: bool,
 }
 
 /// The browser turns the section since a building turn's last turn quotes
@@ -1718,6 +1739,7 @@ fn browser_turns_since(
                 "request",
                 "routedNotOpened",
                 "findings",
+                "findingsLeftOut",
                 "readAt",
                 "viewer",
                 "outcome",
@@ -1768,10 +1790,22 @@ fn browser_turns_since(
         earlier_left_out = true;
     };
     let not_found = turns.iter().any(|(_, turn)| turn.get("notFound").is_some());
+    let left_out = turns.iter().any(|(_, turn)| {
+        turn.get("findingsLeftOut").is_some()
+            || turn
+                .get("findings")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|findings| {
+                    findings
+                        .iter()
+                        .any(|finding| finding.get("factsLeftOut").is_some())
+                })
+    });
     Some(BrowserTurnsSince {
         data,
         jobs: turns.into_iter().filter_map(|(job, _)| job).collect(),
         not_found,
+        left_out,
     })
 }
 
@@ -2298,12 +2332,13 @@ mod tests {
         assert!(!section.contains("request_browser"));
         // What the browser turn didn't find comes in the runtime's words, to use as they are:
         // told to say "I didn't find…" of a "not found" fact, a build replied that a maker's
-        // specs pages "don't give runtime estimates" (a local test, Nov 9).
+        // specs pages "don't give runtime estimates" (a local test, Nov 9). Only where nothing
+        // else gives the value: the person, a finding or a page the building turn reads.
         assert!(
             section.contains(
                 "\n- `notFound` says what Octo looked for and didn't find, in the words to say \
-                 it: wherever such a value would go, use them as they are, unless a finding \
-                 gives it.\n"
+                 it: wherever such a value would go, use them as they are, unless the person \
+                 gave it, or a finding or a page you read this turn gives it.\n"
             ),
             "{section}"
         );
@@ -2367,8 +2402,13 @@ mod tests {
         let data = fenced_data(&section);
         assert_eq!(data["findings"][0]["facts"], facts);
         assert_eq!(data["notFound"], json!(["I didn't find warranty"]));
+        // Nor is a value the person gave, or one a page the building turn reads gives, as
+        // `AGENTS.md` lets a reply state either: a hand-back's request may give one itself, and
+        // the browser turns since and a replay quote turns the person answered after.
         assert!(
-            section.contains("use them as they are, unless a finding gives it.\n"),
+            section.contains(
+                "use them as they are, unless the person gave it, or a finding or a page you read this turn gives it.\n"
+            ),
             "{section}"
         );
     }
@@ -4848,6 +4888,68 @@ mod tests {
             assert!(!section.contains(&line), "{missing}: {section}");
             assert!(!section.contains("I didn't find"), "{missing}: {section}");
         }
+    }
+
+    /// A browser turn since the building thread's last turn is listed with what its pages showed
+    /// (runtime-controller `browser_hand_back::listed_reply`), within the controller's bound: a
+    /// finding over it keeps its first facts and counts the rest (`factsLeftOut`), and a turn whose
+    /// lines give more findings than fit counts those (`findingsLeftOut`). The section quotes both
+    /// counts and says, as a hand-back does, never to guess what was left out; with neither, it
+    /// says nothing of them.
+    #[test]
+    fn a_browser_turn_since_says_when_some_of_what_its_pages_showed_is_left_out() {
+        // The section's own line (`LEFT_OUT_LINE` above), after the line on a turn with none.
+        let line = LEFT_OUT_LINE;
+        let planner = json!([{
+            "url": "https://metro.example/planner",
+            "title": "Journey planner",
+            "facts": ["Cathedral and Square are both on line D."],
+        }]);
+        let whole = turn_since_with("Find the metro route.", "", planner.clone());
+        let section = format_browser_turns_since_section(
+            &json!({ "browser_turns_since": [whole.clone()] }),
+            true,
+        )
+        .expect("section");
+        assert!(!section.contains(line), "{section}");
+        for key in ["findingsLeftOut", "factsLeftOut"] {
+            assert!(!section.contains(key), "{key}: {section}");
+        }
+
+        let mut fewer = turn_since_with("Compare the laptops.", "", planner.clone());
+        fewer["findingsLeftOut"] = json!(4);
+        let mut cut = planner.clone();
+        cut[0]["factsLeftOut"] = json!(2);
+        let cut = turn_since_with("Find the opening hours.", "", cut);
+        for (turn, key) in [(fewer, "findingsLeftOut"), (cut, "factsLeftOut")] {
+            let section = format_browser_turns_since_section(
+                &json!({ "browser_turns_since": [whole.clone(), turn.clone()] }),
+                true,
+            )
+            .expect("section");
+            assert_eq!(section.matches(line).count(), 1, "{key}: {section}");
+            assert!(
+                section.contains(&format!(
+                    "A turn with no findings listed none: do not guess what it found.{line}"
+                )),
+                "{key}: {section}"
+            );
+            let data = fenced_data(&section);
+            let turns = data["turns"].as_array().expect("turns");
+            assert!(turns[0].get("findingsLeftOut").is_none(), "{section}");
+            if key == "findingsLeftOut" {
+                assert_eq!(turns[1]["findingsLeftOut"], 4, "{section}");
+            } else {
+                assert_eq!(turns[1]["findings"][0]["factsLeftOut"], 2, "{section}");
+            }
+        }
+        // A hand-back reads the same line.
+        let mut record = fixtures()["stampedRecord"].clone();
+        record["findingsLeftOut"] = json!(1);
+        let hand_back =
+            format_browser_hand_back_section(Some(&json!({ "browserHandBack": record })))
+                .expect("section");
+        assert_eq!(hand_back.matches(line).count(), 1, "{hand_back}");
     }
 
     /// The controller lists only the newest browser turns since the building thread's last

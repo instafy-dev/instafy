@@ -2659,6 +2659,52 @@ mod tests {
         assert!(!browser_runs_note(false).contains("notFound"));
     }
 
+    /// What a browser turn didn't find stays its own: the person may give that value later, and a
+    /// page the building turn reads, or a later browser turn's finding, may give it. The replay
+    /// quotes every browser turn of the chat, so its words for a value it didn't find are used only
+    /// where nothing else gives that value: told to use them "unless a finding gives it", a build
+    /// would print "I didn't find opening hours" beside the hours the person gave it after the
+    /// browser turn, as `AGENTS.md` lets a reply state a value the person gave.
+    #[test]
+    fn a_replay_uses_what_a_browser_turn_didnt_find_only_where_nothing_else_gives_it() {
+        let note = "{\"url\": \"https://bookshop.example/\", \"title\": \"Bookshop\", \"facts\": [\"The shop is at Rua das Carmelitas 144.\"]}\n{\"missing\":[\"opening hours\"]}";
+        let given = "It's open 9:30 to 19:00, I called them.";
+        let history = json!([
+            {"role": "user", "content": "When is the bookshop open?", "runId": "run-1"},
+            {"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-1"},
+            {"role": "user", "content": "When is the bookshop open?", "runId": "run-2", "lane": "browser"},
+            {"role": "assistant", "content": "I didn't find the opening hours.", "runId": "run-2", "lane": "browser"},
+            {
+                "role": "assistant",
+                "content": note,
+                "runId": "run-2",
+                "lane": "browser",
+                "metadata": {"details": {"browserFindings": {"pages": 1, "pagesRead": 1}}}
+            },
+            {"role": "user", "content": given, "runId": "run-3"},
+            {"role": "assistant", "content": "Thanks, noted.", "runId": "run-3"},
+            {"role": "user", "content": "Put the hours and the address on a small page I can share.", "runId": "run-4"}
+        ]);
+        let context = build_prompt_conversation_context(Some(&history), None, ThreadLane::Building);
+        let text = &context.section_text;
+        // The browser turn's words for the hours, and the person's own after them.
+        assert!(text.contains("\"I didn't find opening hours\""), "{text}");
+        let at = |words: &str| {
+            text.find(words)
+                .unwrap_or_else(|| panic!("{words}: {text}"))
+        };
+        assert!(at("\"I didn't find opening hours\"") < at(given), "{text}");
+        // Those words go only where neither the person, nor a finding, nor a page the building
+        // turn reads gives the value, as `AGENTS.md` lets a reply state what the person gave.
+        assert!(
+            text.contains(
+                "use them as they are, unless the person gave it, or a finding or a page you read this turn gives it."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("unless a finding gives it."), "{text}");
+    }
+
     /// A building thread that is new or lost reads every turn, and each browser turn only as
     /// one fenced block of page data: its request and its reply, with the note its findings
     /// moved into in place of the line it posted. Page text inside it cannot close the fence.
