@@ -31,7 +31,7 @@
  *                          something its link doesn't.
  *   unchecked: ["what was not checked", …]     listed once in the footer, after each row's missing values, on an
  *                          empty page too: only what no cell says, since the footer names those from the cells itself
- *                          (`instafy bind check` fails an entry that names a column no row has a value for)
+ *                          (`instafy bind check` notes an entry that names a column no row has a value for)
  *   from: "memory"         only when the person asked for the page from what Octo knows, with nothing looked up: each
  *                          fact is just {"v"} (or a {"note"}), with no "src", "url" or "date", and no store or filter
  *                          (`instafy bind check` fails them), and reads "<value>, not checked", as a ranked row's value
@@ -523,7 +523,8 @@
   function gapNote(f, col) {
     var note = String((f && f.note) || "").replace(/\s+/g, " ").trim().replace(/\.$/, "");
     var rest = note.toLowerCase();
-    var label = String(col.label || "").toLowerCase();
+    // a label's unit in brackets ("Weight (g)") is no part of the value's name: "Weight (g) (I didn't find weight)"
+    var label = String(col.label || "").toLowerCase().replace(/\s*\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
     var didnt = /^i didn['’]t find (?:an? |the |any )?(.*)$/.exec(rest);
     if (didnt && label && (didnt[1] === label || didnt[1] === label + "s" || didnt[1] + "s" === label)) return "";
     if (label && rest.indexOf(label) === 0) rest = rest.slice(label.length).trim();

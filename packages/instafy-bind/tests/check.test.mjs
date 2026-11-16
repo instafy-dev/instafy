@@ -769,14 +769,14 @@ test("check fails a comparison row that says nowhere where it comes from", () =>
   assert.deepEqual(uncitedRows({ items: [{ name: "Top pick", price: unread }] }), []);
 });
 
-// The rows a turn built when the maker's site never answered: each cell unknown, nothing read, and the turn listed the
-// rows' own names (or the brand) as the request's items. Listing a row is not where it comes from, so the check fails.
 // A comparison of three e-readers told what it didn't find three times; the third was its own "unchecked" entry, "Weight,
 // price and the requested independent reviews were not found in the pages read.", under "Still to confirm", beside what
-// the page names there from its cells (a local test, Nov 10). The check fails an "unchecked" entry that names a column
-// no row has a value for, by the page's own labels: once, naming them. A column some rows have, a price a store can
-// still check, words that only contain a label, and a page from what Octo knows are left as they are.
-test("check fails an \"unchecked\" entry that repeats what the page names from its cells", () => {
+// the page names there from its cells (a local test, Nov 10). The check notes an "unchecked" entry that names a column
+// no row has a value for, by the page's own labels: once, naming them, for the build to judge. Naming a label is no
+// repeat by itself ("Check train times on Taiwan Railway before you book" says what the reader can do), so it never
+// fails the page. A column some rows have, a price a store can still check, words that only contain a label, a page from
+// what Octo knows and a page whose own app.js names no missing value are left as they are.
+test("check notes an \"unchecked\" entry that names what the page already names as missing, and never fails it", () => {
   const DAY = "2026-11-10";
   const reader = (ref, name) => ({
     ref: `reader:${ref}`, name,
@@ -803,10 +803,8 @@ test("check fails an \"unchecked\" entry that repeats what the page names from i
   assert.deepEqual(repeats.map((r) => [r.entry, r.labels]), [
     ["Weight, price and the requested independent reviews were not found in the pages read.", ["Weight (g)", "Price", "Independent reviews"]],
   ]);
-  assert.equal(
-    repeats[0].problem,
-    '"unchecked": "Weight, price and the requested independent reviews were not found in the pages read." names Weight (g), Price and Independent reviews, which the page already names under "Still to confirm" from its cells, with each value\'s "note". Leave it out: "unchecked" holds only what no cell says.',
-  );
+  const note = '"unchecked": "Weight, price and the requested independent reviews were not found in the pages read." names Weight (g), Price and Independent reviews, which the page already names as still missing, from its cells, with each value\'s "note". Keep the entry only for what the reader can do that the page doesn\'t say; leave out one that only says again what is missing.';
+  assert.equal(repeats[0].note, note);
   // in the plural too
   assert.deepEqual(uncheckedRepeats({ ...readers(), unchecked: ["Prices for each model"] }).map((r) => r.labels), [["Price"]]);
   // a column one row has a value for: the entry may say more than the missing ones
@@ -822,19 +820,43 @@ test("check fails an \"unchecked\" entry that repeats what the page names from i
   assert.deepEqual(uncheckedRepeats({ title: "Plan", unchecked: ["Weight"] }), []);
 
   const dir = optionsSite("compare", () => readers());
+  const file = path.join(dir, "data.json");
   try {
-    const { problems } = checkValues(dir);
-    assert.deepEqual(problems, [repeats[0].problem]);
+    // a note for the build, never a problem: the check passes
+    const values = checkValues(dir);
+    assert.deepEqual(values.problems, []);
+    assert.deepEqual(values.notes, [note]);
     const out = run("check", dir, "--expect", "Reader A, Reader B, Reader C");
-    assert.equal(out.status, 1, out.stdout);
-    assert.match(out.stdout, /^VALUES: 1 value\(s\) to fix in data\.json:$/m);
-    fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify({ ...readers(), unchecked: readers().unchecked.slice(1) }));
+    assert.equal(out.status, 0, out.stdout);
+    assert.ok(out.stdout.split("\n").includes(`NOTE: ${note}`), out.stdout);
+    assert.doesNotMatch(out.stdout, /^VALUES:/m);
+    fs.writeFileSync(file, JSON.stringify({ ...readers(), unchecked: readers().unchecked.slice(1) }));
+    assert.deepEqual(checkValues(dir).notes, []);
+    // the cheat sheet's own footer entry, beside a column no row has: what the reader can do, kept as it is
+    const trains = {
+      title: "Two trains",
+      columns: [{ key: "fare", label: "Fare", type: "price" }, { key: "times", label: "Train times", type: "text" }],
+      items: [["a", "Express A", "NT$ 300"], ["b", "Local B", "NT$ 200"]].map(([ref, name, fare]) => ({
+        ref: `train:${ref}`, name,
+        facts: { fare: { v: fare, src: "Rail", url: `https://rail.example/${ref}`, date: DAY }, times: { note: "timetable not read" } },
+      })),
+      unchecked: ["Check train times on Taiwan Railway before you book"],
+    };
+    fs.writeFileSync(file, JSON.stringify(trains));
+    const kept = run("check", dir, "--expect", "Express A, Local B");
+    assert.equal(kept.status, 0, kept.stdout);
     assert.deepEqual(checkValues(dir).problems, []);
+    // a page whose own app.js names no missing value: the page says it nowhere else, so no note says it does
+    fs.writeFileSync(file, JSON.stringify(readers()));
+    fs.writeFileSync(path.join(dir, "app.js"), 'site.head({ title: "Three e-readers" });\n');
+    assert.deepEqual(checkValues(dir).notes, []);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
+// The rows a turn built when the maker's site never answered: each cell unknown, nothing read, and the turn listed the
+// rows' own names (or the brand) as the request's items. Listing a row is not where it comes from, so the check fails.
 test("check fails placeholder rows even when --expect or the data's own list names them", () => {
   const unread = { note: "Unknown: no official product page could be read" };
   const names = [1, 2, 3].map((n) => `Latest eligible Brightvac model ${n}`);

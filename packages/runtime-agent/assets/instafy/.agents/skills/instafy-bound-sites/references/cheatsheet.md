@@ -221,7 +221,7 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
   holds only what the page does not already say (not a cell's "Not found"), each as something the reader can do
   ("Check train times on Taiwan Railway before you book"), never how you worked ("no timetable was read"). A
   comparison's footer first names what each row is still missing, from its cells, with each value's `note`: its
-  `unchecked` never names those again.
+  `unchecked` never says again that they are missing.
 - `url` is the page you read and `date` the day you read it: each value cites them ("checked 17 Oct on
   fleetfeet.com ↗"; a price "seen 17 Oct"); add `asof` when the source dates the fact itself
   (shown instead: "seen 5 Aug"; a price over 30 days old also says "may have changed"), so an old list price never

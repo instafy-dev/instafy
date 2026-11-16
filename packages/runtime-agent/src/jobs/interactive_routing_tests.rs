@@ -1052,8 +1052,9 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
 /// A comparison told what it didn't find three times: under its title, in each cell and under
 /// "Still to confirm", where the build's own `unchecked` said it again (a local test, Nov 10). The
 /// compare starter names each row's missing values once, first in its footer, and the bound-sites
-/// cheat sheet says so: nothing names them under the title any more, and `unchecked` never names
-/// them again. The unedited copy from before is upgraded; an edited one is kept.
+/// cheat sheet says so: nothing names them under the title any more, and `unchecked` never says
+/// again that they are missing, while an entry may still say what the reader can do about one. The
+/// unedited copy from before is upgraded; an edited one is kept.
 #[test]
 fn a_comparisons_missing_values_are_named_once_in_its_footer() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1061,7 +1062,7 @@ fn a_comparisons_missing_values_are_named_once_in_its_footer() {
         "../../assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
     );
     let previous = include_str!("legacy/bound-sites-cheatsheet-v6.md");
-    let rule = "A comparison's footer first names what each row is still missing, from its cells, with each value's `note`: its `unchecked` never names those again.";
+    let rule = "A comparison's footer first names what each row is still missing, from its cells, with each value's `note`: its `unchecked` never says again that they are missing.";
     assert!(flat(sheet).contains(rule), "{sheet}");
     assert!(
         !flat(sheet).contains("and what each row is still missing"),

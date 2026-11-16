@@ -1136,3 +1136,25 @@ test("compare: what a page didn't find is named once, under \"Still to confirm\"
     }
   }
 });
+
+// A column's label often carries its unit in brackets ("Weight (g)"), which `instafy bind check` leaves out when it reads
+// a label. Compared with the brackets, Octo's own words for a missing value ("I didn't find weight") and a note that only
+// says the value isn't checked ("Price not checked") read as more than the label, and the page said the value twice:
+// "Weight (g) (I didn't find weight)".
+test("compare: a label's unit in brackets never makes \"Still to confirm\" say a missing value twice", async () => {
+  const reader = (ref, name) => item(ref, name, {
+    screen: { v: "6 in", src: "Maker", url: `https://maker.example/${ref}`, date: DAY },
+    weight: { note: "I didn't find weight" },
+    price: { note: "Price not checked" },
+  });
+  const data = {
+    title: "Two e-readers",
+    columns: [{ key: "screen", label: "Screen", type: "text" }, { key: "weight", label: "Weight (g)", type: "text" },
+      { key: "price", label: "Price (€)", type: "text" }],
+    items: [reader("a", "Reader A"), reader("b", "Reader B")],
+  };
+  for (const width of [1280, 375]) {
+    const { document } = await draw("compare", data, { width });
+    assert.deepEqual(confirmEntries(document), ["Reader A and Reader B: Weight (g), Price (€)"], `${width}px`);
+  }
+});
