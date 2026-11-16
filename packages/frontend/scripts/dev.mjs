@@ -4,7 +4,8 @@
  *
  * Ensures the Vite dev server inherits controller + Supabase env vars by
  * reading docker/.env.local (generated via `pnpm stack:up`) and falling back
- * to local defaults.
+ * to local defaults: this checkout's Supabase API port from
+ * supabase/supabase/config.toml.
  */
 
 import { spawn } from "node:child_process";
@@ -12,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { localSupabasePorts } from "../../../scripts/lib/localSupabasePorts.mjs";
 import { resolvePrivateEnvPath } from "../../../scripts/lib/privateEnvPaths.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -55,6 +57,9 @@ function normalizeControllerUrl(raw) {
 const composeEnv = parseEnvFile(composeEnvPath);
 const frontendEnv = parseEnvFile(frontendEnvPath);
 const supabaseLocalEnv = parseEnvFile(supabaseLocalEnvPath);
+// This checkout's Supabase API, read only when no file names one. `pnpm stack:up` writes the
+// anon key but no URL into docker/.env.local, so this is the URL that key belongs to.
+const localSupabaseUrl = () => localSupabasePorts().apiUrl;
 
 const env = {
   ...process.env
@@ -81,16 +86,16 @@ const supabaseConfigSource = (() => {
 })();
 
 if (supabaseConfigSource === "compose") {
-  env.VITE_SUPABASE_URL = composeEnv.SUPABASE_URL || "http://127.0.0.1:54321";
+  env.VITE_SUPABASE_URL = composeEnv.SUPABASE_URL || localSupabaseUrl();
   env.VITE_SUPABASE_ANON_KEY = composeEnv.SUPABASE_ANON_KEY || LOCAL_SUPABASE_ANON_KEY;
 } else if (supabaseConfigSource === "supabase-local") {
-  env.VITE_SUPABASE_URL = supabaseLocalEnv.VITE_SUPABASE_URL || "http://127.0.0.1:54321";
+  env.VITE_SUPABASE_URL = supabaseLocalEnv.VITE_SUPABASE_URL || localSupabaseUrl();
   env.VITE_SUPABASE_ANON_KEY = supabaseLocalEnv.VITE_SUPABASE_ANON_KEY || LOCAL_SUPABASE_ANON_KEY;
 } else if (supabaseConfigSource === "frontend") {
-  env.VITE_SUPABASE_URL = frontendEnv.VITE_SUPABASE_URL || "http://127.0.0.1:54321";
+  env.VITE_SUPABASE_URL = frontendEnv.VITE_SUPABASE_URL || localSupabaseUrl();
   env.VITE_SUPABASE_ANON_KEY = frontendEnv.VITE_SUPABASE_ANON_KEY || LOCAL_SUPABASE_ANON_KEY;
 } else {
-  env.VITE_SUPABASE_URL = "http://127.0.0.1:54321";
+  env.VITE_SUPABASE_URL = localSupabaseUrl();
   env.VITE_SUPABASE_ANON_KEY = LOCAL_SUPABASE_ANON_KEY;
 }
 

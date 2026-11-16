@@ -101,7 +101,7 @@ Everything past `/login` needs a session, so verification usually stops at the l
 Studio goes untested. Mint a throwaway user instead — no human, no mailbox, no real account:
 
 ```bash
-pnpm exec supabase --workdir supabase start        # if the local stack is not already up
+pnpm supabase:up        # if the local stack is not already up
 node scripts/mint-test-user.mjs --json
 ```
 

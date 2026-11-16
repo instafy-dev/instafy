@@ -1,8 +1,27 @@
 import fs from "node:fs";
 import path from "node:path";
+import { localSupabasePorts } from "./localSupabasePorts.mjs";
 
 export const DEFAULT_SERVICE_RUNTIME_EMAIL = "service-runtime@instafy.dev";
-export const DEFAULT_SUPABASE_PROJECT_URL = "http://127.0.0.1:54321";
+
+/**
+ * This checkout's Supabase API URL for the dev launcher: SUPABASE_PROJECT_URL or SUPABASE_URL from
+ * the environment, then from the status, else http://127.0.0.1:<[api] port> from this checkout's
+ * config.toml, never the default stack's port. The status's API_URL is not used: its host follows
+ * DOCKER_HOST, and the controller accepts plain http for its JWT keys only on loopback.
+ */
+export function resolveDevSupabaseApiUrl(supabaseEnv = {}, env = process.env, projectDir = undefined) {
+  for (const value of [
+    env.SUPABASE_PROJECT_URL,
+    env.SUPABASE_URL,
+    supabaseEnv?.SUPABASE_PROJECT_URL,
+    supabaseEnv?.SUPABASE_URL,
+  ]) {
+    const url = typeof value === "string" ? value.trim() : "";
+    if (url) return url.replace(/\/$/, "");
+  }
+  return localSupabasePorts(projectDir).apiUrl;
+}
 
 const WAIT_BETWEEN_REQUESTS_MS = 500;
 const ADMIN_USERS_PER_PAGE = 200;
@@ -190,13 +209,7 @@ export function deleteEnvFileValue(filePath, key) {
 }
 
 export async function ensureServiceRuntimeUserId(supabaseEnv = {}) {
-  const supabaseUrlRaw =
-    process.env.SUPABASE_PROJECT_URL ||
-    process.env.SUPABASE_URL ||
-    supabaseEnv.SUPABASE_PROJECT_URL ||
-    supabaseEnv.SUPABASE_URL ||
-    DEFAULT_SUPABASE_PROJECT_URL;
-  const supabaseUrl = supabaseUrlRaw ? supabaseUrlRaw.trim().replace(/\/$/, "") : "";
+  const supabaseUrl = resolveDevSupabaseApiUrl(supabaseEnv);
   if (!supabaseUrl) {
     console.warn(
       "[runtime-dev] Skipping service runtime user setup: SUPABASE_PROJECT_URL is not available."
