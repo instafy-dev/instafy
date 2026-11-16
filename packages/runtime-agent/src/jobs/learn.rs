@@ -112,7 +112,8 @@ const LEGACY_INSTAFY_TEMPLATES: &[&str] = &[
 pub(super) fn is_bundled_instafy_doc(text: &str) -> bool {
     text == INSTAFY_TEMPLATE || LEGACY_INSTAFY_TEMPLATES.contains(&text)
 }
-const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
+/// The `AGENTS.md` Instafy ships now.
+pub(super) const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.md"
 ));
@@ -2624,8 +2625,11 @@ mod tests {
             clarifying.starts_with("- A choice the request leaves open (dates, a currency, which models) is yours: make a sensible one and say it in the reply, without stopping to ask."),
             "{clarifying}"
         );
+        // The choice is the turn's in what it finds or makes, never in a step that acts for the
+        // person: a booking whose hour they didn't pick waits for them, as the browser asks before
+        // such a step.
         assert!(
-            clarifying.ends_with("Ask one short question only when no choice would serve them, such as which of their own things they mean."),
+            clarifying.ends_with("Ask one short question only when no choice would serve them, such as which of their own things they mean, or when a booking, purchase, message or change to their accounts needs a choice they didn't make."),
             "{clarifying}"
         );
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);

@@ -124,7 +124,12 @@ use self::conversation_context::{
 pub(crate) use self::project_preferences::ProjectPreferencesSnapshot;
 use self::workspace_change_detection::GitStatusEntry;
 
-const PROJECT_MEMORY_MAX_TOTAL_BYTES: usize = 50_000;
+/// The room a turn's memory snapshot has for the space's files and the skills its words route
+/// (topic skills draw on [`TOPIC_SKILLS_MAX_BYTES`] first). `AGENTS.md`, read whole and first,
+/// took the rules on when to ask and on what a reply didn't find from the runtime's own lines and
+/// the skills (Nov 16), about 500 bytes, and the room grew by as much: the skills loaded after it,
+/// the router last of all, keep the room they had.
+const PROJECT_MEMORY_MAX_TOTAL_BYTES: usize = 50_500;
 const PROJECT_MEMORY_MAX_FILE_BYTES: usize = 12_000;
 const PROJECT_MEMORY_MAX_OTHER_LEARNINGS: usize = 50;
 const PROMPT_REFERENCED_FILE_MAX_FILES: usize = 4;
@@ -2592,6 +2597,14 @@ fn routed_skills_for_restored_thread(
 /// no turn's memory snapshot carries it.
 const ROUTING_PREFLIGHT_SECTION: &str = "Routing preflight";
 
+/// What a turn on a chat's building thread (`ThreadLane::Building`) that is given `AGENTS.md`'s
+/// "Replies" again is told no longer holds of the instructions the thread began with. A reply-only
+/// turn on a new thread was told "Ask for clarification if you lack enough information to act.",
+/// which pulled against the page skill's "Never stop to ask before building". When to ask is now
+/// a rule of "Replies" alone, and a new thread is never told the old line. A Shared Browser turn's
+/// thread is its own, and its first turn was never told it.
+const WITHDRAWN_THREAD_INSTRUCTION: &str = "\nOf the instructions this thread began with, \"Ask for clarification if you lack enough information to act.\" no longer applies.\n";
+
 /// `AGENTS.md`'s replies guide, all of `AGENTS.md` a browser turn reads: the rest says how to run
 /// commands. Codex withdraws the space's `AGENTS.md` from a turn without the workspace ("The
 /// previously provided AGENTS.md instructions no longer apply"), so a browser turn on a restored
@@ -2654,31 +2667,74 @@ fn pinned_skill_section(workspace_dir: &Path, pinned: &PinnedSkill) -> Option<St
 /// `AGENTS.md`'s section on how a turn reads a public page: with `instafy web read` or a reading
 /// command a skill names, never a script. A turn that may change files and runs without that file
 /// (a required change, a turn on a restored thread, a lookup of another chat:
-/// `broad_contextual_instruction_suppression_reason`) is given it with its lane, from the space's
-/// own copy, as it is given that copy's "Replies" ([`pinned_agents_doc_section`]). Given "Replies"
+/// `broad_contextual_instruction_suppression_reason`) is given it with its lane
+/// ([`pinned_reading_the_web_section`]), as it is given the space's "Replies". Given "Replies"
 /// alone, a required change's build listed its tools, then read a shop's site twice with python's
 /// `urllib`: no robots.txt, budget or pacing, and Details showed only "Ran a command" (a local
-/// test, Nov 8). The rule was once a line of "Responsiveness" that the runtime kept a copy of, word
-/// for word, to find it there; as a section of its own it is found by its heading, in a team's own
-/// words too. A browser turn has no shell and is never given it.
+/// test, Nov 8). A browser turn has no shell and is never given it.
 const READING_THE_WEB_SECTION: &str = "## Reading the web";
 
-/// A section of the space's own `AGENTS.md` under `heading`, for a turn that runs without that
-/// file: Codex leaves it out of a focused turn and withdraws it from a turn on a restored thread
-/// ("The previously provided AGENTS.md instructions no longer apply"). None when the space's copy
-/// has no such section: a copy the space edited, or a team's own, is the space's.
-fn pinned_agents_doc_section(workspace_dir: &Path, heading: &str) -> Option<String> {
-    let section = workspace_file_section(workspace_dir, learn::AGENTS_DOC_FILENAME, heading)?;
-    Some(format!(
+/// A section of the space's `AGENTS.md` as a turn that runs without that file is given it: Codex
+/// leaves the file out of a focused turn and withdraws it from a turn on a restored thread ("The
+/// previously provided AGENTS.md instructions no longer apply").
+fn agents_doc_section_for_turn(section: &str) -> String {
+    format!(
         "\nFrom `{}` (this thread may predate it):\n{section}\n",
         learn::AGENTS_DOC_FILENAME
-    ))
+    )
 }
 
-/// `AGENTS.md`'s replies guide ([`BROWSER_TURN_REPLIES_SECTION`]), from the space's own copy,
-/// for a browser turn on a restored thread. None when the space's copy has no such section.
-fn pinned_replies_section(workspace_dir: &Path) -> Option<String> {
-    pinned_agents_doc_section(workspace_dir, BROWSER_TURN_REPLIES_SECTION)
+/// [`READING_THE_WEB_SECTION`] for a turn that runs without `AGENTS.md`. A copy Instafy shipped,
+/// of any version, gives the current one's: a hosted checkout keeps the copy it has until the
+/// controller replaces it, and the copies from before the section said its rule as a line of
+/// "Responsiveness", or not at all. A copy the space edited, or a team's own, gives its own
+/// section under that heading, or, with none, the current section when it still says that
+/// section's rule word for word, as an edited copy from before the section does. None otherwise.
+fn pinned_reading_the_web_section(workspace_dir: &Path) -> Option<String> {
+    let (text, truncated) = read_text_file_lossy_truncated(
+        workspace_dir,
+        &workspace_dir.join(learn::AGENTS_DOC_FILENAME),
+        PROJECT_MEMORY_MAX_FILE_BYTES,
+    )?;
+    let current = markdown_section(learn::AGENTS_DOC_TEMPLATE, READING_THE_WEB_SECTION)?;
+    let section = if !truncated && learn::is_bundled_agents_doc(&text) {
+        current
+    } else if let Some(own) = markdown_section(&text, READING_THE_WEB_SECTION) {
+        own
+    } else if says_each_rule_of(&text, &current) {
+        current
+    } else {
+        return None;
+    };
+    Some(agents_doc_section_for_turn(&section))
+}
+
+/// Whether `text` says each rule of `section` (its `- ` lines) word for word, as a line of its
+/// own.
+fn says_each_rule_of(text: &str, section: &str) -> bool {
+    let mut rules = section
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .peekable();
+    rules.peek().is_some() && rules.all(|rule| text.lines().any(|line| line == rule))
+}
+
+/// `AGENTS.md`'s replies guide ([`BROWSER_TURN_REPLIES_SECTION`]), from the space's own copy, for
+/// a turn that runs without that file, a browser turn on a restored thread among them. On a
+/// chat's building thread that began on an earlier turn (`restored_building_thread`), it is
+/// followed by [`WITHDRAWN_THREAD_INSTRUCTION`]. None when the space's copy has no such section: a
+/// copy the space edited, or a team's own, is the space's.
+fn pinned_replies_section(workspace_dir: &Path, restored_building_thread: bool) -> Option<String> {
+    let section = workspace_file_section(
+        workspace_dir,
+        learn::AGENTS_DOC_FILENAME,
+        BROWSER_TURN_REPLIES_SECTION,
+    )?;
+    let mut text = agents_doc_section_for_turn(&section);
+    if restored_building_thread {
+        text.push_str(WITHDRAWN_THREAD_INSTRUCTION);
+    }
+    Some(text)
 }
 
 /// The section of a file in the space under `heading`, a line of its own, up to the next
@@ -11345,7 +11401,10 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     ),
                     (
                         "pinnedRepliesSection",
-                        pinned_replies_section(workspace_dir),
+                        pinned_replies_section(
+                            workspace_dir,
+                            thread_lane_for_job(job) == ThreadLane::Building,
+                        ),
                     ),
                 ] {
                     if let Some(section) = section {
@@ -11560,10 +11619,10 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             // A turn that loads no memory snapshot (a required change, a lookup of another chat,
             // a turn on a restored thread) also runs without the space's `AGENTS.md`
             // (`broad_contextual_instruction_suppression_reason`; a restored thread is told "The
-            // previously provided AGENTS.md instructions no longer apply"). From the space's own
-            // copy, it is given the file's section on reading the web with the lane
-            // ([`READING_THE_WEB_SECTION`]), and its "Replies", the guide the reply line names, as
-            // a browser turn on a restored thread is.
+            // previously provided AGENTS.md instructions no longer apply"). It is given the file's
+            // section on reading the web with the lane ([`pinned_reading_the_web_section`]), and,
+            // from the space's own copy, its "Replies", the guide the reply line names, as a
+            // browser turn on a restored thread is.
             let without_agents_md = stateful_thread_restored
                 || direct_workspace_file_change
                 || cross_chat_context_lookup;
@@ -11582,11 +11641,17 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 .concat(),
             );
             if without_agents_md {
-                for (name, heading) in [
-                    ("pinnedReadingTheWebSection", READING_THE_WEB_SECTION),
-                    ("pinnedRepliesSection", BROWSER_TURN_REPLIES_SECTION),
+                for (name, section) in [
+                    (
+                        "pinnedReadingTheWebSection",
+                        pinned_reading_the_web_section(workspace_dir),
+                    ),
+                    (
+                        "pinnedRepliesSection",
+                        pinned_replies_section(workspace_dir, stateful_thread_restored),
+                    ),
                 ] {
-                    if let Some(section) = pinned_agents_doc_section(workspace_dir, heading) {
+                    if let Some(section) = section {
                         append_prompt_section(
                             &mut prompt,
                             &mut prompt_section_metrics,
@@ -25044,11 +25109,14 @@ mod tests {
             "{prompt}"
         );
         assert!(!prompt.contains("Read a public page only with"), "{prompt}");
-        // One with no such section (a team's own file, or a copy from before the rule had a
-        // section of its own that the space edited) gives nothing for it.
+        // A team's own file with no such section, and no line that says its rule word for word,
+        // gives nothing for it (an earlier copy is
+        // `a_turn_without_agents_md_reads_the_web_as_instafy_ships_it_from_an_earlier_copy`).
         fs::write(
             tmp.path().join(learn::AGENTS_DOC_FILENAME),
-            agents_doc.replace(&reading_heading, "\n"),
+            agents_doc
+                .replace(&reading_heading, "\n")
+                .replace(reading_rule, ""),
         )
         .unwrap();
         let prompt = required_change();
@@ -25062,6 +25130,105 @@ mod tests {
         ));
         assert!(!retry.contains("plain-text summary"));
         assert!(!retry.contains("no warranted edits is a valid result"));
+    }
+
+    /// A hosted checkout keeps the `AGENTS.md` it has until the controller replaces it, so a space
+    /// can hold a copy Instafy shipped before "Reading the web" was a section: the rule a line of
+    /// "Responsiveness", or no rule at all. A turn that may change files and runs without the
+    /// file, given only a section under that heading, read no rule for reading a page there,
+    /// where it was given the line before. A copy Instafy shipped, of any version, gives the
+    /// current section, once; so does a copy the space edited that still says its rule word for
+    /// word. A copy with neither is the space's and gives nothing for it.
+    #[test]
+    fn a_turn_without_agents_md_reads_the_web_as_instafy_ships_it_from_an_earlier_copy() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let path = tmp.path().join(learn::AGENTS_DOC_FILENAME);
+        let current = fs::read_to_string(&path).unwrap();
+        let section = markdown_section(&current, READING_THE_WEB_SECTION).expect("section");
+        let given = format!("From `AGENTS.md` (this thread may predate it):\n{section}\n");
+        let rule = section
+            .lines()
+            .find(|line| line.starts_with("- Read a public page only with"))
+            .expect("rule");
+        let restored_state =
+            json!({"defaultThreadId":"existing-thread", "historyReplayRequired":false});
+        let build = |required: bool, restored: bool| {
+            let mut job = test_lease_job(Some("feature"), json!({ "metadata": {} }));
+            job.project_id = Some(project_id);
+            let mut preflight =
+                test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
+            preflight.workspace_file_change_requirement = if required {
+                WorkspaceFileChangeRequirement::Required
+            } else {
+                WorkspaceFileChangeRequirement::Conditional
+            };
+            let job = job_with_agent_routing_preflight(&job, &preflight);
+            processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Put the hours on a small page I can share.",
+                    true,
+                    restored.then_some(&restored_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build")
+                .0
+        };
+        let before_its_section = include_str!("legacy/agents-doc-v20.md");
+        assert!(!before_its_section.contains(READING_THE_WEB_SECTION));
+        assert!(before_its_section.lines().any(|line| line == rule));
+        let before_the_rule = include_str!("legacy/agents-doc-v17.md");
+        assert!(!before_the_rule.contains("Read a public page only with"));
+        let edited = format!("{before_its_section}\n## Our notes\n\n- Keep pages short.\n");
+        for (case, copy, gives) in [
+            ("v20", before_its_section.to_string(), true),
+            (
+                "v19",
+                include_str!("legacy/agents-doc-v19.md").to_string(),
+                true,
+            ),
+            (
+                "v18",
+                include_str!("legacy/agents-doc-v18.md").to_string(),
+                true,
+            ),
+            (
+                "v17, from before the rule",
+                before_the_rule.to_string(),
+                true,
+            ),
+            (
+                "edited, saying the rule word for word",
+                edited.clone(),
+                true,
+            ),
+            (
+                "edited, saying it in its own words",
+                edited.replace(rule, "- Read pages as this team's guide says."),
+                false,
+            ),
+        ] {
+            fs::write(&path, &copy).unwrap();
+            for (required, restored) in [(true, false), (false, true)] {
+                let prompt = build(required, restored);
+                let case = format!("{case}, required={required} restored={restored}");
+                assert_eq!(prompt.contains(&given), gives, "{case}: {prompt}");
+                assert_eq!(prompt.matches(rule).count(), usize::from(gives), "{case}");
+                // "Replies" still comes from the space's own copy.
+                assert!(
+                    prompt.contains("From `AGENTS.md` (this thread may predate it):\n## Replies\n"),
+                    "{case}"
+                );
+                assert!(!prompt.contains("this team's guide"), "{case}");
+            }
+        }
     }
 
     /// What a reply says when it didn't find something, when nothing needed changing, and when the
@@ -25090,6 +25257,10 @@ mod tests {
             rule("- When nothing needed changing,"),
             rule("- A choice the request leaves open"),
         ];
+        // A booking, purchase, message or change to the person's accounts waits for a choice they
+        // made: a browser turn asks before such a step unless their message named it, and an hour
+        // it picked for a booking is no step they named.
+        let for_their_accounts = "or when a booking, purchase, message or change to their accounts needs a choice they didn't make.";
         let restored_state = json!({
             "defaultThreadId": "existing-thread",
             "threadId": "existing-thread",
@@ -25176,8 +25347,11 @@ mod tests {
             for rule in &rules {
                 assert_eq!(prompt.matches(rule.as_str()).count(), 1, "{case}: {rule}");
             }
+            if case.contains("browser") {
+                assert_eq!(prompt.matches(for_their_accounts).count(), 1, "{case}");
+            }
             for elsewhere in [
-                "Ask for clarification",
+                "- Ask for clarification",
                 "stop to ask",
                 "unless a page you read says so",
             ] {
@@ -25190,6 +25364,111 @@ mod tests {
                     "{case}"
                 );
             }
+        }
+    }
+
+    /// A chat's building thread holds what its first turn was told, and a turn on it is told those
+    /// instructions still hold. A reply-only turn on a new thread was told "Ask for clarification
+    /// if you lack enough information to act.", which pulled against the page skill's "Never stop
+    /// to ask before building"; when to ask is now a rule of `AGENTS.md`'s "Replies" alone. A
+    /// building or browser turn on that thread, given "Replies" again, is told with it that the
+    /// old line no longer applies, as a new thread is never given it. A reply-only turn there is
+    /// given no "Replies", so its thread keeps what it began with. A Shared Browser turn's thread
+    /// is its own, and its first turn was never told it.
+    #[test]
+    fn a_turn_on_a_building_thread_is_told_the_old_ask_for_clarification_no_longer_applies() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let restored_state = json!({
+            "defaultThreadId": "existing-thread",
+            "threadId": "existing-thread",
+            "sharedBrowserThreadId": "existing-browser-thread",
+            "historyReplayRequired": false,
+        });
+        let routed = |requirement: WorkspaceFileChangeRequirement| {
+            let mut preflight =
+                test_agent_routing_preflight(AgentRoutingPreflightRoute::Direct, false, false);
+            preflight.workspace_file_change_requirement = requirement;
+            preflight
+        };
+        let withdrawn =
+            "\"Ask for clarification if you lack enough information to act.\" no longer applies.";
+        for (case, metadata, preflight, restored, told) in [
+            ("reply-only", json!({}), None, false, false),
+            ("reply-only, restored", json!({}), None, true, false),
+            (
+                "required change",
+                json!({}),
+                Some(routed(WorkspaceFileChangeRequirement::Required)),
+                false,
+                false,
+            ),
+            (
+                "building, restored",
+                json!({}),
+                Some(routed(WorkspaceFileChangeRequirement::Conditional)),
+                true,
+                true,
+            ),
+            (
+                "required change, restored",
+                json!({}),
+                Some(routed(WorkspaceFileChangeRequirement::Required)),
+                true,
+                true,
+            ),
+            (
+                "personal browser, restored",
+                json!({"browserTransport": "desktop-personal"}),
+                None,
+                true,
+                true,
+            ),
+            (
+                "shared browser, restored",
+                json!({"browserTransport": "shared"}),
+                None,
+                true,
+                false,
+            ),
+        ] {
+            let mut job = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+            job.project_id = Some(project_id);
+            if let Some(preflight) = preflight.as_ref() {
+                job = job_with_agent_routing_preflight(&job, preflight);
+            }
+            let (prompt, _, _) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "Find a hotel near the harbour for next weekend.",
+                    true,
+                    restored.then_some(&restored_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+            assert_eq!(
+                prompt.matches(withdrawn).count(),
+                usize::from(told),
+                "{case}"
+            );
+            if told {
+                // Right after the rule on when to ask that replaces it.
+                let replies = prompt
+                    .find("From `AGENTS.md` (this thread may predate it):\n## Replies\n")
+                    .expect("Replies");
+                let rule = replies
+                    + prompt[replies..]
+                        .find("- A choice the request leaves open")
+                        .expect("the rule on when to ask");
+                assert!(prompt[rule..].contains(withdrawn), "{case}");
+            }
+            assert!(!prompt.contains("- Ask for clarification"), "{case}");
         }
     }
 

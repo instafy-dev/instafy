@@ -804,7 +804,8 @@ read, how many and how to cite them is decided by skills, not by this command. A
 curl, wget, python, node or another script, so robots.txt, the budgets and Details apply to each read; running those
 to build or check the space's own pages stays fine. A turn that may change files and runs without that file (a
 required change, a turn on a restored thread, a lookup of another chat) is given that section with its instructions,
-from the space's own copy, as it is given the file's "Replies".
+as it is given the file's "Replies": the space's own section, or the one Instafy ships now when the space's copy is
+one Instafy shipped, of any version, or one it edited that still says the rule word for word.
 
 ```bash
 instafy web read https://example.org/opening-hours --json
