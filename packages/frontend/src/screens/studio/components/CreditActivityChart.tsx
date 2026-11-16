@@ -43,6 +43,7 @@ function rawReasonCategory(reason: string): Exclude<ActivityCategory, "neutral">
     case "managed_ai_prompt":
     case "managed_ai_adjustment":
     case "managed_ai_refund":
+    case "managed_ai_web_search":
       return "ai";
     case "hosted_runtime":
       return "runtime";

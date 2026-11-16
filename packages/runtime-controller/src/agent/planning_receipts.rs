@@ -117,6 +117,7 @@ pub(super) async fn store(
             state,
             transaction,
             &claims.project_id,
+            &job_id,
             &payload,
             run_id,
             prompt_id,

@@ -40,6 +40,7 @@ fn write_lane_job() -> LeaseJob {
             requires_context_lookup: false,
             requires_command_execution: false,
             workspace_file_change_requirement: WorkspaceFileChangeRequirement::Conditional,
+            deeper_research: false,
             observation_commands: Vec::new(),
         },
     )

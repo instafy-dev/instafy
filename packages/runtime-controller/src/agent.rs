@@ -4273,6 +4273,7 @@ impl CompletionSettlement {
                     state,
                     &transaction,
                     &self.project_id,
+                    &self.job_id,
                     &self.job_payload,
                     self.run_id,
                     self.billing_prompt_id,
@@ -4391,6 +4392,7 @@ async fn reconcile_completion_usage(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
+    job_id: &Uuid,
     job_payload: &JsonValue,
     run_id: Option<Uuid>,
     prompt_id: Option<Uuid>,
@@ -4547,6 +4549,35 @@ async fn reconcile_completion_usage(
                 // the transaction aborted: the caller rolls back and retries.
                 Err(error) => return Err(error),
             }
+            // The turn's web searches, each of which cost the person credits,
+            // in a row of their own on the same message ("Web search").
+            if let Some(web_search) = usage.web_search.filter(|usage| usage.searches > 0) {
+                let charge = crate::credits::charge_managed_ai_web_searches(
+                    transaction,
+                    &state.config,
+                    project_id,
+                    &org_id,
+                    leased_runtime_id,
+                    &prompt_uuid,
+                    job_id,
+                    web_search,
+                )
+                .await?;
+                if charge.ledger_row_written || charge.unpaid_units > 0 {
+                    completion_credit_org_id = Some(org_id);
+                }
+                if charge.unpaid_units > 0 {
+                    warn!(
+                        project_id = %project_id,
+                        prompt_id = %prompt_uuid,
+                        job_id = %job_id,
+                        searches = web_search.searches,
+                        charged_units = charge.charged_units,
+                        unpaid_units = charge.unpaid_units,
+                        "the team's balance did not cover a turn's web searches"
+                    );
+                }
+            }
         }
     }
     Ok(completion_credit_org_id)
@@ -4557,6 +4588,9 @@ struct TurnUsage {
     input_tokens: u64,
     cached_input_tokens: u64,
     output_tokens: u64,
+    /// What an Instafy AI turn's web searches cost (`webSearch`), which its
+    /// tokens above leave out.
+    web_search: Option<crate::credits::ManagedAiWebSearchUsage>,
 }
 
 /// Whether any Codex run log in the artifacts holds a `turn.completed`,
@@ -4613,6 +4647,20 @@ fn extract_turn_usage_from_artifacts(artifacts: &JsonValue) -> Option<TurnUsage>
                     .get("output_tokens")
                     .and_then(JsonValue::as_u64)
                     .unwrap_or(0),
+                web_search: event_map
+                    .get("webSearch")
+                    .and_then(JsonValue::as_object)
+                    .map(|search| {
+                        let count = |field: &str| {
+                            search.get(field).and_then(JsonValue::as_u64).unwrap_or(0)
+                        };
+                        crate::credits::ManagedAiWebSearchUsage {
+                            searches: count("searches"),
+                            input_tokens: count("input_tokens"),
+                            cached_input_tokens: count("cached_input_tokens"),
+                            output_tokens: count("output_tokens"),
+                        }
+                    }),
             });
         }
     }
@@ -7228,6 +7276,39 @@ mod tests {
         assert!(zero.reserve_units > 0);
         assert_eq!(zero.charged_units, 0);
         assert_eq!(zero.adjustment_units, -zero.reserve_units);
+    }
+
+    /// An Instafy AI turn's `turn.completed` says what its web searches cost (`webSearch`),
+    /// which its tokens leave out; a turn that searched nothing has none.
+    #[test]
+    fn turn_usage_reads_what_the_turns_web_searches_cost() {
+        let usage =
+            json!({"input_tokens":50_000,"cached_input_tokens":45_000,"output_tokens":1_000});
+        let searched = json!([{"kind":"codex/run-log","events":[
+            {"type":"turn.completed","usageScope":"turn","usage":usage,
+                "webSearch":{"searches":2,"input_tokens":16_824,"cached_input_tokens":0,
+                    "output_tokens":782}}
+        ]}]);
+        let read = extract_turn_usage_from_artifacts(&searched).expect("the turn's usage");
+        assert_eq!(read.input_tokens, 50_000);
+        assert_eq!(
+            read.web_search,
+            Some(crate::credits::ManagedAiWebSearchUsage {
+                searches: 2,
+                input_tokens: 16_824,
+                cached_input_tokens: 0,
+                output_tokens: 782,
+            })
+        );
+        let unsearched = json!([{"kind":"codex/run-log","events":[
+            {"type":"turn.completed","usageScope":"turn","usage":usage}
+        ]}]);
+        assert_eq!(
+            extract_turn_usage_from_artifacts(&unsearched)
+                .expect("the turn's usage")
+                .web_search,
+            None
+        );
     }
 
     #[test]

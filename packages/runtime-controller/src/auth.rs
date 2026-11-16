@@ -1020,6 +1020,8 @@ mod tests {
                 DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K,
             managed_ai_output_usd_micros_per_1k: DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
             managed_ai_startup_check: true,
+            managed_ai_web_search_usd_micros_per_search:
+                crate::model_defaults::DEFAULT_MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH,
             managed_ai_native_web_search: false,
             managed_ai_openai_api_key: None,
             tunnel_broker_hook_secret: None,

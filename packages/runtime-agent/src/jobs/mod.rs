@@ -294,6 +294,10 @@ struct AgentRoutingPreflight {
     requires_context_lookup: bool,
     requires_command_execution: bool,
     workspace_file_change_requirement: WorkspaceFileChangeRequirement,
+    /// The person's own words ask for deeper research than a quick answer: with Instafy AI the
+    /// message may run more web searches (`managed_web_search`), each of which costs them
+    /// credits.
+    deeper_research: bool,
     observation_commands: Vec<String>,
 }
 
@@ -5033,6 +5037,29 @@ fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text:
     !is_bounded_job(job) && should_run_agent_routing_preflight(job, prompt_text)
 }
 
+/// An Instafy AI message's allowance of web searches for this turn (`managed_web_search`), or
+/// None where the job's grant lets no managed run search: a person's own ChatGPT login searches
+/// on their own plan. It holds more searches when the turn's routing step read the person's own
+/// words as asking for deeper research (`deeper_research`). A hand-back goes on with the allowance
+/// of the turn whose card it carries on, and a job's later attempt with its earlier attempt's, so
+/// the message keeps to one allowance.
+fn managed_web_search_allowance(
+    job: &LeaseJob,
+    deeper_research: bool,
+) -> Option<Arc<crate::managed_web_search::ManagedWebSearch>> {
+    crate::job_proxy_auth::current().filter(|auth| auth.allows_managed_web_search())?;
+    let limit = if deeper_research {
+        crate::managed_web_search::SEARCHES_FOR_DEEPER_RESEARCH
+    } else {
+        crate::managed_web_search::SEARCHES_PER_MESSAGE
+    };
+    Some(crate::managed_web_search::allowance_for_job(
+        job.id,
+        browser_hand_back::card_job_of(job),
+        limit,
+    ))
+}
+
 /// Ends a job whose lease is gone (a Stop cancelled it, and its heartbeat or a refused request
 /// said so) before it does any more: before its folder is brought up to date, its routing step
 /// asks a model, or its thread is restored and its prompt written into it. Its error says the
@@ -5190,6 +5217,12 @@ fn parse_agent_routing_preflight(value: &JsonValue) -> Option<AgentRoutingPrefli
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
     let workspace_file_change_requirement = parse_workspace_file_change_requirement(value).ok()?;
+    // An answer without it (a cached or older one) asks for no deeper research.
+    let deeper_research = object
+        .get("deeperResearch")
+        .or_else(|| object.get("deeper_research"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
     let observation_commands = object
         .get("observationCommands")
         .or_else(|| object.get("observation_commands"))
@@ -5214,6 +5247,7 @@ fn parse_agent_routing_preflight(value: &JsonValue) -> Option<AgentRoutingPrefli
         requires_context_lookup,
         requires_command_execution,
         workspace_file_change_requirement,
+        deeper_research,
         observation_commands,
     })
 }
@@ -5240,6 +5274,7 @@ fn agent_routing_preflight_artifact(preflight: &AgentRoutingPreflight) -> JsonVa
         "requiresCommandExecution": preflight.requires_command_execution,
         "workspaceFileChangeRequirement": preflight.workspace_file_change_requirement.label(),
         "requiresWorkspaceFileChanges": preflight.workspace_file_change_requirement.requires_changes(),
+        "deeperResearch": preflight.deeper_research,
         "observationCommands": &preflight.observation_commands,
     })
 }
@@ -8153,6 +8188,8 @@ impl JobProcessor {
                             continue_building,
                             "routing step sent the message straight to Instafy's browser"
                         );
+                        // The build after the browser goes on with this message's allowance.
+                        managed_web_search_allowance(job, preflight.deeper_research);
                         return Ok(execution);
                     }
                     preflight.route = AgentRoutingPreflightRoute::Direct;
@@ -8353,6 +8390,14 @@ impl JobProcessor {
             // The turn's steps reach the chat, so it may search when the job's grant lets it
             // (`codex.rs`): never in a routing step or a browser or granted turn.
             disable_native_web_search: false,
+            // With Instafy AI each search costs the person credits, so the message keeps to its
+            // allowance, which a hand-back goes on with.
+            managed_web_search: managed_web_search_allowance(
+                job,
+                routing_preflight
+                    .as_ref()
+                    .is_some_and(|preflight| preflight.deeper_research),
+            ),
             disable_final_output_json_schema: final_output_mode.disable_final_output_json_schema(),
             final_output_schema,
             // Browser-mode is a runtime capability (VNC + headed Chromium via CDP), not inferred
@@ -18338,13 +18383,14 @@ fn agent_routing_preflight_prompt(
         Set `requiresCommandExecution = true` when a correct final answer needs a separate fresh observation of current filesystem, Git, process, repo, runtime, server, or tool state. Prior-conversation retrieval belongs only in `requiresContextLookup`; the fact that its transport uses a CLI does not set this flag. Leave it false when supplied current evidence is enough. Both flags may be true when both kinds of evidence are needed.\n\
         Set `workspaceFileChangeRequirement` from the success condition, independently of write permission: `required` when success necessarily requires creating, editing, moving, deleting, committing, or syncing workspace files (a map, page or site the person asks for is files); `conditional` when inspection or validation decides whether changes are warranted, and a justified unchanged result can satisfy the request; `none` when no workspace mutation is requested. Conditional work still permits warranted edits under the existing write scope. Do not turn permission to improve or repair into a requirement to produce a patch. Preserve the requested observations and tests even when no change is warranted.\n\
         {browser_change_line}\
+        Set `deeperResearch = true` only when the latest request's own words ask for deeper or more thorough research than a quick answer, such as researching something in depth or searching further; otherwise false. It lets the turn run more web searches, and each one costs the person credits.\n\
         Always include `observationCommands`; use an empty array when no current-state observation is needed. When `requiresCommandExecution` is true, propose up to 3 concrete safe commands for that observation. These are proposals, not permission grants: the host executes only its existing allowlist, and the main agent must obtain any remaining observation under its normal tool permissions. Do not place conversation/context retrieval commands here. Do not set `requiresCommandExecution = true` merely because the main task includes workspace writes, patches, commits, pushes, or syncs. Do not put file-writing, patching, commit, push, or sync commands in `observationCommands`; classify `workspaceFileChangeRequirement` instead and let the main run make the requested changes under its existing permissions. Explicit non-file Instafy CLI actions such as `instafy automations create` or `instafy automations update` are allowed only when the user asked for that exact action. Propose independent read-only commands, not shell pipelines or command lists whose final status can hide a failed read. If no supported proposal fits, leave `observationCommands` empty and keep the observation requirement for the main agent.\n\
         {skill_snapshot}{browser_snapshot}\n"
     );
     let mut rest = format!(
         "{plan_group_guidance}\
         Latest user request:\n```text\n{prompt_text}\n```\n\
-        Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, `observationCommands`, and nullable `workerQuestionReply`."
+        Return exactly one JSON object with fields `summary`, `route`, `reason`, `selectedSkills`, `confidence` (0-100), `requiresContextLookup`, `requiresCommandExecution`, `workspaceFileChangeRequirement`, `deeperResearch`, `observationCommands`, and nullable `workerQuestionReply`."
     );
     if let Some(pending) = pending {
         pending.append_prompt(&mut rest);
@@ -22882,6 +22928,7 @@ mod tests {
             requires_context_lookup,
             requires_command_execution,
             workspace_file_change_requirement: WorkspaceFileChangeRequirement::None,
+            deeper_research: false,
             observation_commands: Vec::new(),
         }
     }
@@ -30576,6 +30623,49 @@ mod tests {
                 "git status --short".to_string(),
                 "git remote -v".to_string()
             ]
+        );
+    }
+
+    /// The routing step says whether the person's own words ask for deeper research, which
+    /// gives an Instafy AI message more web searches (`managed_web_search`); the job's record of
+    /// its route keeps it. An answer without it, cached or from an older runtime, asks for none.
+    #[test]
+    fn routing_reads_whether_the_persons_words_ask_for_deeper_research() {
+        let answer = |deeper: Option<bool>| {
+            let mut value = json!({"route": "direct", "workspaceFileChangeRequirement": "none"});
+            if let Some(deeper) = deeper {
+                value["deeperResearch"] = json!(deeper);
+            }
+            parse_agent_routing_preflight(&value).expect("parse preflight")
+        };
+        assert!(answer(Some(true)).deeper_research);
+        assert!(!answer(Some(false)).deeper_research);
+        assert!(!answer(None).deeper_research);
+        assert_eq!(
+            agent_routing_preflight_artifact(&answer(Some(true)))["deeperResearch"],
+            json!(true)
+        );
+
+        // The routing answer must give it, and the prompt says when it is true.
+        let schema = crate::codex::routing_preflight_final_output_json_schema();
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!("deeperResearch")))
+        );
+        assert_eq!(schema["properties"]["deeperResearch"]["type"], "boolean");
+        let tmp = tempdir().expect("temp dir");
+        let prompt = build_agent_routing_preflight_prompt(
+            tmp.path(),
+            "Research the best e-readers in depth, keep searching until you're sure.",
+            None,
+            None,
+        );
+        assert!(prompt.contains("Set `deeperResearch = true` only when the latest request's own words ask for deeper or more thorough research"));
+        assert!(
+            prompt.contains(
+                "`workspaceFileChangeRequirement`, `deeperResearch`, `observationCommands`"
+            )
         );
     }
 

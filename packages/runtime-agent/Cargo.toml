@@ -38,6 +38,8 @@ tree-sitter = "0.25.10"
 codex-utils-absolute-path = { path = "../../codex/codex-rs/utils/absolute-path" }
 codex-utils-path-uri = { path = "../../codex/codex-rs/utils/path-uri" }
 codex-web-search-extension = { path = "../../codex/codex-rs/ext/web-search" }
+# The tool types a wrapped search tool passes on (managed_web_search).
+codex-tools = { path = "../../codex/codex-rs/tools" }
 parking_lot = "0.12"
 base64 = "0.21"
 tempfile = "3"
