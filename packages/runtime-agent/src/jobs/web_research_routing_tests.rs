@@ -143,16 +143,28 @@ fn asks_for_a_fact_from_the_web_route_to_the_research_skill() {
         "what are the opening hours of the city museum this weekend",
         "compare prices for these two running shoes, with sources",
         "fact check this claim about the bridge's opening date",
-        // A site that bars agents: the skill's guided mode.
         "compare hotel prices in Lisbon for 12-14 November for two adults on Booking.com",
-        "find an apartment on Airbnb in Porto for next weekend",
+        // Looking things up is the research skill's alone: news, a result, hours, reviews, a page
+        // to read.
+        "What's the news about Siemens today?",
+        "Who won the Celtics game last night, and what was the score?",
+        "Is the Kunsthistorisches Museum in Vienna open this Sunday, and what are its hours?",
+        "What do reviewers say about the Kobo Libra Colour? Main pros and cons.",
+        "look up the pricing page on example.com",
     ] {
         let ids = routed(&contexts, prompt);
         assert!(ids.iter().any(|id| id == RESEARCH), "{prompt}: {ids:?}");
     }
-    // A page to read stays with the browser skill; research may join it, previews do not.
-    let public = routed(&contexts, "look up the pricing page on example.com");
-    assert!(public.iter().any(|id| id == BROWSER), "{public:?}");
+    // A site to use is the browser skill's.
+    for prompt in [
+        "Book a table for two at 7pm on Friday on the restaurant's own site",
+        "Check the availability of a double room at the Grand Hotel for 12-14 December",
+        "Check the status of my last order in my account",
+        "Sign me in to the shop's site",
+    ] {
+        let ids = routed(&contexts, prompt);
+        assert!(ids.iter().any(|id| id == BROWSER), "{prompt}: {ids:?}");
+    }
     for prompt in [
         "rename the variable userId to accountId across the repo",
         "make a packing checklist for a week of camping",
@@ -166,9 +178,109 @@ fn asks_for_a_fact_from_the_web_route_to_the_research_skill() {
         "add a price column to the products table",
         "update the prices in my cafe app's menu",
         "find out why the build fails",
+        // The routing eval's coding and writing negatives, none a lookup.
+        "fix the CSS bug where the header overlaps the sidebar on mobile",
+        "write an invoice for 12 hours of consulting at 900 SEK/h",
+        "summarise this PDF",
+        "set up a cron job that backs up the database every night",
+        "why is my build failing with module not found?",
+        "write a polite email declining the meeting",
+        "add a unit test for the date parser",
+        "show the test results for today's build",
     ] {
         let ids = routed(&contexts, prompt);
         assert!(!ids.iter().any(|id| id == RESEARCH), "{prompt}: {ids:?}");
+    }
+}
+
+/// Looking things up has one owner: the research skill's description and keywords say it (news, a
+/// result, hours, reviews, "look up"), and the browser skill's say using websites (forms, planners,
+/// bookings and availability, sign-ins and accounts) and no longer "look things up", "website",
+/// "web page", "docs" or "pricing". Two skills had claimed the same words, and the browser skill's
+/// "whenever a web page would help" sent lookups to it. Unedited earlier copies are upgraded.
+#[test]
+fn looking_things_up_is_the_research_skills_and_using_websites_the_browsers() {
+    let front = |skill: &str| {
+        let matter = parse_skill_front_matter(skill);
+        (
+            matter.description.unwrap_or_default(),
+            matter.routing_keywords,
+        )
+    };
+    let (research, research_words) = front(RESEARCH_SKILL);
+    assert!(
+        research.starts_with(
+            "Look things up on the web: news, quick facts, prices, reviews and research"
+        ),
+        "{research}"
+    );
+    for word in [
+        "look up",
+        "news about",
+        "last night",
+        "the score",
+        "reviewers say",
+        "open on",
+    ] {
+        assert!(
+            research_words.iter().any(|kept| kept == word),
+            "{word}: {research_words:?}"
+        );
+    }
+    let (browser, browser_words) = front(BROWSER_SKILL);
+    assert!(browser.starts_with("Use websites in Instafy's browser: forms, planners, bookings and availability, sign-ins and accounts"), "{browser}");
+    assert!(!browser.contains("look things up"), "{browser}");
+    for word in ["look up", "website", "web page", "docs", "pricing"] {
+        assert!(
+            !browser_words.iter().any(|kept| kept == word),
+            "{word}: {browser_words:?}"
+        );
+    }
+    for word in ["sign in", "my account", "book a", "availability"] {
+        assert!(
+            browser_words.iter().any(|kept| kept == word),
+            "{word}: {browser_words:?}"
+        );
+    }
+    // No keyword names a site: a booking site is a site to use, whatever its name.
+    for words in [&research_words, &browser_words] {
+        assert!(!words.iter().any(|word| word.contains('.')), "{words:?}");
+    }
+    // A page made from what is looked up keeps the page skill beside the research skill: the
+    // lookup's words never outscore the page's so far that it drops out, as two lookup phrases in
+    // one message did (a skill within 3 of the top is kept).
+    let tmp = scaffolded_space();
+    let contexts = build_top_level_context_nodes(tmp.path());
+    for prompt in [
+        "What's the news about Airbus today? Put it on a small page I can share.",
+        "What do reviewers say about the Kobo Libra Colour? Put the pros and cons on a page.",
+    ] {
+        let ids = routed(&contexts, prompt);
+        for id in [RESEARCH, "instafy-interactive-artifacts"] {
+            assert!(ids.iter().any(|routed| routed == id), "{prompt}: {ids:?}");
+        }
+    }
+    assert!(include_str!("legacy/browser-automation-v44.md").contains("look things up"));
+    for (relative, previous, current) in [
+        (
+            learn::WEB_RESEARCH_RELATIVE_PATH,
+            include_str!("legacy/web-research-v19.md"),
+            RESEARCH_SKILL,
+        ),
+        (
+            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+            include_str!("legacy/browser-automation-v44.md"),
+            BROWSER_SKILL,
+        ),
+    ] {
+        assert!(
+            !previous.contains("Look things up on the web"),
+            "{relative}"
+        );
+        let skill = tmp.path().join(relative);
+        fs::write(&skill, previous).unwrap();
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
     }
 }
 
@@ -291,8 +403,8 @@ fn the_research_skill_says_how_to_choose_read_cross_check_and_cite() {
         "Aggregators only lead to the business's own page, never the final source.",
         "Direct access is only in a visible browser tab.",
         "Honor a tool's policy refusal.",
-        "1. URLs the person gave. 2. Sources an installed skill names for this need. 3. Open data and open APIs",
-        "at most 2 guessed official domains, confirmed by reading the business name",
+        "1. Pages the person gave. 2. Sources an installed skill names for this need (a map's place search, an open API). 3. The AI's own web search, when this run has it (above). 4. `instafy web read` for a page whose address you have",
+        "At most 2 guessed official domains, confirmed by reading the business name",
         "Never put a guessed address in `request_browser`.",
         "Inspect `instafy web budget --json`",
         "Parent, helpers and continued workers share the allowance",
@@ -450,13 +562,15 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
 
     let router = flat(ROUTER_SKILL);
     assert!(router.contains("with `instafy web read <url…> --json` (no browser card)"));
-    assert!(router.contains("Read it with `instafy web read` or `instafy-browser-automation`"));
+    assert!(router.contains(
+        "Look it up as `instafy-web-research` says: the AI's own web search, then `instafy web read`."
+    ));
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     // Whether a page needs a card at all is the building turn's choice, said where the skill says
     // when it is used, which a building turn reads before it hands the person a card: one place,
     // so "whenever a web page would help" no longer reads against "needs no card".
     assert!(carried.contains(
-        "Use this skill when a web page needs Instafy's browser, whether or not the person mentioned one: a page `instafy web read` says `needs_browser` for, a site's screens to walk them through or use, or a page they want to see. `instafy web read <url…> --json` reads the rest, with no card."
+        "Use this skill to use a website for the person, whether or not they mentioned a browser: its forms, buttons and journey planners, a booking or availability for their dates, a sign-in and their own account, a page `instafy web read` says `needs_browser` for, a site's screens to walk them through, or a page they want to see. Looking things up is `instafy-web-research`'s: search and `instafy web read <url…> --json` read the rest, with no card."
     ));
     assert!(carried.contains(
         "In a reply-only turn, the pages `instafy web read` says `needs_browser` for go in a card."
@@ -778,7 +892,7 @@ fn reviews_are_never_guessed_addresses() {
     let research = flat(RESEARCH_SKILL);
     assert!(!research.contains("reviews from publishers you know review"));
     assert!(research.contains(
-        "at most 2 guessed official domains, confirmed by reading the business name; reviewers' homepages and links. An address that does not answer"
+        "the official page of what the request names, reviewers' homepages and links, an exact quote, or a page search couldn't read. At most 2 guessed official domains, confirmed by reading the business name;"
     ));
 
     assert!(!include_str!("legacy/browser-automation-v14.md").contains("reads as busy"));
@@ -818,7 +932,7 @@ fn reviews_are_never_guessed_addresses() {
 #[test]
 fn the_browser_skills_sign_in_and_secret_rules_end_inside_the_carried_bytes() {
     for rule in [
-        "- Treat sign-in, one-time codes, payment and every secret (a password, payment detail, government identifier or recovery code) as the person's steps: never type them;",
+        "- Some steps are only the person's: a sign-in or one-time code, a payment or the final button that books or buys,",
         "- Opening, reading and navigating a signed-in site needs no extra confirmation in chat,",
         "- Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.",
     ] {
@@ -913,7 +1027,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
         line("browser_then_build"),
         "- `browser_then_build`: the same, and Octo then makes or changes something in this space \
          (a page, a map, a table). So is research whose answer ends in a page (a comparison, \
-         prices, a route), from the first message. So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says."
+         prices, a route), from the first message, unless Octo can search the web and no site needs using first (a booking or availability for dates, a sign-in or their account, a form or planner): it then stays `direct`. So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says."
     );
     let reply = section
         .lines()
@@ -1177,10 +1291,10 @@ fn a_turn_prints_a_pages_links_with_its_text() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(
-        "- Open an address the person or a skill gave, or a link on a page you read (print a page's links with its text), else the official site of what the task names and its links and search box. Prefer available native search for discovery; never invent a page path."
+        "- Open an address the person or a skill gave, or a link on a page you read (print a page's links with its text), else the official site of what the task names and its links and search box. Never invent a page path."
     ));
     assert!(flat(COMPARING_SKILL).contains(
-        "- A review no page you read links to comes from a reviewer's own site: its home page, its links and its own search box."
+        "- A review no page you read links to: the AI's own web search finds it (\"<exact model> review\") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box."
     ));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 
@@ -1350,12 +1464,14 @@ fn the_research_skill_distinguishes_optional_policy_from_provider_access() {
         "Do not invent domain bans",
         "Instafy supplies no built-in site templates",
         "**Send page to Octo**",
-        "Provider retrieval follows provider access rules",
+        "Search follows the provider's access rules: its results from sites that bar agents are usable evidence",
     ] {
         assert!(RESEARCH_SKILL.contains(needle), "{needle}");
     }
     assert!(!BROWSER_SKILL.contains("Never a search engine"));
-    assert!(BROWSER_SKILL.contains("Prefer available native search"));
+    // Finding pages by search is the research skill's: the browser skill only points to it.
+    assert!(!BROWSER_SKILL.contains("Prefer available native search"));
+    assert!(BROWSER_SKILL.contains("(the AI's own web search follows `instafy-web-research`)"));
     assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
     let tmp = scaffolded_space();
     for (relative, previous, current) in [
@@ -1391,8 +1507,9 @@ fn the_research_skill_searches_with_instafy_web_search() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     for needle in [
-        "4. Native web search when exposed; otherwise `instafy web search \"<words from the person's request>\" --json` (Searching, below).",
-        "6. Ask the person to search in their own browser and press **Send page to Octo** on the pages they pick.",
+        "3. The AI's own web search, when this run has it (above).",
+        "`instafy web search` with the space's own key (Searching).",
+        "7. The person's own search: they open the pages they pick and press **Send page to Octo**.",
         "## Searching",
         "in Octo's turns only, with the space's own search key: at most 4 searches a turn",
         "Its `status` is `ok`, `not_found`, `unavailable` or `no_provider`; follow its `tell`.",
@@ -1429,7 +1546,7 @@ fn the_research_skill_names_reference_search_for_open_sources() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     for needle in [
-        "3. Open data and open APIs: `instafy web search \"<words>\" --chain reference-search --json` for Wikipedia and Wikivoyage articles and the official websites Wikidata records (no key needed)",
+        "5. Open data: `instafy web search \"<words>\" --chain reference-search --json` for Wikipedia and Wikivoyage articles and the official websites Wikidata records (no key needed)",
         "`--chain reference-search` asks Wikipedia, Wikivoyage and Wikidata at once, with no key and 4 searches a turn of its own; each result names its source's `attribution`, which a citation of it keeps (Citing).",
         "Keep the attribution and licence a source states",
     ] {
@@ -1704,9 +1821,9 @@ fn the_research_skill_keeps_going_without_a_search_key() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     for needle in [
-        "5. Direct reads: official sites from step 3; at most 2 guessed official domains, confirmed by reading the business name",
-        "An address that does not answer: once with `www.` added or removed, as its `tell` says.",
-        "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with steps 3 and 5.",
+        "4. `instafy web read` for a page whose address you have: the official page of what the request names",
+        "At most 2 guessed official domains, confirmed by reading the business name; an address that does not answer: once with `www.` added or removed, as its `tell` says.",
+        "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
         "may go in your reply once; never ask for a key in chat or wait for it.",
         "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",
         "\"not read: <page> (<why, in plain words>)\"",
@@ -1736,9 +1853,9 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     for needle in [
         "## Finding a page",
-        "For direct readers and browsers (provider-hosted retrieval follows `instafy-web-research`):",
+        "For direct readers and browsers (the AI's own web search follows `instafy-web-research`):",
         "Open an address the person or a skill gave, or a link on a page you read (print a page's links with its text), else the official site of what the task names and its links and search box.",
-        "Prefer available native search for discovery; never invent a page path.",
+        "Never invent a page path.",
         "A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task.",
         "a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source.",
         "A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page",
@@ -1910,7 +2027,9 @@ fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     for needle in [
         "\"Finding a page\" says what comes next. Never retry that page another way. A sign-in the person asked for isn't one of these: open its sign-in page and pause (Core rules).",
-        "Treat sign-in, one-time codes, payment and every secret (a password, payment detail, government identifier or recovery code) as the person's steps: never type them; pause on them with `request_human_input`, and continue when they choose Let Octo continue.",
+        "Some steps are only the person's: a sign-in or one-time code,",
+        "Never type their secrets (a password, payment detail, government identifier or recovery code) or press those buttons.",
+        "On a page you may use, highlight it with `request_human_input` and end the turn; they choose Let Octo continue.",
         "Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.",
     ] {
         assert!(carried.contains(needle), "{needle}");
@@ -2193,19 +2312,16 @@ fn every_space_gets_the_topic_skills_under_the_browser_and_research_skills() {
             .split_once("\n## Routing preflight\n")
             .map_or(skill, |(body, _)| body)
     };
-    for (skill, earlier) in [
-        (
-            BROWSER_SKILL,
-            include_str!("legacy/browser-automation-v42.md"),
-        ),
-        (RESEARCH_SKILL, include_str!("legacy/web-research-v18.md")),
-    ] {
-        assert!(
-            without_routing(skill).len() < without_routing(earlier).len(),
-            "{} >= {}",
-            without_routing(skill).len(),
-            without_routing(earlier).len()
-        );
+    // The research skill has since become the one skill for looking things up, the AI's own web
+    // search with it, and keeps within its cap.
+    let browser_before = include_str!("legacy/browser-automation-v42.md");
+    assert!(
+        without_routing(BROWSER_SKILL).len() < without_routing(browser_before).len(),
+        "{} >= {}",
+        without_routing(BROWSER_SKILL).len(),
+        without_routing(browser_before).len()
+    );
+    for skill in [BROWSER_SKILL, RESEARCH_SKILL] {
         assert!(skill.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
     }
     let routing = BROWSER_SKILL
@@ -2586,7 +2702,7 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
     let build = rule("browser_then_build");
     assert!(
         build.ends_with(
-            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message. So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says."
+            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message, unless Octo can search the web and no site needs using first (a booking or availability for dates, a sign-in or their account, a form or planner): it then stays `direct`. So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says."
         ),
         "{build}"
     );
@@ -2775,24 +2891,26 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
-/// A cookie notice is never the person's step: the skill's line of the person's steps named consent beside sign-in and
-/// one-time codes, both browser turns of a local test (Nov 9) read it, and one paused on a notice's "Accept all" while
-/// another pressed a bar's accept and stopped. Consent leaves that line; sign-in, one-time codes, payment and secrets stay
-/// as they were, and no line of the skill asks to pause on a notice. An unedited earlier copy is upgraded.
+/// A cookie notice is never a step Octo pauses on by itself: the skill's line of the person's steps once named
+/// consent beside sign-in and one-time codes, both browser turns of a local test (Nov 9) read it, and one paused on a
+/// notice's "Accept all" while another pressed a bar's accept and stopped. A notice's accept is no longer listed, so no
+/// step reaches it, and the browser declines a notice itself where it can. The person's steps (an owner decision,
+/// Nov 15) name a cookie choice only when a notice the browser couldn't decline covers what the person asked Octo to
+/// use: it is theirs to make, and no line of the skill says accept or consent. An unedited earlier copy is upgraded.
 #[test]
-fn a_cookie_notice_is_never_one_of_the_persons_steps() {
+fn a_cookie_choice_is_the_persons_only_when_a_notice_covers_what_they_asked_for() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let skill = flat(BROWSER_SKILL);
     assert!(skill.contains(
-        "- Treat sign-in, one-time codes, payment and every secret (a password, payment detail, government identifier or recovery code) as the person's steps: never type them; pause on them with `request_human_input`, and continue when they choose Let Octo continue."
+        "a cookie choice when a notice the browser couldn't decline covers what they asked you to use,"
     ));
+    assert_eq!(skill.matches("a cookie choice").count(), 1, "{skill}");
     for line in BROWSER_SKILL
         .lines()
-        .filter(|line| line.contains("request_human_input") || line.contains("person's steps"))
+        .filter(|line| line.contains("request_human_input") || line.contains("person's"))
     {
         assert!(!line.contains("consent"), "{line}");
-        assert!(!line.contains("cookie"), "{line}");
-        assert!(!line.contains("notice"), "{line}");
+        assert!(!line.to_lowercase().contains("accept"), "{line}");
     }
     let previous = include_str!("legacy/browser-automation-v40.md");
     assert!(
@@ -3067,12 +3185,13 @@ fn a_card_is_a_reader_only_in_a_reply_only_turn() {
     // The browser skill's handoff, which such a turn reads too, says the same.
     let browser = flat(BROWSER_SKILL);
     for words in [
-        "When a page would help in a reply-only turn and neither Personal nor Shared Browser tools are exposed, emit one `request_browser` action",
+        "When a site or page needs the browser in a reply-only turn and neither Personal nor Shared Browser tools are exposed, emit one `request_browser` action",
         "In a reply-only turn, the pages `instafy web read` says `needs_browser` for go in a card.",
     ] {
         assert!(browser.contains(words), "{words}");
     }
     assert!(!browser.contains("When a page would help and neither"));
+    assert!(!browser.contains("When a page would help in a reply-only turn"));
     let previous = include_str!("legacy/web-research-v16.md");
     assert!(flat(previous).contains("or when none of these is there: one `request_browser` card"));
     let tmp = scaffolded_space();
@@ -3325,7 +3444,8 @@ fn a_change_in_the_persons_own_words_stays_direct() {
 }
 
 /// The native evidence route must reach ordinary and no-shell skill snapshots without turning
-/// source snippets into facts or granting direct access to sites the reader refuses.
+/// source snippets into facts or granting direct access to sites the reader refuses. How a building
+/// turn searches is its own: a browser turn never searches, and leaves that section out.
 #[test]
 fn provider_retrieval_keeps_direct_reader_restrictions_and_survives_skill_filtering() {
     assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
@@ -3335,18 +3455,23 @@ fn provider_retrieval_keeps_direct_reader_restrictions_and_survives_skill_filter
         json!({"browserTransport": "shared"}),
         json!({"browserTransport": "desktop-personal"}),
     ] {
+        let browser_turn = metadata.get("browserTransport").is_some();
         let prompt = fresh_prompt(
             tmp.path(),
             "Compare prices with independent reviews and cite sources",
             metadata,
         );
-        assert!(prompt.contains("## Provider-hosted retrieval"));
-        assert!(prompt.contains("A title, snippet or bare link alone is only a lead"));
+        assert_eq!(
+            prompt.contains("## The AI's own web search"),
+            !browser_turn,
+            "browser turn: {browser_turn}"
+        );
+        assert!(prompt.contains("a title, snippet or bare link alone is only a lead"));
         assert!(
             prompt
                 .contains("Explicit workspace policies and direct-reader/browser access controls still govern URLs you open yourself")
         );
-        assert!(prompt.contains("Never send a forbidden URL to another reader"));
+        assert!(prompt.contains("never send a forbidden URL to another reader, search included"));
     }
     for (relative, previous, current) in [
         (
@@ -3535,7 +3660,7 @@ fn the_browser_rule_and_the_skills_name_the_same_pages_for_the_browser() {
         "{rule}"
     );
     assert!(flat(BROWSER_SKILL).contains(
-        "a page `instafy web read` says `needs_browser` for, a site's screens to walk them through or use, or a page they want to see. `instafy web read <url…> --json` reads the rest, with no card."
+        "a page `instafy web read` says `needs_browser` for, a site's screens to walk them through, or a page they want to see. Looking things up is `instafy-web-research`'s: search and `instafy web read <url…> --json` read the rest, with no card."
     ));
     assert!(flat(ROUTER_SKILL).contains("A page with neither is read with `instafy web read`"));
     for text in [&rule, &flat(BROWSER_SKILL), &flat(ROUTER_SKILL)] {
@@ -3812,14 +3937,17 @@ fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
 }
 
 /// News put on a page is research whose answer ends in a page, and goes to the browser first as a
-/// comparison does. Instafy's browser has no web search, but it opens the company's own site and
-/// its news pages, while a `direct` page is a change of files whose building turn can't ask for
-/// the browser (`browser_choice_applies`), and on an AI with no web search of its own it reads
-/// only pages whose addresses it already knows. It stays so until research that ends in a page
-/// searches before the browser, which no routing input says a run can do yet. News answered in a
-/// reply stays `direct`, as any research answered in a reply does. Checking the person's own
-/// account is work on a website, which the browser does with their sign-in: no search reaches it.
-/// The routing step reads the whole section for each.
+/// comparison does when Octo can't search the web for the message. Instafy's browser has no web
+/// search, but it opens the company's own site and its news pages, while a `direct` page is a
+/// change of files whose building turn can't ask for the browser (`browser_choice_applies`), and
+/// on an AI with no web search of its own it reads only pages whose addresses it already knows.
+/// When Octo can search the web for the message, which its routing input then says in one line
+/// after the section, such research stays `direct` and searches first, unless a site needs using
+/// first (a booking or availability for dates, a sign-in or their account, a form or a planner);
+/// without that line the routing input is as it was. News answered in a reply stays `direct`, as
+/// any research answered in a reply does. Checking the person's own account is work on a website,
+/// which the browser does with their sign-in: no search reaches it. The routing step reads the
+/// whole section for each.
 #[test]
 fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     let section = routing_section(BROWSER_SKILL);
@@ -3831,7 +3959,7 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     };
     assert!(
         line("- `browser_then_build`:").contains(
-            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message. So is a page, or a change to one,"
+            "So is research whose answer ends in a page (a comparison, prices, a route), from the first message, unless Octo can search the web and no site needs using first (a booking or availability for dates, a sign-in or their account, a form or planner): it then stays `direct`. So is a page, or a change to one,"
         ),
         "{section}"
     );
@@ -3862,9 +3990,37 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
         "Check the status of my last order in my Decathlon account.",
     ] {
         assert_the_routing_step_reads(section, request);
+        // The routing input says whether Octo can search the web for the message, once, right
+        // after the section, and only when it can.
+        let tmp = scaffolded_space();
+        let job = test_lease_job(
+            Some("feature"),
+            json!({ "prompt_text": request, "metadata": {} }),
+        );
+        for searches in [false, true] {
+            let prompt =
+                routing_preflight_request(&job, tmp.path(), request, None, searches).prompt;
+            assert_eq!(
+                prompt.matches(ROUTING_SEARCH_FACT).count(),
+                usize::from(searches),
+                "{request}"
+            );
+            assert_eq!(
+                prompt.contains(&format!("```\n{ROUTING_SEARCH_FACT}")),
+                searches,
+                "{request}"
+            );
+        }
     }
     let previous = include_str!("legacy/browser-automation-v43.md");
     assert!(!previous.contains("check their account"));
+    let previous = include_str!("legacy/browser-automation-v44.md");
+    assert!(!previous.contains("unless Octo can search the web"));
+    let tmp = scaffolded_space();
+    let path = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&path).unwrap(), BROWSER_SKILL);
 }
 
 /// The section says only what the routing step's own instructions don't: that the step can send

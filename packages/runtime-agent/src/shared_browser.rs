@@ -170,9 +170,10 @@ const AGENT_TABS_FILE_MAX_BYTES: u64 = 8 * 1024;
 /// on loopback, so a slower answer is a stuck browser.
 const AGENT_TAB_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_CDP_PORT: u16 = 9223;
-const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 11] = [
+const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 12] = [
     "human_input_required",
     "cookie_notice_required",
+    "human_step_required",
     "approval_denied",
     "approval_timeout",
     "approval_stale",
@@ -3394,6 +3395,12 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
             "The person answers the cookie notice on the page. End this turn now: they choose Let Octo continue once they have, and the next turn takes a fresh snapshot.".to_string(),
             false,
         ),
+        // A pause on a button or a link: a step only the person takes, such as a booking's or a
+        // payment's final button, with any field beside it.
+        "human_step_required" => (
+            "The person does the highlighted step on the page. End this turn now: they choose Let Octo continue once they have, and the next turn takes a fresh snapshot. Never request or repeat what they enter.".to_string(),
+            false,
+        ),
         BROWSER_UNAVAILABLE_CODE => (
             "Instafy's browser closed or stopped responding on this space's machine. End this turn now: do not retry or call another browser tool. Say in one short sentence that the browser closed and that they can open it again and send a message to continue.".to_string(),
             true,
@@ -3934,7 +3941,7 @@ pub(crate) fn shared_browser_mcp_tools() -> Vec<Tool> {
         Tool::new(
             Cow::Borrowed("request_human_input"),
             Cow::Borrowed(
-                "End this turn and ask the user to fill one to eight highlighted fields from a fresh snapshot. Never include field values. The user explicitly continues in a fresh turn.",
+                "End this turn and hand the user a step only they may do on the page: highlight one to eight of its fields or buttons from a fresh snapshot (a sign-in's fields, a booking's or payment's final button). Never include field values. The user explicitly continues in a fresh turn.",
             ),
             schema(json!({
                 "type": "object", "additionalProperties": false,
@@ -4301,7 +4308,7 @@ fn validate_request_body(path: &str, body: &JsonValue) -> Result<()> {
                 .and_then(JsonValue::as_array)
                 .context("Human input requires observed indices")?;
             if indices.is_empty() || indices.len() > 8 {
-                bail!("Human input requires one to eight fields");
+                bail!("Human input requires one to eight fields or buttons");
             }
             let mut unique = std::collections::HashSet::new();
             for index in indices {

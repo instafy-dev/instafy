@@ -200,7 +200,10 @@ job's own parser, as the job then acts on it. The cases are in
 `packages/runtime-agent/tests/fixtures/routing-check-cases.json`. Each has a message, the chat it was sent in (the
 history entries the runtime receives), the expected route and why. A case can also list the
 `workspaceFileChangeRequirement` values it accepts, what the routing preflight says the turn after it must change:
-after a Stop and an Undo, "keep going" must not require a change. Whether that turn then leaves the undone change
+after a Stop and an Undo, "keep going" must not require a change. A case with `"integratedSearch": true` is sent
+where Octo can search the web for the message, as a job whose grant lets its turn search: its routing input then
+has the one line that says so, after the browser skill's routing section, and research that ends in a page stays
+`direct` unless a site needs using first. Whether that turn then leaves the undone change
 alone, only a real turn shows. Every rule of the browser skill's routing section also has a case on a subject the
 recorded tests never used, written for the check (`every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own`
 names which), so a rule that holds only for the few places, products and sites those tests were about shows: a rule

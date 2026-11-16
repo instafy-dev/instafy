@@ -14,7 +14,7 @@ This workspace uses Instafy’s skill-based knowledge files:
 
 ## Reading the web
 
-- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.
+- Read a public page only with `instafy web read <address>`, a reading command a skill names or the AI's own web search, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.
 
 ## Replies
 

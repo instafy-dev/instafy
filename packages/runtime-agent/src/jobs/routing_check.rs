@@ -62,6 +62,10 @@ pub struct Case {
     /// `conversation_history`. The message is added after them.
     #[serde(default)]
     pub history: Vec<JsonValue>,
+    /// Whether Octo's turn for the message can search the web, as the job's grant lets it: the
+    /// routing input then says so, after the browser skill's routing section.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub integrated_search: bool,
     pub expect: Expect,
     /// Why that route is right.
     pub why: String,
@@ -228,7 +232,13 @@ pub fn routing_input(case: &Case, workspace: &Path) -> Result<RoutingInput> {
         "case {}: a turn would skip the routing step",
         case.id
     );
-    let request = super::routing_preflight_request(&job, workspace, &case.message, None);
+    let request = super::routing_preflight_request(
+        &job,
+        workspace,
+        &case.message,
+        None,
+        case.integrated_search,
+    );
     Ok(RoutingInput {
         prompt: request.prompt,
         shared_start: request.shared_start,
@@ -1278,14 +1288,16 @@ mod tests {
     /// hash, as it reads the machine's model settings. A change to what turns read that leaves
     /// routing alone (a skill's other sections, a browser turn's run text, a section only a turn
     /// reads) keeps both hashes. A change that means to move routes updates them, and its pull
-    /// request carries the routing check's table.
+    /// request carries the routing check's table. A message whose turn can search the web shares
+    /// a start of its own: the same, with the one line that says so after the browser skill's
+    /// routing section.
     #[test]
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "b41ed00a2081ef12c66fde53e6093a0fdb6bb4d110b10fca935fce8bc9882b2a";
+            "75197efdcecd534f0575075d457199661589b8e4a37182f68e6da2e00826e806";
         const CASE_PROMPTS_SHA256: &str =
-            "4cb58a76798c5c3424fef4e75c109a02076f836b053e04a6b2a1475a2d973bfe";
+            "e9c1eb9b588b19a4c19f665c3462a022459a240c7eec4eec942756733cdc4cf7";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1312,15 +1324,48 @@ mod tests {
             inputs.iter().all(|(_, input)| input.browser_routes_offered),
             "every case is offered the browser routes"
         );
-        assert_eq!(starts.len(), 1, "every case shares one start");
-        let start = starts.into_iter().next().expect("a start");
+        assert_eq!(starts.len(), 2, "two starts: with and without search");
+        let searching: HashSet<&str> = shipped()
+            .iter()
+            .filter(|case| case.integrated_search)
+            .map(|case| case.id.as_str())
+            .map(|id| {
+                inputs
+                    .iter()
+                    .find(|(each, _)| each == id)
+                    .map(|(_, input)| input.shared_start.as_str())
+                    .expect("its input")
+            })
+            .collect();
+        assert_eq!(
+            searching.len(),
+            1,
+            "every case that searches shares one start"
+        );
+        let search_start = searching.into_iter().next().expect("a start");
+        let start = starts
+            .into_iter()
+            .find(|start| *start != search_start)
+            .expect("the start without search");
+        // The one line is all that tells the two apart.
+        assert_eq!(
+            search_start
+                .matches(super::super::ROUTING_SEARCH_FACT)
+                .count(),
+            1
+        );
+        assert_eq!(
+            search_start.replacen(super::super::ROUTING_SEARCH_FACT, "", 1),
+            start
+        );
+        assert!(!start.contains(super::super::ROUTING_SEARCH_FACT));
         let mut prompts = String::new();
         let mut each = String::new();
         for (id, input) in &inputs {
             let prompt = without_counts(&input.prompt);
             assert!(
-                prompt.starts_with(start),
-                "{id}: the prompt opens with the start"
+                prompt.starts_with(start) || prompt.starts_with(search_start),
+                "{id}: the prompt opens with a start"
             );
             let _ = writeln!(each, "{id}: {}", digest(&prompt));
             let _ = writeln!(prompts, "{id}\n{prompt}");
@@ -1397,11 +1442,14 @@ mod tests {
     /// `news-today` on are these, each with the route its rule gives, and each case's routing
     /// input reads that rule. Eight of them are lookups that a search for fresh information
     /// changes: news, a recent result and opening hours answered in a reply, news put on a page
-    /// and a comparison page (both `browser_then_build` until research pages search before the
-    /// browser), a trip on a map, an order in the person's own account and a site opened in the
-    /// browser. Where two rules could both be read as a case's, the case says which one decides:
-    /// a note in the person's own words, and a place added to a map, after replies that said
-    /// something wasn't found.
+    /// and a comparison page (both `browser_then_build` when Octo can't search the web), a trip
+    /// on a map, an order in the person's own account and a site opened in the browser. Where
+    /// two rules could both be read as a case's, the case says which one decides: a note in the
+    /// person's own words, and a place added to a map, after replies that said something wasn't
+    /// found. The last six are sent where Octo can search the web for the message, which their
+    /// routing input says in one line: news and a comparison put on a page stay `direct`, a page
+    /// that needs prices for dates or a route still browses first, an order in the person's own
+    /// account is still the browser's, and news answered in a reply stays `direct`.
     #[test]
     fn every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own() {
         let cases = shipped();
@@ -1420,7 +1468,12 @@ mod tests {
             (
                 "the work happens on a website (use a site, sign in, check their account, send a form, press its buttons)",
                 "browser",
-                &["metro-planner", "send-a-form-on-a-site", "order-in-account"],
+                &[
+                    "metro-planner",
+                    "send-a-form-on-a-site",
+                    "order-in-account",
+                    "order-in-account-searching",
+                ],
             ),
             (
                 "or it carries on browser work this chat started, whether or not that found the answer.",
@@ -1433,9 +1486,19 @@ mod tests {
                 &["browser-named-then-page"],
             ),
             (
-                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
+                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message,",
                 "browser_then_build",
-                &["comparison-page-watches", "news-then-page"],
+                &[
+                    "comparison-page-watches",
+                    "news-then-page",
+                    "hotels-for-dates-page-searching",
+                    "route-page-searching",
+                ],
+            ),
+            (
+                "unless Octo can search the web and no site needs using first (a booking or availability for dates, a sign-in or their account, a form or planner): it then stays `direct`.",
+                "direct",
+                &["news-then-page-searching", "comparison-page-searching"],
             ),
             (
                 "So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.",
@@ -1508,6 +1571,7 @@ mod tests {
                     "score-last-night",
                     "hours-sunday",
                     "translate-words-about-the-browser",
+                    "news-today-searching",
                 ],
             ),
         ];
@@ -1520,8 +1584,29 @@ mod tests {
                 let input = routing_input(&case, workspace.path()).unwrap();
                 assert!(input.browser_routes_offered, "{id}");
                 assert!(input.prompt.contains(rule), "{id} reads: {rule}");
+                // Whether Octo can search the web for the message is one line of the routing
+                // input, after the section, there exactly when the case says so.
+                let fact = format!("```\n{}", super::super::ROUTING_SEARCH_FACT);
+                assert_eq!(input.prompt.contains(&fact), case.integrated_search, "{id}");
+                assert_eq!(
+                    input
+                        .prompt
+                        .matches(super::super::ROUTING_SEARCH_FACT)
+                        .count(),
+                    usize::from(case.integrated_search),
+                    "{id}"
+                );
                 covered.insert(case.id);
             }
+        }
+        // Each case that can search has a twin rule on the same kind of message without it: news
+        // and a comparison put on a page browse first only when Octo can't search.
+        for (searching, without) in [
+            ("news-then-page-searching", "news-then-page"),
+            ("comparison-page-searching", "comparison-page-watches"),
+        ] {
+            assert!(case(&cases, searching).integrated_search, "{searching}");
+            assert!(!case(&cases, without).integrated_search, "{without}");
         }
         // The cases from `news-today` on are exactly these, and none is about a subject an
         // earlier case is about.

@@ -2657,6 +2657,45 @@ function targetFingerprint(description) {
 
 // A field the person may be asked to fill (request_human_input).
 const EDITABLE_FIELD_TAGS = new Set(["input", "textarea", "select"]);
+const BUTTON_INPUT_TYPES = new Set(["button", "submit", "reset", "image"]);
+
+// Whether a control a pause highlights is one the person fills in (a text
+// box, a list, a check box) rather than one they press (a button, a link, an
+// input drawn as a button): its label in the hand-off says which.
+function isFilledField(description) {
+  return (
+    EDITABLE_FIELD_TAGS.has(description.tag) &&
+    !(description.tag === "input" && BUTTON_INPUT_TYPES.has(String(description.inputType || "").toLowerCase()))
+  );
+}
+
+// A cookie notice's own choice, as a pause names it: a control inside the
+// notice that refuses (`dismiss`), opens its settings or limits what it allows.
+// Its accept is never listed, so never highlighted; a control that does
+// anything else there (a "Delete my account" a page dressed as a notice) is a
+// step of its own, and a pause names it so.
+function isCookieChoice(description, pageUrl) {
+  return (
+    description.policy?.consentContext === true &&
+    ["dismiss", "navigation", "change"].includes(classifyStep("click", description, { pageUrl }).category)
+  );
+}
+
+// What a pause tells the run, by what it highlights: fields only are a
+// sign-in or a form's details (human_input_required); a cookie notice's own
+// choices are the person's choice on it (cookie_notice_required); anything
+// else with a button or a link is a step only the person takes, such as a
+// booking's or a payment's final button (human_step_required). The runtime
+// words the person's reply from the code, never from the page.
+function humanInputKind(selected, pageUrl) {
+  if (selected.every(({ description }) => isFilledField(description))) {
+    return { code: "human_input_required", wait: "filling the highlighted fields" };
+  }
+  if (selected.every(({ description }) => isCookieChoice(description, pageUrl))) {
+    return { code: "cookie_notice_required", wait: "answering the highlighted cookie notice", kind: "cookies" };
+  }
+  return { code: "human_step_required", wait: "doing the highlighted step" };
+}
 
 // One editable field as a pause on fields checks it: its index, label and
 // kind, and where its form sends, on the page's address. Unlike a snapshot's
@@ -6421,20 +6460,42 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     const interactive = await collectInteractiveElements(page);
-    // Only the fields it highlights must be as Octo saw them: a sign-in page
-    // that adds a button under its form after it loads still pauses on them.
-    if (!humanInputFieldsAsObserved(page.url(), interactive, body)) {
+    const selected = body.indices.map((index) => interactive[index]);
+    // Only the controls it highlights must be as Octo saw them: a sign-in page
+    // that adds a button under its form after it loads still pauses on its
+    // fields. A field is checked against the fields recorded for a pause, and
+    // any other control as a step's own control is (targetLocator).
+    const fields = body.indices.filter((index) => interactive[index] && EDITABLE_FIELD_TAGS.has(interactive[index].description.tag));
+    if (
+      !selected.every(Boolean) ||
+      (fields.length && !humanInputFieldsAsObserved(page.url(), interactive, { ...body, indices: fields }))
+    ) {
       pageChangedUnderStep = true;
       throw new Error("The page changed; take a fresh snapshot before requesting human input");
     }
-    // Editable fields only (a sign-in, a form). A cookie notice is never the
-    // person's step: the browser declines one itself where it can, and Octo
-    // carries on under one it could not.
-    const selected = body.indices.map((index) => interactive[index]);
-    if (!selected.every((entry) => entry && EDITABLE_FIELD_TAGS.has(entry.description.tag))) {
-      throw new Error("Human input targets must be observed editable fields");
+    for (const index of body.indices) {
+      if (!fields.includes(index)) await targetLocator(page, { index, snapshotId: body.snapshotId });
     }
-    for (const entry of selected) assertControlOn(entry.description);
+    for (const entry of selected) {
+      assertControlOn(entry.description);
+      const { category } = classifyStep("click", entry.description, { pageUrl: page.url() });
+      // A control that shows a secret is never handed over here: the person
+      // would open it in this browser, and the next reading would show Octo
+      // the value. They open that page in a browser of their own.
+      if (category === "reveal_secret") {
+        throw new Error(
+          `${quotedControlLabel(entry.description)} shows a secret, so nothing was highlighted. Tell the person in words which control shows it; they open this page in their own browser to see it.`,
+        );
+      }
+      // Nor is a cookie notice's accept, should a page list one: Octo never
+      // accepts cookies, and never asks the person to.
+      if (category === "consent") {
+        throw new Error(
+          `${quotedControlLabel(entry.description)} accepts cookies, so nothing was highlighted: Octo never asks the person to accept them.`,
+        );
+      }
+    }
+    const pause = humanInputKind(selected, page.url());
     await clearHumanInputHighlights(page);
     try {
       for (const entry of selected) {
@@ -6462,21 +6523,29 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     assertSameOrigin(page.url(), sourceOrigin);
     const authority = approvalProtocol.authority();
     const createdAtMs = Date.now();
+    let buttons = 0;
+    let filled = 0;
     emitAction({
       type: "human_input", label: "Human input needed", url: null,
       humanInputRequest: {
         version: 1, handoffId: crypto.randomUUID(), runId: authority.runId,
         initiatorUserId: authority.initiatorUserId, browserPageId: EXPECTED_BROWSER_PAGE_ID,
         origin: sourceOrigin, createdAtMs, expiresAtMs: createdAtMs + 600_000,
-        // Fixed labels: nothing of the page goes along.
-        fields: selected.map((_, index) => ({ label: `Highlighted field ${index + 1}` })),
+        ...(pause.kind ? { kind: pause.kind } : {}),
+        // Fixed labels: nothing of the page goes along. Each says whether the
+        // person fills it in or presses it.
+        fields: selected.map(({ description }) =>
+          isFilledField(description)
+            ? { label: `Highlighted field ${++filled}` }
+            : { label: `Highlighted button ${++buttons}` },
+        ),
       },
     });
     // The MCP latch blocks all further observation/mutation for this turn.
     // The existing guard, not this helper, restores human authority only after
     // confirmed shutdown. Never remove the agent marker to lend control.
     throw new Error(
-      "User input is needed. End this turn; the user will explicitly continue after filling the highlighted fields. [human_input_required_non_retryable]",
+      `User input is needed. End this turn; the user will explicitly continue after ${pause.wait}. [${pause.code}_non_retryable]`,
     );
   }
 

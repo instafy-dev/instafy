@@ -22,6 +22,28 @@ type BrowserHumanInputPresentation = {
 type BrowserHumanInputState = ReturnType<typeof useBrowserHumanInput>;
 
 /**
+ * What a pause asks of the person, from its fixed labels: the runtime names
+ * each highlighted control a field (filled in) or a button (pressed), and
+ * nothing of the page. A step that is only theirs, such as a booking's or a
+ * payment's final button, is pressed when they are ready.
+ */
+export function humanInputGuidance(fields: ReadonlyArray<{ label: string }>): string {
+  const buttons = fields.filter((field) => field.label.startsWith("Highlighted button")).length;
+  const filled = fields.length - buttons;
+  const press = `press the highlighted ${buttons === 1 ? "button" : "buttons"} on the page when you're ready, then let Octo continue.`;
+  if (!buttons) {
+    return `Fill the ${filled === 1 ? "highlighted field" : `${filled} highlighted fields`} on the page, then let Octo continue. Keep passwords and codes out of chat.`;
+  }
+  if (!filled) return `Press${press.slice("press".length)}`;
+  return `Fill the ${filled === 1 ? "highlighted field" : `${filled} highlighted fields`} and ${press} Keep passwords and codes out of chat.`;
+}
+
+/** Whether a pause holds a field to fill, as a sign-in does. */
+export function humanInputHasFields(fields: ReadonlyArray<{ label: string }>): boolean {
+  return fields.some((field) => !field.label.startsWith("Highlighted button"));
+}
+
+/**
  * What a pause on the person's fields in the space's browser says stays
  * behind once they sign in: Instafy's browser is the space's, so a sign-in
  * there reaches its other chats (and members). The Browser view shows it in
@@ -58,11 +80,12 @@ function HumanInputControls(props: HumanInputControlsProps & { takeOver?: ReactN
   const { state } = props;
   const canPress = canLetOctoContinue(props);
   // What the pause asks of the person, by its kind: a cookie notice the
-  // browser could not decline is answered on the page, fields are filled.
+  // browser could not decline is answered on the page, fields are filled and
+  // buttons pressed.
   const manualGuidance = state.request?.kind === "cookies"
     ? "Answer the highlighted cookie notice, then let Octo continue."
     : state.request
-      ? `Fill the ${state.request.fields.length === 1 ? "highlighted field" : `${state.request.fields.length} highlighted fields`} on the page, then let Octo continue. Keep passwords and codes out of chat.`
+      ? humanInputGuidance(state.request.fields)
       : "You control the browser. Finish your changes on the page, then let Octo continue.";
   const waitingGuidance = state.busy === "continue"
     ? "Continuing Octo's task. Input remains locked."

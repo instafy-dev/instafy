@@ -7263,6 +7263,113 @@ fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fi
     );
 }
 
+/// A step only the person may do is handed to them as a sign-in is, a button too (an owner
+/// decision, Nov 15): a booking's or a payment's final button, a part of a page Octo can't reach.
+/// The pause highlights it, names it a button in the hand-off in fixed words (nothing of the
+/// page), and ends the turn with a code of its own, whose reply says to press it when they're
+/// ready. A pause on fields alone stays a sign-in's. A cookie notice's own choices are a cookie
+/// notice's pause, and its accept is never listed, so never highlighted. A control that shows a
+/// secret is never handed over in this browser: the next reading would show Octo the value.
+#[test]
+fn a_pause_hands_the_person_a_button_as_it_does_fields() {
+    let human_input = |fixture: &EmbeddedControllerFixture| {
+        fixture
+            .action_log()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<JsonValue>(line).ok())
+            .filter(|action| action["type"] == "human_input")
+            .collect::<Vec<_>>()
+    };
+    let pause_on = |fixture: &EmbeddedControllerFixture, mode: &str, indices: JsonValue| {
+        let snapshot = payload_of(&fixture.run(mode, "GET", "/v1/snapshot", None));
+        let snapshot_id = snapshot["snapshotId"]
+            .as_str()
+            .expect("snapshot id")
+            .to_string();
+        (
+            snapshot,
+            fixture.run(
+                mode,
+                "POST",
+                "/v1/request-human-input",
+                Some(&json!({ "indices": indices, "snapshotId": snapshot_id }).to_string()),
+            ),
+        )
+    };
+
+    // A booking's final button: the person's to press.
+    let fixture = EmbeddedControllerFixture::new();
+    let (snapshot, paused) = pause_on(&fixture, "button:Reserva y paga", json!([0]));
+    assert_eq!(
+        snapshot["interactiveElements"][0]["label"],
+        "Reserva y paga"
+    );
+    let error = failure_of(&paused);
+    assert!(
+        error.contains("[human_step_required_non_retryable]"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("[human_input_required_non_retryable]"),
+        "{error}"
+    );
+    let requests = human_input(&fixture);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let request = &requests[0]["humanInputRequest"];
+    assert_eq!(
+        request["fields"],
+        json!([{ "label": "Highlighted button 1" }])
+    );
+    assert!(request.get("kind").is_none(), "{request}");
+    assert!(
+        !fixture.action_log().contains("Reserva"),
+        "nothing of the page goes along"
+    );
+
+    // Fields alone are still a sign-in's pause.
+    let fixture = EmbeddedControllerFixture::new();
+    let (_, paused) = pause_on(&fixture, "sign-in-page", json!([0, 1]));
+    assert!(failure_of(&paused).contains("[human_input_required_non_retryable]"));
+
+    // A cookie notice's own choices are the person's choice on it; its accept is not listed.
+    let fixture = EmbeddedControllerFixture::new();
+    let (snapshot, paused) = pause_on(&fixture, "cookie-banner", json!([0, 1]));
+    let labels: Vec<&str> = snapshot["interactiveElements"]
+        .as_array()
+        .expect("controls")
+        .iter()
+        .filter_map(|control| control["label"].as_str())
+        .collect();
+    assert!(!labels.contains(&"Accept all"), "{labels:?}");
+    assert_eq!(&labels[..2], ["Reject all", "Customize"], "{labels:?}");
+    let error = failure_of(&paused);
+    assert!(
+        error.contains("[cookie_notice_required_non_retryable]"),
+        "{error}"
+    );
+    let requests = human_input(&fixture);
+    assert_eq!(requests[0]["humanInputRequest"]["kind"], "cookies");
+    assert_eq!(
+        requests[0]["humanInputRequest"]["fields"],
+        json!([{ "label": "Highlighted button 1" }, { "label": "Highlighted button 2" }])
+    );
+    // A notice's choice beside a control of the page is a step of the person's, not a notice's.
+    let fixture = EmbeddedControllerFixture::new();
+    let (_, paused) = pause_on(&fixture, "cookie-banner", json!([0, 2]));
+    assert!(failure_of(&paused).contains("[human_step_required_non_retryable]"));
+
+    // A control that shows a secret is never highlighted, and nothing is handed over.
+    let fixture = EmbeddedControllerFixture::new();
+    let (_, refused) = pause_on(&fixture, "reveal-key", json!([0]));
+    let error = failure_of(&refused);
+    assert!(
+        error.contains("shows a secret, so nothing was highlighted"),
+        "{error}"
+    );
+    assert!(!error.contains("_non_retryable"), "{error}");
+    assert!(human_input(&fixture).is_empty());
+}
+
 /// The same task stopped on the site's home page, whose header has only a
 /// "Sign in" link, with "use its Sign in control … tell me when you're ready":
 /// a page without sign-in fields named nothing. Such a page names the control

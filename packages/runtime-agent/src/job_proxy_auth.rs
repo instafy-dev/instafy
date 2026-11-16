@@ -157,6 +157,15 @@ impl JobProxyAuth {
             && (self.scope.credential_id.is_some() || self.scope.run_id.is_some())
     }
 
+    /// Whether the grant lets a managed run (Instafy AI: a run id and no credential of its own)
+    /// search, whose searches cost the person credits and keep to a message's allowance
+    /// (`managed_web_search`). A person's own ChatGPT login searches on their own plan.
+    pub(crate) fn allows_managed_web_search(&self) -> bool {
+        self.allows_native_web_search()
+            && self.scope.credential_id.is_none()
+            && self.scope.run_id.is_some()
+    }
+
     pub fn new(
         client: Arc<ControllerClient>,
         registration: &Registration,
@@ -664,6 +673,13 @@ mod tests {
                 auth.allows_native_web_search(),
                 expected,
                 "claim {claim}, credential {credential}, run {run}"
+            );
+            // Only the managed lane's searches cost the person credits: a person's own login
+            // searches on their own plan.
+            assert_eq!(
+                auth.allows_managed_web_search(),
+                expected && !credential,
+                "managed: claim {claim}, credential {credential}, run {run}"
             );
         }
     }

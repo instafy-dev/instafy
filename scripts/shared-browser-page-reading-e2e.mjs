@@ -1058,7 +1058,7 @@ export async function runSharedBrowserPageReadingFixture() {
     measurements.coverWaitedClickMs = Date.now() - clickStarted;
     assert.equal(new URL(afterCover.url).pathname, "/reading/visit", "the click under a cover that went was not done");
 
-    // 9. A cookie notice is never the person's step.
+    // 9. A cookie notice is never Octo's step: the browser declines it, and only the person answers it.
     // a. A notice's accept is never listed, so no step can press it: a
     // reading counts it among the controls it leaves out. Its settings, a
     // limited accept, a refusal in words no list knows and a button a page
@@ -1097,29 +1097,39 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.equal(covered.done, COVERED_LINK_WORDS("Plan a journey"));
     assert.doesNotMatch(JSON.stringify(covered), /pause on|request_human_input/u);
     assert.deepEqual(requests, [`GET ${sites().site}/reading/visit`], "the notice's settings or accept were opened");
-    // c. A pause on a notice's buttons is refused as a pause on anything but
-    // fields is: nothing is outlined, published or pressed, in the chat's own
-    // tab and in Octo's own, whose words never send the turn to move the
+    // c. A pause on a notice's own choices (its settings, a refusal, a
+    // limited accept) hands them to the person as theirs to make, with the
+    // cookie notice's words; its accept is never listed, so never among them.
+    // A control a page dressed as a notice (an account's deletion) is a step
+    // of the person's, never named a cookie notice. Each is outlined and
+    // published with fixed labels, and nothing is pressed or answered. In
+    // Octo's own tab nothing is: its words never send the turn to move the
     // person's page for one.
     const humanInputsSince = (length) => fs.readFileSync(actionsPath, "utf8").slice(length).trim().split("\n").filter(Boolean)
       .map((line) => JSON.parse(line)).filter((event) => event.type === "human_input");
-    for (const [address, named] of [
-      ["/reading/cookie-notice", ["Customize cookies"]],
-      ["/reading/allow-notice", ["Cookie settings", "Accept only necessary"]],
-      ["/reading/disagree-notice", ["Disagree and close"]],
-      ["/reading/dressed-notice", ["Delete my account"]],
+    for (const [address, named, code, kind] of [
+      ["/reading/cookie-notice", ["Customize cookies"], "cookie_notice_required", "cookies"],
+      ["/reading/allow-notice", ["Cookie settings", "Accept only necessary"], "cookie_notice_required", "cookies"],
+      ["/reading/disagree-notice", ["Disagree and close"], "cookie_notice_required", "cookies"],
+      ["/reading/dressed-notice", ["Delete my account"], "human_step_required", undefined],
     ]) {
       reading = await read(address);
       const actionsBeforePause = fs.readFileSync(actionsPath, "utf8").length;
       const paused = await runTool("POST", "/v1/request-human-input", { indices: named.map((label) => control(reading, label).index), snapshotId: reading.snapshotId });
       assert.equal(paused.code, 1, paused.stdout);
-      assert.match(paused.stderr, /Human input targets must be observed editable fields/u, `${address}: ${paused.stderr}`);
-      assert.doesNotMatch(paused.stderr, /cookie|_non_retryable/u, address);
-      assert.deepEqual(humanInputsSince(actionsBeforePause), [], `${address}: a pause was published`);
+      assert.ok(paused.stderr.includes(`[${code}_non_retryable]`), `${address}: ${paused.stderr}`);
+      const published = humanInputsSince(actionsBeforePause);
+      assert.equal(published.length, 1, `${address}: one pause is published`);
+      assert.equal(published[0].humanInputRequest.kind, kind, address);
+      assert.deepEqual(
+        published[0].humanInputRequest.fields,
+        named.map((_, index) => ({ label: `Highlighted button ${index + 1}` })),
+        `${address}: fixed labels`,
+      );
       assert.equal(
         await runPage.evaluate(() => Array.from(document.querySelectorAll("a, button, input")).filter((element) => element.style.outlineStyle).length),
-        0,
-        `${address}: something was outlined`,
+        named.length,
+        `${address}: what was outlined`,
       );
       assert.equal(await consentAnswer(), null, `${address}: the notice was answered`);
     }

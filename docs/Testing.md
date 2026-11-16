@@ -1765,14 +1765,15 @@ under a loading screen, is refused at once in words with no call log (the
 loading screen named by its tag and the first words it shows, with "try once
 more", as is one whose role says it has none), and a cover that goes a moment
 after the page moves is waited for. A
-cookie notice is never the person's step: its accept is never listed, in any
+cookie notice is never Octo's step: its accept is never listed, in any
 notice, and is counted among the controls left out, while its settings, a
 limited accept and a button dressed up beside it stay listed; a click under a
 notice the browser could not decline says where to go instead, never to pause
-on it; a pause on a notice's buttons is refused as one on anything but fields,
-in the chat's own tab and in Octo's own, with nothing outlined or pressed; and
-under a bar whose only button accepts, the planner's own button works with no
-prompt. A click whose route the page draws in place 1.5 s later reads it,
+on it; a pause on a notice's own choices is a cookie notice's pause with fixed
+labels and each choice outlined, while one on a button a page dressed up as a
+notice is a step of the person's, and in Octo's own tab nothing is outlined,
+nothing is pressed and the notice is never answered; and under a bar whose only
+button accepts, the planner's own button works with no prompt. A click whose route the page draws in place 1.5 s later reads it,
 after a hidden field, a tip on hover, a suggestion a field drops as it loses
 focus or the address changed first, one whose page still reads as before a few
 seconds on says so, and a click that changes the page, shows a section, menu,
