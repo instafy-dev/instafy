@@ -33,6 +33,12 @@ type UseChatGettingStartedStateOptions = {
   isHistoryLoading: boolean;
   remoteHistoryPresenceResolved: boolean;
   runtimeControllerEnabled: boolean;
+  /**
+   * A turn engine (Claude Code) is chosen for the next message: that message
+   * goes to the person's own engine, so the card's offer to connect an AI
+   * doesn't apply to it, and the card folds to its row as it does over a draft.
+   */
+  turnEngineChosen: boolean;
 };
 
 function buildScopedStorageKey(prefix: string, userId: string | null, projectId: string | null): string {
@@ -83,6 +89,7 @@ export function useChatGettingStartedState({
   isHistoryLoading,
   remoteHistoryPresenceResolved,
   runtimeControllerEnabled,
+  turnEngineChosen,
 }: UseChatGettingStartedStateOptions) {
   const gettingStartedKey = useMemo(
     () => buildScopedStorageKey(GETTING_STARTED_DISMISSED_KEY, currentUserId, activeProjectId),
@@ -249,9 +256,10 @@ export function useChatGettingStartedState({
     if (hasMoreHistory || isHistoryLoading) {
       return null;
     }
-    if (inputValue.trim().length > 0) {
+    if (inputValue.trim().length > 0 || turnEngineChosen) {
       // The GitHub mode was asked for explicitly (from the row or the menu),
-      // so it stays open over a draft; the root card folds to its row.
+      // so it stays open over a draft or a chosen engine; the root card folds
+      // to its row.
       return gettingStartedMode === "github" ? "full" : "collapsed";
     }
     return "full";
@@ -273,6 +281,7 @@ export function useChatGettingStartedState({
     projectHasConversationHistory,
     remoteHistoryPresenceResolved,
     runtimeControllerEnabled,
+    turnEngineChosen,
   ]);
   const shouldShowGettingStarted = gettingStartedPresentation !== null;
   const gettingStartedCollapsed = gettingStartedPresentation === "collapsed";
