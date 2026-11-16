@@ -214,7 +214,11 @@ is not read as the page's words, and the check notes that it isn't drawn. That s
 still missing once, from its cells, first under "Still to confirm", so the check notes an `unchecked` entry that names
 a column no row has a value for: the entry stays only for what the reader can do that the page doesn't say. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
 value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
-it was read (`src`, `url`, `date`), and a filter applied without `site.byFilter`; and it notes the rows the filter
+it was read (`src`, `url`, `date`), a filter applied without `site.byFilter`, and a comparison of two or more options
+with no `sort` entry by a column that reads as a number, while one reads as a number in every row (the line under its
+title names the option each `sort` entry puts first: the check names the columns that read as a number, for an entry
+with its `dir` for each amount the person compares by among them, never for a number in a name such as a chip's); and
+it notes the rows the filter
 lists apart because their value is unknown (`site.within` never counts an unknown value as within a limit). A row of a
 comparison must say where it comes from, by its data, never its words: a value or a `sources` entry cites an https
 page that was read, or, when only a search result names it, `found` names that result's site (`"reviews.example.net"`;

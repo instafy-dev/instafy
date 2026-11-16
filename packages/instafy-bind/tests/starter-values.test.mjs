@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
-import { knownNumber } from "../src/check.mjs";
+import { knownNumber, unsortedNumbers } from "../src/check.mjs";
 
 const STARTERS = new URL("../src/starters/", import.meta.url);
 const SITE_JS = fs.readFileSync(new URL("site.js", STARTERS), "utf8");
@@ -798,6 +798,58 @@ test("compare: a sort by a column no row has a value for is left out", async () 
     { store: { name: "Shop", url: `https://shop.example/${ref}`, readable: true } })), [price]);
   ({ document } = await draw("compare", unread, { width: 390 }));
   assert.equal(document.querySelectorAll(".sortv").length, 2);
+});
+
+// Two builds of a comparison of three laptops wrote every column as text and no "sort", so the page said nothing under
+// its title, although every row had its starting price ("From €619") and its weight ("1.3kg"). `instafy bind check`
+// names the columns that read as a number; with an entry for each amount the person compares by among them, the line
+// names the cheapest and the lightest, read as a sort reads them: the first number in each value. Under 5 options no
+// row moves, and a phone shows the first entry's value on each row.
+test("compare: with an entry for each amount the person compares by, the line under the title names the cheapest and the lightest", async () => {
+  const at = (v, page) => ({ v, src: "Maker", url: `https://maker.example/${page}`, date: DAY });
+  const built = () => ({
+    title: "Three laptops",
+    columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "weight", label: "Weight", type: "text" }, { key: "price", label: "Starting price", type: "text" },
+      { key: "reviews", label: "Independent reviews", type: "text" }],
+    items: [
+      item("13-pro", "Maker Laptop 13 Pro", { cpu: at("Chip Ultra 5", "13pro?tab=specs"), weight: at("1.4 kg", "13pro?tab=specs"), price: at("€1,349", "13pro/configure"),
+        reviews: at("Review One · Review Two", "13pro/reviews") }),
+      item("12", "Maker Laptop 12", { cpu: at("Chip 3", "12?tab=specs"), weight: at("1.3kg", "12?tab=specs"), price: at("From €619", "12/configure"),
+        reviews: { note: "two independent reviews not found" } }),
+      item("16", "Maker Laptop 16", { cpu: at("Chip AI 300", "16?tab=specs"), weight: at("2.1 or 2.4 kg", "16?tab=specs"), price: at("From €1,409", "16/configure"),
+        reviews: { note: "two independent reviews not found" } }),
+    ],
+  });
+  // as built: nothing under the title, and the check names the columns that read as a number
+  const asBuilt = await draw("compare", built());
+  const site = asBuilt.site;
+  let document = asBuilt.document;
+  assert.equal(document.getElementById("lede").textContent, "");
+  assert.equal(document.getElementById("lede").hidden, true);
+  assert.deepEqual(unsortedNumbers(built()).map((c) => c.label), ["CPU", "Weight", "Starting price"]);
+  // each value is read by its first number, on the page and by the check alike
+  for (const [v, n] of [["From €619", 619], ["1.3kg", 1.3], ["€1,349", 1349], ["From €1,409", 1409], ["1.4 kg", 1.4], ["2.1 or 2.4 kg", 2.1]]) {
+    assert.equal(site.known(at(v, "specs")), n, v);
+    assert.equal(knownNumber(at(v, "specs")), n, v);
+  }
+
+  // an entry for the price and one for the weight, the amounts the person compares by: the CPU's number is a name's
+  const sorted = { ...built(), sort: [{ key: "price", label: "Starting price, low to high", dir: "asc" }, { key: "weight", label: "Weight, light first", dir: "asc" }] };
+  assert.deepEqual(unsortedNumbers(sorted), []);
+  for (const width of [1280, 375]) {
+    ({ document } = await draw("compare", sorted, { width }));
+    assert.equal(document.getElementById("lede").textContent, "Lowest starting price and lowest weight: Maker Laptop 12", `${width}px`);
+    assert.equal(document.getElementById("lede").hidden, false, `${width}px`);
+    // three options keep the order they were written in
+    assert.deepEqual(rows(document).within, ["option:13-pro", "option:12", "option:16"], `${width}px`);
+  }
+  // a phone's row shows the first entry's value beside its name, so the skill's "no row moves" is all a sort does there
+  assert.deepEqual(document.querySelectorAll(".sortv").map((el) => el.textContent.split(" · ")[0]), ["€1,349", "From €619", "From €1,409"]);
+  // the cheapest and the lightest apart
+  const lighter = structuredClone(sorted);
+  lighter.items[0].facts.weight = at("1.2kg", "13pro?tab=specs");
+  ({ document } = await draw("compare", lighter, { width: 375 }));
+  assert.equal(document.getElementById("lede").textContent, "Lowest starting price: Maker Laptop 12 · Lowest weight: Maker Laptop 13 Pro");
 });
 
 test("ranked: a stated limit lists apart the rows whose price is unknown", async () => {
