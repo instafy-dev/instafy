@@ -179,8 +179,8 @@ where
 
 /// `count` side calls of `action` that `user_id` made `seconds_ago`, as the
 /// controller records them: closed receipts, and the calls added to their
-/// minute's row. Any prune deletes receipts older than ten minutes, so calls
-/// that only fill the hour are seeded as a minute row alone
+/// minute's row. Any prune deletes receipts older than ten minutes, so seed
+/// receipts well inside that, and older calls as a minute row alone
 /// (`seed_side_call_minute`).
 async fn seed_side_calls(
     pool: &PgPool,
@@ -295,10 +295,10 @@ async fn wait_until_blocked_by(pool: &PgPool, holder_pid: i32) -> anyhow::Result
 
 /// Each kind of side call reaches the provider until its minute, or its hour,
 /// holds its limit, and then answers 429 with that window, and the wait the
-/// window's oldest counted calls set, before the provider is called. The call
-/// that got through is counted on the connection it ran on, closed and added
-/// to its minute's row, and leaves marking the connection used to the
-/// proxy's lease.
+/// window's oldest counted calls set, before the provider is called. Receipts
+/// older than a minute no longer count in the minute. The call that got
+/// through is counted on the connection it ran on, closed and added to its
+/// minute's row, and leaves marking the connection used to the proxy's lease.
 #[tokio::test]
 async fn side_calls_count_in_their_minute_and_hour_before_the_provider() -> anyhow::Result<()> {
     let pool =
@@ -317,8 +317,10 @@ async fn side_calls_count_in_their_minute_and_hour_before_the_provider() -> anyh
 
     let mut answered_calls = 0;
     for kind in Kind::all() {
-        // Calls a few seconds ago, with their receipts, fill the minute; a
-        // minute row that began ten minutes ago, only the hour.
+        // Calls a few seconds ago, with their receipts, fill the minute. The
+        // hour is filled by a full minute of calls two minutes ago, which the
+        // minute no longer counts, and a minute row that began ten minutes
+        // ago for the rest.
         for (limit, window_seconds, minute_full, wait) in [
             (kind.per_minute, MINUTE_SECONDS, true, MINUTE_WAIT),
             (kind.per_hour, HOUR_SECONDS, false, HOUR_WAIT),
@@ -333,10 +335,20 @@ async fn side_calls_count_in_their_minute_and_hour_before_the_provider() -> anyh
                         seed_side_calls(pool, space.owner, kind.action, limit - 1, 5).await?;
                         limit - 1
                     } else {
-                        let calls = i32::try_from(limit - 1)?;
+                        seed_side_calls(
+                            pool,
+                            space.owner,
+                            kind.action,
+                            kind.per_minute,
+                            2 * MINUTE_SECONDS,
+                        )
+                        .await?;
+                        // Seeded last, so the wait counts from just before
+                        // the calls.
+                        let calls = i32::try_from(limit - 1 - kind.per_minute)?;
                         seed_side_call_minute(pool, space.owner, kind.action, calls, 10 * 60)
                             .await?;
-                        0
+                        kind.per_minute
                     };
 
                     let (status, answered) =
