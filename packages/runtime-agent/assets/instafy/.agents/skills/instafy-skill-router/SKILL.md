@@ -38,8 +38,8 @@ Use these mappings unless a project-specific skill overrides them.
   - Use `instafy-frontend-previews`: show it to people with a private Studio preview card (`instafy preview open ... --serve-cmd "<command>" --start`, which also keeps it running after the turn) and check it yourself with `instafy preview check`.
   - Not Instafy's browser: its safety policy blocks this space's own addresses (localhost, 127.0.0.1, 0.0.0.0, private addresses) and non-web ports.
 
-- **Anything a public web page would help with** (look something up, check or verify a public page, show a site's screens, guided clicks, sign-in)
-  - Use `instafy-browser-automation` and open the browser without asking in chat first; its site and action prompts still apply. Not for a site running in this space (above).
+- **A public web page a reader can't read, or a site to use** (a page that needs JavaScript or a sign-in, a site's screens, guided clicks, sign-in)
+  - Use `instafy-browser-automation` and open the browser without asking in chat first; its site and action prompts still apply. Not for a site running in this space (above). A page with neither is read with `instafy web read` (below).
   - Use the exposed Personal or Shared Browser tools. If neither is exposed, follow the skill's `request_browser` handoff so Studio can open or resume the appropriate browser.
 
 - **A fact from the web for an answer or a page** (prices, opening hours, timetables, addresses, places or products to compare, "with sources")

@@ -1973,15 +1973,19 @@ fn select_recursive_context_nodes(
     contexts: &[ContextNode],
     prompt_text: &str,
 ) -> Vec<SelectedContextNode> {
-    select_recursive_context_nodes_admitting(contexts, prompt_text, &|_| true)
+    select_recursive_context_nodes_admitting(contexts, prompt_text, &|_| true, None)
 }
 
 /// [`select_recursive_context_nodes`], where a context `admit` refuses is never selected as a
-/// child, so it takes no parent's place from one it admits.
+/// child, so it takes no parent's place from one it admits. `pinned` is a skill the turn carries
+/// whatever its words (`PinnedSkill`): it takes no place itself, and its own children are routed
+/// as a selected skill's are. A skill's topics hang under it (the browser skill's routes and
+/// comparing), and a turn that carries the skill reads the ones its words name.
 fn select_recursive_context_nodes_admitting(
     contexts: &[ContextNode],
     prompt_text: &str,
     admit: &dyn Fn(&ContextNode) -> bool,
+    pinned: Option<&str>,
 ) -> Vec<SelectedContextNode> {
     let normalized_prompt = prompt_text.trim().to_ascii_lowercase();
     let prompt_terms = PromptRoutingTerms::new(prompt_text);
@@ -2061,6 +2065,9 @@ fn select_recursive_context_nodes_admitting(
             });
             queue.push_back(context.id.clone());
         }
+    }
+    if let Some(pinned) = pinned.filter(|pinned| contexts_by_id.contains_key(*pinned)) {
+        queue.push_back(pinned.to_string());
     }
 
     while let Some(parent_id) = queue.pop_front() {
@@ -2287,8 +2294,8 @@ struct SkillHints {
 /// three workflow skills that match the request strongly, each with its
 /// description and the file to read, after `lead`, within a fixed byte cap. In
 /// a direct workspace change the research skill's line is its `instafy web read`
-/// line, also in place of the browser skill's ([`web_read_line`]). None when
-/// nothing matches that well.
+/// line, also in place of the browser skill's ([`web_read_line`]), and a skill
+/// under either of them brings it. None when nothing matches that well.
 fn format_skill_hints(workspace_dir: &Path, prompt_text: &str, lead: &str) -> Option<SkillHints> {
     let contexts = build_top_level_context_nodes(workspace_dir);
     if contexts.is_empty() {
@@ -2313,14 +2320,36 @@ fn format_skill_hints(workspace_dir: &Path, prompt_text: &str, lead: &str) -> Op
     // A direct change reads a web page with the research skill's `instafy web read`, never in
     // the browser ([`web_read_line`]).
     let direct_change = lead == DIRECT_WRITE_SKILL_HINTS_LEAD;
+    let mut ids: Vec<&str> = matched
+        .iter()
+        .take(SKILL_HINT_MAX_SKILLS)
+        .map(|node| {
+            if direct_change && node.id == BROWSER_TURN_SKILL.id {
+                WEB_RESEARCH_SKILL_ID
+            } else {
+                node.id.as_str()
+            }
+        })
+        .collect();
+    // A skill under the browser or research skill (a topic such as `instafy-comparing`) says
+    // which pages to read, not how a direct change reads them: it brings the research skill's
+    // line. Asked for a comparison page with each item's warranty, a direct change was named the
+    // comparing and page skills only, once comparing took the browser skill's place among them.
+    if direct_change
+        && !ids.contains(&WEB_RESEARCH_SKILL_ID)
+        && ids.iter().any(|id| {
+            by_id.get(id).is_some_and(|context| {
+                context.metadata.context_parents.iter().any(|parent| {
+                    parent == BROWSER_TURN_SKILL.id || parent == WEB_RESEARCH_SKILL_ID
+                })
+            })
+        })
+    {
+        ids.push(WEB_RESEARCH_SKILL_ID);
+    }
     let mut text = String::from(lead);
     let mut skills: Vec<String> = Vec::new();
-    for node in matched.into_iter().take(SKILL_HINT_MAX_SKILLS) {
-        let id = if direct_change && node.id == BROWSER_TURN_SKILL.id {
-            WEB_RESEARCH_SKILL_ID
-        } else {
-            node.id.as_str()
-        };
+    for id in ids {
         if skills.iter().any(|skill| skill.as_str() == id) {
             continue;
         }
@@ -2450,6 +2479,113 @@ fn usable_with_no_shell(context: &ContextNode) -> bool {
         .iter()
         .any(|pack| pack.name == context.id && (pack.cli.is_some() || !pack.bin.is_empty()));
     !scripts && !pack_commands
+}
+
+/// A topic skill: a workflow skill whose parents are all workflow skills, as `instafy-comparing`
+/// and `instafy-getting-around` hang under the browser, research and page skills. It holds what
+/// one kind of task needs, split out of its parents so that a turn reads it only when its words
+/// name it, and in a turn's snapshot it draws on a room of its own ([`TOPIC_SKILLS_MAX_BYTES`])
+/// before the shared one ([`draw_topic_room`]): taken from the shared room, the two topics and
+/// their index lines left the skills loaded last without theirs, and a lookup's build lost the
+/// router's "Answer from memory only when no page can be read" (a local test, Nov 16).
+fn is_topic_skill(context: &ContextNode, contexts: &[ContextNode]) -> bool {
+    let workflow = |node: &ContextNode| node.metadata.context_kind.as_deref() == Some("workflow");
+    workflow(context)
+        && !context.metadata.context_parents.is_empty()
+        && context.metadata.context_parents.iter().all(|parent| {
+            contexts
+                .iter()
+                .any(|node| &node.id == parent && workflow(node))
+        })
+}
+
+/// The room a turn's snapshot gives the topic skills ([`is_topic_skill`]) beside the shared
+/// [`PROJECT_MEMORY_MAX_TOTAL_BYTES`]: their index lines and the ones its words route.
+const TOPIC_SKILLS_MAX_BYTES: usize = PROJECT_MEMORY_MAX_FILE_BYTES;
+
+/// Takes `used` bytes a topic skill's text took from the topic skills' own room first, then from
+/// the shared room: a space's own topic larger than that room still loads as a skill its words
+/// route would.
+fn draw_topic_room(used: usize, topic_room: &mut usize, remaining: &mut usize) {
+    let own = used.min(*topic_room);
+    *topic_room -= own;
+    *remaining = remaining.saturating_sub(used - own);
+}
+
+/// Whether a turn with a pinned skill may be given `context` besides it: the space's memory and
+/// routing skills, which are always walked, and every other skill it can use with no shell. Its
+/// pinned skill is loaded whatever its words, so it takes no routing place.
+fn admitted_beside_pinned(context: &ContextNode, pinned: &PinnedSkill) -> bool {
+    context.metadata.always_include || (context.id != pinned.id && usable_with_no_shell(context))
+}
+
+/// The skills a browser turn on a restored thread is given beside its pinned skill's section: the
+/// ones its words route, as its first turn's snapshot gives them ([`format_project_memory_snapshot_with_preferences`]),
+/// each whole but for the sections a turn with no shell leaves out (and the router's own fields),
+/// up to [`PROJECT_MEMORY_MAX_FILE_BYTES`] and marked `[truncated]` when cut there, as the snapshot
+/// marks it, highest score first, within [`PINNED_SKILL_MAX_BYTES`]. Its thread began on another turn's
+/// words, or before a skill existed: given only "Finding a page" and the replies guide, a
+/// comparison's later browser turns lost how to compare, and a route's how to read a planner,
+/// once both moved into skills of their own. None when its words route none.
+fn routed_skills_for_restored_thread(
+    workspace_dir: &Path,
+    prompt_text: &str,
+    pinned: &PinnedSkill,
+    routed: bool,
+) -> Option<String> {
+    let contexts = build_top_level_context_nodes(workspace_dir);
+    let mut selected: Vec<SelectedContextNode> = select_recursive_context_nodes_admitting(
+        &contexts,
+        prompt_text,
+        &|context| admitted_beside_pinned(context, pinned),
+        Some(pinned.id),
+    )
+    .into_iter()
+    .filter(|node| node.score > 0 && node.id != pinned.id)
+    .collect();
+    selected.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+    let mut out = String::new();
+    for node in selected {
+        let Some(context) = contexts
+            .iter()
+            .find(|context| context.id == node.id && usable_with_no_shell(context))
+        else {
+            continue;
+        };
+        let Some((text, truncated)) = read_text_file_lossy_truncated(
+            workspace_dir,
+            &context.path,
+            PROJECT_MEMORY_MAX_FILE_BYTES,
+        ) else {
+            continue;
+        };
+        let text = match skill_routing::split_front_matter(&text) {
+            (front, body) if !front.is_empty() && !body.trim().is_empty() => body.trim_start(),
+            _ => text.as_str(),
+        };
+        let mut text = without_markdown_h2_section(text, ROUTING_PREFLIGHT_SECTION).into_owned();
+        for heading in sections_left_out(&context.metadata, true, routed) {
+            text = without_markdown_h2_section(&text, &heading).into_owned();
+        }
+        let relative = context
+            .path
+            .strip_prefix(workspace_dir)
+            .unwrap_or(context.path.as_path());
+        // A skill cut at its room says so, as a fresh snapshot's copy does: a turn given half a
+        // rule with no mark acts on it as the whole.
+        let section = format!(
+            "\nFrom `{}` (`{}`; this thread may predate it):\n{}\n{}",
+            context.id,
+            relative.display(),
+            text.trim_end(),
+            if truncated { "[truncated]\n" } else { "" }
+        );
+        if out.len() + section.len() > PINNED_SKILL_MAX_BYTES {
+            continue;
+        }
+        out.push_str(&section);
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// The section of a skill only the routing step reads ([`format_browser_routing_preflight_snapshot`]):
@@ -2765,6 +2901,7 @@ fn format_project_memory_snapshot_with_preferences(
 
     if remaining > 0 && skills_dir.is_dir() {
         let contexts = build_top_level_context_nodes(workspace_dir);
+        let mut topic_room = TOPIC_SKILLS_MAX_BYTES;
         // A turn with a pinned skill has no shell: it is told only of the skills it can use.
         let told_of = |context: &ContextNode| match pinned {
             Some(pinned) => context.id == pinned.id || usable_with_no_shell(context),
@@ -2791,7 +2928,10 @@ fn format_project_memory_snapshot_with_preferences(
                         format!("- {name}: {description}\n")
                     };
                     let line_len = line.as_bytes().len();
-                    if line_len <= remaining {
+                    if is_topic_skill(context, &contexts) && line_len <= topic_room + remaining {
+                        out.push_str(&line);
+                        draw_topic_room(line_len, &mut topic_room, &mut remaining);
+                    } else if line_len <= remaining {
                         out.push_str(&line);
                         remaining = remaining.saturating_sub(line_len);
                     } else {
@@ -2803,16 +2943,15 @@ fn format_project_memory_snapshot_with_preferences(
             // A skill such a turn cannot use takes no routing place: the space's memory and
             // routing skills are still walked (they are always included), and its pinned skill
             // loads whatever its words, so it takes none either.
-            let mut selected_contexts =
-                select_recursive_context_nodes_admitting(&contexts, prompt_text, &|context| {
-                    match pinned {
-                        Some(pinned) => {
-                            context.metadata.always_include
-                                || (context.id != pinned.id && usable_with_no_shell(context))
-                        }
-                        None => true,
-                    }
-                });
+            let mut selected_contexts = select_recursive_context_nodes_admitting(
+                &contexts,
+                prompt_text,
+                &|context| match pinned {
+                    Some(pinned) => admitted_beside_pinned(context, pinned),
+                    None => true,
+                },
+                pinned_skill,
+            );
             // A pinned skill the words did not route is loaded too, under its parent.
             if let Some(pinned) = pinned_skill
                 && !selected_contexts.iter().any(|context| context.id == pinned)
@@ -2911,13 +3050,14 @@ fn format_project_memory_snapshot_with_preferences(
                 )
             });
             for context in ordered_contexts {
-                if remaining == 0 {
-                    break;
+                let node = contexts.iter().find(|node| node.id == context.id);
+                let topic = Some(context.id.as_str()) != pinned_skill
+                    && node.is_some_and(|node| is_topic_skill(node, &contexts));
+                if remaining == 0 && (!topic || topic_room == 0) {
+                    continue;
                 }
                 let label = format!("Context: {}", context.label);
-                let omitted_sections = contexts
-                    .iter()
-                    .find(|node| node.id == context.id)
+                let omitted_sections = node
                     .map(|node| sections_left_out(&node.metadata, pinned.is_some(), routed))
                     .unwrap_or_default();
                 if Some(context.id.as_str()) == pinned_skill {
@@ -2928,6 +3068,17 @@ fn format_project_memory_snapshot_with_preferences(
                         &mut remaining,
                         &mut out,
                     );
+                } else if topic {
+                    let mut room = topic_room + remaining;
+                    let before = room;
+                    append_file(
+                        &label,
+                        &context.path,
+                        &omitted_sections,
+                        &mut room,
+                        &mut out,
+                    );
+                    draw_topic_room(before - room, &mut topic_room, &mut remaining);
                 } else {
                     append_file(
                         &label,
@@ -4139,12 +4290,21 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 - Use the source's observed title in prose. With its accessible ID, write `[[conversation:<id>|<actual chat title>]]` outside code formatting. Use `Source chat` when untitled; never invent titles or links.\n\
 - Show raw conversation, message or run UUIDs in prose or labels only when the user explicitly asks for technical identifiers. Keep IDs in link targets, tool arguments and API fields. If title or link is unavailable, describe the source.\n";
 
-/// Octo opens Instafy's browser on its own whenever a page would help. Like
+/// Octo opens Instafy's browser on its own when a page needs it. Like
 /// the chat reference contract, it is a Studio contract independent of the
 /// lane and of which skills were routed: the browser skill is rarely routed,
 /// and a restored provider thread loads no skills at all. So it rides on every
 /// interactive turn that can emit actions, first, restored, cross-chat and
 /// skill setup alike (see `browser_choice_applies`).
+///
+/// What needs the browser is said as the browser skill says it ("When to use
+/// this skill") and the router does: a page `instafy web read` says
+/// `needs_browser` for, a page the person wants to see, or a provider's
+/// screens to walk the person through. Any other public page is read with
+/// `instafy web read`, with no card. The rule said "Whenever a web page would
+/// help", against the skill's "needs no card", so a turn read two rules for
+/// one page; and "Skip it when you can answer as well without a page" went
+/// with it, as a turn that needs no page has none that needs the browser.
 ///
 /// Studio starts a `request_browser` card by itself only in the tab whose
 /// prompt asked for it, once that turn is finished, for an address the person
@@ -4177,13 +4337,13 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// task, never a browser turn that stopped, failed or refused a page by
 /// itself.
 const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
-- Whenever a web page would help (to look something up, check a page, or walk the person through a provider's screens), open Instafy's browser yourself, without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
+- Open Instafy's browser yourself when a page needs it (`instafy web read` says `needs_browser`, the person wants to see it, or you walk the person through a provider's screens), without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
 - It opens public web addresses only; its safety policy blocks this space's own addresses (localhost, 127.0.0.1, private addresses, ports here). A site running in this space is shown to people with a private Studio preview card (`instafy preview open`), not this browser.\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
 - `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
 - A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n\
-- Skip it when you can answer as well without a page or a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
+- Skip it when a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
 
@@ -11167,13 +11327,26 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 );
                 skill_hints = Some(("restoredSkillHints", hints.skills));
             }
-            // A browser turn is given the browser skill's "Finding a page" and
-            // `AGENTS.md`'s "Replies" again.
+            // A browser turn is given the browser skill's "Finding a page", the skills its
+            // words route and `AGENTS.md`'s "Replies" again.
             if include_workspace_memory && let Some(pinned) = pinned_skill_for_turn(job) {
+                let routed = job
+                    .payload
+                    .get("metadata")
+                    .is_some_and(browser_hand_back::carries_on_a_routed_card);
                 for (name, section) in [
                     (
                         "pinnedSkillSection",
                         pinned_skill_section(workspace_dir, pinned),
+                    ),
+                    (
+                        "restoredRoutedSkills",
+                        routed_skills_for_restored_thread(
+                            workspace_dir,
+                            request_for_skills,
+                            pinned,
+                            routed,
+                        ),
                     ),
                     (
                         "pinnedRepliesSection",

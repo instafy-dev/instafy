@@ -1,6 +1,6 @@
 ---
 name: instafy-browser-automation
-description: Open Instafy's browser whenever a web page would help: look things up, check or verify pages, walk the person through a site. Personal, Shared and read-only observation. Not for sites running in this space (shown with a Studio preview).
+description: Open Instafy's browser when a web page needs it: look things up, check or verify pages, walk the person through a site. Personal, Shared and read-only observation. Not for sites running in this space (shown with a Studio preview).
 context_kind: workflow
 context_parent: instafy-skill-router
 routing_keywords: browser, playwright, page, click, screenshot, visible session, live browser, open url, read title, website, web page, look up, walk me through, docs, pricing, portal, sign in
@@ -25,7 +25,7 @@ Public web addresses only: its safety policy blocks this space's own addresses (
 
 ## When to use this skill
 
-Use this skill whenever a web page would help, whether or not the person mentioned a browser: to look something up, check or verify a page, or walk them through a site's screens. Open the browser yourself, without asking in chat first. When interactive tools are absent, use the Studio handoff below.
+Use this skill when a web page needs Instafy's browser, whether or not the person mentioned one: a page `instafy web read` says `needs_browser` for, a site's screens to walk them through or use, or a page they want to see. `instafy web read <url…> --json` reads the rest, with no card. Open the browser yourself, without asking in chat first. When interactive tools are absent, use the Studio handoff below.
 
 ## Open or resume from Chat
 
@@ -59,9 +59,8 @@ that an expired login, cart or unsaved form is still intact.
 Once interactive tools are exposed, use them directly. A paused/revoked browser
 or a rejected action must not produce another browser request to bypass the
 existing control boundary. Read-only public verification may still use
-`instafy_local_browser.observe` without an interactive handoff. A public page with
-no JavaScript or sign-in needs no card: `instafy web read <url…> --json` reads
-it; in a reply-only turn, its `needs_browser` pages go in a card.
+`instafy_local_browser.observe` without an interactive handoff. In a reply-only turn,
+the pages `instafy web read` says `needs_browser` for go in a card.
 
 ## Several reads in one card
 
@@ -75,11 +74,11 @@ open your own tab (`open_tab`, 3 at most) only to hold two pages at once.
 
 For direct readers and browsers (provider-hosted retrieval follows `instafy-web-research`):
 
-- Open an address the person or a skill gave or a link on a page you read (print a page's links with its text), else the official site of what the task names (for reviews, a reviewer's own site) and its links and search. Prefer available native search for discovery; never invent a page path. Use a search engine only if the person named one or no official site is known.
-- A page that says it is missing ("not found", "are you lost?"): use that site's own search box or menu.
-- A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.
-- A sight, stop, opening hours, price or route comes from its own page (the venue's, operator's or shop's; a route from the operator's journey planner: choose the start, the stop nearest the place (the one its own page names, else your pick), the person's day and time (else a daytime hour); press its button and read the route), not a listing or a kiosk page: those only lead to it. A route's finding, like your reply, names its end stop, whose pick it is ("<stop>, Octo's pick: the place's page names no stop"), what it leaves out ("the walk to the place isn't in it") and the day and time its legs run, not the page header's.
-- Comparing: list the models a page you read names, its menu included, then open each one's own page. Never names from memory, never placeholders such as "candidate 1".
+- Open an address the person or a skill gave, or a link on a page you read (print a page's links with its text), else the official site of what the task names and its links and search box. Prefer available native search for discovery; never invent a page path. Instafy's browser has no web search: open a search engine only when the person named one.
+- A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page: those only lead to it.
+- A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source.
+- A page's own tab or link named for a value (its hours, its warranty) is a page to read: open it before you call the value not found.
+- In Instafy's browser, write a finding's fact under a page you read that states it, not one that only quotes it, in a few words of your own, never long listing text, saying which of its values you chose, not the page.
 
 ## Shared Browser command (only when Shared Browser is exposed)
 
@@ -115,7 +114,7 @@ browser turn's own run text already says how its browser works.
 ## Default decision order
 
 1. If the user named a URL, domain, or target app, go there first.
-2. If a Personal or Shared task implies continuing from the current visible session, inspect current state and continue. The Shared Browser is shared by the space's chats, so the page a turn starts on can hold another chat's task: continue there only when it is this conversation's own work; otherwise start this task's own step and never describe that page as resuming. Owner-local observation cannot continue a session.
+2. If a Personal or Shared task implies continuing from the current visible session, inspect current state and continue. The Shared Browser is shared by the space's chats, so the page a turn starts on can hold another chat's task: continue there only when it is this conversation's own work or the person's message is about that page; otherwise start this task's own step and never describe that page as resuming. Owner-local observation cannot continue a session.
 3. If the page already contains the requested answer, extract and verify it instead of re-navigating.
 
 ## Routing preflight

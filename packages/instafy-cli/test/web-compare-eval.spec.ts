@@ -405,15 +405,22 @@ describe("the shopping comparison eval (fixtures)", () => {
     const flat = (s: string) => s.replace(/\s+/g, " ");
     const skills = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../runtime-agent/assets/instafy/.agents/skills");
     const research = flat(fs.readFileSync(path.join(skills, "instafy-web-research/SKILL.md"), "utf8"));
+    // How items are compared is `instafy-comparing`'s, which the research skill points to.
+    const comparing = flat(fs.readFileSync(path.join(skills, "instafy-comparing/SKILL.md"), "utf8"));
     for (const rule of [
-      "## Comparing items",
-      "Missing or refused: say where/why, then try an allowed shop.",
-      "`instafy web search \"<name> price\" --json`, or `--chain reference-search` for shops' official sites",
-      "a shop restricted by workspace policy can use Guided mode.",
+      "Missing or refused: try an allowed shop.",
       "Never remember or guess a price.",
       "that many per exact model, from independent publishers, not its maker/shops or a sibling model.",
       "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page, citing only those reviews.",
       "an item with no price read this turn is listed as \"price unknown\", never as within it",
+      "List the models a page you read names, its menu included, then open each one's own page. Never names from memory, never placeholders such as \"candidate 1\".",
+    ]) {
+      expect(comparing, rule).toContain(rule);
+    }
+    expect(research).toContain("compare items as `instafy-comparing` says.");
+    for (const rule of [
+      "`instafy web search \"<name> price\" --json`, or `--chain reference-search` for shops' official sites",
+      "a shop restricted by workspace policy can use Guided mode.",
       "each fact not read marked unknown with why.",
       // a model only a search names is "not checked", said where the searches are
       "- An item only a result names is \"not checked\".",
@@ -426,14 +433,13 @@ describe("the shopping comparison eval (fixtures)", () => {
     ]) {
       expect(research, rule).toContain(rule);
     }
-    // Another source after a failed page, and which names a comparison lists, are the browser skill's "Finding a
-    // page", which the research skill points to.
+    // Another source after a failed page is the browser skill's "Finding a page", which the research skill points to.
     expect(research).toContain('as "Finding a page" in `instafy-browser-automation` says');
     const browser = flat(fs.readFileSync(path.join(skills, "instafy-browser-automation/SKILL.md"), "utf8"));
     for (const rule of [
       "## Finding a page",
-      "A page that fails (busy, blank, or an error page such as 504): open the place's own site now, in this turn. After that, another official source.",
-      "Comparing: list the models a page you read names, its menu included, then open each one's own page. Never names from memory, never placeholders such as \"candidate 1\".",
+      "A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task.",
+      "then the official site of what the task names; then another official source.",
       // a stopped page ends that page, never the research: the next source is "Finding a page"'s
       "ends that page, not the task: \"Finding a page\" says what comes next. Never retry that page another way.",
     ]) {

@@ -982,6 +982,14 @@ const WEB_RESEARCH_SEARCH_PROVIDERS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-web-research/references/search-providers.json"
 ));
+const COMPARING_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-comparing/SKILL.md"
+));
+const GETTING_AROUND_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-getting-around/SKILL.md"
+));
 const INTERACTIVE_ARTIFACTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
@@ -1001,7 +1009,7 @@ const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT
 /// Every file the runtime bundles under `assets/instafy`. In a git-canonical
 /// space with history the runtime commits none of them, so this bootstrap is
 /// what brings each one to `main`.
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 39] = [
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 41] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -1183,6 +1191,16 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 39] = [
         path: ".agents/skills/instafy-web-research/references/search-providers.json",
         asset_relative_path: ".agents/skills/instafy-web-research/references/search-providers.json",
         fallback_content: WEB_RESEARCH_SEARCH_PROVIDERS_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-comparing/SKILL.md",
+        asset_relative_path: ".agents/skills/instafy-comparing/SKILL.md",
+        fallback_content: COMPARING_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-getting-around/SKILL.md",
+        asset_relative_path: ".agents/skills/instafy-getting-around/SKILL.md",
+        fallback_content: GETTING_AROUND_TEMPLATE,
     },
     ProjectMemoryTemplateFile {
         path: ".agents/skills/instafy-interactive-artifacts/SKILL.md",
