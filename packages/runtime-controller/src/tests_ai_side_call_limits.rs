@@ -90,11 +90,13 @@ impl Kind {
     }
 }
 
-/// What the provider says, through the proxy, to every side call.
+/// What the provider says, through the proxy, to every side call: an
+/// assistant message, the only output the controller reads text from.
 fn provider_answer() -> Value {
     json!({
         "output": [{
             "type": "message",
+            "role": "assistant",
             "content": [{ "type": "output_text", "text": "Quarterly report" }],
         }],
     })
