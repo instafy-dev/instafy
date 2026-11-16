@@ -1,5 +1,5 @@
 {
-  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. warranty-from-each-laptops-page and keep-going-after-two-stops-and-an-undo were sent in a fifth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-note was sent in a sixth recorded local test, with the entries its routing step received there. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases. Every hand-back's stored prompt, Stop notice, report of what a stopped turn kept, and Undo line carries the metadata the controller writes on it that the runtime reads (the card a hand-back carries on, who stopped which runs, what was kept, which run's change was undone): where a recording kept only its words and kind, the rest is filled in as the controller writes it.",
+  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. warranty-from-each-laptops-page and keep-going-after-two-stops-and-an-undo were sent in a fifth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-note was sent in a sixth recorded local test, with the entries its routing step received there. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases. Every hand-back's stored prompt, Stop notice, report of what a stopped turn kept, and Undo line carries the metadata the controller writes on it that the runtime reads (the card a hand-back carries on, who stopped which runs, what was kept, which run's change was undone): where a recording kept only its words and kind, the rest is filled in as the controller writes it. The cases from news-today on were written for this check and sent in no recorded test, on subjects none of the recorded tests used: one or more for each rule of the browser skill's routing section, and eight lookups that a search for fresh information changes (news, a recent result, opening hours, news put on a page, a trip on a map, a comparison page, an order in the person's own account, a site opened in the browser). Their chats are built as the runtime receives them, with the metadata the controller writes on a routed card's browser turn and its hand-back. The last three say which rule decides where two could be read: a note in the person's own words and a place added to a map, after a reply that said a sight wasn't found, and a note in the person's own words on a page, about a value a reply didn't confirm.",
   "cases": [
     {
       "id": "map-trip",
@@ -1803,6 +1803,800 @@
         "route": "direct"
       },
       "why": "From the Octo turn eval: words like \"comparison\" and \"map\" inside text to rewrite ask for no page and no browser."
+    },
+    {
+      "id": "news-today",
+      "message": "What's the news about Siemens today?",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "News answered in a reply, with no browser named: the building turn finds and reads it. Instafy's browser has no web search."
+    },
+    {
+      "id": "score-last-night",
+      "message": "Who won the Celtics game last night, and what was the score?",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "A recent result answered in a reply, with no browser named: the building turn finds and reads it."
+    },
+    {
+      "id": "hours-sunday",
+      "message": "Is the Kunsthistorisches Museum in Vienna open this Sunday, and what are its hours?",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "Opening hours answered in a reply, with no browser named: the building turn reads the museum's own page, and opens the browser itself only if that page needs it."
+    },
+    {
+      "id": "news-then-page",
+      "message": "What's the news about Airbus today? Put it on a small page I can share.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "News put on a page is research whose answer ends in a page: the browser opens the company's own site and its news first, and Octo then makes the page. It stays so until research pages search before the browser."
+    },
+    {
+      "id": "trip-on-a-map",
+      "message": "Plan 3 days in Valencia for a first visit: where to stay, what to see each day, on a map.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "A trip asked for on a map is one building turn: the map's skill finds and cites its own places, and the map is files that turn must make."
+    },
+    {
+      "id": "comparison-page-watches",
+      "message": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "Research whose answer is a comparison page goes to the browser from the first message, then builds. It stays so until research pages search before the browser."
+    },
+    {
+      "id": "order-in-account",
+      "message": "Check the status of my last order in my Decathlon account.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "The person's own account on a website: the browser opens the shop's site and pauses for them to sign in. No page found by a search could answer it."
+    },
+    {
+      "id": "open-a-site-in-the-browser",
+      "message": "Open www.nationalgallery.org.uk in your browser and find this Sunday's opening hours.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "The person names the browser and the answer is a reply."
+    },
+    {
+      "id": "metro-planner",
+      "message": "Get me from Westbahnhof to Stephansplatz by U-Bahn, using Wiener Linien's journey planner.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "The work happens on a website: the operator's journey planner is used, its button pressed and its route read. The answer is a reply."
+    },
+    {
+      "id": "send-a-form-on-a-site",
+      "message": "Use the contact form on www.belvedere.at to ask whether strollers are allowed in the Upper Belvedere, and send it.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "The work happens on a website: a form is filled in and sent, which asks the person first."
+    },
+    {
+      "id": "browser-follow-up-tram",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.belvedere.at in your browser and find tomorrow's opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.belvedere.at in your browser and find tomorrow's opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:02:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.belvedere.at in your browser and find tomorrow's opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The Upper Belvedere is open daily from 9:00 to 18:00, and until 21:00 on Fridays, per the museum's visitor page, checked 16 Nov. [Belvedere](https://www.belvedere.at/en/visit)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        }
+      ],
+      "message": "Now find which tram goes there from Westbahnhof.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "Carries on this chat's browser work, and the answer is a reply."
+    },
+    {
+      "id": "browser-named-then-page",
+      "message": "Open www.edinburghcastle.scot in your browser, find this week's opening hours and ticket prices, and put them on a small page I can share.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The person names the browser, and Octo then makes a page here from what it finds."
+    },
+    {
+      "id": "page-with-a-value-the-browser-did-not-confirm",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.nhm.ac.uk in your browser and find the museum's opening hours and whether the dinosaur gallery needs a ticket.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.nhm.ac.uk in your browser and find the museum's opening hours and whether the dinosaur gallery needs a ticket.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:02:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.nhm.ac.uk in your browser and find the museum's opening hours and whether the dinosaur gallery needs a ticket.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The Natural History Museum is open daily from 10:00 to 17:50, per its visiting page, checked 16 Nov. I couldn't confirm whether the dinosaur gallery needs a ticket: its page didn't say, and the tickets page kept loading.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        }
+      ],
+      "message": "Put the hours and the ticket rules on a small page I can share.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "This chat's reply found the hours but said the ticket rules weren't confirmed: the browser looks again before the page is built."
+    },
+    {
+      "id": "page-with-a-value-a-reply-did-not-confirm",
+      "history": [
+        {
+          "role": "user",
+          "content": "How much is a 24-hour ticket for Copenhagen's buses and metro?",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't confirm today's price: the operator's fare page didn't load for me, and the figures I found elsewhere were from last year. The ticket covers buses, the metro and harbour buses in the zones you choose.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:02:00.000Z"
+        }
+      ],
+      "message": "Make a small page with the 24-hour ticket's price and where to buy it.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The reply here said today's price wasn't confirmed, and the chat has no browser turn yet: the browser reads the price first, and Octo then makes the page."
+    },
+    {
+      "id": "keep-going-tram-route-open",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.belvedere.at in your browser and find tomorrow's opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.belvedere.at in your browser and find tomorrow's opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:02:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.belvedere.at in your browser and find tomorrow's opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The Upper Belvedere is open daily from 9:00 to 18:00, and until 21:00 on Fridays, per the museum's visitor page, checked 16 Nov. [Belvedere](https://www.belvedere.at/en/visit)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find which tram goes there from Westbahnhof.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:04:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Now find which tram goes there from Westbahnhof.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:05:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-3",
+              "browserAutoStarted": true,
+              "dispatchContent": "Now find which tram goes there from Westbahnhof.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-3",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't confirm a tram route from Westbahnhof: Wiener Linien's journey planner showed no result for the stops I chose, and the Belvedere's page names only the stop Quartier Belvedere.",
+          "runId": "run-4",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:06:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours and the tram route on a small page I can share.",
+          "runId": "run-5",
+          "createdAt": "2026-11-16T09:07:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours and the tram route on a small page I can share.",
+          "runId": "run-6",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:08:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-5",
+              "browserAutoStarted": true,
+              "dispatchContent": "Put the hours and the tram route on a small page I can share.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-5",
+                "routed": true
+              },
+              "browserHandsBack": true
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "runId": "run-6",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:09:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Continue building with what the browser turn found.",
+          "runId": "run-7",
+          "createdAt": "2026-11-16T09:10:00.000Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-5",
+              "browserJobId": "job-run-6"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small page with the Upper Belvedere's opening hours, checked 16 Nov on belvedere.at. The tram route from Westbahnhof isn't confirmed yet; the page says so and links to Wiener Linien's journey planner. People in this space can open it.",
+          "runId": "run-7",
+          "createdAt": "2026-11-16T09:11:00.000Z"
+        }
+      ],
+      "message": "keep going",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The page here marks the tram route not confirmed, and the replies say so: a bare \"keep going\" carries that on in the browser, and Octo then changes the page."
+    },
+    {
+      "id": "keep-going-page-not-made-yet",
+      "history": [
+        {
+          "role": "user",
+          "content": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't make the comparison yet: Garmin's product pages didn't load for me, so I couldn't tell which three Forerunner models are the latest. Send me the product pages you want compared, or tell me to look again.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:02:00.000Z"
+        }
+      ],
+      "message": "keep going",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "An earlier message asked for a comparison page that isn't made yet, and its reply couldn't read the maker's pages: a bare \"keep going\" carries that on in the browser, and Octo then makes the page."
+    },
+    {
+      "id": "change-needs-each-makers-page",
+      "history": [
+        {
+          "role": "user",
+          "content": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:02:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              },
+              "browserHandsBack": true
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Continue building with what the browser turn found.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:04:00.000Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-1",
+              "browserJobId": "job-run-2"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Built the Forerunner comparison page with the 970, 570 and 165: screen, weight and price from Garmin's own pages, checked 16 Nov. Battery life for the 165 and the second independent review for each watch are not confirmed yet; the page marks them.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:05:00.000Z"
+        }
+      ],
+      "message": "Add each watch's warranty from Garmin's own pages.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "A change that needs what a web page says: the browser reads each watch's own page first, and Octo then adds what it says."
+    },
+    {
+      "id": "fill-in-after-browser-work-watches",
+      "history": [
+        {
+          "role": "user",
+          "content": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:02:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              },
+              "browserHandsBack": true
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I read Garmin's pages for the Forerunner 970, 570 and 165 and one independent review of each.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Continue building with what the browser turn found.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:04:00.000Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-1",
+              "browserJobId": "job-run-2"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Built the Forerunner comparison page with the 970, 570 and 165: screen, weight and price from Garmin's own pages, checked 16 Nov. Battery life for the 165 and the second independent review for each watch are not confirmed yet; the page marks them.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:05:00.000Z"
+        }
+      ],
+      "message": "Fill in what's still missing.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "Carries on this chat's browser research for the page it made, whose reply names what is not confirmed yet."
+    },
+    {
+      "id": "note-in-own-words-on-a-map",
+      "history": [
+        {
+          "role": "user",
+          "content": "Plan 3 days in Valencia for a first visit: where to stay, what to see each day, on a map.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "The Valencia map has a three-night plan with a hotel pick in Ciutat Vella and sights pinned for each day: the old town, the City of Arts and Sciences and the Turia gardens. Prices and availability for your dates weren't checked.\n\nAssumed: arrive Mon 16 Nov 2026, stay 3 nights, mid-range hotel, relaxed pace.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:02:00.000Z"
+        }
+      ],
+      "message": "Add a note to day 2: the Oceanogràfic needs tickets booked online.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "A change in the person's own words to the map this chat made needs no web page: the building turn adds the note as they wrote it, and the map is files that turn must change."
+    },
+    {
+      "id": "page-from-confirmed-hours",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.nationalgallery.org.uk in your browser and find this Sunday's opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.nationalgallery.org.uk in your browser and find this Sunday's opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:02:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.nationalgallery.org.uk in your browser and find this Sunday's opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The National Gallery is open on Sunday from 10:00 to 18:00, per its visiting page, checked 16 Nov. [National Gallery](https://www.nationalgallery.org.uk/visiting)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        }
+      ],
+      "message": "Put the hours on a small page I can share.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "The hours came from the gallery's own page, and the page asks for nothing else: a page made only from what this chat found and confirmed is one building turn, and the page is files that turn must make."
+    },
+    {
+      "id": "keep-going-nothing-open",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.nationalgallery.org.uk in your browser and find this Sunday's opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.nationalgallery.org.uk in your browser and find this Sunday's opening hours.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:02:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.nationalgallery.org.uk in your browser and find this Sunday's opening hours.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The National Gallery is open on Sunday from 10:00 to 18:00, per its visiting page, checked 16 Nov. [National Gallery](https://www.nationalgallery.org.uk/visiting)",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours on a small page I can share.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:04:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small page with the National Gallery's Sunday hours, checked 16 Nov on its website. People in this space can open it; ask me for a public link if you want to share it outside.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:05:00.000Z"
+        }
+      ],
+      "message": "keep going",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "none",
+          "conditional"
+        ]
+      },
+      "why": "The page here was made from hours this chat confirmed, and nothing is left open or asked for: a bare \"keep going\" goes direct, and the routing step requires no change."
+    },
+    {
+      "id": "site-runs-in-this-space",
+      "history": [
+        {
+          "role": "user",
+          "content": "Make a one-page site for my bakery with the menu and this week's opening hours.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made your bakery's page with the menu and this week's opening hours. It's open in the preview, and people in this space can open it.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:02:00.000Z"
+        }
+      ],
+      "message": "Open it in your browser and check the menu section on a phone-sized screen.",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "The site runs in this space, so it is shown with a preview card, not Instafy's browser, though the message names the browser."
+    },
+    {
+      "id": "says-not-to-use-the-browser",
+      "message": "Without opening the browser, make a comparison page of the three latest Garmin Forerunner watches from what you can read.",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "The person says not to use the browser: the building turn reads what it can and makes the page."
+    },
+    {
+      "id": "needs-a-file-here",
+      "message": "Open the Vienna city council's contact form in your browser and send my complaint from complaint.md.",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "The browser part needs what a file here says, which a browser turn never sees: the building turn reads it and answers with a card naming it, though the message names the browser."
+    },
+    {
+      "id": "translate-words-about-the-browser",
+      "message": "Translate into Spanish: 'Open the browser and compare the prices on the map.'",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "Words like \"browser\", \"compare\" and \"map\" inside text to translate ask for no page and no browser."
+    },
+    {
+      "id": "price-added-to-a-page-a-reply-did-not-confirm",
+      "history": [
+        {
+          "role": "user",
+          "content": "How much is a 24-hour ticket for Copenhagen's buses and metro?",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't confirm today's price: the operator's fare page didn't load for me, and the figures I found elsewhere were from last year. The ticket covers buses, the metro and harbour buses in the zones you choose.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:02:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Make a small page with where to buy the 24-hour ticket.",
+          "runId": "run-2",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small page with where to buy the 24-hour ticket, from the operator's ticket page, checked 16 Nov: its app, the ticket machines at metro stations and convenience shops. It leaves out the price, which I couldn't confirm. People in this space can open it; ask me for a public link if you want to share it outside.",
+          "runId": "run-2",
+          "createdAt": "2026-11-16T09:04:00.000Z"
+        }
+      ],
+      "message": "Add the 24-hour ticket's price to the page.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The page here leaves out the price this chat's replies said wasn't confirmed, and the person asks for it: a change to a page asked for with that value, so the browser reads the price first, and Octo then adds it."
+    },
+    {
+      "id": "note-on-a-sight-a-map-did-not-find",
+      "history": [
+        {
+          "role": "user",
+          "content": "Plan 3 days in Bologna for a first visit: where to stay, what to see each day, on a map.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Bologna is planned for three nights, with the old town as a base. The lodging search was partial, so prices and availability for your dates weren't checked.\n\nAssumed: arrive Mon 16 Nov 2026, stay 3 nights, departing Thu 19 Nov.\n\nDay 1: Piazza Maggiore and the Basilica of San Petronio. Day 2: the university quarter and the Archiginnasio. Day 3: San Luca and its portico.\n\nSources: OpenStreetMap and Wikipedia. Not found yet: the Asinelli Tower, so it has no pin. Send its address if you'd like me to add it.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:05:00.000Z"
+        }
+      ],
+      "message": "Add a note to day 1: book the Asinelli Tower climb ahead.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "A note in the person's own words for the map this chat made, about a sight its reply said wasn't found: the note asks for nothing from the web, the building turn adds it as they wrote it, and the map is files that turn must change."
+    },
+    {
+      "id": "sight-a-map-did-not-find-on-a-day",
+      "history": [
+        {
+          "role": "user",
+          "content": "Plan 3 days in Bologna for a first visit: where to stay, what to see each day, on a map.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Bologna is planned for three nights, with the old town as a base. The lodging search was partial, so prices and availability for your dates weren't checked.\n\nAssumed: arrive Mon 16 Nov 2026, stay 3 nights, departing Thu 19 Nov.\n\nDay 1: Piazza Maggiore and the Basilica of San Petronio. Day 2: the university quarter and the Archiginnasio. Day 3: San Luca and its portico.\n\nSources: OpenStreetMap and Wikipedia. Not found yet: the Asinelli Tower, so it has no pin. Send its address if you'd like me to add it.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:05:00.000Z"
+        }
+      ],
+      "message": "Add the Asinelli Tower to day 2.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "A place the map's reply said wasn't found, added to the map this chat made: the map's skill looks up and cites its own places, which a browser part can't pin, and the map is files that turn must change."
+    },
+    {
+      "id": "note-in-own-words-on-a-page-about-an-unconfirmed-value",
+      "history": [
+        {
+          "role": "user",
+          "content": "Open www.nhm.ac.uk in your browser and find the museum's opening hours and whether the dinosaur gallery needs a ticket.",
+          "runId": "run-1",
+          "createdAt": "2026-11-16T09:01:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Open www.nhm.ac.uk in your browser and find the museum's opening hours and whether the dinosaur gallery needs a ticket.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:02:00.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Open www.nhm.ac.uk in your browser and find the museum's opening hours and whether the dinosaur gallery needs a ticket.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              }
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "The Natural History Museum is open daily from 10:00 to 17:50, per its visiting page, checked 16 Nov. I couldn't confirm whether the dinosaur gallery needs a ticket: its page didn't say, and the tickets page kept loading.",
+          "runId": "run-2",
+          "lane": "browser",
+          "createdAt": "2026-11-16T09:03:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Put the hours on a small page I can share.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:04:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made a small page with the Natural History Museum's daily hours, checked 16 Nov on its website. It doesn't say whether the dinosaur gallery needs a ticket, since I couldn't confirm that. People in this space can open it; ask me for a public link if you want to share it outside.",
+          "runId": "run-3",
+          "createdAt": "2026-11-16T09:05:00.000Z"
+        }
+      ],
+      "message": "Add a note under the hours: ask at the desk whether the dinosaur gallery needs a ticket.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "A note in the person's own words on the page this chat made, about a value its replies said wasn't confirmed: the note asks for no value, so the building turn adds it as they wrote it, and the page is files that turn must change."
     }
   ]
 }
