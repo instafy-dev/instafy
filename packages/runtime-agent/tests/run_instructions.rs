@@ -1775,8 +1775,8 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "a bare \"keep going\" carries on what a page here left open, and a change that needs a web page browses first",
             ),
             (
-                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message.",
-                "research ending in a page goes to the browser from the first message",
+                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message, unless Octo can search the web and no site needs using first (a booking or availability for dates, a sign-in or their account, a form or planner): it then stays `direct`.",
+                "research ending in a page goes to the browser from the first message unless Octo can search the web",
             ),
             (
                 "So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.",
@@ -1792,6 +1792,12 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "{label}'s routing call never read that {what}"
             );
         }
+        // These jobs' grants let no turn search the web, so the routing call reads nothing of
+        // it: research that ends in a page goes to the browser first, as it did.
+        ensure!(
+            !routing.contains("Octo can search the web for this message."),
+            "{label}'s routing call read that Octo can search the web, though its job can't"
+        );
     }
     for label in ["N2", "N4", "N6"] {
         let turn = harness.turn(label);
