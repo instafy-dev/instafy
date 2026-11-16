@@ -21,6 +21,33 @@ describe("runtime store origin summary", () => {
     const unknown = runtimeReducer(cleared, { type: "applyOriginSummary", summary, derivedPresence: null });
     expect(unknown.desktopOriginProjectId).toBeNull();
   });
+
+  it("tells an origin still loading from a space the controller says has none", () => {
+    const initial = createInitialRuntimeStoreState();
+    expect(initial.desktopOriginAnsweredProjectId).toBeNull();
+
+    const withOrigin = runtimeReducer(initial, {
+      type: "applyOriginSummary",
+      summary,
+      derivedPresence: null,
+      projectId: "desk-project",
+    });
+    expect(withOrigin.desktopOriginAnsweredProjectId).toBe("desk-project");
+
+    // No origin is an answer too.
+    const none = runtimeReducer(withOrigin, {
+      type: "applyOriginSummary",
+      summary: null,
+      derivedPresence: null,
+      projectId: "desk-project",
+    });
+    expect(none.desktopOrigin).toBeNull();
+    expect(none.desktopOriginAnsweredProjectId).toBe("desk-project");
+
+    // Forgotten (a switch, a sync that starts over): loading again until the next answer.
+    const cleared = runtimeReducer(none, { type: "applyOriginSummary", summary: null, derivedPresence: null });
+    expect(cleared.desktopOriginAnsweredProjectId).toBeNull();
+  });
 });
 
 describe("runtime store origin events and hydration", () => {
@@ -50,6 +77,7 @@ describe("runtime store origin events and hydration", () => {
     expect(hydrated.localWorkspace).toEqual(workspace);
     expect(hydrated.desktopOrigin).toEqual(resolved);
     expect(hydrated.desktopOriginProjectId).toBe("desk-project");
+    expect(hydrated.desktopOriginAnsweredProjectId).toBe("desk-project");
 
     // The controller answered that the space has neither any more.
     const gone = runtimeReducer(hydrated, {

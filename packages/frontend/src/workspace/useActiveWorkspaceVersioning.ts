@@ -8,7 +8,8 @@ export interface ActiveWorkspaceVersioning extends WorkspaceVersioningState {
   projectId: string | null;
   /**
    * What the chrome shows (drawer body, nav label, badge source): the probed
-   * mode, else the first-paint guess. Always `legacy` without an origin.
+   * mode, else the first-paint guess. `legacy` for a space with no origin;
+   * while its origin is still loading, the first-paint guess.
    */
   chromeMode: VersioningMode;
   /**
@@ -19,10 +20,16 @@ export interface ActiveWorkspaceVersioning extends WorkspaceVersioningState {
 }
 
 export function resolveChromeMode(
-  state: Pick<WorkspaceVersioningState, "originId" | "resolved" | "mode" | "firstPaintMode">,
+  state: Pick<WorkspaceVersioningState, "originId" | "resolved" | "mode" | "firstPaintMode"> & {
+    /** The controller has not answered for the space's origin yet (a load or a switch). */
+    originPending?: boolean;
+  },
 ): VersioningMode {
   if (!state.originId) {
-    return "legacy";
+    // While the origin loads, the mode this device last saw for the space
+    // holds the chrome, so the nav item keeps one name through a reload. A
+    // space the controller says has no origin is legacy.
+    return state.originPending ? state.firstPaintMode : "legacy";
   }
   return state.resolved ? state.mode : state.firstPaintMode;
 }
@@ -82,14 +89,17 @@ export function useWorkspaceVersioningForProject({
   projectId: string | null | undefined;
   enabled?: boolean;
 }): ActiveWorkspaceVersioning {
-  const { desktopOrigin, desktopOriginProjectId } = useRuntime();
+  const { desktopOrigin, desktopOriginProjectId, desktopOriginAnsweredProjectId } = useRuntime();
   const projectId = requestedProjectId?.trim() || null;
   const state = useWorkspaceVersioning({
     projectId,
     origin: originForProject(projectId, desktopOrigin, desktopOriginProjectId),
     enabled,
   });
-  const chromeMode = resolveChromeMode(state);
+  const chromeMode = resolveChromeMode({
+    ...state,
+    originPending: projectId !== null && desktopOriginAnsweredProjectId !== projectId,
+  });
   return {
     ...state,
     projectId,
