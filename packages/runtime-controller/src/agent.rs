@@ -3753,6 +3753,13 @@ pub(crate) async fn agent_complete(
     );
     let credit_snapshot_value = extract_credit_snapshot(&proxy_metadata);
     let suggested_replies = extract_ui_suggested_replies(&proxy_metadata);
+    // What Instafy AI's web searches in the turn cost (`ai/web-search-usage`). They ran, and
+    // OpenAI billed them, whether or not the turn then finished: they are charged unless the turn
+    // costs nothing (above), apart from its tokens, which a turn that ended in an error has no
+    // `turn.completed` for. A local-engine turn runs on the person's own Claude Code.
+    let web_search_to_charge = (!lane && costs_nothing.is_none())
+        .then(|| extract_web_search_usage_from_artifacts(&artifacts_value))
+        .flatten();
 
     if let Some(run_uuid) = run_id {
         // A granted turn's provider thread is never resumed (dispatch.rs), so
@@ -4138,6 +4145,7 @@ pub(crate) async fn agent_complete(
         artifacts_count,
         provider: provider_value,
         usage: usage_to_reconcile,
+        web_search: web_search_to_charge,
         reply: assistant_message,
         credit_org_id: completion_credit_org_id,
         drain_after_lead_continuation,
@@ -4180,6 +4188,8 @@ struct CompletionSettlement {
     provider: Option<String>,
     /// The turn's usage, when the run has a conversation.
     usage: Option<TurnUsage>,
+    /// What the turn's web searches cost, when it ran any and is charged.
+    web_search: Option<crate::credits::ManagedAiWebSearchUsage>,
     reply: Option<ConversationMessageRow>,
     /// The org whose credits the completion's own transaction changed (a
     /// failed run's refund, or billing deferred until the agent spoke).
@@ -4203,8 +4213,8 @@ impl CompletionSettlement {
             );
         }
         let mut credit_org_id = self.credit_org_id;
-        if let Some(usage) = self.usage {
-            if let Some(org_id) = self.bill_usage(&state, usage).await {
+        if self.usage.is_some() || self.web_search.is_some() {
+            if let Some(org_id) = self.bill_usage(&state).await {
                 credit_org_id = Some(org_id);
             }
         }
@@ -4256,11 +4266,11 @@ impl CompletionSettlement {
         }
     }
 
-    /// Reconcile the turn's managed-AI usage in a transaction of its own.
-    /// The adjustment is idempotent per prompt, so an attempt that failed
-    /// (and rolled back whole) is tried once more. Returns the org whose
-    /// credits changed.
-    async fn bill_usage(&self, state: &AppState, usage: TurnUsage) -> Option<Uuid> {
+    /// Reconcile the turn's managed-AI usage, and charge its web searches, in
+    /// a transaction of its own. The adjustment is idempotent per prompt and
+    /// the searches' row per job, so an attempt that failed (and rolled back
+    /// whole) is tried once more. Returns the org whose credits changed.
+    async fn bill_usage(&self, state: &AppState) -> Option<Uuid> {
         for attempt in 1..=2 {
             let result = async {
                 let mut connection = state.pool.get().await.map_err(|error| {
@@ -4273,12 +4283,14 @@ impl CompletionSettlement {
                     state,
                     &transaction,
                     &self.project_id,
+                    &self.job_id,
                     &self.job_payload,
                     self.run_id,
                     self.billing_prompt_id,
                     self.leased_runtime_id,
                     self.provider.as_deref(),
-                    usage,
+                    self.usage,
+                    self.web_search,
                 )
                 .await?;
                 // A statement that failed in there and was only logged (a
@@ -4391,20 +4403,32 @@ async fn reconcile_completion_usage(
     state: &AppState,
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
+    job_id: &Uuid,
     job_payload: &JsonValue,
     run_id: Option<Uuid>,
     prompt_id: Option<Uuid>,
     leased_runtime_id: Option<Uuid>,
     provider: Option<&str>,
-    usage: TurnUsage,
+    usage: Option<TurnUsage>,
+    web_search: Option<crate::credits::ManagedAiWebSearchUsage>,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
     let mut completion_credit_org_id = None;
     let managed_ai_metadata = job_payload.get("metadata").and_then(JsonValue::as_object);
-    let managed_ai_used = managed_ai_metadata
-        .and_then(|metadata| metadata.get("managedAiUsed"))
-        .and_then(JsonValue::as_bool)
-        .unwrap_or(false);
-    if managed_ai_used {
+    let flag = |key: &str| {
+        managed_ai_metadata
+            .and_then(|metadata| metadata.get(key))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false)
+    };
+    let managed_ai_used = flag("managedAiUsed");
+    // The job ran on Instafy AI: it was charged as such, or it is an ambient
+    // evaluation whose charge waits for it to speak (dispatch stamps that only
+    // on Instafy AI). Its tokens are charged only once it is used; its web
+    // searches ran on the platform's key either way, and are charged.
+    let managed_ai_lane = managed_ai_used || flag("managedAiBillingDeferred");
+    let usage = usage.filter(|_| managed_ai_used);
+    let web_search = web_search.filter(|_| managed_ai_lane);
+    if usage.is_some() || web_search.is_some() {
         let prompt_id_for_billing = prompt_id;
         if let Some(prompt_uuid) = prompt_id_for_billing {
             let project = load_project_record(transaction, project_id).await?;
@@ -4416,24 +4440,30 @@ async fn reconcile_completion_usage(
                 .and_then(JsonValue::as_str)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
-            match reconcile_managed_ai_usage_charge(
-                transaction,
-                &state.config,
-                project_id,
-                &org_id,
-                leased_runtime_id,
-                &prompt_uuid,
-                provider,
-                managed_ai_label.as_deref(),
-                ManagedAiTokenUsage {
-                    input_tokens: usage.input_tokens,
-                    cached_input_tokens: usage.cached_input_tokens,
-                    output_tokens: usage.output_tokens,
-                },
-            )
-            .await
-            {
-                Ok(charge) => {
+            let token_charge = match usage {
+                Some(usage) => Some(
+                    reconcile_managed_ai_usage_charge(
+                        transaction,
+                        &state.config,
+                        project_id,
+                        &org_id,
+                        leased_runtime_id,
+                        &prompt_uuid,
+                        provider,
+                        managed_ai_label.as_deref(),
+                        ManagedAiTokenUsage {
+                            input_tokens: usage.input_tokens,
+                            cached_input_tokens: usage.cached_input_tokens,
+                            output_tokens: usage.output_tokens,
+                        },
+                    )
+                    .await,
+                ),
+                None => None,
+            };
+            match token_charge {
+                None => {}
+                Some(Ok(charge)) => {
                     // A zero adjustment only merges metadata into the
                     // reserve row, and a replayed one writes nothing.
                     // An unpaid remainder changes what the person is told
@@ -4545,7 +4575,36 @@ async fn reconcile_completion_usage(
                 }
                 // The charge was not applied, and a failed statement leaves
                 // the transaction aborted: the caller rolls back and retries.
-                Err(error) => return Err(error),
+                Some(Err(error)) => return Err(error),
+            }
+            // The turn's web searches, each of which cost the person credits,
+            // in a row of their own on the same message ("Web search").
+            if let Some(web_search) = web_search {
+                let charge = crate::credits::charge_managed_ai_web_searches(
+                    transaction,
+                    &state.config,
+                    project_id,
+                    &org_id,
+                    leased_runtime_id,
+                    &prompt_uuid,
+                    job_id,
+                    web_search,
+                )
+                .await?;
+                if charge.ledger_row_written || charge.unpaid_units > 0 {
+                    completion_credit_org_id = Some(org_id);
+                }
+                if charge.unpaid_units > 0 {
+                    warn!(
+                        project_id = %project_id,
+                        prompt_id = %prompt_uuid,
+                        job_id = %job_id,
+                        searches = web_search.searches,
+                        charged_units = charge.charged_units,
+                        unpaid_units = charge.unpaid_units,
+                        "the team's balance did not cover a turn's web searches"
+                    );
+                }
             }
         }
     }
@@ -4557,6 +4616,40 @@ struct TurnUsage {
     input_tokens: u64,
     cached_input_tokens: u64,
     output_tokens: u64,
+}
+
+/// What an Instafy AI job's web searches cost, from its completion's
+/// `ai/web-search-usage` report (runtime-agent `managed_web_search`), which
+/// the runtime sends whether the job succeeded or failed, its recovery
+/// retries' searches included. Several reports add up. None when nothing was
+/// searched.
+fn extract_web_search_usage_from_artifacts(
+    artifacts: &JsonValue,
+) -> Option<crate::credits::ManagedAiWebSearchUsage> {
+    let usage = artifacts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|artifact| {
+            artifact.get("kind").and_then(JsonValue::as_str)
+                == Some(crate::credits::MANAGED_AI_WEB_SEARCH_USAGE_ARTIFACT)
+        })
+        .fold(
+            crate::credits::ManagedAiWebSearchUsage::default(),
+            |total, report| {
+                let count =
+                    |field: &str| report.get(field).and_then(JsonValue::as_u64).unwrap_or(0);
+                crate::credits::ManagedAiWebSearchUsage {
+                    searches: total.searches.saturating_add(count("searches")),
+                    input_tokens: total.input_tokens.saturating_add(count("input_tokens")),
+                    cached_input_tokens: total
+                        .cached_input_tokens
+                        .saturating_add(count("cached_input_tokens")),
+                    output_tokens: total.output_tokens.saturating_add(count("output_tokens")),
+                }
+            },
+        );
+    (usage != crate::credits::ManagedAiWebSearchUsage::default()).then_some(usage)
 }
 
 /// Whether any Codex run log in the artifacts holds a `turn.completed`,
@@ -7228,6 +7321,54 @@ mod tests {
         assert!(zero.reserve_units > 0);
         assert_eq!(zero.charged_units, 0);
         assert_eq!(zero.adjustment_units, -zero.reserve_units);
+    }
+
+    /// What a job's web searches cost comes from its completion's own report, whatever its run
+    /// logs hold: a turn that ended in an error has no `turn.completed`, and a recovery retry's
+    /// run log comes after the first attempt's, whose usage is the one charged for tokens.
+    /// Several reports add up; a completion that searched nothing has none.
+    #[test]
+    fn web_search_usage_is_read_from_the_jobs_own_report() {
+        let report = |searches: u64, input: u64, output: u64| {
+            json!({"kind": "ai/web-search-usage", "searches": searches, "input_tokens": input,
+                   "cached_input_tokens": 0, "output_tokens": output})
+        };
+        let usage =
+            json!({"input_tokens":50_000,"cached_input_tokens":45_000,"output_tokens":1_000});
+        let retried = json!([
+            {"kind":"codex/run-log","metadata":{"attempt":1},
+             "events":[{"type":"turn.completed","usageScope":"turn","usage":usage}]},
+            {"kind":"codex/run-log","events":[{"type":"turn.completed","usageScope":"turn",
+                                               "usage":usage}]},
+            report(2, 16_824, 782),
+        ]);
+        assert_eq!(
+            extract_web_search_usage_from_artifacts(&retried),
+            Some(crate::credits::ManagedAiWebSearchUsage {
+                searches: 2,
+                input_tokens: 16_824,
+                cached_input_tokens: 0,
+                output_tokens: 782,
+            })
+        );
+        let failed = json!([{"kind":"codex/run-log","events":[]}, report(1, 8_412, 391),
+                             report(1, 8_412, 391)]);
+        assert_eq!(
+            extract_web_search_usage_from_artifacts(&failed).map(|usage| usage.searches),
+            Some(2)
+        );
+        for unsearched in [
+            json!([{"kind":"codex/run-log","events":[]}]),
+            json!([report(0, 0, 0)]),
+            json!({"kind": "ai/web-search-usage", "searches": 3}),
+            JsonValue::Null,
+        ] {
+            assert_eq!(
+                extract_web_search_usage_from_artifacts(&unsearched),
+                None,
+                "{unsearched}"
+            );
+        }
     }
 
     #[test]

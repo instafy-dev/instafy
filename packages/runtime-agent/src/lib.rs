@@ -23,6 +23,7 @@ mod job_runtime_settings;
 pub mod jobs;
 pub mod local_browser;
 pub mod loopback_proxy;
+pub mod managed_web_search;
 pub mod mcp_process_groups;
 #[cfg(test)]
 mod mcp_test_wire;

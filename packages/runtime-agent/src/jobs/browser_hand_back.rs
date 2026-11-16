@@ -73,6 +73,7 @@
 //! thing is not made yet ([`BUILD_NOT_MADE_LINE`]).
 
 use serde_json::{Value as JsonValue, json};
+use uuid::Uuid;
 
 use super::{JobExecution, JobMessage};
 use crate::codex::BrowserTried;
@@ -455,6 +456,16 @@ pub(super) fn format_browser_findings_contract_section(
 /// work with what a browser turn found, and never asks for the browser again.
 pub(super) fn is_hand_back_job(job: &LeaseJob) -> bool {
     verified_hand_back(job.payload.get("metadata")).is_some()
+}
+
+/// The job whose card a hand-back carries on (the record's `cardJobId`): the
+/// turn that asked for the browser, or the person's message the routing step
+/// sent to it. None for any other turn.
+pub(super) fn card_job_of(job: &LeaseJob) -> Option<Uuid> {
+    verified_hand_back(job.payload.get("metadata"))?
+        .get("cardJobId")?
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id.trim()).ok())
 }
 
 /// A line that is one JSON object, perhaps after a list marker, in backticks or before a comma,
@@ -4110,6 +4121,31 @@ mod tests {
             );
             assert!(section.contains("your earlier card"), "{section}");
         }
+    }
+
+    /// A hand-back names the job whose card it carries on, so its web searches go on with that
+    /// message's allowance (`managed_web_search`). Only the controller's checked record names
+    /// it.
+    #[test]
+    fn a_hand_back_names_the_job_whose_card_it_carries_on() {
+        let record = fixtures()["stampedRecord"].clone();
+        assert_eq!(
+            card_job_of(&browser_job(json!({ "browserHandBack": record.clone() }))),
+            Some(Uuid::parse_str("00000000-0000-4000-8000-0000000000a1").unwrap())
+        );
+        let mut unchecked = record.clone();
+        unchecked["verified"] = json!("true");
+        assert_eq!(
+            card_job_of(&browser_job(json!({ "browserHandBack": unchecked }))),
+            None
+        );
+        let mut nameless = record;
+        nameless["cardJobId"] = json!("not a job");
+        assert_eq!(
+            card_job_of(&browser_job(json!({ "browserHandBack": nameless }))),
+            None
+        );
+        assert_eq!(card_job_of(&browser_job(json!({}))), None);
     }
 
     /// A hand-back's own words are always the controller's one line, so its skills come from

@@ -32,6 +32,10 @@ pub const DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT: &str = "medium";
 pub const DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K: i64 = 100;
 pub const DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K: i64 = 10;
 pub const DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K: i64 = 500;
+/// What OpenAI charges for one hosted web search, in USD micros: $10 per 1,000
+/// searches, on top of the search content's tokens at the model's input rate.
+/// Each search Instafy AI runs is charged this, at `BILLING_UNITS_PER_USD`.
+pub const DEFAULT_MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH: i64 = 10_000;
 
 pub const DEFAULT_DEEPSEEK_MODEL_ID: &str = "deepseek-chat";
 pub const DEFAULT_ZAI_MODEL_ID: &str = "glm-5";

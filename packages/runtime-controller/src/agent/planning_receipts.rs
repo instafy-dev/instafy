@@ -101,6 +101,10 @@ pub(super) async fn store(
     // as any turn's.
     let system_turn_without_reply = crate::system_turns::system_turn_of(&payload).is_some()
         && row.get::<_, String>("status") == "failed";
+    // Its web searches are charged with its tokens, or alone when it has no
+    // `turn.completed` to reconcile (see agent_complete).
+    let usage = extract_turn_usage_from_artifacts(artifacts);
+    let web_search = extract_web_search_usage_from_artifacts(artifacts);
     let credit_org_id = if system_turn_without_reply {
         crate::system_turns::give_back_reserve_without_reply(
             transaction,
@@ -112,17 +116,19 @@ pub(super) async fn store(
             &payload,
         )
         .await?
-    } else if let Some(usage) = extract_turn_usage_from_artifacts(artifacts) {
+    } else if usage.is_some() || web_search.is_some() {
         reconcile_completion_usage(
             state,
             transaction,
             &claims.project_id,
+            &job_id,
             &payload,
             run_id,
             prompt_id,
             runtime_id,
             provider.as_deref(),
             usage,
+            web_search,
         )
         .await?
     } else {

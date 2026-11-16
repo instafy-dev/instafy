@@ -157,6 +157,15 @@ impl JobProxyAuth {
             && (self.scope.credential_id.is_some() || self.scope.run_id.is_some())
     }
 
+    /// Whether the grant lets a managed run (Instafy AI: a run id and no credential of its own)
+    /// search, whose searches cost the person credits and keep to a message's allowance
+    /// (`managed_web_search`). A person's own ChatGPT login searches on their own plan.
+    pub(crate) fn allows_managed_web_search(&self) -> bool {
+        self.allows_native_web_search()
+            && self.scope.credential_id.is_none()
+            && self.scope.run_id.is_some()
+    }
+
     pub fn new(
         client: Arc<ControllerClient>,
         registration: &Registration,
@@ -391,6 +400,53 @@ fn parse_grant(envelope: &ProxyEnvelopePayload) -> io::Result<(Url, GrantClaims,
     ))
 }
 
+/// `job`'s grant as the controller would sign it (no signature is checked here), with
+/// `native_web_search` as given, for tests elsewhere in the crate. Nothing renews it. Keep the
+/// guard for as long as the grant is used.
+#[cfg(test)]
+pub(crate) fn granted_for_test(
+    job: &mut LeaseJob,
+    native_web_search: bool,
+) -> (Arc<JobProxyAuth>, JobProxyAuthGuard) {
+    let (client, registration) = crate::controller::proxy_test_client(
+        Url::parse("http://127.0.0.1:9").expect("an inert controller address"),
+    );
+    let expires = Utc::now() + chrono::Duration::seconds(1800);
+    let payload = serde_json::json!({
+        "aud": "proxy",
+        "iss": "runtime-controller",
+        "sub": format!(
+            "proxy:{}:{}",
+            job.project_id.expect("a job of a space"),
+            registration.runtime_id
+        ),
+        "project_id": job.project_id,
+        "runtime_id": registration.runtime_id,
+        "job_id": job.id,
+        "lease_attempt": job.lease_attempts,
+        "run_id": job.run_id,
+        "credential_id": job.credential_id,
+        "native_web_search": native_web_search,
+        "exp": expires.timestamp(),
+    });
+    job.proxy = Some(ProxyEnvelopePayload {
+        url: "https://proxy.example.invalid/v1".into(),
+        token: format!(
+            "e30.{}.inert-test-signature",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("claims"))
+        ),
+        expires_at: Some(expires.to_rfc3339()),
+    });
+    JobProxyAuth::with_clock(
+        Arc::new(client),
+        &registration,
+        job,
+        None,
+        Arc::new(Utc::now),
+    )
+    .expect("the job's grant")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,16 +679,20 @@ mod tests {
     async fn native_search_uses_only_the_job_grant_and_defaults_off() {
         let fixture = Fixture::new().await;
         assert!(!fixture.auth.allows_native_web_search());
-        for (claim, credential, run, expected) in [
+        assert!(!fixture.auth.allows_managed_web_search());
+        // Whether the job may search, and whether its searches keep to a message's allowance
+        // and cost the person credits (only a managed run's: a person's own credential searches
+        // on their own plan).
+        for (claim, credential, run, expected, managed) in [
             // A person's own credential, as before.
-            (false, true, true, false),
-            (true, true, true, true),
-            (true, true, false, true),
+            (false, true, true, false, false),
+            (true, true, true, true, false),
+            (true, true, false, true, false),
             // A managed run: the grant decides, on a run with no credential of its own.
-            (false, false, true, false),
-            (true, false, true, true),
+            (false, false, true, false, false),
+            (true, false, true, true, true),
             // A token on neither lane never searches, whatever it claims.
-            (true, false, false, false),
+            (true, false, false, false, false),
         ] {
             let mut job = fixture.job.clone();
             job.payload = json!({"metadata": {"native_web_search": true, "nativeWebSearch": true}});
@@ -664,6 +724,11 @@ mod tests {
                 auth.allows_native_web_search(),
                 expected,
                 "claim {claim}, credential {credential}, run {run}"
+            );
+            assert_eq!(
+                auth.allows_managed_web_search(),
+                managed,
+                "managed: claim {claim}, credential {credential}, run {run}"
             );
         }
     }

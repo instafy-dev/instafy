@@ -24,6 +24,7 @@ use crate::model_defaults::{
     default_managed_ai_model_id, default_managed_ai_model_label,
     DEFAULT_MANAGED_AI_CACHED_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_CHAT_REASONING_EFFORT,
     DEFAULT_MANAGED_AI_INPUT_USD_MICROS_PER_1K, DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K,
+    DEFAULT_MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH,
 };
 
 /// Supabase-managed Postgres endpoints (including the shared session pooler)
@@ -856,6 +857,11 @@ pub struct AppConfig {
     pub managed_ai_input_usd_micros_per_1k: i64,
     pub managed_ai_cached_input_usd_micros_per_1k: i64,
     pub managed_ai_output_usd_micros_per_1k: i64,
+    /// What one web search Instafy AI runs costs, in USD micros
+    /// (`MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH`, default 10,000: OpenAI's
+    /// $10 per 1,000 searches). Each is charged this on top of its tokens, at
+    /// the managed rates ([`crate::credits::calculate_managed_ai_web_search_charge`]).
+    pub managed_ai_web_search_usd_micros_per_search: i64,
     pub managed_ai_startup_check: bool,
     /// `MANAGED_AI_NATIVE_WEB_SEARCH`, off by default: whether a managed
     /// (Instafy AI) job's proxy grant lets it use the AI's own web search, as
@@ -1693,6 +1699,11 @@ impl AppConfig {
                 .ok()
                 .and_then(|raw| raw.parse::<i64>().ok())
                 .unwrap_or(DEFAULT_MANAGED_AI_OUTPUT_USD_MICROS_PER_1K);
+        let managed_ai_web_search_usd_micros_per_search =
+            std::env::var("MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<i64>().ok())
+                .unwrap_or(DEFAULT_MANAGED_AI_WEB_SEARCH_USD_MICROS_PER_SEARCH);
         // Platform key served to proxies as the managed credential lease. Kept
         // on the controller only; it never reaches runtime containers.
         // Hosted deployments hand the managed key to the controller as
@@ -1954,6 +1965,7 @@ impl AppConfig {
             managed_ai_input_usd_micros_per_1k,
             managed_ai_cached_input_usd_micros_per_1k,
             managed_ai_output_usd_micros_per_1k,
+            managed_ai_web_search_usd_micros_per_search,
             managed_ai_startup_check,
             managed_ai_native_web_search,
             managed_ai_openai_api_key,

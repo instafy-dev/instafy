@@ -160,7 +160,7 @@ when no must fails. Its score is the share of graded checks that passed.
 | `no_browser_handoff` | must | Lookups: no `request_browser` consent card |
 | `time_within_budget`, `input_tokens_within_budget`, `output_tokens_within_budget` | must | Within the case budget |
 | `sources` | should | Enough public links to follow, on the page or in the reply |
-| `credits_match_tokens` | should | The credits charged match the tokens at the rates the controller wrote on the ledger, ±max(jobs+1, 15%). Without rates: `credits_charged`, a turn over 500k input tokens charged more than 1 credit |
+| `credits_match_tokens` | should | The credits charged match the tokens at the rates the controller wrote on the ledger, ±max(jobs+1, 15%), plus Instafy AI's web searches as charged (their "Web search" rows, which the case's credits include). Without rates: `credits_charged`, a turn over 500k input tokens charged more than 1 credit |
 | `site_language`, `site_no_file_paths`, `site_console_clean` | should | The page reads in the case's language, shows no paths, logs no errors from its own origin |
 | `reply_short`, `reply_no_dev_details`, `reply_flags_unverified` | should | Page replies: at most 6 lines and 1000 chars, no file paths or "validates"; says what is unverified |
 | `prompt_carries_skills`, `card_within_budget` | should | Skills reached the prompt; the card came in time |
@@ -201,7 +201,10 @@ job's own parser, as the job then acts on it. The cases are in
 history entries the runtime receives), the expected route and why. A case can also list the
 `workspaceFileChangeRequirement` values it accepts, what the routing preflight says the turn after it must change:
 after a Stop and an Undo, "keep going" must not require a change. Whether that turn then leaves the undone change
-alone, only a real turn shows. Every rule of the browser skill's routing section also has a case on a subject the
+alone, only a real turn shows. A case whose message asks in its own words for deeper research says
+`"deeperResearch": true`; every other case expects the answer's `deeperResearch` to be false, since it gives an
+Instafy AI message 8 web searches in place of 2, each charged to the person. A run that answers it true is shown as
+`direct + deeper research`. Every rule of the browser skill's routing section also has a case on a subject the
 recorded tests never used, written for the check (`every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own`
 names which), so a rule that holds only for the few places, products and sites those tests were about shows: a rule
 added to the section adds its case there.

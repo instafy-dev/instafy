@@ -130,6 +130,8 @@ mod tests_job_trigger;
 #[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]
+mod tests_managed_ai_web_search;
+#[cfg(test)]
 mod tests_managed_credential;
 #[cfg(test)]
 mod tests_personal_org_slug;
