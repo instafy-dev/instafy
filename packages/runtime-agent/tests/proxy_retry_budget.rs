@@ -29,6 +29,8 @@ const STEP_TEXT: &str = "LOCAL_RETRY_STEP_DONE";
 const SEARCH_TEXT: &str =
     "LOCAL_SEARCH_EVIDENCE: https://example.invalid/source reports a local fixture result.";
 const FINISHED_CALL_ID: &str = "call-local-finished";
+/// Where the child leaves the room's search steps of its turn for the parent.
+const SEARCH_STEPS_FILE: &str = "search-steps.json";
 const PARTIAL_TEXT: &str = "LOCAL_CUT_SHORT_PARTIAL";
 const TOOL_CMD: &str = "printf x >> tool-count.txt; printf TOOL_APPLIED";
 /// Selects the Codex model the scenarios run; every Codex bump runs them for each model the
@@ -557,9 +559,15 @@ async fn responses(
         | "personal_browser_behind_proxy"
         | "personal_browser_native_search" => return answer(FINAL_TEXT),
         // So does an ordinary turn whose config asks for web search.
-        "native_search_authorized" | "native_search_custom_provider" => {
+        "native_search_authorized" | "native_search_custom_provider" | "native_search_managed" => {
             if ordinal == 1 && offers_standalone_web_search(&body) {
-                let commands = json!({"search_query":[{"q":"local fixture source"}]});
+                // A managed run's search goes through the proxy's search bridge, which sends no
+                // query that looks like a key: the AI asks for one, and the room never names it.
+                let commands = if state.scenario == "native_search_managed" {
+                    json!({"search_query":[{"q":"local fixture source"},{"q":"password: hunter2"}]})
+                } else {
+                    json!({"search_query":[{"q":"local fixture source"}]})
+                };
                 return sse(if offers_namespaced_tool(&body, "web", "run") {
                     json!({"type":"function_call", "call_id":"local-search",
                         "namespace":"web", "name":"run", "arguments":commands.to_string()})
@@ -577,7 +585,10 @@ async fn responses(
             }
             return answer(FINAL_TEXT);
         }
-        "web_search_requested" | "native_search_routing" => {
+        "web_search_requested"
+        | "native_search_routing"
+        | "native_search_managed_routing"
+        | "native_search_managed_finalization" => {
             return answer(FINAL_TEXT);
         }
         "tool_once" => {
@@ -638,8 +649,15 @@ async fn native_search(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     state.search_requests.lock().unwrap().push(body);
-    Json(json!({"output":SEARCH_TEXT, "results":[{"url":"https://example.invalid/source"}]}))
-        .into_response()
+    let page = json!({"url":"https://example.invalid/source"});
+    // For a managed run the proxy's search bridge answers, and names the queries it searched
+    // (openai-proxy-server `search_bridge.rs`): here the first, as the second looks like a key.
+    let results = if managed_native_search_grant(&state.scenario) {
+        json!([{"type":"searched_queries","queries":["local fixture source"]}, page])
+    } else {
+        json!([page])
+    };
+    Json(json!({"output":SEARCH_TEXT, "results":results})).into_response()
 }
 
 /// A completed call of the command tool the request offers, code mode's `exec` or else
@@ -1146,6 +1164,36 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
     }
     let search_requests = state.search_requests.lock().unwrap();
     assert_eq!(search_requests.len(), usize::from(standalone_search));
+    // Each search the proxy answered is one search step in the room, with the words searched for
+    // and the page the search returned, and a turn that did not search has none.
+    if has_native_search_grant(scenario) || scenario == "web_search_requested" {
+        let steps: Vec<Value> =
+            serde_json::from_slice(&fs::read(workspace.join(SEARCH_STEPS_FILE))?)?;
+        let expected: Vec<Value> = search_requests
+            .iter()
+            .map(|_| {
+                json!({
+                    "id": "local-search", "type": "web_search",
+                    "query": "local fixture source", "queries": ["local fixture source"],
+                    "pages": [{"url": "https://example.invalid/source"}],
+                    "status": "completed",
+                })
+            })
+            .collect();
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| {
+                    let mut step = step.clone();
+                    // Code mode names its own call id for a nested call.
+                    step["id"] = json!("local-search");
+                    step
+                })
+                .collect::<Vec<_>>(),
+            expected,
+            "{scenario}: {diagnostics}"
+        );
+    }
     if let Some(search) = search_requests.first() {
         assert_eq!(search["model"], test_model());
         assert_eq!(search["settings"]["external_web_access"], true);
@@ -1423,6 +1471,26 @@ scenario_test!(
     "native_search_routing",
     1
 );
+// A managed (Instafy AI) run the controller granted search searches like a person's own ChatGPT
+// login, and its routing step never does.
+scenario_test!(
+    native_search_on_a_managed_run_uses_the_controller_grant,
+    "native_search_managed",
+    1
+);
+scenario_test!(
+    routing_preflight_cannot_use_a_managed_runs_native_search_grant,
+    "native_search_managed_routing",
+    1
+);
+// The pass that only recovers a turn's missing answer runs with `disable_native_web_search`, as
+// `finalization_codex_run_options` sets it: nothing of its run reaches the chat, so it never
+// searches, whatever the job's grant.
+scenario_test!(
+    the_finalization_pass_cannot_use_a_managed_runs_native_search_grant,
+    "native_search_managed_finalization",
+    1
+);
 scenario_test!(
     personal_browser_cannot_use_the_jobs_native_search_grant,
     "personal_browser_native_search",
@@ -1624,7 +1692,7 @@ fn shared_browser_mcp_records_its_own_process_group_before_serving() -> Result<(
 fn authorized_native_search(scenario: &str) -> bool {
     matches!(
         scenario,
-        "native_search_authorized" | "native_search_custom_provider"
+        "native_search_authorized" | "native_search_custom_provider" | "native_search_managed"
     )
 }
 
@@ -1634,13 +1702,29 @@ fn has_native_search_grant(scenario: &str) -> bool {
         "native_search_authorized"
             | "native_search_custom_provider"
             | "native_search_routing"
+            | "native_search_managed"
+            | "native_search_managed_routing"
+            | "native_search_managed_finalization"
             | "personal_browser_native_search"
     )
 }
 
+/// A managed (Instafy AI) run's grant: on a run, with no credential of its own.
+fn managed_native_search_grant(scenario: &str) -> bool {
+    matches!(
+        scenario,
+        "native_search_managed"
+            | "native_search_managed_routing"
+            | "native_search_managed_finalization"
+    )
+}
+
 // An inert controller grant used only against this test's loopback model endpoint. The proxy's
-// signature and stored-credential checks have their own tests; this proves runtime wiring.
-fn native_search_job_auth() -> Result<(
+// signature and stored-credential checks have their own tests; this proves runtime wiring. A
+// managed run's grant names no credential, as the controller mints it for Instafy AI.
+fn native_search_job_auth(
+    managed: bool,
+) -> Result<(
     Arc<runtime_agent::job_proxy_auth::JobProxyAuth>,
     runtime_agent::job_proxy_auth::JobProxyAuthGuard,
 )> {
@@ -1649,7 +1733,9 @@ fn native_search_job_auth() -> Result<(
     let registration = local_registration(config.controller_base_url.clone());
     let mut job: LeaseJob = serde_json::from_value(json!({
         "id": Uuid::new_v4(), "project_id": config.project_id,
-        "run_id": Uuid::new_v4(), "credential_id": Uuid::new_v4(), "lease_attempts": 1
+        "run_id": Uuid::new_v4(),
+        "credential_id": if managed { None } else { Some(Uuid::new_v4()) },
+        "lease_attempts": 1
     }))?;
     let expires = chrono::Utc::now() + chrono::Duration::minutes(30);
     let claims = json!({
@@ -1730,7 +1816,7 @@ async fn isolated_retry_child() -> Result<()> {
         return run_routing_job(&scenario).await;
     }
     let client = CodexClient::new(CodexConfig {
-        workspace_dir: workspace.into(),
+        workspace_dir: workspace.clone().into(),
     });
     if scenario == "per_turn_usage" {
         return run_per_turn_usage_jobs(&client).await;
@@ -1740,7 +1826,9 @@ async fn isolated_retry_child() -> Result<()> {
     }
     let personal_browser = scenario.starts_with("personal_browser_");
     let native_grant = if has_native_search_grant(&scenario) {
-        Some(native_search_job_auth()?)
+        Some(native_search_job_auth(managed_native_search_grant(
+            &scenario,
+        ))?)
     } else {
         None
     };
@@ -1782,11 +1870,15 @@ async fn isolated_retry_child() -> Result<()> {
             },
             CodexRunOptions {
                 proxy_auth: native_grant.as_ref().map(|(auth, _guard)| auth.clone()),
-                final_output_schema: if scenario == "native_search_routing" {
+                final_output_schema: if matches!(
+                    scenario.as_str(),
+                    "native_search_routing" | "native_search_managed_routing"
+                ) {
                     runtime_agent::codex::CodexFinalOutputSchema::RoutingPreflight
                 } else {
                     Default::default()
                 },
+                disable_native_web_search: scenario == "native_search_managed_finalization",
                 disable_final_output_json_schema: true,
                 allow_plain_text_final_fallback: true,
                 suppress_contextual_instructions: true,
@@ -1882,9 +1974,29 @@ async fn isolated_retry_child() -> Result<()> {
             | "native_search_authorized"
             | "native_search_custom_provider"
             | "native_search_routing"
+            | "native_search_managed"
+            | "native_search_managed_routing"
+            | "native_search_managed_finalization"
             | "personal_browser_native_search"
     ) {
-        assert_eq!(result?.final_json["summary"], FINAL_TEXT);
+        let output = result?;
+        assert_eq!(output.final_json["summary"], FINAL_TEXT);
+        // The room's search steps (a search that ended with words), for the parent to hold
+        // against the searches the proxy saw.
+        let steps = output
+            .events
+            .iter()
+            .filter(|event| {
+                event["type"] == "item.completed"
+                    && event["item"]["type"] == "web_search"
+                    && event["item"].get("query").is_some()
+            })
+            .map(|event| event["item"].clone())
+            .collect::<Vec<_>>();
+        fs::write(
+            Path::new(&workspace).join(SEARCH_STEPS_FILE),
+            serde_json::to_vec(&steps)?,
+        )?;
     } else {
         let error = result.expect_err("scripted failure must remain an error");
         let message = format!("{error:#}").to_ascii_lowercase();

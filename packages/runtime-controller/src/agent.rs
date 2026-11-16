@@ -1197,12 +1197,16 @@ pub(crate) async fn agent_lease(
                         Some(ProxyJobBinding {
                             job_id: job.id,
                             lease_attempt: job.lease_attempts,
-                            native_web_search:
-                                crate::credentials::credential_allows_native_web_search(
-                                    &transaction,
-                                    job.credential_id.as_ref(),
-                                )
-                                .await?,
+                            native_web_search: crate::credentials::job_allows_native_web_search(
+                                &transaction,
+                                &state.config,
+                                crate::credentials::NativeSearchJob {
+                                    credential_id: job.credential_id.as_ref(),
+                                    run_id: job.run_id.as_ref(),
+                                    intent: job.intent.as_deref(),
+                                },
+                            )
+                            .await?,
                         }),
                         agent_handle.as_deref(),
                         agent_display_name.as_deref(),

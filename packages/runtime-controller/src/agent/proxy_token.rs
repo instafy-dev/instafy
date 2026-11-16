@@ -79,6 +79,7 @@ pub(super) async fn renew(
     let run_id: Option<Uuid> = row.get("run_id");
     let credential_id: Option<Uuid> = row.get("credential_id");
     let payload: JsonValue = row.get("payload");
+    let intent: Option<String> = row.get("intent");
     let (handle, name, description) = extract_agent_prompt_identity_from_job_payload(&payload);
     let proxy = issue_proxy_envelope(
         &state.config,
@@ -89,9 +90,14 @@ pub(super) async fn renew(
         Some(ProxyJobBinding {
             job_id,
             lease_attempt: request.lease_attempt,
-            native_web_search: crate::credentials::credential_allows_native_web_search(
+            native_web_search: crate::credentials::job_allows_native_web_search(
                 &transaction,
-                credential_id.as_ref(),
+                &state.config,
+                crate::credentials::NativeSearchJob {
+                    credential_id: credential_id.as_ref(),
+                    run_id: run_id.as_ref(),
+                    intent: intent.as_deref(),
+                },
             )
             .await?,
         }),
@@ -105,7 +111,6 @@ pub(super) async fn renew(
             Json(ApiError::new("job proxy token is unavailable")),
         )
     })?;
-    let intent: Option<String> = row.get("intent");
     if credential_id.is_none()
         && crate::dispatch::dispatch_requires_ai_access(intent.as_deref().unwrap_or_default())
     {
