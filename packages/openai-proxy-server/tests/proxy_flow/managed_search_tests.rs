@@ -3,7 +3,7 @@
 //! OpenAI's hosted search through the search bridge. Every provider answer
 //! here is a recorded fixture; nothing leaves the machine.
 
-use super::native_search_tests::{grant, request, search_reply};
+use super::native_search_tests::{grant, request};
 use super::*;
 
 /// A Responses API answer to one hosted search, as OpenAI documents it.
@@ -186,8 +186,8 @@ async fn managed_search_on_an_api_key_runs_hosted_search_on_the_platform_key() -
 
 #[tokio::test]
 #[serial]
-async fn managed_search_on_a_static_chatgpt_login_passes_through_as_the_pinned_model() -> Result<()>
-{
+async fn managed_search_on_a_static_chatgpt_login_searches_each_clean_query_as_the_pinned_model()
+-> Result<()> {
     let (addr, controller, upstream, _env, _guards) = spawn_search_stack(
         StackProxy::StaticChatGpt {
             pinned_model: Some(PINNED_MODEL),
@@ -195,26 +195,51 @@ async fn managed_search_on_a_static_chatgpt_login_passes_through_as_the_pinned_m
         Some("on"),
     )
     .await?;
-    let mut asked = request();
+    let mut asked = luna_search();
     asked["model"] = json!("gpt-5.6-sol");
-    let (status, body) = post_through_proxy(
-        addr,
-        &managed_grant(true, true),
-        "/v1/alpha/search",
-        asked.clone(),
-    )
-    .await?;
+    let (status, body) =
+        post_through_proxy(addr, &managed_grant(true, true), "/v1/alpha/search", asked).await?;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(serde_json::from_str::<Value>(&body)?, search_reply());
-    // As codex sent it, but as the pinned model.
-    let mut forwarded = asked;
-    forwarded["model"] = json!(PINNED_MODEL);
-    assert_eq!(*upstream.bodies.lock().unwrap(), vec![forwarded]);
+
+    // One search a query on the login's own search endpoint, as the pinned
+    // model, with only the cleaned query: not the chat's recent messages,
+    // and no page to open.
+    let mut sent = upstream.bodies.lock().unwrap().clone();
+    sent.sort_by_key(|body| body["commands"]["search_query"][0]["q"].to_string());
+    let settings = json!({"allowed_callers": ["direct"], "external_web_access": true});
+    assert_eq!(
+        sent,
+        vec![
+            json!({"id": "session-ref", "model": PINNED_MODEL, "commands": {"search_query": [{"q": "Example Reader 7 review"}]}, "settings": settings, "max_output_tokens": 8192}),
+            json!({"id": "session-ref", "model": PINNED_MODEL, "commands": {"search_query": [{"q": "Example Reader 7 weight", "domains": ["example.com"]}]}, "settings": settings, "max_output_tokens": 8192}),
+        ]
+    );
     assert_eq!(
         *upstream.bearers.lock().unwrap(),
-        vec![format!("Bearer {MANAGED_STUB_KEY}")]
+        vec![format!("Bearer {MANAGED_STUB_KEY}"); 2]
     );
     assert!(controller.leases.lock().unwrap().is_empty());
+
+    // What the login's search wrote comes back inside the wrapper, with what
+    // was removed and what was not run.
+    let answer: Value = serde_json::from_str(&body)?;
+    let output = answer["output"].as_str().expect("output is text");
+    for told in [
+        "2 queries sent to the search provider.",
+        "Query 1: \"Example Reader 7 weight\"\n<untrusted_page_content viewer=\"provider search\" read_at=\"",
+        "Found the source: https://example.org/source",
+        "Query 2: \"Example Reader 7 review\"\nRemoved before searching: an e-mail address.",
+        "Not run here: open.",
+    ] {
+        assert!(output.contains(told), "{told}\n---\n{output}");
+    }
+    assert_eq!(output.matches("</untrusted_page_content>").count(), 2);
+    assert!(!output.contains("ana@example.com"));
+    assert_eq!(answer["encrypted_output"], Value::Null);
+    assert_eq!(
+        answer["results"],
+        json!([{"type": "text_result", "url": "https://example.org/source", "title": null}])
+    );
     Ok(())
 }
 
@@ -250,8 +275,19 @@ async fn managed_search_needs_the_job_grant_and_leaves_own_credentials_as_they_a
 #[tokio::test]
 #[serial]
 async fn managed_search_sends_no_query_that_looks_like_a_key() -> Result<()> {
-    let (addr, _controller, upstream, _env, _guards) =
-        spawn_search_stack(StackProxy::Dynamic, Some("1")).await?;
+    for proxy in [
+        StackProxy::Dynamic,
+        StackProxy::StaticChatGpt {
+            pinned_model: Some(PINNED_MODEL),
+        },
+    ] {
+        sends_no_query_that_looks_like_a_key(proxy).await?;
+    }
+    Ok(())
+}
+
+async fn sends_no_query_that_looks_like_a_key(proxy: StackProxy<'_>) -> Result<()> {
+    let (addr, _controller, upstream, _env, _guards) = spawn_search_stack(proxy, Some("1")).await?;
     let mut asked = luna_search();
     asked["commands"]["search_query"] = json!([
         {"q": "password: hunter2"},

@@ -109,8 +109,8 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `PROXY_CREDENTIAL_LEASE_TOKEN` | Dedicated bearer used only for controller credential leases | `None` |
 | `PROXY_PINNED_MODEL` | The only model static credentials serve managed runs as (set it to the controller's `MANAGED_AI_MODEL_ID`); see [Model selection](#model-selection) | `None` |
 | `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` | Which upstream endpoints get the platform lane's `service_tier: "default"`: `openai` (only hosts under `openai.com`), `all` (any endpoint that takes a tier) or `none`; any other value stops the proxy at startup. See [Service tier](#service-tier) | `openai` |
-| `PROXY_MANAGED_NATIVE_WEB_SEARCH` | Lets a managed run the controller granted native search use `/v1/alpha/search`: a static ChatGPT login passes it through, and an API key gets the search bridge. A value that is not a boolean stops the proxy at startup. See [Native search for managed runs](#native-search-for-managed-runs) | Off |
-| `PROXY_MANAGED_WEB_SEARCH_MODEL` | The model the search bridge searches as; unset uses the managed run's pinned model. A value that is not a model id stops the proxy at startup | `None` |
+| `PROXY_MANAGED_NATIVE_WEB_SEARCH` | Lets a managed run the controller granted native search use `/v1/alpha/search` through the search bridge: OpenAI's hosted web search on an API key, or a static ChatGPT login's own search. A value that is not a boolean stops the proxy at startup. See [Native search for managed runs](#native-search-for-managed-runs) | Off |
+| `PROXY_MANAGED_WEB_SEARCH_MODEL` | The model the search bridge's hosted web search runs as; unset uses the managed run's pinned model. A value that is not a model id stops the proxy at startup | `None` |
 | `CODEX_PROXY_CHATGPT_ENDPOINT` | Upstream ChatGPT Codex Responses endpoint | `https://chatgpt.com/backend-api/codex/responses` |
 | `PROXY_STREAM_PASSTHROUGH` | `0`, `false`, `no` or `off` makes a streaming `/v1/responses` request wait for the whole upstream response again; see [Streaming](#streaming) | On |
 | `PROXY_MODEL_CONNECT_TIMEOUT_MS` | Maximum time to establish an upstream model connection, in milliseconds | `30000` (30 seconds) |
@@ -219,57 +219,80 @@ it to managed runs as well. Turning it off refuses every managed search at once 
 `native_web_search_unavailable`. Hosted `web_search` in a model request stays off on the
 platform lane either way.
 
-- **A static ChatGPT login** (`auth.json`, as on a local stack) passes the request through as
-  for a person's own login, as the pinned model on a pinned lease. This route does not renew its
-  expired token; the login's next model request refreshes it.
-- **An API key** (the controller's managed lease, or `OPENAI_API_KEY`) gets the search bridge.
-  Each `search_query` of codex's request (at most 4, and a repeated one once) becomes one
-  Responses request on the platform key: the model below, `tools: [{"type": "web_search"}]` with
-  the query's sites as `filters.allowed_domains` (codex's own `settings.filters.allowed_domains`
-  win when set) and codex's location, context size and live-access settings,
-  `tool_choice: "required"`, `max_tool_calls: 1`, `reasoning.effort: "low"`, `store: false`, at
-  most 8,192 output tokens, and `service_tier: "default"` where the platform lane sends a tier. It
-  carries only the query, not the chat's recent messages codex attaches; a query's wish for recent
-  pages goes as a line of text, since hosted search has no recency filter.
-  - The query rules of `instafy web search` apply first: e-mail addresses, account numbers and
-    numbers of 9 or more digits are removed, and a query that looks like a key or a password, or
-    holds the key the search is sent with, is not sent. A shorter number, such as a 7-digit order
-    number, passes, as in the CLI.
-  - The answer is codex's `SearchResponse`. `output` gives each query's answer and the pages it
-    cites inside `<untrusted_page_content viewer="provider search" read_at="…">`, and says what
-    was removed, refused or not run; `results` lists the cited pages (`type: "text_result"`,
-    `url`, `title`); `encrypted_output` is `null`. Codex's other commands (`open`, `click`,
-    `find`, `screenshot`, `image_query`, finance, weather, sports, time) are not run, and `output`
-    says to read pages with `instafy web read`.
-  - A query whose request fails is told in `output`. When every request fails, the route answers
-    with the first failure, redacted like any upstream failure. Nothing is retried here: codex owns
-    retries.
-  - Each request logs one line, `[proxy] managed web search {…}`, with `jobId`, `runId`,
-    `leaseAttempt`, `model`, `providerModel`, `outcome`, `httpStatus`, `errorCode`, `searches` (the
-    searches OpenAI bills: `tool_usage.web_search.num_requests`, or the `web_search_call` items
-    that searched when that is missing), `searchCalls`, `usage` (input tokens, which include the
-    pages' content, cached input, output and reasoning tokens), `citedPages` and
-    `responseIdHash`, and never the query, the answer or an address. `outcome` is the response's
-    status (`completed`, `incomplete`, `failed`), `error` for a refused or unanswered request, which
-    ran no search, or `interrupted` when the caller went away first, whose `searches` is unknown
-    (`null`). OpenAI charges $10 per 1,000 searches plus the content tokens at the model's input
-    rate. No credits are charged for these searches.
+A managed run's search goes through the search bridge, which works the same on either kind of
+platform credential:
 
-**The model.** `PROXY_MANAGED_WEB_SEARCH_MODEL` when set, else the lease's pinned model (the
-controller's `MANAGED_AI_MODEL_ID`, by default `gpt-6-luna`, which OpenAI's model page lists with
-hosted web search), else the model codex names. It must be a reasoning model with hosted web
-search, since the request sets a reasoning effort.
+- Each `search_query` of codex's request (at most 4, and a repeated one once) becomes one search
+  that carries only that query: not the chat's recent messages codex attaches, and none of
+  codex's other commands (`open`, `click`, `find`, `screenshot`, `image_query`, finance,
+  weather, sports, time), which are not run; `output` says to read pages with
+  `instafy web read`.
+- The query rules of `instafy web search` apply first: characters nobody sees are taken out,
+  e-mail addresses, account numbers and numbers of 9 or more digits are removed, and a query that
+  looks like a key or a password, or holds the credential the search is sent with, is not sent. A
+  shorter number, such as a 7-digit order number, passes, as in the CLI.
+- A query's sites (codex's own `settings.filters.allowed_domains` win when set) must be public
+  host names, as for the CLI's `--site`: a name in another script is sent in its ASCII form and a
+  leading `*.` is dropped. A query whose sites are all unusable is not searched, rather than
+  searched across the whole web.
+- The answer is codex's `SearchResponse`. `output` gives what the search wrote for each query
+  inside `<untrusted_page_content viewer="provider search" read_at="…">`, with the pages it cites,
+  and says what was removed, refused or not run; `results` lists the cited pages
+  (`type: "text_result"`, `url`, `title`); `encrypted_output` is `null`. Only public web pages are
+  cited: http(s) on the default ports, without a user name, a private, local or reserved host, or
+  a fragment, and percent-encoded, so no address can close the wrapper. Hidden characters in what
+  the search wrote become spaces, and a tag of the wrapper's name in it is defused.
+- A query whose search fails is told in `output`. When every search fails, the route answers with
+  the first failure, redacted like any upstream failure. Nothing is retried here: codex owns
+  retries.
+
+What runs each search depends on the credential:
+
+- **An API key** (the controller's managed lease, or `OPENAI_API_KEY`): one Responses request on
+  the platform key with OpenAI's hosted search: the model below,
+  `tools: [{"type": "web_search"}]` with the query's sites as `filters.allowed_domains` and
+  codex's location, context size and live-access settings, `tool_choice: "required"`,
+  `max_tool_calls: 1`, `reasoning.effort: "low"`, `store: false`, at most 8,192 output tokens, and
+  `service_tier: "default"` where the platform lane sends a tier. A query's wish for recent pages
+  goes in the request's instructions, since hosted search has no recency filter. OpenAI charges
+  $10 per 1,000 searches plus the content tokens at the model's input rate.
+- **A static ChatGPT login** (`auth.json`, as on a local stack): one request to the login's own
+  search endpoint with that query alone, codex's settings and the pinned model, on the login's
+  allowance. This route does not renew its expired token; the login's next model request
+  refreshes it.
+
+Each search logs one line, `[proxy] managed web search {…}`, with `jobId`, `runId`,
+`leaseAttempt`, `model`, `via` (`hosted_web_search` or `chatgpt_search`), `providerModel`,
+`outcome`, `httpStatus`, `errorCode`, `searches` (the searches OpenAI bills:
+`tool_usage.web_search.num_requests`, or the `web_search_call` items that searched when that is
+missing; `null` on a ChatGPT login), `searchCalls`, `usage` (input tokens, which include the
+pages' content, cached input, output and reasoning tokens; `null` on a ChatGPT login),
+`citedPages` and `responseIdHash`, and never the query, the answer or an address. `outcome` is
+the response's status (`completed`, `incomplete`, `failed`), `error` for a request that got no
+answer, or `interrupted` when the caller went away first. An `error` the provider refused, or
+one that never connected, ran no search (`searches: 0`); one the provider may have run, because
+it answered but its answer could not be read or the connection broke after the request went
+out, has unknown `searches` (`null`), as an `interrupted` one does. No credits are charged for
+these searches.
+
+**The model.** For hosted search, `PROXY_MANAGED_WEB_SEARCH_MODEL` when set, else the lease's
+pinned model (the controller's `MANAGED_AI_MODEL_ID`, by default `gpt-6-luna`, which OpenAI's
+model page lists with hosted web search), else the model codex names. It must be a reasoning
+model with hosted web search, since the request sets a reasoning effort.
 
 **Checking a key.** `openai-proxy search-probe [--model <id>]` sends one hosted search, the
 bridge's own request, on the machine's `OPENAI_API_KEY`, and prints one line: `ok model=<id>`,
 or `fail model=<id> reason=<code>` (such as `http_400_<provider code>`, `no_search`,
-`no_cited_page` or `no_api_key`). It exits 0, 1 for a failed search, or 2 when no model is named
-or an argument is wrong, and never prints the key, the answer or the provider's message. The
-model is `--model`, else `PROXY_MANAGED_WEB_SEARCH_MODEL`, `PROXY_PINNED_MODEL` or
-`MANAGED_AI_MODEL_ID`. Run it where the platform key is: in a proxy container that holds it
-(`docker exec <container> openai-proxy search-probe`), or with the proxy image and the key in the
-calling shell's environment (`docker run --rm -e OPENAI_API_KEY <image> search-probe --model
-gpt-6-luna`). One probe is one billed search, about one US cent plus its tokens.
+`no_cited_page`, `no_api_key`, `unreachable` or `response_too_large`). It exits 0, 1 for a failed
+search, or 2 when no model is named or an argument is wrong, and never prints the key, the
+answer or the provider's message. The model is `--model`, else `PROXY_MANAGED_WEB_SEARCH_MODEL`,
+`PROXY_PINNED_MODEL` or `MANAGED_AI_MODEL_ID`. Run it where the platform key is, naming the model
+when that environment sets none of these (a proxy that leases its credentials from the
+controller has no model setting of its own): in the proxy container that holds the key
+(`docker exec <container> openai-proxy search-probe --model <MANAGED_AI_MODEL_ID>`), or with the
+proxy image and the key in the calling shell's environment
+(`docker run --rm -e OPENAI_API_KEY <image> search-probe --model gpt-6-luna`). One probe is one
+billed search, about one US cent plus its tokens.
 
 ### Tool controls
 

@@ -213,10 +213,11 @@ A managed run on the controller's OpenAI API key has no ChatGPT login, and OpenA
 endpoint does not serve an API key. With the proxy's `PROXY_MANAGED_NATIVE_WEB_SEARCH` on (off by
 default), the proxy answers such a run's native search itself with OpenAI's hosted `web_search` on
 the platform key, which OpenAI bills at $10 per 1,000 searches plus the search content's tokens at
-the model's input rate. The proxy logs each of these searches with its job, model, tokens and
-billable searches, never its query (see the proxy README), and charges no credits for them. The
-controller grants native search only for a person's own ChatGPT login, so no managed run searches
-this way today.
+the model's input rate. A static ChatGPT login serving managed runs (a local stack) searches the
+same way through the login's own search, on its allowance. The proxy logs each of these searches
+with its job, model, tokens and billable searches, never its query (see the proxy README), and
+charges no credits for them. The controller grants native search only for a person's own ChatGPT
+login, so no managed run searches this way today.
 Static proxy credentials serving managed turns get the same pin from `PROXY_PINNED_MODEL`, as described above.
 
 The pricing envs are standard-tier rates, so the platform key also serves only OpenAI's standard

@@ -2,7 +2,7 @@ use super::*;
 use axum::body::Body;
 use futures_util::stream;
 
-pub(super) fn search_reply() -> Value {
+fn search_reply() -> Value {
     json!({"output":"Found the source: https://example.org/source", "encrypted_output":"opaque:unchanged", "results":[{"type":"text_result","ref_id":"turn0search0","url":"https://example.org/source","future":{"preserved":true}}], "future_top_level":true})
 }
 

@@ -1,10 +1,12 @@
 //! The query rules of `instafy web search` (`prepareQuery` in
 //! `packages/instafy-cli/src/web-search.ts`), for the searches the proxy runs
-//! itself on the operator's key. A query keeps only words: e-mail addresses,
-//! account numbers and long numbers (9 or more digits: phones, cards, ids)
-//! are removed, and a query that looks like it holds a key or a password is
-//! never sent. The patterns are the CLI's and the browser redaction's
-//! (`packages/browser-action-policy/redaction.js`); change them together.
+//! itself on the operator's credentials. A query keeps only words: e-mail
+//! addresses, account numbers and long numbers (9 or more digits: phones,
+//! cards, ids) are removed, and a query that looks like it holds a key or a
+//! password is never sent. Characters nobody sees are taken out first, so
+//! they cannot hide a number or an address. The patterns are the CLI's and
+//! the browser redaction's (`packages/browser-action-policy/redaction.js`);
+//! change them together.
 //!
 //! Numbers shorter than 9 digits, such as a 7-digit order number, pass, as
 //! they do in the CLI: the skills' rule that a query never holds a personal
@@ -116,9 +118,28 @@ fn patterns() -> &'static Patterns {
     })
 }
 
-/// Control characters become spaces, and runs of white space one space.
+/// Characters nobody sees, which could split a number or an address so the
+/// rules below miss it: zero-width spaces and joiners, soft hyphens, direction
+/// marks and byte order marks. The CLI's `\s` takes a byte order mark for a
+/// space; these are taken out, which only removes more.
+pub(crate) fn invisible(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
+}
+
+/// Characters nobody sees are taken out, control characters become spaces,
+/// and runs of white space one space.
 fn collapse(raw: &str) -> String {
     raw.chars()
+        .filter(|character| !invisible(*character))
         .map(|character| {
             if character.is_control() {
                 ' '
@@ -317,6 +338,36 @@ mod tests {
                 removed: vec!["a long number"],
             })
         );
+    }
+
+    #[test]
+    fn characters_nobody_sees_hide_no_number_or_address() {
+        // A byte order mark between digit groups, as the CLI's `\s` takes it.
+        assert_eq!(
+            prepare_query(
+                "card 4111\u{feff}1111\u{feff}1111\u{feff}1111 limit",
+                &[KEY]
+            ),
+            Ok(PreparedQuery {
+                query: "card limit".into(),
+                removed: vec!["a long number"],
+            })
+        );
+        // Zero-width spaces and joiners, soft hyphens and direction marks.
+        for (raw, sent) in [
+            ("call +351\u{200b}912\u{200b}345\u{200b}678 now", "call now"),
+            ("write to ana\u{200b}@example.com today", "write to today"),
+            (
+                "iban DE89\u{2060}3704\u{00ad}0044\u{200d}0532\u{200c}0130\u{200e}00 fees",
+                "iban fees",
+            ),
+        ] {
+            assert_eq!(
+                prepare_query(raw, &[KEY]).map(|q| q.query),
+                Ok(sent.into()),
+                "{raw:?}"
+            );
+        }
     }
 
     #[test]
