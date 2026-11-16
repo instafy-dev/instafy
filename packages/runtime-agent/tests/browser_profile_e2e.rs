@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use runtime_agent::browser_profile::{maybe_restore_and_launch, maybe_snapshot};
+use runtime_agent::browser_profile::{
+    maybe_restore_and_launch, maybe_snapshot, proc_read_reports_exit,
+};
 use runtime_agent::config::Config;
 use runtime_agent::controller::{ControllerClient, Registration};
 use serde::Deserialize;
@@ -116,7 +118,8 @@ async fn stop_without_saving() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Gone, or reaped between opening and reading /proc (ESRCH).
+                Err(error) if proc_read_reports_exit(&error) => {
                     return Ok::<_, anyhow::Error>(());
                 }
                 Ok(stat)
