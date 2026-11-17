@@ -15,8 +15,6 @@ export function StudioDiagnostics({ isOpen, onOpenChange }: { isOpen: boolean; o
   const controls = useWorkspaceControls();
   const {
     userEmail,
-    onShowLogs,
-    hasLogs,
     onOpenBugReport,
     shakeToReportEnabled = false,
     onToggleShakeToReport,
@@ -61,8 +59,6 @@ export function StudioDiagnostics({ isOpen, onOpenChange }: { isOpen: boolean; o
       >
         <DevDiagnosticsMenu
           onClose={() => onOpenChange(false)}
-          onShowLogs={onShowLogs}
-          hasLogs={hasLogs}
           onShowAppLogs={() => setAppLogsOverlayOpen(true)}
           hasAppLogs={hasAppLogs}
           onShowBugReports={onOpenBugReportInbox}

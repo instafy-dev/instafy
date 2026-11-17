@@ -227,21 +227,6 @@ export function GitReviewView({
   // Unsaved work is review-only: no editor opens from it.
   const openFileHandler = review.kind === "unsavedWork" ? undefined : handleOpenFile;
 
-  const handleOpenChangesDrawer = useCallback(() => {
-    if (review.kind !== "workingTree" || typeof window === "undefined") {
-      return;
-    }
-    window.dispatchEvent(
-      new CustomEvent("instafy:open-source-control", {
-        detail: {
-          projectId: activeProjectId ?? null,
-          previewPath,
-          reviewMode: "all",
-        },
-      }),
-    );
-  }, [activeProjectId, previewPath, review]);
-
   const diffActions = previewPath ? (
     <>
       <Button
@@ -450,17 +435,6 @@ export function GitReviewView({
                   </div>
                 ) : null}
               </>
-            ) : null}
-            {review.kind === "workingTree" && !hasSyntheticEntries ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                radius="xl"
-                onPress={handleOpenChangesDrawer}
-                data-testid="git-review-open-source-control"
-              >
-                Open Changes
-              </Button>
             ) : null}
             {review.kind === "savedVersion" ? (
               <IconButton

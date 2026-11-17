@@ -53,7 +53,6 @@ interface BugReportDialogProps {
   activeRuntimeId: string | null;
   controllerProjectMissing: boolean;
   appLogs: BuildLogEntry[];
-  buildLogs: BuildLogEntry[];
 }
 
 type BugReportSubmissionPayload = Parameters<typeof submitControllerBugReport>[0];
@@ -108,7 +107,6 @@ export function BugReportDialog({
   activeRuntimeId,
   controllerProjectMissing,
   appLogs,
-  buildLogs,
 }: BugReportDialogProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const submissionAttemptsRef = useRef(new Map<string, BugReportSubmissionAttempt>());
@@ -151,13 +149,6 @@ export function BugReportDialog({
       });
     };
   }, [screenshots]);
-
-  const logSummary = useMemo(() => {
-    return {
-      app: appLogs.length,
-      runtime: buildLogs.length,
-    };
-  }, [appLogs.length, buildLogs.length]);
 
   const attachFiles = useCallback(
     async (files: File[]) => {
@@ -285,7 +276,7 @@ export function BugReportDialog({
       dataBase64: screenshot.dataBase64,
       byteLength: screenshot.byteLength,
     }));
-    const reportLogs = includeDiagnostics ? [...appLogs, ...buildLogs] : [];
+    const reportLogs = includeDiagnostics ? appLogs : [];
     const diagnosticMetadata = includeDiagnostics
       ? {
           location: sanitizeBugReportLocation(
@@ -373,7 +364,6 @@ export function BugReportDialog({
     activeProjectId,
     activeRuntimeId,
     appLogs,
-    buildLogs,
     controllerProjectMissing,
     description,
     includeDiagnostics,
@@ -502,14 +492,14 @@ export function BugReportDialog({
                 isSelected={includeDiagnostics}
                 onChange={setIncludeDiagnostics}
                 label="Include diagnostics"
-                description="Share app and machine logs plus browser, build, release, and page-path information. This is off by default."
+                description="Share app logs plus browser, build, release, and page-path information. This is off by default."
                 data-testid="bug-report-include-diagnostics"
               />
               {includeDiagnostics ? (
                 <Card tone="default" radius="xl" shadow="none" padding="sm" data-testid="bug-report-diagnostics-preview">
                   <Text variant="caption" tone="secondary" className="font-medium">Diagnostics preview</Text>
                   <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600 dark:text-slate-300">
-                    <li>{logSummary.app} app log entries and {logSummary.runtime} machine log entries</li>
+                    <li>{appLogs.length} app log entries</li>
                     <li>App mode, build identifier, and release information</li>
                     <li>Browser or device user-agent information</li>
                     <li>

@@ -4,7 +4,6 @@ import { logAppInfo, logAppWarn } from "../../../debug/appLogs";
 import { useAppLogs } from "../../../debug/useAppLogs";
 import { useStatus } from "../../../status/useStatus";
 import { statusBehavior } from "../../../status/statusBehavior";
-import type { BuildLogEntry } from "../../../types";
 import { BugReportDialog } from "./BugReportDialog";
 import { BugReportInboxDialog } from "./BugReportInboxDialog";
 import { captureCurrentScreenBugReportDraft } from "./bugReportCapture";
@@ -46,7 +45,6 @@ interface UseStudioBugReportControllerOptions {
   activeConversationLocalId: string | null;
   activeRuntimeId: string | null;
   controllerProjectMissing: boolean;
-  buildLogs: BuildLogEntry[];
   legacyResolutionToasts?: boolean;
   onOpenDiagnostics?: () => void;
 }
@@ -58,7 +56,6 @@ export function useStudioBugReportController({
   activeConversationLocalId,
   activeRuntimeId,
   controllerProjectMissing,
-  buildLogs,
   legacyResolutionToasts = true,
   onOpenDiagnostics,
 }: UseStudioBugReportControllerOptions) {
@@ -526,7 +523,6 @@ export function useStudioBugReportController({
         activeConversationLocalId={activeConversationLocalId}
         activeRuntimeId={activeRuntimeId}
         controllerProjectMissing={controllerProjectMissing}
-        buildLogs={buildLogs}
       />
       <BugReportInboxDialog
         key={`support-inbox:${currentUserId ?? "signed-out"}`}

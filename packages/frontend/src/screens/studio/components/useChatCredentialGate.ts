@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usesTurnEngine } from "../../../conversations/runFailurePresentation";
 import type { ControllerCredentialListItem } from "../../../sdk/instafy";
 import { controllerClient } from "../../../sdk/instafy";
@@ -14,7 +14,6 @@ import {
 } from "./aiConnectWizardStorage";
 import { shouldDisplayChatMessage } from "./chatMessagePresentation";
 import { resolveAiCredentialGateState } from "./credentialGateState";
-import { connectDesktopCodexAuthJson } from "./desktopCodexAuthJson";
 import { isExpiredCredentialProxyError } from "./proxyError";
 import { canRestorePersistedAiOnboarding } from "./gettingStartedAiChoices";
 
@@ -30,13 +29,11 @@ function ranOnInstafyAi(message: ChatMessage): boolean {
 }
 
 const {
-  createCodex: createCodexCredential,
   getRequirements: getCredentialRequirements,
   list: listMyCredentials,
   setDefault: setDefaultCredential,
 } = controllerClient.credentials;
 
-const CREDENTIAL_DRAFT_STORAGE_KEY = "instafy.chat.credentialsDraft";
 const CREDENTIAL_GATE_CACHE_TTL_MS = 5 * 60 * 1000;
 const CREDENTIAL_GATE_CHECKING_RECHECK_MS = 5_000;
 const CREDENTIAL_GATE_REQUEST_TIMEOUT_MS = 8_000;
@@ -48,14 +45,6 @@ const MANAGED_AI_NEXT_AVAILABLE_GRACE_MS = 2_000;
 const MANAGED_AI_NEXT_AVAILABLE_PASSED_RECHECK_MS = 60_000;
 // setTimeout fires at once for anything above a signed 32-bit delay.
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
-type PendingCredentialDraft = {
-  conversationId: string;
-  draft: string;
-  editorState: string | null;
-  createdAt: number;
-  autoSubmit: boolean;
-};
 
 type CredentialRequirementState = {
   requiresUserCredentials: boolean | null;
@@ -88,24 +77,16 @@ type CredentialGateCacheEntry = {
 };
 
 type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
-type FocusInput = (options?: { force?: boolean }) => void;
 type RefreshAvailableAgents = (options?: { silent?: boolean }) => void | Promise<void>;
 
 type UseChatCredentialGateOptions = {
-  activeConversationId: string | null;
   activeProjectId: string | null;
   aiConnectWizardStorageKey: string | null;
-  canUseDesktopConnect: boolean;
   currentUserId: string | null;
-  focusInput: FocusInput;
   hasUser: boolean;
-  inputEditorState: string | null;
   inputRequiresAi: boolean;
-  inputValue: string;
   messages: ChatMessage[];
-  onInputChange: (conversationId: string, value: string, editorState: string | null) => void;
   pinAiOnboardingToBottom: () => void;
-  pendingCredentialAutoSubmitRef: MutableRefObject<boolean>;
   refreshAvailableAgents: RefreshAvailableAgents;
   runtimeControllerEnabled: boolean;
   showStatus: ShowStatus;
@@ -223,64 +204,14 @@ function withCredentialGateTimeout<T>(promise: Promise<T>, label: string): Promi
   });
 }
 
-function readPendingCredentialDraft(): PendingCredentialDraft | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  try {
-    const raw = window.localStorage.getItem(CREDENTIAL_DRAFT_STORAGE_KEY);
-    if (!raw) {
-      return null;
-    }
-    const parsed = JSON.parse(raw) as Partial<PendingCredentialDraft> | null;
-    if (!parsed || typeof parsed !== "object") {
-      return null;
-    }
-    if (typeof parsed.conversationId !== "string" || parsed.conversationId.trim().length === 0) {
-      return null;
-    }
-    return {
-      conversationId: parsed.conversationId,
-      draft: typeof parsed.draft === "string" ? parsed.draft : "",
-      editorState: typeof parsed.editorState === "string" ? parsed.editorState : null,
-      createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : Date.now(),
-      autoSubmit: parsed.autoSubmit === true,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function writePendingCredentialDraft(value: PendingCredentialDraft | null) {
-  if (typeof window === "undefined") {
-    return;
-  }
-  try {
-    if (!value) {
-      window.localStorage.removeItem(CREDENTIAL_DRAFT_STORAGE_KEY);
-      return;
-    }
-    window.localStorage.setItem(CREDENTIAL_DRAFT_STORAGE_KEY, JSON.stringify(value));
-  } catch {
-    // ignore storage failures
-  }
-}
-
 export function useChatCredentialGate({
-  activeConversationId,
   activeProjectId,
   aiConnectWizardStorageKey,
-  canUseDesktopConnect,
   currentUserId,
-  focusInput,
   hasUser,
-  inputEditorState,
   inputRequiresAi,
-  inputValue,
   messages,
-  onInputChange,
   pinAiOnboardingToBottom,
-  pendingCredentialAutoSubmitRef,
   refreshAvailableAgents,
   runtimeControllerEnabled,
   showStatus,
@@ -501,47 +432,6 @@ export function useChatCredentialGate({
     openAiOnboarding();
   }, [messages, openAiOnboarding]);
 
-  const stashDraftForCredentials = useCallback((options?: { autoSubmit?: boolean }) => {
-    if (!activeConversationId) {
-      return;
-    }
-    const draft = inputValue;
-    const editorState = inputEditorState ?? null;
-    const hasPayload = draft.trim().length > 0 || (editorState && editorState.trim().length > 0);
-    if (!hasPayload) {
-      return;
-    }
-    writePendingCredentialDraft({
-      conversationId: activeConversationId,
-      draft,
-      editorState,
-      createdAt: Date.now(),
-      autoSubmit: options?.autoSubmit === true,
-    });
-  }, [activeConversationId, inputEditorState, inputValue]);
-
-  const restoreDraftAfterCredentials = useCallback((): boolean => {
-    if (!activeConversationId) {
-      return false;
-    }
-    if (inputValue.trim().length > 0) {
-      return false;
-    }
-    const pending = readPendingCredentialDraft();
-    if (!pending || pending.conversationId !== activeConversationId) {
-      return false;
-    }
-    if (Date.now() - pending.createdAt > 30 * 60 * 1000) {
-      writePendingCredentialDraft(null);
-      return false;
-    }
-    pendingCredentialAutoSubmitRef.current = pending.autoSubmit;
-    onInputChange(activeConversationId, pending.draft, pending.editorState);
-    writePendingCredentialDraft(null);
-    focusInput();
-    return true;
-  }, [activeConversationId, focusInput, inputValue, onInputChange, pendingCredentialAutoSubmitRef]);
-
   const refreshCredentialRequirements = useCallback(async () => {
     if (!runtimeControllerEnabled) {
       setCredentialRequirements({
@@ -730,8 +620,7 @@ export function useChatCredentialGate({
     if (aiConnectWizardStorageKey) {
       writeAiConnectWizardState(aiConnectWizardStorageKey, null);
     }
-    restoreDraftAfterCredentials();
-  }, [aiConnectWizardStorageKey, credentialsReady, restoreDraftAfterCredentials]);
+  }, [aiConnectWizardStorageKey, credentialsReady]);
 
   useEffect(() => {
     if (!runtimeControllerEnabled || !inputRequiresAi || credentialsReady) {
@@ -741,112 +630,6 @@ export function useChatCredentialGate({
     return () => window.clearInterval(intervalId);
   }, [credentialsReady, inputRequiresAi, refreshCredentials, runtimeControllerEnabled]);
 
-  // The chat's own connect steps are the person choosing their own AI to
-  // answer, so a new connection becomes the default over Instafy AI. With an
-  // own default already set, the controller's rules apply as before.
-  const ownAiChoiceDefault = useMemo(
-    () =>
-      credentialRequirements.hasDefaultCredential || defaultAiCredential
-        ? {}
-        : { makeDefault: true as const },
-    [credentialRequirements.hasDefaultCredential, defaultAiCredential],
-  );
-
-  const connectFromDesktop = useCallback(async () => {
-    stashDraftForCredentials({ autoSubmit: true });
-    if (!canUseDesktopConnect) {
-      showStatus("Desktop connect is only available in the Instafy desktop app.", "info", 4500);
-      return;
-    }
-    if (credentialsBusy) {
-      return;
-    }
-    setCredentialsBusy(true);
-    try {
-      const result = await connectDesktopCodexAuthJson({
-        label: "Codex on this computer",
-        ...ownAiChoiceDefault,
-      });
-      if (!result.success) {
-        throw new Error(result.error ?? "Unable to save credentials.");
-      }
-      await refreshCredentials();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      showStatus(message, "error", 5000);
-    } finally {
-      setCredentialsBusy(false);
-    }
-  }, [
-    canUseDesktopConnect,
-    credentialsBusy,
-    ownAiChoiceDefault,
-    refreshCredentials,
-    showStatus,
-    stashDraftForCredentials,
-  ]);
-
-  const uploadAuthJsonFile = useCallback(async (file: File) => {
-    stashDraftForCredentials({ autoSubmit: true });
-    if (credentialsBusy) {
-      return;
-    }
-    setCredentialsBusy(true);
-    try {
-      const raw = await file.text();
-      const parsed = JSON.parse(raw) as unknown;
-      const result = await createCodexCredential({
-        authJson: parsed,
-        label: "auth.json",
-        ...ownAiChoiceDefault,
-      });
-      if (!result.success) {
-        throw new Error(result.error ?? "Unable to save credentials.");
-      }
-      await refreshCredentials();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      showStatus(`Upload failed: ${message}`, "error", 5000);
-    } finally {
-      setCredentialsBusy(false);
-    }
-  }, [credentialsBusy, ownAiChoiceDefault, refreshCredentials, showStatus, stashDraftForCredentials]);
-
-  const saveApiKey = useCallback(async (apiKey: string, provider: "openai" | "deepseek" | "zai" | "gemini") => {
-    stashDraftForCredentials({ autoSubmit: true });
-    if (credentialsBusy) {
-      return { success: false, error: "Credentials are busy." };
-    }
-    setCredentialsBusy(true);
-    try {
-      const label =
-        provider === "openai"
-          ? "API key"
-          : provider === "deepseek"
-            ? "DeepSeek"
-            : provider === "zai"
-              ? "z.ai"
-              : "Gemini";
-      const result = await createCodexCredential({
-        authJson: {
-          OPENAI_API_KEY: apiKey,
-        },
-        label,
-        provider,
-        ...ownAiChoiceDefault,
-      });
-      if (!result.success) {
-        return { success: false, error: result.error ?? "Unable to save credentials." };
-      }
-      await refreshCredentials();
-      return { success: true };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { success: false, error: message };
-    } finally {
-      setCredentialsBusy(false);
-    }
-  }, [credentialsBusy, ownAiChoiceDefault, refreshCredentials, stashDraftForCredentials]);
 
   const handleSetDefaultCredentialFromChat = useCallback(async (credentialId: string) => {
     if (!credentialId || credentialsBusy) {
@@ -986,7 +769,6 @@ export function useChatCredentialGate({
     aiOnboardingOpen,
     availableCredentials,
     closeAiOnboarding,
-    connectFromDesktop,
     credentialGateDetail,
     credentialInventoryStatus: credentialGateStatus.status,
     credentialGateState,
@@ -999,8 +781,5 @@ export function useChatCredentialGate({
     openAiOnboarding,
     refreshCredentialGate,
     refreshCredentials,
-    saveApiKey,
-    stashDraftForCredentials,
-    uploadAuthJsonFile,
   };
 }

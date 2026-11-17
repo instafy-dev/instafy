@@ -233,7 +233,7 @@ async function mountSupport(page: Page): Promise<string[]> {
       const support = useStudioBugReportController({
         currentUserId: ${JSON.stringify(USER_ID)}, activeProjectId: null,
         activeConversationId: null, activeConversationLocalId: null,
-        activeRuntimeId: null, controllerProjectMissing: false, buildLogs: []
+        activeRuntimeId: null, controllerProjectMissing: false
       });
       return h(React.Fragment, null,
         h("main", { className: "flex min-h-dvh flex-col justify-end bg-slate-50 p-4" },

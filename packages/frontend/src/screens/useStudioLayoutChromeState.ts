@@ -6,12 +6,6 @@ import { useSidebarToggleFocus } from "./studio/useSidebarToggleFocus";
 
 export type LeftDrawerPanel = "history" | "files" | "sourceControl" | "workspaces";
 
-export type SourceControlOpenRequest = {
-  key: number;
-  previewPath: string | null;
-  reviewMode?: "focused" | "all";
-};
-
 const LEFT_DRAWER_WIDTH_STORAGE_NAME = "instafy.leftDrawer.width.v1";
 const SIDEBAR_COLLAPSED_STORAGE_NAME = "instafy.sidebar.collapsed.v1";
 const LEFT_DRAWER_DEFAULT_WIDTH = 352;
@@ -99,7 +93,6 @@ export function useStudioLayoutChromeState({
     setMobileSidebarOpen((previous) => !previous);
   }, [isLargeScreen, prepareSidebarToggleFocus, setMobileSidebarOpen, setSidebarCollapsed]);
   const [mobileGitReviewSheet, setMobileGitReviewSheet] = useState<WorkspaceGitReviewSource | null>(null);
-  const [sourceControlOpenRequest, setSourceControlOpenRequest] = useState<SourceControlOpenRequest | null>(null);
   const drawerWidthStorageName = conversationWorkspace ? "instafy.conversationWorkspace.drawerWidth" : LEFT_DRAWER_WIDTH_STORAGE_NAME;
   const defaultDrawerWidth = conversationWorkspace ? 280 : LEFT_DRAWER_DEFAULT_WIDTH;
   const [leftDrawerWidth, setLeftDrawerWidth] = useState<number>(() => {
@@ -270,8 +263,6 @@ export function useStudioLayoutChromeState({
     setSidebarCollapsed,
     toggleSidebar,
     sidebarCollapsed,
-    sourceControlOpenRequest,
-    setSourceControlOpenRequest,
     handleLeftDrawerResizeStart,
   };
 }

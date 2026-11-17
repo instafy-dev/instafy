@@ -3,7 +3,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation, useNavigate, useNavigationType, type NavigateFunction } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildOrganizationSettingsCategorySearch, useSettingsRoute } from "../studio/settingsRoute";
+import { useSettingsRoute } from "../studio/settingsRoute";
 
 describe("URL-driven settings selection", () => {
   let root: Root;
@@ -87,7 +87,7 @@ describe("URL-driven settings selection", () => {
     expect(new URLSearchParams(state().search).get("settingsOrgId")).toBe("empty-team");
     await act(async () => navigate({
       pathname: "/studio",
-      search: `?${buildOrganizationSettingsCategorySearch(state().search, "profile", "another-team")}`,
+      search: "?panel=settings&settingsTab=org&settingsOrgId=another-team&projectId=other-space",
     }));
     expect(state().category).toBe("profile");
     expect(new URLSearchParams(state().search).get("settingsOrgId")).toBe("another-team");

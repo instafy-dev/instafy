@@ -17,8 +17,6 @@ import { useTouchModeDebugState } from "../../../hooks/useTouchLikeInput";
 
 export interface DevDiagnosticsMenuProps {
   onClose: () => void;
-  onShowLogs?: () => void;
-  hasLogs?: boolean;
   onShowAppLogs?: () => void;
   hasAppLogs?: boolean;
   onShowBugReports?: () => void;
@@ -37,8 +35,6 @@ const SECTION_CLASS = `mt-4 border-t border-slate-200/70 pt-4 ${DARK_DIVIDER_BOR
 
 export function DevDiagnosticsMenu({
   onClose,
-  onShowLogs,
-  hasLogs,
   onShowAppLogs,
   hasAppLogs,
   onShowBugReports,
@@ -54,7 +50,6 @@ export function DevDiagnosticsMenu({
 }: DevDiagnosticsMenuProps) {
   const { showStatus } = useStatus();
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-  const hasWebContainer = import.meta.env.VITE_USE_WEBCONTAINER === "true";
   const environment = import.meta.env.MODE;
   const supabaseHost = (() => {
     if (!supabaseUrl) {
@@ -71,7 +66,6 @@ export function DevDiagnosticsMenu({
       ? `Remote Supabase · ${supabaseHost}`
       : "Remote Supabase"
     : "Harness";
-  const buildDriver = hasWebContainer ? "WebContainer" : "Supabase Edge";
   const {
     effectiveTouchLikeInput,
     hardwareTouchLikeInput,
@@ -116,29 +110,6 @@ export function DevDiagnosticsMenu({
                 View app logs
               </Text>
               {hasAppLogs ? (
-                <span
-                  className="inline-flex h-2 w-2 rounded-full bg-primary-500"
-                  aria-hidden="true"
-                />
-              ) : null}
-            </Button>
-          ) : null}
-          {onShowLogs ? (
-            <Button
-              onPress={() => {
-                onClose();
-                onShowLogs();
-              }}
-              variant="secondary"
-              size="sm"
-              radius="2xl"
-              fullWidth
-              className="justify-between"
-            >
-              <Text as="span" variant="bodyStrong" tone="inherit">
-                View machine logs
-              </Text>
-              {hasLogs ? (
                 <span
                   className="inline-flex h-2 w-2 rounded-full bg-primary-500"
                   aria-hidden="true"
@@ -215,7 +186,6 @@ export function DevDiagnosticsMenu({
             items={[
               { label: "Environment", value: environment },
               { label: "Backend", value: backend },
-              { label: "Build driver", value: buildDriver },
             ]}
           />
         </div>

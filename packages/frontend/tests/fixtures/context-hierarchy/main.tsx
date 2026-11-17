@@ -323,7 +323,6 @@ function Review() {
                 userId: "review-user",
                 userEmail: "review@example.invalid",
                 activeProjectName: "live eval 2026 — browser review",
-                hasLogs: false,
                 sidebarOpen: !collapsed,
                 onToggleSidebar: () => setCollapsed(value => !value),
                 showChatActions: true,

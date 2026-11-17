@@ -62,7 +62,6 @@ function Harness({ userId }: { userId: string | null }) {
     activeConversationLocalId: null,
     activeRuntimeId: null,
     controllerProjectMissing: false,
-    buildLogs: [],
   });
   return null;
 }

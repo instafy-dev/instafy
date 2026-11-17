@@ -31,8 +31,8 @@ export type WorkspaceGitReviewSource =
       initialMode?: GitReviewMode;
       /**
        * Set by History (stateless and desktop modes): read the version from
-       * the default origin, pinned. Absent for the legacy Changes drawer,
-       * whose reviews keep today's routing.
+       * the default origin, pinned. Absent on a tab saved before History
+       * pinned its reviews, which keeps the legacy routing.
        */
       routing?: "default";
       originId?: string | null;

@@ -156,7 +156,6 @@ function projectDerivedClearActions(): RuntimeAction[] {
 
 function createHookDependencies() {
   let runtimeState: RuntimeState = {
-    buildLogs: [],
     activeConversationId: null,
     controllerReady: true,
     controllerProjectMissing: true,

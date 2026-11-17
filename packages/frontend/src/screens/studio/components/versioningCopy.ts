@@ -20,7 +20,7 @@ import type { ChatMessageFileNotSaved, ChatMessageUnsavedReason } from "../types
  * card. A sentence two surfaces share is written once, here.
  *
  * Copy rules: plain words, no em dashes, no server internals (lease holders,
- * raw codes, origin ids). The legacy Changes drawer keeps its own copy.
+ * raw codes, origin ids).
  */
 
 // ---------------------------------------------------------------------------

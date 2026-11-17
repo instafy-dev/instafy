@@ -19,29 +19,21 @@ describe("aiConnectWizardStorage", () => {
       ...defaultAiConnectWizardState(),
       open: true,
       mode: "personal_only",
-      step: "openai-auth",
-      provider: "openai",
       updatedAt: Date.now(),
     });
 
     expect(readAiConnectWizardState(STORAGE_KEY)).toMatchObject({
       open: true,
       mode: "personal_only",
-      step: "openai-auth",
-      provider: "openai",
     });
   });
 
-  it("keeps old version-1 records compatible by using the default mode", () => {
+  it("reads a record without a mode as the default mode", () => {
     window.localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
         version: 1,
         open: true,
-        provider: null,
-        step: "provider",
-        deviceAuthSession: null,
-        deviceAuthError: null,
         updatedAt: Date.now(),
       }),
     );

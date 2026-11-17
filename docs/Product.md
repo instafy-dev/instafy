@@ -200,9 +200,7 @@ Chats and Files reveal their filters on demand from the header. The Files filter
 matches names and paths in already-loaded folders and states that scope beside the
 input. Closing it clears the query; Escape returns focus to its toggle. File
 breadcrumbs appear only below the workspace root. On mobile, Files shares the
-navigation header, with secondary file actions in its More menu. Changes shows
-version-note and selection controls only when there are pending changes, while
-saved versions remain available in a clean workspace. Collapsed navigation keeps these headers inside
+navigation header, with secondary file actions in its More menu. Collapsed navigation keeps these headers inside
 the pane so the team and space pickers remain usable. Phone layouts retain their
 full-screen lists and navigation.
 

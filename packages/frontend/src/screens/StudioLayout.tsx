@@ -122,8 +122,6 @@ import {
   controllerClient,
   type ControllerAuthErrorDetail,
 } from "../sdk/instafy";
-import { useBuildLogs } from "../debug/useBuildLogs";
-import { BuildLogOverlay } from "./studio/components/BuildLogOverlay";
 import { ProviderBindingApprovalHost } from "./studio/components/ProviderBindingApprovalHost";
 import { useRuntime } from "../runtime/useRuntime";
 import { type SubmitPromptResult } from "../prompts/usePromptActions";
@@ -193,11 +191,6 @@ const topbarLocations: Record<TopbarLocation, { title: string; icon: ReactNode }
   chat: { title: "Chat", icon: <ChatLines className="text-[16px]" aria-hidden="true" /> },
 };
 
-type SourceControlOpenDetail = {
-  projectId?: string | null;
-  previewPath?: string | null;
-  reviewMode?: "focused" | "all";
-};
 type GitReviewOpenDetail = {
   review?: WorkspaceGitReviewSource | null;
 };
@@ -478,14 +471,6 @@ function StudioLayoutInner() {
     visibleConversationControllerId,
     searchHidesWorkspace,
   ]);
-  const {
-    buildLogs,
-    hasBuildLogs,
-    isBuildLogOverlayOpen,
-    handleClearBuildLogs,
-    handleShowBuildLogs,
-    handleHideBuildLogs
-  } = useBuildLogs();
   // A reply's toast names its chat, as the chat list names it, when the chat is one this tab has.
   const chatNamesRef = useRef(conversations);
   chatNamesRef.current = conversations;
@@ -509,7 +494,6 @@ function StudioLayoutInner() {
     activeConversationLocalId: activeConversation?.localId ?? null,
     activeRuntimeId: effectiveRuntimeId,
     controllerProjectMissing,
-    buildLogs,
   });
   const openSupportReport = bugReportController.onOpenBugReportInbox;
   const notificationDestinationIdentity = useRef({ userId: currentUserId, accessToken: auth.session?.access_token ?? null });
@@ -683,8 +667,6 @@ function StudioLayoutInner() {
     setSidebarCollapsed,
     toggleSidebar: handleToggleSidebar,
     sidebarCollapsed,
-    sourceControlOpenRequest,
-    setSourceControlOpenRequest,
   } = useStudioLayoutChromeState({ isLargeScreen, conversationWorkspace, scopeKey: currentUserId ? `${currentUserId}:${activeProjectId ?? "no-project"}` : null });
   useEffect(() => {
     if (mobileSidebarNavigation.error) showStatus(mobileSidebarNavigation.error, "error", 5000);
@@ -973,30 +955,16 @@ function StudioLayoutInner() {
       if (typeof window === "undefined") {
         return;
       }
-      const handler = (event: Event) => {
-        const custom = event as CustomEvent<SourceControlOpenDetail>;
-        const previewPath =
-          custom.detail && typeof custom.detail.previewPath === "string" && custom.detail.previewPath.trim().length > 0
-            ? custom.detail.previewPath.trim()
-            : null;
-        const reviewMode =
-          custom.detail?.reviewMode === "all" || custom.detail?.reviewMode === "focused"
-            ? custom.detail.reviewMode
-            : undefined;
+      const handler = () => {
         runStudioNavigation(() => {
-          setSourceControlOpenRequest({ key: Date.now(), previewPath, reviewMode });
           navigateToDestination({ kind: "drawer", workspaceTab: "sourceControl" });
         });
       };
-      window.addEventListener("instafy:open-source-control", handler as EventListener);
+      window.addEventListener("instafy:open-source-control", handler);
       return () => {
-        window.removeEventListener("instafy:open-source-control", handler as EventListener);
+        window.removeEventListener("instafy:open-source-control", handler);
       };
-    }, [
-      navigateToDestination,
-      runStudioNavigation,
-      setSourceControlOpenRequest,
-    ]);
+    }, [navigateToDestination, runStudioNavigation]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1615,7 +1583,7 @@ function StudioLayoutInner() {
       workspaceContentIsLazy = true;
       workspaceContent = (
         <div className="flex h-full flex-col overflow-hidden">
-          <SourceControlDrawer openRequest={sourceControlOpenRequest} title={sourceControlTitle} />
+          <SourceControlDrawer title={sourceControlTitle} />
         </div>
       );
     } else if (activeWorkspaceTab.panel === "projects") {
@@ -1851,9 +1819,6 @@ function StudioLayoutInner() {
             homeAttentionByOrg,
             onSignOut: handleSignOut,
             activeProjectName,
-            onShowLogs: hasBuildLogs ? handleShowBuildLogs : undefined,
-            hasLogs: hasBuildLogs,
-            buildLogs,
             sidebarCollapsed,
             sidebarOpen: isLargeScreen ? !sidebarCollapsed && !globalNavigationContext : mobileSidebarOpen,
             navigationPage: showMobileLeftDrawerOverlay ? "workspace" : navigationScope.page,
@@ -1973,7 +1938,6 @@ function StudioLayoutInner() {
                 ) : leftDrawer === "sourceControl" ? (
                   <SourceControlDrawer
                     headerPortalTarget={desktopPaneHeaderTarget}
-                    openRequest={sourceControlOpenRequest}
                     title={sourceControlTitle}
                     onRequestClose={() => {
                       requestHistoryPush();
@@ -2153,7 +2117,6 @@ function StudioLayoutInner() {
                 ) : leftDrawer === "sourceControl" ? (
                   <SourceControlDrawer
                     actionsPortalTarget={mobileDrawerActionsTarget}
-                    openRequest={sourceControlOpenRequest}
                     title={sourceControlTitle}
                     onRequestClose={() => {
                       requestHistoryPush();
@@ -2214,13 +2177,6 @@ function StudioLayoutInner() {
         onCreateBlank={handleCreateBlankProject}
         onCreateFromGithub={handleCreateGithubProject}
       />
-      {isBuildLogOverlayOpen ? (
-        <BuildLogOverlay
-          logs={buildLogs}
-          onClear={handleClearBuildLogs}
-          onClose={handleHideBuildLogs}
-        />
-      ) : null}
       <ProviderBindingApprovalHost />
       <WaitingBrowserPrompts
         enabled={controllerClient.core.enabled && canWriteProject && projectReadyForWorkspace && !controllerProjectMissing}

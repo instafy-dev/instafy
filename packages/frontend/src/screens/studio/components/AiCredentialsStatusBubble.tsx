@@ -1,50 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { NavArrowLeft, Upload, WarningTriangle, Xmark } from "iconoir-react";
+import { useCallback, useMemo } from "react";
+import { WarningTriangle, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
-import { Input } from "../../../components/Input";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
-import {
-  controllerClient,
-  type ControllerCredentialListItem,
-} from "../../../sdk/instafy";
-import { useStatus } from "../../../status/useStatus";
-import { textTones } from "../../../styles/typography";
+import type { ControllerCredentialListItem } from "../../../sdk/instafy";
 import { formatCredentialOptionLabel, resolveCredentialLabel } from "../../../utils/credentialFormatting";
-import { openExternalUrl } from "../../../utils/openExternalUrl";
-import {
-  defaultAiConnectWizardState,
-  readAiConnectWizardState,
-  writeAiConnectWizardState,
-  type AiConnectWizardProvider,
-  type AiConnectWizardStep,
-} from "./aiConnectWizardStorage";
 import { AccessDecisionCard } from "./AccessDecisionCard";
-import { ChatGptDeviceCodeDisabledNotice } from "./ChatGptDeviceCodeDisabledNotice";
-import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { ChatActivityBubble } from "./ChatActivityBubble";
-import {
-  isLikelyDesktopDevice,
-  shouldPromptForCodexAuthJsonUpload,
-  useDesktopCodexAuthJsonStatus,
-} from "./desktopCodexAuthJson";
-import {
-  CHATGPT_CONNECTION_DEFAULT_WARNING,
-  CHATGPT_CONNECTION_RESOLUTION_WARNING,
-  CHATGPT_CONNECTION_VERIFICATION_WARNING,
-} from "./device-auth/deviceAuthCompletion";
-import { isChatGptDeviceCodeLoginDisabledError } from "./device-auth/deviceAuthErrors";
-import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
 import { describeManagedAiNextAvailable, isManagedAiAllowanceUsedUp } from "./managedAiAllowance";
-
-const {
-  list: listMyCredentials,
-  setDefault: setDefaultCredential,
-  test: testMyCredential,
-} = controllerClient.credentials;
 
 export type AiCredentialsGateState =
   | "checking"
@@ -59,17 +25,8 @@ interface AiCredentialsStatusBubbleProps {
   state: AiCredentialsGateState;
   detail?: string | null;
   isBusy: boolean;
-  canUseDesktopConnect: boolean;
-  onStashDraft: () => void;
-  onConnectDesktop: () => void;
-  onUploadAuthJson: (file: File) => void;
-  onSaveApiKey: (
-    apiKey: string,
-    provider: AiConnectWizardProvider,
-  ) => Promise<{ success: boolean; error?: string }>;
   onRetry?: () => void;
   intent?: AiCredentialsWizardIntent;
-  storageKey?: string | null;
   connectedCredentials?: ControllerCredentialListItem[];
   defaultCredentialId?: string | null;
   managedAi?: {
@@ -110,14 +67,8 @@ export function AiCredentialsStatusBubble({
   state,
   detail,
   isBusy,
-  canUseDesktopConnect,
-  onStashDraft,
-  onConnectDesktop,
-  onUploadAuthJson,
-  onSaveApiKey,
   onRetry,
   intent = "gate",
-  storageKey = null,
   connectedCredentials = [],
   defaultCredentialId = null,
   managedAi = null,
@@ -128,107 +79,14 @@ export function AiCredentialsStatusBubble({
   hasTeammates = false,
   onClose,
 }: AiCredentialsStatusBubbleProps) {
-  const { showStatus } = useStatus();
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [apiKeyDraft, setApiKeyDraft] = useState("");
-  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
-  const [connectStep, setConnectStep] = useState<AiConnectWizardStep>("provider");
-  const [selectedProvider, setSelectedProvider] = useState<AiConnectWizardProvider | null>(null);
-  const [showDeviceAuthPrerequisite, setShowDeviceAuthPrerequisite] = useState(false);
-  const connectWizardHydratedRef = useRef(false);
-  const desktopCodexAuthJsonStatus = useDesktopCodexAuthJsonStatus(canUseDesktopConnect);
-  const shouldPromptForAuthJsonUpload = shouldPromptForCodexAuthJsonUpload(
-    desktopCodexAuthJsonStatus,
-  );
   const effectiveState: AiCredentialsGateState =
     state === "needs_default" && connectedCredentials.length === 0 ? "missing" : state;
   const showUnavailableState = effectiveState === "unavailable";
   // The bubble never hosts a provider list: picking lives in the Add AI
-  // connection modal. The blocking gate is one sentence and one button, and
-  // the proactive connect prompt is the same surface at its provider step.
-  // The connect intent keeps only the inline steps a persisted wizard can
-  // restore (device login, API key entry).
-  const showReducedGate =
-    effectiveState === "missing" && (intent === "gate" || connectStep === "provider");
+  // connection modal. The blocking gate and the proactive connect prompt are
+  // one sentence and one button that hands off to it.
+  const showReducedGate = effectiveState === "missing";
   const showConnectWizard = !showUnavailableState && intent === "connect";
-  const canGoBack = showConnectWizard && connectStep !== "provider";
-  const allowAuthJsonUpload = useMemo(() => isLikelyDesktopDevice(), []);
-
-  const finalizeDeviceAuth = useCallback(
-    async ({
-      provider,
-      credentialId,
-    }: {
-      provider: "codex" | "gemini" | "github";
-      sessionId: string;
-      credentialId?: string | null;
-    }) => {
-      // Only the AI credential wizard uses device auth for Codex/Gemini.
-      if (provider === "github") {
-        onRetry?.();
-        return { success: true as const };
-      }
-
-      const finishWithWarning = (warning: string) => {
-        showStatus(warning, "warning", 6500);
-        onRetry?.();
-        return { success: true as const, warning };
-      };
-
-      let resolvedCredentialId = typeof credentialId === "string" ? credentialId.trim() : "";
-      if (!resolvedCredentialId) {
-        const credentialsResult = await listMyCredentials().catch(() => null);
-        if (!credentialsResult || !credentialsResult.success) {
-          return finishWithWarning(CHATGPT_CONNECTION_RESOLUTION_WARNING);
-        }
-        const activeDefault = credentialsResult.credentials.find(
-          (credential) =>
-            !credential.revokedAt &&
-            credential.isDefault &&
-            (credential.kind === "codex_auth_json" || credential.kind === "openai_api_key"),
-        );
-        resolvedCredentialId = activeDefault?.id?.trim() ?? "";
-      }
-
-      if (!resolvedCredentialId) {
-        return finishWithWarning(CHATGPT_CONNECTION_RESOLUTION_WARNING);
-      }
-
-      const testResult = await testMyCredential(resolvedCredentialId).catch(() => null);
-      if (!testResult || !testResult.success || testResult.ok === false) {
-        return finishWithWarning(CHATGPT_CONNECTION_VERIFICATION_WARNING);
-      }
-
-      const setDefaultResult = await setDefaultCredential(resolvedCredentialId).catch(() => null);
-      if (!setDefaultResult || !setDefaultResult.success) {
-        return finishWithWarning(CHATGPT_CONNECTION_DEFAULT_WARNING);
-      }
-
-      onRetry?.();
-      return { success: true as const };
-    },
-    [onRetry, showStatus],
-  );
-
-  const deviceAuth = useDeviceAuthFlow({
-    onCompleted: finalizeDeviceAuth,
-  });
-
-  const deviceAuthSession = deviceAuth.session;
-  const deviceAuthError = deviceAuth.error;
-  const deviceAuthBusy = deviceAuth.busy;
-  const deviceAuthCompleting = deviceAuth.completing;
-  const deviceAuthCompletionWarning = deviceAuth.completionWarning;
-  const beginDeviceAuthFlow = deviceAuth.begin;
-  const cancelDeviceAuthFlow = deviceAuth.cancel;
-  const resetDeviceAuthFlow = deviceAuth.reset;
-  const hydrateDeviceAuthFlow = deviceAuth.hydrate;
-  const wizardBusy = isBusy || deviceAuthBusy || deviceAuthCompleting;
-  // OpenAI refused device-code login: the session's code can never be
-  // approved, so the login step explains how to turn it on instead.
-  const deviceCodeLoginDisabled =
-    isChatGptDeviceCodeLoginDisabledError(deviceAuthSession?.error) ||
-    isChatGptDeviceCodeLoginDisabledError(deviceAuthError);
   // The gate is up only because today's hosted AI messages are used up, not
   // because AI was never set up: say so, and when more are available.
   const managedAiUsedUp =
@@ -270,15 +128,10 @@ export function AiCredentialsStatusBubble({
   ]);
 
   const resolvedDetail = useMemo(() => {
-    if (deviceAuthError && !deviceCodeLoginDisabled) {
-      return deviceAuthError;
-    }
     if (detail !== undefined) {
       return detail;
     }
     switch (effectiveState) {
-      case "checking":
-        return null;
       case "needs_default":
         // effectiveState normalizes the zero-credential case to "missing", so
         // this branch always has credentials to choose from.
@@ -290,228 +143,18 @@ export function AiCredentialsStatusBubble({
         // from here, so the sentence no longer sends the reader looking for one.
         return "Try again. Your AI connections are unchanged.";
       default:
-        if (intent === "connect" && managedAi?.available && connectedCredentials.length === 0) {
-          // The amount is a reserve taken when the prompt is sent; the turn is
-          // priced by usage after it runs (a GPT-6 Luna turn is often 3).
-          const burnLabel =
-            managedAi.creditBurnAmount === 1
-              ? "Each prompt holds 1 credit up front and is charged by usage."
-              : `Each prompt holds ${managedAi.creditBurnAmount} credits up front and is charged by usage.`;
-          const quotaLabel =
-            typeof managedAi.remainingPrompts === "number"
-              ? ` ${managedAi.remainingPrompts} managed prompts left today.`
-              : "";
-          return `${burnLabel}${quotaLabel} Connect your own provider when you want longer runs, provider-specific control, or deeper work.`;
-        }
-        return "Follow the steps. Browser login is the easiest path, and the connection is saved to your Instafy profile.";
+        // Checking shows only its title, and a missing connection shows the
+        // gate, which says what to do in its title and button.
+        return null;
     }
-  }, [
-    connectedCredentials.length,
-    detail,
-    deviceAuthError,
-    deviceCodeLoginDisabled,
-    effectiveState,
-    intent,
-    managedAi?.available,
-    managedAi?.creditBurnAmount,
-    managedAi?.remainingPrompts,
-  ]);
+  }, [detail, effectiveState]);
 
-  const beginDeviceAuth = useCallback(async () => {
-    if (isBusy || deviceAuthBusy) {
-      return;
+  const handleClose = useCallback(() => {
+    if (!isBusy) {
+      onClose?.();
     }
-    onStashDraft();
-    setApiKeyDraft("");
-    setApiKeyError(null);
-    setSelectedProvider("openai");
-    setConnectStep("openai-login");
-    resetDeviceAuthFlow();
-    await beginDeviceAuthFlow({ provider: "codex" });
-  }, [beginDeviceAuthFlow, deviceAuthBusy, isBusy, onStashDraft, resetDeviceAuthFlow]);
-
-  const cancelDeviceAuthSession = useCallback(async () => {
-    if (wizardBusy) {
-      return;
-    }
-    if (deviceAuthSession?.status === "pending") {
-      await cancelDeviceAuthFlow();
-      return;
-    }
-    resetDeviceAuthFlow();
-  }, [cancelDeviceAuthFlow, deviceAuthSession?.status, resetDeviceAuthFlow, wizardBusy]);
-
-  // Back from "device-code login is off" returns to the login methods, where
-  // the local Codex login stays on offer.
-  const leaveDisabledDeviceCodeLogin = useCallback(() => {
-    if (wizardBusy) {
-      return;
-    }
-    setShowDeviceAuthPrerequisite(false);
-    resetDeviceAuthFlow();
-  }, [resetDeviceAuthFlow, wizardBusy]);
-
-  const resetConnectState = useCallback(() => {
-    setSelectedProvider(null);
-    setConnectStep("provider");
-    setApiKeyDraft("");
-    setApiKeyError(null);
-    setShowDeviceAuthPrerequisite(false);
-    resetDeviceAuthFlow();
-  }, [resetDeviceAuthFlow]);
-
-  const handleBack = useCallback(() => {
-    if (wizardBusy) {
-      return;
-    }
-    if (!showConnectWizard) {
-      return;
-    }
-    if (connectStep === "provider") {
-      return;
-    }
-    // The header and Android back do what the notice's own Back does. The
-    // refusal is the device-auth error, so hiding only the prerequisite would
-    // leave the notice on screen.
-    if (connectStep === "openai-login" && deviceCodeLoginDisabled) {
-      leaveDisabledDeviceCodeLogin();
-      return;
-    }
-    if (connectStep === "openai-login" && showDeviceAuthPrerequisite && !deviceAuthSession) {
-      setShowDeviceAuthPrerequisite(false);
-      return;
-    }
-    if (connectStep === "openai-login" && deviceAuthSession) {
-      void cancelDeviceAuthSession();
-      return;
-    }
-
-    resetDeviceAuthFlow();
-    setApiKeyError(null);
-
-    if (connectStep === "openai-auth") {
-      setSelectedProvider(null);
-      setConnectStep("provider");
-      return;
-    }
-
-    if (connectStep === "openai-login" || connectStep === "openai-api-key" || connectStep === "openai-upload") {
-      setSelectedProvider("openai");
-      setConnectStep("openai-auth");
-      return;
-    }
-
-    if (connectStep === "gemini-api-key") {
-      setSelectedProvider("gemini");
-      setConnectStep("gemini-auth");
-      return;
-    }
-
-    resetConnectState();
-  }, [
-    cancelDeviceAuthSession,
-    connectStep,
-    deviceAuthSession,
-    deviceCodeLoginDisabled,
-    leaveDisabledDeviceCodeLogin,
-    resetDeviceAuthFlow,
-    resetConnectState,
-    showDeviceAuthPrerequisite,
-    showConnectWizard,
-    wizardBusy,
-  ]);
-
-  const handleClose = useCallback(async () => {
-    if (wizardBusy) {
-      return;
-    }
-    if (deviceAuthSession) {
-      await cancelDeviceAuthSession();
-    }
-    onClose?.();
-  }, [cancelDeviceAuthSession, deviceAuthSession, onClose, wizardBusy]);
-
-  const handleNativeBack = useCallback(() => {
-    if (wizardBusy) {
-      return;
-    }
-    if (canGoBack) {
-      handleBack();
-      return;
-    }
-    void handleClose();
-  }, [canGoBack, handleBack, handleClose, wizardBusy]);
-  useNativeBackButtonAction(
-    canGoBack || (intent === "connect" && Boolean(onClose)),
-    handleNativeBack,
-  );
-
-  useEffect(() => {
-    connectWizardHydratedRef.current = false;
-    if (!storageKey || !showConnectWizard) {
-      return;
-    }
-
-    const stored = readAiConnectWizardState(storageKey);
-    if (!stored) {
-      resetConnectState();
-      connectWizardHydratedRef.current = true;
-      return;
-    }
-    setSelectedProvider(stored.provider);
-    setConnectStep(stored.step);
-    const hydratedProvider = stored.step === "openai-login" ? "codex" : null;
-    hydrateDeviceAuthFlow({
-      provider: hydratedProvider,
-      session: stored.deviceAuthSession,
-      error: stored.deviceAuthError,
-    });
-    connectWizardHydratedRef.current = true;
-  }, [hydrateDeviceAuthFlow, resetConnectState, showConnectWizard, storageKey]);
-
-  useEffect(() => {
-    if (!storageKey) {
-      return;
-    }
-    if (!showConnectWizard) {
-      return;
-    }
-    if (!connectWizardHydratedRef.current) {
-      return;
-    }
-
-    const base = defaultAiConnectWizardState();
-    const stored = readAiConnectWizardState(storageKey);
-    const open =
-      intent === "connect" || connectStep !== "provider" || deviceAuthSession?.status === "pending";
-    writeAiConnectWizardState(storageKey, {
-      ...base,
-      open,
-      mode: stored?.mode ?? base.mode,
-      provider: selectedProvider,
-      step: connectStep,
-      deviceAuthSession,
-      deviceAuthError,
-      updatedAt: Date.now(),
-    });
-  }, [connectStep, deviceAuthError, deviceAuthSession, intent, selectedProvider, showConnectWizard, storageKey]);
-
-  const handleTriggerUpload = useCallback(() => {
-    onStashDraft();
-    fileInputRef.current?.click();
-  }, [onStashDraft]);
-
-  const handleUploadFile = useCallback(
-    (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0] ?? null;
-      if (!file) {
-        return;
-      }
-      onUploadAuthJson(file);
-      event.target.value = "";
-    },
-    [onUploadAuthJson],
-  );
+  }, [isBusy, onClose]);
+  useNativeBackButtonAction(intent === "connect" && Boolean(onClose), handleClose);
 
   const defaultCredential = useMemo(() => {
     if (!defaultCredentialId) {
@@ -519,52 +162,6 @@ export function AiCredentialsStatusBubble({
     }
     return connectedCredentials.find((credential) => credential.id === defaultCredentialId) ?? null;
   }, [connectedCredentials, defaultCredentialId]);
-
-  const showDeviceAuthPanel = deviceAuthSession !== null;
-
-  const handleOpenAiAuthChoice = useCallback((choice: "login" | "apiKey" | "upload") => {
-    setSelectedProvider("openai");
-    if (choice === "login") {
-      setConnectStep("openai-login");
-      return;
-    }
-    if (choice === "apiKey") {
-      setConnectStep("openai-api-key");
-      return;
-    }
-    if (!allowAuthJsonUpload) {
-      setConnectStep("openai-auth");
-      return;
-    }
-    setConnectStep("openai-upload");
-  }, [allowAuthJsonUpload]);
-
-  useEffect(() => {
-    if (!allowAuthJsonUpload && connectStep === "openai-upload") {
-      setConnectStep("openai-auth");
-    }
-  }, [allowAuthJsonUpload, connectStep]);
-
-  const localCodexLoginButton = canUseDesktopConnect ? (
-    <Button
-      onPress={() => {
-        if (shouldPromptForAuthJsonUpload) {
-          handleTriggerUpload();
-          return;
-        }
-        onStashDraft();
-        onConnectDesktop();
-      }}
-      variant="primary"
-      size="xs"
-      radius="full"
-      fullWidth
-      isDisabled={isBusy}
-      className="justify-start"
-    >
-      {shouldPromptForAuthJsonUpload ? "Choose auth.json" : "Use local Codex login"}
-    </Button>
-  ) : null;
 
   if (effectiveState === "checking" && intent === "gate") {
     return (
@@ -647,8 +244,8 @@ export function AiCredentialsStatusBubble({
               size="sm"
               radius="full"
               aria-label="Close AI connect"
-              onPress={() => void handleClose()}
-              isDisabled={wizardBusy}
+              onPress={handleClose}
+              isDisabled={isBusy}
               className="-mt-1 -mr-1 shrink-0 text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
@@ -678,7 +275,7 @@ export function AiCredentialsStatusBubble({
             size="sm"
             radius="full"
             onPress={() => onConnectAi?.()}
-            isDisabled={wizardBusy}
+            isDisabled={isBusy}
             data-testid="ai-gate-connect-ai"
           >
             {managedAiUsedUp ? "Connect your own AI" : "Connect AI"}
@@ -691,7 +288,7 @@ export function AiCredentialsStatusBubble({
               onPress={() => {
                 void onUseManagedAi?.();
               }}
-              isDisabled={wizardBusy || managedAi.remainingPrompts === 0}
+              isDisabled={isBusy || managedAi.remainingPrompts === 0}
               data-testid="ai-gate-use-managed-ai"
             >
               {formatManagedAiOfferLabel(managedAi)}
@@ -701,14 +298,14 @@ export function AiCredentialsStatusBubble({
         {intent === "gate" && hasTeammates && onChatWithoutAi ? (
           <Button
             onPress={() => {
-              if (!wizardBusy) {
+              if (!isBusy) {
                 onChatWithoutAi();
               }
             }}
             variant="ghost"
             size="xs"
             radius="full"
-            isDisabled={wizardBusy}
+            isDisabled={isBusy}
             className="mt-2 -ml-1.5 px-1.5 text-left text-xs text-slate-500 underline-offset-2 hover:underline dark:text-slate-400"
             data-testid="ai-gate-chat-without-ai"
           >
@@ -734,32 +331,17 @@ export function AiCredentialsStatusBubble({
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          {canGoBack ? (
-            <IconButton
-              variant="ghost"
-              size="sm"
-              radius="full"
-              aria-label="Back"
-              onPress={handleBack}
-              isDisabled={wizardBusy}
-              className="shrink-0 text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700"
-            >
-              <NavArrowLeft className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
+          {effectiveState === "checking" ? (
+            <Spinner aria-hidden="true" tone="slate" size="xs" />
           ) : null}
-          <div className="flex min-w-0 items-center gap-2">
-            {effectiveState === "checking" ? (
-              <Spinner aria-hidden="true" tone="slate" size="xs" />
-            ) : null}
-            <Text
-              as="div"
-              variant="bodyStrong"
-              tone="inherit"
-              className="min-w-0 text-lg leading-6 text-slate-950 dark:text-white"
-            >
-              {title}
-            </Text>
-          </div>
+          <Text
+            as="div"
+            variant="bodyStrong"
+            tone="inherit"
+            className="min-w-0 text-lg leading-6 text-slate-950 dark:text-white"
+          >
+            {title}
+          </Text>
         </div>
         {intent === "connect" && onClose ? (
           <IconButton
@@ -767,8 +349,8 @@ export function AiCredentialsStatusBubble({
             size="sm"
             radius="full"
             aria-label="Close AI connect"
-            onPress={() => void handleClose()}
-            isDisabled={wizardBusy}
+            onPress={handleClose}
+            isDisabled={isBusy}
             className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
           >
             <Xmark className="h-4 w-4" aria-hidden="true" />
@@ -780,507 +362,39 @@ export function AiCredentialsStatusBubble({
           {resolvedDetail}
         </Text>
       ) : null}
-          {state === "needs_default" && connectedCredentials.length > 0 ? (
-            <div className="mt-2 flex flex-col gap-2">
-              {connectedCredentials.map((credential) => (
-                <Button
-                  key={credential.id}
-                  onPress={() => onSetDefaultCredential?.(credential.id)}
-                  variant={credential.id === defaultCredentialId ? "primary" : "outline"}
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  isDisabled={isBusy || !onSetDefaultCredential}
-                  className="justify-start"
-                >
-                  {formatCredentialOptionLabel(credential)}
-                </Button>
-              ))}
-            </div>
-          ) : null}
+      {state === "needs_default" && connectedCredentials.length > 0 ? (
+        <div className="mt-2 flex flex-col gap-2">
+          {connectedCredentials.map((credential) => (
+            <Button
+              key={credential.id}
+              onPress={() => onSetDefaultCredential?.(credential.id)}
+              variant={credential.id === defaultCredentialId ? "primary" : "outline"}
+              size="xs"
+              radius="full"
+              fullWidth
+              isDisabled={isBusy || !onSetDefaultCredential}
+              className="justify-start"
+            >
+              {formatCredentialOptionLabel(credential)}
+            </Button>
+          ))}
+        </div>
+      ) : null}
 
-          {showConnectWizard && connectStep === "provider" && onConnectAi ? (
-            <div className="mt-3">
-              <Button
-                onPress={onConnectAi}
-                variant="outline"
-                size="xs"
-                radius="full"
-                isDisabled={isBusy}
-                data-testid="ai-connect-add-connection"
-              >
-                Connect AI
-              </Button>
-            </div>
-          ) : null}
-
-          {showConnectWizard && connectStep === "openai-auth" ? (
-            <div className="mt-2 space-y-2">
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                OpenAI selected. How do you want to connect?
-              </Text>
-              <div className="flex flex-col gap-2">
-                <Button
-                  onPress={() => handleOpenAiAuthChoice("login")}
-                  variant="primary"
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  isDisabled={isBusy}
-                  className="justify-start"
-                >
-                  ChatGPT login (Plus/Team)
-                </Button>
-                <Button
-                  onPress={() => handleOpenAiAuthChoice("apiKey")}
-                  variant="outline"
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  isDisabled={isBusy}
-                  className="justify-start"
-                >
-                  API key
-                </Button>
-                {allowAuthJsonUpload ? (
-                  <Button
-                    onPress={() => handleOpenAiAuthChoice("upload")}
-                    variant="ghost"
-                    size="xs"
-                    radius="full"
-                    fullWidth
-                    isDisabled={isBusy}
-                    className="justify-start"
-                  >
-                    Upload auth.json (advanced)
-                  </Button>
-                ) : null}
-              </div>
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                ChatGPT subscription or API key.
-              </Text>
-            </div>
-          ) : null}
-
-          {showConnectWizard && connectStep === "gemini-auth" ? (
-            <div className="mt-2 space-y-2">
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Gemini currently connects with an API key.
-              </Text>
-              <div className="flex flex-col gap-2">
-                <Button
-                  onPress={() => {
-                    setApiKeyDraft("");
-                    setApiKeyError(null);
-                    setConnectStep("gemini-api-key");
-                  }}
-                  variant="primary"
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  isDisabled={isBusy}
-                  className="justify-start"
-                >
-                  API key
-                </Button>
-              </div>
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Gemini connects with an API key. Google login is no longer supported.
-              </Text>
-            </div>
-          ) : null}
-
-          {showConnectWizard && connectStep === "openai-login" && deviceCodeLoginDisabled ? (
-            <div className="mt-2 space-y-2" data-testid="chat-ai-device-code-disabled">
-              <ChatGptDeviceCodeDisabledNotice
-                busy={wizardBusy}
-                onTryAgain={() => void beginDeviceAuth()}
-                onBack={leaveDisabledDeviceCodeLogin}
-                className="rounded-2xl border border-slate-200/70 bg-slate-50/60 p-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300"
-              />
-              {localCodexLoginButton}
-            </div>
-          ) : null}
-
-          {showConnectWizard &&
-          connectStep === "openai-login" &&
-          !deviceCodeLoginDisabled &&
-          !showDeviceAuthPanel &&
-          !showDeviceAuthPrerequisite ? (
-            <div className="mt-2 space-y-2">
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Pick a login method:
-              </Text>
-              <div className="flex flex-col gap-2">
-                {localCodexLoginButton}
-                <Button
-                  onPress={() => setShowDeviceAuthPrerequisite(true)}
-                  variant={canUseDesktopConnect ? "outline" : "primary"}
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  isDisabled={isBusy}
-                  className="justify-start"
-                >
-                  Browser login (device code)
-                </Button>
-              </div>
-              {canUseDesktopConnect ? (
-                <Text as="div" variant="caption" tone="muted" className="text-xs">
-                  {desktopCodexAuthJsonStatus?.exists
-                    ? "Found ~/.codex/auth.json."
-                    : shouldPromptForAuthJsonUpload
-                      ? "No default Codex auth.json found on this computer."
-                      : "Desktop will use this computer's local Codex login."}
-                </Text>
-              ) : null}
-            </div>
-          ) : null}
-
-          {showConnectWizard &&
-          connectStep === "openai-login" &&
-          !deviceCodeLoginDisabled &&
-          !showDeviceAuthPanel &&
-          showDeviceAuthPrerequisite ? (
-            <ChatGptDeviceCodePrerequisite
-              busy={deviceAuthBusy}
-              containerClassName="mt-2 rounded-2xl border border-slate-200/70 bg-slate-50/60 p-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300"
-              containerTestId="chat-ai-device-code-prerequisite"
-              continueClassName="mt-2 min-h-11"
-              disabled={isBusy}
-              helpTestId="chat-ai-device-code-help"
-              onContinue={beginDeviceAuth}
-            />
-          ) : null}
-
-          {showConnectWizard &&
-          connectStep === "openai-login" &&
-          !deviceCodeLoginDisabled &&
-          showDeviceAuthPanel ? (
-            <div className="mt-2 space-y-2">
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Open the login page and enter this one‑time code:
-              </Text>
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                You&apos;ll connect whichever ChatGPT account you sign into (email doesn&apos;t need to match Instafy). Codex
-                access typically requires ChatGPT Plus/Team.
-              </Text>
-              <div className="space-y-1.5 rounded-2xl border border-slate-200/70 bg-slate-50/60 px-3 py-2 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
-                <div className="flex items-start gap-2">
-                  <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-200 text-xxs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-100">
-                    1
-                  </span>
-                  <span>Copy the one-time code if needed.</span>
-                </div>
-                <div className="flex items-start gap-2">
-                  <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-200 text-xxs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-100">
-                    2
-                  </span>
-                  <span>Finish approval in the browser tab that opens.</span>
-                </div>
-                <div className="flex items-start gap-2">
-                  <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-200 text-xxs font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-100">
-                    3
-                  </span>
-                  <span>Come back here. Instafy will detect the connection automatically.</span>
-                </div>
-              </div>
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <code className="min-w-0 break-all rounded-lg bg-white px-3 py-2 text-base font-semibold tracking-widest text-slate-800 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700">
-                    {deviceAuthSession.userCode}
-                  </code>
-                  <Button
-                    onPress={() => {
-                      try {
-                        void navigator.clipboard?.writeText(deviceAuthSession.userCode);
-                      } catch (_error) {
-                        // ignore clipboard failures
-                      }
-                    }}
-                    variant="outline"
-                    size="sm"
-                    radius="full"
-                    isDisabled={isBusy || deviceAuthCompleting}
-                  >
-                    Copy code
-                  </Button>
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <Button
-                    onPress={() => void openExternalUrl(deviceAuthSession.verificationUrl)}
-                    variant="primary"
-                    size="sm"
-                    radius="full"
-                    fullWidth
-                    isDisabled={isBusy || deviceAuthCompleting}
-                    className="min-h-11 justify-start sm:w-auto sm:flex-1"
-                  >
-                    Open login
-                  </Button>
-                  <Button
-                    onPress={() => {
-                      try {
-                        void navigator.clipboard?.writeText(deviceAuthSession.verificationUrl);
-                      } catch (_error) {
-                        // ignore clipboard failures
-                      }
-                    }}
-                    variant="outline"
-                    size="sm"
-                    radius="full"
-                    fullWidth
-                    isDisabled={isBusy || deviceAuthCompleting}
-                    className="min-h-11 justify-start sm:w-auto sm:flex-1"
-                  >
-                    Copy link
-                  </Button>
-                  <Button
-                    onPress={cancelDeviceAuthSession}
-                    variant="ghost"
-                    size="sm"
-                    radius="full"
-                    fullWidth
-                    isDisabled={isBusy || deviceAuthBusy || deviceAuthCompleting}
-                    className="min-h-11 justify-start sm:w-auto"
-                  >
-                    Cancel login
-                  </Button>
-                </div>
-              </div>
-              <Text as="div" variant="caption" tone="muted" className="text-[11px] leading-relaxed">
-                Only enter this code on the OpenAI page. Instafy will never ask you to paste your ChatGPT password
-                here.
-              </Text>
-              {/* Slate-600 in light: slate-500 read 3.1:1 on the card. */}
-              <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-                {deviceAuthSession.status === "pending" ? (
-                  <>
-                    <Spinner aria-hidden="true" tone="slate" size="xs" />
-                    <span>
-                      {deviceAuthCompleting
-                        ? "Login complete. Checking the connection…"
-                        : "Waiting for you to finish login…"}
-                    </span>
-                  </>
-                ) : deviceAuthSession.status === "completed" ? (
-                  deviceAuthCompletionWarning ? (
-                    <span className="text-amber-700 dark:text-amber-300">
-                      {deviceAuthCompletionWarning}
-                    </span>
-                  ) : (
-                    <>
-                      <Spinner aria-hidden="true" tone="primary" size="xs" />
-                      <span>Connected. Syncing credentials…</span>
-                    </>
-                  )
-                ) : deviceAuthSession.status === "failed" ? (
-                  <span className={textTones.danger}>
-                    {deviceAuthSession.error ?? "Device login failed."}
-                  </span>
-                ) : null}
-              </div>
-              {deviceAuthSession.status === "failed" ? (
-                <div className="flex flex-col gap-2">
-                  <Button
-                    onPress={beginDeviceAuth}
-                    variant="primary"
-                    size="xs"
-                    radius="full"
-                    fullWidth
-                    className="justify-start"
-                    isDisabled={isBusy}
-                  >
-                    Try again
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {showConnectWizard && connectStep === "openai-upload" ? (
-            <div className="mt-2 space-y-2">
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Upload a `codex` auth JSON (advanced).
-              </Text>
-              <div className="flex flex-col gap-2">
-                <Button
-                  onPress={handleTriggerUpload}
-                  variant="outline"
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  isDisabled={isBusy}
-                  className="justify-start"
-                >
-                  <Upload className="h-4 w-4" aria-hidden="true" />
-                  Upload auth.json
-                </Button>
-              </div>
-            </div>
-          ) : null}
-
-          {state === "error" || state === "unavailable" ? (
-            <div className="mt-2 flex flex-col gap-2">
-              {onRetry ? (
-                <Button onPress={onRetry} variant="primary" size="xs" radius="full" fullWidth isDisabled={isBusy} className="justify-start">
-                  Retry
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-
-          {showConnectWizard &&
-          (connectStep === "openai-api-key" ||
-            connectStep === "deepseek-api-key" ||
-            connectStep === "zai-api-key" ||
-            connectStep === "gemini-api-key") ? (
-            <div className="mt-2 space-y-2">
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                {(connectStep === "openai-api-key"
-                  ? "OpenAI API key"
-                  : connectStep === "deepseek-api-key"
-                    ? "DeepSeek API key"
-                    : connectStep === "zai-api-key"
-                      ? "z.ai API key"
-                      : "Gemini API key") + " selected. Paste it below:"}
-              </Text>
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Don’t have a key?{" "}
-                <a
-                  href={
-                    connectStep === "openai-api-key"
-                      ? "https://platform.openai.com/api-keys"
-                      : connectStep === "deepseek-api-key"
-                        ? "https://platform.deepseek.com/api_keys"
-                        : connectStep === "zai-api-key"
-                          ? "https://z.ai"
-                          : "https://aistudio.google.com/apikey"
-                  }
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    void openExternalUrl(event.currentTarget.href);
-                  }}
-                  className="font-medium text-primary-600 underline underline-offset-2 hover:text-primary-700 dark:text-primary-300 dark:hover:text-primary-200"
-                >
-                  Create one at{" "}
-                  {connectStep === "openai-api-key"
-                    ? "platform.openai.com"
-                    : connectStep === "deepseek-api-key"
-                      ? "platform.deepseek.com"
-                      : connectStep === "zai-api-key"
-                        ? "z.ai"
-                        : "Google AI Studio"}
-                </a>
-                . You pay the provider directly for what you use.
-              </Text>
-              <Input
-                value={apiKeyDraft}
-                onChange={(event) => {
-                  setApiKeyDraft(event.target.value);
-                  setApiKeyError(null);
-                }}
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                aria-label={
-                  connectStep === "openai-api-key"
-                    ? "OpenAI API key"
-                    : connectStep === "deepseek-api-key"
-                      ? "DeepSeek API key"
-                      : connectStep === "zai-api-key"
-                        ? "z.ai API key"
-                        : "Gemini API key"
-                }
-                placeholder="sk-…"
-                size="sm"
-                radius="xl"
-                disabled={isBusy}
-              />
-              {apiKeyError ? (
-                <Text
-                  as="div"
-                  variant="caption"
-                  tone="danger"
-                  className="text-xs"
-                  data-testid="ai-connect-api-key-error"
-                >
-                  {apiKeyError}
-                </Text>
-              ) : null}
-              <div className="flex flex-col gap-2">
-                <Button
-                  onPress={() => {
-                    const trimmed = apiKeyDraft.trim();
-                    if (!trimmed) {
-                      return;
-                    }
-                    onStashDraft();
-                    setApiKeyError(null);
-                    void (async () => {
-                      const provider =
-                        connectStep === "openai-api-key"
-                          ? "openai"
-                          : connectStep === "deepseek-api-key"
-                            ? "deepseek"
-                            : connectStep === "zai-api-key"
-                              ? "zai"
-                              : "gemini";
-                      const result = await onSaveApiKey(trimmed, provider);
-                      if (!result.success) {
-                        setApiKeyError(result.error ?? "Unable to save API key.");
-                        return;
-                      }
-                      setApiKeyDraft("");
-                    })();
-                  }}
-                  variant="primary"
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  className="justify-start"
-                  isDisabled={isBusy || apiKeyDraft.trim().length === 0}
-                >
-                  Save key
-                </Button>
-                <Button
-                  onPress={() => {
-                    setApiKeyDraft("");
-                    if (connectStep === "openai-api-key") {
-                      setConnectStep("openai-auth");
-                      return;
-                    }
-                    if (connectStep === "gemini-api-key") {
-                      setConnectStep("gemini-auth");
-                      return;
-                    }
-                    resetConnectState();
-                  }}
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  fullWidth
-                  className="justify-start"
-                  isDisabled={isBusy}
-                >
-                  Cancel
-                </Button>
-              </div>
-              <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Saved to your Instafy profile (not stored in the browser).
-              </Text>
-            </div>
-          ) : null}
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="application/json,.json"
-        className="hidden"
-        onChange={handleUploadFile}
-      />
+      {showConnectWizard && onConnectAi ? (
+        <div className="mt-3">
+          <Button
+            onPress={onConnectAi}
+            variant="outline"
+            size="xs"
+            radius="full"
+            isDisabled={isBusy}
+            data-testid="ai-connect-add-connection"
+          >
+            Connect AI
+          </Button>
+        </div>
+      ) : null}
     </AccessDecisionCard>
   );
 }

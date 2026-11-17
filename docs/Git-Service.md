@@ -549,12 +549,13 @@ canonical.
 
 ## History in Studio
 
-Studio picks its versioning UI per space from the project's default origin:
+The source-control drawer is History. It sends requests only once the project's default origin
+is known to keep versions: a cloud space whose gateway answers `/git/status` with
+`stateless: true`, or a Desktop space. Until then (the mode is still being checked, the space has
+no origin, or its gateway is an older, stateful one) History lists nothing and offers Retry when
+the check got no answer; the nav item keeps the name Changes on those spaces.
 
-- **Changes** (a cloud space on an older, stateful gateway, and any space whose mode is not known yet):
-  the working-tree drawer with Save version and Discard, unchanged.
-- **History** (a cloud space whose gateway answers `/git/status` with `stateless: true`, and every
-  Desktop space): saved versions read from the default origin, 20 per page with Show more where
+- **History**: saved versions read from the default origin, 20 per page with Show more where
   the origin pages history. Each version can be reviewed or reverted; Revert saves a new version
   that undoes it (`POST /git/revert-commit {commit, base}`) and never rewrites history.
   A version is titled by what it did. A turn's save takes the person's request, as the chat
@@ -612,11 +613,7 @@ Studio picks its versioning UI per space from the project's default origin:
 - **Desktop**: History also counts files changed in the folder outside Studio and saves them as a
   version (`POST /git/sync`), naming files it kept on the computer and why.
 
-When a mode check swaps one drawer for the other while it has keyboard focus, the new drawer's
-title takes focus and says which one the space uses; a space only ever shown as Changes never
-sees this.
-
-The nav badge counts uncommitted changes in Changes and, in History, unsaved-work entries that are
+The nav badge counts uncommitted changes on a space named Changes and, in History, unsaved-work entries that are
 not restored yet. Each viewer sees one chat row the first time new
 unsaved work appears (opening History counts as seeing it); it is not written into the
 conversation. What a viewer has seen lives in the browser's storage, and in memory for the session
