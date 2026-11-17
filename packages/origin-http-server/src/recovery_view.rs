@@ -16,10 +16,6 @@
 //! read from the remote by their exact names; locally they are never refs of
 //! their own names, which a case-insensitive disk could merge.
 
-// The hosted gateway's reads and the recovery routes call these as they land;
-// until then only the tests do.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use axum::http::StatusCode;
 use chrono::{FixedOffset, SecondsFormat, TimeZone as _};
 use git_service::policy::RECOVERY_REF_ROOT;
@@ -509,6 +505,7 @@ pub(crate) struct ObjectEntry {
 }
 
 impl ObjectEntry {
+    #[cfg(test)]
     pub(crate) fn executable(&self) -> bool {
         self.mode == "100755"
     }

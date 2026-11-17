@@ -203,7 +203,6 @@ enum ControlOwner {
     Human {
         participant_id: String,
     },
-    #[allow(dead_code)]
     Agent {
         owner_id: String,
         run_id: String,

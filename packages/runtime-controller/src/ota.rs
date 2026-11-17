@@ -12,7 +12,9 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::OnceCell;
+#[cfg(test)]
+use tokio::sync::RwLock;
 use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::Row;
@@ -32,6 +34,7 @@ const MAX_LIST_DEVICE_STATES_LIMIT: i64 = 500;
 const MAX_LIST_CHANNEL_HISTORY_LIMIT: i64 = 100;
 const MAX_DOWNLOAD_INSIGHTS_DAYS: i64 = 90;
 const MAX_STORED_EVENTS: i64 = 5_000;
+#[cfg(test)]
 const MAX_STORED_CHANNEL_HISTORY: usize = 2_000;
 const EVENT_RETENTION_DAYS: i32 = 30;
 
@@ -64,6 +67,8 @@ pub(crate) struct OtaRegistry {
 
 #[derive(Clone)]
 enum OtaRegistryBackend {
+    // The tests' backend; the server always uses Postgres.
+    #[cfg(test)]
     InMemory(Arc<RwLock<OtaRegistrySnapshot>>),
     Postgres(PostgresOtaRegistry),
 }
@@ -102,6 +107,7 @@ struct ResolvedDownloadInsightsParams {
 }
 
 impl OtaRegistry {
+    #[cfg(test)]
     pub(crate) fn new_in_memory() -> Self {
         Self {
             backend: OtaRegistryBackend::InMemory(Arc::new(RwLock::new(
@@ -121,6 +127,7 @@ impl OtaRegistry {
 
     async fn list_releases(&self) -> Result<Vec<OtaReleaseRecord>, OtaRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 let mut releases = guard.releases.values().cloned().collect::<Vec<_>>();
@@ -133,6 +140,7 @@ impl OtaRegistry {
 
     async fn list_channels(&self) -> Result<Vec<OtaChannelAssignment>, OtaRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 Ok(guard.channels.values().cloned().collect())
@@ -148,6 +156,7 @@ impl OtaRegistry {
         limit: i64,
     ) -> Result<Vec<OtaChannelHistoryEntry>, OtaRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 let mut history = guard
@@ -171,6 +180,7 @@ impl OtaRegistry {
         params: ResolvedDeviceStateListParams,
     ) -> Result<Vec<OtaDeviceState>, OtaRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 let mut devices = guard.device_states.values().cloned().collect::<Vec<_>>();
@@ -188,6 +198,7 @@ impl OtaRegistry {
         params: ResolvedEventListParams,
     ) -> Result<Vec<OtaUpdateEvent>, OtaRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 let mut events = guard.recent_events.clone();
@@ -205,6 +216,7 @@ impl OtaRegistry {
         params: ResolvedDownloadInsightsParams,
     ) -> Result<OtaDownloadInsights, OtaRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 build_download_insights_from_events(&guard.recent_events, params)
@@ -219,6 +231,7 @@ impl OtaRegistry {
     ) -> Result<OtaReleaseRecord, OtaRegistryError> {
         normalize_release(&mut release)?;
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 let mut guard = store.write().await;
                 if let Some(existing) = guard.releases.get(&release.release_id) {
@@ -241,6 +254,7 @@ impl OtaRegistry {
         request: ActivateChannelRequest,
     ) -> Result<OtaChannelAssignment, OtaRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 activate_channel_in_memory(store, platform, channel, request).await
             }
@@ -257,6 +271,7 @@ impl OtaRegistry {
         request: RollbackChannelRequest,
     ) -> Result<OtaChannelAssignment, OtaRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => {
                 rollback_channel_in_memory(store, platform, channel, request).await
             }
@@ -272,6 +287,7 @@ impl OtaRegistry {
     ) -> Result<OtaCheckResponse, OtaRegistryError> {
         normalize_check_request(&mut request)?;
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => check_for_update_in_memory(store, request).await,
             OtaRegistryBackend::Postgres(store) => store.check_for_update(request).await,
         }
@@ -283,6 +299,7 @@ impl OtaRegistry {
     ) -> Result<OtaUpdateEvent, OtaRegistryError> {
         normalize_event(&mut event)?;
         match &self.backend {
+            #[cfg(test)]
             OtaRegistryBackend::InMemory(store) => record_event_in_memory(store, event).await,
             OtaRegistryBackend::Postgres(store) => store.record_event(event).await,
         }
@@ -1207,6 +1224,7 @@ impl PostgresOtaRegistry {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct OtaRegistrySnapshot {
@@ -2109,6 +2127,7 @@ fn build_download_insight_query_parts(
     (clauses, bindings)
 }
 
+#[cfg(test)]
 fn build_download_insights_from_events(
     events: &[OtaUpdateEvent],
     params: ResolvedDownloadInsightsParams,
@@ -2250,6 +2269,7 @@ fn build_download_insights_response(
     }
 }
 
+#[cfg(test)]
 fn device_matches_filters(device: &OtaDeviceState, params: &ResolvedDeviceStateListParams) -> bool {
     if let Some(platform) = &params.platform {
         if &device.platform != platform {
@@ -2287,6 +2307,7 @@ fn device_matches_filters(device: &OtaDeviceState, params: &ResolvedDeviceStateL
     true
 }
 
+#[cfg(test)]
 fn event_matches_filters(event: &OtaUpdateEvent, params: &ResolvedEventListParams) -> bool {
     if let Some(platform) = &params.platform {
         if &event.platform != platform {
@@ -2326,6 +2347,7 @@ fn event_matches_filters(event: &OtaUpdateEvent, params: &ResolvedEventListParam
     true
 }
 
+#[cfg(test)]
 fn device_attention(device: &OtaDeviceState) -> bool {
     matches!(
         device.last_event_type,
@@ -2335,6 +2357,7 @@ fn device_attention(device: &OtaDeviceState) -> bool {
     ) || device.current_bundle_version.is_none()
 }
 
+#[cfg(test)]
 async fn activate_channel_in_memory(
     store: &Arc<RwLock<OtaRegistrySnapshot>>,
     platform: OtaPlatform,
@@ -2417,6 +2440,7 @@ async fn activate_channel_in_memory(
     Ok(assignment)
 }
 
+#[cfg(test)]
 async fn rollback_channel_in_memory(
     store: &Arc<RwLock<OtaRegistrySnapshot>>,
     platform: OtaPlatform,
@@ -2502,6 +2526,7 @@ async fn rollback_channel_in_memory(
     Ok(assignment)
 }
 
+#[cfg(test)]
 async fn check_for_update_in_memory(
     store: &Arc<RwLock<OtaRegistrySnapshot>>,
     request: OtaCheckRequest,
@@ -2586,6 +2611,7 @@ async fn check_for_update_in_memory(
     Ok(response)
 }
 
+#[cfg(test)]
 async fn record_event_in_memory(
     store: &Arc<RwLock<OtaRegistrySnapshot>>,
     event: OtaUpdateEvent,
@@ -3203,10 +3229,12 @@ fn normalize_channel(value: &str) -> Result<String, OtaRegistryError> {
     Ok(normalize_non_empty(value, "channel")?.to_ascii_lowercase())
 }
 
+#[cfg(test)]
 fn channel_key(platform: OtaPlatform, channel: &str) -> String {
     format!("{platform}:{channel}")
 }
 
+#[cfg(test)]
 fn device_key(platform: OtaPlatform, channel: &str, device_id: &str) -> String {
     format!("{platform}:{channel}:{}", device_id.trim())
 }

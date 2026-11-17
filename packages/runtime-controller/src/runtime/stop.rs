@@ -121,13 +121,11 @@ const STOPS_THAT_YIELD_TO_A_RETURNING_USER: [&str; 3] = [
 ];
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct StopOutcome {
-    pub(crate) runtime_id: Uuid,
-    pub(crate) project_id: Uuid,
     pub(crate) status_changed: bool,
     pub(crate) requeued_jobs: Vec<Uuid>,
     pub(crate) failed_personal_browser_jobs: Vec<Uuid>,
+    #[allow(dead_code)] // Only tests read it; the stop event lists the disposition's copy.
     pub(crate) failed_shared_browser_jobs: Vec<Uuid>,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
     /// The Personal and Shared Browser turns this stop failed, whose run's
@@ -144,10 +142,8 @@ pub(crate) struct StopOutcome {
 }
 
 impl StopOutcome {
-    fn skipped(runtime: &RuntimeDetails, reason: impl Into<String>) -> Self {
+    fn skipped(reason: impl Into<String>) -> Self {
         Self {
-            runtime_id: runtime.id,
-            project_id: runtime.project_id,
             status_changed: false,
             requeued_jobs: Vec::new(),
             failed_personal_browser_jobs: Vec::new(),
@@ -888,19 +884,19 @@ async fn preflight_runtime_stop(
         .as_ref()
         .and_then(|expected| expected_identity_skip_reason(runtime, expected))
     {
-        return Ok(Some(StopOutcome::skipped(runtime, reason)));
+        return Ok(Some(StopOutcome::skipped(reason)));
     }
 
     if options.require_idle_timeout {
         let Some(last_seen_at) = runtime.last_seen_at else {
-            return Ok(Some(StopOutcome::skipped(runtime, "missing_last_seen")));
+            return Ok(Some(StopOutcome::skipped("missing_last_seen")));
         };
         if runtime.idle_ttl_seconds <= 0 {
-            return Ok(Some(StopOutcome::skipped(runtime, "idle_ttl_not_positive")));
+            return Ok(Some(StopOutcome::skipped("idle_ttl_not_positive")));
         }
         let cutoff = last_seen_at + ChronoDuration::seconds(runtime.idle_ttl_seconds.into());
         if cutoff > Utc::now() {
-            return Ok(Some(StopOutcome::skipped(runtime, "runtime_recently_seen")));
+            return Ok(Some(StopOutcome::skipped("runtime_recently_seen")));
         }
     }
 
@@ -908,7 +904,7 @@ async fn preflight_runtime_stop(
         && !matches!(runtime.status.as_str(), "stopped" | "offline" | "removed")
         && runtime_has_active_hosted_jobs(transaction, &runtime.id).await?
     {
-        return Ok(Some(StopOutcome::skipped(runtime, "active_jobs")));
+        return Ok(Some(StopOutcome::skipped("active_jobs")));
     }
 
     Ok(None)
@@ -952,7 +948,7 @@ pub(super) async fn stop_runtime_safely_with(
             source = options.source,
             "this controller is retiring; leaving the stop to the serving controller"
         );
-        let outcome = StopOutcome::skipped(&runtime, "controller_retiring");
+        let outcome = StopOutcome::skipped("controller_retiring");
         return Ok(SafeRuntimeStop {
             runtime,
             outcome,
@@ -1034,7 +1030,7 @@ async fn stop_after_flush(
                             source = options.source,
                             "someone opened the space while its idle stop flushed; keeping the runtime"
                         );
-                        skipped = Some(StopOutcome::skipped(&runtime, "workspace_reopened"));
+                        skipped = Some(StopOutcome::skipped("workspace_reopened"));
                     }
                 }
             }
@@ -3276,19 +3272,19 @@ pub(crate) async fn perform_runtime_stop(
         .as_ref()
         .and_then(|expected| expected_identity_skip_reason(runtime, expected))
     {
-        return Ok(StopOutcome::skipped(runtime, reason));
+        return Ok(StopOutcome::skipped(reason));
     }
 
     if options.require_idle_timeout {
         let Some(last_seen_at) = runtime.last_seen_at else {
-            return Ok(StopOutcome::skipped(runtime, "missing_last_seen"));
+            return Ok(StopOutcome::skipped("missing_last_seen"));
         };
         if runtime.idle_ttl_seconds <= 0 {
-            return Ok(StopOutcome::skipped(runtime, "idle_ttl_not_positive"));
+            return Ok(StopOutcome::skipped("idle_ttl_not_positive"));
         }
         let cutoff = last_seen_at + ChronoDuration::seconds(runtime.idle_ttl_seconds.into());
         if cutoff > now {
-            return Ok(StopOutcome::skipped(runtime, "runtime_recently_seen"));
+            return Ok(StopOutcome::skipped("runtime_recently_seen"));
         }
     }
 
@@ -3297,7 +3293,7 @@ pub(crate) async fn perform_runtime_stop(
 
         if has_active_jobs && !matches!(runtime.status.as_str(), "stopped" | "offline" | "removed")
         {
-            return Ok(StopOutcome::skipped(runtime, "active_jobs"));
+            return Ok(StopOutcome::skipped("active_jobs"));
         }
     }
 
@@ -3322,8 +3318,6 @@ pub(crate) async fn perform_runtime_stop(
             || !failed_shared_browser_jobs.is_empty()
             || !failed_claude_code_turns.is_empty();
         return Ok(StopOutcome {
-            runtime_id: runtime.id,
-            project_id: runtime.project_id,
             status_changed,
             requeued_jobs,
             failed_personal_browser_jobs,
@@ -3464,8 +3458,6 @@ pub(crate) async fn perform_runtime_stop(
     );
 
     Ok(StopOutcome {
-        runtime_id: runtime.id,
-        project_id: runtime.project_id,
         status_changed: true,
         requeued_jobs,
         failed_personal_browser_jobs,
@@ -3916,8 +3908,6 @@ mod tests {
     #[test]
     fn runtime_stop_response_reports_changed_and_skipped_outcomes() {
         let skipped = StopOutcome {
-            runtime_id: Uuid::new_v4(),
-            project_id: Uuid::new_v4(),
             status_changed: false,
             requeued_jobs: Vec::new(),
             failed_personal_browser_jobs: Vec::new(),
@@ -3993,10 +3983,8 @@ mod tests {
         build_test_state(pool, config)
     }
 
-    fn changed_outcome(runtime: &RuntimeDetails) -> StopOutcome {
+    fn changed_outcome() -> StopOutcome {
         StopOutcome {
-            runtime_id: runtime.id,
-            project_id: runtime.project_id,
             status_changed: true,
             requeued_jobs: Vec::new(),
             failed_personal_browser_jobs: Vec::new(),
@@ -4403,8 +4391,7 @@ mod tests {
             "test failure",
         )
         .await;
-        let (status, response) =
-            build_runtime_stop_response(&changed_outcome(&runtime), &release, true);
+        let (status, response) = build_runtime_stop_response(&changed_outcome(), &release, true);
 
         assert_eq!(status, StatusCode::OK);
         assert!(response.ok);
@@ -4439,8 +4426,7 @@ mod tests {
             "test failure",
         )
         .await;
-        let (status, response) =
-            build_runtime_stop_response(&changed_outcome(&runtime), &release, true);
+        let (status, response) = build_runtime_stop_response(&changed_outcome(), &release, true);
         let serialized = serde_json::to_string(&response).expect("serialize response");
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
@@ -4475,8 +4461,7 @@ mod tests {
 
         let release =
             release_runtime_via_provider(&state, &runtime, Some(&lease_id), "test failure").await;
-        let (status, response) =
-            build_runtime_stop_response(&changed_outcome(&runtime), &release, true);
+        let (status, response) = build_runtime_stop_response(&changed_outcome(), &release, true);
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(!response.ok);
@@ -4502,8 +4487,7 @@ mod tests {
             "test failure",
         )
         .await;
-        let (status, response) =
-            build_runtime_stop_response(&changed_outcome(&runtime), &release, true);
+        let (status, response) = build_runtime_stop_response(&changed_outcome(), &release, true);
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(!response.ok);
@@ -4513,13 +4497,11 @@ mod tests {
 
     #[test]
     fn legacy_provider_release_failure_remains_best_effort() {
-        let runtime = runtime_details("ready", None);
         let release = ProviderReleaseOutcome {
             attempted: true,
             succeeded: false,
         };
-        let (status, response) =
-            build_runtime_stop_response(&changed_outcome(&runtime), &release, false);
+        let (status, response) = build_runtime_stop_response(&changed_outcome(), &release, false);
 
         assert_eq!(status, StatusCode::OK);
         assert!(response.ok);

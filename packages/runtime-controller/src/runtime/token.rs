@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::auth::{authenticate_request, require_user_session, RequestContext};
 use crate::config::ClaudeCodeLaneUsers;
 #[cfg(test)]
-use crate::ensure_scoped_claims_allow_requested_scopes;
+use crate::projects::ensure_scoped_claims_allow_requested_scopes;
 use crate::tokens::{
     mint_scoped_token_with_runtime_generation, MintedAccessToken, ScopedTokenRequest,
 };

@@ -188,7 +188,6 @@ pub(crate) struct ConversationMessagePayload {
     pub(crate) created_at: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ConversationRecord {
     pub(crate) id: Uuid,
@@ -207,7 +206,6 @@ pub(crate) struct ConversationRecord {
     pub(crate) updated_at: DateTime<Utc>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct ConversationMessageRow {
     pub(crate) id: Uuid,

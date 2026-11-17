@@ -1,4 +1,7 @@
 mod auth;
+// config, db, error, hooks, listening and tokens are also the lib's, which the
+// sidecar binaries use. Items only a sidecar or the lib calls say so where they
+// allow dead code.
 mod config;
 mod db;
 mod error;

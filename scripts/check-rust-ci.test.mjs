@@ -17,6 +17,16 @@ const agentLinkerDefault = `          if [[ '\${{ runner.environment == 'self-ho
             export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
           fi
 `;
+// The dead-code gate: one job-level line in every Rust lane but runtime-agent's,
+// the comment above the Rust aggregate that explains it, and --all-targets in
+// the check lanes it covers.
+const deadCodeFlags = '      RUSTFLAGS: "-D dead_code -D unused_imports"\n';
+const deadCodeComment = `  # Every Rust lane but runtime-agent's denies dead code and unused imports, so
+  # what the 2026-11 cleanup removed cannot quietly come back. The check lanes
+  # check all targets: \`--tests\` alone builds binaries only as tests, where code
+  # that only tests call looks used. runtime-agent's lanes join once its own
+  # warnings are gone.
+`;
 const checks = [
   ['controller', 'runtime controller', 'runtime-controller'],
   ['agent', 'runtime agent', 'runtime-agent'],
@@ -167,6 +177,31 @@ test('eleven bounded children independently check out exact source and retain na
   }
 });
 
+test("every Rust lane but runtime-agent's denies dead code and unused imports, and its check covers every target", () => {
+  assert.equal(source.split(`\n${deadCodeComment}  rust:\n`).length, 2);
+  for (const item of children) {
+    const text = job(item.key);
+    const env = text.match(/^    env:\n((?:      .*\n)+)/mu)?.[1];
+    assert.ok(env, `${item.key} env`);
+    if (item.pkg === 'runtime-agent') {
+      // Not yet: its own warnings come first, and its test step sets the lld
+      // linker only while RUSTFLAGS is unset.
+      assert.doesNotMatch(env, /RUSTFLAGS/u, item.key);
+      continue;
+    }
+    // A job-level variable reaches every Cargo command of the lane, and nothing
+    // else in the lane may set or clear it.
+    assert.ok(env.endsWith(deadCodeFlags), item.key);
+    assert.equal(text.split('RUSTFLAGS').length, 2, item.key);
+  }
+  for (const item of checks) {
+    const run = step(item.key, 'Check public Rust package').split('        run: |\n')[1];
+    const targets = item.pkg === 'runtime-agent' ? '--tests' : '--all-targets';
+    assert.equal(run.split('\n')[0].trim(), `cargo check --locked ${targets} --manifest-path packages/${item.pkg}/Cargo.toml`);
+  }
+  assert.equal(source.split(' --all-targets ').length - 1, 4);
+});
+
 test('only self-hosted Rust children install the fixed missing native packages within the original thirty-minute job', () => {
   assert.equal((source.match(/      - name: Install scoped Rust native prerequisites/g) ?? []).length,11);
   const commands=[];
@@ -199,10 +234,11 @@ test('the full reviewed seven check and twenty-three test command lines (not lan
   // the inert native_images, granted_turns, native_subagents, browser_hand_back, stopped_turn, thread_mode, evidence_retry, reply_draft_stream, page_cards and codex_never_starts_claude selectors,
   // the hermetic local-engine turn targets (claude_code_lane, claude_code_supervision and the live suite's own checks in claude_code_live) and
   // the inert run_instructions target,
-  // plus the complete tunnel-broker suite in its own lane.
+  // plus the complete tunnel-broker suite in its own lane,
+  // and --all-targets instead of --tests in every check lane but runtime-agent's.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
-    [checks, 'Check public Rust package', '7ab805f6d9f99e7d6cae9fd5ab924ebb4cc3612d07690f954330bbc0f6381608', 7],
+    [checks, 'Check public Rust package', '56d9e43b7771706613ef6006df0f999dd70ac7eebb80f8c8c6211c0f55391177', 7],
     [suites, 'Run database-free Rust test suite', '3f4716e5d0459b5b9b266cc923c97ab83951e49d08fdbc0265ff5cd0e82f0f87', 23],
   ]) {
     const inventory = list.flatMap(item => {
@@ -392,10 +428,11 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // per-model proxy_retry_budget runs, the runtime provider core and service unit
   // tests, CLI git wrapper suite, local author pseudonym key test and inert native
   // compaction, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the hermetic local-engine turn targets and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings and local tunnel suites, and the tunnel
-  // broker test lane with its Rust tests aggregate entry: retains all functional commands, aggregate
-  // guards, routing, permissions and other jobs.
+  // broker test lane with its Rust tests aggregate entry, and the dead-code gate (RUSTFLAGS in every
+  // lane but runtime-agent's, --all-targets in their check lanes, and its comment): retains all
+  // functional commands, aggregate guards, routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '8403946c9d7c53d7a95e1af9e832c1b513fc3f8dddd403fca1e14e4e4c367b80');
+    '6876490a3220a29c7a379f2c7d8b21254ea2717acb412106ba9f3b0b008dc981');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

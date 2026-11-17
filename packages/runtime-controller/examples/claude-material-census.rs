@@ -38,7 +38,7 @@
 
 // The guard's rules, compiled unchanged. Only its classification is used here;
 // its refusal builder names the controller's error type, which `errors.rs`
-// provides.
+// provides. The rest of both modules goes unused here.
 #[allow(dead_code)]
 #[path = "../src/claude_material.rs"]
 mod claude_material;

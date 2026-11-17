@@ -206,7 +206,7 @@ pub struct EnsureRuntimeRequest {
 
 #[derive(Clone, Debug, Default)]
 pub struct EnsureRuntimeOutcome {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Only the allocator tests read it.
     pub(crate) launched: bool,
     pub message: Option<String>,
 }
@@ -286,7 +286,6 @@ pub trait RuntimeAllocator: Send + Sync {
 
 pub type DynRuntimeAllocator = Arc<dyn RuntimeAllocator>;
 
-#[allow(dead_code)]
 pub fn build_runtime_allocator(config: &ProviderConfig) -> anyhow::Result<DynRuntimeAllocator> {
     let provider = config
         .runtime_providers

@@ -699,7 +699,7 @@ fn publish_thumbnail_event(
 pub(super) struct ThumbnailQuery {
     /// The version the card asks for; only a cache key for the browser.
     #[serde(default)]
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Accepted and ignored; the request span records it.
     v: Option<String>,
 }
 

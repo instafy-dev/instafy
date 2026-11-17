@@ -534,7 +534,7 @@ impl JwksRefresher {
     /// Restart delays short enough for a test to wait out. The auth tests,
     /// built with the binary, use this and the next.
     #[cfg(test)]
-    #[allow(dead_code)]
+    #[allow(dead_code)] // The lib's own test build has no caller.
     pub(crate) fn with_restart_backoff(mut self, initial: Duration, max: Duration) -> Self {
         self.restart_backoff = RestartBackoff::new(initial, max);
         self
@@ -542,7 +542,7 @@ impl JwksRefresher {
 
     /// Panic in as many fetch cycles as `panics` holds when they start.
     #[cfg(test)]
-    #[allow(dead_code)]
+    #[allow(dead_code)] // The lib's own test build has no caller.
     pub(crate) fn with_injected_panics(
         mut self,
         panics: Arc<std::sync::atomic::AtomicUsize>,

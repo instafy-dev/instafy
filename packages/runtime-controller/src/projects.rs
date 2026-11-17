@@ -63,12 +63,10 @@ pub(crate) struct ProjectScope {
 pub(crate) struct ProjectRecord {
     pub(crate) id: Uuid,
     pub(crate) org_id: Option<Uuid>,
-    #[allow(dead_code)]
     pub(crate) name: Option<String>,
     pub(crate) sandbox_session_id: Option<Uuid>,
     pub(crate) project_type: Option<String>,
     pub(crate) owner_user_id: Option<Uuid>,
-    #[allow(dead_code)]
     pub(crate) _status: Option<String>,
 }
 

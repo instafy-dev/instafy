@@ -58,8 +58,8 @@ pub(crate) const GOAL_CONTINUATION: LoopSchedule = schedule("goal_continuation",
 pub(crate) const RETENTION_PRUNE: LoopSchedule = schedule("retention_prune", 300, 19);
 
 /// Every periodic loop that uses the database pool. Each schedule constant
-/// above must appear here exactly once.
-#[cfg_attr(not(test), allow(dead_code))]
+/// above must appear here exactly once, which the tests check.
+#[cfg(test)]
 pub(crate) const DATABASE_LOOPS: [LoopSchedule; 10] = [
     SEND_QUEUE_RECOVERY,
     NOTIFICATION_WORKER,

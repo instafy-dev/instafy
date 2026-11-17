@@ -584,6 +584,8 @@ pub(crate) fn enqueue_message_push_notifications(
     }
 }
 
+// Only the tests call this now; see `enqueue_message_push_notifications`.
+#[cfg(test)]
 pub(crate) async fn load_notification_recipients(
     transaction: &tokio_postgres::Transaction<'_>,
     conversation: &crate::conversations::ConversationRecord,

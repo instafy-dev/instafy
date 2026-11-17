@@ -35,10 +35,7 @@ use super::{
     SkillMultiAgentPlanAgent,
 };
 use crate::auth::RequestContext;
-use crate::dispatch::{
-    normalize_dispatch_request, process_dispatch_prompt, DispatchPromptRequest,
-    DispatchPromptResponse,
-};
+use crate::dispatch::{normalize_dispatch_request, process_dispatch_prompt, DispatchPromptRequest};
 use crate::{ApiError, AppState};
 
 /// How many more turns one agent of a plan may get after its first.

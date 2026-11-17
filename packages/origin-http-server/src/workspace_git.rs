@@ -870,7 +870,6 @@ impl<'a> WorkspaceGit<'a> {
 
 /// Bare repositories, quarantines and separate work trees: the hosted
 /// gateway's layout.
-#[cfg_attr(not(test), allow(dead_code))]
 impl<'a> WorkspaceGit<'a> {
     /// Git in the bare repository at `git_dir`, an absolute path. The
     /// repository must have been created by the server ([`Self::init_bare`]);
@@ -1099,13 +1098,11 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
 /// [`Quarantine::promote`] moves the objects in once the push succeeded;
 /// dropping the quarantine removes it with whatever was not promoted, so a
 /// refused push leaves no object behind.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Quarantine {
     dir: PathBuf,
     objects: PathBuf,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl Quarantine {
     /// A new quarantine under `parent`: an absolute path to an existing
     /// directory (not a link) on the same filesystem as the repositories it
@@ -1542,7 +1539,7 @@ mod blob_tests {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::io::{Read as _, Write as _};
+    use std::io::Read as _;
     use std::path::{Path, PathBuf};
 
     use super::*;

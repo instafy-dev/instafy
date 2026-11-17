@@ -69,11 +69,13 @@ const cancellationWorkflows = [
   // code-mode host build, per-model proxy_retry_budget runs, inert native compaction,
   // native chat image, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the hermetic local-engine turn targets, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
   // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings and local tunnel suites bound below, and the local author pseudonym key
-  // test in the contracts lane, and the tunnel broker test lane in the Rust tests
-  // aggregate, also bound by check-rust-ci; other commands and authority are exact.
+  // test in the contracts lane, the tunnel broker test lane in the Rust tests
+  // aggregate, and the Rust dead-code gate (RUSTFLAGS in every Rust lane but
+  // runtime-agent's, --all-targets in their check lanes), also bound by
+  // check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '19dff1bc93a006450524e20c5b33cb6b157a4c0a4773dcf935aac02064098758' },
+    previousHash: '3c813ab346cc9dd67ea85d4e3f3db01dc6a5e11fde43873ecd3cfbe855d52826' },
   // The Browser UI rendering aggregate came with the lane's split into parts;
   // reversing that split exactly (inside withoutBrowserUiJobBudget) removes it.
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),

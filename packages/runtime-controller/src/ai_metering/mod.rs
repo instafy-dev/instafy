@@ -3,5 +3,5 @@
 
 pub(crate) mod job_record;
 // Nothing outside the tests prices a request until the settle endpoint lands.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) mod pricing;

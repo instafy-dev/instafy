@@ -762,6 +762,11 @@ jobs:
         working-directory: packages/browser-webrtc-sender
         run: go test ./...
 
+  # Every Rust lane but runtime-agent's denies dead code and unused imports, so
+  # what the 2026-11 cleanup removed cannot quietly come back. The check lanes
+  # check all targets: `--tests` alone builds binaries only as tests, where code
+  # that only tests call looks used. runtime-agent's lanes join once its own
+  # warnings are gone.
   rust:
     name: Rust packages
     needs:
@@ -864,6 +869,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner
@@ -945,7 +951,7 @@ jobs:
 
       - name: Check public Rust package
         run: |
-          cargo check --locked --tests --manifest-path packages/runtime-controller/Cargo.toml
+          cargo check --locked --all-targets --manifest-path packages/runtime-controller/Cargo.toml
 
   rust-check-agent:
     name: Rust check runtime agent
@@ -1090,6 +1096,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner
@@ -1171,7 +1178,7 @@ jobs:
 
       - name: Check public Rust package
         run: |
-          cargo check --locked --tests --manifest-path packages/git-service/Cargo.toml
+          cargo check --locked --all-targets --manifest-path packages/git-service/Cargo.toml
 
   rust-check-provider:
     name: Rust check runtime provider
@@ -1203,6 +1210,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner
@@ -1284,7 +1292,7 @@ jobs:
 
       - name: Check public Rust package
         run: |
-          cargo check --locked --tests --manifest-path packages/runtime-provider-service/Cargo.toml
+          cargo check --locked --all-targets --manifest-path packages/runtime-provider-service/Cargo.toml
           cargo test --locked --manifest-path packages/runtime-provider-core/Cargo.toml
           cargo test --locked --manifest-path packages/runtime-provider-service/Cargo.toml
 
@@ -1318,6 +1326,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner
@@ -1399,7 +1408,7 @@ jobs:
 
       - name: Check public Rust package
         run: |
-          cargo check --locked --tests --manifest-path packages/tunnel-broker/Cargo.toml
+          cargo check --locked --all-targets --manifest-path packages/tunnel-broker/Cargo.toml
 
   # Formatting ran nowhere in CI, so main drifted out of `cargo fmt` shape and
   # every branch cut from it inherited the failure — reviewers then charged the
@@ -1586,6 +1595,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner
@@ -1893,6 +1903,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner
@@ -2030,6 +2041,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner
@@ -2167,6 +2179,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner
@@ -2304,6 +2317,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+      RUSTFLAGS: "-D dead_code -D unused_imports"
 
     steps:
       - name: Qualify isolated Rust CI runner

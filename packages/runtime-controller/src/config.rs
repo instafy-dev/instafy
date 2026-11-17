@@ -168,14 +168,12 @@ impl CredentialEncryptionKey {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn for_test(seed: &str) -> Self {
         Self::derive_from_user_token_secret(seed)
     }
 
     /// A fresh random key, for tests that must not depend on any fixed key.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn random_for_test() -> Self {
         Self(rand::random())
     }
@@ -823,7 +821,7 @@ pub struct AppConfig {
     /// author pseudonyms signed into users' workspace-write tokens. `None`
     /// (unset) mints no author claims, so origins keep their own identity.
     pub author_pseudonym_keys: Option<crate::author_identity::AuthorPseudonymKeyring>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Only the binary's browser routes read it; the lib has none.
     pub(crate) browser_turn_rest: Option<crate::browser_turn::BrowserTurnRestConfig>,
     pub sandbox_credit_seed_amount: i32,
     pub sandbox_credit_seed_limit: i32,

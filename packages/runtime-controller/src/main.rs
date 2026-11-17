@@ -165,9 +165,8 @@ pub(crate) use errors::{
     unauthorized, ApiError,
 };
 pub(crate) use projects::{
-    ensure_project_access, ensure_project_write_access,
-    ensure_scoped_claims_allow_requested_scopes, load_project_record, parse_optional_uuid_param,
-    resolve_scope, ProjectRecord, ScopeParams,
+    ensure_project_access, ensure_project_write_access, load_project_record,
+    parse_optional_uuid_param, resolve_scope, ProjectRecord, ScopeParams,
 };
 pub(crate) use state::{
     publish_controller_event, publish_controller_event_with_conversation, AppState,
