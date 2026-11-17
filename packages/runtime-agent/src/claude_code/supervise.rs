@@ -13,9 +13,19 @@
 //!   they are gone. When that cannot be confirmed, the cleanup latch stops leasing.
 //! - **Timeouts.** A wall clock ([`TURN_TIMEOUT_ENV`], 2700 s by default, 60 to 3000 s) and a
 //!   15-minute stall with no stream event, both through the stop path.
-//! - **End of the turn.** A top-level `result` with no background task live but a command, a
-//!   Monitor watch or an ambient one ends the turn ([`super::events`]): the runtime stops `claude`
-//!   as for a Stop and ignores what it prints afterwards. Exit 143 after that SIGTERM counts as 0.
+//! - **End of the turn.** A top-level `result` ends the turn ([`super::events`]) once every
+//!   top-level `init` has its top-level `result` (a background task's follow-up turn prints both),
+//!   no background task is live but a command, a Monitor watch or an ambient one, and every other
+//!   task the turn or one of its subagents started in the background that named a run id has had
+//!   its follow-up turn's `result`. When all that holds but for the follow-up turns of tasks that
+//!   already ended, the turn waits for them only a while ([`FollowUpWait`]): `claude` gets
+//!   [`FOLLOW_UP_GRACE`] to start one, restarted when another top-level turn ran in between, at
+//!   most [`FOLLOW_UP_REARMS`] times, and the turn then ends at the `result`s read. The runtime
+//!   stops `claude` as for a Stop and ignores what it prints afterwards. Exit 143 after that
+//!   SIGTERM counts as 0. Until then it reads on, within the wall clock and the stall limit. A
+//!   `claude` that exits by itself during that wait with 0, or with 1 after a last `result` that
+//!   was an error, ends the turn as the wait would; any other exit, and an exit at any other
+//!   time, ends it as the exit says.
 //! - **Every exit.** `terminate_and_confirm` runs whatever ended the turn. The outcome counts the
 //!   programs the turn left running that it stopped, for the status step that says so.
 //! - **Shutdown.** While the runtime's shutdown signal is set, the turn reports nothing.
@@ -37,7 +47,7 @@ use tracing::{debug, info, warn};
 
 use super::FailureCode;
 use super::command::write_prompt;
-use super::events::{AdapterStatus, EventAdapter, ExitFacts, LaneFailure};
+use super::events::{AdapterStatus, EventAdapter, ExitFacts, FollowUpWaitEnd, LaneFailure};
 use crate::agent::ShutdownSignal;
 use crate::job_cancel::JobCancelSignal;
 use crate::process_tree::ProcessTree;
@@ -53,6 +63,27 @@ pub const MAX_TURN_TIMEOUT_SECONDS: u64 = 3_000;
 pub const STALL_LIMIT: Duration = Duration::from_secs(15 * 60);
 /// How long `claude` gets to exit after the runtime's SIGTERM (3.6).
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
+/// How long `claude` gets to start the follow-up turn of a background task that ended, once
+/// nothing else holds the turn ([`EventAdapter::waits_only_for_a_follow_up`], [`FollowUpWait`]).
+/// After it, the turn ends at the `result`s read and succeeds as they say: Claude Code 2.1.325
+/// can fold the task's notification into the running turn, or deliver a subagent's task's
+/// notification to that subagent, and then no follow-up turn comes.
+///
+/// A follow-up turn's `init` comes only after 2.1.325 ran the person's own `UserPromptSubmit`
+/// hooks for it, refreshed its tools and rebuilt its system prompt. Phase 0's runs, whose record
+/// cannot show whether such a hook ran, saw the follow-up's first assistant line, a model request
+/// after that `init`, 1.3 s after the task ended in background-agent and 1.9 s after it in
+/// bash-wait (3.6); 15 s leaves room for a slow hook. It is waited only while `claude` stays alive
+/// with nothing else holding the turn: one with nothing left to run exits right after its last
+/// `result`, which ends the turn first.
+pub const FOLLOW_UP_GRACE: Duration = Duration::from_secs(15);
+/// How many times one follow-up wait restarts its grace after another top-level turn ran in
+/// between ([`FollowUpWait`]). Claude Code runs queued notifications one at a time, so a follow-up
+/// queued behind another event's notification, a Monitor watch's or a background command's,
+/// starts only after that event's turn; but a Monitor watch can keep such turns coming for as long
+/// as it runs. Once a wait used them all, the turn ends the next time it waits only for
+/// follow-ups.
+pub const FOLLOW_UP_REARMS: usize = 5;
 /// How often the process tree is observed, as the isolated worker polls it.
 pub const OBSERVE_EVERY: Duration = Duration::from_millis(50);
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -96,6 +127,7 @@ pub struct TurnLimits {
     wall_clock: Duration,
     stall: Duration,
     stop_grace: Duration,
+    follow_up_grace: Duration,
     observe_every: Duration,
     max_line_bytes: usize,
     max_unparsed_lines: usize,
@@ -114,6 +146,7 @@ impl TurnLimits {
             wall_clock: turn_timeout(super::turn_timeout_setting().as_deref()),
             stall: STALL_LIMIT,
             stop_grace: STOP_GRACE,
+            follow_up_grace: FOLLOW_UP_GRACE,
             observe_every: OBSERVE_EVERY,
             max_line_bytes: MAX_LINE_BYTES,
             max_unparsed_lines: MAX_UNPARSED_LINES,
@@ -158,6 +191,12 @@ impl TurnLimits {
         self
     }
 
+    /// For tests of the end of a turn whose follow-up turn never comes, or comes late.
+    pub fn with_follow_up_grace(mut self, grace: Duration) -> Self {
+        self.follow_up_grace = grace;
+        self
+    }
+
     /// For tests of the line bound with a line of a size that is quick to print.
     pub fn with_max_line_bytes(mut self, bytes: usize) -> Self {
         self.max_line_bytes = bytes;
@@ -187,8 +226,9 @@ pub struct TurnSpec<'a> {
 /// How a turn ended.
 #[derive(Debug)]
 pub enum TurnEnd {
-    /// Exit 0, or 143 after the runtime's own SIGTERM, and a latest top-level `result` that is
-    /// no error, after launch checks that passed. The adapter has its reply and usage.
+    /// Exit 0, or 143 after the runtime's own SIGTERM, and a reply's top-level `result`
+    /// ([`EventAdapter::reply_result`]) that is no error, after launch checks that passed. The
+    /// adapter has its reply and usage.
     Succeeded,
     /// Nothing is saved.
     Failed(LaneFailure),
@@ -521,6 +561,119 @@ fn spawn_failure(error: &io::Error) -> LaneFailure {
     LaneFailure::new(code, format!("Claude Code could not be started: {error}"))
 }
 
+/// The follow-up wait of a turn (3.6), which `supervise` and the live suite's turn loop keep
+/// alike. Once the adapter waits only for the follow-up turns of tasks that ended
+/// ([`EventAdapter::waits_only_for_a_follow_up`]), a grace starts, and the wait keeps the tasks
+/// that await their follow-up turns then. A top-level turn that runs in between, such as a
+/// Monitor watch's event or a background command's follow-up, takes the turn out of that wait,
+/// and once it waits only for follow-ups again the grace restarts: at most [`FOLLOW_UP_REARMS`]
+/// times, after which the turn ends the next time it waits only for follow-ups, at once.
+///
+/// Progress starts a fresh wait, with no restart used: one of the tasks the wait keeps no longer
+/// awaits its follow-up turn, as when a follow-up turn's `result` named it. What a turn in between
+/// starts and ends is none, so turns in between that each start a task of their own still use up
+/// the restarts.
+#[derive(Clone, Debug)]
+pub struct FollowUpWait {
+    grace: Duration,
+    /// The run ids of the tasks that awaited their follow-up turns when this wait's first grace
+    /// started. `None` until then.
+    awaited: Option<Vec<String>>,
+    /// When the running grace ends, while the turn waits only for follow-ups.
+    deadline: Option<Instant>,
+    /// The restarts this wait used.
+    restarts: usize,
+}
+
+impl FollowUpWait {
+    pub fn new(grace: Duration) -> Self {
+        Self {
+            grace,
+            awaited: None,
+            deadline: None,
+            restarts: 0,
+        }
+    }
+
+    /// The restarts the current wait used.
+    pub fn restarts(&self) -> usize {
+        self.restarts
+    }
+
+    /// Whether the wait ends the turn at `now`, which it then did through
+    /// [`EventAdapter::end_without_follow_up`]. It is asked after each line the adapter read, so
+    /// it sees every top-level turn that runs in between however the lines were read, and on each
+    /// tick while `claude` runs, so a grace runs out between lines too.
+    pub fn ends_the_turn(&mut self, adapter: &mut EventAdapter, now: Instant) -> bool {
+        let tasks = adapter.background_tasks();
+        if self
+            .awaited
+            .as_ref()
+            .is_some_and(|runs| runs.iter().any(|run| !tasks.awaits_the_follow_up_of(run)))
+        {
+            *self = Self::new(self.grace);
+        }
+        if !adapter.waits_only_for_a_follow_up() {
+            self.deadline = None;
+            return false;
+        }
+        let deadline = match self.deadline {
+            Some(deadline) => deadline,
+            None => {
+                if let Some(awaited) = &self.awaited {
+                    // A held turn of a task this wait keeps comes just before the turn that
+                    // answers it (3.6): its grace starts again with no restart used. Each held
+                    // turn is one notification's, so this cannot go on.
+                    let held = adapter
+                        .held_run()
+                        .is_some_and(|run| awaited.iter().any(|kept| kept == run));
+                    if !held {
+                        if self.restarts >= FOLLOW_UP_REARMS {
+                            return adapter.end_without_follow_up(
+                                self.grace,
+                                self.restarts,
+                                FollowUpWaitEnd::RanOut,
+                            );
+                        }
+                        self.restarts += 1;
+                    }
+                } else {
+                    self.awaited = Some(adapter.background_tasks().awaited_runs());
+                }
+                *self.deadline.insert(now + self.grace)
+            }
+        };
+        now >= deadline
+            && adapter.end_without_follow_up(self.grace, self.restarts, FollowUpWaitEnd::RanOut)
+    }
+
+    /// Whether `claude`, which exited by itself with `code`, ends the turn as the wait would: it
+    /// exited while the turn waited only for follow-up turns, with 0, or with 1 after a last
+    /// top-level `result` that was an error ([`EventAdapter::last_result_failed`]). The wait then
+    /// ends the turn there, at the `result`s read, through
+    /// [`EventAdapter::end_without_follow_up`]. By a reading of 2.1.325's code, `claude` that
+    /// comes to its natural end exits 1 only when the last line it wrote that counts is an error
+    /// `result`, whichever turn's, and 0 otherwise, so such an exit says nothing of the reply's
+    /// `result` (3.6). A crash writes an error `result` of its own, with no `origin`, before it
+    /// exits 1: that `result` becomes the reply, and the turn fails by it. Any other exit, such
+    /// as 1 after a `result` that was no error (a crash whose `result` could not be written, or
+    /// uncaught errors that kept coming), a signal, or 143 from a SIGTERM the runtime did not
+    /// send, leaves the turn to the exit status.
+    pub fn ends_at_claudes_exit(&self, adapter: &mut EventAdapter, code: Option<i32>) -> bool {
+        let says_nothing_of_the_reply = match code {
+            Some(0) => true,
+            Some(1) => adapter.last_result_failed(),
+            _ => false,
+        };
+        says_nothing_of_the_reply
+            && adapter.end_without_follow_up(
+                self.grace,
+                self.restarts,
+                FollowUpWaitEnd::ClaudeExited,
+            )
+    }
+}
+
 /// Runs a turn's `claude` from `command` to the end of the turn (3.6), feeding what it prints to
 /// `adapter` and each event that makes to `on_event`, and returns how the turn ended. Whatever
 /// ends it, the processes the tracker saw are stopped before this returns.
@@ -584,6 +737,7 @@ pub async fn supervise(
     let mut found: Vec<Line> = Vec::new();
     let mut unparsed = 0usize;
     let mut ignored = 0usize;
+    let mut follow_up = FollowUpWait::new(limits.follow_up_grace);
     let mut ticker = tokio::time::interval(limits.observe_every);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut chunk = vec![0u8; READ_CHUNK_BYTES];
@@ -663,10 +817,28 @@ pub async fn supervise(
                             &mut last_event,
                             limits,
                         );
+                        // The follow-up wait reads every line, so it sees each top-level turn
+                        // that runs in between, however `claude`'s output was split into reads.
+                        if reason.is_none()
+                            && exit.is_none()
+                            && follow_up.ends_the_turn(adapter, Instant::now())
+                        {
+                            reason = Some(StopReason::EndOfTurn);
+                        }
                     }
                     reason
                 }
             },
+        };
+        // The follow-up wait (3.6) also runs out between lines, on a tick.
+        let reason = match reason {
+            None if stopping.is_none()
+                && exit.is_none()
+                && follow_up.ends_the_turn(adapter, Instant::now()) =>
+            {
+                Some(StopReason::EndOfTurn)
+            }
+            reason => reason,
         };
         if let Some(reason) = reason {
             // The stop path: SIGTERM to `claude` while it runs, then up to the grace. One more
@@ -754,7 +926,15 @@ pub async fn supervise(
             Some(StopReason::EndOfTurn | StopReason::Stop | StopReason::Shutdown) | None => {
                 let code = status.and_then(|status| status.code());
                 let after_own_sigterm = reason == Some(StopReason::EndOfTurn) && term_sent;
-                let exited_ok = exit_counts_as_zero(code, after_own_sigterm);
+                // `claude` exited by itself while the turn waited only for follow-up turns, with
+                // 0, or with 1 after a last `result` that was an error, such as a background
+                // command's follow-up that failed: by a reading of 2.1.325's code, that exit
+                // status follows the last `result` of any turn. The turn ends as the follow-up
+                // wait ends it, and the reply's `result` alone says whether it succeeded (3.6).
+                // Any other exit, such as a signal's or 1 after a `result` that was no error, is
+                // judged as its status says. A crash's own error `result` fails the turn anyway.
+                let exited_ok = (reason.is_none() && follow_up.ends_at_claudes_exit(adapter, code))
+                    || exit_counts_as_zero(code, after_own_sigterm);
                 if exited_ok && adapter.succeeded() {
                     TurnEnd::Succeeded
                 } else {
@@ -812,6 +992,7 @@ mod tests {
         let limits = TurnLimits::standard();
         assert_eq!(limits.stall, Duration::from_secs(900));
         assert_eq!(limits.stop_grace, Duration::from_secs(5));
+        assert_eq!(limits.follow_up_grace, Duration::from_secs(15));
         assert_eq!(limits.observe_every, Duration::from_millis(50));
         assert_eq!(limits.max_line_bytes, 8 * 1024 * 1024);
         assert_eq!(limits.max_unparsed_lines, 50);
@@ -830,6 +1011,415 @@ mod tests {
         assert!(!exit_counts_as_zero(Some(143), false));
         assert!(!exit_counts_as_zero(Some(1), true));
         assert!(!exit_counts_as_zero(None, true));
+    }
+
+    const GRACE: Duration = Duration::from_secs(15);
+
+    fn init(folder: &std::path::Path) -> Value {
+        serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50",
+            "cwd": folder,
+            "model": "claude-sonnet-4-5",
+            "permissionMode": "acceptEdits",
+            "mcp_servers": [],
+        })
+    }
+
+    fn started(id: &str, run: &str, kind: &str) -> Value {
+        serde_json::json!({"type": "system", "subtype": "task_started", "task_id": id, "run_id": run, "task_type": kind, "is_backgrounded": true})
+    }
+
+    fn ended(id: &str, run: &str) -> Value {
+        serde_json::json!({"type": "system", "subtype": "task_notification", "task_id": id, "run_id": run, "status": "completed"})
+    }
+
+    fn result(text: &str, origin: Option<Value>) -> Value {
+        let mut line = serde_json::json!({"type": "result", "subtype": "success", "is_error": false, "result": text});
+        if let Some(origin) = origin {
+            line["origin"] = origin;
+        }
+        line
+    }
+
+    /// The `origin` of a turn a task's notification started: a follow-up's names the task's run,
+    /// and a Monitor watch's event names none.
+    fn notified(run: Option<&str>) -> Value {
+        let mut origin =
+            serde_json::json!({"kind": "task-notification", "producer": "session-task"});
+        if let Some(run) = run {
+            origin["runId"] = serde_json::json!(run);
+        }
+        origin
+    }
+
+    /// A turn that started a subagent and a Monitor watch, whose subagent ended before the
+    /// person's `result`: it waits only for the subagent's follow-up turn. `others` more subagents
+    /// still run.
+    fn waiting(others: &[&str]) -> (tempfile::TempDir, std::path::PathBuf, EventAdapter) {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = std::fs::canonicalize(temp.path()).unwrap();
+        let mut adapter = EventAdapter::new(&folder, None);
+        adapter.feed(&init(&folder));
+        adapter.feed(&started("m1", "run-m", "local_bash"));
+        adapter.feed(&started("a1", "run-a", "local_agent"));
+        for other in others {
+            adapter.feed(&started(other, &format!("run-{other}"), "local_agent"));
+        }
+        adapter.feed(&ended("a1", "run-a"));
+        adapter.feed(&result("A helper is on it.", None));
+        assert_eq!(adapter.waits_only_for_a_follow_up(), others.is_empty());
+        (temp, folder, adapter)
+    }
+
+    /// Another top-level turn that runs in between, a Monitor watch's event, asking the wait after
+    /// each of its lines at `at`. Returns whether the wait ended the turn.
+    fn another_turn(
+        wait: &mut FollowUpWait,
+        adapter: &mut EventAdapter,
+        folder: &std::path::Path,
+        at: Instant,
+    ) -> bool {
+        adapter.feed(&init(folder));
+        assert!(!wait.ends_the_turn(adapter, at), "a turn runs");
+        adapter.feed(&result(
+            "The log shows another request.",
+            Some(notified(None)),
+        ));
+        wait.ends_the_turn(adapter, at)
+    }
+
+    fn ended_without_follow_up(adapter: &EventAdapter) -> Value {
+        adapter
+            .run_log()
+            .events()
+            .into_iter()
+            .find(|event| event["type"] == "instafy.ended_without_follow_up")
+            .expect("the run log says the turn ended without a follow-up")
+    }
+
+    /// The wait's grace starts once the turn waits only for a follow-up, and ends the turn when
+    /// it runs out, as a success with the person's reply. The run log says so, with the restarts
+    /// the wait used. Nothing ends a turn that does not wait only for follow-ups.
+    #[test]
+    fn the_follow_up_wait_ends_the_turn_when_its_grace_runs_out() {
+        let (_temp, _folder, mut adapter) = waiting(&[]);
+        let mut wait = FollowUpWait::new(GRACE);
+        let start = Instant::now();
+        assert!(!wait.ends_the_turn(&mut adapter, start));
+        assert!(!wait.ends_the_turn(&mut adapter, start + GRACE - Duration::from_millis(1)));
+        assert_eq!(adapter.status(), &AdapterStatus::Running);
+        assert!(wait.ends_the_turn(&mut adapter, start + GRACE));
+        assert_eq!(adapter.status(), &AdapterStatus::EndOfTurn);
+        assert_eq!(adapter.reply(), Some("A helper is on it."));
+        assert!(adapter.succeeded());
+        assert_eq!(
+            ended_without_follow_up(&adapter),
+            serde_json::json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 15_000, "restarts": 0, "claude_exited": false})
+        );
+
+        // A subagent that still runs holds the turn: no grace starts, however long it runs.
+        let (_temp, _folder, mut running) = waiting(&["a2"]);
+        let mut wait = FollowUpWait::new(GRACE);
+        assert!(!wait.ends_the_turn(&mut running, start));
+        assert!(!wait.ends_the_turn(&mut running, start + GRACE * 100));
+        assert_eq!(running.status(), &AdapterStatus::Running);
+    }
+
+    /// Another top-level turn in between restarts the grace, at most `FOLLOW_UP_REARMS` times;
+    /// the next one then ends the turn as it waits only for follow-ups again, at once. The time a
+    /// turn in between ran counts toward no grace.
+    #[test]
+    fn another_turn_in_between_restarts_the_grace_at_most_five_times() {
+        let (_temp, folder, mut adapter) = waiting(&[]);
+        let mut wait = FollowUpWait::new(GRACE);
+        let mut at = Instant::now();
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        for restart in 1..=FOLLOW_UP_REARMS {
+            // Each turn starts late in the running grace, and ends after it would have run out.
+            adapter.feed(&init(&folder));
+            assert!(!wait.ends_the_turn(&mut adapter, at + GRACE - Duration::from_secs(1)));
+            at += GRACE * 2;
+            adapter.feed(&result(
+                "The log shows another request.",
+                Some(notified(None)),
+            ));
+            assert!(!wait.ends_the_turn(&mut adapter, at), "restart {restart}");
+            assert_eq!(wait.restarts(), restart);
+            assert!(!wait.ends_the_turn(&mut adapter, at + GRACE - Duration::from_millis(1)));
+        }
+        assert_eq!(adapter.status(), &AdapterStatus::Running);
+        assert!(another_turn(&mut wait, &mut adapter, &folder, at));
+        assert_eq!(adapter.status(), &AdapterStatus::EndOfTurn);
+        assert_eq!(adapter.results(), 1 + FOLLOW_UP_REARMS + 1);
+        assert_eq!(adapter.reply(), Some("A helper is on it."));
+        assert_eq!(
+            ended_without_follow_up(&adapter)["restarts"],
+            FOLLOW_UP_REARMS
+        );
+
+        // After the last restart, the grace still runs out on its own.
+        let (_temp, folder, mut adapter) = waiting(&[]);
+        let mut wait = FollowUpWait::new(GRACE);
+        let at = Instant::now();
+        for _ in 0..=FOLLOW_UP_REARMS {
+            assert!(!another_turn(&mut wait, &mut adapter, &folder, at));
+        }
+        assert_eq!(wait.restarts(), FOLLOW_UP_REARMS);
+        assert!(wait.ends_the_turn(&mut adapter, at + GRACE));
+        assert_eq!(
+            ended_without_follow_up(&adapter)["restarts"],
+            FOLLOW_UP_REARMS
+        );
+    }
+
+    /// Progress starts a fresh wait with no restart used: here the first subagent's follow-up
+    /// turn named it, one of the two tasks the wait kept when its grace started. Another event's
+    /// turn, a background command's follow-up and a peer message's turn are no progress.
+    #[test]
+    fn progress_starts_a_fresh_wait() {
+        let (_temp, folder, mut adapter) = waiting(&["a2"]);
+        let mut wait = FollowUpWait::new(GRACE);
+        let at = Instant::now();
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        // The second subagent ends: the turn now waits only for both follow-ups.
+        adapter.feed(&ended("a2", "run-a2"));
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        assert_eq!(wait.restarts(), 0);
+        for _ in 0..3 {
+            assert!(!another_turn(&mut wait, &mut adapter, &folder, at));
+        }
+        assert_eq!(wait.restarts(), 3);
+        // A background command's follow-up and a peer message's turn restart the grace too.
+        for (ending, origin) in [
+            (Some(ended("m1", "run-m")), notified(Some("run-m"))),
+            (None, serde_json::json!({"kind": "peer"})),
+        ] {
+            if let Some(ending) = ending {
+                adapter.feed(&ending);
+                assert!(!wait.ends_the_turn(&mut adapter, at));
+            }
+            adapter.feed(&init(&folder));
+            assert!(!wait.ends_the_turn(&mut adapter, at));
+            adapter.feed(&result("Not the person's.", Some(origin)));
+            assert!(!wait.ends_the_turn(&mut adapter, at));
+        }
+        assert_eq!(wait.restarts(), 5);
+        assert_eq!(adapter.reply(), Some("A helper is on it."));
+        // The first subagent's follow-up: a fresh wait for the second one's.
+        adapter.feed(&init(&folder));
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        adapter.feed(&result(
+            "The helper found the bug in parser.ts.",
+            Some(notified(Some("run-a"))),
+        ));
+        let fresh = at + Duration::from_secs(1);
+        assert!(!wait.ends_the_turn(&mut adapter, fresh));
+        assert_eq!(wait.restarts(), 0);
+        assert!(!wait.ends_the_turn(&mut adapter, fresh + GRACE - Duration::from_millis(1)));
+        for restart in 1..=FOLLOW_UP_REARMS {
+            assert!(!another_turn(&mut wait, &mut adapter, &folder, fresh));
+            assert_eq!(wait.restarts(), restart);
+        }
+        assert!(another_turn(&mut wait, &mut adapter, &folder, fresh));
+        assert_eq!(
+            adapter.reply(),
+            Some("The helper found the bug in parser.ts.")
+        );
+        assert_eq!(ended_without_follow_up(&adapter)["runs"], 1);
+    }
+
+    /// Turns in between that each start a subagent of their own, which ends and is followed up,
+    /// make no progress: the wait kept only the person's subagent, whose follow-up never comes.
+    /// They use up the restarts as any turn in between does, so the wait still ends the turn
+    /// long before the wall clock, and the latest of those follow-ups gives the reply, as any
+    /// subagent's follow-up can (3.6).
+    #[test]
+    fn turns_in_between_that_start_tasks_of_their_own_still_use_up_the_restarts() {
+        let (_temp, folder, mut adapter) = waiting(&[]);
+        let mut wait = FollowUpWait::new(GRACE);
+        let at = Instant::now();
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        let mut ended_at = None;
+        for cycle in 1..=10 {
+            let helper = format!("b{cycle}");
+            let run = format!("run-b{cycle}");
+            // A Monitor watch's event turn starts a subagent, which ends within it.
+            let lines = [
+                init(&folder),
+                started(&helper, &run, "local_agent"),
+                ended(&helper, &run),
+                result("The log shows an error.", Some(notified(None))),
+                // The subagent's follow-up turn.
+                init(&folder),
+                result(
+                    &format!("Helper {cycle} reports."),
+                    Some(notified(Some(&run))),
+                ),
+            ];
+            for line in lines {
+                adapter.feed(&line);
+                if wait.ends_the_turn(&mut adapter, at) {
+                    ended_at = Some(cycle);
+                    break;
+                }
+            }
+            if ended_at.is_some() {
+                break;
+            }
+        }
+        // Two restarts a cycle, one after each of its turns: the third cycle's follow-up ends it.
+        assert_eq!(ended_at, Some(3));
+        assert_eq!(adapter.status(), &AdapterStatus::EndOfTurn);
+        assert_eq!(adapter.reply(), Some("Helper 3 reports."));
+        assert_eq!(
+            ended_without_follow_up(&adapter),
+            serde_json::json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 15_000, "restarts": FOLLOW_UP_REARMS, "claude_exited": false})
+        );
+    }
+
+    /// A held turn's `result`: no model request ran (`num_turns` 0), its `result` is empty, and its
+    /// `origin` names the notification it took, by a reading of 2.1.325's code (3.6).
+    fn held(run: &str) -> Value {
+        let mut line = result("", Some(notified(Some(run))));
+        line["num_turns"] = serde_json::json!(0);
+        line
+    }
+
+    /// A held turn of a task the wait keeps comes just before the turn that answers it, so once
+    /// the turn waits only for follow-ups again, the grace restarts with no restart used, even
+    /// after the last one (3.6). Should nothing answer it, that grace still runs out. A held turn
+    /// of a task the wait does not keep uses a restart as any other turn in between.
+    #[test]
+    fn a_held_turn_of_a_kept_task_restarts_the_grace_without_a_restart() {
+        let (_temp, folder, mut adapter) = waiting(&[]);
+        let mut wait = FollowUpWait::new(GRACE);
+        let at = Instant::now();
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        for _ in 0..FOLLOW_UP_REARMS {
+            assert!(!another_turn(&mut wait, &mut adapter, &folder, at));
+        }
+        assert_eq!(wait.restarts(), FOLLOW_UP_REARMS);
+        adapter.feed(&init(&folder));
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        adapter.feed(&held("run-a"));
+        assert_eq!(adapter.held_run(), Some("run-a"));
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        assert_eq!(wait.restarts(), FOLLOW_UP_REARMS);
+        assert_eq!(adapter.status(), &AdapterStatus::Running);
+        // The turn that answers it: a background command's follow-up, which gives the reply for
+        // the held notification and ends the turn.
+        adapter.feed(&ended("m1", "run-m"));
+        adapter.feed(&init(&folder));
+        adapter.feed(&result(
+            "The helper found the bug, and the command finished.",
+            Some(notified(Some("run-m"))),
+        ));
+        assert_eq!(adapter.status(), &AdapterStatus::EndOfTurn);
+        assert_eq!(
+            adapter.reply(),
+            Some("The helper found the bug, and the command finished.")
+        );
+
+        // Nothing answers it: the grace runs out.
+        let (_temp, folder, mut unanswered) = waiting(&[]);
+        let mut wait = FollowUpWait::new(GRACE);
+        assert!(!wait.ends_the_turn(&mut unanswered, at));
+        for _ in 0..FOLLOW_UP_REARMS {
+            assert!(!another_turn(&mut wait, &mut unanswered, &folder, at));
+        }
+        unanswered.feed(&init(&folder));
+        assert!(!wait.ends_the_turn(&mut unanswered, at));
+        unanswered.feed(&held("run-a"));
+        assert!(!wait.ends_the_turn(&mut unanswered, at));
+        assert!(wait.ends_the_turn(&mut unanswered, at + GRACE));
+        assert_eq!(unanswered.reply(), Some("A helper is on it."));
+
+        // A held turn of a task the wait does not keep: the last restart is used, and the turn
+        // ends at once.
+        let (_temp, folder, mut other) = waiting(&[]);
+        let mut wait = FollowUpWait::new(GRACE);
+        assert!(!wait.ends_the_turn(&mut other, at));
+        for _ in 0..FOLLOW_UP_REARMS {
+            assert!(!another_turn(&mut wait, &mut other, &folder, at));
+        }
+        other.feed(&init(&folder));
+        other.feed(&started("c1", "run-c", "local_agent"));
+        other.feed(&ended("c1", "run-c"));
+        assert!(!wait.ends_the_turn(&mut other, at));
+        other.feed(&held("run-c"));
+        assert!(wait.ends_the_turn(&mut other, at));
+        assert_eq!(other.reply(), Some("A helper is on it."));
+    }
+
+    /// `claude` that exits by itself while the turn waits only for follow-up turns ends the turn
+    /// there, as the wait would, with the restarts the wait used, when its exit says nothing of
+    /// the reply: 0, or 1 after a last `result` that was an error, here a background command's
+    /// follow-up's. Any other exit leaves the turn to the exit status: 1 after a `result` that
+    /// was no error, as from a crash whose own `result` could not be written, 143 from a SIGTERM
+    /// the runtime did not send, another code or a signal. So does any exit while the turn does
+    /// not wait only for follow-up turns.
+    #[test]
+    fn claude_exiting_during_the_wait_ends_the_turn_as_the_wait_would() {
+        let (_temp, folder, mut adapter) = waiting(&[]);
+        let mut wait = FollowUpWait::new(GRACE);
+        let at = Instant::now();
+        assert!(!wait.ends_the_turn(&mut adapter, at));
+        assert!(!another_turn(&mut wait, &mut adapter, &folder, at));
+        assert!(!another_turn(&mut wait, &mut adapter, &folder, at));
+        assert!(wait.ends_at_claudes_exit(&mut adapter, Some(0)));
+        assert_eq!(adapter.status(), &AdapterStatus::EndOfTurn);
+        assert_eq!(adapter.reply(), Some("A helper is on it."));
+        assert_eq!(
+            ended_without_follow_up(&adapter),
+            serde_json::json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 15_000, "restarts": 2, "claude_exited": true})
+        );
+
+        // 1 after the background command's follow-up ended in an error: the person's `result`
+        // still gives the reply and success.
+        let (_temp, folder, mut failed) = waiting(&[]);
+        failed.feed(&ended("m1", "run-m"));
+        failed.feed(&init(&folder));
+        let mut error = result("The request failed.", Some(notified(Some("run-m"))));
+        error["subtype"] = "error_during_execution".into();
+        error["is_error"] = true.into();
+        failed.feed(&error);
+        assert!(failed.last_result_failed());
+        assert!(failed.waits_only_for_a_follow_up());
+        assert!(FollowUpWait::new(GRACE).ends_at_claudes_exit(&mut failed, Some(1)));
+        assert_eq!(failed.status(), &AdapterStatus::EndOfTurn);
+        assert_eq!(failed.reply(), Some("A helper is on it."));
+        assert!(failed.succeeded());
+        assert_eq!(ended_without_follow_up(&failed)["claude_exited"], true);
+
+        // Any other exit, after the person's `result`, which was no error.
+        for code in [Some(1), Some(EXIT_ON_SIGTERM), Some(2), None] {
+            let (_temp, _folder, mut other) = waiting(&[]);
+            assert!(!other.last_result_failed());
+            assert!(
+                !FollowUpWait::new(GRACE).ends_at_claudes_exit(&mut other, code),
+                "{code:?}"
+            );
+            assert_eq!(other.status(), &AdapterStatus::Running, "{code:?}");
+            assert!(
+                other
+                    .run_log()
+                    .events()
+                    .iter()
+                    .all(|event| event["type"] != "instafy.ended_without_follow_up"),
+                "{code:?}"
+            );
+        }
+
+        // A subagent that still runs, or an `init` whose `result` has yet to come.
+        let (_temp, _folder, mut running) = waiting(&["a2"]);
+        assert!(!FollowUpWait::new(GRACE).ends_at_claudes_exit(&mut running, Some(0)));
+        assert_eq!(running.status(), &AdapterStatus::Running);
+        let (_temp, folder, mut midway) = waiting(&[]);
+        midway.feed(&init(&folder));
+        assert!(!FollowUpWait::new(GRACE).ends_at_claudes_exit(&mut midway, Some(0)));
+        assert_eq!(midway.status(), &AdapterStatus::Running);
     }
 
     fn split(max: usize, pieces: &[&[u8]]) -> Vec<Option<Vec<u8>>> {

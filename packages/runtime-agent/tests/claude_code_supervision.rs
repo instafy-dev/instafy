@@ -15,9 +15,11 @@ use std::time::{Duration, Instant};
 
 use runtime_agent::agent::ShutdownSignal;
 use runtime_agent::claude_code::command::{McpConfigFile, turn_command};
-use runtime_agent::claude_code::events::{EventAdapter, LaneFailure, OUTSIDE_THIS_SPACE};
+use runtime_agent::claude_code::events::{
+    AdapterStatus, EventAdapter, LaneFailure, OUTSIDE_THIS_SPACE,
+};
 use runtime_agent::claude_code::supervise::{
-    TurnEnd, TurnLimits, TurnOutcome, TurnSpec, supervise,
+    FOLLOW_UP_GRACE, FOLLOW_UP_REARMS, TurnEnd, TurnLimits, TurnOutcome, TurnSpec, supervise,
 };
 use runtime_agent::claude_code::{
     Confinement, FailureCode, Lane, LaunchEnvSnapshot, LaunchGrant, RawLaunchGrant, ReadyLane,
@@ -575,6 +577,836 @@ async fn a_result_while_a_background_subagent_runs_waits_for_the_later_one() {
     );
 }
 
+/// The usage artifact of the turns' token counts, summed.
+fn usage(input: u64, cache_creation: u64, cache_read: u64, output: u64) -> Value {
+    json!({
+        "kind": "claude-code/usage",
+        "model": "claude-sonnet-4-5",
+        "usage": {
+            "input_tokens": input,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+            "output_tokens": output,
+        },
+    })
+}
+
+/// Claude Code 2.1.325's order (Phase 0, item 5): a background subagent that finished before
+/// the turn's `result` was printed makes `claude` run a follow-up turn first, a second top-level
+/// `init`, and print both turns' `result`s back to back. The turn ends at the follow-up's,
+/// whose `origin` names the subagent's run: the reply is the subagent's answer, and the usage is
+/// both turns', never `modelUsage` (3.6, 3.7).
+#[tokio::test]
+async fn a_subagents_follow_up_turn_that_ran_first_gives_the_reply_and_its_usage_counts() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .turn("result-subagent-follow-up")
+        .await;
+    turn.succeeded();
+    assert_eq!(turn.adapter.inits(), 2);
+    assert_eq!(turn.adapter.results(), 2);
+    assert_eq!(turn.adapter.reply(), Some("The helper answered: PONG."));
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(7, 880, 5_500, 162))
+    );
+    // The runtime's own SIGTERM ended it at that `result`, and its 143 counted as 0.
+    assert_eq!(turn.exit_code(), Some(143));
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// A background command's follow-up turn only says the command ended, and never gives the
+/// reply (3.6). In Phase 0's bash-wait order it comes after the turn's `result`, which ends the
+/// turn. When its notification and follow-up `init` came first, the turn reads on to the
+/// follow-up's `result`, whose usage counts, and the reply stays the turn's own.
+#[tokio::test]
+async fn a_background_commands_follow_up_never_gives_the_reply() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let after = Run::new(&machine, &LATCH)
+        .turn("result-local-bash-follow-up")
+        .await;
+    after.succeeded();
+    assert_eq!(after.adapter.results(), 1);
+    assert_eq!(
+        after.adapter.reply(),
+        Some("The tests pass, and the dev server is starting in the background.")
+    );
+    assert_eq!(after.exit_code(), Some(143));
+
+    let first = Run::new(&machine, &LATCH)
+        .turn("result-local-bash-follow-up-first")
+        .await;
+    first.succeeded();
+    assert_eq!(first.adapter.results(), 2);
+    assert_eq!(
+        first.adapter.reply(),
+        Some("The build runs in the background.")
+    );
+    assert_eq!(
+        first.adapter.usage_artifact(),
+        Some(usage(5, 120, 1_900, 80))
+    );
+    assert_eq!(first.exit_code(), Some(143));
+}
+
+/// A peer message, which another program can queue through the messaging socket every `init`
+/// names, runs as a turn of its own (`origin.kind` `peer`). Here it runs between the subagent's
+/// notification and the subagent's follow-up turn: its `result` closes its `init` but is never
+/// the reply, and the turn waits on for the follow-up's, which is (3.6).
+#[tokio::test]
+async fn a_peer_messages_turn_never_gives_the_reply() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH).turn("result-peer").await;
+    turn.succeeded();
+    assert_eq!(turn.adapter.results(), 3);
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper found the bug in parser.ts.")
+    );
+    // Every top-level `result` read counts toward the usage, the peer's included.
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(6, 150, 1_500, 60))
+    );
+    // It waited past the peer's `result`: the scenario pauses before the follow-up turn.
+    assert!(
+        turn.elapsed >= Duration::from_millis(300),
+        "{:?}",
+        turn.elapsed
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// The wall clock of a turn that would otherwise wait for a follow-up turn that never comes, or
+/// for event turns that keep coming: it fails the turn instead of hanging the test.
+const NEVER_ENDS: Duration = Duration::from_secs(20);
+
+/// The run log's line that says the follow-up wait ended the turn, if one does.
+fn ended_without_follow_up(turn: &Turn) -> Option<Value> {
+    turn.adapter
+        .run_log()
+        .events()
+        .into_iter()
+        .find(|event| event["type"] == "instafy.ended_without_follow_up")
+}
+
+/// A background subagent that ends between two tool steps of the main conversation while a
+/// background command runs. As the main conversation goes on to its next model request, Claude
+/// Code 2.1.325 may fold the notification into it, and then no follow-up turn comes; but it
+/// prints nothing of its own when it does, and these same lines come when the fold missed the
+/// notification (3.6). So the subagent stays awaited: with the command keeping `claude` alive,
+/// the turn ends after the follow-up grace at its own `result`, whose reply already answers, and
+/// the command is stopped with it.
+#[tokio::test]
+async fn a_notification_the_running_turn_may_have_folded_in_is_awaited_for_the_grace() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let grace = Duration::from_millis(600);
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| {
+            limits
+                .with_wall_clock(NEVER_ENDS)
+                .with_follow_up_grace(grace)
+        })
+        .turn("result-absorbed-notification")
+        .await;
+    turn.succeeded();
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The dev server runs, and the helper found the bug in parser.ts.")
+    );
+    assert_eq!(turn.adapter.results(), 1);
+    assert_eq!(turn.exit_code(), Some(143));
+    assert!(turn.elapsed >= grace, "{:?}", turn.elapsed);
+    assert!(turn.elapsed < Duration::from_secs(10), "{:?}", turn.elapsed);
+    assert_eq!(
+        ended_without_follow_up(&turn),
+        Some(
+            json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 600, "restarts": 0, "claude_exited": false})
+        )
+    );
+    let devserver = machine.pid("devserver").expect("the dev server started");
+    assert!(gone(devserver).await, "the background command survived");
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// The subagent's notification came after the last tool result, and no follow-up turn comes
+/// while a background command keeps `claude` alive. The turn waits only for the subagent's
+/// follow-up turn, and ends after the follow-up grace at its `result`, as a success: a follow-up
+/// that never came fails nothing (3.6). The run log says so.
+#[tokio::test]
+async fn a_follow_up_that_never_comes_ends_the_turn_after_the_grace() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let grace = Duration::from_millis(600);
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| {
+            limits
+                .with_wall_clock(NEVER_ENDS)
+                .with_follow_up_grace(grace)
+        })
+        .turn("result-follow-up-never-comes")
+        .await;
+    turn.succeeded();
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The dev server runs, and the helper found the bug in parser.ts.")
+    );
+    assert_eq!(turn.adapter.results(), 1);
+    assert_eq!(turn.exit_code(), Some(143));
+    assert!(turn.elapsed >= grace, "{:?}", turn.elapsed);
+    assert!(turn.elapsed < Duration::from_secs(10), "{:?}", turn.elapsed);
+    let run_log = serde_json::to_string(&turn.adapter.run_log().artifact()).unwrap();
+    assert!(
+        run_log.contains(r#""type":"instafy.ended_without_follow_up""#),
+        "{run_log}"
+    );
+    assert_eq!(
+        ended_without_follow_up(&turn).map(|line| line["restarts"].clone()),
+        Some(json!(0))
+    );
+    let devserver = machine.pid("devserver").expect("the dev server started");
+    assert!(gone(devserver).await, "the background command survived");
+}
+
+/// The subagent ended during the turn's last model call, so the turn's own `result` went out
+/// first and its follow-up turn starts a moment later, within the grace: the turn reads on to the
+/// follow-up's `result`, which gives the reply, and ends there, not at the grace (3.6).
+#[tokio::test]
+async fn a_follow_up_that_starts_within_the_grace_gives_the_reply() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let grace = Duration::from_secs(3);
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| limits.with_follow_up_grace(grace))
+        .turn("result-follow-up-after-the-result")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (2, 2));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper found the bug in parser.ts.")
+    );
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(3, 150, 1_900, 50))
+    );
+    assert!(
+        turn.elapsed >= Duration::from_millis(300) && turn.elapsed < grace,
+        "{:?}",
+        turn.elapsed
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// After a `cd` inside the folder, Claude Code 2.1.325's follow-up `init` reports the shell's
+/// folder as `cwd` and the folder it started in as `original_cwd`. The later `init` passes the
+/// launch checks: its `cwd` is inside the folder and its `original_cwd` is the folder. The
+/// subagent's follow-up gives the reply (3.6).
+#[tokio::test]
+async fn a_follow_up_turn_after_a_cd_inside_the_folder_gives_the_reply() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .turn("result-follow-up-after-cd")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (2, 2));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper says the changelog is up to date.")
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// A later `init` that started in another folder than the space's fails the launch checks as
+/// the first one would: the turn ends at once as `unexpected_configuration`.
+#[tokio::test]
+async fn a_later_init_that_started_in_another_folder_ends_the_turn() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .turn("init-later-other-folder")
+        .await;
+    let failure = turn.failed_with(FailureCode::UnexpectedConfiguration);
+    assert!(failure.message.contains("later turn"), "{failure:?}");
+    assert!(turn.elapsed < Duration::from_secs(10), "{:?}", turn.elapsed);
+    assert_eq!(turn.exit_code(), Some(143));
+    assert!(
+        turn.adapter.init().is_some(),
+        "the launch's own init passed"
+    );
+    assert_eq!(turn.adapter.inits(), 1);
+}
+
+/// A Monitor watch's event turn, whose `origin` is a `task-notification` that names no run,
+/// printed its `result` after the person's: it counts toward the tally and the usage, but never
+/// gives the reply once the turn's task events name run ids (3.6).
+#[tokio::test]
+async fn a_monitor_events_turn_never_gives_the_reply() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .turn("result-monitor-event")
+        .await;
+    turn.succeeded();
+    assert_eq!(turn.adapter.results(), 2);
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The dev server is up, and I'm watching its log.")
+    );
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(6, 110, 2_100, 60))
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// Limits under which a turn that waits out the follow-up grace fails by the wall clock instead:
+/// a turn that succeeds under them ended at a `result` it read.
+fn no_grace(limits: TurnLimits) -> TurnLimits {
+    limits
+        .with_wall_clock(NEVER_ENDS)
+        .with_follow_up_grace(Duration::from_secs(60))
+}
+
+/// A subagent in the foreground starts a helper in the background and returns before the helper
+/// ends. Under `-p`, Claude Code 2.1.325 delivers the helper's notification to its subagent only
+/// while that subagent runs, so it goes to the main conversation and runs a follow-up turn that
+/// names the helper's run: the turn waits past its own `result` for that follow-up's, which
+/// gives the reply (3.6).
+#[tokio::test]
+async fn a_task_a_subagent_started_is_awaited_until_its_follow_up() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(no_grace)
+        .turn("result-nested-under-foreground")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (2, 2));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper reports two failing tests in parser.ts.")
+    );
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(3, 150, 1_900, 50))
+    );
+    // It waited past its own `result`: the scenario pauses before the follow-up turn.
+    assert!(
+        turn.elapsed >= Duration::from_millis(300) && turn.elapsed < Duration::from_secs(10),
+        "{:?}",
+        turn.elapsed
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// A subagent in the background starts a helper and ends while the helper runs, before a tool
+/// step and a model request of the main conversation's. Both stay awaited, whatever those may
+/// have folded in: the turn reads past its own `result` and the helper's follow-up to the
+/// subagent's follow-up, which gives the reply (3.6).
+#[tokio::test]
+async fn a_subagent_that_ended_while_its_own_task_ran_is_awaited_until_its_follow_up() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(no_grace)
+        .turn("result-nested-outlives-owner")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (3, 3));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helpers found the bug in parser.ts.")
+    );
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(4, 200, 2_800, 90))
+    );
+    assert!(
+        turn.elapsed >= Duration::from_millis(300) && turn.elapsed < Duration::from_secs(10),
+        "{:?}",
+        turn.elapsed
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// A tool step that ends the turn (here a hook stops it after a command) goes on to no model
+/// request, so the subagent that ended during it gets a follow-up turn after the turn's
+/// `result`: the turn waits for it, and its `result` gives the reply (3.6).
+#[tokio::test]
+async fn a_tool_step_that_ends_the_turn_leaves_the_notification_to_its_follow_up() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(no_grace)
+        .turn("result-turn-ending-tool-step")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (2, 2));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper found the bug in parser.ts.")
+    );
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(3, 150, 1_900, 50))
+    );
+    assert!(
+        turn.elapsed >= Duration::from_millis(300) && turn.elapsed < Duration::from_secs(10),
+        "{:?}",
+        turn.elapsed
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// The subagent ended between two tool steps, and the main conversation's next model request may
+/// have folded its notification in: no follow-up turn comes, and with nothing else to run Claude
+/// Code exits right after its last `result`, by itself. That ends the turn as the follow-up wait
+/// would, as a success with the person's reply, well before the grace would have run out (3.6).
+#[tokio::test]
+async fn claude_exiting_by_itself_ends_a_turn_whose_follow_up_never_comes() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| limits.with_wall_clock(NEVER_ENDS))
+        .turn("result-no-follow-up-then-exit")
+        .await;
+    turn.succeeded();
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper found the bug: the parser drops the last token.")
+    );
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (1, 1));
+    // `claude` exited 0 by itself: the runtime sent no SIGTERM, and the grace never ran out.
+    assert_eq!(turn.exit_code(), Some(0));
+    assert_eq!(
+        ended_without_follow_up(&turn),
+        Some(
+            json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 15_000, "restarts": 0, "claude_exited": true})
+        )
+    );
+    assert!(turn.elapsed < FOLLOW_UP_GRACE / 3, "{:?}", turn.elapsed);
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// While the turn waits for a follow-up that never comes, a background command's follow-up turn
+/// ends in an error, and `claude`, with nothing left to run, exits 1: by a reading of 2.1.325's
+/// code, its exit status follows its last `result`, whichever turn's. The turn ends as the
+/// follow-up wait would, and succeeds as the person's own `result` says (3.6).
+#[tokio::test]
+async fn claude_exiting_with_another_turns_error_during_the_wait_keeps_the_persons_success() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(no_grace)
+        .turn("result-error-turn-then-exit")
+        .await;
+    turn.succeeded();
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The tests run, and the helper traced the bug to the tokenizer.")
+    );
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (2, 2));
+    assert_eq!(turn.exit_code(), Some(1));
+    assert_eq!(
+        ended_without_follow_up(&turn),
+        Some(
+            json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 60_000, "restarts": 1, "claude_exited": true})
+        )
+    );
+    assert!(turn.elapsed < Duration::from_secs(10), "{:?}", turn.elapsed);
+    let tests = machine.pid("tests").expect("the test run started");
+    assert!(gone(tests).await, "the background command survived");
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// While the turn waits for a follow-up that never comes, `claude` exits 1 by itself after a last
+/// `result` that was no error, as a crash whose own `result` could not be written does. By a
+/// reading of 2.1.325's code, an exit at `claude`'s natural end follows the last `result`, 1
+/// meaning that `result` was an error, so this exit says what the `result`s do not. The
+/// follow-up wait does not end the turn there, and it fails as `crashed`, as an exit 1 at any
+/// other time does (3.6).
+#[tokio::test]
+async fn a_crash_during_the_follow_up_wait_fails_the_turn_as_crashed() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| limits.with_wall_clock(NEVER_ENDS))
+        .turn("result-crash-during-wait")
+        .await;
+    let failure = turn.failed_with(FailureCode::Crashed);
+    assert!(
+        failure.message.contains("exited with status 1"),
+        "{failure:?}"
+    );
+    assert_eq!(turn.exit_code(), Some(1));
+    assert_eq!(turn.adapter.status(), &AdapterStatus::Running);
+    assert_eq!(ended_without_follow_up(&turn), None);
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (1, 1));
+    assert!(turn.elapsed < FOLLOW_UP_GRACE / 3, "{:?}", turn.elapsed);
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// The same wait, ended by a SIGTERM the runtime did not send: `claude` exits 143, as Claude Code
+/// does on SIGTERM. Only after the runtime's own SIGTERM does 143 count as 0, so the turn fails,
+/// and the follow-up wait does not end it there either (3.6).
+#[tokio::test]
+async fn an_outside_sigterm_during_the_follow_up_wait_fails_the_turn() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| limits.with_wall_clock(NEVER_ENDS))
+        .turn("result-killed-during-wait")
+        .await;
+    let failure = turn.failed_with(FailureCode::Crashed);
+    assert!(
+        failure.message.contains("exited with status 143"),
+        "{failure:?}"
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+    assert_eq!(turn.adapter.status(), &AdapterStatus::Running);
+    assert_eq!(ended_without_follow_up(&turn), None);
+    assert!(turn.elapsed < FOLLOW_UP_GRACE / 3, "{:?}", turn.elapsed);
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// A Monitor watch keeps `claude` alive, and its events keep running turns of their own while the
+/// subagent's follow-up never comes. Each such turn restarts the follow-up grace, at most
+/// `FOLLOW_UP_REARMS` times; the next one then ends the turn as it waits only for the follow-up
+/// again, at once, as a success with the person's reply, far below the wall clock (3.6). The run
+/// log says how many restarts the wait used, and the watch is stopped with the turn.
+#[tokio::test]
+async fn monitor_events_that_keep_coming_restart_the_follow_up_grace_only_five_times() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let grace = Duration::from_secs(3);
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| {
+            limits
+                .with_wall_clock(NEVER_ENDS)
+                .with_follow_up_grace(grace)
+        })
+        .turn("result-monitor-events-keep-coming")
+        .await;
+    turn.succeeded();
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("A helper is checking the parser, and I'm watching the dev server's log.")
+    );
+    // The person's turn, then the event turns up to the one after the last restart.
+    let turns = 1 + FOLLOW_UP_REARMS + 1;
+    assert_eq!(
+        (turn.adapter.inits(), turn.adapter.results()),
+        (turns, turns)
+    );
+    assert_eq!(
+        ended_without_follow_up(&turn),
+        Some(
+            json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 3_000, "restarts": FOLLOW_UP_REARMS, "claude_exited": false})
+        )
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+    assert!(turn.elapsed < grace * 2, "{:?}", turn.elapsed);
+    let watcher = machine.pid("watcher").expect("the watch started");
+    assert!(gone(watcher).await, "the Monitor watch survived");
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// A Monitor watch's events keep running turns that each start a helper of their own, which ends
+/// and is followed up, while the person's subagent's follow-up never comes. Those helpers are no
+/// progress for the wait, which kept only the person's subagent: their turns use up its restarts,
+/// two a helper, and the turn ends at once after the fifth, far below the wall clock. The latest
+/// helper's follow-up gives the reply, as any subagent's follow-up can, whichever turn started
+/// its task (3.6).
+#[tokio::test]
+async fn event_turns_that_keep_starting_helpers_still_end_the_wait() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let grace = Duration::from_secs(3);
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| {
+            limits
+                .with_wall_clock(NEVER_ENDS)
+                .with_follow_up_grace(grace)
+        })
+        .turn("result-event-agents-keep-coming")
+        .await;
+    turn.succeeded();
+    assert_eq!(turn.adapter.reply(), Some("Helper 3 reports a timeout."));
+    // The person's turn, then three helpers' event and follow-up turns.
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (7, 7));
+    assert_eq!(
+        ended_without_follow_up(&turn),
+        Some(
+            json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 3_000, "restarts": FOLLOW_UP_REARMS, "claude_exited": false})
+        )
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+    assert!(turn.elapsed < grace * 2, "{:?}", turn.elapsed);
+    let watcher = machine.pid("watcher").expect("the watch started");
+    assert!(gone(watcher).await, "the Monitor watch survived");
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// While the person's subagent runs, a Monitor watch's event runs a turn that starts a helper of
+/// its own. 2.1.325 holds the `result`s back while a subagent runs, and prints them just before
+/// the subagent's follow-up's. The helper's follow-up comes last, ends the turn and gives the
+/// reply: the latest follow-up of a subagent does, whichever turn started its task (3.6).
+#[tokio::test]
+async fn the_latest_follow_up_gives_the_reply_whichever_turn_started_its_task() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(no_grace)
+        .turn("result-event-agent-follow-up")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (4, 4));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("Helper E found the cause: a timeout.")
+    );
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(7, 200, 3_400, 120))
+    );
+    assert!(ended_without_follow_up(&turn).is_none());
+    assert!(
+        turn.elapsed >= Duration::from_millis(400) && turn.elapsed < Duration::from_secs(10),
+        "{:?}",
+        turn.elapsed
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// The person's subagent and background test run end together. By a reading of 2.1.325's code,
+/// Claude Code then runs the subagent's notification as a held turn, which makes no model request
+/// and prints an `init` and an empty `result` with `num_turns` 0, and leaves it to the turn of the
+/// test run's notification, queued behind it, which answers both. The held `result` neither ends
+/// the turn nor gives the reply: the subagent awaits its follow-up until the next `result`, the
+/// test run's follow-up's, which ends the turn and gives the reply, as the held one could have.
+/// Every `result` counts toward the usage (3.6).
+#[tokio::test]
+async fn a_command_follow_up_that_answers_a_held_notification_gives_the_reply() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(no_grace)
+        .turn("result-held-notification-then-command")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (3, 3));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper fixed the parser, and all 57 tests pass.")
+    );
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(5, 190, 3_100, 110))
+    );
+    assert!(ended_without_follow_up(&turn).is_none());
+    assert!(turn.elapsed < Duration::from_secs(10), "{:?}", turn.elapsed);
+    assert_eq!(turn.exit_code(), Some(143));
+    let tests = machine.pid("tests").expect("the test run started");
+    assert!(gone(tests).await, "the background command survived");
+}
+
+/// As above, but the notification queued behind the held turn does not run next, so 2.1.325 runs
+/// the turn it owes the held notification instead: one with no `origin`, which answers it. With
+/// nothing else awaited, the held `result` still does not end the turn: that turn's does, and it
+/// gives the reply (3.6).
+#[tokio::test]
+async fn a_held_notification_is_awaited_until_the_turn_owed_to_it() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(no_grace)
+        .turn("result-held-notification-then-owed-call")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (3, 3));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper fixed the parser in parser.ts: it dropped the last token.")
+    );
+    assert!(ended_without_follow_up(&turn).is_none());
+    assert!(turn.elapsed < Duration::from_secs(10), "{:?}", turn.elapsed);
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// On a resumed session, by a reading of 2.1.325's code, Claude Code first runs a turn with no
+/// model request for each background task of an earlier turn that left no record of its end, as
+/// a command the runtime stopped at that turn's end does. Each prints a held turn's `result`,
+/// whose `origin` names no run, before the person's own turn runs. None of them ends the turn:
+/// the person's `result` does, and gives the reply (3.6).
+#[tokio::test]
+async fn a_resumed_sessions_notices_before_the_persons_turn_do_not_end_it() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .resumed()
+        .turn("result-resume-notices-before-the-persons-turn")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (3, 3));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The homepage loads, and the layout fix is in place.")
+    );
+    assert!(ended_without_follow_up(&turn).is_none());
+    assert!(
+        turn.elapsed >= Duration::from_millis(200) && turn.elapsed < Duration::from_secs(10),
+        "{:?}",
+        turn.elapsed
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+}
+
+/// While the turn waits for a follow-up that never comes, `claude` crashes. By a reading of
+/// 2.1.325's code, it first writes an error `result` of its own, with no `origin` and no text,
+/// and then exits 1. That `result` becomes the reply and fails the turn with the crash's own
+/// words; the exit, 1 after an error `result`, ends it as the follow-up wait would (3.6).
+#[tokio::test]
+async fn a_crash_result_during_the_follow_up_wait_fails_the_turn_by_it() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| limits.with_wall_clock(NEVER_ENDS))
+        .turn("result-crash-result-during-wait")
+        .await;
+    let failure = turn.failure();
+    assert_eq!(failure.code, None, "{failure:?}");
+    assert!(failure.message.contains("[session_crash]"), "{failure:?}");
+    assert_eq!(turn.exit_code(), Some(1));
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (1, 2));
+    assert_eq!(
+        ended_without_follow_up(&turn),
+        Some(
+            json!({"type": "instafy.ended_without_follow_up", "runs": 1, "grace_ms": 15_000, "restarts": 0, "claude_exited": true})
+        )
+    );
+    assert!(turn.elapsed < FOLLOW_UP_GRACE / 3, "{:?}", turn.elapsed);
+    assert!(turn.outcome.cleanup_confirmed);
+}
+
+/// The person's subagent stops at the plan's limit after Claude Code reported a refused request.
+/// By a reading of 2.1.325's code, its notification only repeats a usage limit the session has
+/// already reached, so it runs as a turn with no model request that prints a held turn's
+/// `result`, and no later turn answers it. When `claude` then exits 0 by itself, the turn ends as
+/// the follow-up wait would, but fails as `plan_limit`: the work the subagent stood for was
+/// stopped by the limit, which the person's interim reply does not say (3.6).
+#[tokio::test]
+async fn a_usage_limit_repeat_that_nothing_answers_fails_the_turn_as_plan_limit() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| limits.with_wall_clock(NEVER_ENDS))
+        .turn("result-usage-limit-repeat")
+        .await;
+    let failure = turn.failed_with(FailureCode::PlanLimit);
+    assert_eq!(failure.resets_at, Some(1_900_000_000), "{failure:?}");
+    assert_eq!(turn.adapter.reply(), Some("A helper is on it."));
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (2, 2));
+    assert_eq!(turn.exit_code(), Some(0));
+    assert_eq!(
+        ended_without_follow_up(&turn).map(|line| line["claude_exited"].clone()),
+        Some(json!(true))
+    );
+    assert!(turn.elapsed < FOLLOW_UP_GRACE / 3, "{:?}", turn.elapsed);
+}
+
+/// Five Monitor event turns use up the follow-up wait's restarts while the person's subagent's
+/// follow-up is still to come. Then the build ends too, and 2.1.325 holds the subagent's
+/// notification for the build's follow-up turn, which answers both. The held turn, of a task the
+/// wait keeps, comes just before its answer, so it restarts the grace without using a restart:
+/// the turn reads on to the build's follow-up, which gives the reply (3.6).
+#[tokio::test]
+async fn a_held_turn_after_the_last_restart_still_reaches_its_answer() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let grace = Duration::from_secs(3);
+    let turn = Run::new(&machine, &LATCH)
+        .limits(|limits| {
+            limits
+                .with_wall_clock(NEVER_ENDS)
+                .with_follow_up_grace(grace)
+        })
+        .turn("result-held-after-five-event-turns")
+        .await;
+    turn.succeeded();
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper fixed the tokenizer, and the build passed.")
+    );
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (8, 8));
+    assert!(ended_without_follow_up(&turn).is_none());
+    assert_eq!(turn.exit_code(), Some(143));
+    assert!(turn.elapsed < grace * 2, "{:?}", turn.elapsed);
+    let watcher = machine.pid("watcher").expect("the watch started");
+    assert!(gone(watcher).await, "the Monitor watch survived");
+}
+
+/// A worktree subagent's notification is printed before Claude Code 2.1.325 queues it, behind its
+/// git work, so the main conversation's next tool result and model request come in between and
+/// fold nothing in. Its follow-up turn then comes only after an unrelated one, a background
+/// command's follow-up: the turn reads past both, and the reply is the subagent's follow-up (3.6).
+#[tokio::test]
+async fn an_awaited_follow_up_after_another_turn_gives_the_reply() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .limits(no_grace)
+        .turn("result-follow-up-after-another-turn")
+        .await;
+    turn.succeeded();
+    assert_eq!((turn.adapter.inits(), turn.adapter.results()), (3, 3));
+    assert_eq!(
+        turn.adapter.reply(),
+        Some("The helper found the bug in parser.ts: it drops the last token.")
+    );
+    assert_eq!(
+        turn.adapter.usage_artifact(),
+        Some(usage(6, 200, 3_400, 110))
+    );
+    assert!(ended_without_follow_up(&turn).is_none());
+    // It waited past its own `result` and the command's follow-up: the scenario pauses before
+    // each later turn.
+    assert!(
+        turn.elapsed >= Duration::from_millis(600) && turn.elapsed < Duration::from_secs(10),
+        "{:?}",
+        turn.elapsed
+    );
+    assert_eq!(turn.exit_code(), Some(143));
+    let build = machine.pid("build").expect("the build started");
+    assert!(gone(build).await, "the background command survived");
+}
+
+/// A later `init` whose shell left the folder fails the launch checks, though it names the
+/// folder it started in: the turn ends at once as `unexpected_configuration`.
+#[tokio::test]
+async fn a_later_init_whose_shell_left_the_folder_ends_the_turn() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .turn("init-later-cwd-outside")
+        .await;
+    let failure = turn.failed_with(FailureCode::UnexpectedConfiguration);
+    assert!(failure.message.contains("later turn"), "{failure:?}");
+    assert!(turn.elapsed < Duration::from_secs(10), "{:?}", turn.elapsed);
+    assert_eq!(turn.exit_code(), Some(143));
+    assert!(
+        turn.adapter.init().is_some(),
+        "the launch's own init passed"
+    );
+    assert_eq!(turn.adapter.inits(), 1);
+    assert_eq!(turn.adapter.results(), 0);
+}
+
 #[tokio::test]
 async fn a_setsid_grandchild_and_a_double_forked_daemon_are_gone_after_the_turn() {
     static LATCH: AtomicBool = AtomicBool::new(false);
@@ -670,6 +1502,71 @@ async fn a_resume_miss_before_init_is_session_unavailable_and_starts_nothing_els
     // The same exit without a resume is another startup failure.
     let fresh = Run::new(&machine, &LATCH).turn("resume-miss").await;
     fresh.failed_with(FailureCode::Crashed);
+}
+
+/// Claude Code 2.1.325's resume miss (Phase 0, item 7): a `result` on stdout before any `init`,
+/// whose `errors` name the missing session, then exit 1. That `result` ends the turn, so the
+/// runtime's own SIGTERM races the exit: whether `claude` exits 1 by itself (its own shutdown
+/// came first) or 143 on the SIGTERM, the turn is `session_unavailable`. Without `--resume` the
+/// same line is another failure, in Claude Code's own words.
+#[tokio::test]
+async fn a_resume_miss_result_before_init_is_session_unavailable_whether_claude_exits_1_or_143() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    for (scenario, exit_code) in [
+        ("resume-miss-result", 1),
+        ("resume-miss-result-then-term", 143),
+    ] {
+        let missed = Run::new(&machine, &LATCH).resumed().turn(scenario).await;
+        let failure = missed.failed_with(FailureCode::SessionUnavailable);
+        assert!(
+            failure.message.starts_with("No conversation found"),
+            "{scenario}: {failure:?}"
+        );
+        assert_eq!(missed.exit_code(), Some(exit_code), "{scenario}");
+        assert!(missed.adapter.init().is_none(), "{scenario}");
+        assert!(missed.outcome.cleanup_confirmed, "{scenario}");
+    }
+    // One process a turn, and no second one.
+    assert_eq!(machine.print_calls().len(), 2);
+    let fresh = Run::new(&machine, &LATCH).turn("resume-miss-result").await;
+    let failure = fresh.failure();
+    assert_eq!(failure.code, None, "{failure:?}");
+    assert!(failure.message.starts_with("No conversation found"));
+}
+
+/// When `claude`'s exit after that SIGTERM is 0, as a later version's may be, or `claude`
+/// outlives the grace and is killed, the structured `errors` still say it: the exit does not
+/// decide a resume miss (2.7).
+#[tokio::test]
+async fn a_resume_miss_result_before_init_is_session_unavailable_even_after_exit_0_or_a_kill() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let zero = Run::new(&machine, &LATCH)
+        .resumed()
+        .turn("resume-miss-result-term-0")
+        .await;
+    zero.failed_with(FailureCode::SessionUnavailable);
+    assert_eq!(zero.exit_code(), Some(0));
+
+    let killed = Run::new(&machine, &LATCH)
+        .resumed()
+        .limits(|limits| limits.with_stop_grace(Duration::from_millis(300)))
+        .turn("resume-miss-result-ignore-term")
+        .await;
+    killed.failed_with(FailureCode::SessionUnavailable);
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(killed.exit_code(), None);
+        assert_eq!(
+            killed
+                .outcome
+                .exit_status
+                .and_then(|status| status.signal()),
+            Some(libc::SIGKILL)
+        );
+    }
+    assert!(killed.outcome.cleanup_confirmed);
 }
 
 #[tokio::test]
