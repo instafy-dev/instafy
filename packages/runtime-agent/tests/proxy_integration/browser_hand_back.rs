@@ -70,7 +70,7 @@ const ROUTE_LINE: &str = "\n- Where you use a fact, say with it what its finding
 /// How a turn that may change files reads a public page (`AGENTS.md`'s "Reading the web", given
 /// with the lane to a turn that runs without that file): a build once read a shop's site with
 /// python's `urllib`.
-const READ_A_PUBLIC_PAGE: &str = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.\n";
+const READ_A_PUBLIC_PAGE: &str = "- Read a public page only with `instafy web read <address>`, a reading command a skill names or the AI's own web search, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.\n";
 /// What the lane of a routed build says (runtime-agent `jobs/mod.rs`).
 const WRITE_LANE: &str = "\nDirect workspace-change response contract:\n";
 const NO_ACTIONS: &str = "- Do not emit `multi_agent_plan`, goals, integrations, browser/location actions, or broad coordination metadata.";

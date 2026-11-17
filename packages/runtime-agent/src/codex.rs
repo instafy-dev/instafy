@@ -140,7 +140,7 @@ macro_rules! shared_browser_developer_instructions {
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
 - Never type authentication, payment, or identity secrets. A sign-in or one-time code step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. When the user asked to sign in, or a step they asked for needs it, open the site's sign-in page (a snapshot's `signIn` names the control that opens it, then its fields) and pause there; never end the turn telling them to sign in themselves. Any other sign-in, such as a page read for research, ends that page, not the task. Never ask for those values in chat.
 - Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.
-- For a manual field step, use `request_human_input` with one to eight indices and the fresh snapshotId. It highlights the actual fields and ends this turn. Do not issue any further browser calls; the user explicitly continues after entering values directly, and the next turn must take a fresh snapshot. Never request or repeat those values in chat.
+- For a step only the person may do, use `request_human_input` with one to eight indices of its fields or buttons and the fresh snapshotId. It highlights them and ends this turn. Do not issue any further browser calls; the user explicitly continues after doing the step directly, and the next turn must take a fresh snapshot. Never request or repeat their values in chat.
 "#,
             $approval_start,
             "\n",
@@ -171,7 +171,7 @@ const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transp
 - The Personal Browser capability is deliberately unavailable to shell tools and subprocesses. Never try to discover, print, persist, or reconstruct it.
 - A page whose snapshot lists a cookie banner's reject button ("Reject all", "Reject", "Only necessary"): press it before your next step, and nothing else on the banner; never accept. With no reject button on the banner itself, leave it up and read on. Refuse through its settings only when the person asks; saving those settings asks once.
 - Never type authentication, payment, or identity secrets. A sign-in or one-time code step is a manual step for the user: pause on it with `request_human_input` on its fields, so the user completes it on the page and then chooses Let Octo continue. When the user asked to sign in, or a step they asked for needs it, open the site's sign-in page and pause there; never end the turn telling them to sign in themselves. Any other sign-in, such as a page read for research, ends that page, not the task. Never ask for those values in chat.
-- For a manual field step, use `request_human_input` with one to eight fresh snapshot indices. It highlights the fields and revokes agent control. End this turn immediately; the user fills the page directly and explicitly continues in a fresh turn. Never request or repeat their values in chat.
+- For a manual field step, use `request_human_input` with one to eight fresh snapshot indices. It highlights the fields and revokes agent control. End this turn immediately; the user fills the page directly and explicitly continues in a fresh turn. Never request or repeat their values in chat. It takes fields only: for a button only the person may press, tell them in words which one, and end the turn.
 - Never open or reveal a screen, dialog or field that shows a credential value such as an API secret, token, key or recovery code, and never ask the user to open one in this browser: the next snapshot would show the value to you. When the user needs one, stop on the screen that lists it, tell them in words which control opens it, and ask them to open that same page in a tab of their own browser to see and copy the value there; do not use `request_human_input` for it. If an observation shows a value anyway, never repeat, store or act on it.
 - Snapshots and status mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
 - A 403 with `step_refused_secret`, `step_refused_sign_in` or `step_refused_upload` is final in every approval mode: revealing or copying a credential, signing in, and choosing files are the user's steps. Do not retry or look for another control that does the same; tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
@@ -4749,6 +4749,10 @@ struct RunLane {
     local_browser: bool,
     /// A Shared Browser turn that starts on a page a run of another chat left.
     page_left_by_other_chat: bool,
+    /// The run's grant lets it use the AI's own web search on Instafy AI, where each search costs
+    /// the person credits ([`PAID_WEB_SEARCH_LINE`]). A bounded turn (a granted turn's, or a
+    /// Personal or Shared Browser turn's) still never searches, and its text never reads it.
+    paid_web_search: bool,
 }
 
 /// The lane a run's options ask for, with the browsers this runtime resolved for the run.
@@ -4769,8 +4773,23 @@ fn run_lane(
         personal_browser,
         local_browser,
         page_left_by_other_chat: shared_browser && options.shared_browser_page_left_by_other_chat,
+        // As the run's search mode decides it (`codex_policy`): never in a routing step or a run
+        // that leaves search off, and only on the managed lane's grant. A bounded turn never
+        // searches ([`run_instructions_for_turn`]).
+        paid_web_search: options.final_output_schema != CodexFinalOutputSchema::RoutingPreflight
+            && !options.disable_native_web_search
+            && options
+                .proxy_auth
+                .as_ref()
+                .is_some_and(|auth| auth.allows_managed_web_search()),
     }
 }
+
+/// What a run that may search the web on Instafy AI reads: each search costs the person credits
+/// (`docs/Credits-Billing.md`). Only the fact: when to search, and how often, is the research
+/// skill's (`instafy-web-research`, "The AI's own web search"). A person's own ChatGPT login
+/// searches on their own plan, and its runs read nothing of it.
+const PAID_WEB_SEARCH_LINE: &str = "- Each web search you run costs the person credits.";
 
 /// A run's developer text: its lane's contract (granted, then generic MCP, then browser, then
 /// the ordinary write, focused or structured lane; `env` reads each lane's operator override),
@@ -4799,6 +4818,18 @@ fn run_instructions_for_turn(
                 STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS.to_string()
             }
         })
+    };
+    // A bounded turn never searches (`codex_policy`), as the run decides it: a granted turn, or a
+    // Personal or Shared Browser turn. Any other turn may, a browser-mode turn on a runtime that
+    // runs every turn in browser mode too, so it says it.
+    let lane_text = if lane.paid_web_search
+        && !lane.granted
+        && !lane.shared_browser
+        && !lane.personal_browser
+    {
+        format!("{lane_text}\n{PAID_WEB_SEARCH_LINE}")
+    } else {
+        lane_text
     };
     RunInstructions {
         policy: append_browser_developer_instructions_for_turn(
@@ -8647,6 +8678,66 @@ mod tests {
         assert!(!PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS.contains("Let AI continue"));
     }
 
+    /// A run that may search the web on Instafy AI reads that each search costs the person
+    /// credits, once, in its run's own text, which a resumed thread is given again: the research
+    /// skill then searches only for what is fresh or a page no source names. A run on a person's
+    /// own login, or with no search, reads nothing of it, and neither does a bounded turn (a
+    /// Personal or Shared Browser turn, or a granted one), which never searches. A turn in browser
+    /// mode with neither browser, as on a runtime that runs every turn in browser mode, still
+    /// searches, so it reads the line.
+    #[test]
+    fn a_run_that_searches_on_instafy_ai_reads_that_each_search_costs_credits() {
+        let policy = |lane: RunLane| run_instructions_for_turn(lane, |_| None).policy;
+        let paid = RunLane {
+            paid_web_search: true,
+            ..RunLane::default()
+        };
+        for lane in [
+            paid,
+            RunLane {
+                plain_text_final: true,
+                plain_text_write: true,
+                ..paid
+            },
+            RunLane {
+                browser: true,
+                ..paid
+            },
+        ] {
+            assert_eq!(
+                policy(lane).matches(PAID_WEB_SEARCH_LINE).count(),
+                1,
+                "{lane:?}"
+            );
+        }
+        for lane in [
+            RunLane::default(),
+            RunLane {
+                browser: true,
+                shared_browser: true,
+                ..paid
+            },
+            RunLane {
+                browser: true,
+                personal_browser: true,
+                ..paid
+            },
+            RunLane {
+                granted: true,
+                ..paid
+            },
+        ] {
+            assert!(
+                !policy(lane).contains("costs the person credits"),
+                "{lane:?}"
+            );
+        }
+        // Only the fact: no word of when to search or how often, which is the skill's.
+        for word in ["fresh", "at most", "2 searches"] {
+            assert!(!PAID_WEB_SEARCH_LINE.contains(word), "{word}");
+        }
+    }
+
     /// A setup's walk reaches the provider's sign-in page before the screen it
     /// was asked for. The person signs in on the page, so the walk pauses there
     /// with `request_human_input` and goes on when they choose Let Octo continue:
@@ -8682,7 +8773,9 @@ mod tests {
     /// run text names consent as a step to pause on, or a cookie notice to
     /// answer, nor does the Shared Browser's pause tool, whose words every
     /// browser turn reads, while the sign-in and one-time code pause stays as
-    /// it was.
+    /// it was. The pause tool takes a step's fields or buttons, a booking's or a
+    /// payment's final button among them, and still names no cookie notice: when
+    /// a notice is the person's choice is the browser skill's judgement.
     #[test]
     fn no_browser_turn_is_told_to_pause_on_a_cookie_notice() {
         let tools = crate::shared_browser::shared_browser_mcp_tools();
@@ -8691,8 +8784,12 @@ mod tests {
             .find(|tool| tool.name == "request_human_input")
             .and_then(|tool| tool.description.as_deref())
             .expect("the Shared Browser serves request_human_input");
-        assert!(pause.contains("highlighted fields"), "{pause}");
-        for word in ["cookie", "consent", "notice", "button"] {
+        assert!(pause.contains("fields or buttons"), "{pause}");
+        assert!(
+            pause.contains("a booking's or payment's final button"),
+            "{pause}"
+        );
+        for word in ["cookie", "consent", "notice"] {
             assert!(!pause.contains(word), "{pause}");
         }
         // The reading counts a notice's accept among what it leaves out, and

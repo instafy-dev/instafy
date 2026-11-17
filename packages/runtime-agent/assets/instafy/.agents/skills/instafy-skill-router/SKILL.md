@@ -38,14 +38,14 @@ Use these mappings unless a project-specific skill overrides them.
   - Use `instafy-frontend-previews`: show it to people with a private Studio preview card (`instafy preview open ... --serve-cmd "<command>" --start`, which also keeps it running after the turn) and check it yourself with `instafy preview check`.
   - Not Instafy's browser: its safety policy blocks this space's own addresses (localhost, 127.0.0.1, 0.0.0.0, private addresses) and non-web ports.
 
-- **A public web page a reader can't read, or a site to use** (a page that needs JavaScript or a sign-in, a site's screens, guided clicks, sign-in)
+- **A site to use, or a page a reader can't read** (forms, planners, bookings and availability, a sign-in or their account, a site's screens, a page that needs JavaScript)
   - Use `instafy-browser-automation` and open the browser without asking in chat first; its site and action prompts still apply. Not for a site running in this space (above). A page with neither is read with `instafy web read` (below).
   - Use the exposed Personal or Shared Browser tools. If neither is exposed, follow the skill's `request_browser` handoff so Studio can open or resume the appropriate browser.
 
-- **A fact from the web for an answer or a page** (prices, opening hours, timetables, addresses, places or products to compare, "with sources")
-  - Use `instafy-web-research`: which sources to read, how many, cross-checking, citing, and the link-only sites.
+- **Looking something up, for an answer or a page** (news, prices, opening hours, timetables, reviews, products to compare, "with sources")
+  - Use `instafy-web-research`: the AI's own web search when the run has it, which sources to read, cross-checking and citing.
   - Read public pages that need no JavaScript or sign-in with `instafy web read <url…> --json` (no browser card); its `provenance` is what to cite.
-  - Combine with `instafy-browser-automation` when the reads go through Instafy's browser (a page `instafy web read` reports as `needs_browser`, an aggregator, a page the person wants to see); one card may carry up to 6 related reads.
+  - Combine with `instafy-browser-automation` only for what search and the reader can't reach (a site to use, a page `instafy web read` reports as `needs_browser`, a page the person wants to see); one card may carry up to 6 related reads.
 
 - **Public page text / element counts / computed CSS / screenshot verification**
   - Use `instafy-browser-automation`.
@@ -123,5 +123,5 @@ Use these mappings unless a project-specific skill overrides them.
 - If the user asks “use a browser” but they actually want a shareable link:
   - Ask one short clarification: “Do you want a shareable public preview link, or a live browser walkthrough here?”
 - For current information (news, prices, releases, status pages):
-  - Read it with `instafy web read` or `instafy-browser-automation`, choosing and citing sources with `instafy-web-research`.
+  - Look it up as `instafy-web-research` says: the AI's own web search, then `instafy web read`.
   - Answer from memory only when no page can be read, and then say no live browsing was used.

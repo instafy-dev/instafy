@@ -164,7 +164,38 @@ const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 /// How much of the browser skill's "Routing preflight" section the routing step reads: all of the
 /// shipped one, with little to spare, so a rule added there takes one out. A space's longer copy
 /// is cut here and marked.
-const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_010;
+const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_180;
+/// What the routing step reads after the browser skill's routing section when Octo's turn for the
+/// message can search the web: the job's grant lets that turn use the AI's own web search
+/// (`job_proxy_auth`), which the routing step itself never does, and this runtime has
+/// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] on. Only the fact: the section says what it changes
+/// (research whose answer ends in a page searches before the browser, unless a site needs using
+/// first). Without it, which is every turn whose AI has no web search of its own and every turn
+/// while the setting is off, the routing input is as it was.
+const ROUTING_SEARCH_FACT: &str = "Octo can search the web for this message.\n";
+/// The runtime setting that lets research whose answer ends in a page search before the browser
+/// ([`ROUTING_SEARCH_FACT`]): on only when set to `1`, `true`, `on` or `yes`. Off by default, so
+/// routes stay as they were on release, a person's own ChatGPT login's too, until the comparison
+/// and research-page cases pass with it on; a building turn that makes a page still can't ask for
+/// the browser for what search didn't reach. It can be turned off again at once.
+pub(crate) const RESEARCH_PAGES_SEARCH_FIRST_ENV: &str = "INSTAFY_RESEARCH_PAGES_SEARCH_FIRST";
+
+/// Whether this runtime lets research that ends in a page search before the browser
+/// ([`RESEARCH_PAGES_SEARCH_FIRST_ENV`]).
+fn research_pages_search_first() -> bool {
+    research_pages_search_first_reads_on(
+        std::env::var(RESEARCH_PAGES_SEARCH_FIRST_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn research_pages_search_first_reads_on(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on" | "yes")
+    )
+}
 /// The longest message a routed card carries as its task, as a card's own task is bounded
 /// (`BrowserRequest::parse`).
 const ROUTED_BROWSER_TASK_MAX_UTF16_UNITS: usize = 8_000;
@@ -2695,7 +2726,8 @@ fn agents_doc_section_for_turn(section: &str) -> String {
 /// controller replaces it, and the copies from before the section said its rule as a line of
 /// "Responsiveness", or not at all. A copy the space edited, or a team's own, gives its own
 /// section under that heading, or, with none, the current section when it still says that
-/// section's rule word for word, as an edited copy from before the section does. None otherwise.
+/// section's rule word for word, or the rule of a section Instafy shipped before, as an edited
+/// copy from before the section does. None otherwise.
 fn pinned_reading_the_web_section(workspace_dir: &Path) -> Option<String> {
     let (text, truncated) = read_text_file_lossy_truncated(
         workspace_dir,
@@ -2707,7 +2739,10 @@ fn pinned_reading_the_web_section(workspace_dir: &Path) -> Option<String> {
         current
     } else if let Some(own) = markdown_section(&text, READING_THE_WEB_SECTION) {
         own
-    } else if says_each_rule_of(&text, &current) {
+    } else if says_each_rule_of(&text, &current)
+        || learn::earlier_agents_doc_sections(READING_THE_WEB_SECTION)
+            .any(|earlier| says_each_rule_of(&text, &earlier))
+    {
         current
     } else {
         return None;
@@ -8155,6 +8190,9 @@ impl JobProcessor {
                 &workspace_dir,
                 prompt_text,
                 pending_worker_input.as_ref(),
+                research_pages_search_first()
+                    && crate::job_proxy_auth::current()
+                        .is_some_and(|auth| auth.allows_native_web_search()),
             );
             browser_routes = request.browser_routes;
             tracing::info!(job_id = %job.id, context = %request.history_metrics, "routing preflight history projection");
@@ -16338,21 +16376,64 @@ const HUMAN_INPUT_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting 
 /// The same for a pause on a cookie notice.
 const COOKIE_NOTICE_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Answer the highlighted cookie notice, then choose Let Octo continue.";
 
+/// What the person reads when a Shared Browser turn paused on a step only they take, a button or
+/// a link it highlighted, with any field beside it (`human_step_required`): a booking's or a
+/// payment's final button, or a part of the page Octo can't reach. The turn's own words say which
+/// step it is, where it is on the page and what it does, as the browser skill asks, and how to go
+/// on follows them ([`human_step_pause_reply`]). A turn that wrote none reads this.
+const HUMAN_STEP_PAUSE_REPLY: &str = "Your step is highlighted on the page in Instafy's browser: fill in any highlighted fields, press the highlighted button when you're ready, then choose Let Octo continue. I don't ask for those details in chat.";
+
+/// The same, when Octo's last reply in the chat was a pause already.
+const HUMAN_STEP_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waiting for you. Fill in any highlighted fields, press the highlighted button when you're ready, then choose Let Octo continue. I don't ask for those details in chat.";
+
+/// How to go on, after the words of a turn that paused on the person's step.
+const HUMAN_STEP_GO_ON: &str = "When you've done it, choose Let Octo continue.";
+
+/// The last words of every pause on the person's fields or step: what they enter stays on the
+/// page.
+const NOTHING_ASKED_IN_CHAT: &str = "I don't ask for those details in chat.";
+
+/// The person's reply after a pause on their step: the turn's own words (`words`, without its
+/// finding lines), then how to go on, unless its words say to choose Let Octo continue already,
+/// and that nothing is asked in chat. With no words of its own, or words that only repeat what
+/// the browser told the turn (its tool or its code), the fixed reply.
+fn human_step_pause_reply(words: &str, paused_already: bool) -> String {
+    let tool_words = [
+        "request_human_input",
+        "human_step_required",
+        "_non_retryable",
+    ]
+    .iter()
+    .any(|word| words.contains(word));
+    if words.is_empty() || tool_words {
+        return if paused_already {
+            HUMAN_STEP_PAUSE_AGAIN_REPLY
+        } else {
+            HUMAN_STEP_PAUSE_REPLY
+        }
+        .to_string();
+    }
+    if words.contains("Let Octo continue") {
+        format!("{words}\n\n{NOTHING_ASKED_IN_CHAT}")
+    } else {
+        format!("{words}\n\n{HUMAN_STEP_GO_ON} {NOTHING_ASKED_IN_CHAT}")
+    }
+}
+
 /// Whether Octo's last reply in the chat before this turn was a pause for the
-/// person's input, in the history the controller leased the turn with.
+/// person's input, in the history the controller leased the turn with: a pause
+/// on a cookie notice in its own words, and one on the person's fields or step
+/// by its last words ([`NOTHING_ASKED_IN_CHAT`]), which a step's pause says
+/// after the turn's own words.
 fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
     parse_conversation_history(job.payload.get("conversation_history"))
         .iter()
         .rev()
         .find(|turn| turn.role.eq_ignore_ascii_case("assistant"))
         .is_some_and(|turn| {
-            [
-                HUMAN_INPUT_PAUSE_REPLY,
-                HUMAN_INPUT_PAUSE_AGAIN_REPLY,
-                COOKIE_NOTICE_PAUSE_REPLY,
-                COOKIE_NOTICE_PAUSE_AGAIN_REPLY,
-            ]
-            .contains(&turn.content.trim())
+            let reply = turn.content.trim();
+            [COOKIE_NOTICE_PAUSE_REPLY, COOKIE_NOTICE_PAUSE_AGAIN_REPLY].contains(&reply)
+                || reply.ends_with(NOTHING_ASKED_IN_CHAT)
         })
 }
 
@@ -16375,11 +16456,19 @@ fn apply_terminal_shared_browser_summary(
     };
     let lines = browser_hand_back::read_lines_of(summary);
     *summary = match code {
-        "human_input_required" if paused_already => HUMAN_INPUT_PAUSE_AGAIN_REPLY,
-        "cookie_notice_required" if paused_already => COOKIE_NOTICE_PAUSE_AGAIN_REPLY,
-        _ => terminal_shared_browser_summary(code),
-    }
-    .to_string();
+        // The turn's own words say which step is the person's and what it does: a runtime
+        // fallback in their place says nothing.
+        "human_step_required" => human_step_pause_reply(
+            &fallback_kind
+                .is_none()
+                .then(|| browser_hand_back::words_of(summary))
+                .unwrap_or_default(),
+            paused_already,
+        ),
+        "human_input_required" if paused_already => HUMAN_INPUT_PAUSE_AGAIN_REPLY.to_string(),
+        "cookie_notice_required" if paused_already => COOKIE_NOTICE_PAUSE_AGAIN_REPLY.to_string(),
+        _ => terminal_shared_browser_summary(code).to_string(),
+    };
     if let Some(lines) = lines {
         browser_hand_back::add_finding_lines(summary, &lines);
     }
@@ -18473,17 +18562,27 @@ pub(crate) struct RoutingPreflightRequest {
     pub(crate) history_metrics: JsonValue,
 }
 
+/// `searches`: Octo's turn for this message can search the web, which the routing step then reads
+/// after the browser skill's routing section ([`ROUTING_SEARCH_FACT`]).
 fn routing_preflight_request(
     job: &LeaseJob,
     workspace_dir: &Path,
     prompt_text: &str,
     pending: Option<&worker_input_routing::PendingContext>,
+    searches: bool,
 ) -> RoutingPreflightRequest {
     let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
     let browser_routes = pending
         .is_none()
         .then(|| browser_routing_snapshot_for_job(job, workspace_dir, prompt_text))
-        .flatten();
+        .flatten()
+        .map(|routes| {
+            if searches {
+                format!("{routes}{ROUTING_SEARCH_FACT}")
+            } else {
+                routes
+            }
+        });
     let (shared_start, rest) = agent_routing_preflight_prompt(
         workspace_dir,
         prompt_text,
@@ -25213,10 +25312,11 @@ mod tests {
         assert!(agents_doc[start..].contains(replies_rule));
         let no_change_rule = "- When nothing needed changing, say what you checked and why.\n";
         assert!(agents_doc[start..].contains(no_change_rule));
-        let reading_rule = "- Read a public page only with `instafy web read <address>` or a \
-                            reading command a skill names, where robots.txt, budgets and Details \
-                            apply; never with curl, wget, python, node or another script. \
-                            Running those to build or check this space's own pages is fine.\n";
+        let reading_rule = "- Read a public page only with `instafy web read <address>`, a \
+                            reading command a skill names or the AI's own web search, where \
+                            robots.txt, budgets and Details apply; never with curl, wget, python, \
+                            node or another script. Running those to build or check this space's \
+                            own pages is fine.\n";
         assert!(agents_doc[..start].contains(reading_rule));
         let reading_heading = format!("\n{READING_THE_WEB_SECTION}\n");
         assert!(agents_doc[..start].contains(&reading_heading));
@@ -25451,13 +25551,35 @@ mod tests {
                 .expect("prompt should build")
                 .0
         };
+        // The rule as copies from before the AI's own web search say it, which a copy the space
+        // edited may still say word for word.
+        let before_search = include_str!("legacy/agents-doc-v21.md");
+        let earlier_section =
+            markdown_section(before_search, READING_THE_WEB_SECTION).expect("section");
+        let earlier_rule = earlier_section
+            .lines()
+            .find(|line| line.starts_with("- Read a public page only with"))
+            .expect("rule");
+        assert_ne!(earlier_rule, rule);
         let before_its_section = include_str!("legacy/agents-doc-v20.md");
         assert!(!before_its_section.contains(READING_THE_WEB_SECTION));
-        assert!(before_its_section.lines().any(|line| line == rule));
+        assert!(before_its_section.lines().any(|line| line == earlier_rule));
         let before_the_rule = include_str!("legacy/agents-doc-v17.md");
         assert!(!before_the_rule.contains("Read a public page only with"));
         let edited = format!("{before_its_section}\n## Our notes\n\n- Keep pages short.\n");
+        let edited_section = format!("{before_search}\n## Our notes\n\n- Keep pages short.\n")
+            .replace(READING_THE_WEB_SECTION, "## How we read");
         for (case, copy, gives) in [
+            (
+                "v21, from before the AI's own web search",
+                before_search.to_string(),
+                true,
+            ),
+            (
+                "v21 edited, saying the earlier rule word for word",
+                edited_section.clone(),
+                true,
+            ),
             ("v20", before_its_section.to_string(), true),
             (
                 "v19",
@@ -25481,7 +25603,7 @@ mod tests {
             ),
             (
                 "edited, saying it in its own words",
-                edited.replace(rule, "- Read pages as this team's guide says."),
+                edited.replace(earlier_rule, "- Read pages as this team's guide says."),
                 false,
             ),
         ] {
@@ -30584,11 +30706,12 @@ mod tests {
     }
 
     /// The router weighs a word by how few skills use it, so "browser" and
-    /// "page" alone route nothing. A lookup on a live page and a walk through a
-    /// provider's screens must still load the browser skill, with its handoff
-    /// and its sign-in rules inside the part of the file the prompt carries.
+    /// "page" alone route nothing. A question about a live page and a walk
+    /// through a provider's screens must still load the browser skill, with its
+    /// handoff and its sign-in rules inside the part of the file the prompt
+    /// carries.
     #[test]
-    fn router_loads_the_browser_skill_for_lookups_and_walkthroughs() {
+    fn router_loads_the_browser_skill_for_a_live_page_and_walkthroughs() {
         let tmp = tempdir().expect("temp dir");
         learn::ensure_project_memory_scaffold(tmp.path());
         for request in [
@@ -30605,7 +30728,7 @@ mod tests {
             for carried in [
                 "## Open or resume from Chat",
                 "Open the browser yourself, without asking in chat first.",
-                "Its site and action approval prompts still apply.",
+                "Its site and action prompts still apply,",
                 "Opening, reading and navigating a signed-in site needs no extra confirmation in chat",
                 "the browser's own site and action prompts still apply",
                 "Never use a sign-in that belongs to someone else in this space",
@@ -32290,6 +32413,120 @@ mod tests {
             );
             assert_eq!(summary, HUMAN_INPUT_PAUSE_REPLY);
         }
+    }
+
+    /// A pause on a step only the person may do, a button among it (a booking's or a payment's
+    /// final button), keeps what the turn said of it: which button, where it is on the page and
+    /// what pressing it does, as the browser skill asks. How to go on follows, and that nothing is
+    /// asked in chat, once. Its missing and unread lines, and the lines for pages that stopped it,
+    /// go as for any pause; the lines for pages it read stay after the words. A turn that wrote no
+    /// words of its own, or whose answer the runtime stood in for, reads the fixed words, and
+    /// "still waiting" right after a pause, as the other pauses do. Octo's last reply being such
+    /// a pause counts as one.
+    #[test]
+    fn a_pause_on_the_persons_step_keeps_the_turns_words_on_it() {
+        let words = "I filled in a table for 2 at 19:00 on Friday. Scroll to the end of the form: the highlighted “Confirm reservation” button books it.";
+        let read = r#"{"url":"https://table.example/book","title":"Book a table","facts":["Friday 19:00 is free for 2."]}"#;
+        let stopped = r#"{"url":"https://table.example/book/pay","stopped":"sign-in"}"#;
+        let missing = r#"{"missing": []}"#;
+        let unread = r#"{"unread": []}"#;
+        let mut summary = format!("{words}\n{read}\n{stopped}\n{missing}\n{unread}");
+        let mut fallback = None;
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut fallback,
+            Some("human_step_required"),
+            false,
+        );
+        assert_eq!(
+            summary,
+            format!("{words}\n\n{HUMAN_STEP_GO_ON} {NOTHING_ASKED_IN_CHAT}\n\n{read}")
+        );
+        assert!(fallback.is_none());
+        // Words that already say to choose Let Octo continue are not told it twice.
+        let mut summary = "Press the highlighted “Pay €42” button when you're ready, then choose Let Octo continue.".to_string();
+        apply_terminal_shared_browser_summary(
+            &mut summary,
+            &mut None,
+            Some("human_step_required"),
+            true,
+        );
+        assert_eq!(summary.matches("Let Octo continue").count(), 1, "{summary}");
+        assert!(
+            summary.ends_with(&format!("\n\n{NOTHING_ASKED_IN_CHAT}")),
+            "{summary}"
+        );
+        // No words of its own, words that only repeat what the browser told the turn, or the
+        // runtime's stand-in for a missing answer: the fixed words.
+        for (mut summary, mut fallback, paused_already, reply) in [
+            (String::new(), None, false, HUMAN_STEP_PAUSE_REPLY),
+            (read.to_string(), None, false, HUMAN_STEP_PAUSE_REPLY),
+            (String::new(), None, true, HUMAN_STEP_PAUSE_AGAIN_REPLY),
+            (
+                "User input is needed. End this turn; the user will explicitly continue after doing the highlighted step. [human_step_required_non_retryable]".to_string(),
+                None,
+                false,
+                HUMAN_STEP_PAUSE_REPLY,
+            ),
+            (
+                "I called request_human_input on the Book button.".to_string(),
+                None,
+                false,
+                HUMAN_STEP_PAUSE_REPLY,
+            ),
+            (
+                "Codex finished without a final message.".to_string(),
+                Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage),
+                false,
+                HUMAN_STEP_PAUSE_REPLY,
+            ),
+        ] {
+            apply_terminal_shared_browser_summary(
+                &mut summary,
+                &mut fallback,
+                Some("human_step_required"),
+                paused_already,
+            );
+            assert!(summary.starts_with(reply), "{summary}");
+            assert!(fallback.is_none());
+        }
+        assert!(HUMAN_STEP_PAUSE_REPLY.contains("press the highlighted button when you're ready"));
+        assert!(!HUMAN_STEP_PAUSE_REPLY.contains("Sign in"));
+        assert!(
+            HUMAN_STEP_PAUSE_AGAIN_REPLY.starts_with("Instafy's browser is still waiting for you.")
+        );
+        // Every pause on the person's fields or step ends on the same words, which tell a pause.
+        for reply in [
+            HUMAN_INPUT_PAUSE_REPLY,
+            HUMAN_INPUT_PAUSE_AGAIN_REPLY,
+            HUMAN_STEP_PAUSE_REPLY,
+            HUMAN_STEP_PAUSE_AGAIN_REPLY,
+        ] {
+            assert!(reply.ends_with(NOTHING_ASKED_IN_CHAT), "{reply}");
+        }
+        for (last, paused) in [
+            (
+                format!("{words}\n\n{HUMAN_STEP_GO_ON} {NOTHING_ASKED_IN_CHAT}"),
+                true,
+            ),
+            (HUMAN_STEP_PAUSE_REPLY.to_string(), true),
+            (HUMAN_INPUT_PAUSE_REPLY.to_string(), true),
+            (COOKIE_NOTICE_PAUSE_REPLY.to_string(), true),
+            (words.to_string(), false),
+        ] {
+            let job = test_lease_job(
+                Some("feature"),
+                json!({ "conversation_history": [
+                    { "role": "assistant", "content": last },
+                    { "role": "user", "content": "Continue the previous browser task on this same page." },
+                ] }),
+            );
+            assert_eq!(last_reply_was_a_pause(&job), paused, "{last}");
+        }
+        assert_eq!(
+            crate::shared_browser::canonical_terminal_consent_failure_code("human_step_required"),
+            Some("human_step_required")
+        );
     }
 
     /// Under routine browsing a turn opens pages and clicks before the step

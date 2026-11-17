@@ -2,7 +2,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BrowserHumanInputControls } from "../BrowserHumanInputControls";
+import { BrowserHumanInputControls, humanInputGuidance } from "../BrowserHumanInputControls";
 import { SharedBrowserCollaborationControls } from "../SharedBrowserCollaborationControls";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
@@ -217,6 +217,26 @@ describe("BrowserHumanInputControls", () => {
     expect(container.textContent).not.toContain("Keep passwords and codes out of chat");
     await click("browser-human-input-continue");
     expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
+  });
+
+  it("asks the person to press a highlighted button that is theirs, such as a booking's final button", async () => {
+    props.request = { version: 1, handoffId: "step", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted button 1" }] };
+    props.humanControlConfirmed = true;
+    await render();
+    expect(container.textContent).toContain("Press the highlighted button on the page when you're ready, then let Octo continue.");
+    expect(container.textContent).not.toContain("highlighted field");
+    expect(container.textContent).not.toContain("Keep passwords and codes out of chat");
+    await click("browser-human-input-continue");
+    expect(props.onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
+  });
+
+  it("words a pause by what it highlights: fields are filled, buttons pressed", () => {
+    const field = (n: number) => ({ label: `Highlighted field ${n}` });
+    const button = (n: number) => ({ label: `Highlighted button ${n}` });
+    expect(humanInputGuidance([field(1)])).toBe("Fill the highlighted field on the page, then let Octo continue. Keep passwords and codes out of chat.");
+    expect(humanInputGuidance([field(1), field(2)])).toBe("Fill the 2 highlighted fields on the page, then let Octo continue. Keep passwords and codes out of chat.");
+    expect(humanInputGuidance([button(1)])).toBe("Press the highlighted button on the page when you're ready, then let Octo continue.");
+    expect(humanInputGuidance([field(1), field(2), button(1)])).toBe("Fill the 2 highlighted fields and press the highlighted button on the page when you're ready, then let Octo continue. Keep passwords and codes out of chat.");
   });
 
   it("keeps generic Done after manual navigation removes origin-bound guidance", async () => {

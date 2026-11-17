@@ -10,7 +10,7 @@ routing_keywords: compare, comparing, comparison, versus, side by side, which to
 
 Never prune: yes
 
-For every reader and browser. Pages are found as "Finding a page" in `instafy-browser-automation` says.
+For every reader and browser. Pages are found as "Finding a page" in `instafy-browser-automation` says. With the AI's own web search, a comparison looks things up as `instafy-web-research` says, searching first, and uses Instafy's browser only for what search can't reach: a site to use, availability for dates, a sign-in, a page nothing else read.
 
 ## The items
 
@@ -26,7 +26,7 @@ For every reader and browser. Pages are found as "Finding a page" in `instafy-br
 ## Reviews
 
 - Requested reviews: that many per exact model, from independent publishers, not its maker/shops or a sibling model.
-- A review no page you read links to comes from a reviewer's own site: its home page, its links and its own search box.
+- A review no page you read links to: the AI's own web search finds it ("<exact model> review") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box.
 - A review you have no address or link for is a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.
 - Short: "<item>: 1 of 2 reviews found", in the reply and on the page, citing only those reviews.
 

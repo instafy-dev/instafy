@@ -171,11 +171,21 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // in "Replies", and the rule for reading a public page was a section of its own ("Reading the
     // web") rather than a line of "Responsiveness".
     include_str!("legacy/agents-doc-v20.md"),
+    // From before a public page was read with the AI's own web search too.
+    include_str!("legacy/agents-doc-v21.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
 pub(super) fn is_bundled_agents_doc(text: &str) -> bool {
     text == AGENTS_DOC_TEMPLATE || LEGACY_AGENTS_DOC_TEMPLATES.contains(&text)
+}
+
+/// The section under `heading` of each earlier copy of `AGENTS.md` Instafy shipped that has one:
+/// how a copy a space edited may still say that section's rules word for word.
+pub(super) fn earlier_agents_doc_sections(heading: &str) -> impl Iterator<Item = String> + '_ {
+    LEGACY_AGENTS_DOC_TEMPLATES
+        .iter()
+        .filter_map(move |text| super::markdown_section(text, heading))
 }
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -660,6 +670,13 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // instructions already say (that the step can route to the browser, that a message with
     // attachments is never offered it, and that a card hands back to a build).
     include_str!("legacy/browser-automation-v43.md"),
+    // From before the skill was for using websites (forms, planners, bookings and availability,
+    // sign-ins and accounts) and looking things up was the research skill's, a step only the
+    // person may do (a payment or the button that books or buys, a cookie choice, a CAPTCHA, a
+    // part of a page Octo can't reach) was said and highlighted for them, research that ends in a
+    // page stayed `direct` when Octo can search the web and no site needs using first, and the
+    // card's section and the browsers' names were shorter.
+    include_str!("legacy/browser-automation-v44.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -727,6 +744,10 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     include_str!("legacy/web-research-v17.md"),
     // From before comparing items moved into `instafy-comparing`.
     include_str!("legacy/web-research-v18.md"),
+    // From before it was the one skill for looking things up, the AI's own web search came
+    // first, and only for what is fresh or a page no source names when each search costs the
+    // person credits, and a site closed to Octo was guided in words with its link.
+    include_str!("legacy/web-research-v19.md"),
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its
 /// values and the reviews asked for, and what a value nobody found says. A topic of the browser,
@@ -735,6 +756,13 @@ const COMPARING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-comparing/SKILL.md"
 ));
+/// Earlier bundled copies of the comparing skill a scaffold may replace. A copy someone edited is
+/// kept.
+const LEGACY_COMPARING_TEMPLATES: &[&str] = &[
+    // From before a comparison searched first with the AI's own web search, reviews included,
+    // and used the browser only for what search can't reach.
+    include_str!("legacy/comparing-v1.md"),
+];
 /// How Octo finds and gives a route between places, for every reader and browser. A topic of the
 /// browser, research and page skills, under them in the skills tree.
 const GETTING_AROUND_TEMPLATE: &str = include_str!(concat!(
@@ -1162,8 +1190,12 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
             LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES,
             WEB_RESEARCH_LINK_ONLY_TEMPLATE,
         ),
+        (
+            &comparing_path,
+            LEGACY_COMPARING_TEMPLATES,
+            COMPARING_TEMPLATE,
+        ),
         // New in every space, and an edited copy is kept: there is no earlier copy yet.
-        (&comparing_path, &[] as &[&str], COMPARING_TEMPLATE),
         (
             &getting_around_path,
             &[] as &[&str],
@@ -2681,7 +2713,8 @@ mod tests {
     /// (that build was a required change) is given that section with its lane, by its heading
     /// (`jobs::READING_THE_WEB_SECTION`), as it is given "Replies"; it was a line of
     /// "Responsiveness", which the runtime found by a copy of its words. A browser turn, which has
-    /// no shell, reads only "Replies". The copies from before are upgraded.
+    /// no shell, reads only "Replies". The line names the AI's own web search beside them, which a
+    /// run that has it uses to look things up. The copies from before are upgraded.
     #[test]
     fn agents_doc_says_a_turn_reads_a_public_page_only_with_instafys_reader() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2693,7 +2726,8 @@ mod tests {
                 .map(str::to_string)
                 .expect("section")
         };
-        let rule = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
+        let rule = "- Read a public page only with `instafy web read <address>`, a reading command a skill names or the AI's own web search, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
+        let earlier_rule = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
         let heading = super::super::READING_THE_WEB_SECTION;
         assert!(
             AGENTS_DOC_TEMPLATE.contains(&format!("\n{heading}\n")),
@@ -2711,8 +2745,11 @@ mod tests {
         assert!(!flat(before_the_rule).contains("instafy web read"));
         let before_its_section = include_str!("legacy/agents-doc-v20.md");
         assert!(!before_its_section.contains(heading));
-        assert!(flat(before_its_section).contains(rule));
-        for previous in [before_the_rule, before_its_section] {
+        assert!(flat(before_its_section).contains(earlier_rule));
+        let before_search = include_str!("legacy/agents-doc-v21.md");
+        assert!(flat(before_search).contains(earlier_rule));
+        assert!(!before_search.contains("the AI's own web search"));
+        for previous in [before_the_rule, before_its_section, before_search] {
             let workspace = tempdir().expect("workspace");
             let path = workspace.path().join(AGENTS_DOC_FILENAME);
             fs::write(&path, previous).unwrap();

@@ -99,6 +99,10 @@ services:
       # INSTAFY_HOLD_PAGES=0 on the provider service to stop holding pages on
       # the runtimes it starts from then on. Unset or empty keeps holding on.
       INSTAFY_HOLD_PAGES: ${INSTAFY_HOLD_PAGES:-1}
+      # Research that ends in a page searches before the browser where the
+      # job's AI can search the web (packages/runtime-agent/README.md). Off
+      # unless the provider service sets it to 1.
+      INSTAFY_RESEARCH_PAGES_SEARCH_FIRST: ${INSTAFY_RESEARCH_PAGES_SEARCH_FIRST:-0}
       CONTROLLER_BASE_URL: ${CONTROLLER_BASE_URL:-http://host.docker.internal:80}
       SPACE_ID: ${SPACE_ID:-00000000-0000-0000-0000-000000000000}
       PROJECT_ID: ${SPACE_ID:-00000000-0000-0000-0000-000000000000}
