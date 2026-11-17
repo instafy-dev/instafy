@@ -1,5 +1,12 @@
 # @instafy/cli
 
+## 0.5.11
+
+### Patch Changes
+
+- e5f05b7: `instafy bind check` now fails a comparison of two or more options that has no `sort` entry by a column that reads as a number, while a column reads as a number in every row. It names the columns that read as a number and asks for a `sort` entry, with its `dir`, for each amount the person compares by among them (a price, a weight, a size), never for a number in a name (a chip, a model, a version). The compare starter writes the line under the title from its sort entries ("Lowest price: Option B"), so a page built with every column as text and no `sort` said nothing there. The numbers are read as the page reads them, by the first number in each value ("From €619" is 619, "1.3kg" is 1.3). An entry by a column that reads as a number settles the check even while it says nothing yet, such as when a row lacks the value, so no entry is needed for a chip's name, and with fewer than 5 options an entry moves no row.
+- b272139: The compare starter names what each row is still missing once, first under "Still to confirm" at the foot of the page, read from its cells with each value's note ("Option B: Weight (not found · checked 17 Oct on maker.com ↗), Price"), and then the page's own `unchecked` entries. Nothing is named under the title any more, a wide table's cell for a missing value reads only "Unknown", and a phone's row still leaves it out. A note that only says the value wasn't found, in Octo's words ("I didn't find weight"), adds nothing beside it, also under a label with its unit in brackets ("Weight (g)"). `instafy bind check` now notes a comparison's `unchecked` entry that names a column no row has a value for, since the page already names it from its cells: the entry stays only for what the reader can do. `site.notes` takes entries with links the page drew itself, and captions are tidied once more after a part takes a line of its own, so no caption line starts with a dot ("· seen 17 Oct") in a table whose columns changed width (`site.js` 1.10.0). Pages made before keep their own copies of `app.js` and `site.js`.
+
 ## 0.5.10
 
 ### Patch Changes
