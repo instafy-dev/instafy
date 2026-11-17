@@ -588,6 +588,30 @@ jobs:
       - name: Test CLI space ids in request paths
         run: pnpm --filter @instafy/cli exec vitest run test/space-id-paths.e2e.spec.ts test/agent-settings.test.ts
 
+      - name: Test CLI account and team commands
+        run: pnpm --filter @instafy/cli exec vitest run test/credentials.e2e.spec.ts test/secrets-cli.e2e.spec.ts test/team.e2e.spec.ts test/space-invite.e2e.spec.ts test/runtime-token.e2e.spec.ts test/git-credential-helper.e2e.spec.ts test/login-callback.e2e.spec.ts
+
+      - name: Test CLI chat, conversation and support commands
+        run: pnpm --filter @instafy/cli exec vitest run test/chat.e2e.spec.ts test/conversation.e2e.spec.ts test/conversation-grep.e2e.spec.ts test/history.e2e.spec.ts test/support.e2e.spec.ts
+
+      - name: Test CLI agent commands and diagnostics
+        run: pnpm --filter @instafy/cli exec vitest run test/agents.e2e.spec.ts test/agent-grade.spec.ts test/diagnostics.e2e.spec.ts test/cli-ux.e2e.spec.ts
+
+      - name: Test CLI preview server and space pages
+        run: pnpm --filter @instafy/cli exec vitest run test/preview.e2e.spec.ts test/preview-serve.spec.ts test/space-pages.spec.ts
+
+      - name: Test CLI bound site check in a browser
+        run: pnpm --filter @instafy/cli exec vitest run test/bind-check-drawn.spec.ts
+
+      - name: Test CLI space setup, providers and hardware
+        run: pnpm --filter @instafy/cli exec vitest run test/project-init.e2e.spec.ts test/project-defaults-refresh.e2e.spec.ts test/providers.e2e.spec.ts test/provider-bindings.e2e.spec.ts test/hardware.e2e.spec.ts test/recommendations.e2e.spec.ts
+
+      - name: Test CLI research settings and allowance
+        run: pnpm --filter @instafy/cli exec vitest run test/research-settings.test.ts test/web-budget.spec.ts
+
+      - name: Test CLI tunnels against local servers
+        run: pnpm --filter @instafy/cli exec vitest run test/tunnel-cli.e2e.spec.ts test/tunnel-managed.e2e.spec.ts test/tunnel-server-address.spec.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-
