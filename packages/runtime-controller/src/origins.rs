@@ -2494,31 +2494,6 @@ async fn workspace_runtime_binding_is_visible(
     }))
 }
 
-#[instrument(skip(pool))]
-#[allow(dead_code)]
-pub(crate) async fn list_project_origins(
-    pool: &PgPool,
-    project_id: &Uuid,
-) -> Result<Vec<WorkspaceOriginRecord>> {
-    let connection = pool
-        .get()
-        .await
-        .context("failed to acquire connection for list_project_origins")?;
-
-    let rows = connection
-        .query(
-            "select *
-             from workspace_origins
-             where project_id = $1
-             order by created_at asc",
-            &[project_id],
-        )
-        .await
-        .context("failed to query workspace origins for project")?;
-
-    rows.iter().map(origin_from_row).collect()
-}
-
 async fn auth_user_exists(pool: &PgPool, user_id: &Uuid) -> Result<bool> {
     let connection = pool
         .get()
@@ -2832,44 +2807,6 @@ pub(crate) async fn resolve_accessible_origin_for_protocol_with_hosted_fallback(
     }
 
     Ok(None)
-}
-
-#[instrument(skip(pool))]
-pub(crate) async fn resolve_desktop_origin_presence(
-    pool: &PgPool,
-    project_id: &Uuid,
-) -> Result<Option<OriginPresenceRecord>> {
-    let connection = pool
-        .get()
-        .await
-        .context("failed to acquire connection for resolve_desktop_origin_presence")?;
-
-    let rows = connection
-        .query(
-            "select p.*
-             from workspace_origins o
-             left join origin_presence p on p.origin_id = o.id
-             where o.project_id = $1
-               and o.mode = 'desktop'
-             order by coalesce(p.updated_at, o.updated_at) desc
-             limit 1",
-            &[project_id],
-        )
-        .await
-        .context("failed to resolve desktop origin presence")?;
-
-    match rows.first() {
-        Some(row) => {
-            // If there is no presence row (nulls), p.* will be nulls; guard by checking a not-nullable
-            // origin_id field via Option<Uuid> extraction from row.
-            let origin_id: Option<Uuid> = row.try_get("origin_id").unwrap_or(None);
-            if origin_id.is_none() {
-                return Ok(None);
-            }
-            presence_from_row(row).map(Some)
-        }
-        None => Ok(None),
-    }
 }
 
 #[instrument(skip(pool, metadata))]
@@ -3525,31 +3462,6 @@ pub(crate) async fn release_lease(
         .context("failed to release workspace lease")?;
 
     Ok(row.map(|record| lease_from_row(&record)))
-}
-
-#[instrument(skip(pool))]
-#[allow(dead_code)]
-pub(crate) async fn expire_stale_leases(pool: &PgPool) -> Result<Vec<WorkspaceLeaseRecord>> {
-    let connection = pool
-        .get()
-        .await
-        .context("failed to acquire connection for expire_stale_leases")?;
-
-    let rows = connection
-        .query(
-            "update workspace_leases
-             set status = 'expired',
-                 released_at = now(),
-                 updated_at = now()
-             where status = 'active'
-               and expires_at <= now()
-             returning *",
-            &[],
-        )
-        .await
-        .context("failed to expire stale workspace leases")?;
-
-    Ok(rows.into_iter().map(|row| lease_from_row(&row)).collect())
 }
 
 #[instrument(skip(pool, metadata))]
@@ -6843,18 +6755,6 @@ eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n";
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PresenceBeatBody {
-    project_id: String,
-    origin_id: String,
-    status: Option<String>,
-    latency_ms: Option<i32>,
-    region: Option<String>,
-    metadata: Option<JsonValue>,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PresenceBeatResponse {
@@ -6866,49 +6766,6 @@ struct PresenceBeatResponse {
     region: Option<String>,
     metadata: Option<JsonValue>,
     updated_at: String,
-}
-
-#[instrument(skip_all)]
-#[allow(dead_code)]
-async fn post_presence_beat(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<PresenceBeatBody>,
-) -> Result<Json<PresenceBeatResponse>, (StatusCode, Json<ApiError>)> {
-    let project_id = parse_optional_uuid_param(Some(body.project_id), "projectId")?
-        .ok_or_else(|| bad_request("projectId is required"))?;
-    let origin_id = parse_optional_uuid_param(Some(body.origin_id), "originId")?
-        .ok_or_else(|| bad_request("originId is required"))?;
-    // Every read of a beat goes through one checkout, taken at its first read.
-    let mut db = RequestConnection::new(&state.pool);
-    let claims =
-        authorize_origin_request_on(&state, &mut db, &headers, &project_id, &["origin.presence"])
-            .await?;
-
-    let status_str = body.status.unwrap_or_else(|| "online".to_string());
-    let status = OriginPresenceStatus::from_str(status_str.to_lowercase().as_str())
-        .map_err(|_| bad_request("invalid presence status"))?;
-    let instance = check_presence_origin_instance(
-        &mut db,
-        &claims,
-        &project_id,
-        &origin_id,
-        status == OriginPresenceStatus::Offline,
-    )
-    .await?;
-
-    handle_presence_beat(
-        &state,
-        &mut db,
-        instance,
-        project_id,
-        origin_id,
-        status,
-        body.latency_ms,
-        body.region,
-        body.metadata,
-    )
-    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -8655,14 +8512,6 @@ async fn load_and_authorize_project(
     context: &RequestContext,
 ) -> Result<ProjectRecord, (StatusCode, Json<ApiError>)> {
     load_and_authorize_project_with_scopes(state, project_id, context, None).await
-}
-
-async fn load_and_authorize_project_for_write(
-    state: &AppState,
-    project_id: &Uuid,
-    context: &RequestContext,
-) -> Result<ProjectRecord, (StatusCode, Json<ApiError>)> {
-    load_and_authorize_project_with_scopes(state, project_id, context, Some(&[])).await
 }
 
 async fn load_and_authorize_project_write(
