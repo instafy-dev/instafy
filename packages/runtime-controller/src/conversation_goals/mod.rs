@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use tokio_postgres::{types::Json as PgJson, Transaction};
 use uuid::Uuid;
 
+use crate::typed_sql::typed;
 use crate::{
     auth::RequestContext,
     conversations::ConversationRecord,
@@ -68,7 +69,7 @@ pub(crate) async fn bind_dispatch(
     let Some(owner) = context.user_id else {
         return Ok(());
     };
-    let row = tx.query_one("select coalesce(metadata, '{}'::jsonb) as metadata from conversations where id=$1 for update", &[&conversation.id])
+    let row = tx.query_typed_one("select coalesce(metadata, '{}'::jsonb) as metadata from conversations where id=$1 for update", typed![&conversation.id])
         .await.map_err(|e| internal_error(format!("load goal admission: {e}")))?;
     let mut metadata = row.get::<_, PgJson<Value>>("metadata").0;
     let current_revision = revision(&metadata);
@@ -140,9 +141,9 @@ pub(crate) async fn bind_dispatch(
         // the goal's text did not change. Late agent messages cannot undo it.
         let next_revision = Uuid::new_v4();
         metadata["_goalController"] = json!({"revision":next_revision,"ownerUserId":owner});
-        tx.execute(
+        tx.execute_typed(
             "update conversations set metadata=$2::jsonb where id=$1",
-            &[&conversation.id, &PgJson(&metadata)],
+            typed![&conversation.id, &PgJson(&metadata)],
         )
         .await
         .map_err(|e| internal_error(format!("bind goal revision: {e}")))?;

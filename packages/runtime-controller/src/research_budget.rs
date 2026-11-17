@@ -1,6 +1,7 @@
 //! A task's fresh-page allowance, shared by native and controller-dispatched helpers.
 //! The controller owns the binding and settings snapshot; tools can only reserve against
 //! their exact active job. A row lock serializes reservations across runtimes/controllers.
+use crate::typed_sql::typed;
 use crate::{
     active_job_auth::{authorize_active_job, ActiveJobProjectAccess},
     auth::{authenticate_request, RequestContext},
@@ -92,9 +93,9 @@ async fn ensure_binding(tx: &Transaction<'_>, project_id: Uuid, job_id: Uuid) ->
     // Only lazy creation needs this project lock. Siblings can arrive through different
     // runtimes, so locking just the requested job would let them create separate pools.
     // Already-bound jobs go straight to their own budget's reservation row lock.
-    tx.query_one(
+    tx.query_typed_one(
         "select pg_advisory_xact_lock(hashtextextended($1,0))",
-        &[&format!("research-bindings:{project_id}")],
+        typed![&format!("research-bindings:{project_id}")],
     )
     .await
     .map_err(|e| internal_error(format!("lock research bindings: {e}")))?;
@@ -118,9 +119,9 @@ async fn ensure_binding(tx: &Transaction<'_>, project_id: Uuid, job_id: Uuid) ->
         }
         let settings = crate::research_settings::load(tx, &project_id).await?;
         let budget = Uuid::new_v4();
-        tx.execute(
+        tx.execute_typed(
             "insert into agent_research_budgets(id,project_id,settings) values($1,$2,$3)",
-            &[&budget, &project_id, &PgJson(settings)],
+            typed![&budget, &project_id, &PgJson(settings)],
         )
         .await
         .map_err(|e| internal_error(format!("create research budget: {e}")))?;
@@ -138,13 +139,13 @@ async fn load_job_binding(
     job_id: Uuid,
 ) -> ApiResult<(Option<Uuid>, Option<Uuid>)> {
     let row = tx
-        .query_opt(
+        .query_typed_opt(
             "select j.parent_job_id, binding.budget_id, b.project_id as budget_project_id
              from agent_jobs j
              left join agent_job_research_budgets binding on binding.job_id=j.id
              left join agent_research_budgets b on b.id=binding.budget_id
              where j.id=$1 and j.project_id=$2",
-            &[&job_id, &project_id],
+            typed![&job_id, &project_id],
         )
         .await
         .map_err(|e| internal_error(format!("validate research job: {e}")))?
@@ -157,17 +158,17 @@ async fn load_job_binding(
 }
 
 async fn bind_to_budget(tx: &Transaction<'_>, job_id: Uuid, budget: Uuid) -> ApiResult<()> {
-    tx.execute(
+    tx.execute_typed(
         "insert into agent_job_research_budgets(job_id,budget_id) values($1,$2)
          on conflict(job_id) do nothing",
-        &[&job_id, &budget],
+        typed![&job_id, &budget],
     )
     .await
     .map_err(|e| internal_error(format!("bind research budget: {e}")))?;
     let actual: Uuid = tx
-        .query_one(
+        .query_typed_one(
             "select budget_id from agent_job_research_budgets where job_id=$1",
-            &[&job_id],
+            typed![&job_id],
         )
         .await
         .map_err(|e| internal_error(format!("verify research binding: {e}")))?

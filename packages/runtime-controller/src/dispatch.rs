@@ -28,6 +28,7 @@ use crate::credentials;
 use crate::job_trigger::JobTrigger;
 use crate::model_defaults::DEFAULT_MANAGED_AI_PROVIDER_ID;
 use crate::state::publish_controller_event_to_user;
+use crate::typed_sql::typed;
 use crate::{
     agent, bad_request, coerce_idle_ttl, conversations, credits, forbidden, internal_error,
     projects::ensure_project_org, publish_controller_event,
@@ -211,12 +212,12 @@ async fn record_dispatch_timings(
     }
     let value = dispatch_timings_json(timings, committed_at);
     if let Err(error) = client
-        .execute(
+        .execute_typed(
             "update runs
              set metadata = coalesce(metadata, '{}'::jsonb)
                  || jsonb_build_object('dispatchTimings', $2::jsonb)
              where id = any($1)",
-            &[&run_ids, &PgJson(&value)],
+            typed![&run_ids, &PgJson(&value)],
         )
         .await
     {
@@ -612,7 +613,7 @@ async fn resolve_agent_targets(
 
         if let Some(user_uuid) = user_id {
             let row = transaction
-                .query_opt(
+                .query_typed_opt(
                     "select ua.id as agent_id,
                             uc.id as credential_id,
                             uaps.runtime_id as runtime_id,
@@ -632,7 +633,7 @@ async fn resolve_agent_targets(
                        and lower(ua.handle) = lower($2)
                        and ua.deleted_at is null
                      limit 1",
-                    &[&user_uuid, &handle, project_id],
+                    typed![&user_uuid, &handle, project_id],
                 )
                 .await
                 .map_err(|error| {
@@ -1315,9 +1316,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // closes the stale-client/drain race across controller processes.
     let dispatch_fence_key = format!("conversation-dispatch:{}", conversation.id);
     transaction
-        .query_one(
+        .query_typed_one(
             "select pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&dispatch_fence_key],
+            typed![&dispatch_fence_key],
         )
         .await
         .map_err(|error| {
@@ -1336,7 +1337,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 &client_message_id,
             );
             transaction
-                .query_one("select pg_advisory_xact_lock($1)", &[&advisory_lock_key])
+                .query_typed_one(
+                    "select pg_advisory_xact_lock($1)",
+                    typed![&advisory_lock_key],
+                )
                 .await
                 .map_err(|error| {
                     internal_error(format!(
@@ -3603,7 +3607,7 @@ async fn insert_prompt_record(
     let metadata_param = PgJson(&request.metadata);
 
     transaction
-        .execute(
+        .execute_typed(
             "insert into prompts (
                  id,
                  project_id,
@@ -3615,7 +3619,7 @@ async fn insert_prompt_record(
                  plan_seed,
                  metadata
              ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)",
-            &[
+            typed![
                 prompt_id,
                 &project.id,
                 &request.session_id,
@@ -3645,7 +3649,7 @@ async fn insert_run_record(
     let status = "queued";
     let progress_stage = "agent:queued";
     transaction
-        .execute(
+        .execute_typed(
             "insert into runs (
                  id,
                  project_id,
@@ -3658,7 +3662,7 @@ async fn insert_run_record(
                  progress_stage,
                  metadata
              ) values ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9::jsonb)",
-            &[
+            typed![
                 &run_id,
                 &project.id,
                 &request.session_id,
@@ -5139,13 +5143,13 @@ async fn ensure_shared_browser_runtime_dispatchable(
     runtime_id: &Uuid,
 ) -> Result<runtime::RuntimeRecord, (StatusCode, Json<ApiError>)> {
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id, project_id, provider, status, idle_ttl_seconds,
                     last_seen_at, capabilities, display_name, active_lease_id
              from runtimes
              where project_id = $1 and id = $2
              for share",
-            &[project_id, runtime_id],
+            typed![project_id, runtime_id],
         )
         .await
         .map_err(|error| {
@@ -5216,13 +5220,13 @@ async fn ensure_personal_browser_runtime_dispatchable(
     let requesting_user_id = requesting_user_id
         .ok_or_else(|| unauthorized("Personal Browser requests require an authenticated user"))?;
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id, project_id, provider, status, idle_ttl_seconds,
                     last_seen_at, capabilities, display_name, active_lease_id
              from runtimes
              where project_id = $1 and id = $2
              for share",
-            &[project_id, runtime_id],
+            typed![project_id, runtime_id],
         )
         .await
         .map_err(|error| {
@@ -5330,12 +5334,12 @@ pub(crate) async fn ensure_runtime_target_owner(
         return Ok(None);
     };
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select provider, capabilities
              from runtimes
              where project_id = $1 and id = $2
              for share",
-            &[project_id, &runtime_id],
+            typed![project_id, &runtime_id],
         )
         .await
         .map_err(|error| {
@@ -5418,7 +5422,7 @@ pub(crate) async fn persist_run_job_identity(
     job_id: &Uuid,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let updated = transaction
-        .execute(
+        .execute_typed(
             "update runs
              set metadata =
                  (case
@@ -5428,7 +5432,7 @@ pub(crate) async fn persist_run_job_identity(
                  || jsonb_build_object('jobId', $3::uuid)
              where id = $1
                and project_id = $2",
-            &[run_id, project_id, job_id],
+            typed![run_id, project_id, job_id],
         )
         .await
         .map_err(|error| {
@@ -5457,9 +5461,9 @@ pub(crate) async fn persist_run_managed_ai_credit_metadata(
 
     for run_id in run_ids {
         let row = transaction
-            .query_opt(
+            .query_typed_opt(
                 "select metadata from runs where id = $1 for update",
-                &[run_id],
+                typed![run_id],
             )
             .await
             .inspect_err(crate::errors::note_sql_state)
@@ -5479,9 +5483,9 @@ pub(crate) async fn persist_run_managed_ai_credit_metadata(
         let merged = merge_run_managed_ai_credit_metadata(existing.as_ref(), managed_ai_credit);
         let merged_param = PgJson(&merged);
         transaction
-            .execute(
+            .execute_typed(
                 "update runs set metadata = $2::jsonb where id = $1",
-                &[run_id, &merged_param],
+                typed![run_id, &merged_param],
             )
             .await
             .inspect_err(crate::errors::note_sql_state)
@@ -5611,9 +5615,9 @@ pub(crate) async fn persist_run_ai_access_mode(
 
     for run_id in run_ids {
         let row = transaction
-            .query_opt(
+            .query_typed_opt(
                 "select metadata from runs where id = $1 for update",
-                &[run_id],
+                typed![run_id],
             )
             .await
             .inspect_err(crate::errors::note_sql_state)
@@ -5632,9 +5636,9 @@ pub(crate) async fn persist_run_ai_access_mode(
         let merged = merge_ai_access_metadata(existing.as_ref(), mode, managed_ai_used);
         let merged_param = PgJson(&merged);
         transaction
-            .execute(
+            .execute_typed(
                 "update runs set metadata = $2::jsonb where id = $1",
-                &[run_id, &merged_param],
+                typed![run_id, &merged_param],
             )
             .await
             .inspect_err(crate::errors::note_sql_state)
@@ -5670,9 +5674,9 @@ pub(crate) async fn persist_prompt_ai_access_mode(
     managed_ai_used: bool,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select metadata from prompts where id = $1 for update",
-            &[prompt_id],
+            typed![prompt_id],
         )
         .await
         .inspect_err(crate::errors::note_sql_state)
@@ -5691,9 +5695,9 @@ pub(crate) async fn persist_prompt_ai_access_mode(
     let merged = merge_ai_access_metadata(existing.as_ref(), mode, managed_ai_used);
     let merged_param = PgJson(&merged);
     transaction
-        .execute(
+        .execute_typed(
             "update prompts set metadata = $2::jsonb where id = $1",
-            &[prompt_id, &merged_param],
+            typed![prompt_id, &merged_param],
         )
         .await
         .inspect_err(crate::errors::note_sql_state)
@@ -5925,9 +5929,9 @@ async fn ensure_project_record_for_dispatch(
     context: &RequestContext,
 ) -> Result<ProjectRecord, (StatusCode, Json<ApiError>)> {
     let existing = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id, org_id, name, sandbox_session_id, project_type, owner_user_id, status from projects where id = $1",
-            &[&request.project_id],
+            typed![&request.project_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load project: {error}")))?;

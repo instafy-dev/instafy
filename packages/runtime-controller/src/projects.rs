@@ -33,6 +33,7 @@ use crate::state::{
     EventHub,
 };
 use crate::tokens::{mint_scoped_token, mint_scoped_token_with_author, ScopedTokenRequest};
+use crate::typed_sql::typed;
 
 /// Roster invalidation for a space's viewers (the targeted
 /// `project.access_changed` still tells the affected user). Signal only:
@@ -305,11 +306,11 @@ pub(crate) async fn load_project_record(
     project_id: &Uuid,
 ) -> Result<ProjectRecord, (StatusCode, Json<ApiError>)> {
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id, org_id, name, sandbox_session_id, project_type, owner_user_id, status
              from projects
              where id = $1",
-            &[project_id],
+            typed![project_id],
         )
         .await
         .inspect_err(crate::errors::note_sql_state)

@@ -523,5 +523,6 @@ controller.
 - Avoid introducing provider-specific logic into controller routes; instead, persist module configuration (GitHub repo, hosting provider, domain) inside the workspace so agents can reuse it.
 - When deprecating legacy endpoints (e.g., `/build/dispatch`), update documentation and TODO items to reflect the new flow before removing code.
 - Attach structured logs with `request_id`, `project_id`, and `run_id` when adding new instrumentation so downstream tooling can correlate events.
+- On a send's path, and on any other request that runs many statements, use tokio-postgres's typed calls (`query_typed`, `query_typed_one`, `query_typed_opt`, `execute_typed`) with a `typed![...]` parameter list from `src/typed_sql.rs`. Given SQL text, the untyped calls prepare each statement and wait for the answer before running it, so every statement costs two round trips to a database that is often in another region. `src/tests_send_round_trips.rs` fails when a repeat send prepares a statement on its own.
 
 For deeper integration notes (runtime providers, WebContainers, billing), see `docs/Architecture.md`.

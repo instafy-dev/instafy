@@ -6,6 +6,7 @@ use tokio_postgres::{Row, Transaction};
 use tracing::{error, info};
 use uuid::Uuid;
 
+use crate::typed_sql::typed;
 use crate::{internal_error, not_found, ApiError};
 
 use super::lease::RuntimeLeaseScope;
@@ -183,9 +184,9 @@ pub(crate) async fn ensure_runtime_record(
 ) -> Result<RuntimeRecord, (StatusCode, Json<ApiError>)> {
     if let Some(id) = runtime_id {
         if let Some(row) = transaction
-            .query_opt(
+            .query_typed_opt(
                 "select id, project_id, provider, status, idle_ttl_seconds, capabilities, display_name, active_lease_id, last_seen_at, endpoint_url from runtimes where project_id = $1 and id = $2",
-                &[project_id, &id],
+                typed![project_id, &id],
             )
             .await
             .map_err(|error| internal_error(format!("failed to load runtime: {error}")))? {
@@ -208,7 +209,7 @@ pub(crate) async fn ensure_runtime_record(
                         crate::workspace::endpoint_matches_local(endpoint_url.as_deref()),
                     ));
             let updated = transaction
-                .query_one(
+                .query_typed_one(
                     "update runtimes
                      set idle_ttl_seconds = case when $5 then $2 else idle_ttl_seconds end,
                          display_name = coalesce($3, display_name),
@@ -224,7 +225,7 @@ pub(crate) async fn ensure_runtime_record(
                          updated_at = now()
                      where id = $1
                      returning id, project_id, provider, status, idle_ttl_seconds, capabilities, display_name, active_lease_id",
-                    &[
+                    typed![
                         &runtime.id,
                         &(idle_ttl_seconds as i32),
                         &display_name,

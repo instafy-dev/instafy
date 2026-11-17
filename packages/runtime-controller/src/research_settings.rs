@@ -1,3 +1,4 @@
+use crate::typed_sql::typed;
 use crate::{
     auth::authenticate_request,
     bad_request, forbidden, internal_error,
@@ -28,7 +29,7 @@ pub(crate) fn router() -> Router<AppState> {
 }
 
 pub(crate) async fn load(tx: &Transaction<'_>, project_id: &Uuid) -> ApiResult<ResearchSettings> {
-    let row = tx.query_opt("select max_page_loads, max_page_loads_per_site from project_research_settings where project_id=$1", &[project_id]).await.map_err(|e| internal_error(format!("load research settings: {e}")))?;
+    let row = tx.query_typed_opt("select max_page_loads, max_page_loads_per_site from project_research_settings where project_id=$1", typed![project_id]).await.map_err(|e| internal_error(format!("load research settings: {e}")))?;
     row.map(|r| ResearchSettings {
         max_page_loads: r.get::<_, i32>(0) as u32,
         max_page_loads_per_site: r.get::<_, i32>(1) as u32,

@@ -21,6 +21,7 @@ use crate::dispatch::{
     DispatchPromptNormalized, DispatchPromptRequest, DispatchPromptResponse,
 };
 use crate::provider_requests::ProviderRequestRecord;
+use crate::typed_sql::typed;
 use crate::workspace::{endpoint_matches_local, runtime_is_recent, status_is_viable};
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, internal_error, not_found,
@@ -359,9 +360,9 @@ pub(crate) async fn is_internal_conversation(
     conversation_id: &Uuid,
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {
     transaction
-        .query_one(
+        .query_typed_one(
             "select public.is_internal_conversation($1)",
-            &[conversation_id],
+            typed![conversation_id],
         )
         .await
         .map(|row| row.get(0))
@@ -464,7 +465,7 @@ pub(crate) async fn effective_visibility(
     conversation_id: &Uuid,
 ) -> Result<&'static str, (StatusCode, Json<ApiError>)> {
     let private = transaction
-        .query_one(
+        .query_typed_one(
             "with recursive chain (id, parent_conversation_id, visibility, depth) as (
                  select id, parent_conversation_id, visibility, 0
                    from conversations
@@ -476,7 +477,7 @@ pub(crate) async fn effective_visibility(
                   where chain.depth < 64
              )
              select coalesce(bool_or(lower(visibility) = 'private'), true) from chain",
-            &[conversation_id],
+            typed![conversation_id],
         )
         .await
         .map_err(|error| {
@@ -1780,7 +1781,7 @@ pub(crate) async fn find_conversation_message_by_client_message_id(
     client_message_id: &str,
 ) -> Result<Option<ConversationMessageRow>, (StatusCode, Json<ApiError>)> {
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id,
                     conversation_id,
                     project_id,
@@ -1804,7 +1805,7 @@ pub(crate) async fn find_conversation_message_by_client_message_id(
                    ) = $2
              order by created_at desc
              limit 1",
-            &[conversation_id, &client_message_id],
+            typed![conversation_id, &client_message_id],
         )
         .await
         .map_err(|error| {
@@ -3267,7 +3268,7 @@ pub(crate) async fn ensure_conversation_record(
     };
 
     let existing = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id,
                     project_id,
                     session_id,
@@ -3285,7 +3286,7 @@ pub(crate) async fn ensure_conversation_record(
              from conversations
              where id = $1
              for update",
-            &[&conversation_id],
+            typed![&conversation_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load conversation: {error}")))?;
@@ -3521,7 +3522,7 @@ pub(crate) async fn load_conversation_record(
     conversation_id: &Uuid,
 ) -> Result<ConversationRecord, (StatusCode, Json<ApiError>)> {
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id,
                     project_id,
                     session_id,
@@ -3538,7 +3539,7 @@ pub(crate) async fn load_conversation_record(
                     updated_at
              from conversations
              where id = $1",
-            &[conversation_id],
+            typed![conversation_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load conversation: {error}")))?;
@@ -3689,7 +3690,7 @@ async fn record_conversation_user_message(
     let message_id = Uuid::new_v4();
 
     let row = transaction
-        .query_one(
+        .query_typed_one(
             "insert into conversation_messages (
                  id,
                  conversation_id,
@@ -3713,7 +3714,7 @@ async fn record_conversation_user_message(
                        content,
                        metadata,
                        created_at",
-            &[
+            typed![
                 &message_id,
                 &conversation.id,
                 &project.id,
@@ -3733,14 +3734,14 @@ async fn record_conversation_user_message(
 
     let last_message_preview = build_conversation_last_message_preview(&request.prompt_text);
     transaction
-        .execute(
+        .execute_typed(
             "update conversations
              set updated_at = now(),
                  last_message_id = $2,
                  last_message_at = now(),
                  last_message_preview = $3
              where id = $1",
-            &[&conversation.id, &message_id, &last_message_preview],
+            typed![&conversation.id, &message_id, &last_message_preview],
         )
         .await
         .map_err(|error| {
@@ -3766,11 +3767,11 @@ async fn record_conversation_user_message(
 
     if let Some(user_id) = context.user_id {
         transaction
-            .execute(
+            .execute_typed(
                 "insert into conversation_participants (conversation_id, user_id, role, added_by)
                  values ($1, $2, 'member', $3)
                  on conflict (conversation_id, user_id) do nothing",
-                &[&conversation.id, &user_id, &context.user_id],
+                typed![&conversation.id, &user_id, &context.user_id],
             )
             .await
             .map_err(|error| {
@@ -4334,12 +4335,12 @@ pub(crate) async fn upsert_conversation_runtime_preference(
     let wrapper_param = PgJson(&wrapper);
 
     transaction
-        .execute(
+        .execute_typed(
             "update conversations
              set metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb,
                  updated_at = now()
              where id = $1",
-            &[conversation_id, &wrapper_param],
+            typed![conversation_id, &wrapper_param],
         )
         .await
         .map_err(|error| {

@@ -21,6 +21,7 @@ use crate::projects::{
     ensure_project_access, ensure_project_read_access, ensure_project_write_access,
     load_project_record,
 };
+use crate::typed_sql::typed;
 use crate::{bad_request, forbidden, internal_error, not_found, ApiError, AppState};
 
 const MAX_HANDLE_LEN: usize = 20;
@@ -350,12 +351,12 @@ pub(crate) async fn load_or_create_octo_agent_profile(
     user_id: &Uuid,
 ) -> Result<OctoAgentProfile, (StatusCode, Json<ApiError>)> {
     let existing = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id, display_name, description
              from user_agents
              where user_id = $1 and lower(handle) = 'octo' and deleted_at is null
              limit 1",
-            &[user_id],
+            typed![user_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to check octo agent profile: {error}")))?;
@@ -413,12 +414,12 @@ pub(crate) async fn load_or_create_octo_agent_profile(
     }
 
     let row = transaction
-        .query_one(
+        .query_typed_one(
             "select id, display_name, description
              from user_agents
              where user_id = $1 and lower(handle) = 'octo' and deleted_at is null
              limit 1",
-            &[user_id],
+            typed![user_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to reload octo agent profile: {error}")))?;

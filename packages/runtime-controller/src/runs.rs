@@ -18,6 +18,7 @@ use crate::conversations::{ensure_conversation_access, load_conversation_record}
 use crate::credits::{
     extract_credit_snapshot, extract_provider_conversation_state, extract_provider_from_metadata,
 };
+use crate::typed_sql::typed;
 use crate::{
     bad_request, ensure_project_access, internal_error, load_project_record, not_found,
     resolve_scope, ApiError, AppState, ScopeParams,
@@ -390,7 +391,7 @@ where
 {
     let query = format!("{RUN_SELECT_BASE} where id = $1");
     let row = client
-        .query_opt(&query, &[run_id])
+        .query_typed_opt(&query, typed![run_id])
         .await
         .map_err(|error| internal_error(format!("failed to load run snapshot: {error}")))?;
 

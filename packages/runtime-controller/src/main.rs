@@ -148,12 +148,15 @@ mod tests_provider_space;
 #[cfg(test)]
 mod tests_runtime_stop_fence;
 #[cfg(test)]
+mod tests_send_round_trips;
+#[cfg(test)]
 mod tests_stopped_turn_report;
 #[cfg(test)]
 mod tests_workspace_lease_after_stop;
 mod tokens;
 mod tunnels;
 mod turn_rate_limit_retry;
+mod typed_sql;
 mod upstream_pacing;
 mod user_input_requests;
 mod utils;
