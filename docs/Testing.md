@@ -559,8 +559,15 @@ monorepo installation on Node20. No existing check is removed:
 | --- | --- | --- |
 | JavaScript contracts and migrations | Workflow/release/migration/self-host contracts and real empty-database migration application | `public-js-contracts` |
 | JavaScript frontend | Frontend lint, build and the complete unit suite | `public-js-frontend` |
-| JavaScript CLI and provider contract | CLI package artifact and automations; provider-contract packing | `public-js-cli` |
+| JavaScript CLI and provider contract | CLI package artifact and every CLI test file, each named by a reviewed step; provider-contract packing | `public-js-cli` |
 | JavaScript Desktop and runtime | Runtime helper build/tests and complete Desktop build/tests | `public-js-desktop` |
+
+Each file in `packages/instafy-cli/test` is named by a reviewed step of the CLI child, or is on a short
+manual list in `scripts/check-javascript-ci.test.mjs`, which fails when a file is in neither.
+The manual list holds the suites that need a live tunnel (`pnpm --filter @instafy/cli test:live`) or a
+real controller and tunnel broker (`pnpm test:cli:tunnel:e2e`). The CLI's browser cases use Chrome when
+the runner has one and skip otherwise. A new CLI test file is added to a step with its hash and a
+reviewed comment, and the three `build.yml` pins are taken again.
 
 The Desktop test script installs the locked Electron binary once, with the
 package's own `install-electron`, before `node --test` starts. Electron 42 and

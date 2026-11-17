@@ -391,11 +391,11 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // proxy_retry_budget, provider_mcp and read-reference selectors, the code-mode host build, the
   // per-model proxy_retry_budget runs, the runtime provider core and service unit
   // tests, CLI git wrapper suite, local author pseudonym key test and inert native
-  // compaction, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the hermetic local-engine turn targets and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, and MCP server, login profile and space id path suites, and the tunnel
+  // compaction, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the hermetic local-engine turn targets and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings and local tunnel suites, and the tunnel
   // broker test lane with its Rust tests aggregate entry: retains all functional commands, aggregate
   // guards, routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '40d1f0e835cbc0b3910c6eebcf2dc8c7d01df1602e14e37349d6d3bd423cb129');
+    '8403946c9d7c53d7a95e1af9e832c1b513fc3f8dddd403fca1e14e4e4c367b80');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

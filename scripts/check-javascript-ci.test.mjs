@@ -68,12 +68,12 @@ const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget, provider_mcp and read-reference selectors, the
   // code-mode host build, per-model proxy_retry_budget runs, inert native compaction,
   // native chat image, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the hermetic local-engine turn targets, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
-  // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, and MCP server, login profile and space id path suites bound below, and the local author pseudonym key
+  // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings and local tunnel suites bound below, and the local author pseudonym key
   // test in the contracts lane, and the tunnel broker test lane in the Rust tests
   // aggregate, also bound by check-rust-ci; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: 'a4529ff27cb5df063f975a82c0f846f0c9efe464ae1801b1ddeaa60c45f637ad' },
+    previousHash: '19dff1bc93a006450524e20c5b33cb6b157a4c0a4773dcf935aac02064098758' },
   // The Browser UI rendering aggregate came with the lane's split into parts;
   // reversing that split exactly (inside withoutBrowserUiJobBudget) removes it.
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
@@ -387,6 +387,22 @@ test('the complete pre-split command inventory and working directories are uncha
     'Test CLI login profiles': '9e9eb5edfe207c4482ab85f55f1459fb7417094d30830e47c5cf13f881251ad4',
     // Reviewed addition: a space id from a flag, the environment or a folder's binding keeps every request on its route, against local mock controllers only.
     'Test CLI space ids in request paths': '03e41dc78890f5d215ef1bb2aef290628b42909ee0098ac1cc6e61d7ee631ad1',
+    // Reviewed addition: the CLI's sign-in callback and its credentials, secrets, team, space invite, runtime token and git credential helper commands, against loopback mock servers only.
+    'Test CLI account and team commands': '128bbab721610ac01ff00acb301ef2cb7bdbe47f55f8b178675035fdf5be43b3',
+    // Reviewed addition: `instafy chat` and the conversation, conversation grep, history and support commands, against loopback mock servers only.
+    'Test CLI chat, conversation and support commands': 'fef5a7c166842bade6aad5a86b54a6cabd85b594e9feed504e2a18d045c36378',
+    // Reviewed addition: the agents and agent-grade commands, the agent-facing diagnostics and the CLI's command-line UX, against loopback mock servers only.
+    'Test CLI agent commands and diagnostics': '6fe457d97c311325dc84c996cd41a839616854730def70c94806efdc079304da',
+    // Reviewed addition: `instafy preview`, its preview server and which chat a page is written down with, against loopback servers only; the card picture's browser case uses Chrome when the runner has one and skips otherwise.
+    'Test CLI preview server and space pages': 'b1c118213c73c407edc7acd398437cc98e1e81003a1a25f039b5a7b771d5f10f',
+    // Reviewed addition: `instafy bind`'s page check against a local binder, in Chrome when the runner has one (it skips otherwise), against loopback servers only.
+    'Test CLI bound site check in a browser': 'c524f275053d47d7d56da09139900d68cfb933157c16b64a2e89c3bf6983cac9',
+    // Reviewed addition: space init, project defaults refresh, providers and provider bindings, the hardware serial commands and space recommendations, against loopback mock servers only.
+    'Test CLI space setup, providers and hardware': '452833d0e14cff6e28a7575dc7169065343231dfb831ffe439738bc722e07aac',
+    // Reviewed addition: research settings and the shared research allowance, against local files and loopback servers only.
+    'Test CLI research settings and allowance': '1e261b82897e840dcf353e732538f36169f969d5e835c1d7b81e0c94236e641c',
+    // Reviewed addition: `instafy tunnel` and its detached and managed modes, against loopback servers only; the live tunnel suites stay manual (see below).
+    'Test CLI tunnels against local servers': '144011cc23ce1d56e9cef748472b3018b233893472dd8411a819729d91c9d73f',
     'Build and test desktop runtime': '4404b931ad4c93454f1acb37955f5059b7f3df6ac9cf9ffa81e92d3306481e73',
     'Build and test desktop app': '189e65ceed9465ec56589e5b804be189a9adc623daf4f4f3cee05b4b846a5ba5',
   };
@@ -410,7 +426,7 @@ test('the complete pre-split command inventory and working directories are uncha
 test('the full frontend, CLI, provider artifact and Desktop commands are preserved without filtering', () => {
   const commands = {
     'javascript-frontend': ['pnpm --filter @instafy/frontend lint', 'pnpm --filter @instafy/frontend build', 'pnpm --filter @instafy/frontend test:unit'],
-    'javascript-cli': ['pnpm --filter @instafy/cli test:package', 'npm pack --dry-run --ignore-scripts', 'pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/local-site.spec.ts test/site-check.spec.ts', 'pnpm --filter @instafy/bind test', 'pnpm --filter @instafy/cli exec vitest run test/bind.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-read.spec.ts test/web-fixtures.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/preview-thumbnail.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-search.spec.ts test/web-search-eval.spec.ts test/web-compare-eval.spec.ts test/web-reference-search.spec.ts test/web-link.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/mcp.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/login-profile.e2e.spec.ts test/runtime-env.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/space-id-paths.e2e.spec.ts test/agent-settings.test.ts'],
+    'javascript-cli': ['pnpm --filter @instafy/cli test:package', 'npm pack --dry-run --ignore-scripts', 'pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/local-site.spec.ts test/site-check.spec.ts', 'pnpm --filter @instafy/bind test', 'pnpm --filter @instafy/cli exec vitest run test/bind.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-read.spec.ts test/web-fixtures.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/preview-thumbnail.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/web-search.spec.ts test/web-search-eval.spec.ts test/web-compare-eval.spec.ts test/web-reference-search.spec.ts test/web-link.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/mcp.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/login-profile.e2e.spec.ts test/runtime-env.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/space-id-paths.e2e.spec.ts test/agent-settings.test.ts', 'pnpm --filter @instafy/cli exec vitest run test/credentials.e2e.spec.ts test/secrets-cli.e2e.spec.ts test/team.e2e.spec.ts test/space-invite.e2e.spec.ts test/runtime-token.e2e.spec.ts test/git-credential-helper.e2e.spec.ts test/login-callback.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/chat.e2e.spec.ts test/conversation.e2e.spec.ts test/conversation-grep.e2e.spec.ts test/history.e2e.spec.ts test/support.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/agents.e2e.spec.ts test/agent-grade.spec.ts test/diagnostics.e2e.spec.ts test/cli-ux.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/preview.e2e.spec.ts test/preview-serve.spec.ts test/space-pages.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/bind-check-drawn.spec.ts','pnpm --filter @instafy/cli exec vitest run test/project-init.e2e.spec.ts test/project-defaults-refresh.e2e.spec.ts test/providers.e2e.spec.ts test/provider-bindings.e2e.spec.ts test/hardware.e2e.spec.ts test/recommendations.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/research-settings.test.ts test/web-budget.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/tunnel-cli.e2e.spec.ts test/tunnel-managed.e2e.spec.ts test/tunnel-server-address.spec.ts'],
     'javascript-desktop': ['pnpm --filter @instafy/desktop-runtime-agent build', 'pnpm --filter @instafy/desktop-runtime-agent exec vitest run', 'pnpm --filter @instafy/desktop-app test'],
   };
   for (const [key, list] of Object.entries(commands)) for (const command of list) {
@@ -418,6 +434,26 @@ test('the full frontend, CLI, provider artifact and Desktop commands are preserv
     assert.equal(lanes.reduce((count, lane) => count + (job(lane.key).split(command).length - 1), 0), 1, command);
   }
   assert.match(step('javascript-cli', 'Validate provider contract package artifact'), /working-directory: packages\/provider-contract/u);
+});
+
+test('every CLI test file runs in a reviewed CLI step or is a named manual check', () => {
+  // A new CLI test file runs nowhere until a reviewed step above names it. These need what the
+  // hosted CLI job does not have, so they run by hand.
+  const manual = {
+    'test/tunnel-live.e2e.spec.ts': 'a live tunnel (pnpm --filter @instafy/cli test:live)',
+    'test/runtime-tunnel.e2e.spec.ts': 'a real controller and tunnel broker (pnpm test:cli:tunnel:e2e)',
+  };
+  // The same files vitest's include (test/**/*.ts) collects, subfolders included.
+  const testRoot = path.join(root, 'packages/instafy-cli');
+  const files = fs.readdirSync(path.join(testRoot, 'test'), { recursive: true })
+    .filter(name => name.endsWith('.ts')).map(name => `test/${name.split(path.sep).join('/')}`);
+  const cli = job('javascript-cli');
+  const named = file => (cli.match(new RegExp(` ${file.replaceAll('.', '\\.')}(?= |$)`, 'gmu')) ?? []).length;
+  for (const file of files) assert.equal(named(file), file in manual ? 0 : 1, file);
+  for (const file of Object.keys(manual)) assert.ok(files.includes(file), `${file} is named as manual but does not exist`);
+  for (const [, file] of cli.matchAll(/ (test\/[\w./-]+\.ts)(?= |$)/gmu)) {
+    assert.ok(fs.existsSync(path.join(testRoot, file)), `${file} is named by a CLI step but does not exist`);
+  }
 });
 
 test('the Desktop test script installs the locked Electron binary once before node --test starts its file processes', () => {
