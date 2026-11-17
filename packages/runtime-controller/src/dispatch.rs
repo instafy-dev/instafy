@@ -9,7 +9,7 @@ use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use tokio_postgres::types::Json as PgJson;
@@ -5958,12 +5958,6 @@ fn map_project_row(row: &tokio_postgres::Row) -> ProjectRecord {
     }
 }
 
-#[allow(dead_code)]
-fn build_progress_callback_url(config: &AppConfig) -> Option<String> {
-    let base = config._controller_external_url.as_ref()?;
-    Some(format!("{}/progress-callback", base.trim_end_matches('/')))
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct ProgressCallbackRequest {
@@ -6031,28 +6025,6 @@ fn verify_progress_callback_token(
     }
 
     Ok(())
-}
-
-#[allow(dead_code)]
-fn issue_progress_callback_token(config: &AppConfig, run_id: &Uuid) -> Option<String> {
-    let secret = config.progress_callback_secret.as_ref()?;
-    let expires_at = Utc::now() + ChronoDuration::minutes(30);
-    #[derive(Serialize)]
-    struct ProgressTokenClaims<'a> {
-        run_id: &'a str,
-        exp: i64,
-    }
-    let run_id_string = run_id.to_string();
-    let claims = ProgressTokenClaims {
-        run_id: run_id_string.as_str(),
-        exp: expires_at.timestamp(),
-    };
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .ok()
 }
 
 fn normalize_progress_percent(input: Option<f64>) -> Option<i32> {

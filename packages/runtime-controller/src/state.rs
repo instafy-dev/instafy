@@ -171,17 +171,6 @@ impl RuntimeActivityTracker {
         entry.last_active = Utc::now();
     }
 
-    /// Most recent activity mark for a project, if the tracker has one.
-    /// Absent entries mean "no activity seen since controller start" — treat
-    /// as idle only in combination with durable (DB) signals.
-    pub(crate) async fn last_activity_for(
-        &self,
-        project_id: &Uuid,
-    ) -> Option<RuntimeActivityEntry> {
-        let guard = self.inner.read().await;
-        guard.get(project_id).copied()
-    }
-
     pub(crate) async fn idle_candidates(&self) -> Vec<(Uuid, RuntimeActivityEntry)> {
         let now = Utc::now();
         let guard = self.inner.read().await;
@@ -269,20 +258,6 @@ impl LocalWorkspaceRegistry {
                 }
                 return Some(existing.clone());
             }
-        }
-        None
-    }
-
-    pub(crate) async fn set_preferred_runtime(
-        &self,
-        project_id: &Uuid,
-        owner_user_id: &Uuid,
-        runtime_id: Uuid,
-    ) -> Option<LocalWorkspaceEntry> {
-        let mut guard = self.inner.write().await;
-        if let Some(existing) = guard.get_mut(&(*project_id, *owner_user_id)) {
-            existing.preferred_runtime_id = Some(runtime_id);
-            return Some(existing.clone());
         }
         None
     }

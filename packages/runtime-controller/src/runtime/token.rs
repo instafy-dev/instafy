@@ -245,46 +245,6 @@ fn resolve_runtime_token_ttl(
     Ok(ttl)
 }
 
-/// Ensure a scoped parent token does not silently widen its identity bounds
-/// when re-minting a runtime token. An origin-bound parent may not mint a
-/// runtime token, and a runtime/lease-bound parent may not change its binding.
-fn ensure_scoped_runtime_binding(
-    context: &crate::auth::RequestContext,
-    runtime_id: Option<uuid::Uuid>,
-    lease_id: Option<uuid::Uuid>,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let Some(claims) = context.scoped_claims.as_ref() else {
-        return Ok(());
-    };
-    // This endpoint always mints a runtime token (`origin_id = None`) and may
-    // change the audience to the requested runtime. Allowing an origin-bound
-    // parent through would silently discard both of those identity bounds.
-    if claims.origin_id.is_some() {
-        return Err(forbidden(
-            "An origin-scoped token cannot mint runtime access tokens",
-        ));
-    }
-    if let Some(parent_runtime) = claims.runtime_id.as_deref() {
-        let parent_runtime = uuid::Uuid::parse_str(parent_runtime.trim())
-            .map_err(|_| forbidden("Parent access token has an invalid runtime scope"))?;
-        if runtime_id != Some(parent_runtime) {
-            return Err(forbidden(
-                "A runtime-scoped token cannot change or remove its runtime binding",
-            ));
-        }
-    }
-    if let Some(parent_lease) = claims.lease_id.as_deref() {
-        let parent_lease = uuid::Uuid::parse_str(parent_lease.trim())
-            .map_err(|_| forbidden("Parent access token has an invalid lease scope"))?;
-        if lease_id != Some(parent_lease) {
-            return Err(forbidden(
-                "A lease-scoped token cannot change or remove its lease binding",
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn runtime_generation_from_capabilities(
     capabilities: &JsonValue,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
@@ -978,13 +938,6 @@ mod tests {
             &["origin.apply".to_string()]
         )
         .is_err());
-
-        let mut origin_bound = context;
-        let origin_id = Uuid::new_v4();
-        let claims = origin_bound.scoped_claims.as_mut().unwrap();
-        claims.origin_id = Some(origin_id.to_string());
-        claims.aud = origin_id.to_string();
-        assert!(ensure_scoped_runtime_binding(&origin_bound, None, None).is_err());
     }
 
     #[test]

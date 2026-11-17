@@ -20,7 +20,7 @@ use crate::credits::{
 };
 use crate::{
     bad_request, ensure_project_access, internal_error, load_project_record, not_found,
-    publish_controller_event_with_conversation, resolve_scope, ApiError, AppState, ScopeParams,
+    resolve_scope, ApiError, AppState, ScopeParams,
 };
 use anyhow::Context;
 
@@ -486,97 +486,4 @@ pub(crate) async fn rebuild_run_result_from_db(
     );
 
     Ok(Some(payload))
-}
-
-#[allow(dead_code)]
-pub(crate) async fn update_run_status_after_dispatch(
-    state: &AppState,
-    run_id: &Uuid,
-    status: &str,
-    stage: Option<&str>,
-    message: Option<&str>,
-    workflow_url: Option<&str>,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-
-    let stage_param = stage.map(|value| value.to_string());
-    let message_param = message.map(|value| value.to_string());
-
-    connection
-        .execute(
-            "update runs
-             set status = $2,
-                 progress = case when $2 = 'failed' then progress else greatest(progress, 5) end,
-                 progress_stage = $3,
-                 last_message = $4,
-                 updated_at = now()
-             where id = $1",
-            &[run_id, &status, &stage_param, &message_param],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to update run status: {error}")))?;
-
-    if let Some(url) = workflow_url {
-        connection
-            .execute(
-                "update runs
-                 set metadata = jsonb_set(
-                     coalesce(metadata, '{}'::jsonb),
-                     '{workflow_url}',
-                     to_jsonb($2::text),
-                     true
-                 )
-                 where id = $1",
-                &[run_id, &url],
-            )
-            .await
-            .map_err(|error| internal_error(format!("failed to update run metadata: {error}")))?;
-    }
-
-    let (project_id, session_id, conversation_id, run_payload) = {
-        let client = &mut *connection;
-        match load_run_snapshot(client, run_id).await {
-            Ok(Some(snapshot)) => (
-                snapshot.project_id,
-                snapshot.session_id,
-                snapshot.conversation_id,
-                run_snapshot_to_json(&snapshot),
-            ),
-            Ok(None) => {
-                tracing::warn!(run_id = %run_id, "run snapshot missing after status update");
-                (None, None, None, JsonValue::Null)
-            }
-            Err((status_code, Json(api_error))) => {
-                tracing::warn!(
-                    run_id = %run_id,
-                    status = status_code.as_u16(),
-                    error = %api_error.message,
-                    "failed to load run snapshot after status update"
-                );
-                (None, None, None, JsonValue::Null)
-            }
-        }
-    };
-
-    publish_controller_event_with_conversation(
-        &state.events,
-        "run.progress",
-        project_id,
-        session_id,
-        conversation_id,
-        Some(*run_id),
-        None,
-        json!({
-            "status": status,
-            "stage": stage,
-            "message": message,
-            "workflowUrl": workflow_url,
-            "run": run_payload,
-        }),
-    );
-    Ok(())
 }

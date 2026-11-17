@@ -512,24 +512,6 @@ pub(crate) fn ensure_scoped_claims_allow_requested_scopes(
     ))
 }
 
-/// Returns the maximum lifetime available to a delegated token. The token
-/// signer enforces a 60-second minimum, so a nearly-expired parent cannot be
-/// used to create a child that outlives it through that minimum clamp.
-pub(crate) fn scoped_claims_remaining_ttl_seconds(
-    context: &RequestContext,
-) -> Result<Option<i64>, (StatusCode, Json<ApiError>)> {
-    let Some(claims) = context.scoped_claims.as_ref() else {
-        return Ok(None);
-    };
-    let remaining = claims.exp.saturating_sub(Utc::now().timestamp());
-    if remaining < 60 {
-        return Err(unauthorized(
-            "Scoped access token expires too soon to delegate",
-        ));
-    }
-    Ok(Some(remaining))
-}
-
 pub(crate) fn ensure_scoped_project_match(
     context: &RequestContext,
     project_id: &Uuid,
