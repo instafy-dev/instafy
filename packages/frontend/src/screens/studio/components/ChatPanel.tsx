@@ -3279,7 +3279,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     currentUserId,
     chatClientSessionId,
     humanPeerContext: conversationHumanPeerContext,
-    agentHandles,
+    // The rail's AIs, so a reply stamped with the viewer's own Octo id is that Octo.
+    rosterAgents: conversationRosterAgents,
     // A recent page or a targeted search result cannot tell us who authored
     // the older conversation. Never fetch extra history for cosmetic layout.
     historyComplete: Boolean(activeConversationEntry) &&
@@ -3293,9 +3294,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }), [
     activeConversationEntry,
     activeConversationRuns,
-    agentHandles,
     chatClientSessionId,
     conversationHumanPeerContext,
+    conversationRosterAgents,
     currentUserId,
     hasMoreRecentHistory,
     hasResolvedRecentHistory,
