@@ -294,6 +294,23 @@ fn controller_settings_scope_runs_a_full_job_on_the_production_worker_stack() {
                             .as_str()
                             .is_some_and(|text| !text.is_empty())
                     );
+                    // The job's own steps, timed from when its handling began.
+                    let timings = completions[0]["body"]["artifacts"]
+                        .as_array()
+                        .and_then(|artifacts| {
+                            artifacts
+                                .iter()
+                                .find(|artifact| artifact["kind"] == "agent/phase-timings")
+                        })
+                        .expect("the completion says where the job's time went");
+                    let phases: Vec<&str> = timings["phases"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|phase| phase["phase"].as_str().unwrap())
+                        .collect();
+                    assert!(phases.contains(&"secrets"), "{timings}");
+                    assert!(phases.contains(&"message_drain"), "{timings}");
                     assert_eq!(crate::job_runtime_settings::current(), None);
                 });
         })
@@ -632,6 +649,78 @@ async fn untracked_job_cannot_publish_a_worker_question() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["endpoint"], "complete");
     assert_eq!(requests[0]["body"]["outcome"], "failed");
+}
+
+/// A completion says where the job's own time went, up to its report, while the job's clock
+/// runs (crate::turn_phases), and adds nothing when no clock runs.
+#[tokio::test]
+async fn a_completion_reports_the_jobs_own_steps_while_its_clock_runs() {
+    let harness = Harness::start().await;
+    let processor = JobProcessor::new(harness.config.clone());
+    let reply = || JobExecution {
+        summary: "Hi! What can I help you with?".into(),
+        suggested_replies: Vec::new(),
+        provider: "test".into(),
+        artifacts: vec![json!({"kind": "apply/files", "files": []})],
+        credit_snapshot: None,
+        provider_conversation_state: None,
+        messages: Vec::new(),
+        messages_streamed: false,
+        final_messages: Vec::new(),
+    };
+
+    let timed = harness.job();
+    let clock = crate::turn_phases::start(timed.id);
+    drop(crate::turn_phases::span(
+        timed.id,
+        crate::turn_phases::Phase::Secrets,
+    ));
+    RuntimeAgent::complete_job(
+        &harness.client,
+        &harness.registration,
+        &timed,
+        reply(),
+        &processor,
+    )
+    .await;
+    drop(clock);
+    let untimed = harness.job();
+    RuntimeAgent::complete_job(
+        &harness.client,
+        &harness.registration,
+        &untimed,
+        reply(),
+        &processor,
+    )
+    .await;
+
+    let requests = harness.stand_in.requests.lock();
+    let artifacts_of = |job: &LeaseJob| -> Vec<serde_json::Value> {
+        requests
+            .iter()
+            .find(|request| {
+                request["endpoint"] == "complete"
+                    && request["body"]["job_id"] == json!(job.id.to_string())
+            })
+            .expect("the job's completion")["body"]["artifacts"]
+            .as_array()
+            .expect("artifacts")
+            .clone()
+    };
+    let timed_artifacts = artifacts_of(&timed);
+    let kinds: Vec<&str> = timed_artifacts
+        .iter()
+        .map(|artifact| artifact["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["apply/files", "agent/phase-timings"]);
+    let timings = &timed_artifacts[1];
+    assert_eq!(timings["phases"][0]["phase"], "secrets");
+    assert!(timings["phases"][0]["ms"].is_u64(), "{timings}");
+    assert!(timings["reportedMs"].is_u64(), "{timings}");
+    assert_eq!(
+        artifacts_of(&untimed),
+        [json!({"kind": "apply/files", "files": []})]
+    );
 }
 
 /// A finished building turn's execution: it changed a page, read another,

@@ -720,6 +720,8 @@ fn a_lane_turn_runs_on_the_persons_claude_code_and_saves_through_the_lane_filter
         // The reply is Claude Code's, with the folder's prefix made relative.
         assert_eq!(completion["summary"], "Renamed the project in README.md.");
         assert!(artifact(&completion, "codex/run-log").is_none());
+        // Only what docs/Local-Engine-Turns.md lists: the runtime's own step timings stay out.
+        assert!(artifact(&completion, "agent/phase-timings").is_none());
         let run_log = artifact(&completion, "claude-code/run-log").expect("a run log");
         assert_eq!(run_log["metadata"]["provider"], "claude-code");
         let usage = artifact(&completion, "claude-code/usage").expect("usage");

@@ -272,10 +272,14 @@ impl AgentExecutor {
         // No in-flight draft may overtake the durable completion.
         drop(reply_draft_task);
         if let Some(saves) = saves.as_ref() {
+            let _step = crate::turn_phases::span(job.id, crate::turn_phases::Phase::TurnEndSave);
             rolling_saves::finish_job(saves, ticker, &mut result).await;
         }
 
-        finish_progress_dispatch(progress_tx, progress_task, job.id).await;
+        {
+            let _step = crate::turn_phases::span(job.id, crate::turn_phases::Phase::MessageDrain);
+            finish_progress_dispatch(progress_tx, progress_task, job.id).await;
+        }
         // A turn that lost its lease sends no completion. What it already
         // changed goes in its one end report, once every step it streamed
         // has reached the controller, which leaves out of the report what

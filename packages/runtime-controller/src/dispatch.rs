@@ -180,6 +180,50 @@ pub(crate) fn server_timing_value(phases: &[(&str, Option<Duration>)]) -> String
         .join(", ")
 }
 
+/// A send's phases as its runs keep them (`metadata.dispatchTimings`), in milliseconds, with the
+/// controller's clock at COMMIT. A run's `queued_at` is the dispatch transaction's BEGIN and its
+/// job is invisible until `committedAt`, so its queue wait splits into `txMs` and the hand-off to
+/// the runtime that leased it after `committedAt`.
+fn dispatch_timings_json(timings: &DispatchPhaseTimings, committed_at: DateTime<Utc>) -> JsonValue {
+    let ms = |phase: Option<Duration>| {
+        phase.map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+    };
+    json!({
+        "preMs": ms(timings.pre),
+        "txMs": ms(timings.transaction),
+        "proxyMs": ms(timings.proxy),
+        "postMs": ms(timings.post),
+        "committedAt": committed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    })
+}
+
+/// Keeps a send's phases on its runs ([`dispatch_timings_json`]). Written once its jobs are
+/// visible and their runtimes woken, so it delays no lease; a failure is logged and never fails
+/// the send.
+async fn record_dispatch_timings(
+    client: &tokio_postgres::Client,
+    run_ids: &[Uuid],
+    timings: &DispatchPhaseTimings,
+    committed_at: DateTime<Utc>,
+) {
+    if run_ids.is_empty() {
+        return;
+    }
+    let value = dispatch_timings_json(timings, committed_at);
+    if let Err(error) = client
+        .execute(
+            "update runs
+             set metadata = coalesce(metadata, '{}'::jsonb)
+                 || jsonb_build_object('dispatchTimings', $2::jsonb)
+             where id = any($1)",
+            &[&run_ids, &PgJson(&value)],
+        )
+        .await
+    {
+        warn!(%error, "failed to keep the send's timings on its runs");
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AgentTarget {
     handle: String,
@@ -2840,6 +2884,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .await
         .map_err(|error| internal_error(format!("failed to commit dispatch prompt: {error}")))?;
     let committed = Instant::now();
+    let committed_at = Utc::now();
     timings.transaction = Some(committed.duration_since(transaction_started));
 
     if let Some(user_message) = user_message.as_ref() {
@@ -3367,6 +3412,8 @@ pub(crate) async fn process_dispatch_prompt_timed(
     }
 
     timings.post = Some(committed.elapsed());
+    let dispatched_run_ids: Vec<Uuid> = dispatches.iter().map(|(run_id, ..)| *run_id).collect();
+    record_dispatch_timings(&connection, &dispatched_run_ids, timings, committed_at).await;
     info!(
         run_id = %primary_run_id,
         project_id = %project.id,
@@ -6186,6 +6233,29 @@ mod browser_card_sites_tests {
 mod tests {
     use super::*;
     use serde_json::{json, Value as JsonValue};
+
+    #[test]
+    fn a_sends_runs_keep_its_phases_in_milliseconds_and_its_commit_time() {
+        let committed_at = DateTime::parse_from_rfc3339("2026-11-17T10:19:57.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let timings = DispatchPhaseTimings {
+            pre: Some(Duration::from_micros(412_600)),
+            proxy: Some(Duration::from_micros(3_900)),
+            transaction: Some(Duration::from_micros(5_930_400)),
+            post: None,
+        };
+        assert_eq!(
+            dispatch_timings_json(&timings, committed_at),
+            json!({
+                "preMs": 412,
+                "txMs": 5930,
+                "proxyMs": 3,
+                "postMs": null,
+                "committedAt": "2026-11-17T10:19:57.123Z",
+            })
+        );
+    }
 
     #[test]
     fn natural_worker_replies_only_attach_to_one_ordinary_human_turn() {
