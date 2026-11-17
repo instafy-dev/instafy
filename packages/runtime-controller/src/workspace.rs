@@ -31,6 +31,7 @@ use crate::config::PgPool;
 use crate::state::{
     publish_controller_event_to_user, EventHub, LocalWorkspaceEntry, RuntimePreferenceRegistry,
 };
+use crate::typed_sql::typed;
 use crate::{
     bad_request, database_unavailable, ensure_project_access, ensure_project_write_access,
     internal_error, load_project_record, publish_controller_event, unauthorized, ApiError,
@@ -735,10 +736,10 @@ pub(crate) async fn fetch_runtime_candidate_with_client(
     runtime_id: &Uuid,
 ) -> Result<Option<RuntimeCandidate>, (StatusCode, Json<ApiError>)> {
     let row = client
-        .query_opt(
+        .query_typed_opt(
             "select id, provider, capabilities, status, endpoint_url, last_seen_at, idle_ttl_seconds, display_name \
              from runtimes where id = $1 and project_id = $2",
-            &[runtime_id, project_id],
+            typed![runtime_id, project_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load runtime: {error}")))?;

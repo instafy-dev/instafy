@@ -14,6 +14,7 @@ use tokio_postgres::Transaction;
 use uuid::Uuid;
 
 use crate::projects::{ensure_project_read_access, load_project_record};
+use crate::typed_sql::typed;
 use crate::{
     auth::authenticate_request, bad_request, forbidden, internal_error, ApiError, AppState,
 };
@@ -46,9 +47,9 @@ pub(crate) async fn load(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
 ) -> Result<MultiAgentSettings, (StatusCode, Json<ApiError>)> {
-    let row = transaction.query_opt(
+    let row = transaction.query_typed_opt(
         "select max_agents_per_plan, max_concurrent_agents, max_native_subagents from project_multi_agent_settings where project_id = $1",
-        &[project_id],
+        typed![project_id],
     ).await.map_err(|e| internal_error(format!("failed to load team settings: {e}")))?;
     let settings = row
         .map(|row| MultiAgentSettings {

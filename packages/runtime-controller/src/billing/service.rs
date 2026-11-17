@@ -5,6 +5,7 @@ use uuid::Uuid;
 use super::plans;
 use super::plans::BillingPlan;
 use super::processors::ProcessorKind;
+use crate::typed_sql::typed;
 
 pub(crate) async fn ensure_default_org_subscription(
     client: &impl GenericClient,
@@ -18,9 +19,9 @@ pub(crate) async fn ensure_default_org_subscription(
         .is_ok();
 
     let existing = match client
-        .query_opt(
+        .query_typed_opt(
             "select 1 from org_subscriptions where org_id = $1 order by updated_at desc limit 1",
-            &[org_id],
+            typed![org_id],
         )
         .await
     {

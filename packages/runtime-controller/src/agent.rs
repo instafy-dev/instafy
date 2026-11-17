@@ -42,6 +42,7 @@ use crate::tokens::{
     decode_scoped_token, mint_scoped_token_with_runtime_generation, MintedAccessToken,
     ScopedTokenRequest,
 };
+use crate::typed_sql::typed;
 use crate::workspace;
 
 #[path = "agent/planning_receipts.rs"]
@@ -4971,7 +4972,7 @@ pub(crate) async fn enqueue_agent_job_record(
         .map(|_| crate::claude_code_lane::ENGINE);
 
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "insert into agent_jobs (
                  project_id,
                  run_id,
@@ -4995,7 +4996,7 @@ pub(crate) async fn enqueue_agent_job_record(
                   where parent.id = $12 and parent.project_id = $1),
                  $13, $14, coalesce($15, now()), nullif($16::uuid[], '{}'), $17)
              returning id",
-            &[
+            typed![
                 &project.id,
                 run_id,
                 prompt_id,

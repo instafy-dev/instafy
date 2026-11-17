@@ -25,6 +25,7 @@ use crate::credential_keys::CredentialKeyRing;
 use crate::model_defaults::{
     default_chatgpt_model_id, default_model_for_provider, floor_own_ai_model_for_provider,
 };
+use crate::typed_sql::typed;
 use crate::{bad_request, internal_error, not_found, unauthorized, ApiError, AppState};
 
 const CREDENTIAL_KIND_CODEX_AUTH_JSON: &str = "codex_auth_json";
@@ -1957,13 +1958,13 @@ pub(crate) async fn load_default_credential_id(
     };
 
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id
              from user_credentials
              where user_id = $1 and is_default = true and revoked_at is null
              order by updated_at desc, created_at desc
              limit 1",
-            &[&user_id],
+            typed![&user_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load default credential: {error}")))?;
