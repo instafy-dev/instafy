@@ -1456,6 +1456,11 @@ fn a_lane_job_in_a_batch_fails_and_the_rest_go_on() {
         }))
         .unwrap();
         other.lease_attempts = 1;
+        other.proxy = Some(crate::job_proxy_auth::inert_grant_for_test(
+            &other,
+            space.registration.runtime_id,
+            false,
+        ));
         RuntimeAgent::handle_job_batch(
             space.client.clone(),
             space.executor.clone(),

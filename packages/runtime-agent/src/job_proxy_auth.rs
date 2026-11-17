@@ -45,12 +45,48 @@ pub(crate) fn for_job(
     job: &LeaseJob,
     cancel: Option<JobCancelSignal>,
 ) -> io::Result<(Option<Arc<JobProxyAuth>>, Option<JobProxyAuthGuard>)> {
-    if job.proxy.is_some() || registration.proxy.is_some() {
+    // A job that can reach a model never runs without its grant, whatever runs it.
+    // `RuntimeAgent::handle_job` refuses one before it starts; this is the second check.
+    if job.proxy.is_some() || registration.proxy.is_some() || needs_grant(job) {
         let (auth, guard) = JobProxyAuth::new(client, registration, job, cancel)?;
         Ok((Some(auth), Some(guard)))
     } else {
         Ok((None, None))
     }
+}
+
+/// The intent of a job that runs one terminal command and never a model, as the controller's
+/// dispatch counts it (`dispatch_requires_ai_access`).
+const TERMINAL_COMMAND_INTENT: &str = "terminal_command";
+
+/// What a job that needs a grant (`needs_grant`) fails with when it came without one.
+pub(crate) const MISSING_GRANT: &str = "This turn didn't start: it came without the controller's grant for the Instafy proxy, which every model call needs.";
+
+/// Whether `job` can reach a model, and so runs only on a grant of its own. Every model call of a
+/// leased job goes through the Instafy proxy on the grant the controller signed for that job and
+/// lease, and a runtime has no key of its own to fall back to
+/// (docs/Self-Hosted-Runtime-Security.md). A local-engine turn reaches its person's own Claude
+/// Code, never the proxy (docs/Local-Engine-Turns.md 3.1), and a terminal-command job runs its
+/// command without a model.
+pub(crate) fn needs_grant(job: &LeaseJob) -> bool {
+    !crate::claude_code::job::has_engine(job) && !is_terminal_command(job)
+}
+
+/// Whether `job` is a terminal-command job, which never reaches a model (`needs_grant`).
+pub(crate) fn is_terminal_command(job: &LeaseJob) -> bool {
+    job.intent
+        .as_deref()
+        .is_some_and(|intent| intent.trim().eq_ignore_ascii_case(TERMINAL_COMMAND_INTENT))
+}
+
+/// A job's own grant, with a token: what each of its model calls presents, and the only
+/// credential they may present.
+pub(crate) fn require_grant(
+    envelope: Option<&ProxyEnvelopePayload>,
+) -> anyhow::Result<&ProxyEnvelopePayload> {
+    envelope
+        .filter(|envelope| !envelope.token.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!(MISSING_GRANT))
 }
 
 /// Provider-local credentials outrank AuthManager. Remove those static paths
@@ -411,32 +447,11 @@ pub(crate) fn granted_for_test(
     let (client, registration) = crate::controller::proxy_test_client(
         Url::parse("http://127.0.0.1:9").expect("an inert controller address"),
     );
-    let expires = Utc::now() + chrono::Duration::seconds(1800);
-    let payload = serde_json::json!({
-        "aud": "proxy",
-        "iss": "runtime-controller",
-        "sub": format!(
-            "proxy:{}:{}",
-            job.project_id.expect("a job of a space"),
-            registration.runtime_id
-        ),
-        "project_id": job.project_id,
-        "runtime_id": registration.runtime_id,
-        "job_id": job.id,
-        "lease_attempt": job.lease_attempts,
-        "run_id": job.run_id,
-        "credential_id": job.credential_id,
-        "native_web_search": native_web_search,
-        "exp": expires.timestamp(),
-    });
-    job.proxy = Some(ProxyEnvelopePayload {
-        url: "https://proxy.example.invalid/v1".into(),
-        token: format!(
-            "e30.{}.inert-test-signature",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("claims"))
-        ),
-        expires_at: Some(expires.to_rfc3339()),
-    });
+    job.proxy = Some(inert_grant_for_test(
+        job,
+        registration.runtime_id,
+        native_web_search,
+    ));
     JobProxyAuth::with_clock(
         Arc::new(client),
         &registration,
@@ -445,6 +460,43 @@ pub(crate) fn granted_for_test(
         Arc::new(Utc::now),
     )
     .expect("the job's grant")
+}
+
+/// The envelope of `job`'s grant on the runtime `runtime_id`, shaped as the controller signs one
+/// for that job and lease, for tests elsewhere in the crate. It is inert and unsigned: the
+/// runtime reads a grant's claims for consistency, never its signature, and the address is
+/// reserved, so it reaches no model or proxy.
+#[cfg(test)]
+pub(crate) fn inert_grant_for_test(
+    job: &LeaseJob,
+    runtime_id: Uuid,
+    native_web_search: bool,
+) -> ProxyEnvelopePayload {
+    let expires = Utc::now() + chrono::Duration::seconds(1800);
+    let payload = serde_json::json!({
+        "aud": "proxy",
+        "iss": "runtime-controller",
+        "sub": format!(
+            "proxy:{}:{runtime_id}",
+            job.project_id.expect("a job of a space")
+        ),
+        "project_id": job.project_id,
+        "runtime_id": runtime_id,
+        "job_id": job.id,
+        "lease_attempt": job.lease_attempts,
+        "run_id": job.run_id,
+        "credential_id": job.credential_id,
+        "native_web_search": native_web_search,
+        "exp": expires.timestamp(),
+    });
+    ProxyEnvelopePayload {
+        url: "https://proxy.example.invalid/v1".into(),
+        token: format!(
+            "e30.{}.inert-test-signature",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("claims"))
+        ),
+        expires_at: Some(expires.to_rfc3339()),
+    }
 }
 
 #[cfg(test)]
@@ -1032,6 +1084,80 @@ mod tests {
                 JobProxyAuth::new(fixture.auth.client.clone(), &registration, &job, None).is_err()
             );
         }
+    }
+
+    fn unleased_job(intent: Option<&str>, engine: Option<&str>) -> LeaseJob {
+        serde_json::from_value(json!({
+            "id": Uuid::new_v4(),
+            "project_id": Uuid::new_v4(),
+            "intent": intent,
+            "engine": engine,
+            "lease_attempts": 1,
+        }))
+        .unwrap()
+    }
+
+    /// Every job that can reach a model needs a grant of its own: one with no intent, or any
+    /// intent but a terminal command's, as the controller's dispatch counts them. A local-engine
+    /// turn never reaches the proxy, and a terminal command runs without a model.
+    #[test]
+    fn only_a_local_engine_turn_or_a_terminal_command_runs_without_a_grant() {
+        for intent in [None, Some(""), Some("feature"), Some("multi_agent_plan")] {
+            assert!(needs_grant(&unleased_job(intent, None)), "{intent:?}");
+        }
+        for intent in ["terminal_command", " Terminal_Command "] {
+            assert!(!needs_grant(&unleased_job(Some(intent), None)), "{intent}");
+        }
+        assert!(!needs_grant(&unleased_job(
+            Some("feature"),
+            Some("claude-code")
+        )));
+    }
+
+    #[test]
+    fn a_grant_without_a_token_is_no_grant() {
+        let refusal = |grant: Option<&ProxyEnvelopePayload>| {
+            require_grant(grant)
+                .err()
+                .expect("no grant to present")
+                .to_string()
+        };
+        assert_eq!(refusal(None), MISSING_GRANT);
+        let mut grant = ProxyEnvelopePayload {
+            url: "https://proxy.example.invalid".into(),
+            token: " \n".into(),
+            expires_at: None,
+        };
+        assert_eq!(refusal(Some(&grant)), MISSING_GRANT);
+        grant.token = "inert-grant".into();
+        assert_eq!(require_grant(Some(&grant)).unwrap().token, "inert-grant");
+    }
+
+    /// The check behind `RuntimeAgent::handle_job`'s: whatever runs a model job that came
+    /// without its grant gets an error, not a turn on whatever key the runtime's environment or
+    /// its Codex home holds.
+    #[tokio::test]
+    async fn a_model_job_without_its_grant_gets_no_proxy_authentication() {
+        let (client, registration) =
+            proxy_test_client(Url::parse("http://127.0.0.1:9").expect("an inert address"));
+        let client = Arc::new(client);
+        assert!(registration.proxy.is_none());
+        let mut job = unleased_job(None, None);
+        let error = for_job(client.clone(), &registration, &job, None)
+            .err()
+            .expect("a model job needs its grant");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        // A terminal command runs without one, as before.
+        job.intent = Some("terminal_command".into());
+        let (auth, guard) = for_job(client.clone(), &registration, &job, None).unwrap();
+        assert!(auth.is_none() && guard.is_none());
+
+        // A model job with its own grant presents it.
+        job.intent = Some("feature".into());
+        job.proxy = Some(inert_grant_for_test(&job, registration.runtime_id, false));
+        let (auth, guard) = for_job(client, &registration, &job, None).unwrap();
+        assert!(auth.is_some() && guard.is_some());
     }
 
     #[tokio::test]

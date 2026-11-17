@@ -53,8 +53,10 @@ supplying a runtime ID in the request body does not grant that identity. Private
 lease only work belonging to their attested owner, and never a platform AI job (an AI job whose
 target has no credential): Instafy AI runs only on Instafy-hosted runtimes. Own-key jobs and
 terminal commands still run there. The rule holds with `MANAGED_AI_ENABLED=false` too: a
-credential-less job is then served by a proxy's own static key, the private runtime calls the
-proxy the controller names unless its owner overrides `PROXY_BASE_URL`, and that key belongs to
+credential-less job is then served by a proxy's own static key (see
+[Model traffic goes through the Instafy proxy](#model-traffic-goes-through-the-instafy-proxy) for
+when a proxy uses one), the private runtime calls the proxy the controller names unless its owner
+overrides `PROXY_BASE_URL`, and that key belongs to
 the deployment. Dispatch refuses such a job when only private runtimes could run it (pinned to
 one, or a spread plan worker whose plan runtimes are all private), and one already queued that
 way is failed by the controller's idle sweep (see [Credits and billing](Credits-Billing.md)).
@@ -113,6 +115,46 @@ Origin registration is part of the same runtime generation. Mutation tokens must
 
 Private local startup does not call the hosted `/runtime/request` allocator or create an allocator lease. The CLI first mints the owner-bound unleased runtime token, the runtime registers that exact signed identity, and only then the runtime-agent requests `/tunnels/request` with its runtime ID and no lease ID. The controller revalidates the private owner, signed generation, live runtime status, and exact target before issuing the tunnel. Provider-managed agents retain their explicit lease-bound tunnel flow; omitting that lease fails closed for them.
 
+## Model traffic goes through the Instafy proxy
+
+Every model call of a leased job goes through the configured Instafy proxy, on a grant the
+controller signs for that job and lease with `PROXY_SIGNING_SECRET` (or a secret derived from
+`CONTROLLER_INTERNAL_TOKEN`). The grant names the job, its lease attempt, its run and its
+credential. The proxy checks the signature and serves the call on that credential, which it
+leases from the controller, or on the managed lane. Runtimes and browsers never hold a provider
+credential, and nothing falls back to one when a grant is missing:
+
+- **The controller** refuses to start without `PROXY_SIGNING_SECRET` or
+  `CONTROLLER_INTERNAL_TOKEN`, in `DEV_MODE` too. It could sign no grant, so every model job it
+  leased would fail.
+- **A runtime** refuses a job that can reach a model and came without a grant of its own. The job
+  fails before heartbeats, secrets or its folder with "This turn didn't start: it came without the
+  controller's grant for the Instafy proxy, which every model call needs." The session envelope a
+  runtime gets when it registers is not a job's grant. No model lane falls back to a key in the
+  runtime's environment (`OPENAI_API_KEY`, `CODEX_API_KEY`) or to a login in its Codex home: the
+  grant replaces both for every model request. Two kinds of job run without a grant: a terminal
+  command, which runs no model, and a local-engine turn, which reaches its person's own Claude
+  Code and never the proxy ([Local-engine turns](Local-Engine-Turns.md)).
+- **The proxy's own static credentials** (`OPENAI_API_KEY` or `auth.json`) serve managed runs on a
+  proxy with controller integration only as `PROXY_STATIC_PLATFORM_CREDENTIALS` allows. In this
+  release, unset keeps today's behaviour: the proxy serves them and logs a warning at startup and
+  for every managed run they serve. `1` keeps them without the warnings. `0` never reads them, and
+  managed runs lease the controller's managed credential (`MANAGED_AI_OPENAI_API_KEY` on the
+  controller). **The next release treats unset as `0`.** A proxy without controller integration
+  has no managed runs, and its static credentials serve every request whatever the setting says.
+
+Upgrading:
+
+1. Set `PROXY_SIGNING_SECRET` or `CONTROLLER_INTERNAL_TOKEN` on the controller before you upgrade
+   it or its runtimes. Without either, the controller refuses to start, and a runtime fails every
+   model job leased to it, since none comes with a grant. `scripts/run-e2e-dev.mjs` already sets
+   both.
+2. Before the next release, decide for every proxy with controller integration that serves
+   managed runs from its own key: set `PROXY_STATIC_PLATFORM_CREDENTIALS=1` to keep that key, or
+   set `MANAGED_AI_OPENAI_API_KEY` on the controller and `PROXY_STATIC_PLATFORM_CREDENTIALS=0` to
+   lease it now. The proxy's `/healthz` reports the result as `platformLane.servedBy`: `static`
+   or `controller_lease`.
+
 ## Workspace path containment
 
 The origin HTTP/apply facade resolves workspace paths relative to an already-open root capability: descriptor-relative `openat` operations on Unix and capability directory handles on Windows. File reads, writes, archive apply, Git layout validation, rename, and delete open every untrusted component with no-follow semantics. Symlinks in the workspace cannot redirect those facade operations outside the canonical root, including through protected `.git` and `.instafy` paths. ZIP extraction is bounded and validates every entry before mutation.
@@ -162,6 +204,12 @@ cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-
 cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-controller \
   private_self_hosted_origin_tokens_are_owner_bound_and_revoked_on_rotation
 cargo test --manifest-path packages/origin-http-server/Cargo.toml
+cargo test --manifest-path packages/runtime-controller/Cargo.toml --test startup \
+  startup_refuses_a_controller_that_cannot_sign_proxy_grants
+cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib -- \
+  a_model_job_without_its_proxy_grant_fails_before_it_starts job_proxy_auth
+cargo test --manifest-path packages/openai-proxy-server/Cargo.toml \
+  --test proxy_static_platform_credentials
 pnpm --filter @instafy/frontend test:e2e:desktop:shared-browser-collaboration
 ```
 

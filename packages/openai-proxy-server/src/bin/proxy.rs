@@ -20,13 +20,19 @@ async fn main() -> Result<()> {
         .parse()
         .context("invalid CODEX_PROXY_ADDR; expected host:port")?;
 
-    let credentials = match auth::load_credentials(None) {
-        Ok(creds) => Some(creds),
-        Err(error) => {
-            eprintln!(
-                "[proxy] unable to load local credentials: {error}; continuing without static upstream credentials"
-            );
-            None
+    // With controller integration and PROXY_STATIC_PLATFORM_CREDENTIALS=0 the
+    // proxy never reads OPENAI_API_KEY or auth.json (see the README).
+    let credentials = if !proxy::loads_static_credentials()? {
+        None
+    } else {
+        match auth::load_credentials(None) {
+            Ok(creds) => Some(creds),
+            Err(error) => {
+                eprintln!(
+                    "[proxy] unable to load local credentials: {error}; continuing without static upstream credentials"
+                );
+                None
+            }
         }
     };
 

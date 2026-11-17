@@ -1554,6 +1554,29 @@ impl RuntimeAgent {
             }
             return Ok(());
         }
+        // A job that can reach a model runs only on the grant the controller signed for it, and
+        // fails before heartbeats, secrets or its folder without one: every model call goes
+        // through the Instafy proxy, and this runtime has no key of its own to fall back to.
+        if crate::job_proxy_auth::needs_grant(&job)
+            && let Err(error) = crate::job_proxy_auth::require_grant(job.proxy.as_ref())
+        {
+            warn!(
+                job_id = %job.id,
+                "refusing a model job without its proxy grant; the controller signs one for \
+                 every model job once PROXY_SIGNING_SECRET or CONTROLLER_INTERNAL_TOKEN is set"
+            );
+            if let Err(report_error) = client
+                .fail_job(registration, job.id, &error.to_string(), None)
+                .await
+            {
+                warn!(
+                    ?report_error,
+                    job_id = %job.id,
+                    "failed to report the refusal of a model job without its proxy grant"
+                );
+            }
+            return Ok(());
+        }
 
         // Where this job's own time goes (`agent/phase-timings`, crate::turn_phases). A
         // local-engine turn reports only what docs/Local-Engine-Turns.md lists, so its clock

@@ -28,6 +28,10 @@ const ADMIN_MAX_PAGES: usize = 50;
 // refuses to start without both.
 const USER_TOKEN_SECRET: &str = "inert-startup-user-token-secret-0123456789";
 const CREDENTIAL_ENCRYPTION_KEY: &str = "aW5lcnQtc3RhcnR1cC1jcmVkZW50aWFsLWtleS0zMmI=";
+// Inert fixtures. Without one of them the controller refuses to start, in
+// DEV_MODE too: it signs the proxy grant every model job runs on.
+const PROXY_SIGNING_SECRET: &str = "inert-startup-proxy-signing-secret";
+const CONTROLLER_INTERNAL_TOKEN: &str = "inert-startup-controller-internal-token";
 const ADMIN_PATH: &str = "/auth/v1/admin/users";
 const JWKS_PATH: &str = "/auth/v1/.well-known/jwks.json";
 const OUTPUT_LIMIT: u64 = 32 * 1024;
@@ -86,6 +90,7 @@ fn run_controller(server: &MockServer, configure: impl FnOnce(&mut Command)) -> 
         .env("SERVICE_RUNTIME_USER_EMAIL", SERVICE_EMAIL)
         .env("USER_TOKEN_SECRET", USER_TOKEN_SECRET)
         .env("CREDENTIAL_ENCRYPTION_KEY", CREDENTIAL_ENCRYPTION_KEY)
+        .env("PROXY_SIGNING_SECRET", PROXY_SIGNING_SECRET)
         .env("MANAGED_AI_ENABLED", "false")
         .env("MANAGED_AI_STARTUP_CHECK", "false")
         .env("RUST_LOG", "info")
@@ -129,6 +134,8 @@ fn run_controller(server: &MockServer, configure: impl FnOnce(&mut Command)) -> 
     assert!(!output.contains(SERVICE_PASSWORD));
     assert!(!output.contains(USER_TOKEN_SECRET));
     assert!(!output.contains(CREDENTIAL_ENCRYPTION_KEY));
+    assert!(!output.contains(PROXY_SIGNING_SECRET));
+    assert!(!output.contains(CONTROLLER_INTERNAL_TOKEN));
     StartupExit { status, output }
 }
 
@@ -492,6 +499,40 @@ fn startup_refuses_a_missing_credential_encryption_key_before_network_io() {
         );
     }
     requests.assert_hits(0);
+}
+
+#[test]
+fn startup_refuses_a_controller_that_cannot_sign_proxy_grants() {
+    // A runtime runs a model job only on the proxy grant the controller signs
+    // for it, so a controller with nothing to sign grants with would lease
+    // model jobs no runtime runs. It refuses to start, in DEV_MODE too, before
+    // it reaches the database. Blank is unset.
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    for dev_mode in ["0", "1"] {
+        let result = run_controller(&server, |command| {
+            command
+                .env("DEV_MODE", dev_mode)
+                .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+                .env("PROXY_SIGNING_SECRET", "  ")
+                .env("CONTROLLER_INTERNAL_TOKEN", "");
+        });
+        assert_normal_error(
+            &result,
+            "PROXY_SIGNING_SECRET or CONTROLLER_INTERNAL_TOKEN must be set",
+        );
+        assert!(!result.output.contains("failed to parse DATABASE_URL"));
+    }
+
+    // Either secret signs grants: startup goes on to the database.
+    let result = run_controller(&server, |command| {
+        command
+            .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+            .env_remove("PROXY_SIGNING_SECRET")
+            .env("CONTROLLER_INTERNAL_TOKEN", CONTROLLER_INTERNAL_TOKEN);
+    });
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    jwks.assert_hits(3);
 }
 
 #[test]

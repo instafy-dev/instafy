@@ -4,6 +4,7 @@
 
 use super::*;
 use axum::{Json, Router, extract::State, http::StatusCode as AxumStatusCode, routing::post};
+use runtime_contracts::ProxyEnvelopePayload;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone, Default)]
@@ -210,8 +211,20 @@ impl Harness {
     }
 
     /// A job the runtime refuses at once (its execution mode is not
-    /// implemented): it ends on its own, without running a turn.
+    /// implemented): it ends on its own, without running a turn. It carries
+    /// its grant for the Instafy proxy, as the controller leases every job
+    /// that can reach a model.
     fn job(&self) -> LeaseJob {
+        let mut job = self.job_without_a_grant();
+        job.proxy = Some(crate::job_proxy_auth::inert_grant_for_test(
+            &job,
+            self.registration.runtime_id,
+            false,
+        ));
+        job
+    }
+
+    fn job_without_a_grant(&self) -> LeaseJob {
         LeaseJob {
             id: Uuid::new_v4(),
             intent: None,
@@ -379,6 +392,61 @@ async fn the_job_loop_records_whether_a_turn_was_interrupted() {
         1,
         "the lost job is not completed"
     );
+}
+
+/// A job that can reach a model and came without its grant for the Instafy proxy fails before
+/// heartbeats, secrets or its folder, with a reason the chat can show: the runtime has no key of
+/// its own to fall back to. A runtime's session envelope is not a job's grant, and neither is a
+/// grant without a token.
+#[tokio::test]
+async fn a_model_job_without_its_proxy_grant_fails_before_it_starts() {
+    let harness = Harness::start().await;
+    let mut with_a_session_envelope = harness.registration.clone();
+    with_a_session_envelope.proxy = Some(ProxyEnvelopePayload {
+        url: "https://proxy.example.invalid".into(),
+        token: "inert-session-envelope".into(),
+        expires_at: None,
+    });
+    let mut without_a_token = harness.job_without_a_grant();
+    without_a_token.proxy = Some(ProxyEnvelopePayload {
+        url: "https://proxy.example.invalid".into(),
+        token: " ".into(),
+        expires_at: None,
+    });
+    for (registration, mut job) in [
+        (&harness.registration, harness.job_without_a_grant()),
+        (&with_a_session_envelope, harness.job_without_a_grant()),
+        (&harness.registration, without_a_token),
+    ] {
+        job.payload = json!({
+            "prompt_text": "Write a short poem about the sea.",
+            "metadata": {"execution_mode": "apply"}
+        });
+        let executor = Arc::new(AgentExecutor::new(harness.config.clone()));
+        RuntimeAgent::handle_job(
+            harness.client.clone(),
+            executor.clone(),
+            registration,
+            job.clone(),
+            60,
+            Arc::new(Mutex::new(HashSet::new())),
+        )
+        .await
+        .unwrap();
+        assert!(!executor.turn_interrupted());
+    }
+    assert_eq!(harness.stand_in.heartbeats.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.stand_in.secrets_fetches.load(Ordering::SeqCst), 0);
+    let requests = harness.stand_in.requests.lock();
+    assert_eq!(requests.len(), 3, "{requests:#?}");
+    for request in requests.iter() {
+        assert_eq!(request["endpoint"], "complete");
+        assert_eq!(request["body"]["outcome"], "failed");
+        assert_eq!(
+            request["body"]["error_message"],
+            crate::job_proxy_auth::MISSING_GRANT
+        );
+    }
 }
 
 /// A job that finished sends no heartbeat while it reports its end. In a recorded local test

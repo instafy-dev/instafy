@@ -592,6 +592,20 @@ fn proxy_signing_secret(config: &AppConfig) -> Option<Cow<'_, str>> {
         })
 }
 
+/// Refuses to start a controller that cannot sign proxy grants. Every model call of a runtime's
+/// job goes through the Instafy proxy on the grant this controller signs for that job and lease,
+/// and runtimes refuse a model job that came without one, so a controller without a signing
+/// secret would lease model jobs no runtime runs (docs/Self-Hosted-Runtime-Security.md).
+pub(crate) fn check_proxy_signing_secret(config: &AppConfig) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        proxy_signing_secret(config).is_some(),
+        "PROXY_SIGNING_SECRET or CONTROLLER_INTERNAL_TOKEN must be set: the controller signs the \
+         grant each model job presents to the Instafy proxy, and runtimes refuse model jobs \
+         without one"
+    );
+    Ok(())
+}
+
 /// The lowercase hex sha256 of a proxy token, as the job lease records it in
 /// `ai_usage_jobs.token_sha256_by_attempt`.
 pub(crate) fn proxy_token_sha256(token: &str) -> String {
@@ -1108,6 +1122,44 @@ mod tests {
             (1790..=1810).contains(&lifetime),
             "proxy envelope lifetime should cover a long Codex run, got {lifetime}s"
         );
+    }
+
+    /// A controller that could sign no proxy grant would lease model jobs that no runtime runs:
+    /// it refuses to start, in development too. Either secret signs, and blank is unset.
+    #[test]
+    fn a_controller_that_cannot_sign_proxy_grants_refuses_to_start() {
+        for dev_mode in [false, true] {
+            let mut config = base_app_config();
+            config.dev_mode = dev_mode;
+            let error = check_proxy_signing_secret(&config)
+                .expect_err("no secret to sign grants with")
+                .to_string();
+            assert!(
+                error.starts_with("PROXY_SIGNING_SECRET or CONTROLLER_INTERNAL_TOKEN must be set"),
+                "{error}"
+            );
+            config.proxy_signing_secret = Some(" \t".to_string());
+            config.controller_internal_token = Some(String::new());
+            assert!(check_proxy_signing_secret(&config).is_err());
+            assert!(issue_proxy_envelope(
+                &config,
+                &Uuid::new_v4(),
+                &Uuid::new_v4(),
+                Some(&Uuid::new_v4()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .is_none());
+
+            config.controller_internal_token = Some("internal-token".to_string());
+            check_proxy_signing_secret(&config).expect("the internal token signs grants");
+            config.controller_internal_token = None;
+            config.proxy_signing_secret = Some("proxy-secret".to_string());
+            check_proxy_signing_secret(&config).expect("the signing secret signs grants");
+        }
     }
 
     fn proxy_token_claims(config: &AppConfig, token: &str) -> serde_json::Value {

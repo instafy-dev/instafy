@@ -123,6 +123,9 @@ services:
       # "Native search for managed runs" in packages/openai-proxy-server/README.md.
       PROXY_MANAGED_NATIVE_WEB_SEARCH: ${PROXY_MANAGED_NATIVE_WEB_SEARCH:-}
       PROXY_MANAGED_WEB_SEARCH_MODEL: ${PROXY_MANAGED_WEB_SEARCH_MODEL:-}
+      # Whether this proxy's own OPENAI_API_KEY or auth.json serve managed
+      # runs; see docker-compose.runtime.provider.yml.
+      PROXY_STATIC_PLATFORM_CREDENTIALS: ${PROXY_STATIC_PLATFORM_CREDENTIALS:-}
       # Where the proxy sends a ChatGPT login's or an API key's requests; empty
       # is the provider itself. Separate names, because CODEX_PROXY_CHATGPT_ENDPOINT
       # in docker/.env.local points the runtime at this proxy. Used to put

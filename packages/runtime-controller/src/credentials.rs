@@ -703,7 +703,7 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
 
     if !proxy_serves_managed(&requirements) {
         anyhow::bail!(
-            "managed AI startup check failed for {}: proxy reports requiresCredential=true; provide static proxy credentials (OPENAI_API_KEY or auth.json, with PROXY_PINNED_MODEL set to MANAGED_AI_MODEL_ID), set MANAGED_AI_OPENAI_API_KEY on the controller so proxies lease it, or disable MANAGED_AI_ENABLED",
+            "managed AI startup check failed for {}: proxy reports requiresCredential=true; set MANAGED_AI_OPENAI_API_KEY on the controller so proxies lease it, provide static proxy credentials (OPENAI_API_KEY or auth.json, with PROXY_STATIC_PLATFORM_CREDENTIALS=1 and PROXY_PINNED_MODEL set to MANAGED_AI_MODEL_ID), or disable MANAGED_AI_ENABLED",
             proxy_base_url
         );
     }
