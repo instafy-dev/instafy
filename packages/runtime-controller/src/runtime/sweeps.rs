@@ -3793,7 +3793,13 @@ mod tests {
     /// scans every failed job. A database without that index's migration
     /// (`20261114112320_agent_jobs_stopped_browser_turn_recovery_idx.sql`)
     /// fails here. Sequential scans are off for this plan alone: the test
-    /// database's tables are too small for any index to look cheaper.
+    /// database's tables are too small for any index to look cheaper. Sorts
+    /// are off too. `agent_jobs_status_idx` also finds failed jobs, and with
+    /// the statistics other tests leave behind, reading it and then sorting
+    /// sometimes looked cheaper, so the test failed now and then. Only the
+    /// partial index yields `completed_at, id` order without a sort, so with
+    /// sorts off the plan comes from it whatever the statistics, and a
+    /// database without it still plans a sort and fails here.
     #[tokio::test]
     async fn the_stopped_browser_turn_repair_is_planned_on_its_index() -> anyhow::Result<()> {
         let pool =
@@ -3801,7 +3807,7 @@ mod tests {
         let mut connection = pool.get().await?;
         let transaction = connection.transaction().await?;
         transaction
-            .batch_execute("set local enable_seqscan = off")
+            .batch_execute("set local enable_seqscan = off; set local enable_sort = off")
             .await?;
         let sentences = vec![
             super::super::stop::PERSONAL_BROWSER_DISCONNECTED_ERROR,
