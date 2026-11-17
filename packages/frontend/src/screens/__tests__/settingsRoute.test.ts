@@ -1,17 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildProjectSettingsCategorySearch,
   buildSettingsSectionSearch,
   resolveProjectSettingsCategory,
-  buildOrganizationSettingsCategorySearch,
-  resolveOrganizationSettingsCategory,
   resolveSettingsRoute,
 } from "../studio/settingsRoute";
 
 describe("project settings routing", () => {
   it("keeps project settings active when a category is selected from stale search state", () => {
-    const search = buildProjectSettingsCategorySearch(
+    const search = buildSettingsSectionSearch(
       "?projectId=project-1&conversationId=conversation-1",
+      "project",
       "access",
     );
     const params = new URLSearchParams(search);
@@ -24,8 +22,9 @@ describe("project settings routing", () => {
   });
 
   it("uses the default category without leaving a stale category param", () => {
-    const search = buildProjectSettingsCategorySearch(
+    const search = buildSettingsSectionSearch(
       "?panel=settings&settingsTab=project&settingsCategory=access",
+      "project",
       "overview",
     );
     const params = new URLSearchParams(search);
@@ -42,54 +41,14 @@ describe("project settings routing", () => {
 });
 
 describe("team settings routing", () => {
-  it("keeps the selected empty team independent of the active project", () => {
-    const search = buildOrganizationSettingsCategorySearch("?projectId=other-project&panel=chat", "members", "empty-team");
-    const params = new URLSearchParams(search);
-    expect(params.get("projectId")).toBe("other-project");
-    expect(params.get("panel")).toBe("settings");
-    expect(params.get("settingsTab")).toBe("org");
-    expect(params.get("settingsOrgId")).toBe("empty-team");
-    expect(resolveOrganizationSettingsCategory(search)).toBe("members");
-    expect(resolveSettingsRoute(search)).toEqual({ tab: "org", category: "members", itemId: null });
-  });
-
-  it("returns to profile without carrying a previous team's category or ID", () => {
-    const search = buildOrganizationSettingsCategorySearch("?settingsCategory=danger&settingsOrgId=old-team", "profile", null);
-    const params = new URLSearchParams(search);
-    expect(params.has("settingsCategory")).toBe(false);
-    expect(params.has("settingsOrgId")).toBe(false);
-    expect(params.get("settingsTab")).toBe("org");
-    expect(resolveSettingsRoute(search)).toEqual({ tab: "org", category: "profile", itemId: null });
-  });
-
-  it("opens Team profile from a space audio item without inheriting its category or item", () => {
-    const search = buildOrganizationSettingsCategorySearch(
-      "?panel=settings&projectId=other-space&settingsTab=project&settingsCategory=ai&settingsItem=speech",
-      "profile",
-      "empty-team",
-    );
-    const params = new URLSearchParams(search);
-    expect(resolveSettingsRoute(search)).toEqual({ tab: "org", category: "profile", itemId: null });
-    expect(params.get("settingsOrgId")).toBe("empty-team");
-    expect(params.get("projectId")).toBe("other-space");
-    expect(params.has("settingsItem")).toBe(false);
-    expect(resolveSettingsRoute(`${search}&settingsCategory=profile`).category).toBe("profile");
-  });
-
   it("retains team scope across sections and clears it when entering space or account settings", () => {
-    const team = buildOrganizationSettingsCategorySearch("?projectId=other-space", "profile", "empty-team");
+    const team = "?projectId=other-space&panel=settings&settingsTab=org&settingsOrgId=empty-team";
     const members = buildSettingsSectionSearch(team, "org", "members");
     expect(new URLSearchParams(members).get("settingsOrgId")).toBe("empty-team");
     for (const next of [buildSettingsSectionSearch(members, "project", "overview"), buildSettingsSectionSearch(members, "profile", "account")]) {
       expect(new URLSearchParams(next).has("settingsOrgId")).toBe(false);
       expect(new URLSearchParams(next).get("projectId")).toBe("other-space");
     }
-  });
-
-  it("accepts team categories on reload and rejects unrelated space categories", () => {
-    expect(resolveOrganizationSettingsCategory("?settingsCategory=billing")).toBe("billing");
-    expect(resolveOrganizationSettingsCategory("?settingsCategory=profile")).toBe("profile");
-    expect(resolveOrganizationSettingsCategory("?settingsCategory=providers")).toBeNull();
   });
 });
 

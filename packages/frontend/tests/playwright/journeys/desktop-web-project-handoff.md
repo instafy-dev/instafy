@@ -52,7 +52,7 @@ What holds today (verified against the origin/git implementation):
 - **Onboarding**: with a remote configured, an empty working-copy folder is populated by `git clone`-equivalent checkout on origin start. A non-empty, non-clone folder hard-fails origin startup rather than overwriting anything.
 - **Write-back**: agent runs commit+push after apply (`/git/sync`); user edits via web `/apply` land directly in whichever origin serves the project and become dirty working-copy state until the next sync (`Save version`, agent auto-sync, or `/sync`).
 - **Pull**: origins refresh from the remote lazily (~120s TTL on reads, forced on `/entries?sync=blocking`), fast-forward only, and never clobber dirty local edits.
-- **Conflicts**: pushes are never forced; a rebase that cannot apply surfaces HTTP 409 → the Changes drawer / chat conflict card with the assistant-driven resolution playbook.
+- **Conflicts**: pushes are never forced; a rebase that cannot apply surfaces HTTP 409 → the chat conflict card with the assistant-driven resolution playbook.
 - **Eventing**: successful syncs emit `workspace.commit` to web clients over SSE; the file explorer refreshes and raises a stale-file merge notice instead of clobbering unsaved editor buffers.
 
 Known non-guarantees (acceptable, but must not be misrepresented in UI):

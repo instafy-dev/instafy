@@ -18,7 +18,6 @@ export interface BuildLogEntry {
 }
 
 export interface RuntimeState {
-  buildLogs: BuildLogEntry[];
   activeConversationId: string | null;
   controllerReady: boolean;
   controllerProjectMissing: boolean;

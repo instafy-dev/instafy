@@ -1,5 +1,4 @@
 import { useSyncExternalStore } from "react";
-import { changesApi } from "./changesAdapters";
 import type { CodeWorkspace } from "../../../src/types";
 import type { ControllerWorkspaceEntry, ControllerWorkspaceFileContent } from "../../../src/sdk/instafy";
 
@@ -102,7 +101,12 @@ export const filesApi = {
 export const filesControllerExtras = {
   workspace: {
     git: {
-      ...changesApi,
+      // Files falls back to its unavailable Git status; reads and reverts stay inert.
+      fetchStatus: async () => null,
+      fetchHistory: async () => ({ supported: true, entries: [], branch: "review", busy: false, error: null }),
+      fetchDiff: async () => ({ supported: true, diff: "", error: null, truncated: false }),
+      revertPaths: async () => ({ ok: false, error: "Discard is not connected in this local review." }),
+      revertCommit: async () => ({ ok: false, error: "Revert is not connected in this local review." }),
       // Acknowledges a fixture-only version; no Git or network transport exists here.
       syncToRemote: async () => { assertCanSave(); localVersion += 1; return { ok: true, rev: `review-version-${localVersion}` }; },
     },

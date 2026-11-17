@@ -307,8 +307,6 @@ export function ChatPostTranscriptAuxiliaryRows({
   aiOnboardingOpen,
   credentialGateDetail,
   credentialsBusy,
-  canUseDesktopConnect,
-  aiConnectWizardStorageKey,
   activeAiCredentials,
   defaultCredentialId,
   managedAi,
@@ -318,10 +316,6 @@ export function ChatPostTranscriptAuxiliaryRows({
   onConnectAi,
   hasTeammates,
   onCloseAiOnboarding,
-  onStashDraftForCredentials,
-  onConnectDesktop,
-  onUploadAuthJson,
-  onSaveApiKey,
   onRetryCredentials,
   renderAssistantAvatar,
 }: {
@@ -340,8 +334,6 @@ export function ChatPostTranscriptAuxiliaryRows({
   aiOnboardingOpen: boolean;
   credentialGateDetail: string | null;
   credentialsBusy: boolean;
-  canUseDesktopConnect: boolean;
-  aiConnectWizardStorageKey: string | null;
   activeAiCredentials: ControllerCredentialListItem[];
   defaultCredentialId: string | null;
   managedAi: {
@@ -362,13 +354,6 @@ export function ChatPostTranscriptAuxiliaryRows({
   // Gates the gate's "turn the assistant off" caption on a real second member.
   hasTeammates: boolean;
   onCloseAiOnboarding: () => void;
-  onStashDraftForCredentials: () => void;
-  onConnectDesktop: () => void;
-  onUploadAuthJson: (file: File) => void;
-  onSaveApiKey: (
-    apiKey: string,
-    provider: "openai" | "deepseek" | "zai" | "gemini",
-  ) => Promise<{ success: boolean; error?: string }>;
   onRetryCredentials: () => void;
   renderAssistantAvatar: AssistantAvatarRenderer;
 }) {
@@ -458,8 +443,6 @@ export function ChatPostTranscriptAuxiliaryRows({
             intent={aiOnboardingOpen ? "connect" : "gate"}
             detail={credentialGateDetail}
             isBusy={credentialsBusy}
-            canUseDesktopConnect={canUseDesktopConnect}
-            storageKey={aiConnectWizardStorageKey}
             connectedCredentials={activeAiCredentials}
             defaultCredentialId={defaultCredentialId}
             managedAi={managedAi}
@@ -469,10 +452,6 @@ export function ChatPostTranscriptAuxiliaryRows({
             onConnectAi={onConnectAi}
             hasTeammates={hasTeammates}
             onClose={onCloseAiOnboarding}
-            onStashDraft={onStashDraftForCredentials}
-            onConnectDesktop={onConnectDesktop}
-            onUploadAuthJson={onUploadAuthJson}
-            onSaveApiKey={onSaveApiKey}
             onRetry={() => void onRetryCredentials()}
           />
         </ChatBubbleRow>

@@ -160,12 +160,9 @@ describe("ChatPanel's turn-engine wiring", () => {
     expect(effect).toMatch(/sendingAttachment,\s*turnEngineChosen,\s*\]\);/);
   });
 
-  it("never sends the draft from the AI wizard while an engine is chosen", () => {
+  it("never sends the draft from the managed-AI offer while an engine is chosen", () => {
     const keepDraft =
       /if \(pendingTurnEngineIdRef\.current !== null\) \{\s*return;\s*\}\s*void submitMessage\(undefined, \{ allowWhileBusy: true \}\);/;
-    expect(between(chatPanel, "if (!pendingCredentialAutoSubmitRef.current) {", "const handleUseManagedAi")).toMatch(
-      keepDraft,
-    );
     expect(between(chatPanel, "const handleUseManagedAi = useCallback(() => {", "const handleChatWithoutAi")).toMatch(
       keepDraft,
     );

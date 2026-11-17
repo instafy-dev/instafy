@@ -96,8 +96,6 @@ export function HistoryDrawer({
   versioning,
   onRequestClose,
   probeFailed = false,
-  arrived = false,
-  arrivalNotice = null,
 }: {
   headerPortalTarget?: HTMLElement | null;
   actionsPortalTarget?: HTMLElement | null;
@@ -105,13 +103,6 @@ export function HistoryDrawer({
   onRequestClose?: () => void;
   /** The mode probe made when the drawer opened got no answer. */
   probeFailed?: boolean;
-  /**
-   * Set when this drawer replaced Changes while Changes had keyboard focus:
-   * the title takes the focus that fell to the page.
-   */
-  arrived?: boolean;
-  /** Why it replaced Changes, for the status (a notice also takes the focus). */
-  arrivalNotice?: string | null;
 }) {
   const { projectCapabilitiesResolved, canWriteProject } = useProject();
   const { user } = useAuth();
@@ -347,16 +338,6 @@ export function HistoryDrawer({
       setNotice({ tone: "info", text: HISTORY_PROBE_ANSWERED_COPY });
     }
   }, [drawerTitleId, focusSavedVersionsHeading, probeUnanswered, ready, savedVersionsLabelId, setNotice]);
-
-  useEffect(() => {
-    if (!arrived && !arrivalNotice) {
-      return;
-    }
-    restoreLostFocus(document.getElementById(drawerTitleId));
-    if (arrivalNotice) {
-      setNotice({ tone: "info", text: arrivalNotice });
-    }
-  }, [arrivalNotice, arrived, drawerTitleId, setNotice]);
 
   // Show more keeps focus on the first new row.
   useEffect(() => {

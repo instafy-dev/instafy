@@ -1,6 +1,5 @@
 import { createContext, useContext, type ReactNode } from "react";
 import type { OrganizationChatTab } from "../../workspace/useOrganizationChatTabs";
-import type { BuildLogEntry } from "../../types";
 
 export type PrivateChatTarget = {
   userId: string;
@@ -17,9 +16,6 @@ export interface WorkspaceControlsContextValue {
   homeAttentionByOrg?: Record<string, number>;
   onSignOut?: () => void;
   activeProjectName: string | null;
-  onShowLogs?: () => void;
-  hasLogs: boolean;
-  buildLogs?: BuildLogEntry[];
   sidebarCollapsed?: boolean;
   sidebarOpen?: boolean;
   onToggleSidebar?: () => void;
@@ -75,9 +71,6 @@ const defaultWorkspaceControls: WorkspaceControlsContextValue = {
   homeAttentionByOrg: {},
   onSignOut: undefined,
   activeProjectName: null,
-  onShowLogs: undefined,
-  hasLogs: false,
-  buildLogs: [],
   sidebarCollapsed: undefined,
   sidebarOpen: undefined,
   onToggleSidebar: undefined,

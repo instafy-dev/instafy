@@ -812,7 +812,7 @@ describe("ComposerInviteModal", () => {
     const onStartPrivateConversation = vi.fn();
     const onOpenChange = vi.fn();
     const render = (props: Partial<ComponentProps<typeof ComposerInviteModal>>) => root.render(
-      <WorkspaceControlsProvider value={{ userEmail: null, activeProjectName: null, hasLogs: false, onStartPrivateConversation }}>
+      <WorkspaceControlsProvider value={{ userEmail: null, activeProjectName: null, onStartPrivateConversation }}>
         <ComposerInviteModal {...createProps({ activeConversationVisibility: "public", onOpenChange, ...props })} />
       </WorkspaceControlsProvider>,
     );

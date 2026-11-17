@@ -163,7 +163,6 @@ describe("ProjectProviderBindingsCard", () => {
     window.__INSTAFY_RUNTIME__ = {
       getSnapshot: () => ({
         runtime: {
-          buildLogs: [],
           activeConversationId: null,
           controllerReady: true,
           controllerProjectMissing: false,

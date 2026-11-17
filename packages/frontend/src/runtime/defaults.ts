@@ -1,7 +1,6 @@
 import type { RuntimeState } from "../types";
 
 export const DEFAULT_RUNTIME_STATE: RuntimeState = {
-  buildLogs: [],
   activeConversationId: null,
   controllerReady: false,
   controllerProjectMissing: false,

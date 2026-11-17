@@ -89,7 +89,6 @@ describe("BugReportDialog diagnostic consent", () => {
           activeRuntimeId="runtime-1"
           controllerProjectMissing={false}
           appLogs={appLogs}
-          buildLogs={[{ id: "runtime-1", severity: "error", message: "runtime detail", timestamp: 2 }]}
         />
       );
       root.render(session.strictMode ? <StrictMode>{dialog}</StrictMode> : dialog);
@@ -151,7 +150,7 @@ describe("BugReportDialog diagnostic consent", () => {
     await act(async () => checkbox?.click());
 
     const preview = document.querySelector('[data-testid="bug-report-diagnostics-preview"]');
-    expect(preview?.textContent).toContain("1 app log entries and 1 machine log entries");
+    expect(preview?.textContent).toContain("1 app log entries");
     expect(preview?.textContent).toContain("http://localhost:3000/studio/demo");
     expect(preview?.textContent).not.toContain("oauth_code");
     expect(preview?.textContent).not.toContain("private-fragment");
@@ -165,7 +164,7 @@ describe("BugReportDialog diagnostic consent", () => {
       logs: unknown[];
       metadata: Record<string, unknown>;
     };
-    expect(payload.logs).toHaveLength(2);
+    expect(payload.logs).toHaveLength(1);
     expect(payload.metadata.location).toBe("http://localhost:3000/studio/demo");
     expect(payload.metadata).not.toHaveProperty("userEmail");
     expect(mocks.collectReleaseMetadata).toHaveBeenCalledTimes(1);

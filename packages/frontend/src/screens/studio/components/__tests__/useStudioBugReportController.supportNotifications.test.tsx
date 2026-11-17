@@ -78,7 +78,6 @@ function Harness({ userId, legacyResolutionToasts }: { userId: string | null; le
     activeConversationLocalId: null,
     activeRuntimeId: null,
     controllerProjectMissing: false,
-    buildLogs: [],
     legacyResolutionToasts,
   });
   return (

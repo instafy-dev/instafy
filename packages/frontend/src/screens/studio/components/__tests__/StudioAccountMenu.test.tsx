@@ -12,11 +12,11 @@ const mocks = vi.hoisted(() => ({
   desktop: true, native: false, large: false,
   refresh: vi.fn(), download: vi.fn(), install: vi.fn(), check: vi.fn(),
   otaInstall: vi.fn(), otaCheck: vi.fn(), showStatus: vi.fn(), nativeBack: vi.fn(),
-  copyTunnel: vi.fn(), clearLogs: vi.fn(), onShowLogs: vi.fn(), onSupport: vi.fn(),
+  copyTunnel: vi.fn(), clearLogs: vi.fn(), onSupport: vi.fn(),
 }));
 vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform: () => mocks.native, getPlatform: () => mocks.native ? "android" : "web" } }));
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({
-  userEmail: "reader@example.test", hasLogs: true, onShowLogs: mocks.onShowLogs,
+  userEmail: "reader@example.test",
   onOpenBugReportInbox: mocks.onSupport,
 }) }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => mocks.large }));
@@ -38,7 +38,6 @@ vi.mock("../../../../desktop/updates/client", () => ({
 vi.mock("../../../../mobile/ota/shared", () => ({ otaIsSupportedOnThisClient: () => mocks.native }));
 vi.mock("../../../../mobile/ota/bootstrap", () => ({ applyStagedNativeOtaUpdate: mocks.otaInstall, triggerNativeOtaCheck: mocks.otaCheck }));
 vi.mock("../DevDiagnosticsMenu", () => ({ DevDiagnosticsMenu: (props: ComponentProps<typeof DevDiagnosticsMenu>) => <div>
-  <button data-testid="test-runtime-logs" onClick={props.onShowLogs}>Logs</button>
   <button data-testid="test-app-logs" onClick={props.onShowAppLogs}>App logs</button>
   <button data-testid="test-copy-tunnel" onClick={() => props.onCopyTunnel("url", "runtime-a")}>Copy</button>
 </div> }));

@@ -36,10 +36,6 @@ Add `filesSave=manual` to hold a local file write in its saving state. Release i
 toolbar checks use this explicit fixture mode to verify focus, pending appearance and
 completion without timing assumptions; it does not simulate a real controller.
 
-`?panel=changes` mounts the production Changes drawer and its single-file and all-files
-diff viewers with two inert Git diffs. Discard and revert return local review-only errors;
-refresh reads the same fixture data and never runs Git or contacts a controller.
-
 These are rendered product-surface checks with simulated data, not authenticated integration,
 backend, Electron or native-device coverage. The fixture is not a production entrypoint.
 

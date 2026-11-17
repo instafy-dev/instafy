@@ -142,10 +142,10 @@ async function expectToolbarFocusClearance(header: Locator) {
 }
 
 for (const { width, hasTouch } of [{ width: 390, hasTouch: true }, { width: 1440, hasTouch: false }]) {
-  test.describe(`Changes surfaces at ${width}px`, () => {
+  test.describe(`Files header and empty states at ${width}px`, () => {
     test.use({ hasTouch });
     for (const theme of ["Light", "Dark"]) {
-      test(`${theme.toLowerCase()} diff switching and unavailable Files remain usable`, async ({ page }, testInfo) => {
+      test(`${theme.toLowerCase()} file header and unavailable Files remain usable`, async ({ page }, testInfo) => {
         const errors: string[] = [];
         page.on("pageerror", error => errors.push(error.message));
         await page.setViewportSize({ width, height: 950 });
@@ -156,120 +156,12 @@ for (const { width, hasTouch } of [{ width: 390, hasTouch: true }, { width: 1440
         const fileHeader = page.getByTestId("files-viewer-header");
         const fileTitle = fileHeader.getByRole("heading", { name: "guide.md", exact: true });
         await expect(fileTitle).toBeVisible();
-        const titleStyle = await fileTitle.evaluate(element => {
-          const style = getComputedStyle(element);
-          return { fontSize: style.fontSize, fontWeight: style.fontWeight, color: style.color };
-        });
         const headerGutters = (header: Locator) => header.evaluate(element => {
           const style = getComputedStyle(element);
           return { left: style.paddingLeft, right: style.paddingRight };
         });
         expect(await headerGutters(fileHeader)).toEqual({ left: "16px", right: "16px" });
         await expectToolbarFocusClearance(fileHeader);
-        await page.goto("/tests/fixtures/workspace-surfaces/index.html?panel=changes");
-        await page.getByRole("radiogroup", { name: "Review theme" }).getByText(theme, { exact: true }).click();
-        const rolling = page.getByTestId(hasTouch ? "source-control-rolling-diff-sheet-panel" : "source-control-rolling-diff-view");
-        await expect(rolling).toBeVisible();
-        const welcome = rolling.getByTestId("source-control-rolling-diff-item-src-welcome-ts-panel");
-        const changedLine = welcome.getByText('const displayName = name.trim() || "there";', { exact: false });
-        await expect(changedLine).toBeVisible();
-        const toggle = welcome.getByRole("button", { name: "Collapse diff", exact: true });
-        const header = welcome.getByRole("heading", { name: "src/welcome.ts", exact: true });
-        await expect(header).toBeVisible();
-        expect(await header.evaluate(element => {
-          const style = getComputedStyle(element);
-          return { fontSize: style.fontSize, fontWeight: style.fontWeight, color: style.color };
-        })).toEqual(titleStyle);
-        expect(await headerGutters(welcome.getByTestId("source-control-rolling-diff-item-src-welcome-ts-diff-toolbar"))).toEqual({ left: "16px", right: "16px" });
-        const titleBounds = (await header.boundingBox())!;
-        const toggleBounds = (await toggle.boundingBox())!;
-        expect(Math.abs(titleBounds.y + titleBounds.height / 2 - toggleBounds.y - toggleBounds.height / 2), "file title and action share a vertical center").toBeLessThanOrEqual(2);
-        if (hasTouch) {
-          expect(toggleBounds.width).toBeGreaterThanOrEqual(44);
-          expect(toggleBounds.height).toBeGreaterThanOrEqual(44);
-        }
-        await toggle.focus();
-        await expect(toggle).toHaveAttribute("aria-expanded", "true");
-        await toggle.press("Enter");
-        await expect(changedLine).toHaveCount(0);
-        const expand = welcome.getByRole("button", { name: "Expand diff", exact: true });
-        await expect(expand).toBeFocused();
-        await expect(expand).toHaveAttribute("aria-expanded", "false");
-        await expect(header).toBeVisible();
-        await expand.press("Space");
-        await expect(changedLine).toBeVisible();
-        await expect(toggle).toBeFocused();
-        await page.screenshot({ path: testInfo.outputPath("changes-all.png"), animations: "disabled" });
-
-        if (hasTouch) await page.getByTestId("source-control-rolling-diff-close").click();
-        else await page.getByTestId("source-control-review-mode-focused").click();
-        const focused = page.getByTestId(hasTouch ? "source-control-diff-sheet-panel" : "source-control-diff-view");
-        await expect(focused).toBeVisible();
-        await expect(focused).toContainText('const displayName = name.trim() || "there";');
-        const previousFile = focused.getByRole("button", { name: "Previous changed file", exact: true });
-        const nextFile = focused.getByRole("button", { name: "Next changed file", exact: true });
-        if (hasTouch) {
-          for (const action of [previousFile, nextFile]) {
-            const bounds = (await action.boundingBox())!;
-            expect(bounds.width).toBeGreaterThanOrEqual(44);
-            expect(bounds.height).toBeGreaterThanOrEqual(44);
-          }
-        }
-        await expect(previousFile).toBeDisabled();
-        await expect(nextFile).toBeEnabled();
-        await nextFile.click();
-        await expect(focused.getByRole("heading", { name: "README.md", exact: true })).toBeVisible();
-        await expect(nextFile).toBeDisabled();
-        await expect(previousFile).toBeEnabled();
-        await previousFile.click();
-        await expect(previousFile).toBeDisabled();
-        const selectedTitle = focused.getByRole("heading", { name: "src/welcome.ts", exact: true });
-        await expect(selectedTitle).toBeVisible();
-        expect(await selectedTitle.evaluate(element => {
-          const style = getComputedStyle(element);
-          return { fontSize: style.fontSize, fontWeight: style.fontWeight, color: style.color };
-        })).toEqual(titleStyle);
-        const selectedToolbar = focused.getByTestId("source-control-diff-toolbar");
-        expect(await headerGutters(selectedToolbar)).toEqual({ left: "16px", right: "16px" });
-        const expectReadableSelectedHeader = async () => {
-          await expectToolbarFocusClearance(selectedToolbar);
-          expect((await selectedTitle.boundingBox())!.width, "selected filename remains readable beside the actions (1px rounding tolerance)").toBeGreaterThanOrEqual(99);
-          expect((await selectedToolbar.getByText("Working tree", { exact: true }).boundingBox())!.height, "subtitle does not wrap into a vertical stack").toBeLessThanOrEqual(32);
-          expect((await selectedToolbar.boundingBox())!.height, "crowded actions wrap without making the toolbar excessively tall").toBeLessThan(140);
-          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-        };
-        await expectReadableSelectedHeader();
-        if (hasTouch) {
-          await page.setViewportSize({ width: 320, height: 950 });
-          await expectReadableSelectedHeader();
-          await page.setViewportSize({ width, height: 950 });
-        }
-        const refresh = focused.getByRole("button", { name: "Refresh diff", exact: true });
-        const refreshBounds = (await refresh.boundingBox())!;
-        expect(refreshBounds.x).toBeGreaterThanOrEqual(0);
-        expect(refreshBounds.x + refreshBounds.width).toBeLessThanOrEqual(width);
-        if (hasTouch) {
-          expect(refreshBounds.width).toBeGreaterThanOrEqual(44);
-          expect(refreshBounds.height).toBeGreaterThanOrEqual(44);
-        }
-        await page.screenshot({ path: testInfo.outputPath("changes-focused.png"), animations: "disabled" });
-        if (hasTouch) await page.getByTestId("source-control-diff-close").click();
-        await page.getByTestId("source-control-review-mode-all").click();
-        await expect(rolling).toBeVisible();
-        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-        if (hasTouch) {
-          await page.getByTestId("source-control-rolling-diff-close").click();
-          await page.getByRole("button", { name: "README.md", exact: true }).click();
-        } else {
-          await page.getByTestId("source-control-review-mode-focused").click();
-          await nextFile.click();
-        }
-        await expect(focused).toBeVisible();
-        const openFile = focused.getByRole("button", { name: "Open file", exact: true });
-        await expect(openFile).toHaveText("Open");
-        await openFile.click();
-        await expect(page.getByTestId("review-files-panel")).toBeVisible();
-        await expect(page.getByTestId("files-viewer-header").getByRole("heading", { name: "README.md", exact: true })).toBeVisible();
 
         for (const [scenario, message, action] of [
           ["unavailable", "Connect the runtime controller to browse space files.", "Back to Assistant"],

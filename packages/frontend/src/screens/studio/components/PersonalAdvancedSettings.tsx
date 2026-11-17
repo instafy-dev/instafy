@@ -16,7 +16,7 @@ export function PersonalAdvancedSettings() {
             <span className="ml-auto transition-transform group-open/developer:rotate-180 motion-reduce:transition-none"><ControlChevron /></span>
           </summary>
           <div className="space-y-3 px-2 pb-2 pt-3">
-            <Text variant="bodyCompact" tone="muted">Inspect app and machine logs, build information, connections, and layout overrides.</Text>
+            <Text variant="bodyCompact" tone="muted">Inspect app logs, build information, connections, and layout overrides.</Text>
             <Button variant="outline" isDisabled={!onOpenDiagnostics} onPress={onOpenDiagnostics} data-testid="settings-open-diagnostics">Open diagnostics</Button>
           </div>
         </details>

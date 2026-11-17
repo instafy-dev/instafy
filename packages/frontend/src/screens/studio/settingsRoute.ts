@@ -5,24 +5,6 @@ import type { SettingsTab } from "./types";
 export type ProjectSettingsCategory = "overview" | "access" | "providers" | "ai" | "danger";
 export type OrganizationSettingsCategory = "profile" | "members" | "ai" | "billing" | "danger";
 
-export function resolveOrganizationSettingsCategory(search: string): OrganizationSettingsCategory | null {
-  const category = new URLSearchParams(search).get("settingsCategory");
-  return category === "profile" || category === "members" || category === "ai" || category === "billing" || category === "danger"
-    ? category : null;
-}
-
-export function buildOrganizationSettingsCategorySearch(
-  search: string,
-  category: OrganizationSettingsCategory,
-  organizationId: string | null,
-): string {
-  const params = new URLSearchParams(buildSettingsSectionSearch(search, "org", category));
-  const selectedId = organizationId?.trim();
-  if (selectedId) params.set("settingsOrgId", selectedId);
-  else params.delete("settingsOrgId");
-  return params.toString();
-}
-
 // An unknown category resolves to the tab's first one, so an old link to the
 // removed profile "preferences" category (its only setting, auto-save, is
 // gone because every turn saves) opens Profile.
@@ -114,11 +96,4 @@ export function resolveProjectSettingsCategory(search: string): ProjectSettingsC
   } catch {
     return null;
   }
-}
-
-export function buildProjectSettingsCategorySearch(
-  search: string,
-  category: ProjectSettingsCategory,
-): string {
-  return buildSettingsSectionSearch(search, "project", category);
 }

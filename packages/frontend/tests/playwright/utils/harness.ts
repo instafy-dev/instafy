@@ -4528,29 +4528,6 @@ export async function writeWorkspaceFile(
   });
 }
 
-export async function writeWorkspaceFiles(
-  page: Page,
-  files: Array<{ path: string; content: string }>,
-  options?: { projectId?: string | null; preferRuntimeId?: string | null }
-): Promise<void> {
-  const normalizedFiles = files
-    .map((file) => ({
-      path: normalizeWorkspaceRelativePath(file.path),
-      content: file.content ?? "",
-      encoding: "utf-8",
-    }))
-    .filter((file) => file.path.length > 0);
-  if (normalizedFiles.length === 0) {
-    return;
-  }
-  await applyWorkspaceChanges(page, {
-    files: normalizedFiles,
-    deletes: [],
-    projectId: options?.projectId ?? undefined,
-    preferRuntimeId: options?.preferRuntimeId ?? null,
-  });
-}
-
 export async function syncGitRemote(
   page: Page,
   options?: { projectId?: string | null; message?: string | null }

@@ -31,20 +31,13 @@ function Harness({ options }: { options: HookOptions }) {
 
 function options(messages: HookOptions["messages"]): HookOptions {
   return {
-    activeConversationId: "conv-1",
     activeProjectId: "project-a",
     aiConnectWizardStorageKey: null,
-    canUseDesktopConnect: false,
     currentUserId: "user-1",
-    focusInput: () => undefined,
     hasUser: true,
-    inputEditorState: null,
     inputRequiresAi: false,
-    inputValue: "",
     messages,
-    onInputChange: () => undefined,
     pinAiOnboardingToBottom: () => undefined,
-    pendingCredentialAutoSubmitRef: { current: false },
     refreshAvailableAgents: () => undefined,
     runtimeControllerEnabled: true,
     showStatus: () => undefined,

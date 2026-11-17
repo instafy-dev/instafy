@@ -6,7 +6,7 @@ import { WorkspaceControlsProvider } from "../../workspaceControls";
 import { PersonalAdvancedSettings } from "../PersonalAdvancedSettings";
 import { StudioDiagnostics } from "../StudioDiagnostics";
 
-const mocks = vi.hoisted(() => ({ copyTunnel: vi.fn(), clearLogs: vi.fn(), onShowLogs: vi.fn(), nativeBack: vi.fn() }));
+const mocks = vi.hoisted(() => ({ copyTunnel: vi.fn(), clearLogs: vi.fn(), nativeBack: vi.fn() }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: "space" }) }));
 vi.mock("../../../../runtime/useRuntimeMenu", () => ({ useRuntimeMenuOptions: () => ({ runtime: { copyTunnelDetails: mocks.copyTunnel }, runtimeOptions: [] }) }));
 vi.mock("../../../../debug/useAppLogs", () => ({ useAppLogs: () => ({ logs: [], hasLogs: true, clearLogs: mocks.clearLogs }) }));
@@ -16,7 +16,7 @@ vi.mock("../BuildLogOverlay", () => ({ BuildLogOverlay: ({ onClose, onClear }: {
 
 function Harness() {
   const [open, setOpen] = useState(false);
-  return <WorkspaceControlsProvider value={{ userEmail: "reader@example.test", activeProjectName: "Space", hasLogs: true, onShowLogs: mocks.onShowLogs, onOpenDiagnostics: () => setOpen(true) }}>
+  return <WorkspaceControlsProvider value={{ userEmail: "reader@example.test", activeProjectName: "Space", onOpenDiagnostics: () => setOpen(true) }}>
     <PersonalAdvancedSettings />
     <StudioDiagnostics isOpen={open} onOpenChange={setOpen} />
   </WorkspaceControlsProvider>;
@@ -54,9 +54,6 @@ describe("Settings diagnostics", () => {
     await openTools();
     expect(document.querySelector("details")?.open).toBe(true);
     expect(document.querySelector('[aria-label="Diagnostics"]')).not.toBeNull();
-    await click("View machine logs");
-    expect(mocks.onShowLogs).toHaveBeenCalledOnce();
-    expect(document.querySelector('[aria-label="Diagnostics"]')).toBeNull();
   });
 
   it("keeps app logs mounted when leaving diagnostics and preserves log controls", async () => {

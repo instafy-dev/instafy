@@ -4,35 +4,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AiCredentialsStatusBubble } from "../AiCredentialsStatusBubble";
-import { defaultAiConnectWizardState, writeAiConnectWizardState } from "../aiConnectWizardStorage";
 
 const mocks = vi.hoisted(() => ({
-  beginDeviceAuth: vi.fn(),
-  cancelDeviceAuth: vi.fn(),
-  deviceAuthCompleting: false,
-  deviceAuthCompletionWarning: null as string | null,
-  deviceAuthError: null as string | null,
-  deviceAuthOnCompleted: null as null | ((input: {
-    provider: "codex" | "gemini" | "github";
-    sessionId: string;
-    credentialId?: string | null;
-  }) => unknown),
-  deviceAuthSession: null as null | {
-    sessionId: string;
-    verificationUrl: string;
-    userCode: string;
-    expiresAt: string;
-    pollIntervalSeconds: number;
-    status: "pending" | "completed" | "failed" | "cancelled";
-    error?: string | null;
-  },
-  hydrateDeviceAuth: vi.fn(),
-  listCredentials: vi.fn(),
   nativeBackEnabled: false,
   nativeBackHandler: null as null | (() => void),
-  resetDeviceAuth: vi.fn(),
-  setDefaultCredential: vi.fn(),
-  testCredential: vi.fn(),
 }));
 
 vi.mock("../../../../native/useNativeBackButtonAction", () => ({
@@ -41,47 +16,6 @@ vi.mock("../../../../native/useNativeBackButtonAction", () => ({
     mocks.nativeBackHandler = onBack;
   },
 }));
-
-vi.mock("../device-auth/useDeviceAuthFlow", () => ({
-  useDeviceAuthFlow: (options?: { onCompleted?: typeof mocks.deviceAuthOnCompleted }) => {
-    mocks.deviceAuthOnCompleted = options?.onCompleted ?? null;
-    return {
-      session: mocks.deviceAuthSession,
-      error: mocks.deviceAuthError,
-      busy: false,
-      completing: mocks.deviceAuthCompleting,
-      completionWarning: mocks.deviceAuthCompletionWarning,
-      begin: mocks.beginDeviceAuth,
-      cancel: mocks.cancelDeviceAuth,
-      reset: mocks.resetDeviceAuth,
-      hydrate: mocks.hydrateDeviceAuth,
-    };
-  },
-}));
-
-vi.mock("../../../../sdk/instafy", () => ({
-  controllerClient: {
-    credentials: {
-      list: mocks.listCredentials,
-      setDefault: mocks.setDefaultCredential,
-      test: mocks.testCredential,
-    },
-  },
-}));
-
-// The bubble draws no provider list any more (the Add AI connection modal
-// owns it), so the inline login steps are only reachable through a persisted
-// wizard: seed one at the OpenAI method step the way a reload would.
-const WIZARD_KEY = "test:ai-connect-wizard";
-function seedOpenAiAuthStep() {
-  writeAiConnectWizardState(WIZARD_KEY, {
-    ...defaultAiConnectWizardState(),
-    open: true,
-    provider: "openai",
-    step: "openai-auth",
-    updatedAt: Date.now(),
-  });
-}
 
 describe("AiCredentialsStatusBubble", () => {
   let container: HTMLDivElement;
@@ -93,11 +27,6 @@ describe("AiCredentialsStatusBubble", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    mocks.deviceAuthCompleting = false;
-    mocks.deviceAuthCompletionWarning = null;
-    mocks.deviceAuthError = null;
-    mocks.deviceAuthOnCompleted = null;
-    mocks.deviceAuthSession = null;
     mocks.nativeBackEnabled = false;
     mocks.nativeBackHandler = null;
   });
@@ -107,7 +36,6 @@ describe("AiCredentialsStatusBubble", () => {
       root.unmount();
     });
     container.remove();
-    delete window.instafyDesktop;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
     vi.clearAllMocks();
   });
@@ -118,11 +46,6 @@ describe("AiCredentialsStatusBubble", () => {
         <AiCredentialsStatusBubble
           state="checking"
           isBusy={false}
-          canUseDesktopConnect={false}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -148,11 +71,6 @@ describe("AiCredentialsStatusBubble", () => {
           state="unavailable"
           detail="Retry after the local stack is ready. Your AI credentials may still be fine."
           isBusy={false}
-          canUseDesktopConnect={false}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
           onRetry={onRetry}
         />,
       );
@@ -192,14 +110,9 @@ describe("AiCredentialsStatusBubble", () => {
           state="missing"
           intent="connect"
           isBusy={false}
-          canUseDesktopConnect={false}
           connectedCredentials={[]}
           managedAi={managedAiFixture()}
           onUseManagedAi={onUseManagedAi}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -231,14 +144,9 @@ describe("AiCredentialsStatusBubble", () => {
           state="missing"
           intent="connect"
           isBusy={false}
-          canUseDesktopConnect={false}
           connectedCredentials={[]}
           managedAi={managedAiFixture({ remainingPrompts: 0 })}
           onUseManagedAi={onUseManagedAi}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -262,7 +170,6 @@ describe("AiCredentialsStatusBubble", () => {
           state="needs_default"
           intent="connect"
           isBusy={false}
-          canUseDesktopConnect={false}
           connectedCredentials={[
             {
               id: "cred-1",
@@ -273,10 +180,6 @@ describe("AiCredentialsStatusBubble", () => {
           ]}
           managedAi={managedAiFixture()}
           onUseManagedAi={() => undefined}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -291,19 +194,13 @@ describe("AiCredentialsStatusBubble", () => {
 
   it("reduces the blocking gate to one sentence and one button that opens the modal", async () => {
     const onConnectAi = vi.fn();
-    const onStashDraft = vi.fn();
     await act(async () => {
       root.render(
         <AiCredentialsStatusBubble
           state="missing"
           intent="gate"
           isBusy={false}
-          canUseDesktopConnect={false}
           onConnectAi={onConnectAi}
-          onStashDraft={onStashDraft}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -338,8 +235,6 @@ describe("AiCredentialsStatusBubble", () => {
       connect?.click();
     });
     expect(onConnectAi).toHaveBeenCalledTimes(1);
-    // The host stashes the draft; the bubble only reports the press.
-    expect(onStashDraft).not.toHaveBeenCalled();
   });
 
   it("adds Instafy AI as a secondary action in the gate only while it is available", async () => {
@@ -351,14 +246,9 @@ describe("AiCredentialsStatusBubble", () => {
             state="missing"
             intent="gate"
             isBusy={false}
-            canUseDesktopConnect={false}
             managedAi={managedAi}
             onUseManagedAi={onUseManagedAi}
             onConnectAi={() => undefined}
-            onStashDraft={() => undefined}
-            onConnectDesktop={() => undefined}
-            onUploadAuthJson={() => undefined}
-            onSaveApiKey={async () => ({ success: true })}
           />,
         );
       });
@@ -402,14 +292,9 @@ describe("AiCredentialsStatusBubble", () => {
             state="missing"
             intent="gate"
             isBusy={false}
-            canUseDesktopConnect={false}
             managedAi={managedAi}
             onUseManagedAi={onUseManagedAi}
             onConnectAi={onConnectAi}
-            onStashDraft={() => undefined}
-            onConnectDesktop={() => undefined}
-            onUploadAuthJson={() => undefined}
-            onSaveApiKey={async () => ({ success: true })}
           />,
         );
       });
@@ -475,14 +360,9 @@ describe("AiCredentialsStatusBubble", () => {
           state="missing"
           intent="gate"
           isBusy={false}
-          canUseDesktopConnect={false}
           hasTeammates
           onChatWithoutAi={onChatWithoutAi}
           onConnectAi={() => undefined}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -506,14 +386,9 @@ describe("AiCredentialsStatusBubble", () => {
           state="missing"
           intent="gate"
           isBusy={false}
-          canUseDesktopConnect={false}
           hasTeammates={false}
           onChatWithoutAi={onChatWithoutAi}
           onConnectAi={() => undefined}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -527,12 +402,7 @@ describe("AiCredentialsStatusBubble", () => {
           state="missing"
           intent="connect"
           isBusy={false}
-          canUseDesktopConnect={false}
           onChatWithoutAi={() => undefined}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -549,17 +419,12 @@ describe("AiCredentialsStatusBubble", () => {
           state="missing"
           intent="connect"
           isBusy={false}
-          canUseDesktopConnect={false}
           connectedCredentials={[]}
           managedAi={managedAiFixture()}
           hasTeammates
           onConnectAi={onConnectAi}
           onChatWithoutAi={onChatWithoutAi}
           onUseManagedAi={() => undefined}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
           onClose={onClose}
         />,
       );
@@ -594,7 +459,6 @@ describe("AiCredentialsStatusBubble", () => {
           state="missing"
           intent="connect"
           isBusy={false}
-          canUseDesktopConnect={false}
           connectedCredentials={[
             {
               id: "cred-1",
@@ -607,10 +471,6 @@ describe("AiCredentialsStatusBubble", () => {
           managedAi={managedAiFixture()}
           onUseManagedAi={() => undefined}
           onConnectAi={onConnectAi}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
@@ -621,459 +481,38 @@ describe("AiCredentialsStatusBubble", () => {
     expect(container.querySelector('[data-testid="ai-gate-connect-ai"]')).toBeInstanceOf(HTMLButtonElement);
   });
 
-  it("keeps a restored login step inline and returns to the hand-off on Back", async () => {
-    seedOpenAiAuthStep();
+  it("leaves Android Back alone in the gate", async () => {
     await act(async () => {
       root.render(
         <AiCredentialsStatusBubble
           state="missing"
-          intent="connect"
-          storageKey={WIZARD_KEY}
+          intent="gate"
           isBusy={false}
-          canUseDesktopConnect={false}
           onConnectAi={() => undefined}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
         />,
       );
     });
 
-    expect(container.textContent).toContain("ChatGPT login");
-    expect(container.querySelector('[data-testid="ai-gate-connect-ai"]')).toBeNull();
-
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>('button[aria-label="Back"]')?.click();
-    });
-    expect(container.textContent).not.toContain("ChatGPT login");
-    expect(container.querySelector('[data-testid="ai-gate-connect-ai"]')).toBeInstanceOf(HTMLButtonElement);
+    expect(container.querySelector('button[aria-label="Back"]')).toBeNull();
+    expect(mocks.nativeBackEnabled).toBe(false);
   });
 
-  it("shows the ChatGPT Security prerequisite before requesting a device code", async () => {
-    seedOpenAiAuthStep();
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="connect"
-          storageKey={WIZARD_KEY}
-          isBusy={false}
-          canUseDesktopConnect={false}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
-        />,
-      );
-    });
-
-    const clickButton = async (label: string) => {
-      const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
-        candidate.textContent?.includes(label),
-      );
-      expect(button).toBeInstanceOf(HTMLButtonElement);
-      await act(async () => {
-        button?.click();
-        await Promise.resolve();
-      });
-    };
-
-    await clickButton("ChatGPT login");
-    await clickButton("Browser login (device code)");
-
-    expect(mocks.beginDeviceAuth).not.toHaveBeenCalled();
-    const prerequisite = container.querySelector('[data-testid="chat-ai-device-code-prerequisite"]');
-    expect(prerequisite).toBeInstanceOf(HTMLElement);
-    expect(prerequisite?.textContent).toContain("Before you get a code");
-    expect(prerequisite?.textContent).toContain("Settings → Security");
-    expect(prerequisite?.textContent).toContain("workspace admin");
-    expect(prerequisite?.querySelector('[data-testid="chat-ai-device-code-help"]')).toBeInstanceOf(
-      HTMLButtonElement,
-    );
-
-    await clickButton("I’ve enabled it \u2014 get a code");
-    expect(mocks.beginDeviceAuth).toHaveBeenCalledWith({ provider: "codex" });
-  });
-
-  it("offers no code when ChatGPT device-code login is off", async () => {
-    seedOpenAiAuthStep();
-    const onStashDraft = vi.fn();
-    const onConnectDesktop = vi.fn();
-    window.instafyDesktop = {
-      codexAuthJsonStatus: vi.fn().mockResolvedValue({ exists: true }),
-      connectDefaultCodexAuthJson: vi.fn(),
-    } as Partial<typeof window.instafyDesktop> as typeof window.instafyDesktop;
-    // The controller's answer to OpenAI's 403 while polling.
-    const refusal =
-      "ChatGPT device-code login is not enabled. Enable it in ChatGPT Settings → Security, or ask your workspace admin to allow it in workspace permissions, then generate a new code.";
-    mocks.deviceAuthError = refusal;
-    mocks.deviceAuthSession = {
-      sessionId: "session-refused",
-      verificationUrl: "https://auth.openai.com/codex/device",
-      userCode: "ABCD-EFGH",
-      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
-      pollIntervalSeconds: 5,
-      status: "failed",
-      error: refusal,
-    };
-
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="connect"
-          storageKey={WIZARD_KEY}
-          isBusy={false}
-          canUseDesktopConnect
-          onStashDraft={onStashDraft}
-          onConnectDesktop={onConnectDesktop}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
-        />,
-      );
-    });
-    const clickButton = async (label: string) => {
-      const button = Array.from(container.querySelectorAll("button")).find(
-        (candidate) => candidate.textContent?.trim() === label,
-      );
-      expect(button).toBeInstanceOf(HTMLButtonElement);
-      await act(async () => {
-        button?.click();
-        await Promise.resolve();
-      });
-    };
-    await clickButton("ChatGPT login (Plus/Team)");
-
-    const notice = container.querySelector('[data-testid="chat-ai-device-code-disabled"]');
-    expect(notice).toBeInstanceOf(HTMLElement);
-    expect(notice?.querySelector('[role="alert"]')?.textContent).toContain(
-      "turn on device-code authorization",
-    );
-    expect(notice?.textContent).toContain("Settings, then Security");
-    // The refused session's code, its copy button and the login page are gone,
-    // and the raw refusal is not repeated above the card.
-    expect(container.textContent).not.toContain("ABCD-EFGH");
-    for (const label of ["Copy code", "Open login", "Copy link", "Cancel login"]) {
-      expect(container.textContent).not.toContain(label);
-    }
-    expect(container.textContent).not.toContain("generate a new code");
-    expect(container.textContent).not.toContain("\u2014");
-
-    // The local Codex login stays on offer beside it.
-    await clickButton("Use local Codex login");
-    expect(onConnectDesktop).toHaveBeenCalledTimes(1);
-
-    mocks.resetDeviceAuth.mockClear();
-    await clickButton("Back");
-    expect(mocks.resetDeviceAuth).toHaveBeenCalledTimes(1);
-    expect(mocks.beginDeviceAuth).not.toHaveBeenCalled();
-
-    await clickButton("Try again");
-    expect(mocks.beginDeviceAuth).toHaveBeenCalledWith({ provider: "codex" });
-  });
-
-  it("labels a completed login while the saved connection is being checked", async () => {
-    seedOpenAiAuthStep();
+  it("closes the connect prompt on Android Back", async () => {
     const onClose = vi.fn();
-    mocks.deviceAuthCompleting = true;
-    mocks.deviceAuthSession = {
-      sessionId: "session-finalizing",
-      verificationUrl: "https://auth.openai.com/codex/device",
-      userCode: "ABCD-EFGH",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      pollIntervalSeconds: 5,
-      status: "pending",
-    };
-
     await act(async () => {
       root.render(
         <AiCredentialsStatusBubble
           state="missing"
           intent="connect"
-          storageKey={WIZARD_KEY}
           isBusy={false}
-          canUseDesktopConnect={false}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
+          onConnectAi={() => undefined}
           onClose={onClose}
         />,
       );
     });
-
-    const clickButton = async (label: string) => {
-      const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
-        candidate.textContent?.includes(label),
-      );
-      expect(button).toBeInstanceOf(HTMLButtonElement);
-      await act(async () => button?.click());
-    };
-    await clickButton("ChatGPT login");
-
-    expect(container.textContent).toContain("Login complete. Checking the connection…");
-    expect(container.textContent).not.toContain("Waiting for you to finish login");
-    expect(container.textContent).not.toContain("Try again");
-    expect(container.querySelector<HTMLButtonElement>('button[aria-label="Back"]')?.disabled).toBe(true);
-    expect(container.querySelector<HTMLButtonElement>('button[aria-label="Close AI connect"]')?.disabled).toBe(true);
-    const cancelButton = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
-      (candidate) => candidate.textContent?.includes("Cancel login"),
-    );
-    expect(cancelButton?.disabled).toBe(true);
-    expect(mocks.nativeBackEnabled).toBe(true);
-    act(() => mocks.nativeBackHandler?.());
-    expect(mocks.cancelDeviceAuth).not.toHaveBeenCalled();
-    expect(onClose).not.toHaveBeenCalled();
-
-    mocks.deviceAuthCompleting = false;
-    mocks.deviceAuthCompletionWarning =
-      "ChatGPT is connected, but the test request couldn't be verified.";
-    mocks.deviceAuthSession = {
-      ...mocks.deviceAuthSession!,
-      status: "completed",
-    };
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="connect"
-          storageKey={WIZARD_KEY}
-          isBusy={false}
-          canUseDesktopConnect={false}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
-          onClose={onClose}
-        />,
-      );
-    });
-    expect(container.textContent).toContain("ChatGPT is connected");
-    expect(container.textContent).not.toContain("Try again");
-  });
-
-  it("cancels a pending device login before Android Back leaves the wizard", async () => {
-    seedOpenAiAuthStep();
-    const onClose = vi.fn();
-    mocks.deviceAuthSession = {
-      sessionId: "session-native-back",
-      verificationUrl: "https://auth.openai.com/codex/device",
-      userCode: "ABCD-EFGH",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      pollIntervalSeconds: 5,
-      status: "pending",
-    };
-
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="connect"
-          storageKey={WIZARD_KEY}
-          isBusy={false}
-          canUseDesktopConnect={false}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
-          onClose={onClose}
-        />,
-      );
-    });
-
-    const clickButton = async (label: string) => {
-      const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
-        candidate.textContent?.includes(label),
-      );
-      expect(button).toBeInstanceOf(HTMLButtonElement);
-      await act(async () => button?.click());
-    };
-    await clickButton("ChatGPT login");
 
     expect(mocks.nativeBackEnabled).toBe(true);
     await act(async () => mocks.nativeBackHandler?.());
-    expect(mocks.cancelDeviceAuth).toHaveBeenCalledTimes(1);
-    expect(onClose).not.toHaveBeenCalled();
-  });
-
-  it("keeps the chat-without-AI escape disabled during device-login finalization", async () => {
-    const onChatWithoutAi = vi.fn();
-    mocks.deviceAuthCompleting = true;
-
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="gate"
-          isBusy={false}
-          canUseDesktopConnect={false}
-          hasTeammates
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
-          onChatWithoutAi={onChatWithoutAi}
-        />,
-      );
-    });
-
-    const escape = container.querySelector<HTMLButtonElement>(
-      '[data-testid="ai-gate-chat-without-ai"]',
-    );
-    expect(escape?.disabled).toBe(true);
-    await act(async () => escape?.click());
-    expect(onChatWithoutAi).not.toHaveBeenCalled();
-  });
-
-  it("hosts no inline login steps in the gate, so Android Back is left alone", async () => {
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="gate"
-          isBusy={false}
-          canUseDesktopConnect
-          onConnectAi={() => undefined}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
-        />,
-      );
-    });
-
-    expect(container.textContent).not.toContain("ChatGPT login");
-    expect(container.textContent).not.toContain("Use local Codex login");
-    expect(container.querySelector('button[aria-label="Back"]')).toBeNull();
-    expect(mocks.nativeBackEnabled).toBe(false);
-    expect(mocks.hydrateDeviceAuth).not.toHaveBeenCalled();
-  });
-
-  it("keeps a saved ChatGPT connection successful without replacing the default when its test cannot be verified", async () => {
-    const onRetry = vi.fn();
-    mocks.setDefaultCredential.mockResolvedValue({ success: true });
-    mocks.testCredential.mockResolvedValue({ success: true, ok: false, output: "rate limited" });
-
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="connect"
-          isBusy={false}
-          canUseDesktopConnect={false}
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
-          onRetry={onRetry}
-        />,
-      );
-    });
-
-    expect(mocks.deviceAuthOnCompleted).toBeTypeOf("function");
-    const result = await mocks.deviceAuthOnCompleted?.({
-      provider: "codex",
-      sessionId: "session-warning",
-      credentialId: "credential-warning",
-    });
-
-    expect(result).toMatchObject({
-      success: true,
-      warning: expect.stringContaining("ChatGPT is connected"),
-    });
-    expect(mocks.testCredential).toHaveBeenCalledWith("credential-warning");
-    expect(mocks.setDefaultCredential).not.toHaveBeenCalled();
-    expect(onRetry).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows the local Codex login action in the chat onboarding flow on Desktop", async () => {
-    seedOpenAiAuthStep();
-    window.instafyDesktop = {
-      codexAuthJsonStatus: vi.fn().mockResolvedValue({
-        exists: true,
-      }),
-      connectDefaultCodexAuthJson: vi.fn(),
-    } as Partial<typeof window.instafyDesktop> as typeof window.instafyDesktop;
-
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="connect"
-          storageKey={WIZARD_KEY}
-          isBusy={false}
-          canUseDesktopConnect
-          onStashDraft={() => undefined}
-          onConnectDesktop={() => undefined}
-          onUploadAuthJson={() => undefined}
-          onSaveApiKey={async () => ({ success: true })}
-        />,
-      );
-    });
-
-    const indicator = container.querySelector('[data-testid="credentials-status-indicator"]');
-    expect(indicator).toBeInstanceOf(HTMLElement);
-    expect(indicator?.className).not.toContain("mx-auto");
-    expect(indicator?.className).toContain("max-w-[min(100%,42rem)]");
-    expect(indicator?.className).toContain("w-full");
-
-    const loginChoice = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("ChatGPT login"),
-    );
-    expect(loginChoice).toBeInstanceOf(HTMLButtonElement);
-
-    await act(async () => {
-      loginChoice?.click();
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain("Use local Codex login");
-    expect(container.textContent).toContain("Found ~/.codex/auth.json.");
-    expect(container.textContent).not.toContain("/home/example");
-    expect(container.textContent).toContain("Browser login (device code)");
-  });
-
-  it("keeps the default Desktop importer while auth.json status is unknown", async () => {
-    seedOpenAiAuthStep();
-    const onStashDraft = vi.fn();
-    const onConnectDesktop = vi.fn();
-    const onUploadAuthJson = vi.fn();
-    window.instafyDesktop = {
-      connectDefaultCodexAuthJson: vi.fn(),
-    } as Partial<typeof window.instafyDesktop> as typeof window.instafyDesktop;
-
-    await act(async () => {
-      root.render(
-        <AiCredentialsStatusBubble
-          state="missing"
-          intent="connect"
-          storageKey={WIZARD_KEY}
-          isBusy={false}
-          canUseDesktopConnect
-          onStashDraft={onStashDraft}
-          onConnectDesktop={onConnectDesktop}
-          onUploadAuthJson={onUploadAuthJson}
-          onSaveApiKey={async () => ({ success: true })}
-        />,
-      );
-    });
-
-    const clickButton = async (label: string) => {
-      const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
-        candidate.textContent?.includes(label),
-      );
-      expect(button).toBeInstanceOf(HTMLButtonElement);
-      await act(async () => button?.click());
-    };
-
-    await clickButton("ChatGPT login");
-    expect(container.textContent).toContain("Use local Codex login");
-    expect(container.textContent).toContain("Desktop will use this computer's local Codex login.");
-
-    await clickButton("Use local Codex login");
-    expect(onStashDraft).toHaveBeenCalledTimes(1);
-    expect(onConnectDesktop).toHaveBeenCalledTimes(1);
-    expect(onUploadAuthJson).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

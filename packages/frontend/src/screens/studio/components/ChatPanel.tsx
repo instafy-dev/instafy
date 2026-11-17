@@ -233,7 +233,6 @@ import { useChatBrowserView } from "./useChatBrowserView";
 import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
 import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
-import { canUseDesktopCodexAuthJson } from "./desktopCodexAuthJson";
 import { CredentialsConnectModal } from "./CredentialsConnectModal";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { AgentProfileCardContent } from "./AssistantAvatarPopover";
@@ -1261,7 +1260,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     typeof (supabase as unknown as { channel?: unknown }).channel === "function";
   const typingChannelRef = useRef<RealtimeChannel | null>(null);
   const typingChannelControllerIdRef = useRef<string | null>(null);
-  const pendingCredentialAutoSubmitRef = useRef(false);
   const typingChannelSubscribedRef = useRef(false);
   const pendingTypingBroadcastRef = useRef<{
     conversationLocalId: string;
@@ -1330,7 +1328,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     keepTabOpen,
   });
   const { pendingConversationInviteId, clearConversationInvite } = useWorkspaceUi();
-  const canUseDesktopConnect = canUseDesktopCodexAuthJson();
   const [notificationsNudgeOpen, setNotificationsNudgeOpen] = useState(false);
   const [notificationsNudgeKind, setNotificationsNudgeKind] = useState<"browser" | "native">("browser");
   const [notificationsNudgeAnchorTimestamp, setNotificationsNudgeAnchorTimestamp] = useState<number | null>(null);
@@ -4207,7 +4204,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     aiOnboardingOpen,
     availableCredentials,
     closeAiOnboarding,
-    connectFromDesktop,
     credentialGateDetail,
     credentialInventoryStatus,
     credentialGateState,
@@ -4220,24 +4216,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     openAiOnboarding,
     refreshCredentialGate,
     refreshCredentials,
-    saveApiKey,
-    stashDraftForCredentials,
-    uploadAuthJsonFile,
   } = useChatCredentialGate({
-    activeConversationId,
     activeProjectId,
     aiConnectWizardStorageKey,
-    canUseDesktopConnect,
     currentUserId,
-    focusInput,
     hasUser: Boolean(user),
-    inputEditorState,
     inputRequiresAi,
-    inputValue,
     messages,
-    onInputChange,
     pinAiOnboardingToBottom,
-    pendingCredentialAutoSubmitRef,
     refreshAvailableAgents,
     runtimeControllerEnabled,
     showStatus,
@@ -6139,31 +6125,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     voiceInputTranscribing,
   });
 
-  useEffect(() => {
-    if (!pendingCredentialAutoSubmitRef.current) {
-      return;
-    }
-    if (!credentialsReady || sendingAttachment || onboardingInputLocked) {
-      return;
-    }
-    if (inputValue.trim().length === 0) {
-      return;
-    }
-    pendingCredentialAutoSubmitRef.current = false;
-    // The draft of an engine chosen for the next message goes out only by
-    // the composer's own Send, on that engine: never from here, on another.
-    if (pendingTurnEngineIdRef.current !== null) {
-      return;
-    }
-    void submitMessage(undefined, { allowWhileBusy: true });
-  }, [credentialsReady, inputValue, onboardingInputLocked, sendingAttachment, submitMessage]);
-
   // Managed AI is available and send is already unblocked (credentialsReady is
-  // true), so the connect wizard's "Use Instafy AI" button just dismisses
-  // the wizard and fires whatever prompt the user already typed. The draft is
-  // still in the composer (openAiOnboarding never clears it), so there is no
-  // stashed draft to restore, and the false→true auto-submit effect above
-  // never runs in this case, so we submit here explicitly.
+  // true), so the connect prompt's "Use Instafy AI" button just dismisses
+  // the prompt and sends whatever the user already typed: the draft is still
+  // in the composer (openAiOnboarding never clears it).
   const handleUseManagedAi = useCallback(() => {
     closeAiOnboarding();
     if (sendingAttachment || onboardingInputLocked) {
@@ -6780,8 +6745,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               aiOnboardingOpen={aiOnboardingOpen}
               credentialGateDetail={credentialGateDetail}
               credentialsBusy={credentialsBusy}
-              canUseDesktopConnect={canUseDesktopConnect}
-              aiConnectWizardStorageKey={aiConnectWizardStorageKey}
               activeAiCredentials={activeAiCredentials}
               defaultCredentialId={defaultAiCredential?.id ?? null}
               managedAi={aiOnboardingMode === "personal_only" ? null : credentialRequirements.managedAi}
@@ -6791,10 +6754,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               onConnectAi={handleConnectAiFromGate}
               hasTeammates={spaceHasTeammates}
               onCloseAiOnboarding={closeAiOnboarding}
-              onStashDraftForCredentials={stashDraftForCredentials}
-              onConnectDesktop={connectFromDesktop}
-              onUploadAuthJson={uploadAuthJsonFile}
-              onSaveApiKey={saveApiKey}
               onRetryCredentials={refreshCredentialGate}
               renderAssistantAvatar={renderAssistantAvatar}
             />

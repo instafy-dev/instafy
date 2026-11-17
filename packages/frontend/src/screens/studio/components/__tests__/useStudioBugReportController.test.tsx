@@ -73,7 +73,6 @@ function Harness({ currentUserId = "00000000-0000-0000-0000-000000000001" }: { c
     activeConversationLocalId: null,
     activeRuntimeId: null,
     controllerProjectMissing: false,
-    buildLogs: [],
   }).dialogs;
 }
 

@@ -39,14 +39,12 @@ const GATED_FILES = [
   // Skills saved as one version.
   resolve(components, "SkillsPanel.tsx"),
   resolve(components, "skillsWorkspaceWrites.ts"),
-  // History, Unsaved work and the Desktop line, and the Changes drawer they
-  // replace in the new modes.
+  // History, Unsaved work and the Desktop line.
   resolve(components, "SourceControlDrawer.tsx"),
   resolve(components, "HistoryDrawer.tsx"),
   resolve(components, "HistoryConfirmDialog.tsx"),
   resolve(components, "UnsavedWorkSection.tsx"),
   resolve(components, "DesktopChangesLine.tsx"),
-  resolve(components, "LegacyChangesDrawer.tsx"),
   resolve(components, "unsavedWorkPathChecks.ts"),
   resolve(components, "historyFocus.ts"),
   resolve(components, "useUnsavedWorkNotice.ts"),

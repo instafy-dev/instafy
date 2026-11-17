@@ -60,7 +60,7 @@ vi.mock("../../../../sdk/instafy", async () => {
   } };
 });
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({
-  userEmail: fixture.userEmail, hasLogs: false, sidebarOpen: true,
+  userEmail: fixture.userEmail, sidebarOpen: true,
   homeAttentionCount: fixture.homeAttentionCount,
   homeAttentionByProject: fixture.homeAttentionByProject,
   onOpenOrgSettings: fixture.settingsAvailable ? fixture.onSettings : undefined, onStartNewProject: fixture.onNewSpace,

@@ -101,10 +101,6 @@ test.describe("Credential onboarding", () => {
         JSON.stringify({
           version: 1,
           open: true,
-          provider: "openai",
-          step: "provider",
-          deviceAuthSession: null,
-          deviceAuthError: null,
           updatedAt: Date.now(),
         }),
       );

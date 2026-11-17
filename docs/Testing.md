@@ -26,8 +26,7 @@
   `PLAYWRIGHT_GATEWAY_MODE=stateless`. With the variable unset, the History spec (written for
   `stateless`) skips and the specs written for the stateful gateway run against the stateless one
   and fail: the Files specs' stateful flows (Save draft, then sync) make no probe
-  (`assertGatewayMode` probes only when the mode is named), so they fail without saying why, and
-  the Changes spec (`requireGatewayMode`, which probes whenever its spec runs) fails its probe.
+  (`assertGatewayMode` probes only when the mode is named), so they fail without saying why.
 
 The default `pnpm test:e2e` loop is intentionally product-focused:
 - it covers the regular Playwright regression surface
