@@ -9,6 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use runtime_contracts::proxy_route::is_proxy_route_env_key;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tokio_postgres::error::SqlState;
@@ -38,6 +39,10 @@ use crate::{
 /// The job secret that carries the managed chat reasoning effort to the
 /// runtime (see `apply_managed_ai_env_overrides`).
 const MANAGED_AI_REASONING_EFFORT_ENV: &str = "CODEX_MANAGED_AI_REASONING_EFFORT";
+
+/// The error code of the 400 that refuses a value under one of the proxy
+/// route's names (`runtime_contracts::proxy_route`).
+const PROXY_ROUTE_NAME_REFUSED_CODE: &str = "proxy_route_name_reserved";
 
 const SECRET_NAME_MAX_LEN: usize = 64;
 const SECRET_DESCRIPTION_MAX_LEN: usize = 800;
@@ -222,10 +227,38 @@ fn stored_secret_is_refused(
     is_refused_secret(name, value.as_deref())
 }
 
-/// Opens a secret granted to a job, or gives `None` for one the credential
-/// guard refuses: a reserved name, which is skipped before anything is
-/// decrypted, or a value that is Claude sign-in material. A skipped secret is
-/// logged by its id and name only.
+/// Whether a project secret's name is one of the proxy route's
+/// (`runtime_contracts::proxy_route`) once `normalize_secret_name` has trimmed
+/// it, turned its spaces and hyphens into `_` and upper-cased it. A turn's
+/// model traffic and its proxy grant go wherever those variables point, so no
+/// value is saved under one of these names and a secret stored under one
+/// earlier is never delivered.
+fn is_proxy_route_secret_name(name: &str) -> bool {
+    is_proxy_route_env_key(&name.trim().replace([' ', '-'], "_"))
+}
+
+/// The 400 that refuses a value under one of the proxy route's names, which it
+/// names as `normalize_secret_name` writes it.
+fn proxy_route_name_refused(name: &str) -> (StatusCode, Json<ApiError>) {
+    let name = name.trim().replace([' ', '-'], "_").to_ascii_uppercase();
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            message: format!(
+                "{name} is reserved: Instafy uses it in every turn to send the AI's requests \
+                 through Instafy. Save your value under another name, such as APP_{name}."
+            ),
+            code: Some(PROXY_ROUTE_NAME_REFUSED_CODE.to_string()),
+            details: None,
+        }),
+    )
+}
+
+/// Opens a secret granted to a job, or gives `None` for one that is never
+/// delivered: one named after the proxy route, or one the credential guard
+/// refuses, which is a reserved name or a value that is Claude sign-in
+/// material. Either name is skipped before anything is decrypted. A skipped
+/// secret is logged by its id and name only.
 fn open_deliverable_secret(
     keys: &CredentialKeyRing,
     secret_id: Uuid,
@@ -233,6 +266,14 @@ fn open_deliverable_secret(
     nonce_b64: &str,
     ciphertext_b64: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    if is_proxy_route_secret_name(name) {
+        tracing::debug!(
+            %secret_id,
+            secret_name = %name,
+            "not delivering a project secret named after the proxy route"
+        );
+        return Ok(None);
+    }
     if !is_reserved_secret_name(name) {
         let plaintext = keys.open(nonce_b64, ciphertext_b64).map_err(|error| {
             internal_error(format!("failed to decrypt secret payload: {error}"))
@@ -603,6 +644,9 @@ async fn create_project_secret(
     if is_reserved_secret_name(&name) || is_claude_secret_value(&value) {
         return Err(claude_credential_refused());
     }
+    if is_proxy_route_secret_name(&name) {
+        return Err(proxy_route_name_refused(&name));
+    }
 
     let keys = state
         .config
@@ -793,7 +837,8 @@ async fn update_project_secret(
     ensure_secret_tables_for_request(&transaction).await?;
 
     // An update carries no name, so a new value for a secret stored under the
-    // reserved name is refused by the name already stored.
+    // reserved name, or under one of the proxy route's, is refused by the name
+    // already stored.
     if value.is_some() {
         let stored_name = transaction
             .query_opt(
@@ -806,6 +851,9 @@ async fn update_project_secret(
             .map(|row| row.get::<_, String>("name"));
         if stored_name.as_deref().is_some_and(is_reserved_secret_name) {
             return Err(claude_credential_refused());
+        }
+        if let Some(name) = stored_name.filter(|name| is_proxy_route_secret_name(name)) {
+            return Err(proxy_route_name_refused(&name));
         }
     }
 
@@ -1622,6 +1670,10 @@ mod managed_model_tests;
 #[cfg(test)]
 #[path = "secrets_claude_material_tests.rs"]
 mod claude_material_tests;
+
+#[cfg(test)]
+#[path = "secrets_proxy_route_tests.rs"]
+mod proxy_route_tests;
 
 #[cfg(test)]
 mod tests {

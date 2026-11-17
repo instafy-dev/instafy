@@ -381,6 +381,17 @@ stores Claude sign-ins; remove it", instead of being hidden: the controller neve
 a job, and a GitHub import never sends one stored as `GITHUB_TOKEN` or `GH_TOKEN`. A Claude API
 key, such as one stored as `ANTHROPIC_API_KEY`, is not refused and keeps working.
 
+Seven names are reserved for the proxy route, the variables that send a turn's AI requests and
+its proxy grant through Instafy's proxy (`runtime_contracts::proxy_route`): `OPENAI_API_KEY`,
+`CODEX_API_KEY`, `OPENAI_BASE_URL`, `CODEX_API_ENDPOINT`, `CODEX_CHATGPT_ENDPOINT`,
+`CODEX_PROXY_CHATGPT_ENDPOINT` and `PROXY_BASE_URL`, in any letter case. Saving a secret under one
+of them, or a new value for one stored earlier, gets a 400 (`proxy_route_name_reserved`) whose
+message suggests the same name after `APP_`, such as `APP_OPENAI_API_KEY`. A secret stored under
+one before stays in the list, where its description can change and it can be removed, but the
+controller never delivers it and the runtime agent never sets one from a job's secrets. In a turn
+these names always hold the proxy's values, so a project member cannot send the turn's AI requests
+or its grant anywhere else.
+
 `/tests/fixtures/menus-forms/index.html` mounts the production Secrets and Your AI
 pages with local sample data, plus the shared Select. Its isolated browser suite covers
 light/dark themes at 390, 1280 and 2560px, form drafts across viewport changes, local

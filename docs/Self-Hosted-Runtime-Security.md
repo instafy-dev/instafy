@@ -87,7 +87,12 @@ job its runtime holds, with the job's status.
 `POST /agent/secrets` independently requires the same signed runtime identity and current
 generation. The requested job must belong to that exact runtime, remain leased, and have a
 future expiry before granted secrets can be decrypted. Missing runtime ownership or expiry
-fails closed regardless of `STRICT_MODE`.
+fails closed regardless of `STRICT_MODE`. It never delivers a project secret stored under
+one of the proxy route's names (`runtime_contracts::proxy_route`). Those variables tell the
+turn's engine, its worker lanes and its commands where to send the turn's model requests with
+its proxy grant, so a secret of that name could send them to an address a project member
+chose. Saving a value under one of those names is refused, and a runtime never sets one from
+a job's secrets (see [Settings UI](Settings-UI.md), Secrets).
 
 Conversation-authorized viewers still receive basic run lifecycle status when work runs on
 another participant's private runtime. If a lifecycle event contains private runtime details,
