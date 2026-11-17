@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   boundedCdpScreencastText,
   cdpScreencastModifiers,
-  mapCdpScreencastPoint,
   normalizeCdpScreencastViewport,
   parseCdpScreencastServerMessage,
 } from "../cdpScreencastProtocol";
@@ -55,17 +54,6 @@ describe("CDP screencast protocol", () => {
     expect(parseCdpScreencastServerMessage({ type: "frame", frameId: 0, data: "x" })).toBeNull();
     expect(parseCdpScreencastServerMessage({ type: "frame", sessionId: 4, data: "x" })).toBeNull();
     expect(parseCdpScreencastServerMessage({ type: "unknown" })).toBeNull();
-  });
-
-  it("maps local CSS coordinates into the remote logical viewport", () => {
-    expect(
-      mapCdpScreencastPoint({
-        clientX: 250,
-        clientY: 150,
-        rect: { left: 50, top: 50, width: 400, height: 200 },
-        viewport: { width: 1280, height: 720 },
-      }),
-    ).toEqual({ x: 640, y: 360 });
   });
 
   it("uses the CDP modifier mask and bounds inserted UTF-8 text", () => {

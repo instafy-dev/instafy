@@ -192,21 +192,3 @@ export function applyAdaptiveBrowserRfbEncoding(
     rfb.compressionLevel = 2;
   }
 }
-
-// Kept as the narrow compatibility entry point for callers/tests that only
-// need encoding quality. New code should use applyAdaptiveBrowserRfbEncoding.
-export function applyDenseDisplayRfbQuality(
-  rfb: BrowserSessionRfbEncodingTarget | null,
-  {
-    devicePixelRatio,
-    viewportOnly,
-  }: {
-    devicePixelRatio: number;
-    viewportOnly: boolean;
-  },
-): void {
-  if (!rfb || !viewportOnly || devicePixelRatio < 1.5) {
-    return;
-  }
-  rfb.qualityLevel = 9;
-}

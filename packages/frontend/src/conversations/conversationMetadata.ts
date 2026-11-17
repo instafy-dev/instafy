@@ -277,18 +277,6 @@ export function resolveConversationVisibility(
   );
 }
 
-export function formatNotificationBody(content: string): string | null {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return null;
-  }
-  const maxLength = 180;
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  return `${normalized.slice(0, maxLength - 1)}…`;
-}
-
 export function computePlanSignature(message: ChatMessage): string | null {
   const type = normalizeMessageTypeValue(message.messageType);
   let resolvedType = type;

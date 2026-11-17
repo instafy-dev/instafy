@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   activeGoalPromptMetadata,
-  applyGoalActionMessage,
   applyGoalCommand,
   assessGoalStagnation,
   buildGoalContinuationPrompt,
@@ -11,18 +10,12 @@ import {
   buildConversationGoalHealth,
   countGoalContinuationTurns,
   createConversationGoal,
-  decideGoalContinuation,
   extractConversationGoalFromMetadata,
   hasNonRecoverableErrorForRun,
   isNonRecoverableRunErrorMessage,
   normalizeConversationGoalProgressSummaryForDisplay,
   parseGoalCommand,
-  resolveNonRecoverableGoalErrorRunId,
   resolveGoalCommandDispatch,
-  resolveGoalCommandDispatchInput,
-  selectLatestSuccessfulGoalRuns,
-  settleGoalAfterNonRecoverableRunError,
-  settleGoalAfterTerminalRun,
   shouldApplyConversationGoalSnapshot,
 } from "../conversationGoals";
 
@@ -87,10 +80,11 @@ describe("conversationGoals", () => {
 
   it("dispatches only active goal start commands to the assistant", () => {
     const started = applyGoalCommand(null, { kind: "set", objective: "count to 3" }, "u1");
-    const dispatchInput = resolveGoalCommandDispatchInput(
-      { kind: "set", objective: "count to 3" },
-      started.goal,
-    );
+    const dispatchInput =
+      resolveGoalCommandDispatch({
+        command: { kind: "set", objective: "count to 3" },
+        goal: started.goal,
+      })?.input ?? null;
     expect(dispatchInput).toContain("Start the active goal: count to 3");
     expect(dispatchInput).toContain("gather relevant safe evidence before declaring it blocked");
     expect(dispatchInput).toContain("Automatic goal loops can call you again");
@@ -98,8 +92,13 @@ describe("conversationGoals", () => {
     expect(dispatchInput).toContain("Do not block only because no evidence has been gathered yet");
 
     const paused = applyGoalCommand(started.goal, { kind: "pause" }, "u1");
-    expect(resolveGoalCommandDispatchInput({ kind: "pause" }, paused.goal)).toBeNull();
-    expect(resolveGoalCommandDispatchInput({ kind: "complete", progressSummary: null }, started.goal)).toBeNull();
+    expect(resolveGoalCommandDispatch({ command: { kind: "pause" }, goal: paused.goal })).toBeNull();
+    expect(
+      resolveGoalCommandDispatch({
+        command: { kind: "complete", progressSummary: null },
+        goal: started.goal,
+      }),
+    ).toBeNull();
   });
 
   it("dispatches resumed goals as continuation turns", () => {
@@ -132,7 +131,7 @@ describe("conversationGoals", () => {
     expect(dispatch?.input).toContain("Do not block only because no evidence has been gathered yet");
   });
 
-  it("extracts persisted goals and applies assistant goal updates", () => {
+  it("extracts persisted goals", () => {
     const goal = extractConversationGoalFromMetadata({
       instafyGoal: {
         id: "goal-1",
@@ -141,62 +140,6 @@ describe("conversationGoals", () => {
       },
     });
     expect(goal?.objective).toBe("Finish the contract");
-
-    const updated = applyGoalActionMessage(
-      goal,
-      {
-        id: "msg-1",
-        role: "assistant",
-        content: "Goal blocked: waiting on hardware.",
-        messageType: "goal_update",
-        metadata: {
-          messageType: "goal_update",
-          details: {
-            status: "blocked",
-            progressSummary: "waiting on hardware",
-          },
-        },
-        timestamp: Date.now(),
-      },
-      "u1",
-    );
-
-    expect(updated.changed).toBe(true);
-    expect(updated.goal?.status).toBe("blocked");
-    expect(updated.goal?.progressSummary).toBe("waiting on hardware");
-  });
-
-  it("unwraps runtime metadata envelopes for assistant goal updates", () => {
-    const goal = createConversationGoal("count to 3", "u1");
-    const updated = applyGoalActionMessage(
-      goal,
-      {
-        id: "msg-1",
-        role: "assistant",
-        content: "Goal completed: Answered the counting request.",
-        messageType: "goal_update",
-        metadata: {
-          messageType: "goal_update",
-          details: {
-            kind: "runtime_selection",
-            runtimeId: "runtime-1",
-            displayName: "Hosted Runtime",
-            messageType: "goal_update",
-            details: {
-              status: "completed",
-              objective: "count to 3",
-              progressSummary: "Answered the counting request.",
-            },
-          },
-        },
-        timestamp: Date.now(),
-      },
-      "u1",
-    );
-
-    expect(updated.changed).toBe(true);
-    expect(updated.goal?.status).toBe("completed");
-    expect(updated.goal?.progressSummary).toBe("Answered the counting request.");
   });
 
   it("does not let stale active metadata reopen a completed goal", () => {
@@ -223,139 +166,6 @@ describe("conversationGoals", () => {
     ).toBe(true);
   });
 
-  it("blocks an active goal when its runtime run fails", () => {
-    const goal = {
-      ...createConversationGoal("count to 3", "u1"),
-      id: "goal-1",
-    };
-    const result = settleGoalAfterTerminalRun(
-      goal,
-      { goal: { id: "goal-1", objective: "count to 3" } },
-      "failed",
-      "u1",
-    );
-
-    expect(result.changed).toBe(true);
-    expect(result.goal?.status).toBe("blocked");
-    expect(result.goal?.progressSummary).toBe("Run failed before the goal completed.");
-  });
-
-  it("does not block an active goal for a different runtime goal id", () => {
-    const goal = {
-      ...createConversationGoal("count to 3", "u1"),
-      id: "goal-1",
-    };
-    const result = settleGoalAfterTerminalRun(
-      goal,
-      { goal: { id: "goal-2", objective: "other task" } },
-      "failed",
-      "u1",
-    );
-
-    expect(result.changed).toBe(false);
-    expect(result.goal?.status).toBe("active");
-  });
-
-  it("does not block an active goal for runs without goal metadata", () => {
-    const goal = {
-      ...createConversationGoal("count to 3", "u1"),
-      id: "goal-1",
-    };
-    const result = settleGoalAfterTerminalRun(goal, {}, "failed", "u1");
-
-    expect(result.changed).toBe(false);
-    expect(result.goal?.status).toBe("active");
-  });
-
-  it("blocks an active goal when its run receives a non-recoverable quota error", () => {
-    const goal = {
-      ...createConversationGoal("count to 3", "u1"),
-      id: "goal-1",
-    };
-    const result = settleGoalAfterNonRecoverableRunError(
-      goal,
-      [
-        {
-          id: "user-1",
-          role: "user",
-          content: "/goal count to 3",
-          timestamp: Date.now(),
-          metadata: {
-            runId: "run-1",
-            prompt_metadata: {
-              goal: {
-                id: "goal-1",
-                objective: "count to 3",
-              },
-            },
-          },
-        },
-      ],
-      {
-        id: "assistant-1",
-        role: "assistant",
-        content:
-          "backend responded with 429 Too Many Requests: {\"error\":{\"type\":\"insufficient_quota\"}}",
-        messageType: "error",
-        timestamp: Date.now(),
-        metadata: {
-          runId: "run-1",
-          messageType: "error",
-        },
-      },
-      "u1",
-    );
-
-    expect(result.changed).toBe(true);
-    expect(result.goal?.status).toBe("blocked");
-    expect(result.goal?.progressSummary).toBe(
-      "AI request is blocked by upstream provider quota or rate limits.",
-    );
-  });
-
-  it("blocks an active goal when a non-recoverable quota error lacks a run id but follows its goal prompt", () => {
-    const goal = {
-      ...createConversationGoal("count to 3", "u1"),
-      id: "goal-1",
-    };
-    const result = settleGoalAfterNonRecoverableRunError(
-      goal,
-      [
-        {
-          id: "user-1",
-          role: "user",
-          content: "/goal count to 3",
-          timestamp: 1000,
-          metadata: {
-            prompt_metadata: {
-              goal: {
-                id: "goal-1",
-                objective: "count to 3",
-              },
-            },
-          },
-        },
-      ],
-      {
-        id: "assistant-1",
-        role: "assistant",
-        content: "Upstream 429 rejected the AI request (insufficient_quota).",
-        messageType: "error",
-        timestamp: 1001,
-        metadata: {
-          messageType: "error",
-        },
-      },
-      "u1",
-    );
-
-    expect(result.changed).toBe(true);
-    expect(result.goal?.status).toBe("blocked");
-    expect(result.goal?.progressSummary).toBe(
-      "AI request is blocked by upstream provider quota or rate limits.",
-    );
-  });
-
   it("identifies non-recoverable quota error messages by run", () => {
     const message = {
       id: "assistant-1",
@@ -371,62 +181,6 @@ describe("conversationGoals", () => {
 
     expect(isNonRecoverableRunErrorMessage(message, "run-1")).toBe(true);
     expect(isNonRecoverableRunErrorMessage(message, "run-2")).toBe(false);
-  });
-
-  it("resolves the pending goal run id from non-recoverable quota errors", () => {
-    const goal = {
-      ...createConversationGoal("count to 3", "u1"),
-      id: "goal-1",
-    };
-    const userMessage = {
-      id: "user-1",
-      role: "user" as const,
-      content: "/goal count to 3",
-      timestamp: 1000,
-      metadata: {
-        runId: "run-1",
-        prompt_metadata: {
-          goal: {
-            id: "goal-1",
-            objective: "count to 3",
-          },
-        },
-      },
-    };
-
-    expect(
-      resolveNonRecoverableGoalErrorRunId(
-        goal,
-        [userMessage],
-        {
-          id: "assistant-1",
-          role: "assistant",
-          content: "Upstream 429 rejected the AI request (insufficient_quota).",
-          messageType: "error",
-          timestamp: 1001,
-          metadata: {
-            runId: "run-1",
-            messageType: "error",
-          },
-        },
-      ),
-    ).toBe("run-1");
-    expect(
-      resolveNonRecoverableGoalErrorRunId(
-        goal,
-        [userMessage],
-        {
-          id: "assistant-2",
-          role: "assistant",
-          content: "Upstream 429 rejected the AI request (insufficient_quota).",
-          messageType: "error",
-          timestamp: 1001,
-          metadata: {
-            messageType: "error",
-          },
-        },
-      ),
-    ).toBe("run-1");
   });
 
   it("matches runless quota errors back to the pending goal run", () => {
@@ -464,428 +218,33 @@ describe("conversationGoals", () => {
 
     expect(hasNonRecoverableErrorForRun(messages, "run-1", goal)).toBe(true);
     expect(hasNonRecoverableErrorForRun(messages, "run-2", goal)).toBe(false);
-  });
 
-  it("does not block an active goal for unrelated quota errors", () => {
-    const goal = {
-      ...createConversationGoal("count to 3", "u1"),
-      id: "goal-1",
-    };
-    const result = settleGoalAfterNonRecoverableRunError(
-      goal,
-      [
-        {
-          id: "user-1",
-          role: "user",
-          content: "unrelated prompt",
-          timestamp: Date.now(),
-          metadata: {
-            runId: "run-1",
-          },
-        },
-      ],
+    // A newer prompt that is not the goal's stands between the goal run and the error.
+    const withNewerUnrelatedPrompt = [
+      messages[0],
       {
-        id: "assistant-1",
-        role: "assistant",
-        content:
-          "backend responded with 429 Too Many Requests: {\"error\":{\"type\":\"insufficient_quota\"}}",
-        messageType: "error",
-        timestamp: Date.now(),
-        metadata: {
-          runId: "run-1",
-          messageType: "error",
-        },
-      },
-      "u1",
-    );
-
-    expect(result.changed).toBe(false);
-    expect(result.goal?.status).toBe("active");
-  });
-
-  it("does not block an active goal for runless quota errors after a newer unrelated user prompt", () => {
-    const goal = {
-      ...createConversationGoal("count to 3", "u1"),
-      id: "goal-1",
-    };
-    const result = settleGoalAfterNonRecoverableRunError(
-      goal,
-      [
-        {
-          id: "user-1",
-          role: "user",
-          content: "/goal count to 3",
-          timestamp: 1000,
-          metadata: {
-            prompt_metadata: {
-              goal: {
-                id: "goal-1",
-                objective: "count to 3",
-              },
-            },
-          },
-        },
-        {
-          id: "user-2",
-          role: "user",
-          content: "What is 1+1?",
-          timestamp: 1001,
-          metadata: {},
-        },
-      ],
-      {
-        id: "assistant-1",
-        role: "assistant",
-        content: "Upstream 429 rejected the AI request (insufficient_quota).",
-        messageType: "error",
-        timestamp: 1002,
-        metadata: {
-          messageType: "error",
-        },
-      },
-      "u1",
-    );
-
-    expect(result.changed).toBe(false);
-    expect(result.goal?.status).toBe("active");
-  });
-
-  it("continues an active goal after a successful matching goal run", () => {
-    const goal = {
-      ...createConversationGoal("count to 50", "u1"),
-      id: "goal-1",
-    };
-    const decision = decideGoalContinuation({
-      goal,
-      terminalRun: {
-        id: "run-1",
-        status: "success",
-        metadata: {
-          goal: {
-            id: "goal-1",
-            objective: "count to 50",
-          },
-        },
-      },
-      messages: [assistantRunMessage("run-1", "1")],
-      pendingRuns: [],
-    });
-
-    expect(decision).toEqual({
-      shouldContinue: true,
-      nextTurn: 1,
-      reason: "continue",
-      stagnation: {
-        level: "none",
-        reason: "none",
-        summary: null,
-      },
-    });
-    expect(buildGoalContinuationPrompt({ goal, turn: decision.nextTurn })).toContain(
-      "automatic goal continuation turn 1",
-    );
-  });
-
-  it("continues after a successful run that created the active goal", () => {
-    const goal = {
-      ...createConversationGoal("Count to three, one number per turn", "u1"),
-      id: "goal-1",
-    };
-    const decision = decideGoalContinuation({
-      goal,
-      terminalRun: {
-        id: "run-1",
-        status: "success",
+        id: "user-2",
+        role: "user" as const,
+        content: "What is 1+1?",
+        timestamp: 1001,
         metadata: {},
       },
-      messages: [
-        {
-          id: "goal-update-1",
-          role: "assistant",
-          content: "Goal started.",
-          timestamp: Date.now(),
-          messageType: "goal_update",
-          metadata: {
-            runId: "run-1",
-            messageType: "goal_update",
-            details: {
-              status: "active",
-              objective: "Count to three, one number per turn",
-            },
-          },
-        },
-      ],
-      pendingRuns: [],
-    });
-
-    expect(decision.shouldContinue).toBe(true);
-    expect(decision.reason).toBe("continue");
-    expect(decision.nextTurn).toBe(1);
+      { ...messages[1], timestamp: 1002 },
+    ];
+    expect(hasNonRecoverableErrorForRun(withNewerUnrelatedPrompt, "run-1", goal)).toBe(false);
   });
 
-  it("does not continue a goal while another run for the same goal is pending", () => {
-    const goal = {
-      ...createConversationGoal("count to 50", "u1"),
-      id: "goal-1",
-    };
-    const decision = decideGoalContinuation({
-      goal,
-      terminalRun: {
-        id: "run-1",
-        status: "success",
-        metadata: {
-          goal: {
-            id: "goal-1",
-          },
-        },
-      },
-      messages: [assistantRunMessage("run-1", "1")],
-      pendingRuns: [
-        {
-          id: "run-2",
-          status: "in_progress",
-          metadata: {
-            goal: {
-              id: "goal-1",
-            },
-          },
-        },
-      ],
-    });
-
-    expect(decision.shouldContinue).toBe(false);
-    expect(decision.reason).toBe("goal_run_already_pending");
-  });
-
-  it("does not request duplicate continuation for the same terminal run", () => {
-    const goal = {
-      ...createConversationGoal("count to 50", "u1"),
-      id: "goal-1",
-    };
-    const decision = decideGoalContinuation({
-      goal,
-      terminalRun: {
-        id: "run-1",
-        status: "success",
-        metadata: {
-          goal: {
-            id: "goal-1",
-          },
-        },
-      },
-      messages: [
-        {
-          id: "user-2",
-          role: "user",
-          content: "Continue goal: count to 50",
-          timestamp: Date.now(),
-          metadata: {
-            goal: {
-              id: "goal-1",
-            },
-            goalContinuation: {
-              triggerRunId: "run-1",
-              turn: 1,
-            },
-          },
-        },
-      ],
-      pendingRuns: [],
-    });
-
-    expect(decision.shouldContinue).toBe(false);
-    expect(decision.reason).toBe("goal_continuation_already_requested");
-  });
-
-  it("waits for successful run messages before continuing a goal", () => {
-    const goal = {
-      ...createConversationGoal("count to 50", "u1"),
-      id: "goal-1",
-    };
-    const decision = decideGoalContinuation({
-      goal,
-      terminalRun: {
-        id: "run-1",
-        status: "success",
-        metadata: {
-          goal: {
-            id: "goal-1",
-          },
-        },
-      },
-      messages: [],
-      pendingRuns: [],
-    });
-
-    expect(decision.shouldContinue).toBe(false);
-    expect(decision.reason).toBe("run_messages_pending");
-  });
-
-  it("does not continue after the terminal run emitted a completed goal update", () => {
+  it("reports no stagnation for a goal that has not continued yet", () => {
     const goal = {
       ...createConversationGoal("count to 3", "u1"),
       id: "goal-1",
     };
-    const decision = decideGoalContinuation({
-      goal,
-      terminalRun: {
-        id: "run-3",
-        status: "success",
-        metadata: {
-          goal: {
-            id: "goal-1",
-          },
-        },
-      },
-      messages: [
-        {
-          id: "assistant-3",
-          role: "assistant",
-          content: "Goal completed.",
-          timestamp: Date.now(),
-          messageType: "goal_update",
-          metadata: {
-            runId: "run-3",
-            messageType: "goal_update",
-            details: {
-              status: "completed",
-              progressSummary: "counted to 3",
-            },
-          },
-        },
-      ],
-      pendingRuns: [],
+
+    expect(assessGoalStagnation({ goal, messages: [] })).toEqual({
+      level: "none",
+      reason: "none",
+      summary: null,
     });
-
-    expect(decision.shouldContinue).toBe(false);
-    expect(decision.reason).toBe("terminal_goal_update_observed");
-  });
-
-  it("selects only the latest successful run for each active goal", () => {
-    const goal = {
-      ...createConversationGoal("count to 50", "u1"),
-      id: "goal-1",
-    };
-    const selected = selectLatestSuccessfulGoalRuns({
-      conversations: [
-        {
-          localId: "conversation-1",
-          controllerId: "controller-1",
-          activeGoal: goal,
-        },
-      ],
-      runs: [
-        {
-          id: "run-1",
-          status: "success",
-          conversationId: "controller-1",
-          createdAt: "2026-05-26T00:00:01.000Z",
-          updatedAt: "2026-05-26T00:00:02.000Z",
-          metadata: {
-            goal: {
-              id: "goal-1",
-            },
-          },
-        },
-        {
-          id: "run-2",
-          status: "success",
-          conversationId: "controller-1",
-          createdAt: "2026-05-26T00:00:03.000Z",
-          updatedAt: "2026-05-26T00:00:04.000Z",
-          metadata: {
-            goal: {
-              id: "goal-1",
-            },
-          },
-        },
-      ],
-    });
-
-    expect(selected.map((run) => run.id)).toEqual(["run-2"]);
-  });
-
-  it("selects a successful run that produced the active goal update", () => {
-    const goal = {
-      ...createConversationGoal("Count to three, one number per turn", "u1"),
-      id: "goal-1",
-    };
-    const selected = selectLatestSuccessfulGoalRuns({
-      conversations: [
-        {
-          localId: "conversation-1",
-          controllerId: "controller-1",
-          activeGoal: goal,
-          messages: [
-            {
-              id: "goal-update-1",
-              role: "assistant",
-              content: "Goal started.",
-              timestamp: Date.now(),
-              messageType: "goal_update",
-              metadata: {
-                runId: "run-1",
-                messageType: "goal_update",
-                details: {
-                  status: "active",
-                  objective: "Count to three, one number per turn",
-                },
-              },
-            },
-          ],
-        },
-      ],
-      runs: [
-        {
-          id: "run-1",
-          status: "success",
-          conversationId: "controller-1",
-          metadata: {},
-        },
-      ],
-    });
-
-    expect(selected.map((run) => run.id)).toEqual(["run-1"]);
-  });
-
-  it("ignores successful runs that do not belong to the active goal", () => {
-    const goal = {
-      ...createConversationGoal("count to 50", "u1"),
-      id: "goal-1",
-    };
-    const selected = selectLatestSuccessfulGoalRuns({
-      conversations: [
-        {
-          localId: "conversation-1",
-          controllerId: "controller-1",
-          activeGoal: goal,
-        },
-      ],
-      runs: [
-        {
-          id: "run-1",
-          status: "success",
-          conversationId: "controller-1",
-          metadata: {
-            goal: {
-              id: "goal-2",
-            },
-          },
-        },
-        {
-          id: "run-2",
-          status: "failed",
-          conversationId: "controller-1",
-          metadata: {
-            goal: {
-              id: "goal-1",
-            },
-          },
-        },
-      ],
-    });
-
-    expect(selected).toEqual([]);
   });
 
   it("warns when automatic goal continuations repeat assistant output", () => {
@@ -1043,7 +402,7 @@ describe("conversationGoals", () => {
     expect(prompt).toContain("Do not resume or change the goal automatically unless I ask.");
   });
 
-  it("blocks automatic goal continuation after repeated stagnant outputs", () => {
+  it("assesses repeated stagnant outputs as blocked", () => {
     const goal = {
       ...createConversationGoal("count to 50", "u1"),
       id: "goal-1",
@@ -1075,31 +434,10 @@ describe("conversationGoals", () => {
       },
     ]);
 
-    const decision = decideGoalContinuation({
-      goal,
-      terminalRun: {
-        id: "run-5",
-        status: "success",
-        metadata: {
-          goal: {
-            id: "goal-1",
-          },
-        },
-      },
-      messages,
-      pendingRuns: [],
-    });
-
-    expect(decision.shouldContinue).toBe(false);
-    expect(decision.reason).toBe("stagnation_detected");
-    expect(decision.stagnation?.level).toBe("blocked");
+    expect(assessGoalStagnation({ goal, messages }).level).toBe("blocked");
   });
 
-  it("uses continuation turn metadata to stop automatic goal loops", () => {
-    const goal = {
-      ...createConversationGoal("keep going", "u1"),
-      id: "goal-1",
-    };
+  it("counts automatic goal turns from continuation turn metadata", () => {
     const messages = [
       {
         id: "user-1",
@@ -1135,25 +473,5 @@ describe("conversationGoals", () => {
     ];
 
     expect(countGoalContinuationTurns(messages, "goal-1")).toBe(2);
-    const decision = decideGoalContinuation({
-      goal,
-      terminalRun: {
-        id: "run-3",
-        status: "success",
-        metadata: {
-          goal: {
-            id: "goal-1",
-          },
-        },
-      },
-      messages,
-      pendingRuns: [],
-      maxTurns: 2,
-    });
-
-    expect(decision.shouldContinue).toBe(false);
-    expect(decision.nextTurn).toBe(3);
-    expect(decision.reason).toBe("turn_limit_reached");
-    expect(decision.stagnation).toBeNull();
   });
 });

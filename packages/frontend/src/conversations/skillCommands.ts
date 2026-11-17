@@ -31,50 +31,6 @@ function splitSourcePath(value: string): string[] {
     .filter((segment) => segment.length > 0);
 }
 
-export function deriveSkillNameHintFromImportSource(source: string): string | null {
-  const trimmed = source.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const pickFromSegments = (segments: string[]): string | null => {
-    if (segments.length === 0) {
-      return null;
-    }
-    const last = segments[segments.length - 1]?.trim() ?? "";
-    const candidate =
-      last.toLowerCase() === SKILL_FILE_NAME.toLowerCase() && segments.length >= 2
-        ? segments[segments.length - 2] ?? ""
-        : last;
-    const normalized = normalizeSkillName(candidate);
-    return normalized || null;
-  };
-
-  try {
-    const parsed = new URL(trimmed);
-    const segments = parsed.pathname
-      .split("/")
-      .map((segment) => segment.trim())
-      .filter((segment) => segment.length > 0);
-    if (segments.length === 0) {
-      return null;
-    }
-
-    if (
-      parsed.hostname.toLowerCase() === "github.com" &&
-      segments.length >= 5 &&
-      (segments[2] === "blob" || segments[2] === "tree")
-    ) {
-      const githubPathSegments = segments.slice(4);
-      return pickFromSegments(githubPathSegments);
-    }
-
-    return pickFromSegments(segments);
-  } catch {
-    return pickFromSegments(splitSourcePath(trimmed));
-  }
-}
-
 /**
  * Human label for the toast after a send: the repo name for a bare repo, a
  * tree root or a `.agents/skills` folder; the folder name for one skill

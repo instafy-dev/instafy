@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import type { AssistantMentionToken } from "../../../conversations/assistantMentions";
 import {
   getBuiltInAssistantMentionPatternSource,
@@ -55,23 +54,4 @@ export function parseAssistantMentions(text: string): AssistantMentionChunk[] {
     chunks.push({ type: "text", value: text.slice(cursor) });
   }
   return chunks;
-}
-
-export function renderAssistantMentionTokens(text: string): ReactNode {
-  if (!text) {
-    return "";
-  }
-  const chunks = parseAssistantMentions(text);
-  if (chunks.length === 1 && chunks[0]?.type === "text") {
-    return chunks[0].value;
-  }
-  return chunks.map((chunk, index) =>
-    chunk.type === "text" ? (
-      chunk.value
-    ) : (
-      <span key={`${chunk.value}-${index}`} className={getAssistantMentionClass(chunk.value)}>
-        {chunk.value}
-      </span>
-    )
-  );
 }

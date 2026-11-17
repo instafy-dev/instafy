@@ -2,12 +2,9 @@ import { CAMERA_PROVIDER_FAMILY } from "@instafy/provider-contract/builtins";
 import { describe, expect, it } from "vitest";
 import {
   buildExtensionNativeAttachMetadata,
-  resolveExtensionAttachedDeviceFamilyId,
   resolveExtensionFamilyCurrentNativeProviderId,
   resolveExtensionFamilyInstanceTitle,
   resolveExtensionProjectIntegrationProviderEntryKey,
-  shouldUseExtensionCurrentNativeStatus,
-  supportsExtensionAttachedDeviceList,
   supportsExtensionRemoteDeviceUi,
 } from "../extensionFamilyUiRegistry";
 
@@ -79,34 +76,6 @@ describe("extensionFamilyUiRegistry", () => {
 
   it("reports remote-device ui support only for camera today", () => {
     expect(supportsExtensionRemoteDeviceUi(CAMERA_PROVIDER_FAMILY.id)).toBe(true);
-    expect(supportsExtensionAttachedDeviceList("camera:pixel-test")).toBe(true);
-    expect(resolveExtensionAttachedDeviceFamilyId("camera:pixel-test")).toBe(
-      CAMERA_PROVIDER_FAMILY.id,
-    );
     expect(supportsExtensionRemoteDeviceUi("other-provider")).toBe(false);
-  });
-
-  it("uses family-specific rules when deciding whether native status should backfill a provider", () => {
-    expect(
-      shouldUseExtensionCurrentNativeStatus({
-        providerId: "camera:pixel-test",
-        source: "project_integration",
-        currentNativeProviderId: "camera:pixel-test",
-      }),
-    ).toBe(true);
-    expect(
-      shouldUseExtensionCurrentNativeStatus({
-        providerId: CAMERA_PROVIDER_FAMILY.id,
-        source: "native_runtime",
-        currentNativeProviderId: null,
-      }),
-    ).toBe(true);
-    expect(
-      shouldUseExtensionCurrentNativeStatus({
-        providerId: "other-provider",
-        source: "native_runtime",
-        currentNativeProviderId: null,
-      }),
-    ).toBe(false);
   });
 });

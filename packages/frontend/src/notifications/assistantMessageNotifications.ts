@@ -189,17 +189,6 @@ export async function enableMessageNotifications(): Promise<boolean> {
   return await enableBrowserMessageNotifications();
 }
 
-export async function disableBrowserMessageNotifications(): Promise<boolean> {
-  setMessageNotificationsEnabled(false);
-  if (typeof window === "undefined") {
-    return true;
-  }
-  if (Capacitor.isNativePlatform()) {
-    return await unregisterNativePushToken();
-  }
-  return await unregisterWebPushSubscription();
-}
-
 export async function disableMessageNotifications(): Promise<boolean> {
   setMessageNotificationsEnabled(false);
   const [nativeOk, webOk] = await Promise.all([

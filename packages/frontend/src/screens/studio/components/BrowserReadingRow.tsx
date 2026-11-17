@@ -12,28 +12,6 @@ import {
   shownBrowserPageTitle,
 } from "./browserAgentTabs";
 
-/**
- * The mark on a tab the agent holds, in the same violet as "<agent> has
- * control". It names the agent so the tab is never mistaken for the person's;
- * on a tab the agent opened in the Shared Browser it shows that tab's label
- * ("Octo's tab 2"), the one its prompts use.
- */
-export function BrowserAgentTabBadge({ agentName = BROWSER_AGENT_DEFAULT_NAME, label, className = "" }: {
-  agentName?: string;
-  label?: string;
-  className?: string;
-}) {
-  return (
-    <span
-      className={`inline-flex h-4 ${label ? "max-w-24" : "max-w-20"} flex-none items-center rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 text-[10px] font-semibold leading-none text-violet-700 dark:text-violet-300 ${className}`}
-      data-testid="browser-agent-tab-badge"
-      title={`${agentName} opened or is using this tab`}
-    >
-      <span className="truncate">{label ?? agentName}</span>
-    </span>
-  );
-}
-
 /** "visitporto.travel", "a.example and b.example", "a.example, b.example and c.example". */
 function sitesInWords(pages: readonly BrowserSessionPage[]): string {
   const hosts = [...new Set(pages.map(browserReadingHost))];

@@ -34,10 +34,6 @@ export function extractLocalCapabilityArtifact(message: ChatMessage) {
   return resolveLocalCapabilityArtifact(message);
 }
 
-export function extractLocalCapabilityLearnDraft(message: ChatMessage) {
-  return extractLocalCapabilityArtifact(message)?.artifact.value ?? null;
-}
-
 export function extractAgentJobId(message: ChatMessage): string | null {
   if (!message.metadata || !isRecord(message.metadata)) {
     return null;

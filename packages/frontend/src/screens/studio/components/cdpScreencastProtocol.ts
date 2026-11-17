@@ -229,34 +229,6 @@ export function cdpScreencastMouseButton(button: number): CdpScreencastMouseButt
   }
 }
 
-export function mapCdpScreencastPoint(params: {
-  clientX: number;
-  clientY: number;
-  rect: Pick<DOMRect, "left" | "top" | "width" | "height">;
-  viewport: Pick<CdpScreencastViewport, "width" | "height">;
-}): { x: number; y: number } | null {
-  if (
-    !Number.isFinite(params.clientX) ||
-    !Number.isFinite(params.clientY) ||
-    params.rect.width <= 0 ||
-    params.rect.height <= 0
-  ) {
-    return null;
-  }
-  return {
-    x: clamp(
-      ((params.clientX - params.rect.left) / params.rect.width) * params.viewport.width,
-      0,
-      params.viewport.width,
-    ),
-    y: clamp(
-      ((params.clientY - params.rect.top) / params.rect.height) * params.viewport.height,
-      0,
-      params.viewport.height,
-    ),
-  };
-}
-
 export function boundedCdpScreencastText(text: string): string | null {
   if (!text || new TextEncoder().encode(text).byteLength > CDP_SCREENCAST_MAX_TEXT_BYTES) {
     return null;

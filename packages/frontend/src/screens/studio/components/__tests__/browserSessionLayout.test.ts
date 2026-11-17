@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   getChatScrollObstructionPaddingPx,
-  getVisualViewportBottomInset,
   shouldForceDockedBrowserFullscreen,
   shouldPinChatMessagesToBottom,
   shouldRenderBrowserSessionFullscreen,
@@ -137,26 +136,6 @@ describe("browserSessionLayout", () => {
         smallViewport: false,
       }),
     ).toBe(true);
-  });
-
-  it("derives the keyboard occlusion inset from the visual viewport", () => {
-    expect(
-      getVisualViewportBottomInset({
-        layoutViewportHeight: 844,
-        visualViewportHeight: 560,
-        visualViewportOffsetTop: 0,
-      }),
-    ).toBe(284);
-  });
-
-  it("does not add an inset when the layout viewport already resized", () => {
-    expect(
-      getVisualViewportBottomInset({
-        layoutViewportHeight: 560,
-        visualViewportHeight: 560,
-        visualViewportOffsetTop: 0,
-      }),
-    ).toBe(0);
   });
 
   describe("getChatScrollObstructionPaddingPx", () => {

@@ -275,15 +275,6 @@ export function rejectedPathCopy(reason: string | null | undefined): SaveCopy {
   }
 }
 
-/** The first refused path of a save that matters to the user, as copy. */
-export function rejectedPathsCopy(
-  rejected: OriginRejectedPath[],
-  paths: string[],
-): SaveCopy | null {
-  const relevant = rejected.find((entry) => paths.includes(entry.path)) ?? rejected[0];
-  return relevant ? rejectedPathCopy(relevant.reason) : null;
-}
-
 /**
  * Copy for a failed save, folder creation or delete. `label` names the file
  * or folder the way the explorer shows it.

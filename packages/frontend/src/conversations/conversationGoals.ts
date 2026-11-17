@@ -61,42 +61,6 @@ export function normalizeConversationGoalProgressSummaryForDisplay(
   return normalized;
 }
 
-export interface GoalContinuationDecision {
-  shouldContinue: boolean;
-  nextTurn: number;
-  reason:
-    | "continue"
-    | "no_active_goal"
-    | "run_not_successful"
-    | "run_goal_mismatch"
-    | "run_messages_pending"
-    | "goal_run_already_pending"
-    | "goal_continuation_already_requested"
-    | "terminal_goal_update_observed"
-    | "turn_limit_reached"
-    | "stagnation_detected";
-  stagnation: GoalStagnationAssessment | null;
-}
-
-export interface GoalRunLike {
-  id: string;
-  status: string;
-  metadata?: Record<string, unknown> | null;
-}
-
-export interface GoalConversationLike {
-  localId: string;
-  controllerId: string | null;
-  activeGoal: ConversationGoal | null;
-  messages?: ChatMessage[];
-}
-
-export interface GoalConversationRunLike extends GoalRunLike {
-  conversationId?: string | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
-}
-
 export interface GoalStagnationAssessment {
   level: "none" | "warning" | "blocked";
   reason:
@@ -158,35 +122,6 @@ function normalizeGoalStatus(value: unknown): ConversationGoalStatus | null {
 
 function normalizeMessageType(value: unknown): string | null {
   return normalizeString(value)?.toLowerCase() ?? null;
-}
-
-function resolveGoalActionDetails(
-  metadata: Record<string, unknown> | null,
-): Record<string, unknown> | null {
-  if (!metadata) {
-    return null;
-  }
-  const directDetails = isPlainObject(metadata.details) ? metadata.details : metadata;
-  let resolved: Record<string, unknown> = directDetails;
-  for (let depth = 0; depth < 3; depth += 1) {
-    const nestedDetails = isPlainObject(resolved.details) ? resolved.details : null;
-    if (!nestedDetails) {
-      break;
-    }
-    const hasWrapperShape =
-      typeof resolved.runtimeId === "string" ||
-      typeof resolved.runtime_id === "string" ||
-      typeof resolved.displayName === "string" ||
-      typeof resolved.display_name === "string" ||
-      typeof resolved.messageType === "string" ||
-      typeof resolved.message_type === "string" ||
-      normalizeMessageType(resolved.kind) === "runtime_selection";
-    if (!hasWrapperShape) {
-      break;
-    }
-    resolved = nestedDetails;
-  }
-  return resolved;
 }
 
 function nowIso(): string {
@@ -313,10 +248,6 @@ function timestampMs(value: string | null | undefined): number | null {
   }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function goalRunTimestamp(run: GoalConversationRunLike): number {
-  return timestampMs(run.updatedAt) ?? timestampMs(run.createdAt) ?? 0;
 }
 
 export function shouldApplyConversationGoalSnapshot(
@@ -572,144 +503,6 @@ function extractPromptGoalId(message: ChatMessage): string | null {
   return extractGoalMetadataId(promptMetadata?.goal) ?? extractGoalMetadataId(metadata?.goal);
 }
 
-export function runMetadataMatchesConversationGoal(
-  runMetadata: Record<string, unknown> | null | undefined,
-  goal: ConversationGoal | null,
-): boolean {
-  if (!goal || goal.status !== "active") {
-    return false;
-  }
-  return extractGoalMetadataId(runMetadata?.goal) === goal.id;
-}
-
-function isGoalUpdateMessage(message: ChatMessage): boolean {
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
-  const messageType =
-    normalizeMessageType(message.messageType) ??
-    normalizeMessageType(metadata?.messageType) ??
-    normalizeMessageType(metadata?.message_type);
-  return message.role === "assistant" && messageType === "goal_update";
-}
-
-function goalUpdateMessageMatchesGoal(message: ChatMessage, goal: ConversationGoal): boolean {
-  if (!isGoalUpdateMessage(message)) {
-    return false;
-  }
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
-  const details = resolveGoalActionDetails(metadata);
-  const clear =
-    normalizeMessageType(details?.operation) === "clear" ||
-    normalizeMessageType(details?.op) === "clear";
-  if (clear) {
-    return false;
-  }
-  const status = normalizeGoalStatus(details?.status);
-  if (status && status !== "active") {
-    return false;
-  }
-  const goalId = extractGoalMetadataId(details?.goal) ?? extractGoalMetadataId(metadata?.goal);
-  if (goalId) {
-    return goalId === goal.id;
-  }
-  const objective = normalizeString(details?.objective);
-  return objective === goal.objective;
-}
-
-function isTerminalGoalUpdateMessage(message: ChatMessage): boolean {
-  if (!isGoalUpdateMessage(message)) {
-    return false;
-  }
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
-  const details = resolveGoalActionDetails(metadata);
-  const status = normalizeGoalStatus(details?.status);
-  const clear =
-    normalizeMessageType(details?.operation) === "clear" ||
-    normalizeMessageType(details?.op) === "clear";
-  return clear || status === "completed" || status === "blocked" || status === "canceled";
-}
-
-function runProducedActiveGoalUpdate(
-  run: GoalRunLike,
-  messages: ChatMessage[] | undefined,
-  goal: ConversationGoal | null,
-): boolean {
-  if (!goal || goal.status !== "active" || !messages?.length) {
-    return false;
-  }
-  return messages.some(
-    (message) =>
-      extractMessageRunId(message) === run.id && goalUpdateMessageMatchesGoal(message, goal),
-  );
-}
-
-function runProducedTerminalGoalUpdate(
-  run: GoalRunLike,
-  messages: ChatMessage[] | undefined,
-): boolean {
-  if (!messages?.length) {
-    return false;
-  }
-  return messages.some(
-    (message) => extractMessageRunId(message) === run.id && isTerminalGoalUpdateMessage(message),
-  );
-}
-
-function runProducedAnyMessage(
-  run: GoalRunLike,
-  messages: ChatMessage[] | undefined,
-): boolean {
-  if (!messages?.length) {
-    return false;
-  }
-  return messages.some((message) => extractMessageRunId(message) === run.id);
-}
-
-function runMatchesConversationGoal(
-  run: GoalRunLike,
-  messages: ChatMessage[] | undefined,
-  goal: ConversationGoal | null,
-): boolean {
-  return (
-    runMetadataMatchesConversationGoal(run.metadata, goal) ||
-    runProducedActiveGoalUpdate(run, messages, goal)
-  );
-}
-
-export function selectLatestSuccessfulGoalRuns<T extends GoalConversationRunLike>(args: {
-  conversations: GoalConversationLike[];
-  runs: T[];
-}): T[] {
-  const conversationsByControllerId = new Map<string, GoalConversationLike>();
-  args.conversations.forEach((conversation) => {
-    if (conversation.controllerId) {
-      conversationsByControllerId.set(conversation.controllerId, conversation);
-    }
-  });
-
-  const latestByGoal = new Map<string, T>();
-  args.runs.forEach((run) => {
-    if (run.status.trim().toLowerCase() !== "success" || !run.conversationId) {
-      return;
-    }
-    const conversation = conversationsByControllerId.get(run.conversationId);
-    if (!conversation?.activeGoal) {
-      return;
-    }
-    if (!runMatchesConversationGoal(run, conversation.messages, conversation.activeGoal)) {
-      return;
-    }
-    const key = `${conversation.localId}:${conversation.activeGoal.id}`;
-    const existing = latestByGoal.get(key);
-    if (!existing || goalRunTimestamp(run) >= goalRunTimestamp(existing)) {
-      latestByGoal.set(key, run);
-    }
-  });
-
-  return Array.from(latestByGoal.values()).sort(
-    (first, second) => goalRunTimestamp(first) - goalRunTimestamp(second),
-  );
-}
-
 function resolveGoalContinuationRecord(message: ChatMessage): Record<string, unknown> | null {
   if (message.role !== "user") {
     return null;
@@ -733,24 +526,6 @@ function extractGoalContinuationTurn(message: ChatMessage): number | null {
   return typeof rawTurn === "number" && Number.isFinite(rawTurn) && rawTurn > 0
     ? Math.floor(rawTurn)
     : null;
-}
-
-function extractGoalContinuationTriggerRunId(message: ChatMessage): string | null {
-  const continuation = resolveGoalContinuationRecord(message);
-  return normalizeString(continuation?.triggerRunId ?? continuation?.trigger_run_id);
-}
-
-function hasContinuationRequestedForRun(
-  messages: ChatMessage[],
-  goalId: string,
-  runId: string,
-): boolean {
-  return messages.some(
-    (message) =>
-      message.role === "user" &&
-      extractPromptGoalId(message) === goalId &&
-      extractGoalContinuationTriggerRunId(message) === runId,
-  );
 }
 
 function isGoalRunActivityMessage(message: ChatMessage): boolean {
@@ -1030,63 +805,6 @@ export function buildGoalUnblockHelpPrompt(args: {
   ].join("\n");
 }
 
-export function decideGoalContinuation(args: {
-  goal: ConversationGoal | null;
-  terminalRun: GoalRunLike;
-  messages: ChatMessage[];
-  pendingRuns: GoalRunLike[];
-  maxTurns?: number;
-}): GoalContinuationDecision {
-  const maxTurns = args.maxTurns ?? DEFAULT_GOAL_CONTINUATION_MAX_TURNS;
-  const goal = args.goal;
-  if (!goal || goal.status !== "active") {
-    return { shouldContinue: false, nextTurn: 0, reason: "no_active_goal", stagnation: null };
-  }
-  if (args.terminalRun.status.trim().toLowerCase() !== "success") {
-    return { shouldContinue: false, nextTurn: 0, reason: "run_not_successful", stagnation: null };
-  }
-  const runGoalId = extractGoalMetadataId(args.terminalRun.metadata?.goal);
-  if (
-    (!runGoalId || runGoalId !== goal.id) &&
-    !runProducedActiveGoalUpdate(args.terminalRun, args.messages, goal)
-  ) {
-    return { shouldContinue: false, nextTurn: 0, reason: "run_goal_mismatch", stagnation: null };
-  }
-  if (hasContinuationRequestedForRun(args.messages, goal.id, args.terminalRun.id)) {
-    return { shouldContinue: false, nextTurn: 0, reason: "goal_continuation_already_requested", stagnation: null };
-  }
-  const hasPendingGoalRun = args.pendingRuns.some((run) => {
-    const status = run.status.trim().toLowerCase();
-    if (status === "success" || status === "failed" || status === "canceled") {
-      return false;
-    }
-    return extractGoalMetadataId(run.metadata?.goal) === goal.id;
-  });
-  if (hasPendingGoalRun) {
-    return { shouldContinue: false, nextTurn: 0, reason: "goal_run_already_pending", stagnation: null };
-  }
-  if (!runProducedAnyMessage(args.terminalRun, args.messages)) {
-    return { shouldContinue: false, nextTurn: 0, reason: "run_messages_pending", stagnation: null };
-  }
-  if (runProducedTerminalGoalUpdate(args.terminalRun, args.messages)) {
-    return { shouldContinue: false, nextTurn: 0, reason: "terminal_goal_update_observed", stagnation: null };
-  }
-  const nextTurn = countGoalContinuationTurns(args.messages, goal.id) + 1;
-  if (nextTurn > maxTurns) {
-    return { shouldContinue: false, nextTurn, reason: "turn_limit_reached", stagnation: null };
-  }
-  const stagnation = assessGoalStagnation({ goal, messages: args.messages });
-  if (stagnation.level === "blocked") {
-    return {
-      shouldContinue: false,
-      nextTurn,
-      reason: "stagnation_detected",
-      stagnation,
-    };
-  }
-  return { shouldContinue: true, nextTurn, reason: "continue", stagnation };
-}
-
 export function buildConversationGoalHealth(args: {
   goal: ConversationGoal | null;
   messages: ChatMessage[];
@@ -1215,107 +933,6 @@ export function hasNonRecoverableErrorForRun(
   });
 }
 
-function resolveNonRecoverableGoalErrorMatch(args: {
-  currentGoal: ConversationGoal | null;
-  existingMessages: ChatMessage[];
-  errorMessage: ChatMessage;
-}): { matches: boolean; runId: string | null } {
-  const { currentGoal, existingMessages, errorMessage } = args;
-  if (!currentGoal || currentGoal.status !== "active") {
-    return { matches: false, runId: null };
-  }
-  if (!isNonRecoverableRunErrorMessage(errorMessage)) {
-    return { matches: false, runId: null };
-  }
-  const failedRunId = extractMessageRunId(errorMessage);
-  if (failedRunId) {
-    const matches = existingMessages.some(
-      (message) =>
-        message.role === "user" &&
-        extractMessageRunId(message) === failedRunId &&
-        extractPromptGoalId(message) === currentGoal.id,
-    );
-    return { matches, runId: matches ? failedRunId : null };
-  }
-  const latestUserMessage = latestUserMessageBeforeError(existingMessages, errorMessage);
-  const matches =
-    latestUserMessage !== null && extractPromptGoalId(latestUserMessage) === currentGoal.id;
-  return {
-    matches,
-    runId: matches ? extractMessageRunId(latestUserMessage) : null,
-  };
-}
-
-export function resolveNonRecoverableGoalErrorRunId(
-  currentGoal: ConversationGoal | null,
-  existingMessages: ChatMessage[],
-  errorMessage: ChatMessage,
-): string | null {
-  return resolveNonRecoverableGoalErrorMatch({
-    currentGoal,
-    existingMessages,
-    errorMessage,
-  }).runId;
-}
-
-export function settleGoalAfterTerminalRun(
-  currentGoal: ConversationGoal | null,
-  runMetadata: Record<string, unknown> | null | undefined,
-  runStatus: string,
-  userId: string | null,
-): { goal: ConversationGoal | null; changed: boolean } {
-  if (!currentGoal || currentGoal.status !== "active") {
-    return { goal: currentGoal, changed: false };
-  }
-  const normalizedStatus = runStatus.trim().toLowerCase();
-  if (normalizedStatus !== "failed" && normalizedStatus !== "canceled") {
-    return { goal: currentGoal, changed: false };
-  }
-  const runGoalId = extractGoalMetadataId(runMetadata?.goal);
-  if (!runGoalId || runGoalId !== currentGoal.id) {
-    return { goal: currentGoal, changed: false };
-  }
-  const nextGoal = updateConversationGoal(
-    currentGoal,
-    {
-      status: normalizedStatus === "canceled" ? "canceled" : "blocked",
-      progressSummary:
-        normalizedStatus === "canceled"
-          ? "Run was canceled before the goal completed."
-          : "Run failed before the goal completed.",
-    },
-    userId,
-  );
-  return { goal: nextGoal, changed: true };
-}
-
-export function settleGoalAfterNonRecoverableRunError(
-  currentGoal: ConversationGoal | null,
-  existingMessages: ChatMessage[],
-  errorMessage: ChatMessage,
-  userId: string | null,
-): { goal: ConversationGoal | null; changed: boolean } {
-  const match = resolveNonRecoverableGoalErrorMatch({
-    currentGoal,
-    existingMessages,
-    errorMessage,
-  });
-  if (!match.matches || !currentGoal) {
-    return { goal: currentGoal, changed: false };
-  }
-  return {
-    goal: updateConversationGoal(
-      currentGoal,
-      {
-        status: "blocked",
-        progressSummary: NON_RECOVERABLE_AI_REQUEST_GOAL_SUMMARY,
-      },
-      userId,
-    ),
-    changed: true,
-  };
-}
-
 function latestUserMessageBeforeError(
   existingMessages: ChatMessage[],
   errorMessage: ChatMessage,
@@ -1338,13 +955,6 @@ function latestUserMessageBeforeError(
     latestUserMessage = message;
   }
   return latestUserMessage;
-}
-
-export function resolveGoalCommandDispatchInput(
-  command: GoalCommand,
-  goal: ConversationGoal | null,
-): string | null {
-  return resolveGoalCommandDispatch({ command, goal })?.input ?? null;
 }
 
 export function resolveGoalCommandDispatch(args: {
@@ -1372,71 +982,4 @@ export function resolveGoalCommandDispatch(args: {
     };
   }
   return null;
-}
-
-export function applyGoalActionMessage(
-  currentGoal: ConversationGoal | null,
-  message: ChatMessage,
-  userId: string | null,
-): { goal: ConversationGoal | null; changed: boolean } {
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
-  const messageType =
-    normalizeMessageType(message.messageType) ??
-    normalizeMessageType(metadata?.messageType) ??
-    normalizeMessageType(metadata?.message_type);
-  if (messageType !== "goal_update") {
-    return { goal: currentGoal, changed: false };
-  }
-  const details = resolveGoalActionDetails(metadata);
-  const status = normalizeGoalStatus(details?.status);
-  const objective = normalizeString(details?.objective);
-  const progressSummary = normalizeNullableString(
-    details?.progressSummary ?? details?.progress_summary ?? message.content,
-  );
-  const doneWhen = normalizeNullableString(details?.doneWhen ?? details?.done_when);
-  const stopWhen = normalizeNullableString(details?.stopWhen ?? details?.stop_when);
-  const clear =
-    normalizeMessageType(details?.operation) === "clear" ||
-    normalizeMessageType(details?.op) === "clear";
-
-  if (clear) {
-    return { goal: null, changed: currentGoal !== null };
-  }
-
-  if (!currentGoal && objective) {
-    const goal = createConversationGoal(objective, userId);
-    return {
-      goal: updateConversationGoal(
-        goal,
-        {
-          status: status ?? "active",
-          progressSummary,
-          doneWhen,
-          stopWhen,
-        },
-        userId,
-      ),
-      changed: true,
-    };
-  }
-
-  if (!currentGoal) {
-    return { goal: currentGoal, changed: false };
-  }
-
-  const nextGoal = updateConversationGoal(
-    currentGoal,
-    {
-      ...(objective ? { objective } : {}),
-      ...(status ? { status } : {}),
-      ...(progressSummary ? { progressSummary } : {}),
-      ...(doneWhen ? { doneWhen } : {}),
-      ...(stopWhen ? { stopWhen } : {}),
-    },
-    userId,
-  );
-  return {
-    goal: nextGoal,
-    changed: !conversationGoalsEqual(currentGoal, nextGoal),
-  };
 }

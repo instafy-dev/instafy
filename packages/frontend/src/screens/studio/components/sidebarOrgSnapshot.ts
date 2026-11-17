@@ -143,11 +143,6 @@ export function readCachedControllerOrgs(
   }));
 }
 
-/** True when the last successful load for this user rendered a team rail. */
-export function sidebarTeamRailExpected(userEmail: string | null | undefined): boolean {
-  return (readSidebarOrgSnapshot(userEmail)?.railChipCount ?? 0) > 1;
-}
-
 /** Persists the minimal rail snapshot. Never throws (quota, private mode, SSR). */
 export function writeSidebarOrgSnapshot(
   userEmail: string | null | undefined,

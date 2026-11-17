@@ -5,7 +5,7 @@
 // Detection relies on the preload bridge, which only the desktop shell
 // injects (packages/desktop-app/src/preload.ts exposes `instafyDesktop`).
 
-type ShellWindow = { instafyDesktop?: { windowChrome?: unknown } | unknown };
+type ShellWindow = { instafyDesktop?: unknown };
 
 function defaultWindow(): (ShellWindow & { open?: Window["open"] }) | undefined {
   return typeof window === "undefined" ? undefined : (window as ShellWindow);
@@ -50,19 +50,6 @@ export function showBackToLanding({
   shellWindow?: ShellWindow;
 }): boolean {
   return !isNativeApp && !isExtensionEmbed && !isDesktopShell(shellWindow ?? defaultWindow());
-}
-
-// The shell's window chrome style, versioned through the bridge on purpose:
-// a frontend older than the property keeps stock-title-bar spacing, and an
-// app older than the integrated layout never exposes it, so mismatched
-// halves always degrade to the safe stock layout instead of an undraggable
-// window or overlapped traffic lights.
-export function desktopWindowChrome(
-  shellWindow: ShellWindow | undefined = defaultWindow(),
-): "hiddenInset" | "system" | null {
-  if (!isDesktopShell(shellWindow)) return null;
-  const bridge = shellWindow?.instafyDesktop as { windowChrome?: unknown } | undefined;
-  return bridge?.windowChrome === "hiddenInset" ? "hiddenInset" : "system";
 }
 
 /**

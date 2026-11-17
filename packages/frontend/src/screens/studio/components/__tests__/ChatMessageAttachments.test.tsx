@@ -68,7 +68,7 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
 }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 
-import { extractChatAttachments, extractImageAttachments, UserMessageBubble } from "../ChatMessageEntries";
+import { extractChatAttachments, UserMessageBubble } from "../ChatMessageEntries";
 import { clearChatAttachmentPreviews, seedChatAttachmentPreview } from "../../../../lib/chatAttachmentPreviews";
 import { TEXT_ATTACHMENT_PAGE_BYTES } from "../textAttachmentPage";
 
@@ -157,7 +157,6 @@ describe("chat message attachments", () => {
         sizeBytes: null,
       },
     ]);
-    expect(extractImageAttachments(message)).toHaveLength(2);
   });
 
   it("downloads a Storage image with the session and revokes its object URL on unmount", async () => {

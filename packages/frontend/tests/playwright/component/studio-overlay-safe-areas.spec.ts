@@ -11,7 +11,6 @@ async function mountOverlays(page: Page): Promise<void> {
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { StudioDialogModal } from "/src/components/aria/StudioModal.tsx";
-    import { HostedRuntimePromptDialog } from "/src/runtime/components/HostedRuntimePromptDialog.tsx";
     import { BuildLogOverlay } from "/src/screens/studio/components/BuildLogOverlay.tsx";
     import { ProjectLauncher } from "/src/screens/studio/components/ProjectLauncher.tsx";
     const React = ReactNS.default ?? ReactNS;
@@ -33,12 +32,6 @@ async function mountOverlays(page: Page): Promise<void> {
           "data-testid": "studio-modal-overlay",
           dialogAriaLabel: "Safe area fixture",
         }, h("div", { className: "p-6" }, "Shared modal")),
-        h(HostedRuntimePromptDialog, {
-          runtimes: [],
-          onUseExisting: noop,
-          onLaunchNew: noop,
-          onCancel: noop,
-        }),
         h(BuildLogOverlay, {
           logs: [],
           onClear: noop,
@@ -107,17 +100,14 @@ test("fixed Studio overlays stay inside asymmetric landscape safe areas", async 
   await mountOverlays(page);
 
   const sharedModal = page.getByTestId("studio-modal-overlay");
-  const hostedRuntime = page.getByTestId("hosted-runtime-existing-dialog");
   const buildLogs = page.getByTestId("build-log-overlay");
   const projectLauncher = page.getByTestId("project-launcher-overlay");
 
   await expectPadding(sharedModal, { top: 24, right: 48, bottom: 18, left: 27 });
-  await expectPadding(hostedRuntime, { top: 24, right: 48, bottom: 18, left: 27 });
   await expectPadding(buildLogs, { top: 24, right: 48, bottom: 18, left: 27 });
   await expectPadding(projectLauncher, { top: 32, right: 48, bottom: 32, left: 27 });
 
   await expectInsideSafeArea(page.locator(".studio-safe-area-modal-panel"));
-  await expectInsideSafeArea(hostedRuntime.locator(":scope > *"));
   await expectInsideSafeArea(page.getByTestId("build-log-panel"));
 
   const launcherPanel = projectLauncher.getByRole("dialog");

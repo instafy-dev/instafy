@@ -11,7 +11,7 @@ describe("desktop sidebar toggle focus", () => {
   let root: Root;
   let wide = true;
   let moveFocusElsewhere = false;
-  let popoverTestId = "sidebar-recent-chats-popover";
+  let popoverTestId = "sidebar-recent-spaces-popover";
 
   function Harness() {
     const [collapsed, setCollapsed] = useState(false);
@@ -37,7 +37,7 @@ describe("desktop sidebar toggle focus", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     wide = true;
     moveFocusElsewhere = false;
-    popoverTestId = "sidebar-recent-chats-popover";
+    popoverTestId = "sidebar-recent-spaces-popover";
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -74,7 +74,7 @@ describe("desktop sidebar toggle focus", () => {
     expect(document.activeElement).toBe(other);
   });
 
-  it.each(["sidebar-recent-chats-popover", "sidebar-recent-spaces-popover", "sidebar-more-menu", "sidebar-team-menu"])("restores focus from %s removed when expanding", async (testId) => {
+  it.each(["sidebar-recent-spaces-popover", "sidebar-more-menu", "sidebar-team-menu"])("restores focus from %s removed when expanding", async (testId) => {
     popoverTestId = testId;
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="sidebar-drawer-toggle"]')!.click());
     const detail = document.querySelector<HTMLButtonElement>('[data-testid="popover-detail"]')!;

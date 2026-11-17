@@ -6,12 +6,10 @@ import {
   callLocalProviderTool,
   getLocalProviderForCapability,
   getLocalProviderSummary,
-  readLocalProviderResource,
   type LocalProviderSummary,
 } from "../capabilities/localProviderHostClient";
 import { controllerClient } from "../sdk/instafy";
 import {
-  dispatchControllerProviderResourceRead,
   dispatchControllerProviderToolCall,
   listControllerProviderRequests,
 } from "../services/runtimeController/providerRequests";
@@ -24,11 +22,8 @@ import {
 import {
   CAMERA_CAPTURE_PHOTO_SERIES_TOOL_ID,
   CAMERA_CAPTURE_PHOTO_TOOL_ID,
-  CAMERA_LATEST_CAPTURE_RESOURCE_URI,
-  CAMERA_LENSES_RESOURCE_URI,
   CAMERA_OBSERVATION_CAPABILITY_ID,
   CAMERA_PROVIDER_ID,
-  CAMERA_STATUS_RESOURCE_URI,
 } from "./cameraCapabilityMetadata";
 import { getProjectProviderCameraState } from "./cameraProjectState";
 import {
@@ -46,10 +41,8 @@ import {
   type CameraRemoteRequestSummary,
 } from "./cameraRemoteRequestPresentation";
 import type {
-  CameraCaptureMetadata,
   CameraCaptureResult,
   CameraCaptureSeriesResult,
-  CameraLensSummary,
   CameraLensId,
   CameraStatusSnapshot,
 } from "./types";
@@ -68,11 +61,6 @@ type CameraProviderContext = {
     capturePhoto: string;
     capturePhotoSeries: string;
   };
-  resourceAliases: {
-    cameraStatus: string;
-    cameraLenses: string;
-    latestCaptureMetadata: string;
-  };
 };
 
 export type CameraProviderCaptureResponse<TCaptureResult> = {
@@ -85,11 +73,6 @@ const DEFAULT_CAMERA_TOOL_ALIASES = {
   capturePhotoSeries: CAMERA_CAPTURE_PHOTO_SERIES_TOOL_ID,
 };
 
-const DEFAULT_CAMERA_RESOURCE_ALIASES = {
-  cameraStatus: CAMERA_STATUS_RESOURCE_URI,
-  cameraLenses: CAMERA_LENSES_RESOURCE_URI,
-  latestCaptureMetadata: CAMERA_LATEST_CAPTURE_RESOURCE_URI,
-};
 const REMOTE_CAMERA_REQUEST_POLL_INTERVAL_MS = 1_250;
 
 function createMissingCameraProviderError() {
@@ -222,10 +205,6 @@ function createCameraProviderContext(
     toolAliases: {
       ...DEFAULT_CAMERA_TOOL_ALIASES,
       ...(provider?.toolAliases ?? {}),
-    },
-    resourceAliases: {
-      ...DEFAULT_CAMERA_RESOURCE_ALIASES,
-      ...(provider?.resourceAliases ?? {}),
     },
   };
 }
@@ -368,61 +347,6 @@ async function monitorRemoteCameraRequestSummaries(params: {
   }
 }
 
-async function readRemoteCameraProviderStatus(
-  options?: CameraProviderClientOptions,
-): Promise<CameraStatusSnapshot> {
-  const projectId = options?.projectId?.trim() ?? "";
-  const providerId = resolveCameraProviderId(options);
-  const response = await dispatchControllerProviderResourceRead<CameraStatusSnapshot>({
-    projectId,
-    providerId,
-    uri: CAMERA_STATUS_RESOURCE_URI,
-  });
-  if (!response.ok || !response.value) {
-    throw new Error(
-      response.error?.trim() || `Camera provider ${providerId} did not return a remote status payload.`,
-    );
-  }
-  return response.value;
-}
-
-async function readRemoteCameraProviderLenses(
-  options?: CameraProviderClientOptions,
-): Promise<CameraLensSummary[]> {
-  const projectId = options?.projectId?.trim() ?? "";
-  const providerId = resolveCameraProviderId(options);
-  const response = await dispatchControllerProviderResourceRead<{ availableLenses?: CameraLensSummary[] }>({
-    projectId,
-    providerId,
-    uri: CAMERA_LENSES_RESOURCE_URI,
-  });
-  if (!response.ok) {
-    throw new Error(
-      response.error?.trim() || `Camera provider ${providerId} did not return a remote lenses payload.`,
-    );
-  }
-  return response.value?.availableLenses ?? [];
-}
-
-async function readRemoteCameraLatestCaptureMetadata(
-  options?: CameraProviderClientOptions,
-): Promise<CameraCaptureMetadata | null> {
-  const projectId = options?.projectId?.trim() ?? "";
-  const providerId = resolveCameraProviderId(options);
-  const response = await dispatchControllerProviderResourceRead<{ lastCapture?: CameraCaptureMetadata | null }>({
-    projectId,
-    providerId,
-    uri: CAMERA_LATEST_CAPTURE_RESOURCE_URI,
-  });
-  if (!response.ok) {
-    throw new Error(
-      response.error?.trim() ||
-        `Camera provider ${providerId} did not return remote latest-capture metadata.`,
-    );
-  }
-  return response.value?.lastCapture ?? null;
-}
-
 async function captureRemoteProviderPhoto(
   options?: CameraProviderClientOptions & {
     lens?: CameraLensId | null;
@@ -530,80 +454,6 @@ async function captureRemoteProviderPhotoSeries(
     result: response.value,
     executionContext: response.executionContext,
   };
-}
-
-export async function readCameraProviderStatus(
-  options?: CameraProviderClientOptions,
-): Promise<CameraStatusSnapshot> {
-  if (await maybeUseNativeCameraCapture(options)) {
-    return getNativeCameraStatus();
-  }
-
-  const context = await resolveCameraProviderContext(options).catch(() => null);
-  if (context) {
-    const response = await readLocalProviderResource<CameraStatusSnapshot>(
-      context.providerId,
-      context.resourceAliases.cameraStatus,
-    );
-    if (!response.value) {
-      throw new Error(`Camera provider ${context.providerId} did not return a status payload.`);
-    }
-    return response.value;
-  }
-
-  if (canUseRemoteCameraProvider(options)) {
-    return readRemoteCameraProviderStatus(options);
-  }
-
-  throw createMissingCameraProviderError();
-}
-
-export async function readCameraProviderLenses(
-  options?: CameraProviderClientOptions,
-): Promise<CameraLensSummary[]> {
-  if (await maybeUseNativeCameraCapture(options)) {
-    const status = await getNativeCameraStatus();
-    return status.availableLenses;
-  }
-
-  const context = await resolveCameraProviderContext(options).catch(() => null);
-  if (context) {
-    const response = await readLocalProviderResource<{ availableLenses?: CameraLensSummary[] }>(
-      context.providerId,
-      context.resourceAliases.cameraLenses,
-    );
-    return response.value?.availableLenses ?? [];
-  }
-
-  if (canUseRemoteCameraProvider(options)) {
-    return readRemoteCameraProviderLenses(options);
-  }
-
-  throw createMissingCameraProviderError();
-}
-
-export async function readCameraLatestCaptureMetadata(
-  options?: CameraProviderClientOptions,
-): Promise<CameraCaptureMetadata | null> {
-  if (await maybeUseNativeCameraCapture(options)) {
-    const status = await getNativeCameraStatus();
-    return status.lastCapture ?? null;
-  }
-
-  const context = await resolveCameraProviderContext(options).catch(() => null);
-  if (context) {
-    const response = await readLocalProviderResource<{ lastCapture?: CameraCaptureMetadata | null }>(
-      context.providerId,
-      context.resourceAliases.latestCaptureMetadata,
-    );
-    return response.value?.lastCapture ?? null;
-  }
-
-  if (canUseRemoteCameraProvider(options)) {
-    return readRemoteCameraLatestCaptureMetadata(options);
-  }
-
-  throw createMissingCameraProviderError();
 }
 
 export async function captureProviderPhoto(

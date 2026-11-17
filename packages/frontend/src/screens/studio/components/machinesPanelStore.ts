@@ -22,14 +22,6 @@ export function setMachinesPanelFocus(runtimeId: string | null): void {
   emit();
 }
 
-/** One-shot read: returns the pending focus and clears it. */
-export function consumeMachinesPanelFocus(): string | null {
-  const value = focusRuntimeId;
-  focusRuntimeId = null;
-  if (value !== null) emit();
-  return value;
-}
-
 export function useMachinesPanelFocus(): string | null {
   return useSyncExternalStore(
     (listener) => {

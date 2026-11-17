@@ -789,34 +789,3 @@ export function buildHomeFeed({
     isEmpty: needsAll.length === 0 && liveAll.length === 0 && activityAll.length === 0,
   };
 }
-
-const HOME_LAST_SEEN_STORAGE_PREFIX = "instafy.home.lastSeen.v1";
-
-function lastSeenStorageKey(userKey: string | null | undefined): string {
-  const user = userKey?.trim().toLowerCase() || "anonymous";
-  return `${HOME_LAST_SEEN_STORAGE_PREFIX}:${user}`;
-}
-
-export function readHomeLastSeen(userKey: string | null | undefined): number | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  try {
-    const raw = window.localStorage.getItem(lastSeenStorageKey(userKey));
-    const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-    return Number.isFinite(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-export function writeHomeLastSeen(userKey: string | null | undefined, at: number): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-  try {
-    window.localStorage.setItem(lastSeenStorageKey(userKey), String(Math.round(at)));
-  } catch {
-    // Storage unavailable: the cut just won't persist across visits.
-  }
-}

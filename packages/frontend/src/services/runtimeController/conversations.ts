@@ -131,24 +131,6 @@ export interface ProjectConversationTitleResult {
   error?: string;
 }
 
-export interface DispatchControllerBuildParams {
-  projectId: string;
-  sessionId?: string;
-  repoOwner?: string;
-  repoName?: string;
-  branch?: string;
-  workflow?: string;
-  metadata?: Record<string, unknown> | null;
-  accessToken?: string | null;
-}
-
-export interface DispatchControllerBuildResponse {
-  runId: string;
-  status: string;
-  workflowUrl?: string | null;
-  message?: string | null;
-}
-
 export interface ControllerConversationMessage {
   id: string;
   conversationId: string;
@@ -484,78 +466,6 @@ export async function requestProjectConversationTitle(
     }
     const messageText = error instanceof Error ? error.message : String(error);
     return { success: false, title: null, error: `Unable to generate conversation title: ${messageText}` };
-  }
-}
-
-export async function createControllerConversation(
-  params: ControllerConversationParams,
-): Promise<DispatchControllerPromptResponse | null> {
-  if (!runtimeControllerEnabled) {
-    return null;
-  }
-
-  const requestContext = await resolveControllerRequestContext(
-    params.accessToken ?? null,
-  );
-  const sessionToken = requestContext.accessToken;
-
-  if (!sessionToken) {
-    console.warn(
-      "[runtime-controller] No access token available; skipping conversation creation.",
-    );
-    return null;
-  }
-
-  const body = {
-    sessionId: params.sessionId ?? null,
-    promptText: params.promptText,
-    intent: params.intent ?? "feature",
-    metadata: safeJson(params.metadata) ?? {},
-    conversationMetadata: safeJson(params.conversationMetadata) ?? undefined,
-    parentConversationId: params.parentConversationId ?? undefined,
-    threadKind: params.threadKind ?? undefined,
-    priority: params.priority ?? undefined,
-    idleTtlSeconds: coerceControllerRuntimeIdleTtlSeconds(params.idleTtlSeconds),
-    runtimeId: params.runtimeId ?? undefined,
-    runtimeDisplayName: params.runtimeDisplayName ?? undefined,
-    preferRuntime: params.preferRuntime ?? undefined,
-    ui:
-      params.requestedPreview === undefined
-        ? undefined
-        : { requestedPreview: params.requestedPreview },
-  };
-
-  try {
-    const response = await fetch(
-      `${requestContext.baseUrl}/projects/${params.projectId}/conversations`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${sessionToken}`,
-        },
-        body: JSON.stringify(body),
-      },
-    );
-
-    if (!response.ok) {
-      const message = await readControllerError(
-        response,
-        "create conversation failed",
-        requestContext,
-      );
-      throw new Error(message);
-    }
-
-    const data = (await response.json()) as DispatchControllerPromptResponse;
-    return {
-      ...data,
-      conversationId: data.conversationId ?? null,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn("[runtime-controller] create conversation error:", message);
-    throw new Error(message);
   }
 }
 

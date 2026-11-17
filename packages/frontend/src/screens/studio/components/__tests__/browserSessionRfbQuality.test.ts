@@ -1,28 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applyAdaptiveBrowserRfbEncoding,
-  applyDenseDisplayRfbQuality,
   installBrowserRfbScaledResize,
   resolveBrowserRfbFramebufferSize,
   selectBrowserRfbRenderScale,
 } from "../browserSessionRfbQuality";
-
-describe("applyDenseDisplayRfbQuality", () => {
-  it("uses noVNC's highest encoding quality for a dense viewport-only viewer", () => {
-    const rfb: { qualityLevel?: number } = {};
-    applyDenseDisplayRfbQuality(rfb, { devicePixelRatio: 2, viewportOnly: true });
-    expect(rfb.qualityLevel).toBe(9);
-  });
-
-  it("leaves legacy and ordinary-density viewers at noVNC defaults", () => {
-    const legacy: { qualityLevel?: number } = {};
-    const ordinary: { qualityLevel?: number } = {};
-    applyDenseDisplayRfbQuality(legacy, { devicePixelRatio: 2, viewportOnly: false });
-    applyDenseDisplayRfbQuality(ordinary, { devicePixelRatio: 1, viewportOnly: true });
-    expect(legacy.qualityLevel).toBeUndefined();
-    expect(ordinary.qualityLevel).toBeUndefined();
-  });
-});
 
 describe("HiDPI RFB geometry", () => {
   it("selects 2x only for dense displays that fit the framebuffer budget", () => {

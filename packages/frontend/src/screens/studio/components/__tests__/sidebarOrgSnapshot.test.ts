@@ -7,7 +7,6 @@ import {
   readCachedControllerOrgs,
   readSidebarOrgSnapshot,
   sidebarOrgSnapshotStorageKey,
-  sidebarTeamRailExpected,
   writeSidebarOrgSnapshot,
 } from "../sidebarOrgSnapshot";
 
@@ -99,7 +98,6 @@ describe("readSidebarOrgSnapshot", () => {
       { id: "org-a", slug: "alpha", name: "Alpha", avatarUrl: "https://cdn/a.png" },
       { id: "org-b", slug: "beta", name: "Beta", avatarUrl: null },
     ]);
-    expect(sidebarTeamRailExpected(USER)).toBe(true);
   });
 
   it("matches case-insensitively so the same person keeps their rail", () => {
@@ -112,7 +110,6 @@ describe("readSidebarOrgSnapshot", () => {
 
     expect(readSidebarOrgSnapshot(OTHER_USER)).toBeNull();
     expect(readCachedControllerOrgs(OTHER_USER)).toEqual([]);
-    expect(sidebarTeamRailExpected(OTHER_USER)).toBe(false);
   });
 
   it("ignores a snapshot whose payload names a different owner than its key", () => {
@@ -131,7 +128,6 @@ describe("readSidebarOrgSnapshot", () => {
     expect(() => readSidebarOrgSnapshot(USER)).not.toThrow();
     expect(readSidebarOrgSnapshot(USER)).toBeNull();
     expect(readCachedControllerOrgs(USER)).toEqual([]);
-    expect(sidebarTeamRailExpected(USER)).toBe(false);
   });
 
   it("falls back cleanly on structurally wrong payloads", () => {
@@ -163,13 +159,11 @@ describe("readSidebarOrgSnapshot", () => {
       { id: "org-a", name: "Alpha", slug: "alpha", avatarUrl: null },
     ]);
     expect(snapshot?.railChipCount).toBe(0);
-    expect(sidebarTeamRailExpected(USER)).toBe(false);
   });
 
   it("returns nothing when there is no cache entry at all", () => {
     expect(readSidebarOrgSnapshot(USER)).toBeNull();
     expect(readCachedControllerOrgs(USER)).toEqual([]);
-    expect(sidebarTeamRailExpected(USER)).toBe(false);
   });
 
   it("survives localStorage being unavailable", () => {

@@ -57,14 +57,4 @@ export const CAMERA_EXTENSION_FAMILY_UI_ADAPTER: ExtensionFamilyUiAdapter = {
       connectedAt: new Date().toISOString(),
     };
   },
-  shouldUseCurrentNativeStatus({ providerId, source, currentNativeProviderId }) {
-    const normalizedProviderId = normalizeString(providerId);
-    if (!normalizedProviderId) {
-      return false;
-    }
-    return (
-      normalizeString(currentNativeProviderId) === normalizedProviderId ||
-      (normalizedProviderId === CAMERA_PROVIDER_FAMILY.id && source === "native_runtime")
-    );
-  },
 };

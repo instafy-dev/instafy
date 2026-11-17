@@ -6,7 +6,6 @@ import { CodeProvider } from "../../code/useCode";
 import { CreditsProvider } from "../../credits/useCredits";
 import { RuntimeProvider } from "../../runtime/RuntimeProvider";
 import { StatusProvider } from "../../status/StatusProvider";
-import { RoadmapProvider } from "../../roadmap/RoadmapProvider";
 import { BillingProvider } from "../../credits/BillingProvider";
 import { ProjectMetadataProvider } from "../../projects/ProjectMetadataProvider";
 import { ProjectAccessProvider } from "../../projects/ProjectAccessProvider";
@@ -18,27 +17,25 @@ export function StudioProviders({ children }: { children: ReactNode }) {
   return (
     <RequireAuth>
       <StatusProvider>
-        <RoadmapProvider>
-          <ProjectStateProvider>
-            <ProjectMetadataProvider>
-              <ProjectAccessProvider>
-                <WorkspaceUiProvider>
-                  <CodeProvider>
-                    <BillingProvider>
-                      <CreditsProvider>
-                        <RuntimeProvider>
-                          <NativeExtensionRequestProvider>
-                            <ConversationsProvider>{children}</ConversationsProvider>
-                          </NativeExtensionRequestProvider>
-                        </RuntimeProvider>
-                      </CreditsProvider>
-                    </BillingProvider>
-                  </CodeProvider>
-                </WorkspaceUiProvider>
-              </ProjectAccessProvider>
-            </ProjectMetadataProvider>
-          </ProjectStateProvider>
-        </RoadmapProvider>
+        <ProjectStateProvider>
+          <ProjectMetadataProvider>
+            <ProjectAccessProvider>
+              <WorkspaceUiProvider>
+                <CodeProvider>
+                  <BillingProvider>
+                    <CreditsProvider>
+                      <RuntimeProvider>
+                        <NativeExtensionRequestProvider>
+                          <ConversationsProvider>{children}</ConversationsProvider>
+                        </NativeExtensionRequestProvider>
+                      </RuntimeProvider>
+                    </CreditsProvider>
+                  </BillingProvider>
+                </CodeProvider>
+              </WorkspaceUiProvider>
+            </ProjectAccessProvider>
+          </ProjectMetadataProvider>
+        </ProjectStateProvider>
       </StatusProvider>
     </RequireAuth>
   );

@@ -3,7 +3,6 @@ import type { OriginError } from "../../../../sdk/instafy";
 import {
   describeSaveFailure,
   rejectedPathCopy,
-  rejectedPathsCopy,
   SAVE_COPY,
   staleSaveMessage,
 } from "../versioningCopy";
@@ -108,16 +107,6 @@ describe("workspace save copy", () => {
     expect(rejectedPathCopy("too_large").message).toBe(SAVE_COPY.tooLarge);
     expect(rejectedPathCopy("unsupported").message).toBe(SAVE_COPY.unsupportedEntry);
     expect(rejectedPathCopy(null).message).toBe(SAVE_COPY.excluded);
-    expect(
-      rejectedPathsCopy(
-        [
-          { path: "other", reason: "too_large", keptSavedVersion: true },
-          { path: ".env", reason: "secret", keptSavedVersion: false },
-        ],
-        [".env"],
-      )?.message,
-    ).toBe(SAVE_COPY.secret);
-    expect(rejectedPathsCopy([], ["a"])).toBeNull();
   });
 
   it("falls back to a plain sentence for unknown failures", () => {

@@ -87,23 +87,23 @@ export const DECK_SHELL_COLLAPSED = "relative flex h-8 w-8 shrink-0 items-center
 export const RAIL_LABEL = "flex flex-1 items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200";
 // StudioSidebar.tsx:1424-1436 the two-line team-and-spaces label.
 export const RAIL_TEAM_LABEL = "flex min-w-0 flex-1 items-center justify-between gap-2 text-left";
-// StudioRecentChats.tsx:134-139 the Chats trigger label.
+// The Chats trigger label (landing-only, as is every recent-chats string below).
 export const RAIL_CHATS_LABEL = "flex min-w-0 flex-1 items-center justify-between gap-2 text-sm font-medium";
 
-// StudioRecentChats.tsx:180 (expanded list wrapper) and 50 (list).
+// The expanded list wrapper and the list.
 export const RECENT_LIST_WRAP = "ml-6 mr-3 py-2";
 export const RECENT_LIST = "space-y-1";
-// StudioRecentChats.tsx:74-79 recent chat row (Button ghost sm lg fullWidth).
+// Recent chat row (Button ghost sm lg fullWidth).
 export const RECENT_CHAT_ROW = "inline-flex w-full min-h-9 min-w-0 items-center gap-2 rounded-lg px-2.5 text-left";
 export const RECENT_CHAT_ROW_SELECTED = `bg-white text-slate-900 ${DARK_ACTIVE_BG_CLASS} dark:text-slate-50`;
 export const RECENT_CHAT_ROW_IDLE = "text-slate-600 dark:text-slate-300";
-// StudioRecentChats.tsx:81 the title span.
+// The title span.
 export const RECENT_CHAT_TITLE = "min-w-0 flex-1 truncate text-sm";
 export const RECENT_CHAT_TITLE_SELECTED = "font-medium text-slate-900 dark:text-slate-50";
 export const RECENT_CHAT_TITLE_IDLE = "font-normal text-slate-700 dark:text-slate-300";
-// StudioRecentChats.tsx:86 the "Running" status text.
+// The "Running" status text.
 export const RECENT_CHAT_STATUS = "shrink-0 text-xs font-normal text-slate-600 dark:text-slate-400";
-// StudioRecentChats.tsx:99-117 Browse all chats.
+// Browse all chats.
 export const BROWSE_ALL_ROW = "mt-1 inline-flex w-full min-h-9 items-center rounded-lg px-2.5 text-left";
 export const BROWSE_ALL_LABEL = "flex w-full min-w-0 items-center justify-between gap-2 text-sm font-normal text-slate-600 dark:text-slate-400";
 

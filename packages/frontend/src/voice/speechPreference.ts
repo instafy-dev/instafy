@@ -1,5 +1,3 @@
-import { selectVoiceTurnCaptureRoute } from "./useVoiceTurnController";
-
 export const PROJECT_SPEECH_MODE_STORAGE_KEY = "instafy:project-speech:mode";
 export const PROJECT_PROVIDER_VOICE_STORAGE_KEY = "instafy:project-speech:provider-voice";
 export const PROJECT_DEVICE_VOICE_STORAGE_KEY = "instafy:project-speech:device-voice";
@@ -40,32 +38,6 @@ export function writeProjectSpeechMode(
     return;
   }
   storage.setItem(key, mode);
-}
-
-export function selectSpeechCaptureRoute(options: {
-  mode: ProjectSpeechMode;
-  hostedVoiceSupported: boolean;
-  localVoiceSupported: boolean;
-  interactionMode: "actions" | "conversation";
-}) {
-  return selectVoiceTurnCaptureRoute({
-    mode: options.mode,
-    hostedVoiceSupported: options.hostedVoiceSupported,
-    localVoiceSupported: options.localVoiceSupported,
-    preferHostedCapture: options.interactionMode === "conversation",
-  });
-}
-
-export function describeSpeechMode(mode: ProjectSpeechMode) {
-  switch (mode) {
-    case "provider":
-      return "Use the shared speech host for transcription and replies.";
-    case "device":
-      return "Keep speech on this device.";
-    case "auto":
-    default:
-      return "Use the shared speech host when ready, otherwise this device.";
-  }
 }
 
 function getProjectScopedStorageKey(baseKey: string, projectId?: string | null): string {

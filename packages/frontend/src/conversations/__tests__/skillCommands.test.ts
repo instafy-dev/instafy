@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   buildSkillImportMessage,
   buildSkillStartMessage,
-  deriveSkillNameHintFromImportSource,
   deriveSkillSourceLabel,
   humanizeSkillName,
   isSkillSetupOpener,
@@ -112,31 +111,6 @@ describe("humanizeSkillName", () => {
     expect(humanizeSkillName("playwright-review")).toBe("Playwright Review");
     expect(humanizeSkillName("books_at")).toBe("Books At");
     expect(humanizeSkillName("  ")).toBe("Unnamed skill");
-  });
-});
-
-describe("deriveSkillNameHintFromImportSource", () => {
-  it("reads the skill folder from GitHub tree and blob URLs", () => {
-    expect(
-      deriveSkillNameHintFromImportSource(
-        "https://github.com/owner/repo/tree/main/skills/playwright-review",
-      ),
-    ).toBe("playwright-review");
-    expect(
-      deriveSkillNameHintFromImportSource(
-        "https://github.com/owner/repo/blob/main/skills/playwright-review/SKILL.md",
-      ),
-    ).toBe("playwright-review");
-  });
-
-  it("reads the last segment of a workspace path", () => {
-    expect(deriveSkillNameHintFromImportSource("playwright/skill-import-fixture")).toBe(
-      "skill-import-fixture",
-    );
-    expect(deriveSkillNameHintFromImportSource("playwright/skill-import-fixture/SKILL.md")).toBe(
-      "skill-import-fixture",
-    );
-    expect(deriveSkillNameHintFromImportSource("")).toBeNull();
   });
 });
 

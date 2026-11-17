@@ -93,14 +93,6 @@ const PLAYWRIGHT_LOGIN_MODE = (
 const UUID_REGEX =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-type RuntimeStatusEntrySnapshot = {
-  runtimeId?: string | null;
-  displayName?: string | null;
-  status?: string | null;
-  health?: string | null;
-  isLocal?: boolean;
-};
-
 export type HostedRuntimeReadyResult = {
   runtimeId: string;
   displayName: string | null;
@@ -1062,11 +1054,6 @@ async function waitForSupabaseReady(page: Page, timeoutMs = 45_000) {
 }
 
 export const resetHarness = resetSupabase;
-
-export async function readNumber(locator: import("@playwright/test").Locator) {
-  await expect.poll(async () => Number((await locator.textContent())?.trim() ?? NaN)).toBeGreaterThanOrEqual(0);
-  return Number((await locator.textContent())?.trim() ?? 0);
-}
 
 export function getSupabaseAuthHeaders(): Record<string, string> {
   const serviceRole =
@@ -3734,47 +3721,6 @@ export async function ensureVisionModelForImagePrompts(page: Page): Promise<stri
   return preferred;
 }
 
-export async function waitForRuntimeEntryByDisplayName(
-  page: Page,
-  matcher: RegExp | string,
-  options?: { timeoutMs?: number }
-): Promise<RuntimeStatusEntrySnapshot> {
-  const timeout = options?.timeoutMs ?? 120_000;
-  const deadline = Date.now() + timeout;
-  const isMatch =
-    typeof matcher === "string"
-      ? (name: string | null | undefined) => (name ?? "") === matcher
-      : (name: string | null | undefined) => matcher.test((name ?? "").toLowerCase());
-
-  while (Date.now() < deadline) {
-    const entry = await page.evaluate<RuntimeStatusEntrySnapshot[]>(() => {
-      const runtimeApi = window?.["__INSTAFY_RUNTIME__"];
-      if (!runtimeApi?.getSnapshot) {
-        return [];
-      }
-      const snapshot = runtimeApi.getSnapshot();
-      if (!snapshot || !Array.isArray(snapshot.runtimeStatuses)) {
-        return [];
-      }
-      return snapshot.runtimeStatuses.map((item: any) => ({
-        runtimeId: item?.runtimeId ?? item?.runtime_id ?? null,
-        displayName: item?.displayName ?? null,
-        status: item?.status ?? null,
-        health: item?.health ?? null,
-        isLocal: Boolean(item?.isLocal)
-      }));
-    });
-
-    const match = entry.find((candidate) => isMatch(candidate.displayName ?? null));
-    if (match) {
-      return match;
-    }
-    await page.waitForTimeout(500);
-  }
-
-  throw new Error("Runtime entry matching display name did not appear in time");
-}
-
 export async function markRuntimeOffline(page: Page, runtimeId: string) {
   const controllerUrl = resolveControllerUrl();
   const serviceRole = resolveServiceRoleKey();
@@ -4447,31 +4393,6 @@ export async function updateTunnelStatus(
       `updateTunnelStatus failed (${response.status()} ${response.statusText()}): ${text}`,
     );
   }
-}
-
-export async function sendLocalWorkspaceHeartbeat(page: Page, deviceId?: string) {
-  const controllerUrl = resolveControllerUrl();
-  const accessToken = await resolveAuthenticatedAccessToken(page);
-  if (!controllerUrl || !accessToken) {
-    return;
-  }
-  const projectId = await resolveWorkspaceProjectId(page);
-  if (!projectId) {
-    return;
-  }
-
-  await page.context().request.post(
-    `${controllerUrl}/projects/${encodeURIComponent(projectId)}/workspaces/local/heartbeat`,
-    {
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        "content-type": "application/json"
-      },
-      data: {
-        deviceId: deviceId ?? "playwright-companion"
-      }
-    }
-  );
 }
 
 export async function unregisterLocalWorkspace(page: Page, deviceId?: string) {

@@ -256,12 +256,6 @@ export function extractChatAttachments(message: ChatMessage): ChatAttachmentDesc
     .filter((entry): entry is ChatAttachmentDescriptor => entry !== null);
 }
 
-export function extractImageAttachments(message: ChatMessage): ChatImageAttachmentDescriptor[] {
-  return extractChatAttachments(message).filter(
-    (entry): entry is ChatImageAttachmentDescriptor => entry.kind === "image",
-  );
-}
-
 function ChatAttachmentImageTile({
   imageUrl,
   alt,

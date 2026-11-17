@@ -380,16 +380,3 @@ export function useCredits(): CreditsContextValue {
   }
   return context;
 }
-
-export function formatCreditReminder(balance?: number | null) {
-  if (balance === undefined || balance === null) {
-    return "";
-  }
-  if (balance <= 0) {
-    return "No credits remain—refill to keep generating.";
-  }
-  if (balance <= 2) {
-    return `Only ${balance} credit${balance === 1 ? "" : "s"} left—refill soon.`;
-  }
-  return `${balance} credits remaining.`;
-}

@@ -6,8 +6,6 @@ import {
   listBrowserRuntimeCandidates,
   listBrowserSessionCandidates,
   resolveAutoRecyclableBrowserRuntimeIdentity,
-  resolveAutoRecyclableBrowserRuntimeId,
-  resolveBrowserRuntimeCandidate,
   resolveBrowserRuntimeSelection,
   waitForBrowserRuntimeOrigin,
 } from "../browserSessionRuntimeEnsure";
@@ -30,9 +28,9 @@ function createRuntimeEntry(
 }
 
 function resolveCandidate(
-  overrides: Partial<Parameters<typeof resolveAutoRecyclableBrowserRuntimeId>[0]> = {},
+  overrides: Partial<Parameters<typeof resolveAutoRecyclableBrowserRuntimeIdentity>[0]> = {},
 ): string | null {
-  return resolveAutoRecyclableBrowserRuntimeId({
+  return resolveAutoRecyclableBrowserRuntimeIdentity({
     activeProjectId: "project-1",
     blockerProjectId: "project-1",
     blockerRuntimeId: "runtime-1",
@@ -42,16 +40,15 @@ function resolveCandidate(
       runtimes: [createRuntimeEntry()],
     },
     ...overrides,
-  });
+  })?.runtimeId ?? null;
 }
 
-describe("resolveBrowserRuntimeCandidate", () => {
+describe("resolveBrowserRuntimeSelection", () => {
   const liveBrowser = (runtimeId: string) => createRuntimeEntry({ runtimeId, displayName: "Browser session", lastSeenAt: null,
     origin: { originId: `origin-${runtimeId}`, endpoint: "https://origin.test", protocols: ["http"] } });
 
   it("requires an explicit choice when multiple eligible sessions have no matching preference", () => {
     const entries = [liveBrowser("first"), liveBrowser("second")];
-    expect(resolveBrowserRuntimeCandidate(entries, null)).toBeNull();
     expect(resolveBrowserRuntimeSelection(entries, null).kind).toBe("choose");
     expect(resolveBrowserRuntimeSelection(entries, "second")).toMatchObject({ kind: "selected", candidate: { runtimeId: "second" } });
   });
@@ -107,15 +104,13 @@ describe("resolveBrowserRuntimeCandidate", () => {
       origin: { ...origin, originId: "origin-2" },
     });
 
-    expect(
-      resolveBrowserRuntimeCandidate([selfHosted, managed], selfHosted.runtimeId),
-    ).toEqual({
+    expect(listBrowserRuntimeCandidates([selfHosted, managed])).toEqual([{
       runtimeId: "managed-runtime",
       originId: "origin-2",
       endpoint: "https://origin.example.test",
       mode: "session",
-    });
-    expect(resolveBrowserRuntimeCandidate([selfHosted], selfHosted.runtimeId)).toBeNull();
+    }]);
+    expect(listBrowserRuntimeCandidates([selfHosted])).toEqual([]);
   });
 
   it("rejects a controller-classified local runtime with a cloud-looking provider id", () => {
@@ -131,12 +126,7 @@ describe("resolveBrowserRuntimeCandidate", () => {
       },
     });
 
-    expect(
-      resolveBrowserRuntimeCandidate(
-        [disguisedSelfHosted],
-        disguisedSelfHosted.runtimeId,
-      ),
-    ).toBeNull();
+    expect(listBrowserRuntimeCandidates([disguisedSelfHosted])).toEqual([]);
   });
 
   it("rejects an otherwise usable custom provider with a cloud-looking id", () => {
@@ -152,9 +142,7 @@ describe("resolveBrowserRuntimeCandidate", () => {
       },
     });
 
-    expect(
-      resolveBrowserRuntimeCandidate([cloudLookingCustom], cloudLookingCustom.runtimeId),
-    ).toBeNull();
+    expect(listBrowserRuntimeCandidates([cloudLookingCustom])).toEqual([]);
   });
 });
 
@@ -199,7 +187,7 @@ describe("Instafy's browser on the space's own machine as a candidate", () => {
   });
 });
 
-describe("resolveAutoRecyclableBrowserRuntimeId", () => {
+describe("resolveAutoRecyclableBrowserRuntimeIdentity", () => {
   it("selects the matching dispatchable generic Instafy Cloud runtime", () => {
     expect(resolveCandidate()).toBe("runtime-1");
     expect(
