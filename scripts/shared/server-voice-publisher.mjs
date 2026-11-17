@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { publishProjectSpeechRoute } from "./project-speech-route-publisher.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -190,15 +189,4 @@ export async function launchServerVoicePublisher(options = {}) {
     await stop().catch(() => undefined);
     throw error;
   }
-}
-
-export async function publishServerSpeechRoute(input) {
-  await publishProjectSpeechRoute({
-    controllerUrl: input.controllerUrl,
-    controllerAccessToken: input.controllerAccessToken,
-    projectId: input.projectId,
-    publicUrl: input.publicUrl,
-    hostMode: "server",
-    connectionType: "http",
-  });
 }
