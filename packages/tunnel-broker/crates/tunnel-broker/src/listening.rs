@@ -6,8 +6,6 @@
 //! ([`db::record_tunnel_listening`]). A broker beside the tunnel's rathole dials it directly; any
 //! other broker answers from that record while it is fresh ([`recorded_listening`]).
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -122,6 +120,7 @@ pub async fn probe_bindings(
 
 /// The ingress sidecar's round: probe this ingress's live bindings and record what answered.
 /// Returns the tunnels that just became active.
+#[allow(dead_code)] // The ingress sidecar calls it through the lib.
 pub async fn probe_and_record(
     pool: &DbPool,
     upstream_host: &str,

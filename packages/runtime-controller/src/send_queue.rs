@@ -1689,6 +1689,9 @@ enum QueueClaimAttempt {
 /// Select and reserve one eligible queue entry in a short transaction. The
 /// transaction-scoped lock can safely have many waiters because no connection
 /// is retained while dispatch acquires another pool connection.
+/// The tests' shorthand for [`claim_next_send_queue_entry_with_reclaim_after`]
+/// with the default window; the drain loop passes its own.
+#[cfg(test)]
 async fn claim_next_send_queue_entry(
     state: &AppState,
     conversation_id: Uuid,

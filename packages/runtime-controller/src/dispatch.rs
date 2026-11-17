@@ -5749,6 +5749,9 @@ fn merge_run_runtime_alert_metadata(existing: Option<&JsonValue>, alert: &JsonVa
 /// connection. `provider.id` names the engine (for example `codex-embedded`),
 /// not the credential's upstream provider (`openai`, `gemini`, ...).
 /// Agent targets have already passed credential ownership checks at dispatch.
+/// The tests' shorthand for [`load_provider_conversation_state_for_job`] with no
+/// source job.
+#[cfg(test)]
 pub(crate) async fn load_previous_provider_conversation_state(
     transaction: &Transaction<'_>,
     project_id: &Uuid,

@@ -37,27 +37,11 @@ struct CreateServerResponse {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct HetznerServer {
     id: u64,
     name: String,
     #[serde(default)]
     labels: HashMap<String, String>,
-    #[serde(default)]
-    public_net: Option<HetznerPublicNet>,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct HetznerPublicNet {
-    #[serde(default)]
-    ipv4: Option<HetznerIp>,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct HetznerIp {
-    ip: String,
 }
 
 impl HetznerRuntimeAllocator {

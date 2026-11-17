@@ -105,7 +105,6 @@ impl ProviderRegistry {
         guard.configs.values().cloned().collect()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn default_provider_id(&self) -> String {
         let guard = self.inner.read().expect("provider registry poisoned");
         guard.default_provider_id.clone()

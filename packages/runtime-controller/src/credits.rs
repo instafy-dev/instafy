@@ -2182,16 +2182,6 @@ pub(crate) enum ManagedAiRefundOutcome {
     AlreadyRefunded(CreditLedgerReference),
 }
 
-impl ManagedAiRefundOutcome {
-    /// The refund ledger row, whether this call or an earlier one wrote it.
-    pub(crate) fn ledger(&self) -> Option<&CreditLedgerReference> {
-        match self {
-            Self::NotRefundable => None,
-            Self::Applied(reference) | Self::AlreadyRefunded(reference) => Some(reference),
-        }
-    }
-}
-
 /// Give a managed-AI prompt reserve back when the run never reached a model.
 ///
 /// The reserve is burned at dispatch under `managed-ai-prompt:{prompt_id}`

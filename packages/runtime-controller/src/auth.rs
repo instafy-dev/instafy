@@ -669,22 +669,22 @@ pub(crate) fn issue_proxy_envelope(
 }
 
 // Nothing verifies a job token outside the tests until the managed-key
-// lease check and the settle endpoint land, hence the dead-code allowances
-// on the items below.
+// lease check and the settle endpoint land, so the items below are built only
+// for the tests.
 
 /// Leeway on a live job token's `exp`, the same as the proxy's (the
 /// `jsonwebtoken` default it validates with).
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 const PROXY_JOB_TOKEN_LEEWAY_SECONDS: i64 = 60;
 
 /// How long after issue a settle may still present a job token
 /// (`MANAGED_AI_SETTLE_MAX_AGE_SECONDS`).
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) const MANAGED_AI_SETTLE_MAX_AGE_SECONDS: i64 = 86_400;
 
 /// Which checks [`verify_proxy_job_token`] runs on a job token's age and
 /// binding.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyJobTokenMode {
     /// A managed-key lease: `exp` holds, with the proxy's leeway, the job is
@@ -703,7 +703,7 @@ pub(crate) enum ProxyJobTokenMode {
 }
 
 /// Why [`verify_proxy_job_token`] refused a token.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyJobTokenRejection {
     /// Not a job token this controller signed, or too old for the mode: a
@@ -719,7 +719,7 @@ pub(crate) enum ProxyJobTokenRejection {
 }
 
 /// A job token that passed [`verify_proxy_job_token`].
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedProxyJobToken {
     pub(crate) project_id: Uuid,
@@ -732,7 +732,7 @@ pub(crate) struct VerifiedProxyJobToken {
     pub(crate) token_sha256: String,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Deserialize)]
 struct ProxyJobTokenWireClaims {
     project_id: String,
@@ -752,7 +752,7 @@ struct ProxyJobTokenWireClaims {
 /// The signature, audience, issuer, age and job-binding claims of a job
 /// token, without the database. `now` is Unix seconds; `Live` checks `exp`
 /// against the clock `jsonwebtoken` reads.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn decode_proxy_job_token(
     config: &AppConfig,
     token: &str,
@@ -817,7 +817,7 @@ fn decode_proxy_job_token(
 ///   [`VerifiedProxyJobToken`], never from the report body.
 ///
 /// The outer error is a database failure; the inner result is the verdict.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) async fn verify_proxy_job_token(
     client: &impl tokio_postgres::GenericClient,
     config: &AppConfig,

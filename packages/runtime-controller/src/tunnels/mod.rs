@@ -80,7 +80,6 @@ pub(crate) struct RuntimeTunnelGenerationState<'a> {
     pub(crate) space_deleted: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TunnelProvider {
@@ -88,7 +87,6 @@ pub(crate) enum TunnelProvider {
 }
 
 impl TunnelProvider {
-    #[allow(dead_code)]
     pub(crate) fn as_str(&self) -> &'static str {
         "self_hosted"
     }
@@ -121,7 +119,6 @@ fn generate_idempotency_key(
     format!("project_tunnel:{}:{}", project_id, Uuid::new_v4())
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct TunnelRequestContext {
     pub(crate) project_id: Uuid,
@@ -173,7 +170,6 @@ pub(crate) struct TunnelAssignment {
 pub(crate) trait TunnelBroker: Send + Sync {
     fn provider_kind(&self) -> TunnelProvider;
     async fn request_tunnel(&self, ctx: TunnelRequestContext) -> Result<TunnelAssignment>;
-    #[allow(dead_code)]
     async fn revoke_tunnel(&self, tunnel_id: &str, metadata: Option<&JsonValue>) -> Result<()>;
     /// `HEAD <path>` against the tunnel's upstream, from the broker's side.
     async fn probe_tunnel(&self, tunnel_id: &str, path: &str) -> Result<TunnelProbe> {
@@ -276,12 +272,7 @@ struct BrokerTunnelDescriptor {
     tunnel_id: Uuid,
     hostname: String,
     status: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    ingress_host: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    ingress_port: u16,
+    // Required in the broker's reply; the client config carries the token used.
     #[allow(dead_code)]
     token: String,
     #[serde(default)]
@@ -554,9 +545,6 @@ struct TunnelBrokerAclPayload {
     org_id: Option<String>,
     #[serde(default)]
     runtime_id: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    lease_id: Option<String>,
     #[serde(default, alias = "idempotencyKey")]
     idempotency_key: Option<String>,
     #[serde(default)]

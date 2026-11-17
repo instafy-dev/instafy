@@ -226,15 +226,15 @@ mod tests {
     // decoder. A successful answer must remain decodable when provider usage
     // is partial; the raw observation is retained outside this typed object.
     #[derive(Deserialize)]
-    #[allow(dead_code)]
     struct Completed {
         id: String,
         usage: Option<CompletedUsage>,
         usage_metadata: Option<Value>,
     }
 
-    #[derive(Deserialize)]
+    // Decoding these is the check; most of their fields are never read.
     #[allow(dead_code)]
+    #[derive(Deserialize)]
     struct CompletedUsage {
         input_tokens: i64,
         input_tokens_details: Option<InputDetails>,
@@ -243,16 +243,16 @@ mod tests {
         total_tokens: i64,
     }
 
-    #[derive(Deserialize)]
     #[allow(dead_code)]
+    #[derive(Deserialize)]
     struct InputDetails {
         cached_tokens: i64,
         #[serde(default)]
         cache_write_tokens: i64,
     }
 
-    #[derive(Deserialize)]
     #[allow(dead_code)]
+    #[derive(Deserialize)]
     struct OutputDetails {
         reasoning_tokens: i64,
     }

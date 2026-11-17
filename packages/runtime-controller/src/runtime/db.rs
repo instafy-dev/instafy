@@ -11,7 +11,6 @@ use crate::{internal_error, not_found, ApiError};
 use super::lease::RuntimeLeaseScope;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct RuntimeRecord {
     pub(crate) id: Uuid,
     pub(crate) project_id: Uuid,
@@ -23,7 +22,6 @@ pub(crate) struct RuntimeRecord {
     pub(crate) active_lease_id: Option<Uuid>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeDetails {
     pub(crate) id: Uuid,
@@ -33,7 +31,10 @@ pub(crate) struct RuntimeDetails {
     pub(crate) status: String,
     pub(crate) idle_ttl_seconds: i32,
     pub(crate) last_seen_at: Option<DateTime<Utc>>,
+    // Selected with the runtime row; only tests read these two.
+    #[allow(dead_code)]
     pub(crate) endpoint_url: Option<String>,
+    #[allow(dead_code)]
     pub(crate) task_ref: Option<String>,
     pub(crate) display_name: Option<String>,
     pub(crate) active_lease_id: Option<Uuid>,
@@ -42,6 +43,7 @@ pub(crate) struct RuntimeDetails {
 #[derive(Debug)]
 pub(crate) struct RuntimeLeaseRecord {
     pub(crate) id: Uuid,
+    // Selected with the lease row; nothing reads them yet.
     #[allow(dead_code)]
     pub(crate) status: String,
     #[allow(dead_code)]

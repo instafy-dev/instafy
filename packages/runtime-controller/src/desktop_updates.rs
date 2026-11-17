@@ -10,7 +10,9 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::OnceCell;
+#[cfg(test)]
+use tokio::sync::RwLock;
 use tokio_postgres::types::{Json as PgJson, ToSql};
 use tokio_postgres::Row;
 use uuid::Uuid;
@@ -58,6 +60,8 @@ pub(crate) struct DesktopUpdateRegistry {
 
 #[derive(Clone)]
 enum DesktopUpdateRegistryBackend {
+    // The tests' backend; the server always uses Postgres.
+    #[cfg(test)]
     InMemory(Arc<RwLock<DesktopUpdateSnapshot>>),
     Postgres(PostgresDesktopUpdateRegistry),
 }
@@ -68,6 +72,7 @@ struct PostgresDesktopUpdateRegistry {
     tables_ready: Arc<OnceCell<()>>,
 }
 
+#[cfg(test)]
 #[derive(Default, Clone)]
 struct DesktopUpdateSnapshot {
     device_states: BTreeMap<String, DesktopUpdateDeviceState>,
@@ -108,6 +113,7 @@ struct ResolvedDesktopDownloadInsightsParams {
 }
 
 impl DesktopUpdateRegistry {
+    #[cfg(test)]
     pub(crate) fn new_in_memory() -> Self {
         Self {
             backend: DesktopUpdateRegistryBackend::InMemory(Arc::new(RwLock::new(
@@ -130,6 +136,7 @@ impl DesktopUpdateRegistry {
         params: ResolvedDesktopDeviceStateListParams,
     ) -> Result<Vec<DesktopUpdateDeviceState>, DesktopUpdateRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             DesktopUpdateRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 let mut rows = guard.device_states.values().cloned().collect::<Vec<_>>();
@@ -147,6 +154,7 @@ impl DesktopUpdateRegistry {
         params: ResolvedDesktopEventListParams,
     ) -> Result<Vec<DesktopUpdateEvent>, DesktopUpdateRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             DesktopUpdateRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 let mut rows = guard.recent_events.clone();
@@ -164,6 +172,7 @@ impl DesktopUpdateRegistry {
         params: ResolvedDesktopPromotionListParams,
     ) -> Result<Vec<DesktopPromotionRecord>, DesktopUpdateRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             DesktopUpdateRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 let mut rows = guard.promotions.clone();
@@ -181,6 +190,7 @@ impl DesktopUpdateRegistry {
         request_id: &str,
     ) -> Result<Option<DesktopPromotionRecord>, DesktopUpdateRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             DesktopUpdateRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 Ok(guard
@@ -199,6 +209,7 @@ impl DesktopUpdateRegistry {
     ) -> Result<DesktopUpdateEvent, DesktopUpdateRegistryError> {
         normalize_desktop_event(&mut event)?;
         match &self.backend {
+            #[cfg(test)]
             DesktopUpdateRegistryBackend::InMemory(store) => {
                 record_event_in_memory(store, event).await
             }
@@ -212,6 +223,7 @@ impl DesktopUpdateRegistry {
     ) -> Result<DesktopPromotionRecord, DesktopUpdateRegistryError> {
         normalize_desktop_promotion(&mut promotion)?;
         match &self.backend {
+            #[cfg(test)]
             DesktopUpdateRegistryBackend::InMemory(store) => {
                 record_promotion_in_memory(store, promotion).await
             }
@@ -226,6 +238,7 @@ impl DesktopUpdateRegistry {
         params: ResolvedDesktopDownloadInsightsParams,
     ) -> Result<DesktopDownloadInsights, DesktopUpdateRegistryError> {
         match &self.backend {
+            #[cfg(test)]
             DesktopUpdateRegistryBackend::InMemory(store) => {
                 let guard = store.read().await;
                 build_download_insights_from_events(&guard.recent_events, params)
@@ -1390,6 +1403,7 @@ fn parse_desktop_download_insights_params(
     })
 }
 
+#[cfg(test)]
 fn desktop_device_matches_filters(
     device: &DesktopUpdateDeviceState,
     params: &ResolvedDesktopDeviceStateListParams,
@@ -1427,6 +1441,7 @@ fn desktop_device_matches_filters(
     true
 }
 
+#[cfg(test)]
 fn desktop_event_matches_filters(
     event: &DesktopUpdateEvent,
     params: &ResolvedDesktopEventListParams,
@@ -1464,6 +1479,7 @@ fn desktop_event_matches_filters(
     true
 }
 
+#[cfg(test)]
 fn desktop_promotion_matches_filters(
     promotion: &DesktopPromotionRecord,
     params: &ResolvedDesktopPromotionListParams,
@@ -1495,6 +1511,7 @@ fn desktop_promotion_matches_filters(
     true
 }
 
+#[cfg(test)]
 async fn record_event_in_memory(
     store: &Arc<RwLock<DesktopUpdateSnapshot>>,
     event: DesktopUpdateEvent,
@@ -1569,6 +1586,7 @@ async fn record_event_in_memory(
     Ok(event)
 }
 
+#[cfg(test)]
 async fn record_promotion_in_memory(
     store: &Arc<RwLock<DesktopUpdateSnapshot>>,
     promotion: DesktopPromotionRecord,
@@ -1626,6 +1644,7 @@ fn normalize_optional(value: &Option<String>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+#[cfg(test)]
 fn tokenize(value: &str) -> Vec<String> {
     value
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -1634,6 +1653,7 @@ fn tokenize(value: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn extract_reason(properties: &BTreeMap<String, JsonValue>) -> Option<String> {
     properties
         .get("reason")
@@ -1642,6 +1662,7 @@ fn extract_reason(properties: &BTreeMap<String, JsonValue>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(test)]
 fn build_download_insights_from_events(
     events: &[DesktopUpdateEvent],
     params: ResolvedDesktopDownloadInsightsParams,
@@ -1848,6 +1869,7 @@ fn resolve_download_window(
     Ok((start_day, end_day, start_at, end_exclusive))
 }
 
+#[cfg(test)]
 fn collapse_daily_rows(
     rows: Vec<(NaiveDate, DesktopDownloadInsightCounts)>,
 ) -> Vec<(NaiveDate, DesktopDownloadInsightCounts)> {
@@ -1869,6 +1891,7 @@ fn increment_counts(
     target.errors += source.errors;
 }
 
+#[cfg(test)]
 fn apply_download_event_type(
     counts: &mut DesktopDownloadInsightCounts,
     event_type: DesktopUpdateEventType,

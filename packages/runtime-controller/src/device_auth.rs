@@ -3224,11 +3224,5 @@ mod device_auth_session_tests {
 }
 
 #[cfg(test)]
-mod gemini_oauth_tests {
-    use chrono::{DateTime, Utc};
-    use serde_json::Value as JsonValue;
-}
-
-#[cfg(test)]
 #[path = "device_auth_claude_material_tests.rs"]
 mod claude_material_tests;

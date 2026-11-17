@@ -262,7 +262,6 @@ async fn bridge_vnc_view_ws(socket: WebSocket, host: String, port: u16, expires_
         Ok(stream) => stream,
         Err(error) => {
             warn!(?error, host = %host, port, "failed to connect the view-only lane to the VNC target");
-            let mut socket = socket;
             let _ = socket.close().await;
             return;
         }

@@ -59,7 +59,7 @@ pub struct PreviewConfig {
     pub domain: String,
     /// Broker base URL as Traefik sees it; serves `/preview-auth` and `/preview-error/:status`.
     /// Only the ingress renderer reads it.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // The renderer is the lib's; this binary has no reader.
     pub auth_address: String,
 }
 
@@ -271,6 +271,7 @@ impl BrokerConfig {
         valid_label && !capability_label
     }
 
+    #[cfg(test)]
     pub fn ingress_url(&self) -> String {
         format!("{}:{}", self.ingress_host, self.ingress_port)
     }
@@ -297,7 +298,6 @@ impl BrokerConfig {
 
 /// A complete local-style config for handler tests; no field reaches the network.
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn test_broker_config() -> BrokerConfig {
     BrokerConfig {
         database_url: "postgres://localhost/unused".into(),

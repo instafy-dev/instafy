@@ -56,8 +56,10 @@ export const MANUAL_CI_BASELINES = {
   // search) and `instafy web link` suites, the `instafy mcp` suite, the `instafy login`
   // profile suite, the space id request path suite, and the account and team, chat
   // and support, agent and diagnostics, preview server and page, bound site check, space
-  // setup, research settings and local tunnel suites.
-  "build.yml": { sha256: "bb0f11c562ff360d55c5bb0959b0a26f2ae59ae0fe68d1f81aa0aa5fd4cbde8c" },
+  // setup, research settings and local tunnel suites. Every Rust lane but
+  // runtime-agent's denies dead code and unused imports, with --all-targets in
+  // its check lanes (check-rust-ci binds that too).
+  "build.yml": { sha256: "5a0937c8e2094903478aa5746fe9846b15ed988742b2ae18e7db3ed115245522" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper

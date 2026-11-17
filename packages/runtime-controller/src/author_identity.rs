@@ -21,6 +21,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+#[cfg(test)]
 use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -164,7 +165,7 @@ impl AuthorPseudonymKeyring {
     /// History able to name the authors of old commits after a rotation; its
     /// caller (resolving History authors for project members) is not built
     /// yet.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn resolves(&self, email: &str, project_id: &Uuid, user_id: &Uuid) -> bool {
         let Some(version) = pseudonym_version(email) else {
             return false;
@@ -192,7 +193,7 @@ fn parse_key_version(label: &str) -> Option<u32> {
 }
 
 /// The key version an author address was made with, if it is a pseudonym.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn pseudonym_version(email: &str) -> Option<u32> {
     let local = email.strip_suffix(AUTHOR_EMAIL_DOMAIN)?.strip_suffix('@')?;
     let rest = local.strip_prefix('p')?;

@@ -7,8 +7,9 @@ use uuid::Uuid;
 
 pub type DbPool = PgPool;
 
-#[derive(Debug, Clone, FromRow)]
+// Mirrors the ingresses row; not every column is read.
 #[allow(dead_code)]
+#[derive(Debug, Clone, FromRow)]
 pub struct IngressRecord {
     pub id: Uuid,
     pub name: String,
@@ -20,8 +21,8 @@ pub struct IngressRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[allow(dead_code)] // The DNS sidecar reads it through the lib.
 #[derive(Debug, Clone, FromRow)]
-#[allow(dead_code)]
 pub struct DnsNodeRecord {
     pub id: Uuid,
     pub hostname: String,
@@ -32,7 +33,6 @@ pub struct DnsNodeRecord {
 }
 
 #[derive(Debug, Clone, FromRow)]
-#[allow(dead_code)]
 pub struct TunnelRecord {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -49,6 +49,7 @@ pub struct TunnelRecord {
     pub token_expires_at: Option<DateTime<Utc>>,
     pub url: Option<String>,
     pub created_at: DateTime<Utc>,
+    #[allow(dead_code)] // Mirrors the tunnels row; nothing reads it.
     pub updated_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub metadata: Option<serde_json::Value>,
@@ -60,7 +61,6 @@ pub struct TunnelRecord {
 
 /// An active public tunnel row for handler tests.
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) fn test_tunnel_record() -> TunnelRecord {
     let now = Utc::now();
     TunnelRecord {
@@ -458,7 +458,7 @@ async fn replace_record(
     Ok(())
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // The DNS sidecar calls it through the lib.
 pub async fn ensure_dns_node(
     pool: &DbPool,
     hostname: &str,
@@ -1028,42 +1028,7 @@ pub async fn revoke_tunnel(
     Ok(record)
 }
 
-/// Marks expired tunnels as revoked and expires their DNS records.
-/// Returns the number of tunnels revoked.
-#[allow(dead_code)]
-pub async fn revoke_expired_tunnels(pool: &DbPool, _cfg: &BrokerConfig) -> Result<u64> {
-    let mut tx = pool.begin().await?;
-
-    #[derive(Debug, FromRow)]
-    struct RevokedTunnel {
-        hostname: String,
-    }
-
-    let revoked: Vec<RevokedTunnel> = sqlx::query_as(
-        r#"
-        update tunnels
-        set status = 'revoked',
-            token = '',
-            token_expires_at = null,
-            updated_at = now()
-        where status != 'revoked'
-          and expires_at is not null
-          and expires_at <= now()
-        returning hostname
-        "#,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let revoked_count = revoked.len() as u64;
-    let hostnames: Vec<String> = revoked.into_iter().map(|row| row.hostname).collect();
-    delete_address_records(&mut tx, &hostnames).await?;
-
-    tx.commit().await?;
-    Ok(revoked_count)
-}
-
-#[allow(dead_code)]
+#[allow(dead_code)] // The ingress sidecar calls it through the lib.
 pub async fn revoke_expired_tunnels_for_ingress(
     pool: &DbPool,
     _cfg: &BrokerConfig,
@@ -1099,8 +1064,8 @@ pub async fn revoke_expired_tunnels_for_ingress(
     Ok(revoked)
 }
 
+#[allow(dead_code)] // The lib's ingress renderer reads it; this binary only probes it.
 #[derive(Debug, Clone, FromRow)]
-#[allow(dead_code)]
 pub struct RatholeBinding {
     pub tunnel_id: Uuid,
     pub rathole_service: String,
@@ -1113,7 +1078,7 @@ pub struct RatholeBinding {
     pub kind: String,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // The lib's ingress renderer calls these.
 impl RatholeBinding {
     /// Anything other than an explicit `public` routes through preview auth.
     pub fn is_private(&self) -> bool {
@@ -1126,37 +1091,17 @@ impl RatholeBinding {
     }
 }
 
-#[allow(dead_code)]
 pub fn visibility_is_private(visibility: &str) -> bool {
     !visibility.trim().eq_ignore_ascii_case("public")
 }
 
-/// Shared by both binding queries so routing never sees a binding without its labels.
+/// The binding query's columns, so routing never sees a binding without its labels.
 const RATHOLE_BINDING_COLUMNS: &str =
     "id as tunnel_id, rathole_service, rathole_port, token, hostname, \
     coalesce(metadata->'labels'->>'visibility', 'public') as visibility, \
     coalesce(metadata->'labels'->>'kind', 'tunnel') as kind";
 
-#[allow(dead_code)]
-pub async fn list_active_rathole_bindings(pool: &DbPool) -> Result<Vec<RatholeBinding>> {
-    let query = format!(
-        r#"
-        select {RATHOLE_BINDING_COLUMNS}
-        from tunnels
-        where rathole_service is not null
-          and rathole_port is not null
-          and status != 'revoked'
-          and (expires_at is null or expires_at > now())
-        order by rathole_port asc
-        "#
-    );
-    let bindings = sqlx::query_as::<_, RatholeBinding>(&query)
-        .fetch_all(pool)
-        .await?;
-    Ok(bindings)
-}
-
-#[allow(dead_code)]
+#[allow(dead_code)] // The ingress sidecar and render-rathole call it through the lib.
 pub async fn list_active_rathole_bindings_for_ingress(
     pool: &DbPool,
     ingress_id: Uuid,
@@ -1300,7 +1245,8 @@ mod tests {
         assert!(RATHOLE_BINDING_COLUMNS
             .contains("coalesce(metadata->'labels'->>'kind', 'tunnel') as kind"));
         let uses = ["select {", "RATHOLE_BINDING_COLUMNS}"].concat();
-        assert_eq!(source.matches(&uses).count(), 2);
+        // The one binding query, `list_active_rathole_bindings_for_ingress`.
+        assert_eq!(source.matches(&uses).count(), 1);
     }
 
     #[test]

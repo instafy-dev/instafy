@@ -26,9 +26,6 @@ pub struct AclRequest {
 #[derive(Debug, Deserialize)]
 pub struct AclResponse {
     pub allowed: bool,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -273,7 +273,6 @@ fn normalize_origin_registration_endpoint(
 // endpoint-provenance helpers are kept for parity and future reuse but are not
 // wired into the shipped registration flow (self-hosted runtimes legitimately
 // register without a controller-issued tunnel).
-#[allow(dead_code)]
 fn endpoint_is_local_development(endpoint: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(endpoint) else {
         return false;
@@ -288,6 +287,7 @@ fn endpoint_is_local_development(endpoint: &str) -> bool {
         || is_private_or_local_ip_host(host)
 }
 
+// Kept unwired on purpose (see above); the helper above is live through it.
 #[allow(dead_code)]
 async fn authorize_origin_registration_binding(
     transaction: &tokio_postgres::Transaction<'_>,
@@ -1315,6 +1315,7 @@ pub(crate) struct WorkspaceOriginRecord {
     pub(crate) updated_at: DateTime<Utc>,
 }
 
+// These four records mirror their table rows; not every column is read.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct OriginPresenceRecord {
@@ -4021,6 +4022,8 @@ fn build_origin_proxy_upstream_url(
     Ok(upstream)
 }
 
+// The tests' shorthand for the two steps `proxy_origin_request` takes.
+#[cfg(test)]
 fn classify_origin_proxy_request(
     method: &Method,
     path: &str,
