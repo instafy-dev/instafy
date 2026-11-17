@@ -135,6 +135,19 @@ wrap-up came, its slowest commands, and the steps its tools reported. The number
 their `agent/turn-timings` artifact. A turn that ran out of time and was continued by a later turn of the same
 agent does not fail `job_succeeded`.
 
+Two more records split a single turn's wait into its steps from stored data alone:
+
+- A run's `metadata.dispatchTimings` keeps its send's phases in milliseconds: `preMs`, `txMs` (the dispatch
+  transaction), `proxyMs` and `postMs`, as in the send's `Server-Timing` header, and `committedAt`, the
+  controller's clock at COMMIT. The job is invisible to every runtime until that commit and its `queuedAt` is the
+  transaction's BEGIN, so `leaseMetrics.queueWaitMs` splits into `txMs` and the hand-off after `committedAt`.
+- A finished job's `agent/phase-timings` artifact keeps the runtime's own steps, timed from `receivedAt` (when the
+  lease loop handed the job over, by the machine's clock): `first_heartbeat`, `secrets`, `workspace_refresh`,
+  `routing_lease_check`, `routing`, `git_status`, `main_lease_check`, `main`, `recovery`, `finalization`,
+  `turn_end_save` and `message_drain`, each with `startMs` and `ms` (`null` while running), and `reportedMs`, when
+  the completion went out. `routing` and `main` are whole Codex runs, setup and shutdown included; the run log's
+  `atMs` counts from the start of `main`. A local-engine turn carries no such artifact.
+
 ## What the grader checks
 
 From the `agent_jobs` rows (preflight, prompt context, task usage, run log, applied paths, `summary` as the

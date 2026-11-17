@@ -7849,6 +7849,8 @@ impl JobProcessor {
             )
             .is_none()
         {
+            let _step =
+                crate::turn_phases::span(job.id, crate::turn_phases::Phase::WorkspaceRefresh);
             // Boxed: this function's future is already large.
             Some(
                 Box::pin(self.refresh_workspace_before_turn(
@@ -8204,11 +8206,18 @@ impl JobProcessor {
                 &request.shared_start,
             );
             let _codex_guard = CODEX_EXECUTION_LOCK.lock().await;
-            confirm_lease_held(cancel_signal.as_ref(), "before its routing step").await?;
-            match codex
-                .execute_with_options(&request.prompt, None, preflight_options)
-                .await
             {
+                let _step =
+                    crate::turn_phases::span(job.id, crate::turn_phases::Phase::RoutingLeaseCheck);
+                confirm_lease_held(cancel_signal.as_ref(), "before its routing step").await?;
+            }
+            let routing_result = {
+                let _step = crate::turn_phases::span(job.id, crate::turn_phases::Phase::Routing);
+                codex
+                    .execute_with_options(&request.prompt, None, preflight_options)
+                    .await
+            };
+            match routing_result {
                 Ok(output) => {
                     if let Some(pending) = &pending_worker_input {
                         worker_question_reply = Some(pending.parse_reply(&output.final_json)?);
@@ -8747,7 +8756,10 @@ impl JobProcessor {
 
         // Always taken, so the checkpoint can save files the turn changed
         // without reporting them.
-        let git_status_before = collect_git_status_porcelain(&workspace_dir).await;
+        let git_status_before = {
+            let _step = crate::turn_phases::span(job.id, crate::turn_phases::Phase::GitStatus);
+            collect_git_status_porcelain(&workspace_dir).await
+        };
         // How the folder began this job's earliest attempt here, when this
         // lease resumes one a stop cut off (see `turn_baseline`).
         let earlier_attempt_status = git_status_before
@@ -8794,11 +8806,14 @@ impl JobProcessor {
                 )
             };
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
-        confirm_lease_held(
-            cancel_signal.as_ref(),
-            "before its thread was restored and its prompt written",
-        )
-        .await?;
+        {
+            let _step = crate::turn_phases::span(job.id, crate::turn_phases::Phase::MainLeaseCheck);
+            confirm_lease_held(
+                cancel_signal.as_ref(),
+                "before its thread was restored and its prompt written",
+            )
+            .await?;
+        }
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
 
@@ -8835,6 +8850,7 @@ impl JobProcessor {
             } else {
                 without_project_preferences(&prompt, &project_id, &project_preferences)?
             };
+            let main_run = crate::turn_phases::span(job_id, crate::turn_phases::Phase::Main);
             let output_result = if streaming_context.is_some() {
                 let mut event_handler = |event: &JsonValue| -> Result<()> {
                     stream_turn_event(
@@ -8859,6 +8875,7 @@ impl JobProcessor {
                     .execute_with_options(native_prompt, None, codex_run_options.clone())
                     .await
             };
+            drop(main_run);
             match output_result {
                 Err(error)
                     if !recovered_thread_restore
@@ -9703,6 +9720,8 @@ impl JobProcessor {
             // run trace loses the retry's interim evidence.
             let native_retry_prompt =
                 without_project_preferences(&retry_prompt, &project_id, &retry_preferences)?;
+            let recovery_run =
+                crate::turn_phases::span(job_id, crate::turn_phases::Phase::Recovery);
             let retry_output_result = if let Some(progress) = progress_sender.as_ref() {
                 let mut retry_steps = StepStream::of(progress);
                 let mut retry_draft = progress
@@ -9757,6 +9776,7 @@ impl JobProcessor {
                 };
                 (result, steps)
             };
+            drop(recovery_run);
             let (retry_output_result, retry_steps) = retry_output_result;
             turn_steps.add(retry_steps.clone());
             held_pages
@@ -10181,13 +10201,17 @@ impl JobProcessor {
                     }
                     Ok(())
                 };
-                let finalization_output = codex
-                    .execute_with_options(
-                        native_finalization_prompt,
-                        Some(&mut finalization_events),
-                        finalization_options,
-                    )
-                    .await?;
+                let finalization_output = {
+                    let _step =
+                        crate::turn_phases::span(job.id, crate::turn_phases::Phase::Finalization);
+                    codex
+                        .execute_with_options(
+                            native_finalization_prompt,
+                            Some(&mut finalization_events),
+                            finalization_options,
+                        )
+                        .await?
+                };
                 drop(codex_guard);
 
                 retry_artifacts.push(build_codex_prompt_context_artifact(

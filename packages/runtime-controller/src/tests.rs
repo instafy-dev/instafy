@@ -23606,6 +23606,22 @@ async fn conversation_message_dispatch_uses_one_pool_connection() -> anyhow::Res
         run_metadata.0["runtimeAlert"]["reason"],
         json!("runtime_unavailable")
     );
+    // The run keeps the send's phases, written on the send's one connection
+    // after its job became visible: `txMs` is the time no runtime could see
+    // the job, `committedAt` when that ended.
+    let dispatch_timings = &run_metadata.0["dispatchTimings"];
+    for phase in ["preMs", "txMs", "postMs"] {
+        anyhow::ensure!(
+            dispatch_timings[phase].is_u64(),
+            "dispatchTimings.{phase} is missing: {dispatch_timings}"
+        );
+    }
+    anyhow::ensure!(
+        dispatch_timings["committedAt"]
+            .as_str()
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()),
+        "dispatchTimings.committedAt is missing: {dispatch_timings}"
+    );
     let runtime_alert_message_count: i64 = connection
         .query_one(
             "SELECT count(*)::bigint

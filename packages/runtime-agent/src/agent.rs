@@ -1550,6 +1550,11 @@ impl RuntimeAgent {
             return Ok(());
         }
 
+        // Where this job's own time goes (`agent/phase-timings`, crate::turn_phases). A
+        // local-engine turn reports only what docs/Local-Engine-Turns.md lists, so its clock
+        // never starts.
+        let _phase_clock = (!local_engine).then(|| crate::turn_phases::start(job.id));
+
         // A stop while this job runs, or within a minute of it losing its
         // lease, interrupts its turn (see AgentExecutor::turn_interrupted).
         let turn = executor.begin_turn(job.id);
@@ -1567,11 +1572,15 @@ impl RuntimeAgent {
                 Some(lease_lost_signal.clone()),
             ));
 
-            if let Err(error) = client
-                .heartbeat(registration, job.id)
-                .await
-                .context("heartbeat during job handling failed")
-            {
+            let first_heartbeat = {
+                let _step =
+                    crate::turn_phases::span(job.id, crate::turn_phases::Phase::FirstHeartbeat);
+                client
+                    .heartbeat(registration, job.id)
+                    .await
+                    .context("heartbeat during job handling failed")
+            };
+            if let Err(error) = first_heartbeat {
                 // The lease is gone already (a Stop cancelled the job as it was leased): nothing
                 // of the job runs. Any other failure is a passing one, and the job goes on.
                 if is_lease_lost(&error) {
@@ -1624,7 +1633,10 @@ impl RuntimeAgent {
         let runtime_settings = if parallel_scoped || local_engine {
             AgentRuntimeSettings::default()
         } else {
-            let fetched = client.fetch_job_secrets(registration, job.id, true).await;
+            let fetched = {
+                let _step = crate::turn_phases::span(job.id, crate::turn_phases::Phase::Secrets);
+                client.fetch_job_secrets(registration, job.id, true).await
+            };
             // The controller says the job is no longer this runtime's (`JobNoLongerLeased`).
             if fetched.as_ref().is_err_and(is_lease_lost) {
                 lease_lost_signal.cancel();
@@ -1999,6 +2011,10 @@ impl RuntimeAgent {
             }
         }
 
+        // Where the job's own time went, up to this report (crate::turn_phases).
+        execution
+            .artifacts
+            .extend(crate::turn_phases::artifact(job.id));
         match client
             .complete_job(
                 registration,
