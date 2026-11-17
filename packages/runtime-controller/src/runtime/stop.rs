@@ -125,7 +125,7 @@ pub(crate) struct StopOutcome {
     pub(crate) status_changed: bool,
     pub(crate) requeued_jobs: Vec<Uuid>,
     pub(crate) failed_personal_browser_jobs: Vec<Uuid>,
-    #[allow(dead_code)] // Only tests read it; the stop response uses the disposition's list.
+    #[allow(dead_code)] // Only tests read it; the stop event lists the disposition's copy.
     pub(crate) failed_shared_browser_jobs: Vec<Uuid>,
     pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
     /// The Personal and Shared Browser turns this stop failed, whose run's

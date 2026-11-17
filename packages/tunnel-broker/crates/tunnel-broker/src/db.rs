@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 pub type DbPool = PgPool;
 
-// Mirrors the ingresses row; not every column is read.
+// Mirrors the ingress_nodes row; not every column is read.
 #[allow(dead_code)]
 #[derive(Debug, Clone, FromRow)]
 pub struct IngressRecord {
