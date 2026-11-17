@@ -185,9 +185,9 @@ pub(crate) async fn job_settings(
 ) -> ApiResult<ResearchSettings> {
     let id = ensure_binding(tx, project_id, job_id).await?;
     let row = tx
-        .query_one(
+        .query_typed_one(
             "select settings from agent_research_budgets where id=$1",
-            &[&id],
+            typed![&id],
         )
         .await
         .map_err(|e| internal_error(format!("read research budget settings: {e}")))?;

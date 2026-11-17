@@ -746,14 +746,14 @@ pub(crate) async fn touch_runtime_last_seen(
     runtime_id: &Uuid,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     transaction
-        .execute(
+        .execute_typed(
             "update runtimes
              set last_seen_at = now(),
                  updated_at = now()
              where id = $1
                and (last_seen_at is null
                     or last_seen_at < now() - ($2::bigint * interval '1 second'))",
-            &[runtime_id, &RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS],
+            typed![runtime_id, &RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS],
         )
         .await
         .map_err(|error| {
