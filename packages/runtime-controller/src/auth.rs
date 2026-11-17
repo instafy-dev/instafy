@@ -74,11 +74,33 @@ pub(crate) struct RequestContext {
     pub(crate) scoped_claims: Option<runtime_contracts::AccessTokenClaims>,
 }
 
+/// Which credential `authenticate_request` accepted. A controller session
+/// token and a Supabase access token give identical contexts, so a handler
+/// that must tell them apart asks for this instead of parsing the header
+/// again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCredential {
+    /// No usable `Authorization` header: absent, blank or not visible ASCII.
+    Anonymous,
+    /// `CONTROLLER_INTERNAL_TOKEN` or the Supabase service-role key.
+    ServiceSecret,
+    /// A session token this controller issued from `POST /auth/session`.
+    ControllerSession,
+    /// An access token verified against the Supabase keys.
+    Supabase,
+    /// A scoped Ed25519 token: runtime, origin, git or job.
+    Scoped,
+}
+
 /// Return the signed-in human user for account-level actions.
 ///
 /// Scoped runtime/origin tokens intentionally retain their subject so exact
 /// capability handlers can attribute work. That subject must never be treated
 /// as a reusable interactive login for `/me/*` or session-minting endpoints.
+///
+/// A controller session token passes this check exactly as a Supabase access
+/// token does, so an endpoint that starts a session must also require a
+/// Supabase credential, as `create_controller_session` does.
 pub(crate) fn require_user_session(
     context: &RequestContext,
 ) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
@@ -131,17 +153,32 @@ pub(crate) async fn authenticate_request(
     config: &AppConfig,
     headers: &HeaderMap,
 ) -> Result<RequestContext, (StatusCode, Json<ApiError>)> {
+    authenticate_request_with_credential(config, headers)
+        .await
+        .map(|(context, _)| context)
+}
+
+/// Authenticate a request and say which credential did it. Each return tags
+/// the credential beside the context it builds, from the same parse of the
+/// header, so the two cannot disagree.
+async fn authenticate_request_with_credential(
+    config: &AppConfig,
+    headers: &HeaderMap,
+) -> Result<(RequestContext, RequestCredential), (StatusCode, Json<ApiError>)> {
     let Some(raw_value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     else {
-        return Ok(RequestContext {
-            user_id: None,
-            is_service_role: false,
-            scoped_claims: None,
-        });
+        return Ok((
+            RequestContext {
+                user_id: None,
+                is_service_role: false,
+                scoped_claims: None,
+            },
+            RequestCredential::Anonymous,
+        ));
     };
 
     if !raw_value.starts_with("Bearer ") {
@@ -161,32 +198,41 @@ pub(crate) async fn authenticate_request(
     if let Some(internal_token) = config.controller_internal_token.as_ref() {
         if ConstantTimeEq::ct_eq(token.as_bytes(), internal_token.as_bytes()).unwrap_u8() == 1 {
             info!("controller internal token accepted via direct match");
-            return Ok(RequestContext {
-                user_id: None,
-                is_service_role: true,
-                scoped_claims: None,
-            });
+            return Ok((
+                RequestContext {
+                    user_id: None,
+                    is_service_role: true,
+                    scoped_claims: None,
+                },
+                RequestCredential::ServiceSecret,
+            ));
         }
     }
 
     if let Some(service_role_key) = config.supabase_service_role_key.as_ref() {
         if ConstantTimeEq::ct_eq(token.as_bytes(), service_role_key.as_bytes()).unwrap_u8() == 1 {
             info!("service role token accepted via direct match");
-            return Ok(RequestContext {
-                user_id: None,
-                is_service_role: true,
-                scoped_claims: None,
-            });
+            return Ok((
+                RequestContext {
+                    user_id: None,
+                    is_service_role: true,
+                    scoped_claims: None,
+                },
+                RequestCredential::ServiceSecret,
+            ));
         }
     }
 
     match decode_controller_user_token(config, &token) {
         Ok(Some(user_id)) => {
-            return Ok(RequestContext {
-                user_id: Some(user_id),
-                is_service_role: false,
-                scoped_claims: None,
-            });
+            return Ok((
+                RequestContext {
+                    user_id: Some(user_id),
+                    is_service_role: false,
+                    scoped_claims: None,
+                },
+                RequestCredential::ControllerSession,
+            ));
         }
         Ok(None) => {}
         Err(error) => return Err(error),
@@ -245,11 +291,14 @@ pub(crate) async fn authenticate_request(
                                 | "agent"
                         ) || audience == "service_role";
 
-                        return Ok(RequestContext {
-                            user_id,
-                            is_service_role,
-                            scoped_claims: None,
-                        });
+                        return Ok((
+                            RequestContext {
+                                user_id,
+                                is_service_role,
+                                scoped_claims: None,
+                            },
+                            RequestCredential::Supabase,
+                        ));
                     }
                     Err(error) => match error.kind() {
                         JwtErrorKind::ExpiredSignature => {
@@ -294,11 +343,14 @@ pub(crate) async fn authenticate_request(
     };
 
     let user_id = Uuid::from_str(claims.sub.trim()).ok();
-    Ok(RequestContext {
-        user_id,
-        is_service_role: false,
-        scoped_claims: Some(claims),
-    })
+    Ok((
+        RequestContext {
+            user_id,
+            is_service_role: false,
+            scoped_claims: Some(claims),
+        },
+        RequestCredential::Scoped,
+    ))
 }
 
 pub(crate) struct AgentToken {
@@ -508,12 +560,28 @@ pub(crate) struct ControllerSessionResponse {
     expires_at: i64,
 }
 
+/// Start a controller session from a Supabase sign-in.
+///
+/// Only a Supabase access token for a signed-in user starts one. A session
+/// token this controller issued is refused: otherwise every token could buy
+/// its own successor, and a session would never end. A session token is
+/// accepted until `USER_TOKEN_TTL_SECONDS` plus 30 seconds of leeway after it
+/// was issued, so a session ends that long after this route last accepted a
+/// Supabase access token for the user. That access token is itself accepted
+/// until 60 seconds past its expiry; the controller does not check Supabase
+/// sign-out.
 pub(crate) async fn create_controller_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ControllerSessionResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers).await?;
+    let (context, credential) =
+        authenticate_request_with_credential(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
+    if credential != RequestCredential::Supabase {
+        return Err(unauthorized(
+            "a controller session can only be started from a Supabase access token",
+        ));
+    }
 
     let token = issue_controller_token(&state.config, &user_id)?;
 
@@ -2216,6 +2284,237 @@ mod tests {
         assert_eq!(context.user_id, Some(user_id));
         assert!(context.scoped_claims.is_some());
         assert!(require_user_session(&context).is_err());
+    }
+
+    const SESSION_NEEDS_SUPABASE: &str =
+        "a controller session can only be started from a Supabase access token";
+
+    fn scoped_test_token(config: &AppConfig, user_id: Uuid) -> String {
+        let runtime_id = Uuid::new_v4();
+        crate::tokens::mint_scoped_token(
+            config,
+            ScopedTokenRequest {
+                audience: runtime_id.to_string(),
+                subject: user_id.to_string(),
+                project_id: Uuid::new_v4().to_string(),
+                origin_id: None,
+                runtime_id: Some(runtime_id.to_string()),
+                protocol: None,
+                scopes: vec!["prompt.execute".to_string()],
+                lease_id: None,
+                run_id: None,
+                prefer_runtime: None,
+                ttl_seconds: Some(600),
+            },
+        )
+        .expect("mint scoped token")
+        .token
+    }
+
+    /// Nothing listens on port 1: a route that reached the database would
+    /// fail with a 5xx instead of the answer each case expects.
+    fn unconnectable_pool() -> crate::config::PgPool {
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )
+        .expect("connection manager");
+        bb8::Pool::builder().max_size(1).build_unchecked(manager)
+    }
+
+    /// An access token shaped like one Supabase Auth issues to a signed-in
+    /// user. It carries every claim a controller session token has, `iat` and
+    /// `session_id` included, so only its audience tells the two apart.
+    fn supabase_sign_in_token(user_id: Uuid) -> String {
+        #[derive(Serialize)]
+        struct SignInClaims {
+            aud: &'static str,
+            role: &'static str,
+            sub: String,
+            session_id: String,
+            iat: i64,
+            exp: i64,
+        }
+        let now = Utc::now();
+        encode(
+            &Header::new(Algorithm::HS256),
+            &SignInClaims {
+                aud: "authenticated",
+                role: "authenticated",
+                sub: user_id.to_string(),
+                session_id: Uuid::new_v4().to_string(),
+                iat: now.timestamp(),
+                exp: (now + ChronoDuration::hours(1)).timestamp(),
+            },
+            &EncodingKey::from_secret(TEST_SUPABASE_SECRET.as_bytes()),
+        )
+        .expect("sign Supabase sign-in test token")
+    }
+
+    async fn post_auth_session(
+        app: &Router,
+        bearer: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let authorization = bearer.map(|bearer| format!("Bearer {bearer}"));
+        crate::tests::call_router(
+            app,
+            authorization.as_deref(),
+            "POST",
+            "/auth/session".to_string(),
+            None,
+        )
+        .await
+        .expect("POST /auth/session")
+    }
+
+    #[tokio::test]
+    async fn authenticate_request_records_which_credential_it_accepted() {
+        let mut config = base_app_config();
+        config.controller_internal_token = Some("internal-token".to_string());
+        config.supabase_service_role_key = Some("service-role-key".to_string());
+        let user_id = Uuid::new_v4();
+        let controller_token = issue_controller_token(&config, &user_id)
+            .expect("controller token")
+            .token;
+        // This config signs controller tokens with the Supabase HS256 secret,
+        // so only the audience tells these two tokens apart.
+        let supabase_token = supabase_sign_in_token(user_id);
+        let mut controller_rules_but_supabase_audience = Validation::new(Algorithm::HS256);
+        controller_rules_but_supabase_audience.set_audience(&["authenticated"]);
+        decode::<UserTokenClaims>(
+            &supabase_token,
+            &DecodingKey::from_secret(config.user_token_secret.as_bytes()),
+            &controller_rules_but_supabase_audience,
+        )
+        .expect("the sign-in token differs from a session token only in its audience");
+
+        let cases = [
+            (None, RequestCredential::Anonymous),
+            (
+                Some("internal-token".to_string()),
+                RequestCredential::ServiceSecret,
+            ),
+            (
+                Some("service-role-key".to_string()),
+                RequestCredential::ServiceSecret,
+            ),
+            (
+                Some(controller_token.clone()),
+                RequestCredential::ControllerSession,
+            ),
+            // The header parser strips every leading "Bearer ", and the tag
+            // comes from that same parse.
+            (
+                Some(format!("Bearer {controller_token}")),
+                RequestCredential::ControllerSession,
+            ),
+            (Some(supabase_token), RequestCredential::Supabase),
+            (
+                Some(scoped_test_token(&config, user_id)),
+                RequestCredential::Scoped,
+            ),
+        ];
+        for (bearer, expected) in cases {
+            let headers = bearer.as_deref().map(header_with_token).unwrap_or_default();
+            let (_, credential) = authenticate_request_with_credential(&config, &headers)
+                .await
+                .expect("credential accepted");
+            assert_eq!(credential, expected, "bearer {bearer:?}");
+        }
+    }
+
+    /// A controller session token must not buy its own successor, or a
+    /// session would never end. Supabase sign-ins (here through the HS256
+    /// secret) keep starting sessions, and every caller refused before is
+    /// refused as before.
+    #[tokio::test]
+    async fn auth_session_starts_only_from_a_supabase_sign_in() {
+        let mut config = base_app_config();
+        config.controller_internal_token = Some("internal-token".to_string());
+        config.supabase_service_role_key = Some("service-role-key".to_string());
+        let state = crate::tests::build_test_state(unconnectable_pool(), config);
+        let app = router().with_state(state.clone());
+        let user_id = Uuid::new_v4();
+
+        let supabase_token = supabase_sign_in_token(user_id);
+        let (status, body) = post_auth_session(&app, Some(&supabase_token)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["tokenType"], json!("bearer"));
+        assert_eq!(body["expiresIn"], json!(900));
+        assert!(body["expiresAt"].is_i64(), "{body}");
+        let session_token = body["token"].as_str().expect("session token").to_string();
+
+        // The session still signs its user in on every other route.
+        let context = authenticate_request(&state.config, &header_with_token(&session_token))
+            .await
+            .expect("session token accepted");
+        assert_eq!(require_user_session(&context).ok(), Some(user_id));
+
+        // But no controller session token renews, however the header spells
+        // it and whoever it belongs to.
+        let another_users_session = issue_controller_token(&state.config, &Uuid::new_v4())
+            .expect("controller token")
+            .token;
+        for bearer in [
+            session_token.clone(),
+            format!("Bearer {session_token}"),
+            another_users_session,
+        ] {
+            let (status, body) = post_auth_session(&app, Some(&bearer)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert_eq!(body, json!({ "message": SESSION_NEEDS_SUPABASE }));
+        }
+
+        let supabase_service_token = mint_access_token(
+            TEST_SUPABASE_SECRET,
+            "service_role",
+            "service_role",
+            None,
+            None,
+        );
+        for bearer in [
+            "internal-token".to_string(),
+            "service-role-key".to_string(),
+            supabase_service_token,
+            scoped_test_token(&state.config, user_id),
+        ] {
+            let (status, body) = post_auth_session(&app, Some(&bearer)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert_eq!(
+                body,
+                json!({ "message": "interactive user session required" })
+            );
+        }
+        let (status, body) = post_auth_session(&app, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body, json!({ "message": "user session required" }));
+
+        assert_eq!(crate::tests::pool_gets(&state.pool), 0);
+    }
+
+    /// Hosted Supabase signs with ES256 keys, not the HS256 fallback.
+    #[tokio::test]
+    async fn auth_session_starts_from_an_es256_sign_in_but_not_from_its_own_token() {
+        let key = TestEcKey::generate("hosted-signing-key");
+        let mut config = base_app_config();
+        config.supabase_jwks = jwks::SupabaseJwksCache::new(key_set(&[&key]));
+        let state = crate::tests::build_test_state(unconnectable_pool(), config);
+        let app = router().with_state(state.clone());
+        let user_id = Uuid::new_v4();
+
+        let (status, body) = post_auth_session(&app, Some(&key.mint(user_id))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let session_token = body["token"].as_str().expect("session token").to_string();
+        let context = authenticate_request(&state.config, &header_with_token(&session_token))
+            .await
+            .expect("session token accepted");
+        assert_eq!(require_user_session(&context).ok(), Some(user_id));
+
+        let (status, body) = post_auth_session(&app, Some(&session_token)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body, json!({ "message": SESSION_NEEDS_SUPABASE }));
+
+        assert_eq!(crate::tests::pool_gets(&state.pool), 0);
     }
 
     #[test]
