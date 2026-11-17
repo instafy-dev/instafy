@@ -25,6 +25,7 @@ import {
   type ChatFileChangeListProps,
 } from "../AgentJobThreadPreviewLayout";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
+import { ChatRuntimeActivityContext } from "../chatRuntimeActivityContext";
 import type { TurnActivity } from "../turnActivity";
 import { useAgentJobThreadPreviewState } from "../useAgentJobThreadPreviewState";
 import { THINKING_LABEL_DELAY_MS } from "../useSteadyActivityLabel";
@@ -474,10 +475,10 @@ describe("AgentJobThreadPreviewLayout", () => {
   });
 
   // A local test: every turn opened with three labels inside 1.1 s. The line says
-  // Starting… until the model has worked a moment with no step.
+  // one word until the model has worked a moment with no step.
   // A local test: a turn showed "Starting…" and then "Thinking…" before its
   // first step; another showed nothing at all for 37 s.
-  it("says Starting… until its first step, however long the model works before it", async () => {
+  it("says Thinking… until its first step, however long the model works before it", async () => {
     vi.useFakeTimers();
     onTestFinished(() => {
       vi.useRealTimers();
@@ -501,13 +502,63 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     const line = container.querySelector('[data-testid="turn-activity-line"]');
     expect(line?.tagName).toBe("DIV");
-    expect(line?.textContent).toBe("Starting…");
+    expect(line?.textContent).toBe("Thinking…");
     await act(async () => {
       vi.advanceTimersByTime(THINKING_LABEL_DELAY_MS * 12);
     });
-    expect(line?.textContent).toBe("Starting…");
-    expect(container.textContent).not.toContain("Thinking");
+    expect(line?.textContent).toBe("Thinking…");
+    expect(container.textContent).not.toContain("Starting");
     expect(container.textContent).not.toContain("Planning the Lisbon weekend");
+  });
+
+  // Every turn used to open with "Starting…", also on a machine that was
+  // already running. The line reads the chat's live start (ChatPanel's
+  // workspaceStarting), so it and the typing row before it say the same word.
+  it("says Starting… only while the space's machine starts, and Thinking… once the model began", async () => {
+    // The turn is on its way (a status of its own, just now) and the model has not begun.
+    const onItsWay: ChatMessage = {
+      id: "octo-status",
+      role: "assistant",
+      authorId: null,
+      content: "Preparing the workspace",
+      timestamp: Date.now() - 500,
+      files: null,
+      messageType: "status",
+      metadata: { messageType: "status", status: "in_progress", jobId: JOB_ID, source: "agent" },
+    };
+    const reasoning: ChatMessage = {
+      id: "octo-reasoning",
+      role: "assistant",
+      authorId: null,
+      content: "**Planning the Lisbon weekend**",
+      timestamp: Date.now() - 400,
+      files: null,
+      messageType: "reasoning",
+      metadata: { messageType: "reasoning", status: "in_progress", jobId: JOB_ID, source: "agent" },
+    };
+    const render = async (message: ChatMessage, workspaceStarting: boolean) => {
+      await act(async () => {
+        root.render(
+          <ChatRuntimeActivityContext.Provider value={{ workspaceStarting, workspaceStartingSince: workspaceStarting ? Date.now() : null }}>
+            <LiveAgentJobThreadPreview message={message} />
+          </ChatRuntimeActivityContext.Provider>,
+        );
+      });
+      return container.querySelector('[data-testid="turn-activity-line"]')?.textContent ?? null;
+    };
+
+    expect(await render(threadMessage([onItsWay]), true)).toBe("Starting…");
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    expect(await render(threadMessage([onItsWay]), false)).toBe("Thinking…");
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    // The model began, so its machine is up, whatever the chat last read.
+    expect(await render(threadMessage([onItsWay, reasoning]), true)).toBe("Thinking…");
   });
 
   it("gives a done turn with notes but no steps a neutral line, so its Details opens", async () => {

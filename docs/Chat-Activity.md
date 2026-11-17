@@ -6,8 +6,9 @@ A turn in chat shows Octo's reply and one plain-language line that says what the
 Built the map, read 6 pages, looked up 14 places ›
 ```
 
-While the turn runs, the line says "Starting…" until the turn's first step, then names the current step ("Looking up
-places…", "Reading pages…") and says "Thinking…" when the model works a while between steps. Details holds everything
+While the turn runs, the line says "Thinking…" until the turn's first step ("Starting…" only while the space's machine
+starts), then names the current step ("Looking up places…", "Reading pages…") and says "Thinking…" when the model works
+a while between steps. Details holds everything
 else: each command and its output, tool
 calls, Octo's notes, reasoning titles and plan updates. This page describes where the words come from and why they
 can be trusted.
@@ -19,7 +20,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 
 | Turn | Line |
 |---|---|
-| From the send until the turn's first step | `Starting…`, however long that takes: the workspace starting, the turn waiting behind another, the model reasoning before its first step, the runtime retrying its request, and a turn Instafy resent by itself all read the same |
+| From the send until the turn's first step | `Thinking…`, however long that takes: the turn waiting behind another, the model reasoning before its first step, the runtime retrying its request, and a turn Instafy resent by itself all read the same. Only while the space's machine has to start first (it stopped after five idle minutes, a deploy replaced it, or it never ran) does the line say `Starting…`, until the model begins (`resolveWorkspaceStarting`, `ChatRuntimeActivityContext`). The page knows that from its own machine status, so the word is right from the send, and the typing row shows from the press of Send, before the controller answers it with the turn's run (`dispatchingSince`, `isAssistantDispatching`): a send that may start no agent (a group chat's message the controller decides, a silent skill-mode evaluation, a terminal command) shows none until a run does |
 | Running a labelled step | its running label, for example `Looking up places…` (the newest running step wins; in a chain, its first command that is not quiet) |
 | Running an unlabelled command or tool | `Working…`; a file edit says `Editing files…` |
 | A runtime status is the newest thing | `Saving your changes…`, `Trying again…` (the runtime sending the turn's request again), until anything newer arrives. A retry for evidence the answer lacked (a look the routing step asked for) reads `Working…`, since nothing failed that the person saw. A dropped stream that Codex sends again by itself leaves no message: the line keeps its step, then says `Thinking…` as after any pause. A step still running from before the turn's save never names the line again; after a retry, it does |
@@ -52,8 +53,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   Only the chat's newest row counts, as for the typing row: once a message has its answer, nothing
   it went through keeps Stop (`chatRunStopBetweenParts`).
   `Waiting for you` shows at once, and goes at once when the person
-  answered. The typing row before the turn's own line uses the same rule and says `Starting…`
-  until then (a run held for an approval, and a long context rewrite, say so instead), and a
+  answered. The typing row before the turn's own line uses the same rule and says `Thinking…`
+  (`Starting…` while the space's machine starts) until then (a run held for an approval, and a
+  long context rewrite, say so instead), and a
   screen reader hears the label it shows, never one it holds back. Its runtime-busy notice, which
   asks the person to act, shows and goes at once. A failed turn's last running label holds its
   moment too before the failure block takes its place.
@@ -74,10 +76,10 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   running line's announcements say only the line. It opens and closes as often as it is
   pressed, and opening Details never moves the line or changes the turn's chrome.
 - A line with nothing in Details yet is plain text, with no arrow and no pointer: a new turn's
-  `Starting…`, a routed card's `Thinking…`, `Opening Instafy's browser…`, the `Trying again…` that stands in for a failed
+  `Thinking…` or `Starting…`, a routed card's `Thinking…`, `Opening Instafy's browser…`, the `Trying again…` that stands in for a failed
   turn while Instafy sends it again, and a failed turn's last running label while it holds,
   since the failure block after it has the turn's one Details. The same words can open: a turn
-  Instafy sent again has its earlier try in Details from its first `Starting…`, and the
+  Instafy sent again has its earlier try in Details from its first moment, and the
   runtime's own `Trying again…` comes only after a step.
 - A turn reads its outcome once. A failed turn has no activity line and no "Run failed" beside
   its author: its failure block is its one line, and that block's Details ("Details ›", then
@@ -314,11 +316,12 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 - A command on its own in the conversation is one row: its label (or "Ran a command"), its
   state and a chevron that shows the command and its output.
 - The typing row that shows before the turn's own line, or under a newer message while a turn
-  runs (a person wrote in the meantime), says "Starting…", never Octo's notes or reasoning
+  runs (a person wrote in the meantime), says "Thinking…" ("Starting…" while the space's machine
+  starts), never Octo's notes or reasoning
   titles, for the same reason as the line. It goes as soon as a row of that turn says what the
   turn is doing: its own line, a routed card's `Thinking…`, or the card the
   routing step posted while that run's record catches up. It leaves nothing under that row, not
-  even its blank space. So a turn shows one Octo row, and "Starting…" never comes back under its
+  even its blank space. So a turn shows one Octo row, and that word never comes back under its
   line.
 - The running line is the turn's one polite live region; it announces a new label at most every
   5 seconds. Reduced motion turns the sweep off. On coarse pointers the line and the rows are at

@@ -374,9 +374,9 @@ export type TurnActivity = {
   stopped?: true;
 };
 
-/** The line before the model has begun, and before its first step. */
+/** The line before the turn's first step while the space's machine still starts. */
 export const STARTING_LINE = "Starting…";
-/** The line while the model works with no step running. */
+/** The line while the model works with no step running, also before the first step. */
 export const THINKING_LINE = "Thinking…";
 /**
  * The line while a message passes from one part to the next, as from a
@@ -1359,9 +1359,17 @@ export type SummarizeTurnActivityOptions = {
   updates?: readonly ChatMessage[];
   /**
    * The line until the turn's first step when a turn engine runs it
-   * (turnEngineStartingLine), in place of {@link STARTING_LINE}.
+   * (turnEngineStartingLine), in place of {@link STARTING_LINE} and
+   * {@link THINKING_LINE}.
    */
   startingLine?: string | null;
+  /**
+   * The space's machine is still starting for this turn (ChatPanel's
+   * `workspaceStarting`): a turn the model has not begun reads
+   * {@link STARTING_LINE} until then. Otherwise it reads {@link THINKING_LINE}
+   * from the send, as the typing row before it does.
+   */
+  machineStarting?: boolean;
   /**
    * The row's work has passed to the next turn of the same message (a
    * hand-back to the building turn), which has shown nothing yet: with no
@@ -1487,13 +1495,14 @@ export function summarizeTurnActivity(
   }
 
   const stepCount = steps.length;
-  const startingLine = options.startingLine || STARTING_LINE;
   let live: string | null = null;
   let summary: string | null = null;
   if (phase === "starting") {
     // A turn Instafy tries again by itself starts as any turn does: one
-    // "Starting…", never a "Trying again…" of its own.
-    live = startingLine;
+    // word, never a "Trying again…" of its own. That word is "Starting…"
+    // only while the space's machine starts; a turn on a running machine,
+    // waiting for its lease or behind another turn, reads "Thinking…".
+    live = options.startingLine || (options.machineStarting ? STARTING_LINE : THINKING_LINE);
   } else if (phase === "stale") {
     live = "Status unavailable";
   } else if (phase === "running") {
@@ -1509,9 +1518,10 @@ export function summarizeTurnActivity(
       live = WAITING_FOR_YOU_LINE;
     } else if (stepCount === 0) {
       // From the send until the turn's first step the line says one thing,
-      // however long that takes: the model reasoning, or the runtime retrying
-      // its request, is still the turn starting.
-      live = startingLine;
+      // however long that takes. The model has begun, so its machine is up:
+      // the model reasoning, or the runtime retrying its request, is the
+      // model at work, never the machine starting.
+      live = options.startingLine || THINKING_LINE;
     } else if (status && status.index > newestOtherIndex && status.activity.live) {
       live = `${fillHost(status.activity.live, status.activity.host)}…`;
     } else if (runningStep) {

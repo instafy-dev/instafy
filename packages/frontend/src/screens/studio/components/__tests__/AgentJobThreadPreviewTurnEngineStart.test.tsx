@@ -207,15 +207,15 @@ describe("a turn row before its first step", () => {
     expect(activityLine()).toBe("Starting Claude Code…");
   });
 
-  it("reads Starting… for any other turn", async () => {
+  it("reads as any other turn does without an engine", async () => {
     live.runMetadata = { jobId: JOB_ID, aiAccessMode: "managed" };
     await render({ ...STAMP, runId: JOB_ID }, firstNote());
-    expect(activityLine()).toBe("Starting…");
+    expect(activityLine()).toBe("Thinking…");
 
     live.runMetadata = null;
     // A mode a client could record on a prompt never counts.
     await render({ aiAccessMode: "claude-code" }, firstNote());
-    expect(activityLine()).toBe("Starting…");
+    expect(activityLine()).toBe("Thinking…");
   });
 
   it("follows the steps from the first one on", async () => {

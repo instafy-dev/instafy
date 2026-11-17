@@ -7,7 +7,7 @@ import { readTurnEngineClaim } from "../features/frontendFeatureModule";
 import { runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { getDefaultRuntimeMetadata } from "../runtime/utils/webdevRuntime";
 import { ControllerApiError } from "../services/runtimeController/core";
-import { isUUID } from "../utils/uuid";
+import { generateUUID, isUUID } from "../utils/uuid";
 import { mapControllerMessageToChat } from "./conversationMessageUtils";
 import { createConversationTaskQueue } from "./conversationTaskQueue";
 import { createConversationRoutingMetadataPatch } from "./conversationRoutingMetadata";
@@ -18,6 +18,7 @@ import { withDefaultInteractiveWorkspaceExpectations } from "./conversationRunti
 import {
   isSkillModeAmbientDispatchMetadata,
   markPendingAgentEvaluationRun,
+  readGroupParticipationPreflightStatus,
 } from "./groupParticipation";
 import type { ConversationState } from "./conversationState";
 import type {
@@ -107,7 +108,26 @@ type UseConversationControllerDispatchArgs = Pick<
   | "setConversationControllerId"
   | "appendMessages"
   | "linkRunToConversation"
+  | "beginConversationDispatch"
+  | "endConversationDispatch"
 >;
+
+/**
+ * Whether a send shows the typing row while it is on its way to the
+ * controller: only one that starts the agent. A silent skill-mode evaluation
+ * never shows one, a group chat's message whose answer the controller decides
+ * may get none (Octo can stay silent), and a terminal command is no AI turn.
+ */
+export function sendShowsTypingWhileDispatching(
+  metadata: Record<string, unknown> | null,
+  intent?: string,
+): boolean {
+  if (intent === "terminal_command" || isSkillModeAmbientDispatchMetadata(metadata)) {
+    return false;
+  }
+  const participation = readGroupParticipationPreflightStatus(metadata);
+  return participation !== "controller_deferred" && participation !== "controller_coverage";
+}
 
 export function useConversationControllerDispatch({
   conversations,
@@ -126,6 +146,8 @@ export function useConversationControllerDispatch({
   setConversationControllerId,
   appendMessages,
   linkRunToConversation,
+  beginConversationDispatch,
+  endConversationDispatch,
 }: UseConversationControllerDispatchArgs) {
   const inFlightControllerConversationIdRef = useRef<Map<string, Promise<string | null>>>(
     new Map(),
@@ -353,34 +375,42 @@ export function useConversationControllerDispatch({
           : resolvedRuntime.runtimeDisplayName;
       const runtimeIdleTtlSeconds = CONTROLLER_RUNTIME_IDLE_TTL_SECONDS_DEFAULT;
 
-      if (runtimeControllerEnabled && runtimeId && preferRuntime) {
-        let preferredEntry =
-          runtimeStatuses.find((entry) => entry.runtimeId === runtimeId) ?? null;
-        if (!preferredEntry) {
-          const snapshot = await fetchRuntimeStatus({
-            projectId,
-            quietOnAbort: true,
-          }).catch(() => null);
-          preferredEntry =
-            snapshot?.runtimes.find((entry) => entry.runtimeId === runtimeId) ?? null;
-        }
-
-        const provider = (preferredEntry?.provider ?? "").trim().toLowerCase();
-        const isCloudProvider = provider === "instafy-cloud" || provider === "instafy_cloud";
-        const canEnsure = isCloudProvider || preferredEntry?.isLocal === false;
-
-        if (canEnsure && !runtimeEntryIsReady(preferredEntry)) {
-          await ensureRuntime({
-            projectId,
-            runtimeId,
-            provider: preferredEntry?.provider ?? "instafy-cloud",
-            displayName: runtimeDisplayName ?? preferredEntry?.displayName ?? undefined,
-            idleTtlSeconds: runtimeIdleTtlSeconds,
-            metadata: getDefaultRuntimeMetadata("chat:recover-preferred"),
-          }).catch(() => null);
-        }
+      // The typing row shows from the press of Send: checking the machine,
+      // starting a stopped one and the send itself can take seconds before
+      // the controller answers with the turn's run, which carries the row
+      // from there (LINK_RUN lands before this mark ends).
+      const dispatchToken = sendShowsTypingWhileDispatching(metadata, intent) ? generateUUID() : null;
+      if (dispatchToken) {
+        beginConversationDispatch?.(conversation.localId, dispatchToken);
       }
       try {
+        if (runtimeControllerEnabled && runtimeId && preferRuntime) {
+          let preferredEntry =
+            runtimeStatuses.find((entry) => entry.runtimeId === runtimeId) ?? null;
+          if (!preferredEntry) {
+            const snapshot = await fetchRuntimeStatus({
+              projectId,
+              quietOnAbort: true,
+            }).catch(() => null);
+            preferredEntry =
+              snapshot?.runtimes.find((entry) => entry.runtimeId === runtimeId) ?? null;
+          }
+
+          const provider = (preferredEntry?.provider ?? "").trim().toLowerCase();
+          const isCloudProvider = provider === "instafy-cloud" || provider === "instafy_cloud";
+          const canEnsure = isCloudProvider || preferredEntry?.isLocal === false;
+
+          if (canEnsure && !runtimeEntryIsReady(preferredEntry)) {
+            await ensureRuntime({
+              projectId,
+              runtimeId,
+              provider: preferredEntry?.provider ?? "instafy-cloud",
+              displayName: runtimeDisplayName ?? preferredEntry?.displayName ?? undefined,
+              idleTtlSeconds: runtimeIdleTtlSeconds,
+              metadata: getDefaultRuntimeMetadata("chat:recover-preferred"),
+            }).catch(() => null);
+          }
+        }
         const resolveIds = (many: unknown, one: unknown) => {
           const ids = Array.isArray(many)
             ? many.filter(
@@ -481,11 +511,17 @@ export function useConversationControllerDispatch({
         return turnEngineRefusal
           ? { ok: false, errorMessage: message, turnEngineRefusal }
           : { ok: false, errorMessage: message };
+      } finally {
+        if (dispatchToken) {
+          endConversationDispatch?.(conversation.localId, dispatchToken);
+        }
       }
     },
     [
       appendMessages,
+      beginConversationDispatch,
       conversations,
+      endConversationDispatch,
       ensureControllerConversationId,
       linkRunToConversation,
       resolveProjectId,

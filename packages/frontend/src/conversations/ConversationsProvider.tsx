@@ -114,6 +114,10 @@ interface ConversationsContextValue {
   setConversationGoal: (conversationId: string, goal: ConversationGoal | null, expectedGoal?: ConversationGoal | null) => void;
   markConversationRead: (conversationId: string) => void;
   linkRunToConversation: (runId: string, conversationId: string) => void;
+  /** A send of the chat left for the controller: the typing row shows from now (`dispatchingSince`). */
+  beginConversationDispatch: (conversationId: string, token: string) => void;
+  /** The controller answered that send, or it failed: its run, if any, carries the row from here. */
+  endConversationDispatch: (conversationId: string, token: string) => void;
   unlinkRunFromConversation: (runId: string) => void;
   resolveConversationForRun: (runId: string, options?: { remove?: boolean }) => string | null;
   resolveConversationByController: (controllerId: string | null | undefined) => ConversationState | null;
@@ -487,6 +491,14 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
     dispatch({ type: "LINK_RUN", runId, conversationId });
   }, []);
 
+  const beginConversationDispatch = useCallback((conversationId: string, token: string) => {
+    dispatch({ type: "BEGIN_DISPATCH", conversationId, token, at: Date.now() });
+  }, []);
+
+  const endConversationDispatch = useCallback((conversationId: string, token: string) => {
+    dispatch({ type: "END_DISPATCH", conversationId, token });
+  }, []);
+
   const unlinkRunFromConversation = useCallback((runId: string) => {
     dispatch({ type: "UNLINK_RUN", runId });
   }, []);
@@ -542,6 +554,8 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
       setConversationGoal,
       markConversationRead,
       linkRunToConversation,
+      beginConversationDispatch,
+      endConversationDispatch,
       unlinkRunFromConversation,
       resolveConversationForRun,
       resolveConversationByController
@@ -571,6 +585,8 @@ const AccountConversationsProvider = ({ children }: PropsWithChildren) => {
       setConversationGoal,
       markConversationRead,
       linkRunToConversation,
+      beginConversationDispatch,
+      endConversationDispatch,
       unlinkRunFromConversation,
       resolveConversationForRun,
       resolveConversationByController

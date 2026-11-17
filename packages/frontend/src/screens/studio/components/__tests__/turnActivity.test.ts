@@ -667,16 +667,16 @@ describe("summarizeTurnActivity", () => {
     expect(summarize([step("file_change", null, { status: "in_progress", paths: ["a"] })], "running").live).toBe(
       "Editing files…",
     );
-    expect(summarize([], "starting").live).toBe("Starting…");
+    expect(summarize([], "starting").live).toBe("Thinking…");
     expect(summarize([finished], "stale").live).toBe("Status unavailable");
   });
 
   // A local test: 37 s passed between a send and its turn's first step, with
   // nothing under the message but "Trying again…" for 0.8 s.
-  it("says Starting until the turn's first step, however long, and a retry keeps it", () => {
-    expect(summarize([], "starting").live).toBe("Starting…");
-    // The model reasoning before its first step is the turn still starting.
-    expect(summarize([note("**Planning the Lisbon weekend**", "reasoning")], "running").live).toBe("Starting…");
+  it("says one word until the turn's first step, however long, and a retry keeps it", () => {
+    expect(summarize([], "starting").live).toBe("Thinking…");
+    // The model reasoning before its first step is the model at work.
+    expect(summarize([note("**Planning the Lisbon weekend**", "reasoning")], "running").live).toBe("Thinking…");
     // So is the runtime retrying its request, with its label attached.
     const retrying = note("Retrying: stream disconnected", "status", {
       v: 1,
@@ -686,12 +686,27 @@ describe("summarizeTurnActivity", () => {
       count: 1,
       also: [],
     });
-    expect(summarize([note("**Reading**", "reasoning"), retrying], "running").live).toBe("Starting…");
+    expect(summarize([note("**Reading**", "reasoning"), retrying], "running").live).toBe("Thinking…");
     // A person's answer is still asked for at once.
     expect(summarize([], "running", true).live).toBe("Waiting for you");
     // From the first step on, the line follows the steps.
     expect(summarize([command(ADD_POINT)], "running").live).toBe("Thinking…");
     expect(summarize([command(ADD_POINT), retrying], "running").live).toBe("Trying again…");
+  });
+
+  // Every turn used to open with "Starting…", also on a machine that was
+  // already running. Only a turn whose machine still starts says so.
+  it("says Starting only while the space's machine starts, before the model begins", () => {
+    const line = (messages: ChatMessage[], phase: TurnActivityPhase, machineStarting: boolean) =>
+      summarizeTurnActivity(messages, { jobId: JOB, phase, machineStarting }).live;
+    expect(line([], "starting", true)).toBe("Starting…");
+    expect(line([], "starting", false)).toBe("Thinking…");
+    // Once the model began, its machine is up, whatever the page last read.
+    expect(line([note("**Planning the Lisbon weekend**", "reasoning")], "running", true)).toBe("Thinking…");
+    expect(line([command(ADD_POINT, { status: "in_progress" })], "running", true)).toBe("Looking up places…");
+    // A person's answer is asked for at once, machine or not.
+    expect(summarizeTurnActivity([], { jobId: JOB, phase: "running", viewerCanAnswer: true, machineStarting: true }).live)
+      .toBe("Waiting for you");
   });
 
   // docs/Local-Engine-Turns.md 5.7: a turn a turn engine runs words its own
@@ -705,8 +720,15 @@ describe("summarizeTurnActivity", () => {
     expect(withEngine([], "running", true).live).toBe("Waiting for you");
     expect(withEngine([command(ADD_POINT)], "running").live).toBe("Thinking…");
     expect(withEngine([command(ADD_POINT)], "completed").live).toBeNull();
-    // Without an engine's words, the line is as it was.
-    expect(summarizeTurnActivity([], { jobId: JOB, phase: "starting", startingLine: null }).live).toBe("Starting…");
+    // The engine's words stand also while a machine starts: such a turn runs on its sender's computer.
+    expect(
+      summarizeTurnActivity([], { jobId: JOB, phase: "starting", startingLine, machineStarting: true }).live,
+    ).toBe(startingLine);
+    // Without an engine's words, the line is as for any turn.
+    expect(summarizeTurnActivity([], { jobId: JOB, phase: "starting", startingLine: null }).live).toBe("Thinking…");
+    expect(
+      summarizeTurnActivity([], { jobId: JOB, phase: "starting", startingLine: null, machineStarting: true }).live,
+    ).toBe("Starting…");
   });
 
   it("shows a runtime status the runtime labelled while it is the newest thing", () => {
@@ -981,9 +1003,9 @@ describe("a command that ran nothing", () => {
       expect(done.summary).toBe("Edited a file");
       expect(done.stepCount).toBe(1);
       // Alone, it leaves the turn with no line, and while it runs the turn
-      // is still starting.
+      // reads as before its first step.
       expect(summarize([nothing]).summary).toBeNull();
-      expect(summarize([started], "running").live).toBe("Starting…");
+      expect(summarize([started], "running").live).toBe("Thinking…");
     },
   );
 

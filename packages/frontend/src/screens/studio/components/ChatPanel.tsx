@@ -356,7 +356,7 @@ import {
   shouldDisplayJobThreadMessage,
   synthesizeAgentJobThreadMessages,
 } from "./chatMessagePresentation";
-import { resolveAgentWaitingActivityCopy } from "./runtimeAlertPresentation";
+import { resolveAgentWaitingActivityCopy, resolveWorkspaceStarting } from "./runtimeAlertPresentation";
 import {
   formatPromptContextModeLabel,
   isCurrentUserChatMessage,
@@ -616,6 +616,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onAssistantEnabledChange,
     onRemoveAgentHandle,
     isAssistantTyping,
+    isAssistantDispatching,
     hasMoreHistory: hasMoreRecentHistory,
     isHistoryLoading: isRecentHistoryLoading,
     isInitialHistoryLoading: isInitialRecentHistoryLoading,
@@ -3402,8 +3403,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     expectedActiveJobId,
   };
 
+  // The typing row shows from the press of Send: while a send that starts the
+  // agent is still on its way to the controller, before any run of it exists,
+  // as while its turn runs. Everything else that waits on a running turn (the
+  // send queue, Stop, the stale-start check) still reads isAssistantTyping.
+  const assistantTurnPending = isAssistantTyping || Boolean(isAssistantDispatching);
   const typingIndicatorFallback = useMemo<{ phase: TypingIndicatorPhase; label: string | null } | null>(() => {
-    if (!isAssistantTyping) {
+    if (!assistantTurnPending) {
       return null;
     }
     if (waitingForPreferredRuntime || hostedRuntimeEnsuring) {
@@ -3427,14 +3433,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
 
     return null;
-  }, [activeConversationRun, hostedRuntimeEnsuring, isAssistantTyping, waitingForPreferredRuntime]);
+  }, [activeConversationRun, assistantTurnPending, hostedRuntimeEnsuring, waitingForPreferredRuntime]);
 
   const typingIndicatorState = useMemo(() => {
-    if (!isAssistantTyping) {
+    if (!assistantTurnPending) {
       return null;
     }
     return resolveTypingIndicatorState(messages, typingIndicatorFallback, activeConversationRun);
-  }, [activeConversationRun, isAssistantTyping, messages, typingIndicatorFallback]);
+  }, [activeConversationRun, assistantTurnPending, messages, typingIndicatorFallback]);
   const typingAgentIdentity = useMemo<AssistantAgentIdentity | null>(() => {
     const activeRunMetadata =
       activeConversationRun?.metadata && isRecord(activeConversationRun.metadata)
@@ -3597,10 +3603,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     status: run.status,
     displayName: typingLanes.agentByRunId.get(run.id)?.displayName ?? "Agent",
   }))), [activeConversationRuns, typingLanes]);
-  const workspaceStarting =
-    waitingForPreferredRuntime ||
-    hostedRuntimeEnsuring ||
-    (!runtimeReady && activeConversationRun?.status === "queued");
+  const workspaceStarting = resolveWorkspaceStarting({
+    waitingForPreferredRuntime,
+    hostedRuntimeEnsuring,
+    runtimeReady,
+    activeRunStatus: activeConversationRun?.status ?? null,
+    turnPending: assistantTurnPending,
+  });
   // When the live start began. Persisted runtime alerts older than this edge
   // are history; the alert this same start just produced is not.
   const [workspaceStartingSince, setWorkspaceStartingSince] = useState<number | null>(null);
@@ -3646,14 +3655,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // whoever views it: it starts on its sender's computer, not a teammate's.
   const typingTurnEngineStartingLine = useMemo(
     () =>
-      isAssistantTyping && !hasMultipleTypingAgents
+      assistantTurnPending && !hasMultipleTypingAgents
         ? newestTurnEngineStartingLine({
             conversationMessages: messages,
             run: activeConversationRun,
             viewer: { currentUserId, nameOf: (userId) => humanLabelByUserId.get(userId) },
           })
         : null,
-    [activeConversationRun, currentUserId, hasMultipleTypingAgents, humanLabelByUserId, isAssistantTyping, messages],
+    [activeConversationRun, assistantTurnPending, currentUserId, hasMultipleTypingAgents, humanLabelByUserId, messages],
   );
   const waitingActivityCopy = resolveAgentWaitingActivityCopy({
     displayNames: hasMultipleTypingAgents
@@ -6791,7 +6800,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             <ChatTypingRows
               identityLayout={chatTranscriptIdentityLayout}
               peerTypingLabel={peerTypingLabel}
-              isAssistantTyping={isAssistantTyping}
+              isAssistantTyping={assistantTurnPending}
               isAssistantTypingCoveredByJobThreadPreview={isAssistantTypingCoveredByJobThreadPreview}
               typingAgents={typingAgents}
               hasMultipleTypingAgents={hasMultipleTypingAgents}

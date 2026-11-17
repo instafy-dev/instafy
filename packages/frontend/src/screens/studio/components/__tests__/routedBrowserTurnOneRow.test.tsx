@@ -615,12 +615,12 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     };
   }
 
-  it("shows one Octo row from the send to the reply, and never a Starting… under the turn's own line", async () => {
+  it("shows one Octo row from the send to the reply, and never a typing row under the turn's own line", async () => {
     const seen: Array<ReturnType<typeof read>> = [];
     // Sent: the routing step is on its way.
     seen.push(await show({ time: "13:07:55.960", runs: [], awaitingLease: true }));
     // Its card lands; that run's record says it ended 20 ms later. The card
-    // is all that turn says, so "Starting…" hands over to it. Studio opens it
+    // is all that turn says, so "Thinking…" hands over to it. Studio opens it
     // once that run has ended, and it reads as the browser turn's line from
     // the moment it lands (useChatBrowserRequest), never as a button.
     seen.push(await show({ time: "13:07:59.673", runs: [routingRun("in_progress")], card: { kind: "opening", note: null } }));
@@ -643,7 +643,7 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     const one = (time: string, says: string[], typingAnnounces: string | null = null, phoneFaces = 1) =>
       ({ time, octoRows: 1, faces: { desktop: 1, phone: phoneFaces }, says, typingAnnounces });
     expect(seen).toEqual([
-      one("13:07:55.960", ["Starting…"], "Octo is starting", 0),
+      one("13:07:55.960", ["Thinking…"], "Octo is thinking", 0),
       one("13:07:59.673", ["Thinking…"]),
       one("13:07:59.693", ["Thinking…"]),
       one("13:08:00.084", ["Thinking…"]),
@@ -680,7 +680,7 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     const one = (time: string, says: string[], typingAnnounces: string | null = null, phoneFaces = 1) =>
       ({ time, octoRows: 1, faces: { desktop: 1, phone: phoneFaces }, says, typingAnnounces });
     expect(seen).toEqual([
-      one("01:11:27.011", ["Starting…"], "Octo is starting", 0),
+      one("01:11:27.011", ["Thinking…"], "Octo is thinking", 0),
       one("01:11:33.334", ["Thinking…"]),
       one("01:11:33.864", ["Thinking…"]),
       one("01:11:40.000", ["Thinking…"]),
@@ -739,7 +739,7 @@ describe("a message Octo sends straight to Instafy's browser", () => {
     const one = (time: string, says: string[], typingAnnounces: string | null = null) =>
       ({ time, octoRows: 1, faces: { desktop: 1, phone: 1 }, says, typingAnnounces });
     expect(seen).toEqual([
-      one("13:07:55.960", ["Starting…"], "Octo is starting"),
+      one("13:07:55.960", ["Thinking…"], "Octo is thinking"),
       one("13:07:59.673", ["card"]),
       one("13:07:59.693", ["card"]),
       one("13:08:00.463", ["Thinking…"]),
@@ -749,7 +749,7 @@ describe("a message Octo sends straight to Instafy's browser", () => {
   });
 
   // A second AI in the chat starts its own turn on the same message. While
-  // Studio opens Octo's card, the typing row says that AI is starting: it has
+  // Studio opens Octo's card, the typing row says that AI is thinking: it has
   // no row of its own yet. Once Octo's browser turn is on its way, the card
   // reads that turn's line and covers the typing row, as that turn's own row
   // does once it shows something. No row speaks for Octo's browser turn under
@@ -771,8 +771,8 @@ describe("a message Octo sends straight to Instafy's browser", () => {
         time: "13:08:00.084",
         octoRows: 1,
         faces: { desktop: 2, phone: 1 },
-        says: ["Thinking…", "Starting…"],
-        typingAnnounces: "@researcher is starting",
+        says: ["Thinking…", "Thinking…"],
+        typingAnnounces: "@researcher is thinking",
       },
       octoAlone("13:08:00.463", "Thinking…"),
       octoAlone("13:08:00.572", "Thinking…"),
@@ -820,7 +820,7 @@ describe("what a routed card covers", () => {
     expect(resolveJobThreadTypingCoverage(card, [browserRun("queued")], [ask, card, pressed])).toBe("none");
     // Its browser turn was stopped before it showed anything: the card stands
     // for that turn no more, also while the stopped run's record catches up,
-    // and the next turn's typing row says it is starting.
+    // and the next turn's typing row speaks for it.
     const stopped = stored({
       id: "stopped",
       role: "assistant",

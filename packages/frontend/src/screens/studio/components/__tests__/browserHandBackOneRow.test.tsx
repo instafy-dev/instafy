@@ -734,9 +734,10 @@ describe("a message Octo answers in its browser and then builds from what it fou
           .map((line) => `${moment}: "${line}"`),
       ]);
       expect(wrong).toEqual([]);
-      // "Starting…" until the build's first step, then at work, then its reply.
+      // "Thinking…" until the build's first step (its machine is up), then at
+      // work, then its reply.
       const lines = moments.map(({ view }) => view.lines);
-      expect(lines.slice(0, 3)).toEqual([["Starting…"], ["Starting…"], ["Starting…"]]);
+      expect(lines.slice(0, 3)).toEqual([["Thinking…"], ["Thinking…"], ["Thinking…"]]);
       for (const atWork of lines.slice(3, 6)) {
         expect(atWork).toHaveLength(1);
         expect(atWork[0]).toMatch(/…$/);
@@ -750,21 +751,22 @@ describe("a message Octo answers in its browser and then builds from what it fou
       expect(done.text.split("Add each laptop's warranty from its own page.")).toHaveLength(2);
     });
 
-    it("reads as starting, not stopped, when the stopped build had shown a step", async () => {
+    it("reads as on its way, not stopped, when the stopped build had shown a step", async () => {
       const chat = withStepBeforeTheStop();
       const local = await pressContinue(chat);
       const sentChat = [...chat.filter((message) => message.timestamp <= PRESSED_AT), local];
       for (const view of [await seen(sentChat, at("17:56:42.236")), await seen(chat, at("17:56:42.684"))]) {
-        expect(view).toMatchObject({ octoRows: 1, typingRow: false, stopRows: 0, lines: ["Starting…"] });
+        expect(view).toMatchObject({ octoRows: 1, typingRow: false, stopRows: 0, lines: ["Thinking…"] });
       }
       const done = await seen(chat, at("17:56:53.544"));
       expect(done).toMatchObject({ octoRows: 1, typingRow: false, stopRows: 0 });
       expect(done.lines.some((line) => line.startsWith("Stopped"))).toBe(false);
     });
 
-    // On its way, the build reads as starting, also while this page doesn't
-    // know its run yet. Its run gone quiet as this page knows it (queued over
-    // five minutes, or at work with no word for half an hour) still reads so.
+    // On its way, the build reads "Thinking…" on its running machine, also
+    // while this page doesn't know its run yet. Its run gone quiet as this page
+    // knows it (queued over five minutes, or at work with no word for half an
+    // hour) still reads so.
     it("still reads gone quiet once the run it waits on has", async () => {
       const known = at("17:56:42.684");
       const chat = chatOf(rows).filter((message) => message.timestamp <= known);
@@ -781,9 +783,9 @@ describe("a message Octo answers in its browser and then builds from what it fou
         views[`${status} ${minutes} min`] = view.lines;
       }
       expect(views).toEqual({
-        "queued 4 min": ["Starting…"],
+        "queued 4 min": ["Thinking…"],
         "queued 6 min": ["Status unavailable"],
-        "in_progress 29 min": ["Starting…"],
+        "in_progress 29 min": ["Thinking…"],
         "in_progress 31 min": ["Status unavailable"],
       });
     });
