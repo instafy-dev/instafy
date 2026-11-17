@@ -19,9 +19,4 @@ export type ExtensionFamilyUiAdapter = {
     currentNativeCameraStatus: CameraStatusSnapshot | null;
     currentPlatform: string;
   }) => ProjectProviderSelectedDeviceInput | null;
-  shouldUseCurrentNativeStatus?: (input: {
-    providerId: string;
-    source: "host" | "project_integration" | "native_runtime";
-    currentNativeProviderId: string | null;
-  }) => boolean;
 };

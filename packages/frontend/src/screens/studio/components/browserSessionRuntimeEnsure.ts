@@ -163,15 +163,6 @@ export function resolveBrowserRuntimeSelection(
   return { kind: candidates.length ? "choose" : "new", candidates };
 }
 
-export function resolveBrowserRuntimeCandidate(
-  entries: ControllerRuntimeStatusEntry[],
-  preferRuntimeId: string | null,
-): BrowserRuntimeCandidate | null {
-  const preferred = listBrowserRuntimeCandidates(entries).find((item) => item.runtimeId === preferRuntimeId?.trim());
-  const selection = resolveBrowserRuntimeSelection(entries, preferred?.runtimeId ?? null);
-  return selection.kind === "selected" ? selection.candidate : null;
-}
-
 export interface BrowserRuntimeProjectStatusSnapshot {
   projectId: string | null;
   runtimes: readonly ControllerRuntimeStatusEntry[];
@@ -248,12 +239,6 @@ export function resolveAutoRecyclableBrowserRuntimeIdentity(
     provider,
     displayName,
   };
-}
-
-export function resolveAutoRecyclableBrowserRuntimeId(
-  input: ResolveAutoRecyclableBrowserRuntimeInput,
-): string | null {
-  return resolveAutoRecyclableBrowserRuntimeIdentity(input)?.runtimeId ?? null;
 }
 
 type BrowserRuntimeStatusFetcher = (

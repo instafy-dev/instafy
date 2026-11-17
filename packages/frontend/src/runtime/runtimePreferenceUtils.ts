@@ -39,31 +39,3 @@ export function extractRuntimePreferenceDetails(
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-export function formatFallbackRuntimeLabel(runtimeId: string): string {
-  if (!runtimeId) {
-    return "Machine";
-  }
-  const trimmed = runtimeId.trim();
-  if (trimmed.length <= 8) {
-    return `Machine ${trimmed}`;
-  }
-  return `Machine ${trimmed.slice(0, 8)}`;
-}
-
-export function formatRuntimeSourceLabel(source: string | null): string | null {
-  if (!source) {
-    return null;
-  }
-  const normalized = source.trim().toLowerCase();
-  switch (normalized) {
-    case "project":
-      return "Selected machine";
-    case "conversation":
-      return null;
-    case "user":
-      return "Manual selection";
-    default:
-      return normalized.charAt(0).toUpperCase() + normalized.slice(1);
-  }
-}

@@ -32,7 +32,6 @@ import { StoppedTurnRow } from "../ChatSystemRows";
 import { ChatTypingRows } from "../ChatTypingRows";
 import { resolveAgentWaitingActivityCopy } from "../runtimeAlertPresentation";
 import {
-  hasStoppedTurn,
   resolveStoppedTurn,
   useStoppedTurnNotice,
   type StoppedTurnInput,
@@ -144,45 +143,43 @@ function input(overrides: Partial<StoppedTurnInput> = {}): StoppedTurnInput {
   };
 }
 
-describe("hasStoppedTurn", () => {
+describe("resolveStoppedTurn, from this tab's Stop", () => {
   it("is a started run with no machine left after the person's Stop", () => {
-    expect(hasStoppedTurn(input())).toBe(true);
-    expect(hasStoppedTurn(input({ activeRuns: [run({ status: "awaiting_approval" })] }))).toBe(true);
+    expect(resolveStoppedTurn(input())).not.toBeNull();
+    expect(resolveStoppedTurn(input({ activeRuns: [run({ status: "awaiting_approval" })] }))).not.toBeNull();
   });
 
   it("is nothing without a Stop, while a machine is ready, or for a run that had not started", () => {
     // No Stop in this tab: an idle pause between turns holds differently.
-    expect(hasStoppedTurn(input({ manualStopAt: null }))).toBe(false);
+    expect(resolveStoppedTurn(input({ manualStopAt: null }))).toBeNull();
     // Stop is still on its way, or another machine runs the turn.
-    expect(hasStoppedTurn(input({ runtimeReady: true }))).toBe(false);
-    expect(hasStoppedTurn(input({ activeRuns: [run({ status: "queued" })] }))).toBe(false);
-    expect(hasStoppedTurn(input({ activeRuns: [] }))).toBe(false);
+    expect(resolveStoppedTurn(input({ runtimeReady: true }))).toBeNull();
+    expect(resolveStoppedTurn(input({ activeRuns: [run({ status: "queued" })] }))).toBeNull();
+    expect(resolveStoppedTurn(input({ activeRuns: [] }))).toBeNull();
   });
 
   it("is nothing for a turn that began after the Stop, or one with no known start", () => {
     // The hold outlives the Stop while a machine that came back without asking
     // through this tab (a Desktop runtime, another tab) runs later turns.
-    expect(hasStoppedTurn(input({ activeRuns: [run({ createdAt: new Date(NOW + 120_000).toISOString() })] }))).toBe(
-      false,
-    );
-    expect(hasStoppedTurn(input({ activeRuns: [run({ createdAt: null })] }))).toBe(false);
-    expect(hasStoppedTurn(input({ activeRuns: [run({ createdAt: "soon" })] }))).toBe(false);
-    expect(hasStoppedTurn(input({ manualStopAt: NOW }))).toBe(true);
+    expect(resolveStoppedTurn(input({ activeRuns: [run({ createdAt: new Date(NOW + 120_000).toISOString() })] }))).toBeNull();
+    expect(resolveStoppedTurn(input({ activeRuns: [run({ createdAt: null })] }))).toBeNull();
+    expect(resolveStoppedTurn(input({ activeRuns: [run({ createdAt: "soon" })] }))).toBeNull();
+    expect(resolveStoppedTurn(input({ manualStopAt: NOW }))).not.toBeNull();
   });
 
   it("is nothing for a finished run", () => {
     for (const status of ["success", "failed", "canceled"] as const) {
-      expect(hasStoppedTurn(input({ activeRuns: [run({ status })] }))).toBe(false);
+      expect(resolveStoppedTurn(input({ activeRuns: [run({ status })] }))).toBeNull();
     }
   });
 
   it("is nothing for a silent skill-mode evaluation", () => {
     const silent = run({ metadata: { groupParticipation: { decision: "agent_evaluation" } } });
-    expect(hasStoppedTurn(input({ activeRuns: [silent] }))).toBe(false);
+    expect(resolveStoppedTurn(input({ activeRuns: [silent] }))).toBeNull();
     const silentRecord = requeued("user_stop", {
       metadata: { ...requeued().metadata, groupParticipation: { decision: "agent_evaluation" } },
     });
-    expect(hasStoppedTurn(input({ manualStopAt: null, activeRuns: [silentRecord] }))).toBe(false);
+    expect(resolveStoppedTurn(input({ manualStopAt: null, activeRuns: [silentRecord] }))).toBeNull();
   });
 });
 

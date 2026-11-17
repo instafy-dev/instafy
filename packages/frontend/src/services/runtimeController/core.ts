@@ -431,10 +431,6 @@ function setInjectedControllerToken(token: string | null | undefined) {
   setInjectedControllerOverrides(token, currentInjectedControllerBaseUrl());
 }
 
-function setInjectedControllerBaseUrl(url: string | null | undefined) {
-  setInjectedControllerOverrides(currentInjectedToken(), url);
-}
-
 function purgeControllerOverrideParamsFromLocation() {
   if (typeof window === "undefined") {
     return;
@@ -574,15 +570,6 @@ export function clearControllerAccessTokenOverride() {
   if (hadInjectedToken) {
     requestControllerDocumentReload("rejected-override");
   }
-}
-
-export function clearControllerBaseUrlOverride() {
-  if (isActiveCustomControllerBaseUrl()) {
-    clearInjectedCustomControllerPair();
-    return;
-  }
-  setInjectedControllerBaseUrl(null);
-  purgeControllerOverrideParamsFromLocation();
 }
 
 function createControllerRequestContext(

@@ -38,14 +38,6 @@ export type PersonalBrowserHandoff = {
 
 type OwnedPersonalBrowserHandoff = PersonalBrowserHandoff & { ownerId: string };
 
-export function resolveDefaultBrowserTransport(input: {
-  checked: boolean;
-  supported: boolean;
-  enabled: boolean;
-}): BrowserTransport {
-  return input.checked && input.supported && input.enabled ? "personal" : "shared";
-}
-
 export function personalBrowserIdentityScope(
   projectId: string | null,
   profileUserId: string | null,

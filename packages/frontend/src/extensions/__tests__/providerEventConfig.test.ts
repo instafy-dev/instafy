@@ -3,7 +3,6 @@ import {
   DEFAULT_PROVIDER_EVENT_CONFIG,
   getProviderEventConfig,
   resetProviderEventConfig,
-  setProviderEventConfig,
 } from "../providerEventConfig";
 
 describe("providerEventConfig", () => {
@@ -16,46 +15,23 @@ describe("providerEventConfig", () => {
     expect(getProviderEventConfig()).toEqual(DEFAULT_PROVIDER_EVENT_CONFIG);
   });
 
-  it("persists normalized overrides to localStorage", () => {
-    const store = new Map<string, string>();
+  it("clamps invalid stored override values to safe bounds", async () => {
     vi.stubGlobal("window", {
       localStorage: {
-        getItem: (key: string) => store.get(key) ?? null,
-        setItem: (key: string, value: string) => {
-          store.set(key, value);
-        },
-        removeItem: (key: string) => {
-          store.delete(key);
-        },
+        getItem: () =>
+          JSON.stringify({
+            logMaxEntries: -10,
+            coalesceWindowMs: 999_999,
+            triggerMaxEntries: 0,
+          }),
+        removeItem: () => {},
       },
     });
+    // The module reads storage once, so load a fresh copy to read the stubbed value.
+    vi.resetModules();
+    const fresh = await import("../providerEventConfig");
 
-    expect(
-      setProviderEventConfig({
-        logMaxEntries: 12,
-        coalesceWindowMs: 4_500,
-        triggerMaxEntries: 5,
-      }),
-    ).toEqual({
-      logMaxEntries: 12,
-      coalesceWindowMs: 4_500,
-      triggerMaxEntries: 5,
-    });
-    expect(getProviderEventConfig()).toEqual({
-      logMaxEntries: 12,
-      coalesceWindowMs: 4_500,
-      triggerMaxEntries: 5,
-    });
-  });
-
-  it("clamps invalid override values to safe bounds", () => {
-    expect(
-      setProviderEventConfig({
-        logMaxEntries: -10,
-        coalesceWindowMs: 999_999,
-        triggerMaxEntries: 0,
-      }),
-    ).toEqual({
+    expect(fresh.getProviderEventConfig()).toEqual({
       logMaxEntries: 1,
       coalesceWindowMs: 60_000,
       triggerMaxEntries: 1,

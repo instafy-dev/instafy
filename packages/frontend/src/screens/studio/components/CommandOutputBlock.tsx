@@ -68,16 +68,6 @@ async function copyCommandOutput(output: string, showStatus: ShowStatus): Promis
   }
 }
 
-/**
- * Copies a command's output to the clipboard and reports through the status
- * bar. For hosts that draw their own copy control; the block itself shares its
- * single status subscription with copyCommandOutput instead.
- */
-export function useCopyCommandOutput(output: string): () => Promise<void> {
-  const { showStatus } = useStatus();
-  return useCallback(() => copyCommandOutput(output, showStatus), [output, showStatus]);
-}
-
 function buildCollapsedWindow(value: string): OutputWindow {
   if (value.length <= COLLAPSED_TAIL_CHARS) {
     return { text: value, omittedChars: 0, mode: "full" };

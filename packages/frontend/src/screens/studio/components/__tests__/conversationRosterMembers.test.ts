@@ -3,15 +3,8 @@ import { resolveAiFace } from "../../../../utils/aiFace";
 import {
   resolveConversationRosterAgents,
   resolveConversationRosterHumans,
-  shouldShowConversationRoster,
   type ConversationRosterAgent,
 } from "../conversationRosterMembers";
-
-const OCTO_AGENT: ConversationRosterAgent = {
-  handle: "octo",
-  displayName: "Octo",
-  avatarSeed: "octo",
-};
 
 function createInput(
   overrides: Partial<Parameters<typeof resolveConversationRosterHumans>[0]> = {},
@@ -114,42 +107,6 @@ describe("resolveConversationRosterHumans", () => {
     );
 
     expect(humans.map((human) => human.userId)).toEqual(["user-self", "user-peer"]);
-  });
-});
-
-describe("shouldShowConversationRoster", () => {
-  it("hides the roster while humans are unresolved", () => {
-    expect(shouldShowConversationRoster({ agents: [OCTO_AGENT], humans: [] })).toBe(false);
-  });
-
-  it("hides the roster for a solo human with no active AI", () => {
-    expect(
-      shouldShowConversationRoster({
-        agents: [],
-        humans: [{ userId: "user-self", label: "You", isSelf: true }],
-      }),
-    ).toBe(false);
-  });
-
-  it("shows the roster for a solo human once an AI is active", () => {
-    expect(
-      shouldShowConversationRoster({
-        agents: [OCTO_AGENT],
-        humans: [{ userId: "user-self", label: "You", isSelf: true }],
-      }),
-    ).toBe(true);
-  });
-
-  it("always shows the roster for multi-human conversations", () => {
-    expect(
-      shouldShowConversationRoster({
-        agents: [],
-        humans: [
-          { userId: "user-self", label: "You", isSelf: true },
-          { userId: "user-peer", label: "Ada", isSelf: false },
-        ],
-      }),
-    ).toBe(true);
   });
 });
 

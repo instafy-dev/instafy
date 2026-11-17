@@ -94,10 +94,6 @@ export function resolveStoppedTurn(input: StoppedTurnInput): "held" | "recorded"
   return input.machineRequested ? null : stopped;
 }
 
-export function hasStoppedTurn(input: StoppedTurnInput): boolean {
-  return resolveStoppedTurn(input) !== null;
-}
-
 /**
  * History lists the turn's unsaved work only once the stop's flush pushed
  * all of it. Before the stop answers, or after a flush that failed, had no

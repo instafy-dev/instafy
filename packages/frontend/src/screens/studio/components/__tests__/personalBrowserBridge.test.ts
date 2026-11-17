@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   normalizePersonalBrowserUrl,
   personalBrowserIdentityScope,
-  resolveDefaultBrowserTransport,
   resolvePersonalBrowserRuntimeOverride,
 } from "../usePersonalBrowserBridge";
 
@@ -14,13 +13,6 @@ describe("personal browser bridge helpers", () => {
     expect(personalBrowserIdentityScope("project-a", "instafy-user:user-b")).not.toBe(first);
     expect(personalBrowserIdentityScope("project-b", "instafy-user:user-a")).not.toBe(first);
     expect(personalBrowserIdentityScope(null, "instafy-user:user-a")).toBeNull();
-  });
-
-  it("prefers Personal only after the desktop bridge confirms support and enablement", () => {
-    expect(resolveDefaultBrowserTransport({ checked: false, supported: true, enabled: true })).toBe("shared");
-    expect(resolveDefaultBrowserTransport({ checked: true, supported: false, enabled: true })).toBe("shared");
-    expect(resolveDefaultBrowserTransport({ checked: true, supported: true, enabled: false })).toBe("shared");
-    expect(resolveDefaultBrowserTransport({ checked: true, supported: true, enabled: true })).toBe("personal");
   });
 
   it("normalizes web addresses and rejects privileged schemes", () => {

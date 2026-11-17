@@ -1,57 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  extractRuntimeAgentImage,
   getDefaultRuntimeEnv,
   getDefaultRuntimeMetadata,
   getWebdevRuntimeEnv,
-  runtimeImageLooksDefault,
-  runtimeImageLooksWebdev,
   shouldUseLocalWebdevRuntime,
 } from "./webdevRuntime";
 
 describe("webdevRuntime helpers", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
-  });
-
-  it("extracts runtime image from direct metadata key", () => {
-    expect(
-      extractRuntimeAgentImage({
-        runtimeAgentImage: "ghcr.io/instafy-dev/instafy-runtime-agent:webdev",
-      }),
-    ).toBe("ghcr.io/instafy-dev/instafy-runtime-agent:webdev");
-  });
-
-  it("extracts runtime image from metadata env map", () => {
-    expect(
-      extractRuntimeAgentImage({
-        env: {
-          RUNTIME_AGENT_IMAGE: "runtime-agent:local",
-        },
-      }),
-    ).toBe("runtime-agent:local");
-  });
-
-  it("detects webdev image references", () => {
-    expect(runtimeImageLooksWebdev("runtime-agent:webdev")).toBe(true);
-    expect(
-      runtimeImageLooksWebdev("ghcr.io/instafy-dev/instafy-runtime-agent:webdev"),
-    ).toBe(true);
-    expect(runtimeImageLooksWebdev("ghcr.io/instafy-dev/instafy-runtime-agent:latest")).toBe(
-      false,
-    );
-  });
-
-  it("detects default image references", () => {
-    expect(runtimeImageLooksDefault("runtime-agent:webdev")).toBe(true);
-    expect(
-      runtimeImageLooksDefault("ghcr.io/instafy-dev/instafy-runtime-agent:webdev"),
-    ).toBe(false);
-    expect(runtimeImageLooksDefault("runtime-agent:local")).toBe(true);
-    expect(
-      runtimeImageLooksDefault("ghcr.io/instafy-dev/instafy-runtime-agent:latest"),
-    ).toBe(true);
-    expect(runtimeImageLooksDefault("ghcr.io/acme/custom:1")).toBe(false);
   });
 
   it("includes browser-session env for webdev runtime defaults", () => {

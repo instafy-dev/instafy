@@ -51,18 +51,6 @@ export function shouldRenderBrowserSessionFullscreen({
   return transportActive && (fullscreen || forceViewportFullscreen);
 }
 
-export function getVisualViewportBottomInset({
-  layoutViewportHeight,
-  visualViewportHeight,
-  visualViewportOffsetTop,
-}: {
-  layoutViewportHeight: number;
-  visualViewportHeight: number;
-  visualViewportOffsetTop?: number;
-}): number {
-  return Math.max(0, Math.ceil(layoutViewportHeight - (visualViewportHeight + (visualViewportOffsetTop ?? 0))));
-}
-
 export function getChatScrollObstructionPaddingPx({
   scrollContainerBottom,
   composerOverlayTop,

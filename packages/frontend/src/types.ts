@@ -57,26 +57,6 @@ export interface RunRecord {
 
 export type RunRecordPatch = Pick<RunRecord, "id"> & Partial<Omit<RunRecord, "id">>;
 
-export type NextStepSuggestionKind = "module" | "prompt" | "panel" | "resource" | "workflow" | "asset";
-
-export type NextStepSuggestionSource = "template" | "system" | "ai";
-
-export interface NextStepSuggestion {
-  id: string;
-  title: string;
-  description: string;
-  prompt?: string;
-  panel?: "chat" | "code" | "credits";
-  ctaLabel?: string;
-  icon?: string;
-  badge?: string;
-  kind?: NextStepSuggestionKind;
-  moduleId?: string;
-  source?: NextStepSuggestionSource;
-  isQuickAction?: boolean;
-  metadata?: Record<string, unknown>;
-}
-
 export interface VersionControlSettings {
   enabled: boolean;
   provider: "github";

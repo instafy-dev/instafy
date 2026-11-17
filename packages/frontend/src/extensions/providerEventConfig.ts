@@ -66,29 +66,8 @@ function loadProviderEventConfigFromStorage() {
   }
 }
 
-function persistProviderEventConfig() {
-  if (typeof window === "undefined") {
-    return;
-  }
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cachedProviderEventConfig));
-  } catch {
-    // Ignore persistence failures.
-  }
-}
-
 export function getProviderEventConfig(): ProviderEventConfig {
   loadProviderEventConfigFromStorage();
-  return cachedProviderEventConfig;
-}
-
-export function setProviderEventConfig(nextConfig: Partial<ProviderEventConfig>) {
-  cachedProviderEventConfig = normalizeProviderEventConfig({
-    ...getProviderEventConfig(),
-    ...nextConfig,
-  });
-  loadedProviderEventConfig = true;
-  persistProviderEventConfig();
   return cachedProviderEventConfig;
 }
 

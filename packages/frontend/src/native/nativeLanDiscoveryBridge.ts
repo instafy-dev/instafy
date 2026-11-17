@@ -160,20 +160,6 @@ export async function ensureNativeLanDiscoveryStarted(): Promise<NativeLanDiscov
   return await nativeLanDiscoveryStartPromise;
 }
 
-export async function stopNativeLanDiscovery(): Promise<NativeLanDiscoverySnapshot | null> {
-  const plugin = getNativeLanDiscoveryPlugin();
-  if (!plugin) {
-    return null;
-  }
-  try {
-    const result = await plugin.stopDiscovery();
-    nativeLanDiscoveryStarted = false;
-    return normalizeSnapshot(result?.snapshot);
-  } catch {
-    return null;
-  }
-}
-
 export async function listenForNativeLanDiscovery(
   listener: (snapshot: NativeLanDiscoverySnapshot) => void,
 ): Promise<PluginListenerHandle | null> {

@@ -63,18 +63,6 @@ export function supportsExtensionRemoteDeviceUi(
   return resolveExtensionFamilyUiDefaults(providerId)?.supportsRemoteDeviceUi === true;
 }
 
-export function supportsExtensionAttachedDeviceList(
-  providerId: string | null | undefined,
-) {
-  return resolveExtensionFamilyUiDefaults(providerId)?.supportsAttachedDeviceList === true;
-}
-
-export function resolveExtensionAttachedDeviceFamilyId(
-  providerId: string | null | undefined,
-) {
-  return resolveExtensionFamilyUiDefaults(providerId)?.attachedDeviceFamilyId ?? null;
-}
-
 export function resolveExtensionFamilyCurrentNativeProviderId(input: {
   familyId: string;
   nativeRuntimeProviders: LocalProviderSummary[];
@@ -116,17 +104,6 @@ export function buildExtensionNativeAttachMetadata(input: {
   return (
     resolveExtensionFamilyUiRegistration(input.providerId)?.buildNativeAttachMetadata?.(input) ??
     null
-  );
-}
-
-export function shouldUseExtensionCurrentNativeStatus(input: {
-  providerId: string;
-  source: "host" | "project_integration" | "native_runtime";
-  currentNativeProviderId: string | null;
-}) {
-  return (
-    resolveExtensionFamilyUiRegistration(input.providerId)?.shouldUseCurrentNativeStatus?.(input) ??
-    false
   );
 }
 

@@ -8,12 +8,10 @@ const {
   listControllerProviderDevicesMock,
   listControllerProviderRequestsMock,
   listProjectIntegrationsMock,
-  dispatchControllerProviderResourceReadMock,
   dispatchControllerProviderToolCallMock,
   getLocalProviderForCapabilityMock,
   getLocalProviderSummaryMock,
   getNativeCameraStatusMock,
-  readLocalProviderResourceMock,
 } = vi.hoisted(() => ({
   callLocalProviderToolMock: vi.fn(),
   captureNativeCameraPhotoMock: vi.fn(),
@@ -22,12 +20,10 @@ const {
   listControllerProviderDevicesMock: vi.fn(),
   listControllerProviderRequestsMock: vi.fn(),
   listProjectIntegrationsMock: vi.fn(),
-  dispatchControllerProviderResourceReadMock: vi.fn(),
   dispatchControllerProviderToolCallMock: vi.fn(),
   getLocalProviderForCapabilityMock: vi.fn(),
   getLocalProviderSummaryMock: vi.fn(),
   getNativeCameraStatusMock: vi.fn(),
-  readLocalProviderResourceMock: vi.fn(),
 }));
 
 vi.mock("../../capabilities/localProviderHostClient", async (importOriginal) => ({
@@ -35,11 +31,9 @@ vi.mock("../../capabilities/localProviderHostClient", async (importOriginal) => 
   callLocalProviderTool: callLocalProviderToolMock,
   getLocalProviderForCapability: getLocalProviderForCapabilityMock,
   getLocalProviderSummary: getLocalProviderSummaryMock,
-  readLocalProviderResource: readLocalProviderResourceMock,
 }));
 
 vi.mock("../../services/runtimeController/providerRequests", () => ({
-  dispatchControllerProviderResourceRead: dispatchControllerProviderResourceReadMock,
   dispatchControllerProviderToolCall: dispatchControllerProviderToolCallMock,
   listControllerProviderRequests: listControllerProviderRequestsMock,
 }));
@@ -67,7 +61,6 @@ import {
   createNativeCameraExecutionContext,
   captureProviderPhoto,
   captureProviderPhotoSeries,
-  readCameraProviderStatus,
 } from "../cameraBridgeClient";
 
 describe("cameraBridgeClient", () => {
@@ -81,12 +74,10 @@ describe("cameraBridgeClient", () => {
     listControllerProviderDevicesMock.mockReset();
     listControllerProviderRequestsMock.mockReset();
     listProjectIntegrationsMock.mockReset();
-    dispatchControllerProviderResourceReadMock.mockReset();
     dispatchControllerProviderToolCallMock.mockReset();
     getLocalProviderForCapabilityMock.mockReset();
     getLocalProviderSummaryMock.mockReset();
     getNativeCameraStatusMock.mockReset();
-    readLocalProviderResourceMock.mockReset();
 
     getNativeCameraStatusMock.mockResolvedValue({
       supported: false,
@@ -137,45 +128,6 @@ describe("cameraBridgeClient", () => {
         transportTarget: "iphone-main",
         executionSurface: "ios",
       },
-    });
-  });
-
-  it("dispatches a remote camera status read when no local provider is discoverable", async () => {
-    dispatchControllerProviderResourceReadMock.mockResolvedValue({
-      ok: true,
-      providerId: "camera:android-test-device",
-      uri: "instafy://camera/status",
-      exists: true,
-      value: {
-        supported: true,
-        platform: "android",
-        backend: "phone_camera",
-        deviceId: "android-test-device",
-        deviceLabel: "Pixel Test",
-        providerId: "camera:android-test-device",
-        permission: "granted",
-        permissionGranted: true,
-        canCapture: true,
-        availableLenses: [{ id: "front", title: "Front camera", available: true }],
-        selectedLens: "front",
-        lastCapture: null,
-      },
-    });
-
-    const status = await readCameraProviderStatus({
-      projectId: "project-1",
-      providerId: "camera:android-test-device",
-    });
-
-    expect(dispatchControllerProviderResourceReadMock).toHaveBeenCalledWith({
-      projectId: "project-1",
-      providerId: "camera:android-test-device",
-      uri: "instafy://camera/status",
-    });
-    expect(status).toMatchObject({
-      supported: true,
-      platform: "android",
-      selectedLens: "front",
     });
   });
 

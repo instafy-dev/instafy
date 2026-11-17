@@ -17,12 +17,6 @@ function resolveCredentialSource(credential: Pick<ControllerCredentialListItem, 
   return typeof source === "string" ? source.trim().toLowerCase() : "";
 }
 
-export function isLocalCodexCredential(
-  credential: Pick<ControllerCredentialListItem, "kind" | "metadata">,
-): boolean {
-  return credential.kind === "codex_auth_json" && resolveCredentialSource(credential) === "codex_cli";
-}
-
 export function formatCredentialKind(
   credential: Pick<ControllerCredentialListItem, "kind" | "metadata">,
 ): string {
@@ -88,41 +82,4 @@ export function formatCredentialOptionLabel(credential: ControllerCredentialList
   const label = resolveCredentialLabel(credential);
   const kind = formatCredentialKind(credential);
   return `${label} · ${kind}`;
-}
-
-export function formatCredentialLastUsed(
-  credential: Pick<ControllerCredentialListItem, "lastUsedAt">,
-  nowMs = Date.now(),
-): string | null {
-  if (!credential.lastUsedAt) {
-    return null;
-  }
-  const usedMs = Date.parse(credential.lastUsedAt);
-  if (!Number.isFinite(usedMs)) {
-    return null;
-  }
-  const elapsedMs = Math.max(0, nowMs - usedMs);
-  const minuteMs = 60_000;
-  const hourMs = 60 * minuteMs;
-  const dayMs = 24 * hourMs;
-  if (elapsedMs < minuteMs) {
-    return "Last used just now";
-  }
-  if (elapsedMs < hourMs) {
-    const minutes = Math.max(1, Math.floor(elapsedMs / minuteMs));
-    return `Last used ${minutes}m ago`;
-  }
-  if (elapsedMs < dayMs) {
-    const hours = Math.max(1, Math.floor(elapsedMs / hourMs));
-    return `Last used ${hours}h ago`;
-  }
-  return `Last used ${new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(
-    new Date(usedMs),
-  )}`;
-}
-
-export function formatCredentialRuntimeDetail(
-  credential: Pick<ControllerCredentialListItem, "kind" | "metadata" | "lastUsedAt">,
-): string {
-  return [formatCredentialKind(credential), formatCredentialLastUsed(credential)].filter(Boolean).join(" · ");
 }

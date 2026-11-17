@@ -135,25 +135,3 @@ export function resolveConversationRosterAgents({
   }
   return rosterAgents;
 }
-
-/**
- * Multi-human conversations always show the roster; a single-human
- * conversation shows it only when at least one AI participant is active (a
- * solo chat with Octo shows just the two of you). An empty humans list means
- * the peer directories have not resolved yet, so nothing is shown.
- */
-export function shouldShowConversationRoster({
-  agents,
-  humans,
-}: {
-  agents: readonly ConversationRosterAgent[];
-  humans: readonly ConversationRosterHuman[];
-}): boolean {
-  if (humans.length === 0) {
-    return false;
-  }
-  if (humans.length > 1) {
-    return true;
-  }
-  return agents.length > 0;
-}

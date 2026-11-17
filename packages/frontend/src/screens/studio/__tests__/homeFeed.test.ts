@@ -9,9 +9,7 @@ import {
   dayLabelFor,
   formatRelativeTimestamp,
   getSpaceLabel,
-  readHomeLastSeen,
   resolveConversationActor,
-  writeHomeLastSeen,
   type HomeFeedRecentConversation,
 } from "../homeFeed";
 
@@ -840,42 +838,5 @@ describe("helpers", () => {
         localConversation({ messages: [{ id: "m", role: "user", content: "x", timestamp: NOW }], ownerAgent: null }),
       ),
     ).toBeNull();
-  });
-
-  it("persists the last-seen cut per user and survives a broken storage", () => {
-    const storage = new Map<string, string>();
-    (globalThis as { window?: unknown }).window = {
-      localStorage: {
-        getItem: (key: string) => storage.get(key) ?? null,
-        setItem: (key: string, value: string) => {
-          storage.set(key, value);
-        },
-      },
-    };
-    try {
-      expect(readHomeLastSeen("Me@Example.com")).toBeNull();
-      writeHomeLastSeen("Me@Example.com", NOW);
-      expect(readHomeLastSeen("me@example.com")).toBe(NOW);
-      expect(readHomeLastSeen("other@example.com")).toBeNull();
-    } finally {
-      delete (globalThis as { window?: unknown }).window;
-    }
-
-    (globalThis as { window?: unknown }).window = {
-      localStorage: {
-        getItem: () => {
-          throw new Error("blocked");
-        },
-        setItem: () => {
-          throw new Error("blocked");
-        },
-      },
-    };
-    try {
-      expect(() => writeHomeLastSeen("x", NOW)).not.toThrow();
-      expect(readHomeLastSeen("x")).toBeNull();
-    } finally {
-      delete (globalThis as { window?: unknown }).window;
-    }
   });
 });

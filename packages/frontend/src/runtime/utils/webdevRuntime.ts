@@ -2,11 +2,8 @@ export const WEBDEV_RUNTIME_LOCAL_IMAGE = "runtime-agent:webdev";
 export const WEBDEV_RUNTIME_BUILD_TARGET = "runtime-webdev";
 export const WEBDEV_RUNTIME_DISPLAY_NAME = "Webdev runtime (Playwright)";
 export const WEBDEV_RUNTIME_FLAVOR = "webdev";
-export const DEFAULT_RUNTIME_REMOTE_IMAGE = "ghcr.io/instafy-dev/instafy-runtime-agent:latest";
 export const DEFAULT_RUNTIME_LOCAL_IMAGE = WEBDEV_RUNTIME_LOCAL_IMAGE;
 export const DEFAULT_RUNTIME_BUILD_TARGET = WEBDEV_RUNTIME_BUILD_TARGET;
-export const LEGACY_DEFAULT_RUNTIME_REMOTE_IMAGE = "ghcr.io/instafy-dev/instafy-runtime-agent:latest";
-export const LEGACY_DEFAULT_RUNTIME_LOCAL_IMAGE = "runtime-agent:local";
 export const BROWSER_SESSION_RUNTIME_ENV: Record<string, string> = {
   INSTAFY_ENABLE_BROWSER_SESSION: "1",
   INSTAFY_VNC_PORT: "5900",
@@ -25,21 +22,6 @@ function resolveProtocol(protocol?: string): string {
 
 function normalizeHost(value: string | null | undefined): string {
   return (value ?? "").trim().toLowerCase();
-}
-
-function readString(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function readRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
 }
 
 function isProductionFrontendBuild(): boolean {
@@ -115,56 +97,4 @@ export function getDefaultRuntimeMetadata(
     metadata.env = env;
   }
   return metadata;
-}
-
-export function extractRuntimeAgentImage(
-  metadata: Record<string, unknown> | null | undefined,
-): string | null {
-  const source = readRecord(metadata);
-  if (!source) {
-    return null;
-  }
-  const direct =
-    readString(source.runtimeAgentImage) ??
-    readString(source.runtime_agent_image) ??
-    readString(source["runtime-agent-image"]);
-  if (direct) {
-    return direct;
-  }
-  const env = readRecord(source.env);
-  if (!env) {
-    return null;
-  }
-  return (
-    readString(env.RUNTIME_AGENT_IMAGE) ??
-    readString(env.runtime_agent_image) ??
-    readString(env.runtimeAgentImage)
-  );
-}
-
-export function runtimeImageLooksWebdev(imageRef: string | null | undefined): boolean {
-  const normalized = normalizeHost(imageRef);
-  if (!normalized) {
-    return false;
-  }
-  return (
-    normalized.includes("runtime-agent:webdev") ||
-    normalized.includes("/instafy-runtime-agent:webdev") ||
-    normalized.endsWith(":webdev")
-  );
-}
-
-export function runtimeImageLooksDefault(imageRef: string | null | undefined): boolean {
-  const normalized = normalizeHost(imageRef);
-  if (!normalized) {
-    return false;
-  }
-  return (
-    normalized === DEFAULT_RUNTIME_LOCAL_IMAGE ||
-    normalized === DEFAULT_RUNTIME_REMOTE_IMAGE ||
-    normalized === LEGACY_DEFAULT_RUNTIME_LOCAL_IMAGE ||
-    normalized === LEGACY_DEFAULT_RUNTIME_REMOTE_IMAGE ||
-    normalized.endsWith("/instafy-runtime-agent:latest") ||
-    normalized.endsWith(":latest")
-  );
 }

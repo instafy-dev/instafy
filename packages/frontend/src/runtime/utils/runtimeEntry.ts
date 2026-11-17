@@ -5,12 +5,6 @@ import {
   resolveRuntimeStopHold,
 } from "../unexpectedHostedRuntimeRecovery";
 
-export type RuntimeConnectionState =
-  | "connected"
-  | "connecting"
-  | "disconnected"
-  | "unknown";
-
 export function runtimeEntryIsReady(
   entry: ControllerRuntimeStatusEntry | null | undefined,
 ): boolean {
@@ -322,33 +316,4 @@ export function resolveStalledHostedLaunch(
 ): boolean {
   const deadlineMs = stalledLaunchDeadlineMs(entry);
   return deadlineMs !== null && nowMs >= deadlineMs;
-}
-
-function resolveConnectionState(
-  entries: ControllerRuntimeStatusEntry[],
-): RuntimeConnectionState {
-  if (entries.some((entry) => runtimeEntryIsReady(entry))) {
-    return "connected";
-  }
-  if (entries.some((entry) => runtimeEntryIsBooting(entry))) {
-    return "connecting";
-  }
-  if (entries.length > 0) {
-    return "disconnected";
-  }
-  return "unknown";
-}
-
-export function resolveHostedConnectionState(
-  statuses: ControllerRuntimeStatusEntry[],
-): RuntimeConnectionState {
-  const hostedEntries = statuses.filter(isHostedRuntime);
-  return resolveConnectionState(hostedEntries);
-}
-
-export function resolveDesktopConnectionState(
-  statuses: ControllerRuntimeStatusEntry[],
-): RuntimeConnectionState {
-  const desktopEntries = statuses.filter(isSelfHostedRuntime);
-  return resolveConnectionState(desktopEntries);
 }
