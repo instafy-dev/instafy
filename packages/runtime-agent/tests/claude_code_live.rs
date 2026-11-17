@@ -42,7 +42,9 @@ use runtime_agent::claude_code::command::{
     McpConfigFile, lane_environment, turn_command, write_prompt,
 };
 use runtime_agent::claude_code::events::{AdapterStatus, EventAdapter, ExitFacts, check_init};
-use runtime_agent::claude_code::supervise::{TurnEnd, TurnLimits, TurnSpec, supervise};
+use runtime_agent::claude_code::supervise::{
+    FOLLOW_UP_GRACE, FollowUpWait, TurnEnd, TurnLimits, TurnSpec, supervise,
+};
 use runtime_agent::claude_code::{
     BIN_ENV, Confinement, FailureCode, GRANTED_ENV_KEYS, HelpFacts, Lane, LaunchEnvSnapshot,
     LaunchGrant, RawLaunchGrant, ReadyLane, Trust, verified_through,
@@ -948,8 +950,9 @@ impl Live {
             .await;
         let tasks = task_event_summary(&turn.lines);
         let reply = turn.reply();
+        let skipped = skipped_results(&turn.lines, turn.adapter.results());
         let detail = format!(
-            "task events: {}\nresults: {}; the last after the task_notification: {}; final reply mentions PONG: {}\n{}",
+            "task events: {}\nresults: {} read of {} printed; the last after the task_notification: {}; final reply mentions PONG: {}\nskipped: {}\n{}",
             if tasks.is_empty() {
                 "none".to_string()
             } else {
@@ -960,8 +963,17 @@ impl Live {
                     .join("; ")
             },
             turn.adapter.results(),
+            turn.lines
+                .iter()
+                .filter(|line| is_top_level_result(line))
+                .count(),
             result_after_notification(&turn.lines),
             reply.contains("PONG"),
+            if skipped.is_empty() {
+                "none".to_string()
+            } else {
+                skipped.join("; ")
+            },
             turn.summary()
         );
         report.add(
@@ -1170,6 +1182,8 @@ impl Live {
         let started = Instant::now();
         let mut escalate_at: Option<Instant> = None;
         let mut drain_until: Option<Instant> = None;
+        // The lane's follow-up wait, kept as `supervise` keeps it.
+        let mut follow_up = FollowUpWait::new(FOLLOW_UP_GRACE);
         let mut ticker = tokio::time::interval(Duration::from_millis(50));
         loop {
             if turn.exit.is_some()
@@ -1199,13 +1213,6 @@ impl Live {
                         if turn.signal_sent.is_none() && turn.exit.is_none() {
                             let now = Instant::now();
                             match plan {
-                                StopPlan::AtEndOfTurn
-                                    if !matches!(turn.adapter.status(), AdapterStatus::Running) =>
-                                {
-                                    send_signal(pid, libc::SIGTERM);
-                                    turn.signal_sent = Some(("SIGTERM", now));
-                                    escalate_at = Some(now + SIGTERM_GRACE);
-                                }
                                 StopPlan::OnFirstDraft(signal) if turn.drafted() => {
                                     send_signal(pid, signal);
                                     turn.signal_sent = Some((signal_name(signal), now));
@@ -1250,6 +1257,29 @@ impl Live {
                     }
                 }
             }
+            // SIGTERM where the lane ends the turn: once the adapter ended it at a `result` or a
+            // launch check failed, or once the lane's follow-up wait ran out, asked after each
+            // line and on each tick as `supervise` asks it.
+            if plan == StopPlan::AtEndOfTurn
+                && turn.signal_sent.is_none()
+                && turn.exit.is_none()
+                && (!matches!(turn.adapter.status(), AdapterStatus::Running)
+                    || follow_up.ends_the_turn(&mut turn.adapter, tokio::time::Instant::now()))
+            {
+                let now = Instant::now();
+                send_signal(pid, libc::SIGTERM);
+                turn.signal_sent = Some(("SIGTERM", now));
+                escalate_at = Some(now + SIGTERM_GRACE);
+            }
+        }
+        // `claude` exited by itself: while the turn waited only for follow-up turns, the lane's
+        // follow-up wait ends it there when the exit says nothing of the reply, as `supervise`
+        // does (3.6).
+        if plan == StopPlan::AtEndOfTurn && turn.signal_sent.is_none() && turn.exit.is_some() {
+            follow_up.ends_at_claudes_exit(
+                &mut turn.adapter,
+                turn.exit.and_then(|status| status.code()),
+            );
         }
         tracker.observe();
         turn.descendants = tracker.kill_survivors();
@@ -1269,7 +1299,8 @@ impl Live {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StopPlan {
-    /// SIGTERM once the adapter says the turn ended, or a launch check failed, as the lane does.
+    /// SIGTERM where the lane ends the turn: once the adapter says the turn ended or a launch
+    /// check failed, or once the lane's follow-up wait ([`FollowUpWait`]) ran out.
     AtEndOfTurn,
     /// This signal once the first reply draft streams.
     OnFirstDraft(i32),
@@ -1378,11 +1409,25 @@ impl LiveTurn {
         })
     }
 
+    /// The run log's line that says the lane's follow-up wait ended the turn at the `result`s
+    /// read, when it did ([`FollowUpWait`]).
+    fn ended_without_follow_up(&self) -> Option<Value> {
+        self.adapter.run_log().events().into_iter().find(|event| {
+            event.get("type").and_then(Value::as_str) == Some("instafy.ended_without_follow_up")
+        })
+    }
+
     /// How the turn went, for a finding's detail.
     fn summary(&self) -> String {
         let status = match self.adapter.status() {
             AdapterStatus::Running => "still running when it stopped".to_string(),
-            AdapterStatus::EndOfTurn => "ended at its result".to_string(),
+            AdapterStatus::EndOfTurn => match self.ended_without_follow_up() {
+                Some(line) if line.get("claude_exited") == Some(&Value::Bool(true)) => {
+                    "ended at claude's own exit, while it waited for a follow-up turn, at the results read".to_string()
+                }
+                Some(_) => "ended after the follow-up wait, at the results read".to_string(),
+                None => "ended at its result".to_string(),
+            },
             AdapterStatus::Unexpected(why) => format!("a launch check failed: {why}"),
         };
         let mut summary = format!(
@@ -1789,7 +1834,145 @@ fn result_after_notification(lines: &[Value]) -> bool {
     matches!((notified, replied), (Some(notified), Some(replied)) if replied > notified)
 }
 
-/// Item 5's verdict (3.6). It holds only when a `task_started` carried a task id and type, a
+/// A top-level `result`, as the adapter counts one: no `parent_tool_use_id` naming a tool call.
+fn is_top_level_result(line: &Value) -> bool {
+    line.get("type").and_then(Value::as_str) == Some("result")
+        && line
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+}
+
+/// The run id `value` names as `run_id` or `runId`, as the adapter reads one: a string that is not
+/// blank, trimmed, or a number.
+fn run_id(value: &Value) -> Option<String> {
+    ["run_id", "runId"]
+        .iter()
+        .find_map(|key| match value.get(*key)? {
+            Value::String(run) if !run.trim().is_empty() => Some(run.trim().to_string()),
+            Value::Number(run) => Some(run.to_string()),
+            _ => None,
+        })
+}
+
+/// What a `task-notification` `origin` names: `Some(Some(run))` for a run, `Some(None)` for none,
+/// and `None` for another `origin`.
+fn notified_run(origin: &Value) -> Option<Option<String>> {
+    (origin.get("kind").and_then(Value::as_str) == Some("task-notification"))
+        .then(|| run_id(origin))
+}
+
+/// Whether a task event names a run id, as the adapter reads one: a `task_started` or a
+/// `task_notification` that names one, or a `background_tasks_changed` entry that does.
+fn names_a_run_id(line: &Value) -> bool {
+    if line.get("type").and_then(Value::as_str) != Some("system") {
+        return false;
+    }
+    match line.get("subtype").and_then(Value::as_str) {
+        Some("task_started" | "task_notification") => run_id(line).is_some(),
+        Some("background_tasks_changed") => ["tasks", "background_tasks", "backgroundTasks"]
+            .iter()
+            .find_map(|key| line.get(*key).and_then(Value::as_array))
+            .is_some_and(|tasks| tasks.iter().any(|task| run_id(task).is_some())),
+        _ => false,
+    }
+}
+
+/// The run ids of the background commands and Monitor watches (`local_bash`) the turn's task
+/// events name: their follow-up turns only say they ended, and are never the reply as this check
+/// reads it, since it does not know held turns (3.6).
+fn background_command_runs(lines: &[Value]) -> Vec<String> {
+    let mut runs = Vec::new();
+    for line in lines {
+        if line.get("type").and_then(Value::as_str) != Some("system") {
+            continue;
+        }
+        let tasks: Vec<&Value> = match line.get("subtype").and_then(Value::as_str) {
+            Some("task_started" | "task_notification") => vec![line],
+            Some("background_tasks_changed") => ["tasks", "background_tasks", "backgroundTasks"]
+                .iter()
+                .find_map(|key| line.get(*key).and_then(Value::as_array))
+                .map(|tasks| tasks.iter().collect())
+                .unwrap_or_default(),
+            _ => continue,
+        };
+        for task in tasks {
+            let kind = ["task_type", "taskType"]
+                .iter()
+                .find_map(|key| task.get(*key).and_then(Value::as_str));
+            if let (Some("local_bash"), Some(run)) = (kind, run_id(task)) {
+                runs.push(run);
+            }
+        }
+    }
+    runs
+}
+
+/// What in the lines `claude` printed shows that the lane's end of turn came too early, or that
+/// its reply skipped a subagent's answer (item 5, 3.6). The adapter read the first `results`
+/// top-level `result`s, and the reply comes from the latest of those that can be the reply: one
+/// with no `origin` (the person's own turn), or a `task-notification` one that names a run other
+/// than a background command's (a subagent's follow-up turn), or that names no run while no task
+/// event before it named a run id. Each of these is described:
+/// - a `result` that can be the reply, printed after the one the turn ended at;
+/// - a subagent's follow-up `result` that the reply did not come from.
+///
+/// A background command's follow-up, a `task-notification` that names no run once a task event
+/// named a run id (a Monitor watch's event turn) and a peer message's turn are neither: the lane
+/// waits for none of them, and none is ever the reply as this check reads it. It does not know
+/// held turns, which item 5's one subagent cannot make.
+fn skipped_results(lines: &[Value], results: usize) -> Vec<String> {
+    let commands = background_command_runs(lines);
+    // Each top-level `result`, and whether a task event before it named a run id.
+    let mut named = false;
+    let mut top_level: Vec<(&Value, bool)> = Vec::new();
+    for line in lines {
+        named |= names_a_run_id(line);
+        if is_top_level_result(line) {
+            top_level.push((line, named));
+        }
+    }
+    let follow_up =
+        |&(result, named): &(&Value, bool)| match result.get("origin").and_then(notified_run) {
+            Some(Some(run)) => !commands.contains(&run),
+            Some(None) => !named,
+            None => false,
+        };
+    let can_reply = |entry: &(&Value, bool)| {
+        entry.0.get("origin").is_none_or(Value::is_null) || follow_up(entry)
+    };
+    let read = results.min(top_level.len());
+    let reply = top_level[..read].iter().rposition(can_reply);
+    top_level
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let after_the_end = index >= read && can_reply(entry);
+            let not_the_reply = follow_up(entry) && Some(index) != reply;
+            (after_the_end || not_the_reply).then(|| {
+                format!(
+                    "top-level result {} of {} ({}) {}",
+                    index + 1,
+                    top_level.len(),
+                    if follow_up(entry) {
+                        "a subagent's follow-up"
+                    } else {
+                        "the turn's own"
+                    },
+                    if after_the_end {
+                        "came after the turn ended"
+                    } else {
+                        "is not the one the reply came from"
+                    }
+                )
+            })
+        })
+        .collect()
+}
+
+/// Item 5's verdict (3.6). It fails when the lines `claude` printed show the turn ended too early
+/// or its reply skipped the subagent's answer ([`skipped_results`]): another run would not make
+/// it hold. Otherwise it holds only when a `task_started` carried a task id and type, a
 /// `task_notification` a task id, every `background_tasks_changed` a list whose entries all carry
 /// an id the adapter reads, and the turn's reply came from a result after the notification: at
 /// least two results, the later one with the subagent's PONG.
@@ -1799,6 +1982,9 @@ fn background_verdict(
     results: usize,
     reply: &str,
 ) -> Verdict {
+    if !skipped_results(lines, results).is_empty() {
+        return Verdict::Fails;
+    }
     let started = tasks
         .iter()
         .any(|task| task.subtype == "task_started" && task.id && task.task_type.is_some());
@@ -1983,8 +2169,10 @@ fn the_suite_reads_the_stream_shapes_the_lane_expects() {
 }
 
 /// Item 5 holds only on what the end-of-turn rule reads, and only when the turn's reply is the
-/// result after the subagent's: an interim result, a list whose entries the adapter cannot tell
-/// apart, or a list under another key leaves it unconfirmed, with the shapes in its details.
+/// result after the subagent's: a reply without its answer, a list whose entries the adapter
+/// cannot tell apart, or a list under another key leaves it unconfirmed, with the shapes in its
+/// details. A turn that ended before a result it waits for, or whose reply skipped the
+/// subagent's follow-up result, fails: no other run makes that hold.
 #[test]
 fn item_5_holds_only_when_the_reply_follows_the_task_and_every_list_is_read() {
     let lines = fixture_lines("result-subagent");
@@ -1992,8 +2180,14 @@ fn item_5_holds_only_when_the_reply_follows_the_task_and_every_list_is_read() {
         background_verdict(&task_event_summary(lines), lines, results, reply)
     };
     assert_eq!(verdict(&lines, 2, "PONG"), Verdict::Holds);
-    // The turn ended at the interim result, or its reply is not the subagent's answer.
-    assert_eq!(verdict(&lines, 1, "PONG"), Verdict::Unconfirmed);
+    // The turn ended at the interim result, and `claude` printed the later one before it
+    // stopped.
+    assert_eq!(verdict(&lines, 1, "PONG"), Verdict::Fails);
+    assert_eq!(
+        skipped_results(&lines, 1),
+        ["top-level result 2 of 2 (the turn's own) came after the turn ended"]
+    );
+    // The reply is not the subagent's answer.
     assert_eq!(
         verdict(&lines, 2, "A helper is looking."),
         Verdict::Unconfirmed
@@ -2044,6 +2238,85 @@ fn item_5_holds_only_when_the_reply_follows_the_task_and_every_list_is_read() {
             .iter()
             .map(TaskEvent::describe)
             .any(|event| event.contains("no list the adapter reads") && event.contains("running")),
+    );
+}
+
+/// Claude Code 2.1.325's order (Phase 0, item 5): a subagent that finished before the turn's
+/// `result` was printed has its follow-up turn run first, and both `result`s are printed back to
+/// back, the follow-up's last, with an `origin` that names the subagent's run. Item 5 holds when
+/// the lane read to the follow-up's `result` and replied with it, and fails when it ended at the
+/// interim `result`, as the rule before Phase 0 did, or replied with an earlier `result` than the
+/// follow-up's. A background command's follow-up after the end and a peer message's turn are no
+/// reason to fail: the lane waits for neither.
+#[test]
+fn item_5_fails_when_the_turn_ends_before_or_replies_without_the_subagents_follow_up() {
+    let lines = fixture_lines("result-subagent-follow-up");
+    let verdict = |lines: &[Value], results: usize, reply: &str| {
+        background_verdict(&task_event_summary(lines), lines, results, reply)
+    };
+    let interim = "A helper is working on it.";
+    assert_eq!(
+        verdict(&lines, 2, "The helper answered: PONG."),
+        Verdict::Holds
+    );
+    assert!(skipped_results(&lines, 2).is_empty());
+    assert_eq!(verdict(&lines, 1, interim), Verdict::Fails);
+    assert_eq!(
+        skipped_results(&lines, 1),
+        ["top-level result 2 of 2 (a subagent's follow-up) came after the turn ended"]
+    );
+    // The follow-up's `result` first and the turn's own last: the reply, the latest that can be
+    // one, skipped the subagent's answer.
+    let mut swapped = lines.clone();
+    let results: Vec<usize> = swapped
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| is_top_level_result(line))
+        .map(|(index, _)| index)
+        .collect();
+    swapped.swap(results[0], results[1]);
+    assert_eq!(verdict(&swapped, 2, interim), Verdict::Fails);
+    assert_eq!(
+        skipped_results(&swapped, 2),
+        ["top-level result 1 of 2 (a subagent's follow-up) is not the one the reply came from"]
+    );
+
+    // A background command's follow-up that came after the turn ended is not waited for.
+    let command = fixture_lines("result-local-bash-follow-up");
+    assert!(skipped_results(&command, 1).is_empty());
+    assert_ne!(
+        verdict(
+            &command,
+            1,
+            "The tests pass, and the dev server is starting in the background."
+        ),
+        Verdict::Fails
+    );
+    // A peer message's turn is never the reply; the subagent's follow-up after it is.
+    let peer = fixture_lines("result-peer");
+    assert!(skipped_results(&peer, 3).is_empty());
+    assert_eq!(
+        skipped_results(&peer, 2),
+        ["top-level result 3 of 3 (a subagent's follow-up) came after the turn ended"]
+    );
+    // A Monitor watch's event turn names no run: once a task event named a run id, it is no
+    // subagent's follow-up and never the reply, as the adapter reads it, whenever it comes.
+    let monitor = fixture_lines("result-monitor-event");
+    assert!(skipped_results(&monitor, 1).is_empty());
+    assert!(skipped_results(&monitor, 2).is_empty());
+    // While no task event named a run id, a follow-up that names no run can be the reply: one
+    // that came after the end is a skipped answer.
+    let mut unnamed = fixture_lines("result-subagent");
+    let last = unnamed
+        .iter()
+        .rposition(is_top_level_result)
+        .expect("a result");
+    unnamed[last]["origin"] =
+        serde_json::json!({"kind": "task-notification", "producer": "session-task"});
+    assert!(skipped_results(&unnamed, 2).is_empty());
+    assert_eq!(
+        skipped_results(&unnamed, 1),
+        ["top-level result 2 of 2 (a subagent's follow-up) came after the turn ended"]
     );
 }
 
