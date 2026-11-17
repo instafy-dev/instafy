@@ -105,15 +105,21 @@ Long messages and code stay inside the reading column.
 
 Below 640px, participant faces and clickable names sit above the message instead
 of taking a separate avatar column. Wider group conversations keep that column.
-A confirmed conversation with only the current user and built-in Octo omits the
-repeated avatar, name and timestamp on ordinary replies at every width. Octo's
-small face stays beside the live thinking or working status; waiting states do
-not animate. Message actions expose the exact sent time, and the existing
-participant rail provides profile access. Group and custom-agent replies retain
-their identities, as do targeted results and explicit active or failed states.
-Unresolved membership, partial history, custom agents or earlier collaborators
-keep participant attribution; clients do not load older history just to choose
-a cosmetic layout. These presentation rules do not change participation policy.
+A confirmed conversation with only the current user and their own Octo omits the
+repeated avatar, name and timestamp on ordinary replies at every width. The
+participant rail must list one AI, Octo, wearing its own tile rather than a
+picture. The controller answers each person with their own saved Octo and
+stamps that agent's id on each reply and run, so a stamped reply counts as Octo
+only by the exact id the rail shows; a reply without an id counts only with
+Octo's own handle and seed. Another member's Octo has another id, so a chat with
+two Octo ids keeps attribution. Octo's small face stays beside the live thinking
+or working status; waiting states do not animate. Message actions expose the
+exact sent time, and the existing participant rail provides profile access.
+Group and custom-agent replies retain their identities, as do targeted results
+and explicit active or failed states. Unresolved membership, partial history,
+custom agents or earlier collaborators keep participant attribution; clients do
+not load older history just to choose a cosmetic layout. These presentation
+rules do not change participation policy.
 
 The transcript uses quiet, centered time landmarks before its first dated
 message, at local calendar-day changes and after at least an hour without

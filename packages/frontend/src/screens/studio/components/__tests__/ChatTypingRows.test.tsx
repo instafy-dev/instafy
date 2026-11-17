@@ -23,6 +23,7 @@ import {
 } from "../../../../components/__tests__/octoCoinExpectations";
 import { AI_TILE_SHAPE_CLASS } from "../../../../components/OctoCoin";
 import { OPEN_AGENT_PROFILE_EVENT, type OpenAgentProfileDetail } from "../agentProfileOpen";
+import { ViewerAgentsContext } from "../viewerAgents";
 
 // The face is Octo's tile (OctoCoin, docs/Brand.md): white with the shared
 // avatar coin shadow in light, reversed in dark, one ink. jsdom cannot resolve dark: variants, so the tile
@@ -102,6 +103,26 @@ describe("ChatTypingRows", () => {
     const face = container.querySelector('[data-testid="assistant-thinking-octo-compact"]');
     expect(face?.querySelector("svg")?.getAttribute("data-octo-animated")).toBe("false");
     expect(face?.querySelectorAll("animate, animateTransform")).toHaveLength(0);
+  });
+
+  it.each(["octo", "own-octo-agent"])("keeps the viewer's own Octo, stamped with its id, beside the solo status (seed %s)", async (avatarSeed) => {
+    // A hosted run carries the viewer's own Octo id, and the chat draws that
+    // Octo from its current profile. Its seed is "octo", or its id once its
+    // picture was removed: Octo's tile either way.
+    await act(async () => {
+      root.render(
+        <ViewerAgentsContext.Provider value={new Map([["own-octo-agent", { avatarSeed, handle: "octo" }]])}>
+          <ChatTypingRows {...soloStatusProps} typingAgentId="own-octo-agent" typingAgentAvatarSeed={avatarSeed} />
+        </ViewerAgentsContext.Provider>,
+      );
+    });
+    const indicator = container.querySelector('[data-testid="assistant-typing-indicator"]');
+    const face = indicator?.querySelector('[data-testid="assistant-thinking-octo-compact"]');
+    expectOctoCoinFace(face ?? null);
+    expect(face?.querySelector(".octo-mark")?.getAttribute("data-octo-motion")).toBe("thinking");
+    expect(container.querySelector(".chat-message-avatar-gutter")).toBeNull();
+    expect(container.querySelector('[data-testid="chat-speaker-inline"]')).toBeNull();
+    expect(indicator?.querySelector("[data-sweep-text]")?.textContent).toBe("Thinking…");
   });
 
   it("retains exact profile targets for same-handle participants in a compact heading", async () => {
