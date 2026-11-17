@@ -37,7 +37,7 @@ export interface StartDesktopRuntimeOptions {
   /**
    * Electron-only ownership contract. When true, the parent kills the complete
    * process tree and dispositions the controller runtime after that proof.
-   * CLI callers must leave this false so the child handles Ctrl+C itself.
+   * Left unset, the child handles Ctrl+C itself.
    */
   parentDispositionsRuntimeOnShutdown?: boolean;
   /**
@@ -492,7 +492,7 @@ function resolveRuntimeBinary(explicit?: string): string {
   }
 
   throw new Error(
-    "Unable to locate runtime-agent binary. Provide --runtime-binary or set INSTAFY_RUNTIME_AGENT_BIN.",
+    "Unable to locate runtime-agent binary. Set runtimeBinaryPath or INSTAFY_RUNTIME_AGENT_BIN.",
   );
 }
 
@@ -1254,7 +1254,7 @@ async function resolveRuntimeAccessToken(
   }
 
   throw new Error(
-    "Unable to resolve runtime access token. Provide --origin-token, set RUNTIME_ACCESS_TOKEN/ORIGIN_INTERNAL_TOKEN, or configure a controller access token.",
+    "Unable to resolve runtime access token. Set origin.internalToken, origin.internalTokenProvider or ORIGIN_INTERNAL_TOKEN, or provide a controller access token (controllerAccessToken or CONTROLLER_ACCESS_TOKEN).",
   );
 }
 

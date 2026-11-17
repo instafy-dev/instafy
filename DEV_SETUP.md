@@ -328,9 +328,6 @@ can reach, because `DEV_MODE` signs sessions with the development value publishe
 - Provide `RUNTIME_ACCESS_TOKEN` (minted via `POST /projects/:id/runtime/token`) and ensure the controller is started with
   `RUNTIME_SIGNING_PRIVATE_KEY` / `RUNTIME_SIGNING_PUBLIC_KEY` so access tokens can be minted when Studio or Playwright calls
   `/projects/:id/access_token`.
-- The `instafy-desktop` helper mints short-lived runtime tokens via
-  `POST /projects/:id/runtime/token`. Export `CONTROLLER_ACCESS_TOKEN` (or pass
-  `--controller-access-token`) to exchange a Supabase/Instafy bearer token for the runtime/origin credential automatically.
 - Playwright’s desktop origin harness no longer spins up a shim binary. It calls `/runtime/ensure`, waits for the
   controller to report the origin endpoint, and drives presence beats via `/projects/:id/origin/presence/beat`. Make sure
   your `.env` exposes `PLAYWRIGHT_CONTROLLER_URL` and a `SUPABASE_SERVICE_ROLE_KEY` so the helper can mint tokens.

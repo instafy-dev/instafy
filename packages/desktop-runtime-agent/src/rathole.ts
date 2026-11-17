@@ -12,9 +12,6 @@ const DEFAULT_VERSION = process.env.RATHOLE_VERSION ?? "v0.5.0";
 const DEFAULT_CACHE_DIR =
   process.env.RATHOLE_CACHE_DIR ?? path.join(os.homedir(), ".instafy", "rathole");
 
-export const DEFAULT_RATHOLE_VERSION = DEFAULT_VERSION;
-export const DEFAULT_RATHOLE_CACHE_DIR = DEFAULT_CACHE_DIR;
-
 interface EnsureOptions {
   version?: string;
   cacheDir?: string;
@@ -75,81 +72,6 @@ export async function ensureRatholeBinary(options: EnsureOptions = {}): Promise<
 
   logger(`rathole ready at ${binaryPath}`);
   return binaryPath;
-}
-
-export interface CachedRatholeBinary {
-  version: string;
-  binaryPath: string;
-  assetName: string;
-  size: number;
-  modifiedAt: string;
-}
-
-export async function listCachedRatholeBinaries(
-  options: { cacheDir?: string } = {},
-): Promise<CachedRatholeBinary[]> {
-  const cacheRoot = path.resolve(options.cacheDir ?? DEFAULT_CACHE_DIR);
-  try {
-    const versionEntries = await fs.promises.readdir(cacheRoot, { withFileTypes: true });
-    const binaries: CachedRatholeBinary[] = [];
-    for (const versionEntry of versionEntries) {
-      if (!versionEntry.isDirectory()) {
-        continue;
-      }
-      const version = versionEntry.name;
-      const versionPath = path.join(cacheRoot, version);
-      const candidates = await collectRatholeBinaries(versionPath);
-      for (const candidate of candidates) {
-        const stats = await fs.promises.stat(candidate);
-        binaries.push({
-          version,
-          binaryPath: candidate,
-          assetName: path.relative(versionPath, path.dirname(candidate)) || ".",
-          size: stats.size,
-          modifiedAt: stats.mtime.toISOString(),
-        });
-      }
-    }
-    return binaries.sort((a, b) => a.version.localeCompare(b.version));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  }
-}
-
-export async function purgeRatholeCache(
-  options: { cacheDir?: string; version?: string } = {},
-): Promise<number> {
-  const cacheRoot = path.resolve(options.cacheDir ?? DEFAULT_CACHE_DIR);
-  try {
-    const targets =
-      options.version && options.version.trim().length > 0
-        ? [path.join(cacheRoot, options.version.trim())]
-        : (await fs.promises
-            .readdir(cacheRoot)
-            .then((entries) => entries.map((entry) => path.join(cacheRoot, entry))));
-
-    let removed = 0;
-    for (const target of targets) {
-      const exists = await fs.promises
-        .access(target)
-        .then(() => true)
-        .catch(() => false);
-      if (!exists) {
-        continue;
-      }
-      await fs.promises.rm(target, { recursive: true, force: true });
-      removed += 1;
-    }
-    return removed;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return 0;
-    }
-    throw error;
-  }
 }
 
 function resolveInstallPlan(): InstallPlan {
@@ -360,24 +282,4 @@ async function safeUnlink(filePath: string): Promise<void> {
   } catch {
     // ignore
   }
-}
-
-async function collectRatholeBinaries(root: string, depth = 0): Promise<string[]> {
-  const entries = await fs.promises.readdir(root, { withFileTypes: true });
-  const binaries: string[] = [];
-  for (const entry of entries) {
-    const entryPath = path.join(root, entry.name);
-    if (entry.isFile() && isBinaryName(entry.name)) {
-      binaries.push(entryPath);
-    } else if (entry.isDirectory() && depth < 2) {
-      const nested = await collectRatholeBinaries(entryPath, depth + 1);
-      binaries.push(...nested);
-    }
-  }
-  return binaries;
-}
-
-function isBinaryName(name: string): boolean {
-  const lower = name.toLowerCase();
-  return lower === "rathole" || lower === "rathole.exe";
 }
