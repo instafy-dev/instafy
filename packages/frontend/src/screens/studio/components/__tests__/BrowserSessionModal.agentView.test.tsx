@@ -215,6 +215,13 @@ function cookieNoticePause(seq: number, runId: string): RuntimeBrowserSessionAct
   return { ...pause, humanInputRequest: { ...pause.humanInputRequest!, kind: "cookies", fields: [{ label: "Highlighted button 1" }] } };
 }
 
+// A pause on a step only the person takes, on its button alone: a sign-in's
+// "Continue with Google", a booking's final button.
+function buttonPause(seq: number, runId: string): RuntimeBrowserSessionAction {
+  const pause = signInPause(seq, runId);
+  return { ...pause, humanInputRequest: { ...pause.humanInputRequest!, fields: [{ label: "Highlighted button 1" }] } };
+}
+
 function action(seq: number, label: string): RuntimeBrowserSessionAction {
   return { seq, ts: seq, pageId: "PAGE1", type: "navigate", label, url: null, x: null, y: null, viewportW: null, viewportH: null };
 }
@@ -543,6 +550,16 @@ describe("Shared Browser view while Octo drives", () => {
     await advance(100);
     expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats until you clear it.");
     // Another person's pause, or none, says nothing.
+    mocks.actions = [];
+    await act(async () => root.render(<Host agentHolds={false} pausedRunId={RUN} />));
+    await advance(100);
+    expect(note()).toBeNull();
+    // A pause on a button alone says it too: a sign-in can be one button
+    // ("Continue with Google"), and the runtime names it only a button.
+    mocks.actions = [buttonPause(1, RUN)];
+    await act(async () => root.render(<Host agentHolds={false} compact pausedRunId={RUN} />));
+    await advance(100);
+    expect(note()?.textContent).toBe("This space's browser keeps you signed in for its chats until you clear it.");
     mocks.actions = [];
     await act(async () => root.render(<Host agentHolds={false} pausedRunId={RUN} />));
     await advance(100);

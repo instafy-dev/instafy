@@ -2669,16 +2669,41 @@ function isFilledField(description) {
   );
 }
 
+// What a pause may hand the person, by what pressing the control does (the
+// action policy's category). A sign-in, a payment or a booking's final
+// button, a cookie notice's own choices and a control that opens a part of
+// the page are theirs to press. A control that may show or change a secret is
+// never handed over in this browser: the next reading would show Octo the
+// value. Nor is a step the browser asks the person about before Octo takes it
+// (deleting, sharing, moving money or ownership, sending a message,
+// downloading): a highlight says nothing of what it does, so Octo asks in
+// words first.
+const PAUSE_SECRET_CATEGORIES = new Set(["reveal_secret", "may_show_secret", "credential"]);
+const PAUSE_ASK_FIRST_CATEGORIES = new Set(["destructive", "permission", "transfer", "message", "download"]);
+
+// A cookie notice's own settings, by the whole of a control's words, and the
+// words that name a notice anywhere in them ("Cookie settings", "Privacy
+// choices").
+const NOTICE_SETTINGS_EXACT = /^(?:customi[sz]e|settings|preferences|options|more\s+options|manage(?:\s+(?:preferences|options|choices|settings))?|einstellungen|anpassen|verwalten|param[èe]tres|personnaliser|configurar|configuraci[óo]n|preferencias|personalizar|gestionar|impostazioni|personalizza|preferenze|defini[çc][õo]es|prefer[êe]ncias|instellingen|aanpassen|voorkeuren)$/iu;
+const NOTICE_NAMED = new RegExp(`(?:${CONSENT_NAMES_SOURCE})`, "iu");
+
 // A cookie notice's own choice, as a pause names it: a control inside the
-// notice that refuses (`dismiss`), opens its settings or limits what it allows.
-// Its accept is never listed, so never highlighted; a control that does
-// anything else there (a "Delete my account" a page dressed as a notice) is a
-// step of its own, and a pause names it so.
+// notice that refuses it (the policy's `consentRejection` or a dismissal),
+// accepts only what is needed (`consentLimited`), or opens its settings, by
+// words that name the notice or its settings. Its accept is never listed, so
+// never highlighted. Anything else beside a notice, or in a small part of a
+// page that speaks of cookies (a booking's "Book now" over "you agree to our
+// cookie policy"), is a step of the person's, and a pause names it so: the
+// person must never press a booking's button taking it for a notice's.
 function isCookieChoice(description, pageUrl) {
-  return (
-    description.policy?.consentContext === true &&
-    ["dismiss", "navigation", "change"].includes(classifyStep("click", description, { pageUrl }).category)
-  );
+  if (description.policy?.consentContext !== true) return false;
+  const step = classifyStep("click", description, { pageUrl });
+  if (step.consentRejection === true || step.consentLimited === true || step.category === "dismiss") return true;
+  if (!["navigation", "change"].includes(step.category)) return false;
+  const labels = actionPolicy.stepLabels(policyTarget(description));
+  return [labels.visible, labels.accessible, description.label]
+    .map((name) => String(name || "").trim())
+    .some((name) => name && (NOTICE_NAMED.test(name) || NOTICE_SETTINGS_EXACT.test(name)));
 }
 
 // What a pause tells the run, by what it highlights: fields only are a
@@ -6479,12 +6504,20 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     for (const entry of selected) {
       assertControlOn(entry.description);
       const { category } = classifyStep("click", entry.description, { pageUrl: page.url() });
-      // A control that shows a secret is never handed over here: the person
-      // would open it in this browser, and the next reading would show Octo
-      // the value. They open that page in a browser of their own.
-      if (category === "reveal_secret") {
+      // A control that may show or change a secret is never handed over here:
+      // the person would use it in this browser, and the next reading would
+      // show Octo the value. They open that page in a browser of their own.
+      if (PAUSE_SECRET_CATEGORIES.has(category)) {
         throw new Error(
-          `${quotedControlLabel(entry.description)} shows a secret, so nothing was highlighted. Tell the person in words which control shows it; they open this page in their own browser to see it.`,
+          `${quotedControlLabel(entry.description)} may show or change a secret, so nothing was highlighted. Tell the person in words which control it is; they open this page in their own browser to use it.`,
+        );
+      }
+      // A step the browser asks the person about before Octo takes it is
+      // never handed over by a highlight, whose words say nothing of what it
+      // does.
+      if (PAUSE_ASK_FIRST_CATEGORIES.has(category)) {
+        throw new Error(
+          `${quotedControlLabel(entry.description)} is a step Octo takes only with the person's yes (${actionPolicy.categoryTitle(category)}), so nothing was highlighted. When their message named it, take it with \`click\`, which asks them; otherwise ask them in chat first, saying what it does.`,
         );
       }
       // Nor is a cookie notice's accept, should a page list one: Octo never
@@ -6498,6 +6531,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const pause = humanInputKind(selected, page.url());
     await clearHumanInputHighlights(page);
     try {
+      // The person finds the step where the page shows it: the first control
+      // highlighted is scrolled into view, as a step's own target is.
+      await selected[0].locator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => {});
       for (const entry of selected) {
         assertStepOnTime();
         await entry.locator.evaluate((element) => {

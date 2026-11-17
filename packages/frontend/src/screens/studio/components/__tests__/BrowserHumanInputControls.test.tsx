@@ -2,7 +2,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BrowserHumanInputControls, humanInputGuidance, humanInputHasFields } from "../BrowserHumanInputControls";
+import { BrowserHumanInputControls, humanInputGuidance } from "../BrowserHumanInputControls";
 import { SharedBrowserCollaborationControls } from "../SharedBrowserCollaborationControls";
 import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT } from "../useBrowserHumanInput";
 
@@ -237,9 +237,6 @@ describe("BrowserHumanInputControls", () => {
     expect(humanInputGuidance([field(1), field(2)])).toBe("Fill the 2 highlighted fields on the page, then let Octo continue. Keep passwords and codes out of chat.");
     expect(humanInputGuidance([button(1)])).toBe("Press the highlighted button on the page when you're ready, then let Octo continue.");
     expect(humanInputGuidance([field(1), field(2), button(1)])).toBe("Fill the 2 highlighted fields and press the highlighted button on the page when you're ready, then let Octo continue. Keep passwords and codes out of chat.");
-    // A sign-in's note is for a pause with a field; a button alone signs nobody in.
-    expect(humanInputHasFields([field(1), button(1)])).toBe(true);
-    expect(humanInputHasFields([button(1)])).toBe(false);
   });
 
   it("keeps generic Done after manual navigation removes origin-bound guidance", async () => {

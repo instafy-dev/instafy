@@ -467,8 +467,10 @@ if (mode.startsWith("long-label-")) {
 // a type="button" control inside a page-wide POST form whose own submit is
 // "Speichern". "menu-item:<label>": a menu item with that label. "link:<label>":
 // a link to an article on the same site whose address holds its label, as a
-// news site's does.
-const labelled = /^(button|post-form-button|menu-item|link):(.+)$/u.exec(specialMode);
+// news site's does. "small-print-button:<label>": a button in a small part of
+// the page whose text speaks of cookies (a booking's "you agree to our cookie
+// policy"), which the describer reads as a consent context.
+const labelled = /^(button|post-form-button|menu-item|link|small-print-button):(.+)$/u.exec(specialMode);
 const slugOf = (label) => label.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
   .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 if (labelled) {
@@ -476,6 +478,8 @@ if (labelled) {
   const article = `https://example.test/2026/10/31/${slugOf(label)}`;
   special[specialMode] = kind === "menu-item"
     ? { description: control(label, { tag: "li", role: "menuitem", inputType: "" }), policy: { areas: "menu" } }
+    : kind === "small-print-button"
+    ? { description: control(label), policy: { consentContext: true } }
     : kind === "link"
     ? { description: control(label, { tag: "a", inputType: "", href: article }), policy: { href: article, linkSelf: true } }
     : kind === "post-form-button"
@@ -7263,13 +7267,17 @@ fn a_sign_in_page_that_draws_more_controls_after_it_loads_still_pauses_on_its_fi
     );
 }
 
-/// A step only the person may do is handed to them as a sign-in is, a button too (an owner
-/// decision, Nov 15): a booking's or a payment's final button, a part of a page Octo can't reach.
-/// The pause highlights it, names it a button in the hand-off in fixed words (nothing of the
-/// page), and ends the turn with a code of its own, whose reply says to press it when they're
-/// ready. A pause on fields alone stays a sign-in's. A cookie notice's own choices are a cookie
-/// notice's pause, and its accept is never listed, so never highlighted. A control that shows a
-/// secret is never handed over in this browser: the next reading would show Octo the value.
+/// A step only the person may do is handed to them as a sign-in is, a button too: a booking's
+/// or a payment's final button, a sign-in's own button, a part of a page Octo can't reach. The
+/// pause highlights it, names it a button in the hand-off in fixed words (nothing of the page),
+/// and ends the turn with a code of its own. A pause on fields alone stays a sign-in's. A cookie
+/// notice's own choices are a cookie notice's pause, and its accept is never listed, so never
+/// highlighted; a booking's button in a part of the page that speaks of cookies is a step, never
+/// a notice's. A control that may show or change a secret is never handed over in this browser:
+/// the next reading would show Octo the value. Nor is a step the browser asks the person about
+/// before Octo takes it (deleting, sharing, moving money or ownership, sending a message,
+/// downloading): its highlight would say nothing of what it does. Neither outlines or publishes
+/// anything, and the turn goes on.
 #[test]
 fn a_pause_hands_the_person_a_button_as_it_does_fields() {
     let human_input = |fixture: &EmbeddedControllerFixture| {
@@ -7358,16 +7366,54 @@ fn a_pause_hands_the_person_a_button_as_it_does_fields() {
     let (_, paused) = pause_on(&fixture, "cookie-banner", json!([0, 2]));
     assert!(failure_of(&paused).contains("[human_step_required_non_retryable]"));
 
-    // A control that shows a secret is never highlighted, and nothing is handed over.
-    let fixture = EmbeddedControllerFixture::new();
-    let (_, refused) = pause_on(&fixture, "reveal-key", json!([0]));
-    let error = failure_of(&refused);
-    assert!(
-        error.contains("shows a secret, so nothing was highlighted"),
-        "{error}"
-    );
-    assert!(!error.contains("_non_retryable"), "{error}");
-    assert!(human_input(&fixture).is_empty());
+    // A payment's, a booking's and a sign-in's own buttons are the person's steps.
+    for mode in [
+        "button:Pay now",
+        "button:Book now",
+        "button:Sign in with Google",
+        "small-print-button:Book now",
+        "small-print-button:Complete booking",
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let (_, paused) = pause_on(&fixture, mode, json!([0]));
+        let error = failure_of(&paused);
+        assert!(
+            error.contains("[human_step_required_non_retryable]"),
+            "{mode}: {error}"
+        );
+        let requests = human_input(&fixture);
+        assert_eq!(requests.len(), 1, "{mode}: {requests:?}");
+        assert!(
+            requests[0]["humanInputRequest"].get("kind").is_none(),
+            "{mode}: a booking's button is never named a cookie notice's"
+        );
+    }
+
+    // A control that may show or change a secret, or a step the browser asks the person about
+    // first, is never highlighted, and nothing is handed over.
+    for (mode, says) in [
+        ("button:Delete my account", "only with the person's yes"),
+        ("button:Transfer ownership", "only with the person's yes"),
+        ("button:Send money", "only with the person's yes"),
+        ("button:Send message", "only with the person's yes"),
+        ("button:Share", "only with the person's yes"),
+        ("button:Download", "only with the person's yes"),
+        ("button:Generate new token", "may show or change a secret"),
+        ("button:Create API key", "may show or change a secret"),
+        ("credential-row", "may show or change a secret"),
+        ("reveal-key", "may show or change a secret"),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let (_, refused) = pause_on(&fixture, mode, json!([0]));
+        let error = failure_of(&refused);
+        assert!(error.contains(says), "{mode}: {error}");
+        assert!(
+            error.contains("so nothing was highlighted"),
+            "{mode}: {error}"
+        );
+        assert!(!error.contains("_non_retryable"), "{mode}: {error}");
+        assert!(human_input(&fixture).is_empty(), "{mode}");
+    }
 }
 
 /// The same task stopped on the site's home page, whose header has only a

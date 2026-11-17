@@ -427,7 +427,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "and an item's name as its official page gives it",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
       "reviewers' homepages and links,",
-      "an address that does not answer: once with `www.` added or removed, as its `tell` says.",
+      "An address that does not answer: once with `www.` added or removed, as its `tell` says.",
       "Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.",
       "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",
     ]) {

@@ -3396,9 +3396,10 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
             false,
         ),
         // A pause on a button or a link: a step only the person takes, such as a booking's or a
-        // payment's final button, with any field beside it.
+        // payment's final button, with any field beside it. The turn's own short words go to the
+        // person with it (`jobs::HUMAN_STEP_PAUSE_TAIL`): which step it is and what it does.
         "human_step_required" => (
-            "The person does the highlighted step on the page. End this turn now: they choose Let Octo continue once they have, and the next turn takes a fresh snapshot. Never request or repeat what they enter.".to_string(),
+            "The person does the highlighted step on the page. End this turn now with a short reply that says which button or field it is, where it is on the page and what pressing it does (it books, pays or signs in); never ask for what they enter. They choose Let Octo continue once they have, and the next turn takes a fresh snapshot.".to_string(),
             false,
         ),
         BROWSER_UNAVAILABLE_CODE => (

@@ -318,6 +318,15 @@ test("the provider runtime forwards the held-pages switch, on when unset", () =>
   assert.equal(providerRuntimeService().environment.get(name), `\${${name}:-1}`);
 });
 
+// The runtime agent's switch for research pages that search before the
+// browser is off until it is set, on hosted runtimes too.
+test("the provider runtime forwards the research-pages switch, off when unset", () => {
+  const source = fs.readFileSync(path.join(REPO_ROOT, "packages/runtime-agent/src/jobs/mod.rs"), "utf8");
+  const name = source.match(/const RESEARCH_PAGES_SEARCH_FIRST_ENV: &str = "([A-Za-z_][A-Za-z0-9_]*)";/)?.[1];
+  assert.equal(name, "INSTAFY_RESEARCH_PAGES_SEARCH_FIRST");
+  assert.equal(providerRuntimeService().environment.get(name), `\${${name}:-0}`);
+});
+
 test(
   "the held-pages switch reaches the runtime from where each Compose file reads it",
   { skip: !composeAvailable && "Docker Compose v2 unavailable" },

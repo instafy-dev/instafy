@@ -404,7 +404,7 @@ fn the_research_skill_says_how_to_choose_read_cross_check_and_cite() {
         "Direct access is only in a visible browser tab.",
         "Honor a tool's policy refusal.",
         "1. Pages the person gave. 2. Sources an installed skill names for this need (a map's place search, an open API). 3. The AI's own web search, when this run has it (above). 4. `instafy web read` for a page whose address you have",
-        "At most 2 guessed official domains, confirmed by reading the business name",
+        "Then at most 2 guessed official domains, confirmed by reading the business name",
         "Never put a guessed address in `request_browser`.",
         "Inspect `instafy web budget --json`",
         "Parent, helpers and continued workers share the allowance",
@@ -892,7 +892,10 @@ fn reviews_are_never_guessed_addresses() {
     let research = flat(RESEARCH_SKILL);
     assert!(!research.contains("reviews from publishers you know review"));
     assert!(research.contains(
-        "the official page of what the request names, reviewers' homepages and links, an exact quote, or a page search couldn't read. At most 2 guessed official domains, confirmed by reading the business name;"
+        "the official page a source gives, reviewers' homepages and links, an exact quote, or a page search couldn't read."
+    ));
+    assert!(research.contains(
+        "Then at most 2 guessed official domains, confirmed by reading the business name."
     ));
 
     assert!(!include_str!("legacy/browser-automation-v14.md").contains("reads as busy"));
@@ -1813,16 +1816,19 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
 
 /// No search key never ends the task (28 Oct drive: the comparison asked for a key and the browser at once, tried a bare
 /// domain that did not answer three times and built nothing): the turn reads without a search (official sites from
-/// reference search, guessed official domains), tries an address that does not answer
+/// reference search, then guessed official domains), tries an address that does not answer
 /// once with `www.` added or removed, builds with what it read, and offers the key card at most once, never waiting for
-/// it. Stops are listed in plain words. An unedited earlier copy is upgraded.
+/// it. Stops are listed in plain words. A run with no web search of its own reads the ladder in the order it read
+/// before the AI's own web search came first: the pages it has, then open data and the space's own search key, and
+/// only then a guessed official domain. An unedited earlier copy is upgraded.
 #[test]
 fn the_research_skill_keeps_going_without_a_search_key() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     for needle in [
-        "4. `instafy web read` for a page whose address you have: the official page of what the request names",
-        "At most 2 guessed official domains, confirmed by reading the business name; an address that does not answer: once with `www.` added or removed, as its `tell` says.",
+        "4. `instafy web read` for a page whose address you have: the official page a source gives",
+        "An address that does not answer: once with `www.` added or removed, as its `tell` says.",
+        "Then at most 2 guessed official domains, confirmed by reading the business name.",
         "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
         "may go in your reply once; never ask for a key in chat or wait for it.",
         "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",
@@ -1832,6 +1838,12 @@ fn the_research_skill_keeps_going_without_a_search_key() {
     }
     assert!(!research.contains("and meanwhile use step 5"));
     assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+    // Without a search of its own, a guess comes after open data and the space's own key, as it
+    // did before.
+    let at = |words: &str| research.find(words).unwrap_or_else(|| panic!("{words}"));
+    assert!(at("--chain reference-search --json` for Wikipedia") < at("guessed official domains"));
+    assert!(at("`instafy web search` with the space's own key") < at("guessed official domains"));
+    assert!(at("4. `instafy web read` for a page whose address you have") < at("5. Open data"));
 
     let previous = include_str!("legacy/web-research-v6.md");
     assert!(previous.contains("and meanwhile use step 5"));
@@ -2031,6 +2043,9 @@ fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
         "Never type their secrets (a password, payment detail, government identifier or recovery code) or press those buttons.",
         "On a page you may use, highlight it with `request_human_input` and end the turn; they choose Let Octo continue.",
         "Never use a sign-in that belongs to someone else in this space; the person signs in to their own account themselves.",
+        // A payment's or a booking's final button is the person's to press; any other step that
+        // moves money, changes records or deletes is still asked about first.
+        "ask before a transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the person's current message named that exact step.",
     ] {
         assert!(carried.contains(needle), "{needle}");
     }
@@ -2894,9 +2909,9 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
 /// A cookie notice is never a step Octo pauses on by itself: the skill's line of the person's steps once named
 /// consent beside sign-in and one-time codes, both browser turns of a local test (Nov 9) read it, and one paused on a
 /// notice's "Accept all" while another pressed a bar's accept and stopped. A notice's accept is no longer listed, so no
-/// step reaches it, and the browser declines a notice itself where it can. The person's steps (an owner decision,
-/// Nov 15) name a cookie choice only when a notice the browser couldn't decline covers what the person asked Octo to
-/// use: it is theirs to make, and no line of the skill says accept or consent. An unedited earlier copy is upgraded.
+/// step reaches it, and the browser declines a notice itself where it can. The steps only the person may do name a
+/// cookie choice only when a notice the browser couldn't decline covers what the person asked Octo to use: it is
+/// theirs to make, and no line of the skill says accept or consent. An unedited earlier copy is upgraded.
 #[test]
 fn a_cookie_choice_is_the_persons_only_when_a_notice_covers_what_they_asked_for() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -4021,6 +4036,33 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     fs::write(&path, previous).unwrap();
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&path).unwrap(), BROWSER_SKILL);
+}
+
+/// Research that ends in a page searches before the browser only on a runtime whose setting says
+/// so: off, which it is unless set, the routing step never reads that Octo can search the web,
+/// whatever the job's grant says, so routes stay as they were on release, a person's own ChatGPT
+/// login's too, and a building turn that makes a page, which can't ask for the browser, is never
+/// sent what only the browser reaches. It turns off again at once.
+#[test]
+fn research_pages_search_first_only_where_the_runtime_setting_is_on() {
+    assert_eq!(
+        RESEARCH_PAGES_SEARCH_FIRST_ENV,
+        "INSTAFY_RESEARCH_PAGES_SEARCH_FIRST"
+    );
+    for (raw, on) in [
+        (None, false),
+        (Some(""), false),
+        (Some("0"), false),
+        (Some("false"), false),
+        (Some("off"), false),
+        (Some("no"), false),
+        (Some("1"), true),
+        (Some(" TRUE "), true),
+        (Some("on"), true),
+        (Some("yes"), true),
+    ] {
+        assert_eq!(research_pages_search_first_reads_on(raw), on, "{raw:?}");
+    }
 }
 
 /// The section says only what the routing step's own instructions don't: that the step can send

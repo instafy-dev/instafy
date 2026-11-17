@@ -1321,9 +1321,9 @@ mod tests {
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "77a6ff811540fcf33678be3098a49e5a1697da0ee866c0e5d5c93ace844befb3";
+            "80e0abc72beba6dd3ef20a921a873ef7e4020be39c3c600ad4aeed633f435ffd";
         const CASE_PROMPTS_SHA256: &str =
-            "c9b062d7434807d7d0e35ae186d9ac8bd4d52ea2c38e47888fec221ea3abcd92";
+            "4a145f8e1f712eff1941931faa717401e009f0f6c4ed8d516e377faee549bd97";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {

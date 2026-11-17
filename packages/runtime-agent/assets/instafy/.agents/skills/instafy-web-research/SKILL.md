@@ -68,8 +68,8 @@ Use the first that can answer, then the next for what is left:
 1. Pages the person gave.
 2. Sources an installed skill names for this need (a map's place search, an open API).
 3. The AI's own web search, when this run has it (above).
-4. `instafy web read` for a page whose address you have: the official page of what the request names, reviewers' homepages and links, an exact quote, or a page search couldn't read. At most 2 guessed official domains, confirmed by reading the business name; an address that does not answer: once with `www.` added or removed, as its `tell` says.
-5. Open data: `instafy web search "<words>" --chain reference-search --json` for Wikipedia and Wikivoyage articles and the official websites Wikidata records (no key needed); OpenStreetMap or a national open-data portal; `instafy web search` with the space's own key (Searching).
+4. `instafy web read` for a page whose address you have: the official page a source gives, reviewers' homepages and links, an exact quote, or a page search couldn't read. An address that does not answer: once with `www.` added or removed, as its `tell` says.
+5. Open data: `instafy web search "<words>" --chain reference-search --json` for Wikipedia and Wikivoyage articles and the official websites Wikidata records (no key needed); OpenStreetMap or a national open-data portal; `instafy web search` with the space's own key (Searching). Then at most 2 guessed official domains, confirmed by reading the business name.
 6. Instafy's browser, one card (Readers), only for what these can't reach: a site to use (a form, a journey planner), bookings and availability for dates, a sign-in and the person's own account, a page nothing else read. Name each page by what it is and say what to do there. Never put a guessed address in `request_browser`.
 7. The person's own search: they open the pages they pick and press **Send page to Octo**.
 

@@ -582,10 +582,15 @@ Two steps never ask, in Ask too:
   listed, so no step or pause reaches it. A cookie choice is the person's when
   a notice the browser couldn't decline covers what they asked Octo to use
   (the browser skill's steps only the person may do): a pause on the notice's
-  own choices (its settings, a refusal, a limited accept) is a cookie notice's
-  pause (`kind: "cookies"`, `cookie_notice_required`), "Answer the highlighted
-  cookie notice". A control a page dressed as a notice that does anything else
-  is a step of the person's, never named a cookie notice.
+  own choices is a cookie notice's pause (`kind: "cookies"`,
+  `cookie_notice_required`), "Answer the highlighted cookie notice". Its own
+  choices are what the action policy tells a notice's refusal or limited
+  accept by (`consentRejection`, `consentLimited`, a dismissal), and a control
+  whose words name the notice or its settings ("Cookie settings",
+  "Customize"). Anything else beside a notice, or in a small part of a page
+  that speaks of cookies (a booking's "Book now" over "you agree to our cookie
+  policy"), is a step of the person's, never named a cookie notice: the person
+  must never press a booking's button taking it for a notice's.
 
 The browser view's prompt asks in the chat row's words: "Octo wants to use
 example.com." with **Deny** and **Allow site** (or "Octo wants to click “Search”
@@ -1427,11 +1432,15 @@ browser has no web search, but it opens the company's own site, while a
 building turn that must make a page can't ask for the browser and, on an AI
 with no web search of its own, reads only pages whose addresses it already
 knows. When Octo can search the web for the message (the job's grant lets its
-turn use the AI's own web search), the routing step reads one line that says
-so, after the section, and such research stays with Octo, which searches
+turn use the AI's own web search) on a runtime with
+`INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on, the routing step reads one line that
+says so, after the section, and such research stays with Octo, which searches
 first, unless a site needs using first (a booking or availability for dates, a
 sign-in or the person's account, a form or a planner). Without that line, on
-every AI with no web search of its own, the routing input is as it was. A change that needs
+every AI with no web search of its own and on every runtime while the setting
+is off, which it is unless set, the routing input is as it was: a building
+turn that makes a page still can't ask for the browser for what search didn't
+reach. A change that needs
 what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,
@@ -2363,17 +2372,33 @@ button that books or buys, a cookie choice, a part of a page Octo can't reach),
 its fields and its buttons. It checks only what it highlights: each field must
 still be at its index with the same label and kind, in a form that sends to the
 same place, on the same address, and each button as a step's own control is
-checked against the reading it names. A control that shows a secret is never
-highlighted, and neither is a cookie notice's accept. The hand-off names each
-control "Highlighted field" or "Highlighted button" (nothing of the page), and
-the turn ends on a code by what it highlights: fields alone are
-`human_input_required`, a cookie notice's own choices `cookie_notice_required`,
-anything with a button or a link `human_step_required`, whose reply says "Your
-step is highlighted on the page in Instafy's browser: fill in any highlighted
-fields, press the highlighted button when you're ready, then choose Let Octo
-continue. I don't ask for those details in chat." and whose row says to press
-the highlighted button. The Personal Browser's pause still takes fields only, so
-there a button that is the person's is named in words. The controller records the editable
+checked against the reading it names. What a button does decides whether it is
+the person's to press, by the action policy's category: a sign-in's own button,
+a payment's or a booking's final button, a cookie notice's own choices and a
+control that opens a part of the page are. A control that may show or change a
+secret (it reveals or copies one, may show one, or changes a key or password)
+is never highlighted: the person would use it in this browser and the next
+reading would show Octo the value. Nor is a step the browser asks the person
+about before Octo takes it (deleting, cancelling or signing out, sharing or
+changing access, moving money or ownership, sending a message, downloading): a
+highlight says nothing of what it does, so the turn asks in words first, or
+takes it with `click`, which asks them, when their message named it. Neither
+is a cookie notice's accept. Each refusal outlines and publishes nothing, and
+the turn goes on. The first control highlighted is scrolled into view. The
+hand-off names each control "Highlighted field" or "Highlighted button"
+(nothing of the page), and the turn ends on a code by what it highlights:
+fields alone are `human_input_required`, a cookie notice's own choices
+`cookie_notice_required`, anything with a button or a link
+`human_step_required`. After that last one the person reads the turn's own
+words, which say which button or field it is, where it is on the page and what
+it does, then "When you've done it, choose Let Octo continue. I don't ask for
+those details in chat." (the first sentence left out when the words already
+say to choose Let Octo continue); a turn that wrote none reads "Your step is
+highlighted on the page in Instafy's browser: fill in any highlighted fields,
+press the highlighted button when you're ready, then choose Let Octo continue.
+I don't ask for those details in chat.", and the Browser view's row says to
+press the highlighted button. The Personal Browser's pause still takes fields
+only, so there a button that is the person's is named in words. The controller records the editable
 fields of its latest snapshot of the page the person chose that way, as
 fingerprints, in the run's approval directory (`observed-fields.json`). So a
 sign-in page that draws more buttons under its form after it loads (a passkey)

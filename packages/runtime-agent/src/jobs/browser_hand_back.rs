@@ -860,6 +860,20 @@ pub(super) fn read_lines_of(answer: &str) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
+/// What an answer says to the person: its words, without its finding lines and the missing and
+/// unread lines Octo's later turns read ([`MISSING_LINE`], [`UNREAD_LINE`]). Empty when it has
+/// none. A turn that paused on a step only the person takes says with them which step it is.
+pub(super) fn words_of(answer: &str) -> String {
+    let words = split_findings(answer).map_or_else(|| answer.to_string(), |(words, _)| words);
+    words
+        .lines()
+        .filter(|line| missing_line(line).is_none() && unread_line(line).is_none())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// The lines the wrap-up pass writes after its finding lines, as it wrote them: its first missing
 /// line ([`MISSING_LINE`]) and, `with_unread` (a turn whose findings go back to the building turn,
 /// asked for it, [`finding_lines_pass_prompt`]), its first unread line after it ([`UNREAD_LINE`]).

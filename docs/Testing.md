@@ -1770,8 +1770,11 @@ notice, and is counted among the controls left out, while its settings, a
 limited accept and a button dressed up beside it stay listed; a click under a
 notice the browser could not decline says where to go instead, never to pause
 on it; a pause on a notice's own choices is a cookie notice's pause with fixed
-labels and each choice outlined, while one on a button a page dressed up as a
-notice is a step of the person's, and in Octo's own tab nothing is outlined,
+labels and each choice outlined, while one on a refusal in words no list knows,
+or on a booking's button in small print that speaks of cookies, is a step of
+the person's, the booking's button scrolled into view from far down its page;
+a pause on an account's deletion a page dressed up as a notice is refused with
+nothing outlined or published, and in Octo's own tab nothing is outlined,
 nothing is pressed and the notice is never answered; and under a bar whose only
 button accepts, the planner's own button works with no prompt. A click whose route the page draws in place 1.5 s later reads it,
 after a hidden field, a tip on hover, a suggestion a field drops as it loses

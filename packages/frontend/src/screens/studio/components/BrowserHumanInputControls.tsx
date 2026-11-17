@@ -38,11 +38,6 @@ export function humanInputGuidance(fields: ReadonlyArray<{ label: string }>): st
   return `Fill the ${filled === 1 ? "highlighted field" : `${filled} highlighted fields`} and ${press} Keep passwords and codes out of chat.`;
 }
 
-/** Whether a pause holds a field to fill, as a sign-in does. */
-export function humanInputHasFields(fields: ReadonlyArray<{ label: string }>): boolean {
-  return fields.some((field) => !field.label.startsWith("Highlighted button"));
-}
-
 /**
  * What a pause on the person's fields in the space's browser says stays
  * behind once they sign in: Instafy's browser is the space's, so a sign-in

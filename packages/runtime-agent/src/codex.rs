@@ -4749,8 +4749,9 @@ struct RunLane {
     local_browser: bool,
     /// A Shared Browser turn that starts on a page a run of another chat left.
     page_left_by_other_chat: bool,
-    /// The run may use the AI's own web search on Instafy AI, where each search costs the person
-    /// credits ([`PAID_WEB_SEARCH_LINE`]).
+    /// The run's grant lets it use the AI's own web search on Instafy AI, where each search costs
+    /// the person credits ([`PAID_WEB_SEARCH_LINE`]). A bounded turn (a granted turn's, or a
+    /// Personal or Shared Browser turn's) still never searches, and its text never reads it.
     paid_web_search: bool,
 }
 
@@ -4773,8 +4774,8 @@ fn run_lane(
         local_browser,
         page_left_by_other_chat: shared_browser && options.shared_browser_page_left_by_other_chat,
         // As the run's search mode decides it (`codex_policy`): never in a routing step or a run
-        // that leaves search off, and only on the managed lane's grant. A browser or granted
-        // turn never searches, and its lane's text never reads it.
+        // that leaves search off, and only on the managed lane's grant. A bounded turn never
+        // searches ([`run_instructions_for_turn`]).
         paid_web_search: options.final_output_schema != CodexFinalOutputSchema::RoutingPreflight
             && !options.disable_native_web_search
             && options
@@ -4818,8 +4819,14 @@ fn run_instructions_for_turn(
             }
         })
     };
-    // A browser or granted turn never searches (`codex_policy`), so only another lane says it.
-    let lane_text = if lane.paid_web_search && !lane.granted && !lane.browser {
+    // A bounded turn never searches (`codex_policy`), as the run decides it: a granted turn, or a
+    // Personal or Shared Browser turn. Any other turn may, a browser-mode turn on a runtime that
+    // runs every turn in browser mode too, so it says it.
+    let lane_text = if lane.paid_web_search
+        && !lane.granted
+        && !lane.shared_browser
+        && !lane.personal_browser
+    {
         format!("{lane_text}\n{PAID_WEB_SEARCH_LINE}")
     } else {
         lane_text
@@ -8674,8 +8681,10 @@ mod tests {
     /// A run that may search the web on Instafy AI reads that each search costs the person
     /// credits, once, in its run's own text, which a resumed thread is given again: the research
     /// skill then searches only for what is fresh or a page no source names. A run on a person's
-    /// own login, or with no search, reads nothing of it, and neither does a browser or granted
-    /// turn, which never searches.
+    /// own login, or with no search, reads nothing of it, and neither does a bounded turn (a
+    /// Personal or Shared Browser turn, or a granted one), which never searches. A turn in browser
+    /// mode with neither browser, as on a runtime that runs every turn in browser mode, still
+    /// searches, so it reads the line.
     #[test]
     fn a_run_that_searches_on_instafy_ai_reads_that_each_search_costs_credits() {
         let policy = |lane: RunLane| run_instructions_for_turn(lane, |_| None).policy;
@@ -8690,14 +8699,27 @@ mod tests {
                 plain_text_write: true,
                 ..paid
             },
+            RunLane {
+                browser: true,
+                ..paid
+            },
         ] {
-            assert_eq!(policy(lane).matches(PAID_WEB_SEARCH_LINE).count(), 1);
+            assert_eq!(
+                policy(lane).matches(PAID_WEB_SEARCH_LINE).count(),
+                1,
+                "{lane:?}"
+            );
         }
         for lane in [
             RunLane::default(),
             RunLane {
                 browser: true,
                 shared_browser: true,
+                ..paid
+            },
+            RunLane {
+                browser: true,
+                personal_browser: true,
                 ..paid
             },
             RunLane {
