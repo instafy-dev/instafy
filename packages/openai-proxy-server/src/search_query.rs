@@ -6,7 +6,9 @@
 //! password is never sent. Characters nobody sees are taken out first, so
 //! they cannot hide a number or an address. The patterns are the CLI's and
 //! the browser redaction's (`packages/browser-action-policy/redaction.js`);
-//! change them together.
+//! change them together. runtime-agent's copy (`search_query.rs`) passes a
+//! person's own ChatGPT login's search words by them before the chat names
+//! them; both copies are held against `tests/fixtures/search_query_cases.json`.
 //!
 //! Numbers shorter than 9 digits, such as a 7-digit order number, pass, as
 //! they do in the CLI: the skills' rule that a query never holds a personal
@@ -367,6 +369,54 @@ mod tests {
                 Ok(sent.into()),
                 "{raw:?}"
             );
+        }
+    }
+
+    /// The cases runtime-agent's copy of these rules is held against too
+    /// (runtime-agent `search_query.rs`), so the words the chat names of a
+    /// person's own search are what a managed search would have sent.
+    #[test]
+    fn passes_the_cases_runtime_agents_copy_shares() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/search_query_cases.json"))
+                .expect("the shared cases parse");
+        let cases = cases["cases"].as_array().expect("a list of cases");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let query = case["query"].as_str().expect("each case names its query");
+            let expected = match case["refused"].as_str() {
+                Some(refusal) => Err(refusal.to_string()),
+                None => Ok((
+                    case["sent"].as_str().expect("a case sent").to_string(),
+                    case["removed"]
+                        .as_array()
+                        .expect("a case says what was removed")
+                        .iter()
+                        .map(|what| what.as_str().expect("removed as words").to_string())
+                        .collect::<Vec<_>>(),
+                )),
+            };
+            let prepared = prepare_query(query, &[KEY])
+                .map(|prepared| {
+                    (
+                        prepared.query,
+                        prepared
+                            .removed
+                            .iter()
+                            .map(|what| what.to_string())
+                            .collect(),
+                    )
+                })
+                .map_err(|refusal| {
+                    match refusal {
+                        QueryRefusal::Empty => "empty",
+                        QueryRefusal::TooLong => "too_long",
+                        QueryRefusal::LooksLikeSecret => "looks_like_secret",
+                        QueryRefusal::NothingLeft => "nothing_left",
+                    }
+                    .to_string()
+                });
+            assert_eq!(prepared, expected, "{query:?}");
         }
     }
 

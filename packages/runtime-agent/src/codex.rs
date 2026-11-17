@@ -6641,10 +6641,11 @@ const SEARCHED_QUERIES: &str = "searched_queries";
 /// repeat or one past its limit, an image query or any other command, none of which it runs, nor
 /// one whose search failed. A call it searched nothing for is no step. A person's own ChatGPT
 /// login searches the AI's words as they are, so without that report the step names the words of
-/// a search, and opening or finding in a page, and the tool's other commands, show no step.
-/// Nothing else of the search is kept: not what it wrote, a snippet, or the tool's name. A search
-/// whose request failed, which the run's search tool ends with no words
-/// (`managed_web_search::SEARCH_FAILED`), is one that was tried.
+/// a search as the bridge's query rules pass them ([`own_login_search_words`]), and opening or
+/// finding in a page, and the tool's other commands, show no step. Nothing else of the search is
+/// kept: not what it wrote, a snippet, or the tool's name. A search whose request failed, which
+/// the run's search tool ends with no words (`managed_web_search::SEARCH_FAILED`), is one that
+/// was tried.
 fn web_search_step(search: &codex_protocol::protocol::WebSearchEndEvent) -> JsonValue {
     let results = search.results.as_deref().unwrap_or_default();
     if results.iter().any(|result| {
@@ -6657,26 +6658,35 @@ fn web_search_step(search: &codex_protocol::protocol::WebSearchEndEvent) -> Json
     let report = results
         .iter()
         .find(|result| result.get("type").and_then(JsonValue::as_str) == Some(SEARCHED_QUERIES));
-    let searched: Vec<&str> = match (report, &search.action) {
-        (Some(report), _) => report
-            .get("queries")
-            .and_then(JsonValue::as_array)
-            .map(|queries| queries.iter().filter_map(JsonValue::as_str).collect())
-            .unwrap_or_default(),
+    let (searched, withheld): (Vec<String>, bool) = match (report, &search.action) {
+        (Some(report), _) => (
+            report
+                .get("queries")
+                .and_then(JsonValue::as_array)
+                .map(|queries| {
+                    queries
+                        .iter()
+                        .filter_map(JsonValue::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            false,
+        ),
         (
             None,
             codex_protocol::models::WebSearchAction::Search {
                 queries: Some(queries),
                 ..
             },
-        ) if !queries.is_empty() => queries.iter().map(String::as_str).collect(),
+        ) if !queries.is_empty() => own_login_search_words(queries.iter().map(String::as_str)),
         (None, codex_protocol::models::WebSearchAction::Search { query, .. }) => {
-            query.iter().map(String::as_str).collect()
+            own_login_search_words(query.iter().map(String::as_str))
         }
         (None, _) => return ended,
     };
     let mut words: Vec<String> = Vec::new();
-    for searched in searched {
+    for searched in &searched {
         let line = plain_line(searched, MAX_WEB_SEARCH_QUERY_CHARS);
         if !line.is_empty() && !words.contains(&line) && words.len() < MAX_WEB_SEARCH_QUERIES {
             words.push(line);
@@ -6687,7 +6697,7 @@ fn web_search_step(search: &codex_protocol::protocol::WebSearchEndEvent) -> Json
     }
     let mut pages: Vec<JsonValue> = Vec::new();
     for result in results {
-        if pages.len() >= MAX_WEB_SEARCH_PAGES {
+        if withheld || pages.len() >= MAX_WEB_SEARCH_PAGES {
             break;
         }
         let Some(url) = result
@@ -6721,10 +6731,36 @@ fn web_search_step(search: &codex_protocol::protocol::WebSearchEndEvent) -> Json
     })
 }
 
+/// The words of a search a person's own ChatGPT login ran, as the room may name them, and whether
+/// the rules held any of them back. The login searched the AI's words as they are, which may carry
+/// what the AI took from the conversation or the workspace, so each query passes the rules the
+/// proxy's search bridge sends a managed query by ([`crate::search_query`]) first: an e-mail
+/// address, an account number or a long number is taken out, and words that look like a key or a
+/// password, or are longer than a query may be, are not named. The pages answered the words as
+/// they were searched, and a page found by an e-mail address can name its owner, so when the rules
+/// held anything back the step lists none of the search's pages, as a managed step lists only the
+/// pages of the words it names.
+fn own_login_search_words<'a>(asked: impl Iterator<Item = &'a str>) -> (Vec<String>, bool) {
+    let mut words = Vec::new();
+    let mut withheld = false;
+    for asked in asked {
+        match crate::search_query::prepare_query(asked) {
+            Ok(prepared) => {
+                withheld |= !prepared.removed.is_empty();
+                words.push(prepared.query);
+            }
+            // Empty words searched for nothing, and hold nothing back.
+            Err(crate::search_query::QueryRefusal::Empty) => {}
+            Err(_) => withheld = true,
+        }
+    }
+    (words, withheld)
+}
+
 /// A page a search returned that the room may link to: an http(s) address of a public site, on its
 /// default port, without a user name or password, written out the way a browser would (without
 /// its `#` part). An address of a machine on a local network, or an IP address, is left out, as
-/// the proxy leaves them out of the pages a managed search cites.
+/// the proxy leaves them out of the pages a managed search cites, by the same host names.
 fn public_page_address(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() || raw.len() > MAX_WEB_SEARCH_PAGE_URL_CHARS {
@@ -6741,6 +6777,8 @@ fn public_page_address(raw: &str) -> Option<String> {
             ".internal",
             ".lan",
             ".home",
+            ".intranet",
+            ".localdomain",
             ".arpa",
         ]
         .iter()
@@ -6758,22 +6796,15 @@ fn public_page_address(raw: &str) -> Option<String> {
     (address.len() <= MAX_WEB_SEARCH_PAGE_URL_CHARS).then_some(address)
 }
 
-/// One line of text the room shows of what a search named: characters nobody sees taken out,
-/// control characters and runs of white space one space, at most `max_chars` characters.
+/// One line of text the room shows of what a search named: characters nobody sees taken out (the
+/// ones the query rules take out before they look for an address or a number, so a line never
+/// joins what they saw apart), control characters and runs of white space one space, at most
+/// `max_chars` characters.
 fn plain_line(raw: &str, max_chars: usize) -> String {
     let mut line = String::new();
     let mut gap = false;
     for character in raw.chars() {
-        if matches!(
-            character,
-            '\u{00ad}'
-                | '\u{180e}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{2069}'
-                | '\u{feff}'
-        ) {
+        if crate::search_query::invisible(character) {
             continue;
         }
         if character.is_whitespace() || character.is_control() {
@@ -12829,6 +12860,103 @@ required = true
         }
     }
 
+    /// A person's own ChatGPT login searches the AI's words as they are, and nothing on the way
+    /// says which it searched. The room's step names them only as the query rules the proxy's
+    /// search bridge sends a managed query by pass them (`search_query.rs`): not an e-mail address
+    /// or a long number, nor words that look like a key, are too long or have nothing left. The
+    /// pages answered the words as they were searched, so when the rules held anything back the
+    /// step lists none of them.
+    #[test]
+    fn an_own_login_search_step_names_only_what_the_query_rules_pass() {
+        let mut adapter = CodexEventStreamAdapter::default();
+        let pages = json!([
+            {"type": "text_result", "url": "https://people.example.org/directory/anna-berg",
+             "title": "Anna Berg | People"},
+            {"type": "text_result", "url": "https://www.example.net/dentists/stockholm",
+             "title": "Dentists in Stockholm"},
+        ]);
+        let too_long = "dentist ".repeat(26);
+        let projected = adapter.collect(&web_search_end(
+            json!({"type": "search", "queries": [
+                "dentist near anna.berg@example.com",
+                "password: hunter2",
+                "invoice 4111 1111 1111 1111 status",
+                "ana@example.com +351 912 345 678",
+                too_long,
+            ]}),
+            Some(pages.clone()),
+        ));
+        assert_eq!(
+            projected,
+            vec![json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "search-1",
+                    "type": "web_search",
+                    "query": "dentist near · invoice status",
+                    "queries": ["dentist near", "invoice status"],
+                    "pages": [],
+                    "status": "completed",
+                }
+            })]
+        );
+        let stored = projected[0].to_string();
+        for absent in [
+            "anna.berg",
+            "example.com",
+            "hunter2",
+            "4111",
+            "+351",
+            "912 345",
+            "dentist dentist",
+            "people.example.org",
+            "Anna Berg",
+            "example.net",
+        ] {
+            assert!(!stored.contains(absent), "{absent} in {stored}");
+        }
+
+        // Words the rules pass whole keep the pages that answered them, and empty words hold
+        // nothing back. A search Codex ran inside the model's request names no pages.
+        let projected = adapter.collect(&web_search_end(
+            json!({"type": "search", "queries": ["dentists stockholm", " \u{200b} "]}),
+            Some(pages.clone()),
+        ));
+        assert_eq!(
+            projected[0]["item"]["queries"],
+            json!(["dentists stockholm"])
+        );
+        assert_eq!(
+            projected[0]["item"]["pages"],
+            json!([
+                {"url": "https://people.example.org/directory/anna-berg", "title": "Anna Berg | People"},
+                {"url": "https://www.example.net/dentists/stockholm", "title": "Dentists in Stockholm"},
+            ])
+        );
+        let projected = adapter.collect(&web_search_end(
+            json!({"type": "search", "query": "dentist near anna.berg@example.com"}),
+            None,
+        ));
+        assert_eq!(projected[0]["item"]["query"], json!("dentist near"));
+        assert_eq!(projected[0]["item"]["pages"], json!([]));
+
+        // A search none of whose words the rules pass is no step, whatever it returned.
+        for asked in [
+            json!({"type": "search", "query": "ana@example.com +351 912 345 678"}),
+            json!({"type": "search", "queries": ["password: hunter2", "token=abc123"]}),
+            json!({"type": "search", "query": "7fQ2xK9pLmZ3vB8nW4rT6yH1jD5sA0cE"}),
+        ] {
+            assert_eq!(
+                adapter.collect(&web_search_end(asked.clone(), Some(pages.clone()))),
+                vec![json!({
+                    "type": "item.completed",
+                    "item": {"id": "search-1", "type": "web_search", "status": "completed"},
+                })],
+                "{asked}"
+            );
+        }
+    }
+
     /// The room links only to public web pages: an address with a user name, of a machine on a
     /// local network, an IP address, a port of its own or another scheme is left out.
     #[test]
@@ -12857,6 +12985,9 @@ required = true
             ("http://intranet/", None),
             ("http://printer.lan/", None),
             ("https://metadata.internal/", None),
+            // The proxy's local names too (search_bridge.rs `local_host_name`).
+            ("https://wiki.corp.intranet/", None),
+            ("http://nas.localdomain/", None),
             ("javascript:alert(1)", None),
             ("ftp://files.example.org/a", None),
             ("file:///etc/passwd", None),

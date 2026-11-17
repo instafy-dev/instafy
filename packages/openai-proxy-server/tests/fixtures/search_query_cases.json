@@ -1,0 +1,68 @@
+{
+  "cases": [
+    {
+      "query": "trail shoes under 120 size 44",
+      "sent": "trail shoes under 120 size 44",
+      "removed": []
+    },
+    {
+      "query": "dentist near anna.berg@example.com call +46 70 123 45 67 Stockholm 2026-11-12",
+      "sent": "dentist near call Stockholm 2026-11-12",
+      "removed": ["an e-mail address", "a long number"]
+    },
+    {
+      "query": "fees to DE89 3704 0044 0532 0130 00 abroad",
+      "sent": "fees to abroad",
+      "removed": ["an account number"]
+    },
+    {
+      "query": "contact josé@example.com hours",
+      "sent": "contact hours",
+      "removed": ["an e-mail address"]
+    },
+    {
+      "query": "return policy order 123-4567",
+      "sent": "return policy order 123-4567",
+      "removed": []
+    },
+    {
+      "query": "card 4111 1111 1111 1111 limit",
+      "sent": "card limit",
+      "removed": ["a long number"]
+    },
+    {
+      "query": "card 4111﻿1111﻿1111﻿1111 limit",
+      "sent": "card limit",
+      "removed": ["a long number"]
+    },
+    {
+      "query": "call +351​912​345​678 now",
+      "sent": "call now",
+      "removed": ["a long number"]
+    },
+    {
+      "query": "write to ana​@example.com today",
+      "sent": "write to today",
+      "removed": ["an e-mail address"]
+    },
+    {
+      "query": "iban DE89⁠3704­0044‍0532‌0130‎00 fees",
+      "sent": "iban fees",
+      "removed": ["an account number"]
+    },
+    {
+      "query": " opening\u0000hours\t\n museum ",
+      "sent": "opening hours museum",
+      "removed": []
+    },
+    { "query": " \t ", "refused": "empty" },
+    { "query": "ana@example.com +351 912 345 678", "refused": "nothing_left" },
+    { "query": "login sk-proj-abcdefghijklmnopqrstuvwx1234", "refused": "looks_like_secret" },
+    { "query": "password: hunter2 gmail", "refused": "looks_like_secret" },
+    { "query": "wifi pwd=Tr0ub4dor&3", "refused": "looks_like_secret" },
+    { "query": "7fQ2xK9pLmZ3vB8nW4rT6yH1jD5sA0cE", "refused": "looks_like_secret" },
+    { "query": "token=abc123", "refused": "looks_like_secret" },
+    { "query": "-----BEGIN RSA PRIVATE KEY----- MIIE", "refused": "looks_like_secret" },
+    { "query": "Bearer abcdefghijklmnopqrstuvwxyz012345", "refused": "looks_like_secret" }
+  ]
+}

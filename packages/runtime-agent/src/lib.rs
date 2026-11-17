@@ -39,6 +39,7 @@ pub mod provider_mcp;
 mod required_execution;
 pub mod research_budget;
 pub mod resources;
+mod search_query;
 pub mod shared_browser;
 mod shared_browser_activity;
 pub mod skill_packs;
