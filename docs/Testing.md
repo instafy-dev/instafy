@@ -569,6 +569,13 @@ real controller and tunnel broker (`pnpm test:cli:tunnel:e2e`). The CLI's browse
 the runner has one and skip otherwise. A new CLI test file is added to a step with its hash and a
 reviewed comment, and the three `build.yml` pins are taken again.
 
+Each tracked `scripts/**/*.test.mjs` file is named by a workflow, directly or by a folder glob, or is
+imported by a test file that is, or is on the short manual list in `scripts/check-script-tests-ci.test.mjs`
+with its one-line reason; that test fails when a file is in neither, or when a manual entry is gone or
+also run. A new hermetic script test joins the contracts child's "Test public migration and self-host
+contracts" step and `ADDED_BUILD_CONTRACT_TESTS` in `scripts/lib/buildContractTestsBaseline.mjs`, which
+the `build.yml` pins strip, so no pin is taken again.
+
 The Desktop test script installs the locked Electron binary once, with the
 package's own `install-electron`, before `node --test` starts. Electron 42 and
 newer download the binary on the first `require("electron")`, `node --test`
