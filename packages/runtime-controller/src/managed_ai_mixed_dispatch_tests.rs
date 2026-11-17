@@ -712,6 +712,11 @@ async fn every_instafy_ai_reply_to_one_message_is_charged() -> anyhow::Result<()
             charged,
             "the message is charged both replies' tokens"
         );
+        assert_eq!(
+            space.managed_total().await?,
+            -(SCOUT_CHARGE + MANAGED_CHARGE),
+            "the Credits log adds the message's rows up to both replies' cost"
+        );
 
         // The reserve row records the reply that settled it, and keeps that
         // reply's cost; each adjustment names its own turn and tokens.
