@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useRuntime } from "../../../runtime/useRuntime";
 import type { RunRecord } from "../../../types";
@@ -34,6 +34,7 @@ import {
 import { resolveThreadPreviewSafeInsetPx } from "./threadPreviewGeometry";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
 import { readTurnStepsRecord, summarizeTurnActivity, type TurnActivityPhase } from "./turnActivity";
+import { ChatRuntimeActivityContext } from "./chatRuntimeActivityContext";
 import { useTurnBrowserApproval } from "./turnBrowserApproval";
 import { isAutomaticRetryPending, readEarlierAttempts, readPendingRetry } from "./automaticRetryFold";
 import type { EarlierAttemptDetails } from "./AgentJobThreadPreviewLayout";
@@ -478,8 +479,9 @@ export function useAgentJobThreadPreviewState({
     [threadMessages],
   );
   // The model has started on the turn: a step, a reasoning title or a plan.
-  // Until then the line says "Starting…", and from then on "Thinking…"
-  // between steps, also before the first one.
+  // Until then the line says "Thinking…", or "Starting…" while the space's
+  // machine starts, and from then on "Thinking…" between steps, also before
+  // the first one.
   const hasModelWork = useMemo(
     () =>
       threadMessages.some((threadMessage) => {
@@ -720,6 +722,9 @@ export function useAgentJobThreadPreviewState({
   // It is worded for whoever views it, by who sent the turn, as its reply's
   // line is: it starts on its sender's computer, not a teammate's.
   const turnStarting = activityPhase === "starting" || activityPhase === "running";
+  // Whether the space's machine is still starting, as the typing row reads it
+  // (ChatPanel), so the turn's line and that row say the same word.
+  const { workspaceStarting } = useContext(ChatRuntimeActivityContext);
   const owningConversationMessages = owningConversation?.messages;
   const turnEngineOwnerOf = useRunFailureRetry()?.turnEngineOwnerOf;
   const startingLine = useMemo(() => {
@@ -751,6 +756,7 @@ export function useAgentJobThreadPreviewState({
       viewerCanAnswer: browserApproval.viewerCanAnswer,
       approvals: browserApproval.settled,
       startingLine,
+      machineStarting: workspaceStarting,
       // The browser turn's part is over and the building turn's is on its
       // way: the hand-over reads as work going on, never as a long "Thinking…".
       handingOver: handBackPending && !startsAgain,
@@ -775,6 +781,7 @@ export function useAgentJobThreadPreviewState({
     startsAgain,
     threadMessages,
     turnJobIds,
+    workspaceStarting,
   ]);
   // A browser step that ended the run on its approval lane (the person said
   // no, or left it, or the page asked for their input): the runtime answers

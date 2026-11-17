@@ -3,11 +3,12 @@ import { resolveAgentWaitingActivityCopy } from "../runtimeAlertPresentation";
 import { COMPACTION_STATUS_LABEL, resolveSingleAgentTypingStatus } from "../typingIndicatorState";
 
 const waiting = resolveAgentWaitingActivityCopy({ displayNames: ["Octo"], workspaceStarting: false, queued: false });
+const machineStarting = resolveAgentWaitingActivityCopy({ displayNames: ["Octo"], workspaceStarting: true, queued: true });
 
 describe("the typing row before a turn's first step", () => {
   // A local test: a turn's typing row read "Starting…", then "Thinking…" 3 s
   // later, before its first step; another showed "Trying again…" for 0.8 s.
-  it("says Starting… however long the turn takes to its first step, retries included", () => {
+  it("says one word however long the turn takes to its first step, retries included", () => {
     for (const state of [
       { phase: "waiting" as const, label: null },
       { phase: "thinking" as const, label: "Thinking…" },
@@ -18,9 +19,13 @@ describe("the typing row before a turn's first step", () => {
     ]) {
       for (const runStatus of ["queued", "in_progress", null] as const) {
         expect(resolveSingleAgentTypingStatus({ state, runStatus, agentName: "Octo", waiting }), JSON.stringify(state)).toEqual({
-          label: "Starting…",
-          ariaLabel: "Octo is starting",
+          label: "Thinking…",
+          ariaLabel: "Octo is thinking",
         });
+        expect(
+          resolveSingleAgentTypingStatus({ state, runStatus, agentName: "Octo", waiting: machineStarting }),
+          JSON.stringify(state),
+        ).toEqual({ label: "Starting…", ariaLabel: "Octo is starting" });
       }
     }
   });

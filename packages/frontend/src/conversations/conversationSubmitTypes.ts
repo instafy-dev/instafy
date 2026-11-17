@@ -83,4 +83,8 @@ export interface UseConversationSubmitFlowArgs {
     updater: (message: ChatMessage) => ChatMessage,
   ) => void;
   linkRunToConversation: (runId: string, conversationId: string) => void;
+  /** Marks a send on its way to the controller, so the typing row shows from the press of Send. */
+  beginConversationDispatch?: (conversationId: string, token: string) => void;
+  /** Ends that mark once the controller answered or the send failed. */
+  endConversationDispatch?: (conversationId: string, token: string) => void;
 }

@@ -48,11 +48,12 @@ export function resolveMultiAgentTypingStatus(
 
 /**
  * What the typing row says for one agent, from the send until the turn's own
- * line takes over at its first step: "Starting…" however long that takes. The
- * model reasoning or drafting, or the runtime retrying its request, is the
- * turn still starting. Only a run held for an approval (its own words) and a
- * long context rewrite say something else. `waiting` is the waiting copy
- * (`resolveAgentWaitingActivityCopy`): "Starting…", or the runtime-busy notice.
+ * line takes over at its first step: one word however long that takes,
+ * "Thinking…", or "Starting…" while the space's machine has to start first.
+ * The model reasoning or drafting, or the runtime retrying its request, is the
+ * turn still on that word. Only a run held for an approval (its own words) and
+ * a long context rewrite say something else. `waiting` is the waiting copy
+ * (`resolveAgentWaitingActivityCopy`): that word, or the runtime-busy notice.
  */
 export function resolveSingleAgentTypingStatus(input: {
   state: TypingIndicatorState | null;

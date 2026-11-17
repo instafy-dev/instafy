@@ -32,7 +32,10 @@ vi.mock("../../sdk/instafy", async () => {
   };
 });
 
-import { useConversationControllerDispatch } from "../useConversationControllerDispatch";
+import {
+  sendShowsTypingWhileDispatching,
+  useConversationControllerDispatch,
+} from "../useConversationControllerDispatch";
 
 const PROJECT_ID = "11111111-2222-4333-8444-555555555555";
 const CONTROLLER_CONVERSATION_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -341,5 +344,134 @@ describe("useConversationControllerDispatch write expectations", () => {
       "error",
       4000,
     );
+  });
+});
+
+// A send takes seconds before the controller answers with its run when the
+// space's machine has stopped (the page checks it, starts it, then sends).
+// The typing row shows from the press of Send: the send marks its chat on its
+// way, and its run carries the row from the controller's answer on.
+describe("useConversationControllerDispatch marks a send on its way", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let api: DispatchApi | null = null;
+  const order: string[] = [];
+  const appendMessagesMock = vi.fn();
+
+  function MarkingHarness({ onReady }: { onReady: (api: DispatchApi) => void }) {
+    const value = useConversationControllerDispatch({
+      conversations: [buildConversation()],
+      activeConversation: null,
+      activeProjectId: PROJECT_ID,
+      currentUserId: "user-1",
+      preferredRuntimeId: null,
+      runtimeStatuses: [],
+      effectiveRuntimeId: null,
+      effectiveRuntimeSource: "auto",
+      showStatus: showStatusMock,
+      createConversation: vi.fn(),
+      selectConversation: vi.fn(),
+      markConversationRead: vi.fn(),
+      setConversationDraft: vi.fn(),
+      setConversationControllerId: setConversationControllerIdMock,
+      appendMessages: appendMessagesMock,
+      linkRunToConversation: (runId: string, conversationId: string) => order.push(`link ${runId} ${conversationId}`),
+      beginConversationDispatch: (conversationId: string, token: string) => order.push(`begin ${conversationId} ${token}`),
+      endConversationDispatch: (conversationId: string, token: string) => order.push(`end ${conversationId} ${token}`),
+    } as unknown as Parameters<typeof useConversationControllerDispatch>[0]);
+    onReady(value);
+    return null;
+  }
+
+  beforeEach(async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    window.history.replaceState({}, "", "/");
+    order.length = 0;
+    appendMessagesMock.mockReset();
+    sendMessageMock.mockReset();
+    showStatusMock.mockReset();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<MarkingHarness onReady={(value) => (api = value)} />);
+    });
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    api = null;
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("marks the chat before the controller answers, and ends the mark after its run is linked", async () => {
+    let answer: (value: unknown) => void = () => {};
+    sendMessageMock.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    let pending: Promise<unknown> | null = null;
+    await act(async () => {
+      pending = api!.sendPromptToController("conversation-local", "how are you?", null);
+    });
+    // The controller has not answered: the chat is marked, nothing else yet.
+    expect(order).toHaveLength(1);
+    expect(order[0]).toMatch(/^begin conversation-local \S+$/);
+    const token = order[0]!.split(" ")[2];
+
+    await act(async () => {
+      answer({ runId: "run-1" });
+      await pending;
+    });
+    expect(order).toEqual([
+      `begin conversation-local ${token}`,
+      "link run-1 conversation-local",
+      `end conversation-local ${token}`,
+    ]);
+  });
+
+  it("ends the mark when the send fails or starts no run", async () => {
+    sendMessageMock.mockRejectedValueOnce(new Error("Controller unavailable. Try again shortly."));
+    await act(async () => {
+      await api!.sendPromptToController("conversation-local", "hello", null);
+    });
+    sendMessageMock.mockResolvedValueOnce({ jobId: null, status: "recorded" });
+    await act(async () => {
+      await api!.sendPromptToController("conversation-local", "hello", null);
+    });
+    expect(order.map((entry) => entry.split(" ")[0])).toEqual(["begin", "end", "begin", "end"]);
+    expect(order[0]!.split(" ")[2]).toBe(order[1]!.split(" ")[2]);
+    expect(order[2]!.split(" ")[2]).toBe(order[3]!.split(" ")[2]);
+    expect(order[0]!.split(" ")[2]).not.toBe(order[2]!.split(" ")[2]);
+    // The failure still shows in the chat as before.
+    expect(appendMessagesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never marks a send that may start no agent, and still sends it", async () => {
+    sendMessageMock.mockResolvedValue({ runId: "run-1" });
+    const controllerDecides = { groupParticipationPreflight: { status: "controller_deferred" } };
+    const skillModeAmbient = { groupParticipation: { decision: "respond", reason: "skill_mode_ambient" } };
+    await act(async () => {
+      await api!.sendPromptToController("conversation-local", "ls", null, undefined, undefined, "terminal_command");
+      await api!.sendPromptToController("conversation-local", "hi all", controllerDecides);
+      await api!.sendPromptToController("conversation-local", "hi all", skillModeAmbient);
+    });
+    expect(sendMessageMock).toHaveBeenCalledTimes(3);
+    expect(order.some((entry) => entry.startsWith("begin") || entry.startsWith("end"))).toBe(false);
+  });
+});
+
+describe("sendShowsTypingWhileDispatching", () => {
+  it("shows the typing row only for a send that starts the agent", () => {
+    expect(sendShowsTypingWhileDispatching(null)).toBe(true);
+    expect(sendShowsTypingWhileDispatching({ groupParticipationPreflight: { status: "single_human" } })).toBe(true);
+    expect(sendShowsTypingWhileDispatching({ groupParticipationPreflight: { status: "resolved" } })).toBe(true);
+    expect(sendShowsTypingWhileDispatching(null, "terminal_command")).toBe(false);
+    for (const status of ["controller_deferred", "controller_coverage"]) {
+      expect(sendShowsTypingWhileDispatching({ groupParticipationPreflight: { status } })).toBe(false);
+    }
+    expect(
+      sendShowsTypingWhileDispatching({ groupParticipation: { decision: "respond", reason: "skill_mode_ambient" } }),
+    ).toBe(false);
   });
 });

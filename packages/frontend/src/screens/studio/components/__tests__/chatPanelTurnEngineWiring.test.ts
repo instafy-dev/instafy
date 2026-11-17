@@ -187,7 +187,8 @@ describe("ChatPanel's turn-engine wiring", () => {
       "turnEngineStartingLine: typingTurnEngineStartingLine",
     );
     const startingLine = between(chatPanel, "const typingTurnEngineStartingLine = useMemo(", "const waitingActivityCopy");
-    expect(startingLine).toContain("isAssistantTyping && !hasMultipleTypingAgents");
+    // From the press of Send, as the typing row it words (chatPanelTypingRowWiring.test.ts).
+    expect(startingLine).toContain("assistantTurnPending && !hasMultipleTypingAgents");
     expect(startingLine).toMatch(
       /newestTurnEngineStartingLine\(\{\s*conversationMessages: messages,\s*run: activeConversationRun,\s*viewer: \{ currentUserId, nameOf: \(userId\) => humanLabelByUserId\.get\(userId\) \},\s*\}\)/,
     );

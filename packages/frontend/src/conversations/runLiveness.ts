@@ -10,6 +10,31 @@ export const ACTIVE_CONVERSATION_RUN_STATUSES: ReadonlySet<RunRecord["status"]> 
 export const STALE_QUEUED_RUN_TIMEOUT_MS = 5 * 60 * 1000;
 export const STALE_IN_PROGRESS_RUN_TIMEOUT_MS = 30 * 60 * 1000;
 export const STALE_AWAITING_LEASE_RUN_TIMEOUT_MS = 20_000;
+/**
+ * How long a send still on its way to the controller keeps the typing row up
+ * on its own. The send ends its mark when the controller answers or fails, so
+ * this only bounds a request that never settles.
+ */
+export const STALE_DISPATCHING_SEND_TIMEOUT_MS = 30_000;
+
+/** A send's mark (when it left for the controller) that no longer shows the typing row. */
+export function isDispatchingSendStale(
+  startedAtMs: number | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (typeof startedAtMs !== "number" || !Number.isFinite(startedAtMs) || startedAtMs <= 0) {
+    return true;
+  }
+  return nowMs > startedAtMs + STALE_DISPATCHING_SEND_TIMEOUT_MS;
+}
+
+/** Whether a chat has a send on its way to the controller that still shows the typing row. */
+export function hasDispatchingSend(
+  dispatchingSince: Readonly<Record<string, number>> | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  return Object.values(dispatchingSince ?? {}).some((startedAtMs) => !isDispatchingSendStale(startedAtMs, nowMs));
+}
 
 function parseRunTimestamp(value: string | null | undefined): number {
   const parsed = Date.parse(value ?? "");

@@ -1,11 +1,11 @@
 import { ChatRunStopNotice } from "./ChatRunStopNotice";
+import { ChatRuntimeActivityContext } from "./chatRuntimeActivityContext";
 import {
   type ClipboardEvent as ReactClipboardEvent,
   type ComponentProps,
   type MouseEvent,
   type PointerEvent,
   type ReactNode,
-  createContext,
   useCallback,
   useContext,
   useEffect,
@@ -683,18 +683,7 @@ function AgentJobThreadPreviewEntry({
   );
 }
 
-// Live runtime activity, provided by ChatPanel, so persisted runtime alerts
-// can tell when a newer workspace start supersedes them: a 45-minute-old
-// "startup failed" card above a live "Starting…" row reads as a
-// contradiction, not as history. `workspaceStartingSince` is when the live
-// start began; an alert persisted for that same start is not history yet.
-export const ChatRuntimeActivityContext = createContext<{
-  workspaceStarting: boolean;
-  workspaceStartingSince: number | null;
-}>({
-  workspaceStarting: false,
-  workspaceStartingSince: null,
-});
+export { ChatRuntimeActivityContext };
 
 function ControllerConversationNoticeEntry({
   message,

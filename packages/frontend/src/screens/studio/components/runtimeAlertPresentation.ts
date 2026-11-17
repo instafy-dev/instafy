@@ -104,6 +104,30 @@ export function isRuntimeAlertSupersededByStart(input: {
   return input.alertTimestamp < input.workspaceStartingSince - RUNTIME_ALERT_SUPERSEDE_GRACE_MS;
 }
 
+/**
+ * Whether the space's machine has to start before the chat's turn can run: a
+ * start this page asked for, a queued run while no machine is ready, or a turn
+ * on its way with no run yet while none is (its send starts one). Only then
+ * does the turn read "Starting…"; on a running machine it reads "Thinking…".
+ */
+export function resolveWorkspaceStarting(input: {
+  waitingForPreferredRuntime: boolean;
+  hostedRuntimeEnsuring: boolean;
+  runtimeReady: boolean;
+  /** The chat's active run, or null while the page has none. */
+  activeRunStatus: string | null;
+  /** A turn of the chat is on its way or running (the typing row shows). */
+  turnPending: boolean;
+}): boolean {
+  if (input.waitingForPreferredRuntime || input.hostedRuntimeEnsuring) {
+    return true;
+  }
+  if (input.runtimeReady) {
+    return false;
+  }
+  return input.activeRunStatus === "queued" || (input.turnPending && input.activeRunStatus === null);
+}
+
 export interface AgentWaitingRuntimeLimit {
   limitReached: boolean;
   blockerProjectLabel: string | null;
@@ -153,10 +177,20 @@ export function resolveAgentWaitingActivityCopy(input: {
   }
 
   // Starting the workspace, waiting behind another turn and getting ready
-  // used to be three labels inside a second: one "Starting…" says it, and a
-  // start that stalls becomes its own notice (useStalledWorkspaceStart).
+  // used to be three labels inside a second; the row holds one word from the
+  // send until the turn's first step, picked by what the turn waits on. Only
+  // a machine that has to start first reads "Starting…" (a start that stalls
+  // becomes its own notice, useStalledWorkspaceStart). On a running machine
+  // the turn is the model at work, also while it waits for its lease or
+  // behind another turn: "Thinking…", as the turn's own line reads.
+  if (input.workspaceStarting) {
+    return {
+      label: "Starting…",
+      ariaLabel: `${subject} ${multiple ? "are" : "is"} starting`,
+    };
+  }
   return {
-    label: "Starting…",
-    ariaLabel: `${subject} ${multiple ? "are" : "is"} starting`,
+    label: "Thinking…",
+    ariaLabel: `${subject} ${multiple ? "are" : "is"} thinking`,
   };
 }

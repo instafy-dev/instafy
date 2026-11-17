@@ -6,7 +6,7 @@ import { useRuntime } from "../runtime/useRuntime";
 import type { ChatMessage } from "../screens/studio/types";
 import { useAuth } from "../providers/AuthProvider";
 import { controllerClient } from "../sdk/instafy";
-import { isAwaitingLeaseRunStale, isRunActivelyProgressing } from "./runLiveness";
+import { hasDispatchingSend, isAwaitingLeaseRunStale, isRunActivelyProgressing } from "./runLiveness";
 import { useConversationHistoryState } from "./useConversationHistoryState";
 import {
   buildConversationAgentHandles,
@@ -44,6 +44,12 @@ interface UseConversationResult {
   onAddAgentHandle: (conversationId: string | null, handle: string) => void;
   onRemoveAgentHandle: (conversationId: string | null, handle: string) => void;
   isAssistantTyping: boolean;
+  /**
+   * A send of this chat that starts the agent is still on its way to the
+   * controller, before any run of it exists. The typing row shows from then;
+   * everything else that waits on a running turn still reads isAssistantTyping.
+   */
+  isAssistantDispatching: boolean;
   isWorkspaceSettingUp: boolean;
   hasMoreHistory: boolean;
   hasResolvedHistory: boolean;
@@ -91,6 +97,8 @@ export function useConversation(): UseConversationResult {
     setConversationTitle,
     setConversationGoal,
     linkRunToConversation,
+    beginConversationDispatch,
+    endConversationDispatch,
   } = useConversations();
   const { showStatus } = useStatus();
   const { activeProjectId } = useProject();
@@ -153,6 +161,8 @@ export function useConversation(): UseConversationResult {
     removeUnsentMessage,
     updateMessage,
     linkRunToConversation,
+    beginConversationDispatch,
+    endConversationDispatch,
   });
 
   useEffect(() => {
@@ -355,6 +365,11 @@ export function useConversation(): UseConversationResult {
     runs,
   ]);
 
+  const isAssistantDispatching = useMemo(
+    () => hasDispatchingSend(activeConversation?.dispatchingSince),
+    [activeConversation?.dispatchingSince],
+  );
+
   const isWorkspaceSettingUp = useMemo(() => {
     const nowMs = Date.now();
     const awaitingLeaseRunIds = activeConversation?.awaitingLeaseRunIds ?? [];
@@ -391,6 +406,7 @@ export function useConversation(): UseConversationResult {
     onAddAgentHandle,
     onRemoveAgentHandle,
     isAssistantTyping,
+    isAssistantDispatching,
     isWorkspaceSettingUp,
     hasMoreHistory,
     hasResolvedHistory,

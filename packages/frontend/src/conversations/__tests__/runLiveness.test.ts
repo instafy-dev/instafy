@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../types";
 import {
   STALE_AWAITING_LEASE_RUN_TIMEOUT_MS,
+  STALE_DISPATCHING_SEND_TIMEOUT_MS,
   STALE_IN_PROGRESS_RUN_TIMEOUT_MS,
   STALE_QUEUED_RUN_TIMEOUT_MS,
+  hasDispatchingSend,
   isAwaitingLeaseRunStale,
+  isDispatchingSendStale,
   isInProgressRunStale,
   isQueuedRunStale,
   isRunActivelyProgressing,
@@ -156,5 +159,30 @@ describe("runLiveness", () => {
     );
     expect(isAwaitingLeaseRunStale(submittedAt, nowMs)).toBe(true);
     expect(isAwaitingLeaseRunStale(nowMs - 5_000, nowMs)).toBe(false);
+  });
+});
+
+// A send on its way to the controller shows the typing row from the press of
+// Send. The send ends its own mark when the controller answers or it fails;
+// the timeout only bounds a request that never settles.
+describe("a send on its way to the controller", () => {
+  const nowMs = 1_800_000_000_000;
+
+  it("shows the typing row until the controller answers, at most for its timeout", () => {
+    expect(isDispatchingSendStale(nowMs - 2_000, nowMs)).toBe(false);
+    expect(isDispatchingSendStale(nowMs - STALE_DISPATCHING_SEND_TIMEOUT_MS, nowMs)).toBe(false);
+    expect(isDispatchingSendStale(nowMs - STALE_DISPATCHING_SEND_TIMEOUT_MS - 1, nowMs)).toBe(true);
+    // A mark without a usable time never holds the row up.
+    for (const startedAt of [null, undefined, 0, -1, Number.NaN]) {
+      expect(isDispatchingSendStale(startedAt, nowMs)).toBe(true);
+    }
+  });
+
+  it("counts a chat as sending while any of its sends is still on its way", () => {
+    expect(hasDispatchingSend(undefined, nowMs)).toBe(false);
+    expect(hasDispatchingSend({}, nowMs)).toBe(false);
+    expect(hasDispatchingSend({ a: nowMs - 1_000 }, nowMs)).toBe(true);
+    expect(hasDispatchingSend({ a: nowMs - STALE_DISPATCHING_SEND_TIMEOUT_MS - 1 }, nowMs)).toBe(false);
+    expect(hasDispatchingSend({ a: nowMs - STALE_DISPATCHING_SEND_TIMEOUT_MS - 1, b: nowMs - 500 }, nowMs)).toBe(true);
   });
 });

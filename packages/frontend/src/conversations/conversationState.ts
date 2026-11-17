@@ -66,6 +66,14 @@ export interface ConversationState {
   pendingRunIds: string[];
   awaitingLeaseRunIds: string[];
   pendingRunSubmittedAt: Record<string, number>;
+  /**
+   * This page's sends of the chat still on their way to the controller, by a
+   * token of each send, with when it left. The typing row shows from the press
+   * of Send instead of from the controller's answer, which can take seconds
+   * (a stopped machine's start, then the send). Its run carries the row from
+   * that answer on; a send that started none simply ends its mark.
+   */
+  dispatchingSince?: Record<string, number>;
   runtimePreference: ConversationRuntimePreference | null;
 }
 
@@ -147,6 +155,8 @@ export type ConversationsAction =
   | { type: "LINK_RUN"; runId: string; conversationId: string }
   | { type: "UNLINK_RUN"; runId: string }
   | { type: "LEASE_CONFIRMED"; conversationId: string; runId: string }
+  | { type: "BEGIN_DISPATCH"; conversationId: string; token: string; at: number }
+  | { type: "END_DISPATCH"; conversationId: string; token: string }
   | {
       type: "APPLY_REMOTE_MESSAGE";
       conversationId: string;
@@ -934,6 +944,39 @@ export function conversationsReducer(
           };
         }),
       };
+    }
+    case "BEGIN_DISPATCH": {
+      if (!state.conversations.some((conversation) => conversation.localId === action.conversationId)) {
+        return state;
+      }
+      return {
+        ...state,
+        conversations: state.conversations.map((conversation) =>
+          conversation.localId === action.conversationId
+            ? {
+                ...conversation,
+                dispatchingSince: { ...(conversation.dispatchingSince ?? {}), [action.token]: action.at },
+              }
+            : conversation,
+        ),
+      };
+    }
+    case "END_DISPATCH": {
+      let changed = false;
+      const conversations = state.conversations.map((conversation) => {
+        if (
+          conversation.localId !== action.conversationId ||
+          !conversation.dispatchingSince ||
+          !(action.token in conversation.dispatchingSince)
+        ) {
+          return conversation;
+        }
+        changed = true;
+        const dispatchingSince = { ...conversation.dispatchingSince };
+        delete dispatchingSince[action.token];
+        return { ...conversation, dispatchingSince };
+      });
+      return changed ? { ...state, conversations } : state;
     }
     case "APPLY_REMOTE_MESSAGE": {
       return {

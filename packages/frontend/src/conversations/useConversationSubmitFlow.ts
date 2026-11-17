@@ -159,6 +159,8 @@ export function useConversationSubmitFlow({
   removeUnsentMessage,
   updateMessage,
   linkRunToConversation,
+  beginConversationDispatch,
+  endConversationDispatch,
 }: UseConversationSubmitFlowArgs) {
   const chatClientSessionId = useMemo(() => getChatClientSessionId(), []);
   const stickyMentionedAgentByConversationRef = useRef<Map<string, string>>(new Map());
@@ -191,6 +193,8 @@ export function useConversationSubmitFlow({
     setConversationControllerId,
     appendMessages,
     linkRunToConversation,
+    beginConversationDispatch,
+    endConversationDispatch,
   });
 
   const { maybeAutoTitleConversation, queueAutoTitleConversation } =
