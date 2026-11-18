@@ -457,9 +457,10 @@ mod tests {
 
     /// A stop only the browser can say is read from its own words for a step, never from what
     /// a page says: a step that didn't answer in time, a site that didn't, a step whose time ran
-    /// out and a link the page didn't take in time are `timed-out`; a click a notice or anything
+    /// out and a page still too busy to be read are `timed-out`; a click a notice or anything
     /// else covered, and a pause on a notice for the person, are `covered`; a page that reads as
-    /// before, one still busy, one with no page and a page's own text are neither.
+    /// before, a link whose address opened in the tab when the page did not take its click, one
+    /// with no page, a page's own text and the labels a step's answer quotes from it are neither.
     #[test]
     fn a_step_is_told_a_stop_only_by_the_browsers_own_words() {
         let failed = |reason: &str| json!({ "error": { "reason": reason } });
@@ -528,7 +529,13 @@ mod tests {
                 true,
                 json!({ "done": "\"Opening hours\" did not take the click in time, so its address was opened in this tab instead." }),
                 None,
-                Some("timed-out"),
+                None,
+            ),
+            (
+                true,
+                json!({ "done": "Typed 7 characters into \"From\". A page's reading never shows typed text. 1 suggestion under \"From\": \"Something else on the page did not answer in time\" (index 3). Click one. Nothing was sent yet." }),
+                None,
+                None,
             ),
             (
                 false,
@@ -576,7 +583,13 @@ mod tests {
                 true,
                 json!({ "message": "The page is still busy, so it could not be read yet. Take a snapshot in a moment." }),
                 None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed("The page could not be read in time, so nothing was read. Take a snapshot."),
                 None,
+                Some("timed-out"),
             ),
             (
                 true,

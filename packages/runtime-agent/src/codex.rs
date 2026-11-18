@@ -13538,6 +13538,46 @@ required = true
             json!({"error": {"reason": "Instafy's browser could not be reached."}, "browserUnavailable": true}),
         ));
         assert_eq!(unanswered.browser_tried().stops_given("timed-out"), None);
+        // A page the browser said was still too busy to be read didn't answer in time there; a
+        // link whose address opened in the tab when the page did not take its click stopped
+        // nothing.
+        let drawn = "https://drawn.example/";
+        let mut busy = CodexEventStreamAdapter::default();
+        busy.collect(&event(
+            shared,
+            "navigate",
+            json!({"url": drawn}),
+            false,
+            json!({"url": drawn, "activity": {"step": "navigate", "url": drawn}, "message": "The page is still busy, so it could not be read yet. Take a snapshot in a moment."}),
+        ));
+        assert_eq!(
+            busy.browser_tried().stops_given("timed-out"),
+            Some(vec![drawn])
+        );
+        let mut opened_instead = CodexEventStreamAdapter::default();
+        opened_instead.collect(&event(
+            shared,
+            "navigate",
+            json!({"url": listing}),
+            false,
+            json!({
+                "snapshotId": "reading-1",
+                "url": listing,
+                "activity": {"step": "navigate", "url": listing},
+                "interactiveElements": [{"index": 0, "label": "Opening hours", "href": hours}],
+            }),
+        ));
+        opened_instead.collect(&event(
+            shared,
+            "click",
+            json!({"index": 0, "snapshotId": "reading-1"}),
+            false,
+            json!({"url": hours, "activity": {"step": "navigate", "url": hours}, "done": "\"Opening hours\" did not take the click in time, so its address was opened in this tab instead."}),
+        ));
+        assert_eq!(
+            opened_instead.browser_tried().stops_given("timed-out"),
+            Some(Vec::new())
+        );
     }
 
     /// The addresses the browser refused to open because no message or page gave them, kept

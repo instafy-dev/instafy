@@ -3839,6 +3839,21 @@ mod tests {
         let mut summary = answer.clone();
         leave_out_addresses_never_opened(&mut summary, &[], &opened, &merged);
         assert_eq!(summary, answer);
+        // A page that stayed too busy to be read was told so in the browser's own words: its
+        // line stays, so the person hears why that page is missing.
+        let busy = json!({
+            "url": planner,
+            "message": "The page is still busy, so it could not be read yet. Take a snapshot in a moment.",
+        });
+        let mut told_busy = told_nothing.clone();
+        told_busy.keep_step(
+            crate::shared_browser_activity::step_stop(true, Some(&busy), None),
+            vec![planner.to_string()],
+        );
+        let mut summary = answer.clone();
+        leave_out_addresses_never_opened(&mut summary, &[], &opened, &told_busy);
+        assert!(summary.contains(&line(planner, "timed-out")), "{summary}");
+        assert!(!summary.contains(&line(hotels, "Covered")), "{summary}");
     }
 
     /// A finding that stops a page at an address none of the turn's steps tried is no finding:
