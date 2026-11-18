@@ -4814,6 +4814,31 @@ fn participation_decline_sentinel(content: &str) -> bool {
     trimmed.trim_matches('`').trim() == "NO_RESPONSE"
 }
 
+/// Whether the controller lets this turn end on the bare decline word: a turn it dispatched for
+/// Octo to decide whether to answer at all (an ambient group turn, an automation with nothing to
+/// report), or one it already marked declined. The controller swallows the word on exactly these
+/// (`job_payload_marks_agent_evaluation` or `job_payload_marks_agent_declined`).
+fn controller_lets_the_turn_decline(job: &LeaseJob) -> bool {
+    let participation = &job.payload["metadata"]["groupParticipation"];
+    let decision = participation["decision"].as_str();
+    participation["enforcedBy"].as_str() == Some("runtime-controller")
+        && (decision == Some("agent_evaluation")
+            || (decision == Some("silent")
+                && participation["reason"].as_str() == Some("agent_declined")))
+}
+
+/// An answer that is only the decline word, on a turn the controller does not let decline. Such a
+/// turn addresses Octo, and the controller posts the word as its reply (a direct answer is never
+/// silently eaten), so the turn runs once more and is told to answer. Nov 18: "hello" in a
+/// one-on-one chat got "NO_RESPONSE".
+fn declined_a_turn_that_needs_an_answer(
+    job: &LeaseJob,
+    summary: &str,
+) -> Option<CodexFallbackSummaryKind> {
+    (participation_decline_sentinel(summary) && !controller_lets_the_turn_decline(job))
+        .then_some(CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer)
+}
+
 fn clean_decline_final_json(value: &JsonValue) -> bool {
     let Some(object) = value.as_object() else {
         return false;
@@ -9109,7 +9134,8 @@ impl JobProcessor {
             );
         }
         let mut codex_fallback_summary_kind =
-            classify_internal_codex_fallback_summary(&outcome.summary);
+            classify_internal_codex_fallback_summary(&outcome.summary)
+                .or_else(|| declined_a_turn_that_needs_an_answer(job, &outcome.summary));
         if first_shared_browser_terminal_consent_failure.is_some() {
             // The lines it keeps name no address the browser refused it and no step opened,
             // and none its steps never tried.
@@ -9558,7 +9584,8 @@ impl JobProcessor {
                             )
                         }
                     }
-                    CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => {
+                    CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
+                    | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
                         codex_fallback_retry_prompt(&prompt, kind)
                     }
                 }
@@ -9806,7 +9833,8 @@ impl JobProcessor {
             log_browser_requests_dropped_as_read(job, &retry_output.final_json);
             suppress_browser_requests_where_unsupported(job, &mut retry_outcome);
             let mut retry_codex_fallback_summary_kind =
-                classify_internal_codex_fallback_summary(&retry_outcome.summary);
+                classify_internal_codex_fallback_summary(&retry_outcome.summary)
+                    .or_else(|| declined_a_turn_that_needs_an_answer(job, &retry_outcome.summary));
             augment_summary_for_onboarding_actions(
                 &mut retry_outcome.summary,
                 &retry_outcome.actions,
@@ -15392,6 +15420,9 @@ fn codex_fallback_retry_reason(kind: CodexFallbackSummaryKind) -> &'static str {
         CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => {
             "invalid_final_assistant_message_json"
         }
+        CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+            "declined_a_turn_that_needs_an_answer"
+        }
     }
 }
 
@@ -15402,6 +15433,10 @@ fn codex_fallback_retry_message(kind: CodexFallbackSummaryKind) -> &'static str 
         }
         CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => {
             "Retrying: Codex completed without returning a valid final assistant JSON message."
+        }
+        // A row of the turn: the decline word is not in it.
+        CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+            "Retrying: Codex declined a turn that needs an answer."
         }
     }
 }
@@ -15414,12 +15449,16 @@ fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> 
         CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => {
             "Your previous response completed, but the final assistant message was not valid JSON."
         }
+        CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+            "Your previous answer was only `NO_RESPONSE`. That word declines an ambient group turn that Instafy marks for a participation decision, and this turn is not one: the person is talking to you, so answer them. Do not answer `NO_RESPONSE`."
+        }
     };
     let observation_requirement = match kind {
         CodexFallbackSummaryKind::MissingFinalAssistantMessage => {
             "\n        - If the latest request depends on workspace, project, repository, or runtime facts and the user did not forbid tool use, make at least one concrete observation with an available tool/command before the final response."
         }
-        CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => "",
+        CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
+        | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => "",
     };
     format!(
         "{prompt}\n\nIMPORTANT RETRY REQUIREMENT:\n\
@@ -15968,6 +16007,11 @@ fn codex_fallback_failure_message(kind: CodexFallbackSummaryKind, summary: &str)
             format!(
                 "Codex returned assistant text instead of the required final JSON after retry. Last assistant output: \"{preview}\""
             )
+        }
+        // Never the word itself as the turn's reply: on this turn the controller would post it.
+        CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+            "Codex declined to answer (NO_RESPONSE) again after retry, on a turn that needs an answer."
+                .to_string()
         }
     }
 }
@@ -28467,6 +28511,96 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    /// Nov 18: "hello" in a one-on-one chat got the reply "NO_RESPONSE". Only a turn the controller
+    /// lets decline may end on the word; on any other, the answer is no answer, the turn runs once
+    /// more told to answer, and a second decline fails it instead of becoming the reply.
+    #[test]
+    fn only_a_turn_the_controller_lets_decline_may_answer_with_the_decline_word() {
+        let participation = |marker: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({"metadata": {"groupParticipation": marker}}),
+            )
+        };
+        let one_on_one = participation(json!({
+            "decision":"respond", "reason":"single_human_conversation", "domain":"direct",
+            "participantCount":1, "confidence":100, "enforcedBy":"runtime-controller"
+        }));
+        // A marker the controller did not stamp lets no turn decline, as the controller reads it.
+        let unstamped = participation(json!({
+            "decision":"agent_evaluation", "reason":"skill_mode_ambient"
+        }));
+        let automation = participation(json!({
+            "decision":"agent_evaluation", "reason":"automation_nothing_to_report",
+            "enforcedBy":"runtime-controller"
+        }));
+        let declined = participation(json!({
+            "decision":"silent", "reason":"agent_declined", "enforcedBy":"runtime-controller"
+        }));
+        let needs_an_answer = [
+            one_on_one.clone(),
+            unstamped,
+            test_lease_job(Some("feature"), json!({})),
+        ];
+        let may_decline = [ambient_participation_test_job(), automation, declined];
+        for word in [
+            "NO_RESPONSE",
+            " `NO_RESPONSE` ",
+            "```text\nNO_RESPONSE\n```",
+        ] {
+            for job in &needs_an_answer {
+                assert_eq!(
+                    declined_a_turn_that_needs_an_answer(job, word),
+                    Some(CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer),
+                    "{word:?} {}",
+                    job.payload
+                );
+            }
+            for job in &may_decline {
+                assert_eq!(
+                    declined_a_turn_that_needs_an_answer(job, word),
+                    None,
+                    "{word:?} {}",
+                    job.payload
+                );
+            }
+        }
+        // Words around the token, or another casing, are an answer, as the controller reads them.
+        for answer in [
+            "Hi! What can I help you with?",
+            "I will not answer: NO_RESPONSE",
+            "no_response",
+        ] {
+            assert_eq!(
+                declined_a_turn_that_needs_an_answer(&one_on_one, answer),
+                None
+            );
+        }
+
+        let kind = CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer;
+        assert_eq!(
+            codex_fallback_retry_reason(kind),
+            "declined_a_turn_that_needs_an_answer"
+        );
+        assert!(!codex_fallback_retry_message(kind).contains("NO_RESPONSE"));
+        let retry = codex_fallback_retry_prompt("hello", kind);
+        assert!(
+            retry.starts_with("hello\n\nIMPORTANT RETRY REQUIREMENT:\n"),
+            "{retry}"
+        );
+        assert!(retry.contains("Do not answer `NO_RESPONSE`."), "{retry}");
+        let failure = codex_retry_blocking_failure_message(
+            Some(kind),
+            "NO_RESPONSE",
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("a second decline fails the turn");
+        assert!(failure.contains("again after retry"), "{failure}");
     }
 
     #[test]
