@@ -1340,14 +1340,6 @@ pub(crate) async fn credit_event(
     Ok((StatusCode::OK, headers, buf))
 }
 
-pub(crate) fn extract_credit_snapshot(metadata: &Option<JsonValue>) -> Option<JsonValue> {
-    metadata
-        .as_ref()
-        .and_then(JsonValue::as_object)
-        .and_then(|map| map.get("creditSnapshot"))
-        .cloned()
-}
-
 pub(crate) fn extract_provider_from_metadata(metadata: &Option<JsonValue>) -> Option<String> {
     metadata
         .as_ref()

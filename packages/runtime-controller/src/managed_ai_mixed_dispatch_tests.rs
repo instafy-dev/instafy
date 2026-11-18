@@ -20,7 +20,7 @@ const HELPER: &str = "helper";
 
 /// What dispatch stamps for a managed target's reserve and a dispatch with no
 /// managed target never sets.
-const MANAGED_RESERVE_KEYS: [&str; 9] = [
+const MANAGED_RESERVE_KEYS: [&str; 8] = [
     "managedAiLabel",
     "managedAiProvider",
     "managedAiModelLabel",
@@ -28,7 +28,6 @@ const MANAGED_RESERVE_KEYS: [&str; 9] = [
     "managedAiDailyPromptLimit",
     "managedAiDailyPromptsUsedBeforeBurn",
     "managedAiBillingDeferred",
-    "creditSnapshot",
     "managedAiCredit",
 ];
 

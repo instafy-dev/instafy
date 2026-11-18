@@ -30,7 +30,7 @@ use crate::conversations::{
     publish_conversation_message_event, ConversationMessageRow,
 };
 use crate::credits::{
-    extract_credit_snapshot, extract_provider_conversation_state, extract_provider_from_metadata,
+    extract_provider_conversation_state, extract_provider_from_metadata,
     reconcile_managed_ai_usage_charge, ManagedAiRefundOutcome, ManagedAiTokenUsage,
 };
 use crate::dispatch::DispatchPromptNormalized;
@@ -3752,7 +3752,6 @@ pub(crate) async fn agent_complete(
         lane,
         extract_provider_from_metadata(&proxy_metadata),
     );
-    let credit_snapshot_value = extract_credit_snapshot(&proxy_metadata);
     let suggested_replies = extract_ui_suggested_replies(&proxy_metadata);
     // What Instafy AI's web searches in the turn cost (`ai/web-search-usage`). They ran, and
     // OpenAI billed them, whether or not the turn then finished: they are charged unless the turn
@@ -3783,7 +3782,6 @@ pub(crate) async fn agent_complete(
             &job_uuid,
             provider_value.as_deref(),
             conversation_state.as_ref(),
-            credit_snapshot_value.as_ref(),
             summary_ref,
             error_ref,
             artifacts_count,
@@ -3965,7 +3963,6 @@ pub(crate) async fn agent_complete(
                             provider_value.as_deref(),
                             artifacts_count,
                             &artifacts_value,
-                            credit_snapshot_value.as_ref(),
                             error_message.as_deref(),
                             &job_uuid,
                             &suggested_replies,
@@ -4090,7 +4087,6 @@ pub(crate) async fn agent_complete(
                 "errorMessage": error_message,
                 "artifactsCount": artifacts_count,
                 "provider": provider_value,
-                "creditSnapshot": credit_snapshot_value,
                 "leaseMetrics": &lease_metrics,
                 "multiAgentPlan": extract_multi_agent_plan_from_job_payload(&job_payload),
                 "run": run_payload,
@@ -6307,7 +6303,6 @@ pub(crate) async fn persist_run_completion_metadata(
     job_id: &Uuid,
     provider: Option<&str>,
     conversation_state: Option<&JsonValue>,
-    credit_snapshot: Option<&JsonValue>,
     summary: Option<&str>,
     error_message: Option<&str>,
     artifacts_count: Option<usize>,
@@ -6341,7 +6336,6 @@ pub(crate) async fn persist_run_completion_metadata(
         existing_metadata.as_ref(),
         provider,
         conversation_state,
-        credit_snapshot,
         summary,
         error_message,
         artifacts_count,
@@ -6361,7 +6355,6 @@ fn merge_run_completion_metadata(
     existing: Option<&JsonValue>,
     provider: Option<&str>,
     conversation_state: Option<&JsonValue>,
-    credit_snapshot: Option<&JsonValue>,
     summary: Option<&str>,
     error_message: Option<&str>,
     artifacts_count: Option<usize>,
@@ -6391,9 +6384,6 @@ fn merge_run_completion_metadata(
         root.insert("provider".to_string(), JsonValue::Object(provider_map));
     }
 
-    if let Some(snapshot) = credit_snapshot {
-        root.insert("creditSnapshot".to_string(), snapshot.clone());
-    }
     if let Some(value) = summary {
         root.insert("summary".to_string(), JsonValue::String(value.to_string()));
     }
@@ -6903,7 +6893,6 @@ fn build_agent_message_metadata(
     provider: Option<&str>,
     artifacts_count: Option<usize>,
     artifacts: &JsonValue,
-    credit_snapshot: Option<&JsonValue>,
     error_message: Option<&str>,
     job_id: &Uuid,
     suggested_replies: &[String],
@@ -6935,9 +6924,6 @@ fn build_agent_message_metadata(
             "artifacts".to_string(),
             cap_artifacts_payload(artifacts).into_owned(),
         );
-    }
-    if let Some(snapshot) = credit_snapshot {
-        map.insert("creditSnapshot".to_string(), snapshot.clone());
     }
     if let Some(message) = error_message {
         map.insert(
@@ -8236,7 +8222,6 @@ mod tests {
             Some("codex-embedded"),
             None,
             &JsonValue::Null,
-            None,
             Some("exceeded retry limit, last status: 429 Too Many Requests"),
             &job_id,
             &[],
@@ -8277,7 +8262,6 @@ mod tests {
                 Some("codex-embedded"),
                 None,
                 &JsonValue::Null,
-                None,
                 Some(error),
                 &job_id,
                 &[],
@@ -8384,7 +8368,6 @@ mod tests {
             None,
             &JsonValue::Null,
             None,
-            None,
             &job_id,
             &[],
         );
@@ -8429,7 +8412,6 @@ mod tests {
             Some("codex-embedded"),
             None,
             &JsonValue::Null,
-            None,
             Some(rate_limited),
             &job_id,
             &[],
@@ -8551,7 +8533,6 @@ mod tests {
             Some(0),
             &JsonValue::Null,
             None,
-            None,
             &job_id,
             &replies,
         );
@@ -8569,7 +8550,6 @@ mod tests {
             Some("codex-embedded"),
             None,
             &JsonValue::Null,
-            None,
             Some("Backend said no"),
             &job_id,
             &[],
@@ -8668,7 +8648,6 @@ mod tests {
                 None,
                 None,
                 &json!([]),
-                None,
                 None,
                 &job_id,
                 &[],
@@ -9445,9 +9424,6 @@ mod tests {
             })),
             Some("openai"),
             None,
-            Some(&json!({
-                "remainingCredits": 42
-            })),
             Some("Done"),
             None,
             Some(3),
@@ -9459,7 +9435,6 @@ mod tests {
             merged["provider"]["conversation"]["responseId"],
             json!("resp_123")
         );
-        assert_eq!(merged["creditSnapshot"]["remainingCredits"], json!(42));
         assert_eq!(merged["summary"], json!("Done"));
         assert_eq!(merged["artifactsCount"], json!(3));
         assert_eq!(merged["custom"], json!(true));
@@ -9475,7 +9450,6 @@ mod tests {
             Some(&json!({
                 "responseId": "resp_new"
             })),
-            None,
             None,
             Some("Backend said no"),
             None,
@@ -9507,7 +9481,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 summary,
                 error,
                 Some(2),
@@ -9519,7 +9492,6 @@ mod tests {
                 Some(&merged),
                 None,
                 None,
-                None,
                 summary,
                 error,
                 Some(2),
@@ -9528,7 +9500,6 @@ mod tests {
             assert_eq!(replay, merged);
         }
         let legacy = merge_run_completion_metadata(
-            None,
             None,
             None,
             None,

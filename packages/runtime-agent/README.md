@@ -24,7 +24,7 @@ Rust binary that runs inside the hosted runtime container. Responsibilities:
 
 - The agent now embeds `codex-core` + `codex-exec` directly. We run conversations in-process, collect streaming events via the JSONL event processor, and surface the final assistant JSON without spawning the CLI.
 - Plan / approval flows are unimplemented placeholders and will be wired once Codex events feed into progress reporting.
-- Credits are handled by the controller; the runtime will forward proxy metadata when those APIs land.
+- Credits are handled by the controller.
 
 Ordinary jobs may use native Codex helpers within the parent job. The collaboration skill
 chooses between direct work, available helpers and durable Instafy workers. Native helpers

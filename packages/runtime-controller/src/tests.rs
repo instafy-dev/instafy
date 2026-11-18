@@ -28477,8 +28477,8 @@ async fn runtime_safe_stop_skips_when_locked_identity_no_longer_matches() -> any
 }
 
 #[tokio::test]
-async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -> anyhow::Result<()>
-{
+async fn persist_run_completion_metadata_merges_provider_summary_and_task_usage(
+) -> anyhow::Result<()> {
     let Some((mut client, connection_handle)) = connect_test_db().await? else {
         eprintln!("skipping run completion metadata test: TEST_DATABASE_URL not set");
         return Ok(());
@@ -28535,9 +28535,6 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
         &job_id,
         Some("openai"),
         None,
-        Some(&json!({
-            "remainingCredits": 17
-        })),
         Some("Final summary"),
         None,
         Some(2),
@@ -28557,7 +28554,6 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
         metadata["provider"]["conversation"]["responseId"],
         json!("resp_existing")
     );
-    assert_eq!(metadata["creditSnapshot"]["remainingCredits"], json!(17));
     assert_eq!(metadata["summary"], json!("Final summary"));
     assert_eq!(metadata["artifactsCount"], json!(2));
     assert_eq!(metadata["custom"], json!(true));
@@ -28569,7 +28565,6 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
         &transaction,
         &run_id,
         &job_id,
-        None,
         None,
         None,
         None,
@@ -28712,7 +28707,6 @@ async fn load_previous_provider_conversation_state_restores_codex_completion() -
         None,
         None,
         None,
-        None,
     )
     .await?;
     transaction.commit().await?;
@@ -28752,7 +28746,6 @@ async fn load_previous_provider_conversation_state_restores_codex_completion() -
         &run_id,
         &job_id,
         Some("codex-embedded"),
-        None,
         None,
         None,
         None,
@@ -33064,7 +33057,6 @@ async fn persist_canceled_run_metadata_merges_summary_and_cancellation_details(
     assert!(metadata["cancellation"]["errorMessage"].is_null());
     assert!(metadata["cancellation"]["artifactsCount"].is_null());
     assert!(metadata["cancellation"]["provider"].is_null());
-    assert!(metadata["cancellation"]["creditSnapshot"].is_null());
 
     connection_handle.abort();
     Ok(())

@@ -15,9 +15,7 @@ use uuid::Uuid;
 
 use crate::auth::{authenticate_request, RequestContext};
 use crate::conversations::{ensure_conversation_access, load_conversation_record};
-use crate::credits::{
-    extract_credit_snapshot, extract_provider_conversation_state, extract_provider_from_metadata,
-};
+use crate::credits::{extract_provider_conversation_state, extract_provider_from_metadata};
 use crate::typed_sql::typed;
 use crate::{
     bad_request, ensure_project_access, internal_error, load_project_record, not_found,
@@ -454,7 +452,6 @@ pub(crate) async fn rebuild_run_result_from_db(
     let proxy_metadata = proxy_metadata_json.map(|json| json.0);
     let provider_value = extract_provider_from_metadata(&proxy_metadata);
     let conversation_state = extract_provider_conversation_state(&proxy_metadata);
-    let credit_snapshot_value = extract_credit_snapshot(&proxy_metadata);
 
     let project_id = snapshot.project_id.unwrap_or(job_project_id);
     let resolved_conversation = conversation_id.or(snapshot.conversation_id);
@@ -483,7 +480,6 @@ pub(crate) async fn rebuild_run_result_from_db(
         provider_value.as_deref(),
         conversation_state.as_ref(),
         &artifacts_value,
-        credit_snapshot_value.as_ref(),
     );
 
     Ok(Some(payload))
