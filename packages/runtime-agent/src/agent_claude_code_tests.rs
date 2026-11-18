@@ -832,6 +832,27 @@ fn a_lane_turn_runs_on_the_persons_claude_code_and_saves_through_the_lane_filter
                         .is_some_and(|text| text.contains("Other page"))),
             "{steps:#?}"
         );
+        // Its edit counts for nothing on the chat's line, which counts a step by its newest
+        // message: after the step that streamed as done, one more for it says it was declined.
+        // The edit of the turn's own file keeps its own message.
+        let page_edit: Vec<&Value> = steps
+            .iter()
+            .filter(|step| {
+                step["message_type"] == "file_change" && step["metadata"]["itemId"] == "toolu_page"
+            })
+            .collect();
+        assert!(page_edit.len() >= 2, "{steps:#?}");
+        assert_eq!(page_edit[0]["metadata"]["status"], "completed");
+        let put_back = page_edit.last().unwrap();
+        assert_eq!(put_back["metadata"]["status"], "declined", "{put_back:#}");
+        assert_eq!(put_back["metadata"]["paths"], json!([HELD_PAGE]));
+        assert_eq!(put_back["metadata"]["eventType"], "item.completed");
+        assert!(
+            !steps.iter().any(|step| step["message_type"] == "file_change"
+                && step["metadata"]["status"] == "declined"
+                && step["metadata"]["itemId"] != "toolu_page"),
+            "{steps:#?}"
+        );
 
         // The turn's steps were streamed as it ran, with paths relative to the folder.
         assert!(

@@ -1763,7 +1763,7 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
         let routing = input_text(first_sampling_request(turn));
         for (line, what) in [
             (
-                "unless it carries on this chat's browser work",
+                "unless the message names the browser, it carries on this chat's browser work",
                 "a message carrying on the chat's browser work goes to the browser",
             ),
             (
@@ -1779,7 +1779,7 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "research ending in a page goes to the browser from the first message",
             ),
             (
-                "and research that ends in a page when it searches first, unless a site must be used first",
+                "or that ends in a page when it searches first, stays `direct`",
                 "research ending in a page stays with Octo only where it searches first",
             ),
             (

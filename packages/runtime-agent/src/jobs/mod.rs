@@ -168,9 +168,10 @@ const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_273;
 /// What the routing step reads after the browser skill's routing section when Octo's turn for the
 /// message can search the web: the job's grant lets that turn use the AI's own web search
 /// (`job_proxy_auth`), which the routing step itself never does. Only the fact: the section says
-/// what it changes (research answered in a reply, and availability for dates at places nobody
-/// named, stay with Octo, which searches first, unless a site must be used first). Without it,
-/// which is every turn whose AI has no web search of its own, the routing input is as it was.
+/// what it changes (availability for dates at places nobody named, answered in a reply, stays
+/// with Octo, which searches first, as other research answered in a reply does, unless a site
+/// must be used first). Without it, which is every turn whose AI has no web search of its own,
+/// the routing input is as it was.
 const ROUTING_SEARCH_FACT: &str = "Octo can search the web for this message.\n";
 /// What the routing step reads after [`ROUTING_SEARCH_FACT`] when this runtime also has
 /// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] on: research that ends in a page then stays with Octo too.

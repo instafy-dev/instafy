@@ -1713,9 +1713,11 @@ mod tests {
     /// news and a comparison put on a page stay `direct` only with both, a page that needs prices
     /// for dates or a route still browses first, an order in the person's own account is still
     /// the browser's, and news answered in a reply and a hotel for dates nobody named stay
-    /// `direct`. A question about a shop's policy beside an order number stays `direct`, a reply's
-    /// article opened in the browser goes by its address, and a change to another chat's page,
-    /// which the routing input's pages name, stays `direct` with no change.
+    /// `direct`, while hotels for dates nobody named put on a page browse first unless research
+    /// that ends in a page searches first. A question about a shop's policy beside an order number
+    /// stays `direct`, with search or without, while that order's own status is the browser's, a
+    /// reply's article opened in the browser goes by its address, and a change to another chat's
+    /// page, which the routing input's pages name, stays `direct` with no change.
     #[test]
     fn every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own() {
         let cases = shipped();
@@ -1732,7 +1734,7 @@ mod tests {
                 &["news-then-open-the-article"],
             ),
             (
-                "- Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email) stays `direct` when the message does not name the browser",
+                "- Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email;",
                 "direct",
                 &[
                     "news-today",
@@ -1741,21 +1743,27 @@ mod tests {
                     "translate-words-about-the-browser",
                     "news-today-searching",
                     "policy-beside-an-order-number",
+                    "policy-beside-an-order-number-searching",
                 ],
             ),
             (
-                "When Octo can search the web, so do availability for dates at places nobody named",
+                "when Octo can search the web, availability for dates at places nobody named)",
                 "direct",
                 &["hotel-for-dates-nobody-named-searching"],
             ),
             (
-                "and research that ends in a page when it searches first, unless a site must be used first (availability at a place named, a sign-in or their account, a form or planner).",
+                "or that ends in a page when it searches first, stays `direct`",
                 "direct",
                 &[
                     "news-then-page-searching",
                     "comparison-page-searching",
                     "comparison-page-watches-searching",
                 ],
+            ),
+            (
+                "unless the message names the browser, it carries on this chat's browser work or a site must be used first (availability at a place named, a sign-in or their account, an order's own status or items, a form or planner)",
+                "browser",
+                &["order-status-beside-an-order-number"],
             ),
             (
                 "the person names Instafy's browser (\"in your browser\")",
@@ -1791,6 +1799,7 @@ mod tests {
                     "hotels-for-dates-page-searching",
                     "route-page-searching",
                     "news-then-page-searching-pages-browse-first",
+                    "hotels-for-dates-nobody-named-page-searching",
                 ],
             ),
             (
@@ -1934,9 +1943,31 @@ mod tests {
                 "news-then-page-searching",
                 "news-then-page-searching-pages-browse-first",
             ),
+            (
+                "policy-beside-an-order-number-searching",
+                "policy-beside-an-order-number",
+            ),
         ] {
             assert_eq!(case(&cases, one).message, case(&cases, other).message);
         }
+        // A question about a shop's policy beside an order number stays with Octo whether or not
+        // it can search the web for the message: the twins differ only in that line.
+        let (searching, without) = (
+            case(&cases, "policy-beside-an-order-number-searching"),
+            case(&cases, "policy-beside-an-order-number"),
+        );
+        assert!(searching.integrated_search && !without.integrated_search);
+        assert!(!searching.research_pages_search_first);
+        // Hotels for dates nobody named are research answered in a reply where Octo can search
+        // the web, and research that ends in a page once they go on one: the page browses first
+        // where only replies' research searches first.
+        let (reply, page) = (
+            case(&cases, "hotel-for-dates-nobody-named-searching"),
+            case(&cases, "hotels-for-dates-nobody-named-page-searching"),
+        );
+        assert!(reply.integrated_search && page.integrated_search);
+        assert!(!reply.research_pages_search_first && !page.research_pages_search_first);
+        assert_eq!(page.expect.route, "browser_then_build");
         // The routing input names the space's pages, each with the chat that made it, after the
         // part every chat shares; a case with no pages names none.
         let other = case(&cases, "change-to-another-chats-page");

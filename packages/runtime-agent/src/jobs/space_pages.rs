@@ -2746,8 +2746,10 @@ mod tests {
             held.restored,
             BTreeSet::from(["sites/framework-laptops/data.json".to_string()])
         );
-        // Only the edit step whose file went back counts for nothing on the chat's line: the
-        // edit of this chat's own page still counts.
+        // The chat's line counts a step by its newest message, so it counts only what the turn
+        // kept: an edit step whose every file went back gets one more message that says it was
+        // declined, one that also changed this chat's own page one that names only what it kept,
+        // and the edit of this chat's own page alone keeps its own message.
         let mut theirs = edit_step(&their_data.display().to_string());
         theirs["item"]["id"] = json!("theirs");
         let mut ours = edit_step("sites/framework-13-16/data.json");
@@ -2761,9 +2763,44 @@ mod tests {
         let mut started = edit_step("sites/framework-laptops/data.json");
         started["type"] = json!("item.started");
         started["item"]["status"] = json!("in_progress");
+        let events = [started, theirs, ours, both];
+        let messages = super::super::put_back_edit_messages(&held, ws, &[&events]);
+        let steps: Vec<(String, String, JsonValue, String, JsonValue)> = messages
+            .iter()
+            .map(|message| {
+                let metadata = message.metadata.clone().expect("its metadata");
+                assert_eq!(message.message_type.as_deref(), Some("file_change"));
+                assert_eq!(metadata["kind"], "codex_file_change");
+                assert_eq!(metadata["eventType"], "item.completed");
+                assert_eq!(metadata["activity"]["key"], "builtin/edit");
+                (
+                    metadata["itemId"].as_str().unwrap().to_string(),
+                    metadata["status"].as_str().unwrap().to_string(),
+                    metadata["paths"].clone(),
+                    message.content.clone(),
+                    metadata["activity"]["count"].clone(),
+                )
+            })
+            .collect();
+        let theirs_path = their_data.display().to_string();
         assert_eq!(
-            held.edits_put_back(ws, &[started, theirs, ours, both]),
-            [("theirs".to_string(), vec![their_data.display().to_string()])]
+            steps,
+            [
+                (
+                    "theirs".to_string(),
+                    "declined".to_string(),
+                    json!([theirs_path]),
+                    format!("File change put back: {theirs_path}"),
+                    json!(1),
+                ),
+                (
+                    "both".to_string(),
+                    "completed".to_string(),
+                    json!(["sites/framework-13-16/data.json"]),
+                    "Applied file changes: sites/framework-13-16/data.json".to_string(),
+                    json!(1),
+                ),
+            ]
         );
         assert_eq!(held.reply_line().as_deref(), Some(NOT_CHANGED));
         let artifact = held.artifact().unwrap();

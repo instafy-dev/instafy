@@ -1433,26 +1433,29 @@ building turn that must make a page can't ask for the browser and, on an AI
 with no web search of its own, reads only pages whose addresses it already
 knows. When Octo can search the web for the message (the job's grant lets its
 turn use the AI's own web search), the routing step reads one line that says
-so, after the section: research answered in a reply, and availability for
-dates where nobody named the places (search finds them, then at most one card
-checks their pages), stay with Octo, which searches first. On a runtime with
-`INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on, a second line says research that ends
-in a page searches first too, and such research stays with Octo as well. Each
-holds unless a site must be used first (availability at a place named, a
-sign-in or the person's account, a form or a planner). Without the first line,
-on every AI with no web search of its own, the routing input is as it was, and
-without the second, which is every runtime while the setting is off, research
-that ends in a page goes to the browser first: a building turn that makes a
-page still can't ask for the browser for what search didn't reach. These are
-the section's first rule, ahead of the routes: as an exception in the middle of
-the `browser_then_build` line, a comparison page went to the browser though its
-routing input said Octo could search (a local test, Nov 17). A question about a
-rule or policy stays with Octo beside an order number or an email too: only an
-order's own status or items need the person's account. A change asked in one
-chat to a page another chat made stays with Octo with no change: the routing
-step reads the space's pages as a turn that may write files does, each made in
-this chat or in another and read-only here, after the part of its input every
-chat shares. A change that needs
+so, after the section: availability for dates where nobody named the places,
+answered in a reply, then stays with Octo, as other research answered in a
+reply does, and searches first (search finds the places, then at most one card
+checks their pages). On a runtime with `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST`
+on, a second line says research that ends in a page searches first too, and
+such research stays with Octo as well. Without the first line, on every AI
+with no web search of its own, the routing input is as it was, and without the
+second, which is every runtime while the setting is off, research that ends in
+a page goes to the browser first, availability for dates put on a page among
+it: a building turn that makes a page can't ask for the browser for what
+search didn't reach, so nothing would check the dates. These are the section's
+first rule, ahead of the routes: as an exception in the middle of the
+`browser_then_build` line, a comparison page went to the browser though its
+routing input said Octo could search (a local test, Nov 17). Its exception is
+the whole rule's, with search or without: a site that must be used first
+(availability at a place named, a sign-in or the person's account, an order's
+own status or items, a form or a planner) keeps a message out of it. So a
+question about a rule or policy stays with Octo beside an order number or an
+email, while that order's own status goes to the browser. A change asked in
+one chat to a page another chat made stays with Octo with no change: the
+routing step reads the space's pages as a turn that may write files does, each
+made in this chat or in another and read-only here, after the part of its
+input every chat shares. A change that needs
 what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,

@@ -677,11 +677,12 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // page stayed `direct` when Octo can search the web and no site needs using first, and the
     // card's section and the browsers' names were shorter.
     include_str!("legacy/browser-automation-v44.md"),
-    // From before the routing section's first rule kept research with Octo: research answered in
-    // a reply, a rule or policy beside an order number or email among it, and, when Octo can
-    // search the web, availability for dates at places nobody named and research that ends in a
-    // page when it searches first. A change to another chat's page stayed `direct` with no
-    // change, and the routing step's `summary` named a page a reply here linked by its address.
+    // From before the routing section's first rule kept research with Octo unless a site must be
+    // used first (an order's own status or items among them): research answered in a reply, a
+    // rule or policy beside an order number or email among it, and, when Octo can search the web,
+    // availability for dates at places nobody named; research that ends in a page when it
+    // searches first too. A change to another chat's page stayed `direct` with no change, and the
+    // routing step's `summary` named a page a reply here linked by its address.
     include_str!("legacy/browser-automation-v45.md"),
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a

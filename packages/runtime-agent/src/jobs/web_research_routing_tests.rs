@@ -982,7 +982,8 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
         "the site runs in this space",
         "says not to use the browser",
         "or it carries on browser work this chat started, whether or not that found the answer.",
-        "Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email) stays `direct` when the message does not name the browser, unless it carries on this chat's browser work:",
+        "Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email;",
+        "stays `direct` unless the message names the browser, it carries on this chat's browser work or a site must be used first",
     ] {
         assert!(section.contains(words), "{words}");
     }
@@ -1035,7 +1036,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
         .find(|line| line.starts_with("- Research whose answer is a reply"))
         .expect("the line for research answered in a reply");
     assert!(
-        reply.contains("stays `direct` when the message does not name the browser"),
+        reply.contains("stays `direct` unless the message names the browser"),
         "{reply}"
     );
     // What it says in place of: a map named only as something built from what the browser found,
@@ -3964,15 +3965,19 @@ fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
 /// change of files whose building turn can't ask for the browser (`browser_choice_applies`), and
 /// on an AI with no web search of its own it reads only pages whose addresses it already knows.
 /// When Octo can search the web for the message, which its routing input then says in one line
-/// after the section, research answered in a reply and availability for dates at places nobody
-/// named stay `direct` and search first; research that ends in a page does too only where it
-/// searches first, a second line, unless a site must be used first (availability at a place
-/// named, a sign-in or their account, a form or a planner). Without the lines the routing input
-/// is as it was. Both are the first rule's, ahead of the routes: with search on, a comparison
-/// page whose input said so went to the browser, its reason that the answer ends in a page, the
-/// rule's exception sitting mid-sentence in the `browser_then_build` line (a local test, Nov 17).
-/// Checking the person's own account is work on a website, which the browser does with their
-/// sign-in: no search reaches it. The routing step reads the whole section for each.
+/// after the section, availability for dates at places nobody named is research answered in a
+/// reply, which stays `direct` and searches first; put on a page, it is research that ends in a
+/// page, which stays `direct` only where it searches first, a second line. A site that must be
+/// used first (availability at a place named, a sign-in or their account, an order's own status
+/// or items, a form or a planner) keeps each of them out of it, with search or without: the rule
+/// comes first, so its exception is the whole rule's, and a rule or policy beside an order
+/// number is research while that order's own status is the person's account's. Without the
+/// lines the routing input is as it was. Both are the first rule's, ahead of the routes: with
+/// search on, a comparison page whose input said so went to the browser, its reason that the
+/// answer ends in a page, the rule's exception sitting mid-sentence in the `browser_then_build`
+/// line (a local test, Nov 17). Checking the person's own account is work on a website, which
+/// the browser does with their sign-in: no search reaches it. The routing step reads the whole
+/// section for each.
 #[test]
 fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     let section = routing_section(BROWSER_SKILL);
@@ -3989,11 +3994,9 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
         "{section}"
     );
     let research = line("- Research whose answer is a reply");
-    assert!(
-        research.ends_with(
-            "When Octo can search the web, so do availability for dates at places nobody named and research that ends in a page when it searches first, unless a site must be used first (availability at a place named, a sign-in or their account, a form or planner)."
-        ),
-        "{research}"
+    assert_eq!(
+        research,
+        "- Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email; when Octo can search the web, availability for dates at places nobody named), or that ends in a page when it searches first, stays `direct` unless the message names the browser, it carries on this chat's browser work or a site must be used first (availability at a place named, a sign-in or their account, an order's own status or items, a form or planner): the building turn reads first, opening the browser itself if a page needs it."
     );
     assert_eq!(section.matches("can search the web").count(), 1);
     // No sentence keeps news put on a page apart from the rest of that research.
@@ -4001,12 +4004,6 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     assert!(
         line("- `browser`:").contains(
             "the work happens on a website (use a site, sign in, check their account, send a form, press its buttons)"
-        ),
-        "{section}"
-    );
-    assert!(
-        research.contains(
-            "stays `direct` when the message does not name the browser, unless it carries on this chat's browser work"
         ),
         "{section}"
     );
