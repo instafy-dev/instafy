@@ -25,8 +25,11 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    never named by what it holds.
 // 4. A frame is named by its site where it shows, and a canvas as a picture
 //    with no text; a tracking frame and an icon are nothing, and no word of a
-//    frame's page is read. A frame's site is no page text: a random-looking
-//    one under a title with a credential word makes no secret screen.
+//    frame's page is read. Nor is a control in it, in a frame of the page's
+//    own site too: none is listed or counted, so no step or pause reaches it,
+//    and the frame's place in the text is what says where it is. A frame's
+//    site is no page text: a random-looking one under a title with a
+//    credential word makes no secret screen.
 // 5. A page longer than the reading says where its text is cut and how far to
 //    scroll, and scrolling reads all of it, within the reading's size, past a
 //    skip link and a pinned header, in a long paragraph and on a plain-text
@@ -906,6 +909,12 @@ export async function runSharedBrowserPageReadingFixture() {
     for (const unread of ["Rooms from", "Booking engine", "Search rooms", "Check dates", "pixel"]) {
       assert.ok(!JSON.stringify(reading).includes(unread), `A frame's page was read: ${unread}`);
     }
+    // The button in the frame of the page's own site, and the booking engine's
+    // field and button, are no controls of the reading: none is listed or
+    // counted, so no step or pause can reach one. Their frames' places in the
+    // text, between the lines around them, say where they are.
+    assert.deepEqual(reading.interactiveElements, [], "A frame's control was listed");
+    assert.equal(reading.omittedControls, undefined, "A frame's control was counted");
     // A frame's site is an address, never page text: under a title with a
     // credential word, a random-looking one makes no secret screen.
     reading = await read("/reading/garden");
@@ -1565,7 +1574,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a details' summary is listed with whether it is open, and opening it reads its section; a tab out of the tab order is listed, and the tab shown says it is selected",
         "the radio button, box, radio link and list option shown chosen say so, and nothing else does: not a field's highlighted suggestion",
         "a control turned off is listed as disabled, and a click or a choice on it is refused at once, sending and asking nothing; taken seats make room for the free ones; a text area is never named by what it holds",
-        "a frame is named by its site and a canvas as a picture with no text, where they show; a tracking frame and an icon are nothing; no word of a frame is read; a frame's site makes no secret screen",
+        "a frame is named by its site and a canvas as a picture with no text, where they show; a tracking frame and an icon are nothing; no word of a frame is read, and no control in one, of the page's own site too, is listed or counted; a frame's site makes no secret screen",
         "a long page's text says where it is cut and how far to scroll, and scrolling reads all of it within the reading's cap, past a skip link and a pinned header, on a plain-text page and in a long paragraph; a view out of reach says so; past 200 controls those scrolled past are left out and counted, past 600 matches too, and a closed list's options never crowd out a form",
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",

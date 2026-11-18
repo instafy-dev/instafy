@@ -1663,6 +1663,40 @@ fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
     assert!(browser_turn.contains("A sign-in the person asked for isn't one of these: open its sign-in page and pause (Core rules)."));
 }
 
+/// A step only the person may do is highlighted where the snapshot lists it, and said otherwise, never called out of
+/// reach. A ticket shop's reading listed none of its ticket controls, and the turn wrote that they "aren't accessible",
+/// named no button and gave no link; two turns whose page was a bot check said only that it was (a local test, Nov 17).
+/// Any step that can't be highlighted is said as one after a bot check is: what to do and where, with the page's link.
+/// A frame's controls are in no snapshot, and the reading marks the frame's place, so the line names the marker the
+/// Shared Browser's reading writes. Both browser turns read it, inside the bytes a snapshot carries.
+#[test]
+fn a_step_only_the_person_may_do_is_highlighted_or_said_with_the_pages_link() {
+    const READING: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/shared-browser-cli.js"
+    ));
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let highlighted = "On a page you may use, highlight it with `request_human_input` and end the turn; they choose Let Octo continue.";
+    let said = "Else, as after a bot check or on a link-only site (take no step there), say what to do and where (\"press + beside Adult\", the box a `[frame not read]` marks) with the page's link, never that it isn't accessible.";
+    let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
+    assert!(carried.contains(&format!("{highlighted} {said}")), "{carried}");
+    for gone in ["say it in words and give its link", "Say exactly what to do"] {
+        assert!(!flat(BROWSER_SKILL).contains(gone), "{gone}");
+    }
+    // The reading's own marker, with the frame's site and without it.
+    assert!(READING.contains("`[frame not read: ${site.slice(0, 253)}]`"));
+    assert!(READING.contains("\"[frame not read]\""));
+    let tmp = scaffolded_space();
+    for transport in ["shared", "desktop-personal"] {
+        let browser_turn = flat(&fresh_prompt(
+            tmp.path(),
+            "Open the ticket shop in your browser and get it to where I choose the date.",
+            json!({ "browserTransport": transport }),
+        ));
+        assert!(browser_turn.contains(said), "{transport}");
+    }
+}
+
 /// A fresh turn's prompt for `request`, with the job's metadata.
 fn fresh_prompt(tmp: &std::path::Path, request: &str, metadata: JsonValue) -> String {
     let processor = test_job_processor(tmp);
