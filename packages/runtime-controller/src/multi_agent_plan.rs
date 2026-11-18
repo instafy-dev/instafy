@@ -685,7 +685,6 @@ async fn finish_parent_plan_job(
                 "errorMessage": error_message,
                 "artifactsCount": 0,
                 "provider": JsonValue::Null,
-                "creditSnapshot": JsonValue::Null,
                 "leaseMetrics": lease_metrics,
                 "multiAgentPlan": extract_multi_agent_plan_payload(&job_payload),
                 "run": run_payload,

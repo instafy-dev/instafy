@@ -2444,7 +2444,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
             "managedAiProvider": DEFAULT_MANAGED_AI_PROVIDER_ID,
             "managedAiModelLabel": state.config.managed_ai_model_label,
         });
-        let credit_snapshot = credits::process_credit_burn(
+        credits::process_credit_burn(
             &transaction,
             &project.id,
             &org_id,
@@ -2518,15 +2518,6 @@ pub(crate) async fn process_dispatch_prompt_timed(
         map.insert(
             "managedAiDailyPromptsUsedBeforeBurn".to_string(),
             JsonValue::from(daily_prompts_used),
-        );
-        map.insert(
-            "creditSnapshot".to_string(),
-            json!({
-                "balance": credit_snapshot.balance,
-                "creditLimit": credit_snapshot.credit_limit,
-                "lastBurnAt": credit_snapshot.last_burn_at.map(|value| value.to_rfc3339()),
-                "lastRefillAt": credit_snapshot.last_refill_at.map(|value| value.to_rfc3339()),
-            }),
         );
         map.insert(
             "managedAiCredit".to_string(),
@@ -3671,7 +3662,6 @@ pub(crate) fn build_run_result_payload(
     provider: Option<&str>,
     conversation_state: Option<&JsonValue>,
     artifacts: &JsonValue,
-    credit_snapshot: Option<&JsonValue>,
 ) -> JsonValue {
     let mut map = JsonMap::new();
     map.insert("jobId".to_string(), JsonValue::String(job_id.to_string()));
@@ -3723,9 +3713,6 @@ pub(crate) fn build_run_result_payload(
         map.insert("conversationState".to_string(), state.clone());
     }
     map.insert("artifacts".to_string(), artifacts.clone());
-    if let Some(snapshot) = credit_snapshot {
-        map.insert("creditSnapshot".to_string(), snapshot.clone());
-    }
     map.insert(
         "timestamp".to_string(),
         JsonValue::String(Utc::now().to_rfc3339()),
@@ -5524,10 +5511,10 @@ fn split_run_ids_by_credential(agent_runs: &[(Uuid, AgentTarget)]) -> (Vec<Uuid>
 }
 
 /// What dispatch stamps on its shared metadata for its managed targets once
-/// any target answers on Instafy AI: the reserve's labels, amounts, balance
-/// snapshot and ledger trace, and an ambient evaluation's deferral of the
-/// flat burn. A dispatch with no managed target stamps none of them.
-const MANAGED_AI_TARGET_METADATA_KEYS: [&str; 9] = [
+/// any target answers on Instafy AI: the reserve's labels, amounts and ledger
+/// trace, and an ambient evaluation's deferral of the flat burn. A dispatch
+/// with no managed target stamps none of them.
+const MANAGED_AI_TARGET_METADATA_KEYS: [&str; 8] = [
     "managedAiLabel",
     "managedAiProvider",
     "managedAiModelLabel",
@@ -5535,7 +5522,6 @@ const MANAGED_AI_TARGET_METADATA_KEYS: [&str; 9] = [
     "managedAiDailyPromptLimit",
     "managedAiDailyPromptsUsedBeforeBurn",
     "managedAiBillingDeferred",
-    "creditSnapshot",
     "managedAiCredit",
 ];
 
@@ -7884,7 +7870,6 @@ mod tests {
             "managedAiDailyPromptLimit": 20,
             "managedAiDailyPromptsUsedBeforeBurn": 3,
             "managedAiBillingDeferred": true,
-            "creditSnapshot": { "balance": 19 },
             "managedAiCredit": { "promptId": "prompt" },
         });
 

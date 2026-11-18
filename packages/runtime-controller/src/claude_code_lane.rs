@@ -1738,11 +1738,11 @@ mod tests {
         let proxy_metadata = Some(json!({
             "provider": "claude-code",
             "conversation": lane_session,
-            "creditSnapshot": { "balance": 1 },
+            "ui": { "suggestedReplies": ["Run the tests"] },
         }));
         assert_eq!(
             without_lane_claims(&proxy_metadata),
-            Some(json!({ "creditSnapshot": { "balance": 1 } }))
+            Some(json!({ "ui": { "suggestedReplies": ["Run the tests"] } }))
         );
         let codex_metadata = Some(json!({
             "provider": "codex",

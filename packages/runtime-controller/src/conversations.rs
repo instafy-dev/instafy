@@ -2350,7 +2350,6 @@ where
                 "errorMessage": null,
                 "artifactsCount": null,
                 "provider": null,
-                "creditSnapshot": null,
                 "run": run_payload,
             }),
         );
@@ -2845,7 +2844,6 @@ fn merge_canceled_run_metadata(existing: Option<&JsonValue>, reason: &str) -> Js
             "errorMessage": JsonValue::Null,
             "artifactsCount": JsonValue::Null,
             "provider": JsonValue::Null,
-            "creditSnapshot": JsonValue::Null,
         }),
     );
 

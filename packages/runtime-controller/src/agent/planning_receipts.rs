@@ -68,7 +68,6 @@ pub(super) async fn store(
     let run_id: Option<Uuid> = row.get("run_id");
     let payload: JsonValue = row.get("payload");
     let provider = extract_provider_from_metadata(proxy_metadata);
-    let credit_snapshot = extract_credit_snapshot(proxy_metadata);
     if let Some(run_id) = run_id {
         let conversation_state = extract_provider_conversation_state(proxy_metadata);
         // The controller's dispatch/refusal result remains authoritative. A
@@ -79,7 +78,6 @@ pub(super) async fn store(
             &job_id,
             provider.as_deref(),
             conversation_state.as_ref(),
-            credit_snapshot.as_ref(),
             row.get::<_, Option<String>>("summary").as_deref(),
             row.get::<_, Option<String>>("error_message").as_deref(),
             artifacts.as_array().map(Vec::len),
