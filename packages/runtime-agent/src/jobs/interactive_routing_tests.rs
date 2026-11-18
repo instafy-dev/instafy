@@ -530,12 +530,12 @@ fn recorded_page(folder: &str, title: &str, chat: Option<Uuid>) -> JsonValue {
 /// comparison page of the Framework Laptop 13 and 16 from what you already know, without
 /// browsing." had the rule in its instructions and still wrote over another chat's comparison:
 /// nothing told it which chat made `sites/framework-laptops`. Every turn that may write files reads
-/// the rule (a new page is a new folder; another chat's page is read-only here, and the person
-/// changes it in that chat), then the space's pages, each made in this chat or in another, by the
-/// chat the space's record keeps with the page, not by the chat's history: a long chat whose page
-/// has left the history it sends still reads that page as its own. A page from before the record
-/// says that no one knows which chat made it, in its own chat too. An automation's run reads
-/// neither: it has no chat to ask in.
+/// the rule (a new page is a new folder, with a copy of any file it uses from another page;
+/// another chat's page is read-only here, and the person changes it in that chat), then the
+/// space's pages, each made in this chat or in another, by the chat the space's record keeps with
+/// the page, not by the chat's history: a long chat whose page has left the history it sends still
+/// reads that page as its own. A page from before the record says that no one knows which chat
+/// made it, in its own chat too. An automation's run reads neither: it has no chat to ask in.
 #[test]
 fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
     let tmp = tempdir().expect("tmp");
@@ -589,7 +589,7 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         .expect("the invariants");
     assert!(invariants.contains(&rule_and_pages), "{prompt}");
     assert!(
-        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. Copy into it any file you take from another page; never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat."),
+        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. Copy into it any file you use from another page. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat."),
         "{PAGE_OF_ITS_OWN_CHAT_RULE}"
     );
     // The other chat, with no history at all: its page is its own.
@@ -948,9 +948,9 @@ fn a_comparison_gets_a_sort_for_each_amount_the_person_compares_by() {
 /// it (a local test, Nov 17). That build never opened the page skill: its message ("… as a
 /// page.") loaded the research and comparing skills in its place. What it did read is the rule
 /// every turn that may write files reads, which says it now: a new page's folder gets a copy of any
-/// file it takes from another page, and never loads that page's files.
+/// file it uses from another page.
 #[test]
-fn a_new_page_copies_what_it_takes_from_another_page_and_never_loads_its_files() {
+fn a_new_page_copies_any_file_it_uses_from_another_page() {
     let tmp = tempdir().expect("tmp");
     learn::ensure_project_memory_scaffold(tmp.path());
     let (project, theirs, ours) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
@@ -973,7 +973,7 @@ fn a_new_page_copies_what_it_takes_from_another_page_and_never_loads_its_files()
         .map(|(_, rest)| rest)
         .expect("the invariants");
     assert!(
-        invariants.contains("- A request for a new page starts a new folder, even on the same subject. Copy into it any file you take from another page; never load that page's files."),
+        invariants.contains("- A request for a new page starts a new folder, even on the same subject. Copy into it any file you use from another page."),
         "{prompt}"
     );
 }

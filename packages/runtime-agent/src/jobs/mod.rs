@@ -4662,8 +4662,9 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 /// A new chat's build took another chat's comparison as its sample and wrote a page that loads
 /// that page's script and styles (`../<that page>/site.js`): served from its own folder, the new
 /// page can't load them, and nobody could open it (a local test, Nov 17). That build never opened
-/// the page skill, so this says it: a new page copies what it takes from another page.
-const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. Copy into it any file you take from another page; never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
+/// the page skill, so this says it: a new page copies what it uses from another page. It rides in
+/// a restored thread's compact reminder too, which has little room: hence so few words.
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. Copy into it any file you use from another page. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
