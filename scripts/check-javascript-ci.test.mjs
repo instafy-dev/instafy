@@ -67,15 +67,16 @@ function route(key, github, enabled = '') {
 const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget, provider_mcp and read-reference selectors, the
   // code-mode host build, per-model proxy_retry_budget runs, inert native compaction,
-  // native chat image, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the hermetic local-engine turn targets, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
+  // native chat image, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card, Codex-never-starts-claude, pages of their own chats, saved change reload, turn wrap-up, client time zone and proxy stream selectors, the hermetic local-engine turn targets, the inert run_instructions target, and provider unit tests, independently bound by check-rust-ci, and the CLI git
   // wrapper, preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings and local tunnel suites bound below, and the local author pseudonym key
   // test in the contracts lane, the tunnel broker test lane in the Rust tests
   // aggregate, and the Rust dead-code gate (RUSTFLAGS in every Rust lane but
-  // runtime-agent's, --all-targets in their check lanes), also bound by
-  // check-rust-ci; other commands and authority are exact.
+  // runtime-agent's, --all-targets in their check lanes, and runtime-agent's
+  // clippy check with its clippy component), also bound by check-rust-ci;
+  // other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '3c813ab346cc9dd67ea85d4e3f3db01dc6a5e11fde43873ecd3cfbe855d52826' },
+    previousHash: '84be16e245967e64bb45448e05853cbbedd527afd06e74d917a487004b7059fa' },
   // The Browser UI rendering aggregate came with the lane's split into parts;
   // reversing that split exactly (inside withoutBrowserUiJobBudget) removes it.
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),

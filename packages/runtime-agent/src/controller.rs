@@ -57,7 +57,6 @@ pub struct ControllerClient {
     lease_wait: Duration,
     lease_max_jobs: u32,
     lease_seconds: u32,
-    #[allow(dead_code)]
     heartbeat_seconds: u32,
     agent_tokens: AgentTokenVerifier,
     resources: Mutex<ResourceSampler>,
@@ -119,7 +118,6 @@ struct BrowserProfileManifest {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Registration {
     pub runtime_id: Uuid,
     pub agent_token: String,
@@ -1083,7 +1081,6 @@ impl ControllerClient {
         self.lease_wait
     }
 
-    #[allow(dead_code)]
     pub fn heartbeat_seconds(&self) -> u32 {
         self.heartbeat_seconds
     }

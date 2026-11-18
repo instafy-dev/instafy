@@ -88,9 +88,13 @@ pnpm --filter @instafy/frontend test:unit
 pnpm --filter @instafy/frontend build
 ```
 
-For Rust packages, run `cargo fmt --check` and the affected crate's `cargo check --tests` or
-targeted tests. For scripts and packaging changes, run their focused Node tests and prove the
-generated or packed artifact from a clean temporary directory.
+For Rust packages, run `cargo fmt --check`, targeted tests and the affected crate's check as CI
+runs it, which fails on the dead code and unused imports that a local build only warns about
+([Bounded Rust CI](docs/Testing.md#bounded-rust-ci)). In `packages/runtime-agent` that is
+`cargo clippy --locked --all-targets -- -A clippy::all -D dead_code -D unused_imports`, and in
+any other crate `RUSTFLAGS="-D dead_code -D unused_imports" cargo check --locked --all-targets`.
+For scripts and packaging changes, run their focused Node tests and prove the generated or packed
+artifact from a clean temporary directory.
 
 Environment-gated browser, mobile, Desktop, Docker and hardware suites should stay explicit.
 Do not silently turn a missing external dependency into a passing test.

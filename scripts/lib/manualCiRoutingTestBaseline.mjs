@@ -40,7 +40,7 @@ export const MANUAL_CI_BASELINES = {
   // The reviewed Build baseline additionally selects proxy_retry_budget, the
   // broker's provider_mcp tests and filtered read-reference integration tests, builds the Codex code-mode host and
   // runs proxy_retry_budget per model, plus the inert native_compaction,
-  // native_images, granted_turns, native_subagents, browser_hand_back, stopped_turn, thread_mode, evidence_retry, reply_draft_stream, page_cards and codex_never_starts_claude selectors,
+  // native_images, granted_turns, native_subagents, browser_hand_back, stopped_turn, thread_mode, evidence_retry, reply_draft_stream, page_cards, codex_never_starts_claude, pages_of_their_own_chats, saved_change_reload, turn_wrap_up, client_timezone and proxy_stream selectors,
   // the hermetic local-engine turn targets (claude_code_lane, claude_code_supervision, claude_code_live) and the inert
   // run_instructions target;
   // check-rust-ci binds their exact argv.
@@ -58,8 +58,9 @@ export const MANUAL_CI_BASELINES = {
   // and support, agent and diagnostics, preview server and page, bound site check, space
   // setup, research settings and local tunnel suites. Every Rust lane but
   // runtime-agent's denies dead code and unused imports, with --all-targets in
-  // its check lanes (check-rust-ci binds that too).
-  "build.yml": { sha256: "5a0937c8e2094903478aa5746fe9846b15ed988742b2ae18e7db3ed115245522" },
+  // its check lanes, and runtime-agent's check lane denies them with clippy,
+  // which it installs (check-rust-ci binds that too).
+  "build.yml": { sha256: "f7326ca5ce6202783b5e75ae869098ad9df92b6776a7a4968a0de5c640b8a10b" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper

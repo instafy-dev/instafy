@@ -3750,12 +3750,15 @@ fn resolve_auto_sync_after_apply_override(
     extract_auto_sync_after_apply_override(metadata).filter(|enabled| *enabled)
 }
 
+/// The status line names no place to save from: the Changes drawer that had Save version went in
+/// #1126, and the note the frontend shows under the turn's message says, for each kind of space,
+/// what happens to changes that were not saved.
 fn workspace_commit_status(
     result: &workspace_commit::CommitToOriginResult,
 ) -> (&'static str, &'static str) {
     if !result.git_sync_attempted {
         return (
-            "Workspace updated. Auto-save is off, so use Changes to save this version.",
+            "Workspace updated. Auto-save is off, so these changes weren't saved.",
             "manual_required",
         );
     }
@@ -3776,10 +3779,7 @@ fn workspace_commit_status(
                 "sync_failed",
             );
         }
-        return (
-            "Workspace updated, but auto-save failed. Open Changes and click Save version.",
-            "sync_failed",
-        );
+        return ("Workspace updated, but auto-save failed.", "sync_failed");
     }
     if result.save.is_partial() {
         return (
@@ -12589,28 +12589,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             native_images,
         ))
     }
-
-    pub async fn run_plan_job(
-        &self,
-        registration: &Registration,
-        job: &LeaseJob,
-    ) -> Result<JobExecution> {
-        let _controller_token_env = self.guard_controller_token(registration, job).await?;
-        Err(anyhow!(
-            "plan_only mode is not yet implemented for the Codex bridge"
-        ))
-    }
-
-    pub async fn run_approval_job(
-        &self,
-        registration: &Registration,
-        job: &LeaseJob,
-    ) -> Result<JobExecution> {
-        let _controller_token_env = self.guard_controller_token(registration, job).await?;
-        Err(anyhow!(
-            "approval_required mode is not yet implemented for the Codex bridge"
-        ))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -12646,7 +12624,6 @@ enum CodexAction {
     MultiAgentPlan {
         plan: JsonValue,
         agent_count: usize,
-        rationale: Option<String>,
     },
     CoordinationRequired {
         reason: String,
@@ -13144,7 +13121,7 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
         }
         let normalized_type = raw_type.to_ascii_lowercase().replace('-', "_");
         if normalized_type == "multi_agent_plan" || normalized_type == "multiagent_plan" {
-            if let Some((plan, agent_count, rationale)) = parse_codex_multi_agent_plan_action(map) {
+            if let Some((plan, agent_count)) = parse_codex_multi_agent_plan_action(map) {
                 if let Some(reason) = multi_agent_plan_coordination_blocker(&plan) {
                     tracing::warn!(
                         reason = %reason,
@@ -13153,11 +13130,7 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
                     out.push(CodexAction::CoordinationRequired { reason });
                     continue;
                 }
-                out.push(CodexAction::MultiAgentPlan {
-                    plan,
-                    agent_count,
-                    rationale,
-                });
+                out.push(CodexAction::MultiAgentPlan { plan, agent_count });
             }
             continue;
         }
@@ -13449,7 +13422,7 @@ fn parse_codex_actions(value: &JsonValue) -> Vec<CodexAction> {
 
 fn parse_codex_multi_agent_plan_action(
     map: &serde_json::Map<String, JsonValue>,
-) -> Option<(JsonValue, usize, Option<String>)> {
+) -> Option<(JsonValue, usize)> {
     let map = without_null_fields(map);
     let plan_map = map
         .get("plan")
@@ -13626,11 +13599,8 @@ fn parse_codex_multi_agent_plan_action(
     }
 
     let mut out = JsonMap::new();
-    if let Some(rationale) = rationale.as_ref() {
-        out.insert(
-            "rationale".to_string(),
-            JsonValue::String(rationale.clone()),
-        );
+    if let Some(rationale) = rationale {
+        out.insert("rationale".to_string(), JsonValue::String(rationale));
     }
     if let Some(threshold_reason) = threshold_reason {
         out.insert(
@@ -13702,7 +13672,7 @@ fn parse_codex_multi_agent_plan_action(
     }
     out.insert("synthesis".to_string(), synthesis);
 
-    Some((JsonValue::Object(out), agents.len(), rationale))
+    Some((JsonValue::Object(out), agents.len()))
 }
 
 /// A plan's fields as the controller reads them. The strict plan output schema makes every
@@ -22922,7 +22892,7 @@ mod tests {
                 ],
                 "lead": {"leadHandle": lead, "continuationPrompt": "Summarize."}
             });
-            let (plan, count, _) =
+            let (plan, count) =
                 parse_codex_multi_agent_plan_action(action.as_object().unwrap()).expect("a plan");
             assert_eq!(count, 4);
             let handles: Vec<&str> = plan["agents"]
@@ -23396,6 +23366,46 @@ mod tests {
             )
         );
         assert_eq!(workspace_commit_git_sync_status(&result), "skipped");
+    }
+
+    #[test]
+    fn an_unsaved_turns_status_names_no_place_to_save_it() {
+        let result = |git_sync_attempted: bool, git_sync_error: Option<&str>| {
+            workspace_commit::CommitToOriginResult {
+                origin_id: Uuid::new_v4(),
+                origin_endpoint: "http://127.0.0.1:8788/origin/test".to_string(),
+                origin_mode: "desktop".to_string(),
+                lease_id: Uuid::new_v4(),
+                apply_rev: Some("rev-1".to_string()),
+                apply_base_rev: None,
+                git_rev: None,
+                git_base_rev: None,
+                git_sync_attempted,
+                git_sync_error: git_sync_error.map(str::to_string),
+                save: Default::default(),
+                paths: vec!["notes.md".to_string()],
+            }
+        };
+        let failed = workspace_commit_status(&result(
+            true,
+            Some("origin git sync failed (502 Bad Gateway)"),
+        ));
+        assert_eq!(
+            failed,
+            ("Workspace updated, but auto-save failed.", "sync_failed")
+        );
+        let off = workspace_commit_status(&result(false, None));
+        assert_eq!(
+            off,
+            (
+                "Workspace updated. Auto-save is off, so these changes weren't saved.",
+                "manual_required"
+            )
+        );
+        for (message, _) in [failed, off] {
+            assert!(!message.contains("Changes"), "{message}");
+            assert!(!message.contains("Files"), "{message}");
+        }
     }
 
     #[test]
@@ -33812,7 +33822,6 @@ mod tests {
             actions: vec![CodexAction::MultiAgentPlan {
                 plan: json!({"type": "multi_agent_plan"}),
                 agent_count: 1,
-                rationale: None,
             }],
         };
 
@@ -39400,7 +39409,6 @@ mod tests {
             CodexAction::MultiAgentPlan {
                 plan: json!({ "agents": [] }),
                 agent_count: 2,
-                rationale: None,
             },
             CodexAction::RequestSecret {
                 name: "LATER_TOKEN".to_string(),
@@ -39997,7 +40005,7 @@ mod tests {
         ] {
             let mut action = base.as_object().unwrap().clone();
             action.extend(fields.as_object().unwrap().clone());
-            let (plan, _, _) = parse_codex_multi_agent_plan_action(&action).expect("valid plan");
+            let (plan, _) = parse_codex_multi_agent_plan_action(&action).expect("valid plan");
             assert_eq!(
                 plan["lead"]
                     .get("expectedReportFormat")
@@ -40058,15 +40066,11 @@ mod tests {
         let actions = parse_codex_actions(&payload);
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            CodexAction::MultiAgentPlan {
-                plan,
-                agent_count,
-                rationale,
-            } => {
+            CodexAction::MultiAgentPlan { plan, agent_count } => {
                 assert_eq!(*agent_count, 2);
                 assert_eq!(
-                    rationale.as_deref(),
-                    Some("Broad audit needs parallel investigation.")
+                    plan["rationale"],
+                    json!("Broad audit needs parallel investigation.")
                 );
                 assert_eq!(plan["mode"], json!("read_only"));
                 assert_eq!(plan["agents"][0]["handle"], json!("front"));
@@ -40117,7 +40121,7 @@ mod tests {
 
         // A null left out at every depth, the same way through the legacy `plan` wrapper.
         let wrapped = json!({ "type": "multi_agent_plan", "plan": fixture["written"].clone() });
-        let (plan, _, _) =
+        let (plan, _) =
             parse_codex_multi_agent_plan_action(wrapped.as_object().unwrap()).expect("a plan");
         assert_eq!(plan, fixture["sent"]);
 
@@ -40126,9 +40130,8 @@ mod tests {
         let mut with_null_entry = fixture["written"].clone();
         with_null_entry["agents"][0]["writeScope"]["ownedPaths"] =
             json!(["handoff/japan/tokyo.json", null]);
-        let (plan, _, _) =
-            parse_codex_multi_agent_plan_action(with_null_entry.as_object().unwrap())
-                .expect("a plan");
+        let (plan, _) = parse_codex_multi_agent_plan_action(with_null_entry.as_object().unwrap())
+            .expect("a plan");
         assert_eq!(
             plan["agents"][0]["writeScope"]["ownedPaths"],
             json!(["handoff/japan/tokyo.json", null])
@@ -40139,7 +40142,7 @@ mod tests {
         let mut wrong_type = fixture["written"].clone();
         wrong_type["agents"][0]["writeScope"]["ownedPaths"] = json!(5);
         wrong_type["agents"][1]["writeScope"]["mode"] = json!(1);
-        let (plan, _, _) =
+        let (plan, _) =
             parse_codex_multi_agent_plan_action(wrong_type.as_object().unwrap()).expect("a plan");
         assert_eq!(plan["agents"][0]["writeScope"]["ownedPaths"], json!(5));
         assert_eq!(plan["agents"][1]["writeScope"]["mode"], json!(1));
@@ -40164,18 +40167,18 @@ mod tests {
             "ownedPathGlobs": null,
             "rationale": null
         });
-        let (all_null, _, _) = parse_codex_multi_agent_plan_action(
+        let (all_null, _) = parse_codex_multi_agent_plan_action(
             read_only_plan(all_null_scope).as_object().unwrap(),
         )
         .expect("a plan");
-        let (left_out, _, _) = parse_codex_multi_agent_plan_action(
+        let (left_out, _) = parse_codex_multi_agent_plan_action(
             read_only_plan(JsonValue::Null).as_object().unwrap(),
         )
         .expect("a plan");
         assert_eq!(all_null, left_out);
         assert!(all_null["agents"][0].get("writeScope").is_none());
         // An empty object the model wrote as such is its own value and stays.
-        let (empty, _, _) =
+        let (empty, _) =
             parse_codex_multi_agent_plan_action(read_only_plan(json!({})).as_object().unwrap())
                 .expect("a plan");
         assert_eq!(empty["agents"][0]["writeScope"], json!({}));
@@ -40611,7 +40614,6 @@ mod tests {
             actions: vec![CodexAction::MultiAgentPlan {
                 plan: json!({"mode": "read_only"}),
                 agent_count: 2,
-                rationale: None,
             }],
         };
 
@@ -40747,7 +40749,6 @@ mod tests {
                     }
                 }),
                 agent_count: 1,
-                rationale: Some("Use one focused sibling for a broad read-only slice.".to_string()),
             }],
             None,
         );
@@ -41286,7 +41287,6 @@ mod tests {
                 ]
             }),
             agent_count: 1,
-            rationale: None,
         }];
         let claims = handoff::declared_handoff_path_claims(&actions);
 
