@@ -11,7 +11,7 @@ This document explains how the Instafy runtime controller is structured and how 
 ## Core Responsibilities
 - **Workspace management**: every project lives under `<WORKSPACE_ROOT>/<project_id>`. `WORKSPACE_ROOT` is the controller/runtime root; each project gets its own child directory. File mutations are applied by a project origin (`/apply` via origin). Clients list and read files through origin endpoints (`/entries`, `/files`, `/raw`). When multiple actors can touch the same workspace tree, run a watcher that emits `workspace.file_changed` events through `/events` so connected clients re-read files immediately after a save.
 - **Conversation + run lifecycle**: `/dispatch-prompt` inserts conversations/runs, enqueues jobs, and tracks results in Postgres.
-- **Runtime coordination**: `/runtime/register`, `/runtime/ensure`, and `/agent/*` coordinate agents that execute jobs (Codex, WebContainer driver, etc.).
+- **Runtime coordination**: `/runtime/register`, `/runtime/ensure`, and `/agent/*` coordinate the runtime agents that execute jobs.
 - **Origin management**: every runtime launch upserts an `origin_instances` row, injects the origin env block for allocators, and tracks presence/endpoint updates from `POST /origin/register` + `POST /projects/:id/origin/presence/beat`.
 - **Event streaming**: `/events` emits `ControllerEvent` payloads (run queued/progress/completed, preview updates, job output) scoped to project, session, or conversation channels.
 - **Credits & policy enforcement**: `/credits` forwards ledger calls to Supabase and enforces sandbox credit seeds.
@@ -24,7 +24,7 @@ This document explains how the Instafy runtime controller is structured and how 
 - **Workspace**: files and artifacts under `<WORKSPACE_ROOT>/<project_id>`; controller guards path traversal before touching disk.
 - **Conversation**: ordered sequence of prompts/messages for a project; runs reference a conversation when applicable.
 - **Run**: a single automation attempt (prompt generation, deploy, module apply). Runs emit SSE and persist structured results retrievable at `/runs/:id/result`.
-- **Runtime**: an execution environment (Codex agent, WebContainer, desktop driver). Agents authenticate via `/agent/login` and renew work with leases/heartbeats.
+- **Runtime**: an execution environment (a hosted runtime agent or a Desktop runtime). Agents authenticate via `/agent/login` and renew work with leases/heartbeats.
 - **Events**: JSON payloads with shape `{ kind, project_id, session_id, conversation_id, run_id, job_id, data, timestamp }`. Channels include `session:<uuid>` and `conversation:<uuid>`.
 
 ## Typical Flow (Prompt/Deploy)
@@ -525,4 +525,4 @@ controller.
 - Attach structured logs with `request_id`, `project_id`, and `run_id` when adding new instrumentation so downstream tooling can correlate events.
 - On a send's path, and on any other request that runs many statements, use tokio-postgres's typed calls (`query_typed`, `query_typed_one`, `query_typed_opt`, `execute_typed`) with a `typed![...]` parameter list from `src/typed_sql.rs`. Given SQL text, the untyped calls prepare each statement and wait for the answer before running it, so every statement costs two round trips to a database that is often in another region. `src/tests_send_round_trips.rs` fails when a repeat send prepares a statement on its own.
 
-For deeper integration notes (runtime providers, WebContainers, billing), see `docs/Architecture.md`.
+For deeper integration notes (runtime providers, billing), see `docs/Architecture.md`.
