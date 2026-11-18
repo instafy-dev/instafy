@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use axum::http::HeaderMap;
 
-use crate::controller_client::ControllerClient;
+use crate::controller_client::{ControllerClient, ManagedSearchClaim, ManagedSearchJob};
 use crate::controller_credential_source::ControllerCredentialSource;
 use crate::credential_lease::{CredentialLease, CredentialLeasePurpose, LeasedCredentials};
 use crate::proxy_auth::{ProxyClaims, ProxyTokenValidator};
@@ -92,6 +92,26 @@ impl ControllerIntegration {
     ) -> Result<()> {
         self.client
             .post_credential_usage(credential_id, snapshot)
+            .await
+    }
+
+    /// The controller's check before a managed job's searches run.
+    pub async fn claim_managed_web_searches(
+        &self,
+        job: &ManagedSearchJob,
+        searches: u32,
+    ) -> Result<ManagedSearchClaim> {
+        self.client.claim_managed_web_searches(job, searches).await
+    }
+
+    /// Gives back searches the controller let run and that did not search.
+    pub async fn give_back_managed_web_searches(
+        &self,
+        job: &ManagedSearchJob,
+        searches: u32,
+    ) -> Result<()> {
+        self.client
+            .give_back_managed_web_searches(job, searches)
             .await
     }
 }

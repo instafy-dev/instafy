@@ -205,6 +205,82 @@ struct ControllerStub {
     /// predates the field.
     pinned_model: Option<String>,
     upstream_base: String,
+    /// The controller's check before a managed job's searches
+    /// (runtime-controller `managed_web_search`): one message for every job.
+    web_searches: Arc<Mutex<WebSearchStub>>,
+}
+
+/// What the stub controller's web search check keeps.
+#[derive(Debug)]
+struct WebSearchStub {
+    /// `MANAGED_AI_NATIVE_WEB_SEARCH`: off refuses every search.
+    switch_on: bool,
+    /// The message's limit, and the searches it let run, less those given back.
+    limit: u64,
+    used: u64,
+    /// (job id, searches asked) of each check, and of each give-back.
+    claims: Vec<(String, u64)>,
+    given_back: Vec<(String, u64)>,
+}
+
+impl Default for WebSearchStub {
+    fn default() -> Self {
+        Self {
+            switch_on: true,
+            limit: 2,
+            used: 0,
+            claims: Vec::new(),
+            given_back: Vec::new(),
+        }
+    }
+}
+
+async fn controller_web_search_claim_stub(
+    State(stub): State<ControllerStub>,
+    headers: HeaderMap,
+    AxumJson(body): AxumJson<Value>,
+) -> impl IntoResponse {
+    let expected = format!("Bearer {LEASE_BEARER}");
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return (StatusCode::UNAUTHORIZED, AxumJson(json!({})));
+    }
+    let asked = body["searches"].as_u64().unwrap_or(0);
+    let mut searches = stub.web_searches.lock().expect("web search log");
+    searches.claims.push((
+        body["jobId"].as_str().unwrap_or_default().to_string(),
+        asked,
+    ));
+    if !searches.switch_on {
+        return (
+            StatusCode::OK,
+            AxumJson(json!({"granted": 0, "limit": searches.limit, "refused": "off"})),
+        );
+    }
+    let granted = asked.min(searches.limit.saturating_sub(searches.used));
+    searches.used += granted;
+    let mut answer = json!({"granted": granted, "limit": searches.limit});
+    if granted < asked {
+        answer["refused"] = json!("used");
+    }
+    (StatusCode::OK, AxumJson(answer))
+}
+
+async fn controller_web_search_give_back_stub(
+    State(stub): State<ControllerStub>,
+    AxumJson(body): AxumJson<Value>,
+) -> impl IntoResponse {
+    let searches = body["searches"].as_u64().unwrap_or(0);
+    let mut stored = stub.web_searches.lock().expect("web search log");
+    stored.used = stored.used.saturating_sub(searches);
+    stored.given_back.push((
+        body["jobId"].as_str().unwrap_or_default().to_string(),
+        searches,
+    ));
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Clone, Default)]
@@ -644,6 +720,7 @@ async fn spawn_stack_with_settings(
         managed_key: managed_key.map(str::to_string),
         pinned_model: pinned_model.map(str::to_string),
         upstream_base: format!("http://{upstream_addr}"),
+        web_searches: Arc::new(Mutex::new(WebSearchStub::default())),
     };
     let (controller_addr, controller_guard) = spawn_router(
         Router::new()
@@ -652,6 +729,14 @@ async fn spawn_stack_with_settings(
                 get(controller_lease_stub),
             )
             .route("/healthz", get(controller_health_stub))
+            .route(
+                "/internal/managed-web-search/claim",
+                post(controller_web_search_claim_stub),
+            )
+            .route(
+                "/internal/managed-web-search/give-back",
+                post(controller_web_search_give_back_stub),
+            )
             .with_state(controller.clone()),
     )
     .await?;

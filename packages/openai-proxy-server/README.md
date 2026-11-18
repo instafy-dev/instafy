@@ -211,14 +211,28 @@ inferred from API web-search prices.
 
 ### Native search for managed runs
 
-`PROXY_MANAGED_NATIVE_WEB_SEARCH` (off by default) lets a managed run search through
-`POST /v1/alpha/search` when the controller granted its job native search: a job-bound token
-with `native_web_search`, a `run_id` and no `credential_id`. The controller grants native search
-to managed runs only with its own `MANAGED_AI_NATIVE_WEB_SEARCH` on (off by default), so a managed
-run searches only with both settings on; `docs/Credits-Billing.md` ("Web search for Instafy AI")
-says how to turn them on in a test environment. Turning the proxy's setting off refuses every
-managed search at once with 403 `native_web_search_unavailable`. Hosted `web_search` in a model
-request stays off on the platform lane either way.
+`PROXY_MANAGED_NATIVE_WEB_SEARCH` (off by default, read when the proxy starts) lets a managed run
+search through `POST /v1/alpha/search` when the controller granted its job native search: a
+job-bound token with `native_web_search`, a `run_id` and no `credential_id`. The controller grants
+native search to managed runs only with its own `MANAGED_AI_NATIVE_WEB_SEARCH` on (off by
+default), so a managed run searches only with both settings on; `docs/Credits-Billing.md` ("Web
+search for Instafy AI") says how to turn them on in a test environment. Hosted `web_search` in a
+model request stays off on the platform lane either way.
+
+Before a managed run's searches go upstream, the proxy asks the controller how many may run
+(`POST /internal/managed-web-search/claim` with the credential-lease bearer, the job named by its
+verified token), and runs only those. The controller counts a message's searches across its jobs
+(2 a message, or 8 when the person asked for deeper research) and refuses every one while its
+`MANAGED_AI_NATIVE_WEB_SEARCH` is off, so that switch turns search off for the next search on
+every machine. Searches it let run that did not search (a search that failed) go back to it
+(`POST /internal/managed-web-search/give-back`). A managed job's search that may not run (this
+proxy's setting off, a grant renewed without `native_web_search`, the controller's refusal, or a
+controller that could not be asked) is answered, not refused: `200` with nothing searched,
+`search_usage.searches` 0, and an `output` that says why and how to answer without it, so the
+turn goes on and nothing is charged. Such a request logs one
+`[proxy] managed web search withheld {…}` line with `jobId`, `runId`, `leaseAttempt`, `asked`,
+`granted` and `reason` (`off`, `ended`, `undecided`, `used` or `unchecked`), never a query. Every
+other token without the capability is refused with 403 `native_web_search_unavailable`.
 
 A managed run's search goes through the search bridge, which works the same on either kind of
 platform credential:
@@ -241,8 +255,8 @@ platform credential:
   and says what was removed, refused or not run; `encrypted_output` is `null`. `results`, which
   codex hands to its clients and never to the model, starts with
   `{"type": "searched_queries", "queries": […]}`: the queries that searched, as they were sent
-  (not one refused, repeated, past the limit or not run, nor one whose search failed), which the
-  chat shows in place of the words codex asked for. Next comes
+  (not one refused, repeated, past the limit, withheld by the controller or not run, nor one
+  whose search failed), which the chat shows in place of the words codex asked for. Next comes
   `{"type": "search_usage", "searches": n, "input_tokens": …, "cached_input_tokens": …, "output_tokens": …}`:
   one search for each query named before it, and the tokens of their requests as the provider
   reported them, the search content among the input (0 on a ChatGPT login, whose search reports

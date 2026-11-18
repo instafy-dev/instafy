@@ -864,9 +864,12 @@ pub struct AppConfig {
     /// `MANAGED_AI_NATIVE_WEB_SEARCH`, off by default: whether a managed
     /// (Instafy AI) job's proxy grant lets it use the AI's own web search, as
     /// a person's own ChatGPT login does (see
-    /// [`crate::credentials::managed_job_allows_native_web_search`]). The
-    /// proxy serves those searches only with its own
-    /// `PROXY_MANAGED_NATIVE_WEB_SEARCH` on as well.
+    /// [`crate::credentials::managed_job_allows_native_web_search`]), and
+    /// whether the proxy's check before each search lets it run
+    /// (`managed_web_search.rs`): off, the next search on every machine
+    /// is refused, and the jobs running there go on without it. The proxy
+    /// serves those searches only with its own `PROXY_MANAGED_NATIVE_WEB_SEARCH`
+    /// on as well.
     pub managed_ai_native_web_search: bool,
     /// Controller-owned OpenAI API key for the managed lane. Proxies lease it
     /// through the internal credential-lease route under
@@ -1750,7 +1753,7 @@ impl AppConfig {
         )?;
         if managed_ai_native_web_search {
             tracing::warn!(
-                "{MANAGED_AI_NATIVE_WEB_SEARCH_ENV} is on: managed AI jobs may use the AI's own web search where the proxy allows it, and no credits are charged for those searches yet"
+                "{MANAGED_AI_NATIVE_WEB_SEARCH_ENV} is on: managed AI jobs may use the AI's own web search where the proxy allows it; the proxy asks this controller before each search, and each one is charged"
             );
         }
 

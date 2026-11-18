@@ -362,8 +362,8 @@ on. Both are off by default, and each is read at startup: a value that is not a 
 
 | Switch | Set on | Default | What it does |
 |---|---|---|---|
-| `MANAGED_AI_NATIVE_WEB_SEARCH` | the controller | off | Puts `native_web_search` in the signed proxy grant of a managed job (no credential of its own, on a run, an intent that runs the AI) when it is leased and each time its grant is renewed. The runtime then turns search on for that job's ordinary turns, never for its routing step or a browser or granted turn. |
-| `PROXY_MANAGED_NATIVE_WEB_SEARCH` | every proxy that serves managed runs | off | Lets a run with that grant search through the proxy's search bridge: OpenAI's hosted web search on the platform's API key, or, where the managed lane is a static ChatGPT login (a local stack), that login's own search, on its allowance. Each search is logged (see the proxy README). |
+| `MANAGED_AI_NATIVE_WEB_SEARCH` | the controller, the same on every node | off | Puts `native_web_search` in the signed proxy grant of a managed job (no credential of its own, on a run, an intent that runs the AI) when it is leased and each time its grant is renewed. The runtime then turns search on for that job's ordinary turns, never for its routing step or a browser or granted turn. The proxy also asks the controller before every search, and the controller refuses it while this switch is off: the live off-switch. |
+| `PROXY_MANAGED_NATIVE_WEB_SEARCH` | every proxy that serves managed runs | off | Lets a run with that grant search through the proxy's search bridge: OpenAI's hosted web search on the platform's API key, or, where the managed lane is a static ChatGPT login (a local stack), that login's own search, on its allowance. Each search is logged (see the proxy README). A machine's proxy reads it when the machine starts, and keeps it until the machine stops. |
 
 A person's own ChatGPT login is not affected by either switch: its grant follows the live login,
 as before, and its searches run on that person's plan, with no Instafy credits and no limit of
@@ -400,42 +400,53 @@ charges for it, passed through:
   turn that costs nothing (one Instafy started that ended without a reply and left nothing, a
   failed turn that left nothing) is not charged its searches either; a search step is a step that
   worked, so a turn that searched leaves something. A turn the person stopped sends no
-  completion, so its searches are not charged. Only a job that ran on Instafy AI is charged:
-  `managedAiUsed`, or an ambient evaluation whose charge waits for it to speak
-  (`managedAiBillingDeferred`), whose searches are charged even when it then declines, though its
-  tokens are not. A job on the person's own AI connection never is, whatever its completion
-  says.
+  completion, so its searches are not charged. Only a job charged as Instafy AI
+  (`managedAiUsed`) is charged its searches. A background check that may decline (an ambient
+  evaluation, whose charge waits for it to speak: `managedAiBillingDeferred`) gets no search
+  until it answers (below), and one that declines is charged nothing, its searches included. A
+  job on the person's own AI connection never is, whatever its completion says.
 - **In Credits.** The activity log shows the row as "Web search" with its credits, next to the
   turn's own row, and the graph counts it with the AI.
 
-**At most 2 searches a message.** A message's turns run at most 2 searches, or 8 when the person's
+**At most 2 searches a message.** A message runs at most 2 searches in all, or 8 when the person's
 own words in it ask to research in depth or to search further or more thoroughly (a comparison,
 reviews or a page to make do not by themselves): its routing step says so (`deeperResearch` in its
-answer; runtime-agent `managed_web_search`). The runtime keeps to it:
+answer), and its job tells the controller (`POST /agent/jobs/:job_id/deeper-research`). The
+controller keeps the message's count, and the proxy asks it before each search
+(`POST /internal/managed-web-search/claim`, runtime-controller `managed_web_search.rs`):
 
+- the count is the message's, kept with its task budget: a team plan's jobs (its lead, each
+  worker, the lead's continuation), the replies of a message to several agents, and a build
+  Instafy starts after the browser (a hand-back, with the turn whose card it carries on) share it,
+  whichever machines they run on;
 - a search sends only as many of its queries as the message has left, and the model reads that
   only the first of them ran;
 - a search with none left does not run, and the model reads, in place of its results, that the
   message has already used its web searches, to answer from what it has already found or read, to
   read a page whose address it has, and to say what it could not check; and that a message gets
-  more only when the person's own words ask for deeper research;
-- a build Instafy starts after the browser (a hand-back) goes on with the allowance of the turn
-  whose card it carries on, and a job's later attempt with its earlier attempt's, while the
-  runtime that ran them is up; a runtime started since gives the turn a new allowance;
-- a native helper, and a recovery retry of the turn, search from its turn's allowance. A retry
-  that starts afresh does not see what the earlier attempt's searches found, and has none left
-  when that attempt used them;
-- each job of a team plan (each worker, the lead's continuation) has an allowance of its own of 2,
-  since a team's jobs may run on machines of their own: a team plan's message can run 2 searches
-  for each of them.
+  more only when the person's own words ask for deeper research. Nothing is searched or charged
+  for it, and the chat shows no search;
+- a search the controller let run that failed goes back to the message
+  (`POST /internal/managed-web-search/give-back`);
+- a native helper, and a recovery retry of the turn, search from the turn's searches. A retry
+  that starts afresh, on a new thread, reads what the earlier attempt's searches answered and the
+  pages it read, and does not search: the message's searches are charged once;
+- a background check that may decline (an ambient evaluation) is not let search until it answers:
+  the model reads that, to answer, it first says in a short sentence what it will look up, and
+  then searches like any turn.
 
-Searches a call held and did not run go back to the message. The limits are the runtime's own
-(`SEARCHES_PER_MESSAGE` and `SEARCHES_FOR_DEEPER_RESEARCH` in `managed_web_search.rs`).
+The runtime keeps to the limit as well, for the turns it runs itself: a hand-back goes on with
+the allowance of the turn whose card it carries on, and a job's later attempt with its earlier
+attempt's, while the runtime that ran them is up. Searches a call held and did not run go back to
+the message. The limits are `MANAGED_WEB_SEARCHES_PER_MESSAGE` and
+`MANAGED_WEB_SEARCHES_FOR_DEEPER_RESEARCH` in `runtime-contracts` (`research.rs`).
 
 **Turning it on.** OpenAI bills the platform key for each search, and each costs the person
 credits. A controller or runtime from before the per-search charge lets searches run uncharged and
 without the allowance, and a proxy from before it reports no tokens, so searches cost their price
-alone: update all three before turning search on in production. To turn it on in a test
+alone. A proxy from before the controller's check runs a message's searches without asking it
+(each job keeps only its runtime's limit), and a proxy that asks a controller from before it runs
+none: update all three before turning search on in production. To turn it on in a test
 environment:
 
 1. **The proxy first.** Set `PROXY_MANAGED_NATIVE_WEB_SEARCH=true` where the proxies that serve
@@ -445,20 +456,23 @@ environment:
    `openai-proxy search-probe --model <MANAGED_AI_MODEL_ID>` where the key is (one billed search).
 2. **Then the controller.** Set `MANAGED_AI_NATIVE_WEB_SEARCH=true` in its environment and
    restart it; with several controller nodes, set it the same on every one of them (each reads
-   it at its own startup, and decides from it every grant it leases or renews). Its log says the
-   switch is on. Jobs leased from then on get search.
+   it at its own startup, and decides from it every grant it leases or renews and every search
+   the proxy asks it for). Its log says the switch is on. Jobs leased from then on get search.
 3. **Check one turn.** Ask Instafy AI something that needs today's information. The turn's line
    says it searched the web, its Details list the words each search sent and the pages it
    returned, the proxy logs one `[proxy] managed web search {…}` line per search, and Credits shows
    a "Web search" row with the searches' credits beside the turn's own.
 
-To turn search off at once, turn the proxy's switch off: it refuses every managed search with
-403 `native_web_search_unavailable`. Turning the controller's off only stops new grants: a job
-that started with search loses it at its next renewal, and the runtime then stops that job rather
-than change its tools in the middle of a turn. The same happens while controller nodes disagree:
-a job that started with search is stopped when a node with the switch off renews its grant, so
-change every node together. With only the controller's on, the proxy refuses each search the AI
-tries, and the turn goes on without it.
+To turn search off at once, turn the controller's switch off (set it off and restart the
+controller, every node). The proxy asks the controller before every search, so the next search on
+every machine is refused: the model reads that web search is off for now and answers without it,
+nothing is searched or charged, and the chat shows no search. Running jobs go on: none is stopped,
+and a job whose grant is renewed after that keeps running with search off for its later turns.
+While controller nodes disagree, a search is let run or refused by the node that answers it, so
+change every node together. The proxy's own switch is read when each proxy starts, and a
+machine's proxy starts with the machine, so turning it off reaches only proxies started since;
+such a proxy answers each Instafy AI search as not searched, as above, and the turn goes on. With
+only the controller's on, the proxy answers each search the AI tries the same way.
 
 ### Failed turns
 

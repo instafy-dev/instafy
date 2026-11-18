@@ -80,6 +80,46 @@ impl ControllerClient {
             .await
             .map_err(|_| JobProxyTokenError::TimedOut)?
     }
+
+    /// Tells the controller that this job's routing step read the person's own words as asking
+    /// for deeper research, so the message's Instafy AI web searches, which the controller counts
+    /// and the proxy asks it for, go up to its larger limit. Fenced to the job's lease attempt
+    /// and authenticated with the machine bearer, as a renewal is.
+    pub async fn report_deeper_research(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        lease_attempt: i32,
+    ) -> Result<()> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/deeper-research"))?;
+        let send = || {
+            http.post(url.clone())
+                .bearer_auth(self.bearer_for_agent(registration))
+                .json(&json!({ "lease_attempt": lease_attempt }))
+                .send()
+        };
+        let mut response = send().await?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) && self.refresh_credentials_once().await
+        {
+            response = send().await?;
+        }
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "the controller refused the deeper research report (status={})",
+                response.status().as_u16()
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

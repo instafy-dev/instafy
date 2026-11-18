@@ -6,14 +6,17 @@
 //!
 //! - A message may run [`SEARCHES_PER_MESSAGE`] searches, or [`SEARCHES_FOR_DEEPER_RESEARCH`]
 //!   when its routing step read the person's own words as asking for deeper research
-//!   (`deeperResearch`). A build Instafy starts after the browser (a hand-back) goes on with the
-//!   allowance of the turn whose card it carries on, and a job's later attempt with its earlier
-//!   attempt's, so the message as a whole keeps to it. Each job of a team plan (a worker, the
-//!   lead's continuation) has an allowance of its own: a team's jobs may run on machines of their
-//!   own, and this one knows only its own jobs.
+//!   (`deeperResearch`, which the job also tells the controller). The controller counts a
+//!   message's searches across all its jobs (a team plan's, its several agents', the build after
+//!   the browser), and the proxy asks it before each search, so the message as a whole keeps to
+//!   them whichever machines its jobs run on. This runtime keeps to them too, for its own jobs: a
+//!   build Instafy starts after the browser (a hand-back) goes on with the allowance of the turn
+//!   whose card it carries on, and a job's later attempt with its earlier attempt's.
 //! - The AI's search tool is wrapped ([`install`]): a call runs only as many of its queries as
 //!   are left, and says so, and a call with none left does not run: the model reads
-//!   [`limit_line`] in its place.
+//!   [`limit_line`] in its place. What the searches answered is kept ([`ManagedWebSearch::found`]),
+//!   so a run of the same turn that starts afresh (a recovery retry on a new thread) reads it
+//!   instead of searching again.
 //! - What the bridge says each search cost (its `search_usage` entry: one search per query it
 //!   searched, and the tokens of its request) is added up over the job's runs: its first, a
 //!   recovery retry, one that ended in an error or its time limit. The job's completion carries
@@ -43,9 +46,13 @@ use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
 /// The web searches one message may run with Instafy AI.
-pub(crate) const SEARCHES_PER_MESSAGE: u32 = 2;
+pub(crate) const SEARCHES_PER_MESSAGE: u32 =
+    runtime_contracts::research::MANAGED_WEB_SEARCHES_PER_MESSAGE;
 /// The web searches a message whose own words ask for deeper research may run.
-pub(crate) const SEARCHES_FOR_DEEPER_RESEARCH: u32 = 8;
+pub(crate) const SEARCHES_FOR_DEEPER_RESEARCH: u32 =
+    runtime_contracts::research::MANAGED_WEB_SEARCHES_FOR_DEEPER_RESEARCH;
+/// The most of what a message's searches answered that is kept for a run that starts afresh.
+const MAX_FOUND_CHARS: usize = 12_000;
 /// The most `search_query` entries one call of the search tool runs: the search bridge's own
 /// limit (openai-proxy-server `search_bridge::MAX_QUERIES`), as codex's tool allows.
 const QUERIES_PER_CALL: usize = 4;
@@ -138,6 +145,8 @@ struct AllowanceState {
     taken: u32,
     /// What the searches since the last report cost.
     unreported: SearchCost,
+    /// What the calls that searched answered, as the model read it, up to [`MAX_FOUND_CHARS`].
+    found: Vec<String>,
 }
 
 impl ManagedWebSearch {
@@ -184,6 +193,22 @@ impl ManagedWebSearch {
         let cost = std::mem::take(&mut self.state.lock().unreported);
         (cost != SearchCost::default()).then_some(cost)
     }
+
+    /// Keeps what a call that searched answered, as the model read it, while there is room.
+    fn keep_found(&self, text: String) {
+        let mut state = self.state.lock();
+        let kept: usize = state.found.iter().map(|text| text.chars().count()).sum();
+        let room = MAX_FOUND_CHARS.saturating_sub(kept);
+        if room > 0 && !text.trim().is_empty() {
+            state.found.push(text.chars().take(room).collect());
+        }
+    }
+
+    /// What the message's searches answered so far, as the model read it, oldest first: a run of
+    /// the same turn that starts afresh gets it in place of searching again.
+    pub(crate) fn found(&self) -> Vec<String> {
+        self.state.lock().found.clone()
+    }
 }
 
 /// Records searches that ran on `allowance`, as a search call does, for tests elsewhere in the
@@ -205,6 +230,13 @@ pub(crate) fn record_searches_for_test(
             output_tokens,
         })),
     );
+}
+
+/// Keeps `text` as what a call that searched answered on `allowance`, as a search call does, for
+/// tests elsewhere in the crate.
+#[cfg(test)]
+pub(crate) fn keep_found_for_test(allowance: &ManagedWebSearch, text: &str) {
+    allowance.keep_found(text.to_string());
 }
 
 /// The allowances of recent jobs, newest last.
@@ -253,9 +285,9 @@ pub(crate) fn usage_artifact_of_job(job_id: Uuid) -> Option<JsonValue> {
     allowance.take_unreported().map(SearchCost::to_artifact)
 }
 
-/// What the model reads in place of a search when its message has none left. It may be a run
-/// that starts afresh after an earlier one of the same message used them (a recovery retry), so
-/// it does not say that their results are at hand.
+/// What the model reads in place of a search when its message has none left. Another of the
+/// message's turns may have used them, so it does not say that their results are at hand. (A
+/// recovery retry that starts afresh reads what its first attempt found, and does not search.)
 pub(crate) fn limit_line(limit: u32) -> String {
     let more = if limit < SEARCHES_FOR_DEEPER_RESEARCH {
         " A message gets more only when the person's own words in it ask for deeper research."
@@ -409,13 +441,22 @@ impl<'call> ToolExecutor<ToolCall<'call>> for KeptSearch {
             if held < asked {
                 keep_first_queries(&mut call.payload, held as usize);
             }
+            let call_id = call.call_id.clone();
+            let payload = call.payload.clone();
             let ended = Arc::new(Mutex::new(None));
             call.turn_item_emitter = Arc::new(SearchCostWatch {
                 inner: call.turn_item_emitter.clone(),
                 ended: ended.clone(),
             });
             let result = self.inner.handle(call).await;
-            self.allowance.settle(held, ended.lock().take());
+            let ended = ended.lock().take();
+            if let (Ok(output), Some(Some(cost))) = (&result, &ended)
+                && cost.searches > 0
+            {
+                self.allowance
+                    .keep_found(output_text(output.as_ref(), &call_id, &payload));
+            }
+            self.allowance.settle(held, ended);
             match result {
                 Ok(output) if held < asked => Ok(Box::new(NotedOutput {
                     inner: output,
@@ -424,6 +465,26 @@ impl<'call> ToolExecutor<ToolCall<'call>> for KeptSearch {
                 result => result,
             }
         })
+    }
+}
+
+/// The text the model reads for a call's output.
+fn output_text(output: &dyn ToolOutput, call_id: &str, payload: &ToolPayload) -> String {
+    let ResponseInputItem::FunctionCallOutput { output, .. } =
+        output.to_response_item(call_id, payload)
+    else {
+        return String::new();
+    };
+    match output.body {
+        FunctionCallOutputBody::Text(text) => text,
+        FunctionCallOutputBody::ContentItems(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                FunctionCallOutputContentItem::InputText { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -608,6 +669,26 @@ mod tests {
         assert_eq!(deeper.hold(4), 4);
         assert_eq!(deeper.hold(4), 4);
         assert_eq!(deeper.hold(1), 0);
+    }
+
+    /// What the calls that searched answered is kept, oldest first, for a run of the same turn
+    /// that starts afresh, up to its room; blank text keeps nothing.
+    #[test]
+    fn what_the_searches_answered_is_kept_for_a_run_that_starts_afresh() {
+        let allowance = ManagedWebSearch::new(SEARCHES_PER_MESSAGE);
+        assert!(allowance.found().is_empty());
+        allowance.keep_found("Query 1: \"museum hours\"".into());
+        allowance.keep_found("  \n ".into());
+        allowance.keep_found("y".repeat(MAX_FOUND_CHARS));
+        let found = allowance.found();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], "Query 1: \"museum hours\"");
+        assert_eq!(
+            found.iter().map(|text| text.chars().count()).sum::<usize>(),
+            MAX_FOUND_CHARS
+        );
+        allowance.keep_found("z".into());
+        assert_eq!(allowance.found().len(), 2, "no room left");
     }
 
     /// A search answered by no bridge (no entry of its own) keeps what it held, and reports

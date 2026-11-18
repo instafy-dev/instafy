@@ -4422,14 +4422,13 @@ async fn reconcile_completion_usage(
             .and_then(JsonValue::as_bool)
             .unwrap_or(false)
     };
+    // The job ran on Instafy AI and is charged as such: an ambient evaluation,
+    // whose charge waits for it to speak, only once it spoke. A check that did
+    // nothing is charged neither its tokens nor its web searches, which the
+    // proxy refuses it until it answers (`managed_web_search`).
     let managed_ai_used = flag("managedAiUsed");
-    // The job ran on Instafy AI: it was charged as such, or it is an ambient
-    // evaluation whose charge waits for it to speak (dispatch stamps that only
-    // on Instafy AI). Its tokens are charged only once it is used; its web
-    // searches ran on the platform's key either way, and are charged.
-    let managed_ai_lane = managed_ai_used || flag("managedAiBillingDeferred");
     let usage = usage.filter(|_| managed_ai_used);
-    let web_search = web_search.filter(|_| managed_ai_lane);
+    let web_search = web_search.filter(|_| managed_ai_used);
     if usage.is_some() || web_search.is_some() {
         let prompt_id_for_billing = prompt_id;
         if let Some(prompt_uuid) = prompt_id_for_billing {

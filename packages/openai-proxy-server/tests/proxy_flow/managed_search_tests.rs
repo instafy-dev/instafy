@@ -18,6 +18,34 @@ fn managed_grant(enabled: bool, bound: bool) -> String {
     grant(None, enabled, bound)
 }
 
+/// A managed run's search token for the job `job_id` of the same message, as
+/// a team plan's worker has beside its lead.
+fn managed_grant_for_job(job_id: &str) -> String {
+    let claims = json!({"aud": "proxy", "iss": "runtime-controller",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "runtime_id": "22222222-2222-4222-8222-222222222222", "run_id": RUN_ID,
+        "credential_id": null, "native_web_search": true, "job_id": job_id,
+        "lease_attempt": 1, "exp": chrono::Utc::now().timestamp() + 300});
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SIGNING_SECRET.as_bytes()),
+    )
+    .unwrap()
+}
+
+/// What a search that ran nothing answers: no query searched, none charged.
+fn nothing_searched() -> Value {
+    json!([
+        {"type": "searched_queries", "queries": []},
+        {"type": "search_usage", "searches": 0, "input_tokens": 0,
+         "cached_input_tokens": 0, "output_tokens": 0},
+    ])
+}
+
+/// What the model reads when web search is off: the turn goes on without it.
+const SEARCH_OFF_LINE: &str = "Not searched: web search is off for now. Answer from what you have already found or read, read a page whose address you have with `instafy web read`, and say plainly what you could not check.";
+
 /// Codex's `web.run` request for Luna: two queries, one holding the
 /// person's e-mail address, a page to open, and the chat's tail, which
 /// codex attaches and which also holds it.
@@ -61,6 +89,9 @@ fn responses_requests(upstream: &UpstreamStub) -> Vec<Value> {
         .collect()
 }
 
+/// With the proxy's switch off, a managed run's search runs nothing: the model
+/// reads that web search is off, so its turn goes on, nothing is leased,
+/// asked or sent, and nothing is charged.
 #[tokio::test]
 #[serial]
 async fn managed_search_stays_off_until_the_proxy_switch_is_on() -> Result<()> {
@@ -79,12 +110,174 @@ async fn managed_search_stays_off_until_the_proxy_switch_is_on() -> Result<()> {
                 luna_search(),
             )
             .await?;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-            assert!(body.contains("native_web_search_unavailable"), "{body}");
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let answer: Value = serde_json::from_str(&body)?;
+            assert_eq!(
+                answer["output"],
+                format!("Web search: nothing was searched.\n\n{SEARCH_OFF_LINE}")
+            );
+            assert_eq!(answer["results"], nothing_searched());
             assert!(controller.leases.lock().unwrap().is_empty());
+            assert!(controller.web_searches.lock().unwrap().claims.is_empty());
             assert!(upstream.bodies.lock().unwrap().is_empty());
         }
     }
+    Ok(())
+}
+
+/// A message runs 2 web searches in all, whichever of its jobs asks: the
+/// controller counts them. The lead's job runs one, a worker asks for two
+/// and runs the one left, and a third, from the lead again, runs nothing:
+/// the model reads that the message has used its searches, nothing is sent
+/// upstream, and nothing is charged, so no "Web search" row is written.
+#[tokio::test]
+#[serial]
+async fn a_third_search_in_one_message_is_refused_uncharged_across_two_jobs() -> Result<()> {
+    const LEAD: &str = "77777777-7777-4777-8777-777777777777";
+    const WORKER: &str = "88888888-8888-4888-8888-888888888888";
+    let (addr, controller, upstream, _env, _guards) =
+        spawn_search_stack(StackProxy::Dynamic, Some("1")).await?;
+    upstream.respond_next.lock().unwrap().extend([
+        (StatusCode::OK, web_search_answer()),
+        (StatusCode::OK, web_search_answer()),
+    ]);
+    let mut one = luna_search();
+    one["commands"]["search_query"] = json!([{"q": "Example Reader 7 weight"}]);
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant_for_job(LEAD),
+        "/v1/alpha/search",
+        one.clone(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first: Value = serde_json::from_str(&body)?;
+    assert_eq!(first["results"][1]["searches"], 1);
+
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant_for_job(WORKER),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second: Value = serde_json::from_str(&body)?;
+    let output = second["output"].as_str().unwrap();
+    for told in [
+        "1 query sent to the search provider.",
+        "Query 1: \"Example Reader 7 weight\"",
+        "Query 2 was not searched.",
+        "Not searched: this message has already used its 2 web searches. Answer from what you have already found or read, read a page whose address you have with `instafy web read`, and say plainly what you could not check. A message gets more only when the person's own words in it ask for deeper research.",
+    ] {
+        assert!(output.contains(told), "{told}\n---\n{output}");
+    }
+    assert_eq!(
+        second["results"][0],
+        json!({"type": "searched_queries", "queries": ["Example Reader 7 weight"]})
+    );
+    assert_eq!(second["results"][1]["searches"], 1);
+
+    let (status, body) =
+        post_through_proxy(addr, &managed_grant_for_job(LEAD), "/v1/alpha/search", one).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let third: Value = serde_json::from_str(&body)?;
+    let output = third["output"].as_str().unwrap();
+    assert!(
+        output.starts_with("Web search: nothing was searched."),
+        "{output}"
+    );
+    assert!(output.contains("Query 1 was not searched."), "{output}");
+    assert!(
+        output.contains("this message has already used its 2 web searches"),
+        "{output}"
+    );
+    assert_eq!(third["results"], nothing_searched());
+    // Two searches went upstream in all, and the controller was asked before
+    // each request, for the job that asked.
+    assert_eq!(responses_requests(&upstream).len(), 2);
+    let searches = controller.web_searches.lock().unwrap();
+    assert_eq!(
+        searches.claims,
+        [
+            (LEAD.to_string(), 1),
+            (WORKER.to_string(), 2),
+            (LEAD.to_string(), 1)
+        ]
+    );
+    assert!(searches.given_back.is_empty());
+    Ok(())
+}
+
+/// Turning the controller's switch off refuses the next search at once: the
+/// running turn's search runs nothing, its model reads that web search is
+/// off, and it goes on. A job whose grant was renewed without search reads
+/// the same, and a search that failed goes back to the message.
+#[tokio::test]
+#[serial]
+async fn the_controllers_switch_off_refuses_the_next_search_and_the_turn_goes_on() -> Result<()> {
+    let (addr, controller, upstream, _env, _guards) =
+        spawn_search_stack(StackProxy::Dynamic, Some("1")).await?;
+    let private = json!({"error": {"code": "server_error", "message": "private"}});
+    upstream.respond_next.lock().unwrap().extend([
+        (StatusCode::OK, web_search_answer()),
+        (StatusCode::INTERNAL_SERVER_ERROR, private),
+    ]);
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(true, true),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // One of the two failed: it goes back to the message.
+    assert_eq!(
+        controller.web_searches.lock().unwrap().given_back,
+        [("77777777-7777-4777-8777-777777777777".to_string(), 1)]
+    );
+    assert_eq!(controller.web_searches.lock().unwrap().used, 1);
+
+    controller.web_searches.lock().unwrap().switch_on = false;
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(true, true),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body)?;
+    let output = answer["output"].as_str().unwrap();
+    assert!(
+        output.starts_with("Web search: nothing was searched."),
+        "{output}"
+    );
+    assert!(output.ends_with(SEARCH_OFF_LINE), "{output}");
+    assert_eq!(answer["results"], nothing_searched());
+    assert_eq!(
+        responses_requests(&upstream).len(),
+        2,
+        "nothing more upstream"
+    );
+
+    // A grant renewed without search, as the controller renews it once its
+    // switch is off, reads the same without asking.
+    let asked = controller.web_searches.lock().unwrap().claims.len();
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(false, true),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body)?["results"],
+        nothing_searched()
+    );
+    assert_eq!(controller.web_searches.lock().unwrap().claims.len(), asked);
+    assert_eq!(responses_requests(&upstream).len(), 2);
     Ok(())
 }
 
@@ -271,10 +464,9 @@ async fn managed_search_on_a_static_chatgpt_login_searches_each_clean_query_as_t
 #[tokio::test]
 #[serial]
 async fn managed_search_needs_the_job_grant_and_leaves_own_credentials_as_they_are() -> Result<()> {
-    let (addr, _controller, upstream, _env, _guards) =
+    let (addr, controller, upstream, _env, _guards) =
         spawn_search_stack(StackProxy::Dynamic, Some("1")).await?;
     for token in [
-        managed_grant(false, true),
         managed_grant(true, false),
         // A person's own API key gets no search, switch or not.
         grant(Some(BYO_CREDENTIAL_ID), true, true),
@@ -283,6 +475,20 @@ async fn managed_search_needs_the_job_grant_and_leaves_own_credentials_as_they_a
             post_through_proxy(addr, &token, "/v1/alpha/search", luna_search()).await?;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
+    // A managed job whose grant has no search searches nothing, and reads why.
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(false, true),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body)?["results"],
+        nothing_searched()
+    );
+    assert!(controller.web_searches.lock().unwrap().claims.is_empty());
     assert!(upstream.bodies.lock().unwrap().is_empty());
     // A person's own ChatGPT login still passes through unchanged.
     let (status, body) = post_through_proxy(
