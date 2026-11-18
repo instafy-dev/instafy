@@ -15,6 +15,12 @@
 //! that only answers get no card, and a card that could not be posted leaves the reply as the
 //! turn wrote it. A page the recovery pass made, after a first pass that changed nothing, gets
 //! its card as well: that pass ends the turn.
+//!
+//! A page that loads files from outside its folder (another page's) can't be opened: served from
+//! its own folder, it can't load them, and the binder holds its card back. In a local test (Nov 17)
+//! a build linked another chat's comparison as a sample, and its reply said "Created a …
+//! comparison page" of a page nobody could open. The reply that says such a page was made gets the
+//! runtime's own line under it, whichever pass made the page.
 
 use super::*;
 use axum::routing::get;
@@ -65,6 +71,17 @@ const RETRIED_TITLE: &str = "Porto viewpoints";
 const RETRIED_REPLY: &str = "I made a page of the Porto viewpoints.";
 /// Whether the viewpoints turn's first pass answered: its recovery pass makes the page.
 static RETRIED_FIRST_PASS_ANSWERED: AtomicBool = AtomicBool::new(false);
+const BORROWS: &str = "Make a page of the Porto hotels, like the laptop comparison.";
+const BORROWS_PAGE: &str = "sites/porto-hotels";
+const BORROWS_REPLY: &str = "Created a comparison page of the Porto hotels.";
+/// The runtime's line under the reply of a turn whose page loads files from outside its folder.
+const NOT_READY: &str =
+    "The new page isn't ready to open: it uses files from outside its own folder.";
+const RETRIED_BORROWS: &str = "Make a page of the Porto bakeries, like the laptop comparison.";
+const RETRIED_BORROWS_PAGE: &str = "sites/porto-bakeries";
+const RETRIED_BORROWS_REPLY: &str = "Created a comparison page of the Porto bakeries.";
+/// Whether the bakeries turn's first pass answered: its recovery pass makes the page.
+static RETRIED_BORROWS_FIRST_PASS_ANSWERED: AtomicBool = AtomicBool::new(false);
 
 #[test]
 fn a_page_a_turn_made_by_hand_gets_its_card_before_the_reply_via_proxy() -> Result<()> {
@@ -123,6 +140,22 @@ fn write_page(folder: &str, title: &str) -> Value {
     })
 }
 
+/// A page written by hand that links another page's style and script (`sample`'s folder), as a
+/// build that takes that page as its sample and loads its files instead of copying them.
+fn write_page_linking(folder: &str, title: &str, sample: &str) -> Value {
+    let name = sample.trim_start_matches("sites/");
+    json!({
+        "id":"tool_write","type":"function_call","name":"exec_command",
+        "call_id":"call_write","status":"completed",
+        "arguments":json!({
+            "cmd":format!(
+                "mkdir -p {folder} && printf '%s\\n' '<!doctype html><title>{title}</title><link rel=\"stylesheet\" href=\"../{name}/theme.css\"><h1>{title}</h1><script src=\"../{name}/site.js\"></script>' > {folder}/index.html"
+            ),
+            "max_output_tokens":64
+        }).to_string()
+    })
+}
+
 /// What a turn asks last, and whether it ran its command yet.
 async fn provider_request(Json(body): Json<Value>) -> axum::response::Response {
     let input = body["input"].as_array().cloned().unwrap_or_default();
@@ -149,6 +182,27 @@ async fn provider_request(Json(body): Json<Value>) -> axum::response::Response {
             response(final_json(RETRIED_REPLY))
         } else {
             response(write_page(RETRIED_PAGE, RETRIED_TITLE))
+        };
+    }
+    if asks(BORROWS) {
+        return if ran {
+            response(message(BORROWS_REPLY))
+        } else {
+            response(write_page_linking(BORROWS_PAGE, "Porto hotels", THEIR_PAGE))
+        };
+    }
+    // The bakeries page, which loads the laptop comparison's files, is made only by the recovery
+    // pass, as the viewpoints page is.
+    if asks(RETRIED_BORROWS) {
+        let first_pass = !RETRIED_BORROWS_FIRST_PASS_ANSWERED.swap(true, Ordering::SeqCst);
+        return if first_pass || ran {
+            response(final_json(RETRIED_BORROWS_REPLY))
+        } else {
+            response(write_page_linking(
+                RETRIED_BORROWS_PAGE,
+                "Porto bakeries",
+                THEIR_PAGE,
+            ))
         };
     }
     let (page, reply) = if asks(MADE) {
@@ -291,7 +345,8 @@ async fn run_case() -> Result<()> {
 
     // A stand-in `instafy`: it notes the card step, where it ran and with which credentials and
     // settings, and as the CLI does for a card it posts, writes the page in the space's record
-    // for the chat it was given; the bookshops page's card can't be posted.
+    // for the chat it was given; the bookshops page's card can't be posted, and as the binder
+    // does, it holds back the card of a page that loads files from above its folder.
     let home = PathBuf::from(std::env::var("HOME")?);
     let seen = home.join("seen");
     let bin = home.join("bin");
@@ -307,6 +362,10 @@ folder=${{3#./}}
 if [ "$folder" = '{fails}' ]; then
   echo '{{"posted":false,"title":"Porto bookshops","error":"the preview could not start"}}'
   exit 1
+fi
+if grep -q '"\.\./' "$folder/index.html"; then
+  echo '{{"posted":false,"reason":"it loads files from outside its folder"}}'
+  exit 2
 fi
 title=$(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$folder/index.html" | head -n 1)
 printf '{{"version":1,"pages":[{{"folder":"%s","title":"%s","conversationId":"%s","server":["instafy","bind"],"openedAt":"2026-11-09T00:43:40.000Z"}}]}}\n' "$folder" "$title" "$INSTAFY_CONVERSATION_ID" > .instafy/pages/pages.json
@@ -692,6 +751,60 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
         ),
         "{row}"
     );
+
+    // A page that loads the style and script of another chat's page, in a space that has that
+    // page: the step ran and the card was held back, so the page has no row in the record, and
+    // the reply that says it was made doesn't stand alone.
+    record_pages(
+        &workspace,
+        &[(THEIR_PAGE, "Three latest Framework laptops", another_chat)],
+    )?;
+    let (job, token) = turn(BORROWS)?;
+    let borrowed = run(job, None).await.context("the hotels turn failed")?;
+    assert_eq!(borrowed.summary, format!("{BORROWS_REPLY}\n\n{NOT_READY}"));
+    assert!(
+        fs::read_to_string(workspace.join(BORROWS_PAGE).join("index.html"))?
+            .contains("src=\"../laptops/site.js\""),
+        "the page loads the other page's script"
+    );
+    assert_eq!(ran().last(), Some(&card_step(BORROWS_PAGE, &token)));
+    assert_eq!(ran().len(), 4, "{:#?}", ran());
+    let rows = record()?;
+    let folders: Vec<&Value> = rows["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| &row["folder"])
+        .collect();
+    assert_eq!(folders, vec![&json!(THEIR_PAGE)], "{rows}");
+
+    // The same, made by a required change's recovery pass after a first pass that changed
+    // nothing: that pass ends the turn, and its reply gets the line too.
+    let (job, token) = turn_requiring(RETRIED_BORROWS, "required")?;
+    let retried_borrowed = run(job, None).await.context("the bakeries turn failed")?;
+    assert_eq!(
+        retried_borrowed.summary,
+        format!("{RETRIED_BORROWS_REPLY}\n\n{NOT_READY}")
+    );
+    assert!(
+        RETRIED_BORROWS_FIRST_PASS_ANSWERED.load(Ordering::SeqCst),
+        "the first pass answered"
+    );
+    assert!(
+        fs::read_to_string(workspace.join(RETRIED_BORROWS_PAGE).join("index.html"))?
+            .contains("src=\"../laptops/site.js\""),
+        "the recovery pass made the page, which loads the other page's script"
+    );
+    assert_eq!(ran().last(), Some(&card_step(RETRIED_BORROWS_PAGE, &token)));
+    assert_eq!(ran().len(), 5, "{:#?}", ran());
+    let rows = record()?;
+    let folders: Vec<&Value> = rows["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| &row["folder"])
+        .collect();
+    assert_eq!(folders, vec![&json!(THEIR_PAGE)], "{rows}");
 
     drop(settings);
     drop(proxy_guard);
