@@ -3653,6 +3653,74 @@ pub(crate) fn provider_thread_restorable_on_this_runtime(
             .is_some_and(|rollout_path| rollout_path.exists())
 }
 
+/// How many input tokens the latest request of the thread a stored state names for `lane` sent,
+/// as Codex recorded it in that thread's rollout: the last usage of its newest `token_count`
+/// event that carries usage, which is how Codex restores a resumed thread's token count
+/// (`last_token_info_from_rollout`), whichever run of the thread sent it (a browser turn's second
+/// pass runs on its turn's thread, and the state its job saves is the first run's). None when the
+/// state names no rollout on this runtime's disk, or the rollout records no usage. Read from the
+/// rollout's end, where its latest requests are.
+pub(crate) fn thread_last_request_input_tokens(
+    state: Option<&JsonValue>,
+    lane: ThreadLane,
+) -> Option<u64> {
+    let rollout = extract_rollout_path_from_provider_state(state, lane)?;
+    last_request_input_tokens_in_rollout(&rollout)
+}
+
+/// How much of a rollout's end [`thread_last_request_input_tokens`] reads first. A window that
+/// holds no usage is read again four times as long, up to the whole rollout.
+const ROLLOUT_TAIL_BYTES: u64 = 64 * 1024;
+
+fn last_request_input_tokens_in_rollout(rollout: &Path) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(rollout).ok()?;
+    let length = file.metadata().ok()?.len();
+    let mut window = ROLLOUT_TAIL_BYTES;
+    loop {
+        let start = length.saturating_sub(window);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail).ok()?;
+        let lines: Vec<&[u8]> = tail.split(|byte| *byte == b'\n').collect();
+        // A window that starts inside the rollout may start inside a line.
+        let whole = if start > 0 { &lines[1..] } else { &lines[..] };
+        if let Some(tokens) = whole
+            .iter()
+            .rev()
+            .find_map(|line| request_input_tokens(line))
+        {
+            return Some(tokens);
+        }
+        if start == 0 {
+            return None;
+        }
+        window = window.saturating_mul(4);
+    }
+}
+
+/// The input tokens of the request a rollout line records: a `token_count` event that carries
+/// usage (one that carries only rate limits records none).
+fn request_input_tokens(line: &[u8]) -> Option<u64> {
+    const TOKEN_COUNT: &[u8] = b"\"token_count\"";
+    if !line
+        .windows(TOKEN_COUNT.len())
+        .any(|window| window == TOKEN_COUNT)
+    {
+        return None;
+    }
+    let mut item: JsonValue = serde_json::from_slice(line).ok()?;
+    if item.get("type").and_then(JsonValue::as_str) != Some("event_msg") {
+        return None;
+    }
+    match serde_json::from_value::<EventMsg>(item.get_mut("payload")?.take()).ok()? {
+        EventMsg::TokenCount(count) => {
+            u64::try_from(count.info?.last_token_usage.input_tokens).ok()
+        }
+        _ => None,
+    }
+}
+
 /// The provider state `execute_inner` saves after the stored thread could not be restored and
 /// the run started a fresh thread whose rollout is `rollout_path`. Job tests use it to carry a
 /// turn's saved state into the next turn without running Codex.
@@ -14370,6 +14438,82 @@ required = true
                 rate_limits: None,
             }),
         }
+    }
+
+    /// A thread's latest request is what its rollout's newest `token_count` event with usage
+    /// says, however far from the rollout's end that event is, past a count with rate limits
+    /// alone and the long answer after it. A rollout with no usage, one not on this disk and a
+    /// state that names none give nothing.
+    #[test]
+    fn a_threads_latest_request_is_read_from_its_rollouts_newest_token_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rollout = tmp.path().join("rollout.jsonl");
+        let event = |msg: EventMsg| {
+            json!({
+                "timestamp": "2026-11-17T14:46:54.441Z",
+                "type": "event_msg",
+                "payload": serde_json::to_value(msg).unwrap(),
+            })
+            .to_string()
+        };
+        let count = |input: i64| {
+            event(EventMsg::TokenCount(TokenCountEvent {
+                info: Some(TokenUsageInfo {
+                    total_token_usage: usage(input * 10, input * 9, 1_000),
+                    last_token_usage: usage(input, input - 400, 100),
+                    last_usage_includes_reasoning: None,
+                    model_context_window: Some(258_400),
+                }),
+                rate_limits: None,
+            }))
+        };
+        let limits_only = event(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        }));
+        let long_line = |kind: &str, chars: usize| {
+            json!({
+                "timestamp": "2026-11-17T14:46:54.457Z",
+                "type": kind,
+                "payload": {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "x".repeat(chars)},
+                ]},
+            })
+            .to_string()
+        };
+        let write = |lines: &[String]| fs::write(&rollout, lines.join("\n") + "\n").unwrap();
+        let state = json!({
+            "sharedBrowserThreadId": ThreadId::new().to_string(),
+            "sharedBrowserRolloutPath": rollout.display().to_string(),
+        });
+        let read = || thread_last_request_input_tokens(Some(&state), ThreadLane::SharedBrowser);
+
+        // Far from the end: the first window holds only the answer, the next starts inside the
+        // thread's first lines.
+        write(&[
+            long_line("session_meta", 300 * 1024),
+            count(13_701),
+            count(113_864),
+            limits_only.clone(),
+            long_line("response_item", 100 * 1024),
+        ]);
+        assert_eq!(read(), Some(113_864));
+        // Near it, in a short rollout read whole.
+        write(&[count(54_301), limits_only.clone()]);
+        assert_eq!(read(), Some(54_301));
+        // The building lane's thread is another rollout, which this state doesn't name.
+        assert_eq!(
+            thread_last_request_input_tokens(Some(&state), ThreadLane::Building),
+            None
+        );
+        write(&[long_line("response_item", 10), limits_only]);
+        assert_eq!(read(), None);
+        fs::remove_file(&rollout).unwrap();
+        assert_eq!(read(), None);
+        assert_eq!(
+            thread_last_request_input_tokens(None, ThreadLane::SharedBrowser),
+            None
+        );
     }
 
     fn turn_complete(turn_id: &str) -> Event {

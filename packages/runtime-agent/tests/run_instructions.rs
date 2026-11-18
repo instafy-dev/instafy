@@ -1661,6 +1661,214 @@ async fn run_browser_flows(harness: &mut Harness) {
     run_messages_the_browser_could_not_make(harness).await;
     run_a_fill_in_after_a_reply(harness).await;
     run_parts_that_open_no_page(harness).await;
+    run_messages_after_a_long_browser_thread(harness).await;
+}
+
+/// Chain J: a comparison, as a local test asked it (Nov 17). Its browser part read three long
+/// reviews, and its thread's latest request sent about 114k input tokens; the fill-in's browser
+/// part resumed that thread and made 25 requests of 117k to 193k tokens, for 49 credits.
+const J_COMPARE: &str = "Compare the three latest laptops of one maker: screen, battery, weight and price, with two independent reviews each, as a comparison page.";
+const J_FILL_IN: &str = "Fill in what's still missing.";
+/// The comparison's browser part's own words, in the note its findings moved into: they claim
+/// reviews no finding gives, as that local test's fill-in claimed second reviews.
+const J_WORDS: &str =
+    "Read 2 pages. I also found second independent reviews for the Twelve and the Sixteen.";
+const J_FACT: &str = "The Thirteen weighs 1.4 kg and costs 1,799 EUR.";
+const J_REVIEW_FACT: &str = "The review measured 11 hours of battery life.";
+/// How many input tokens each chat's browser thread's latest request sent: J's as that local
+/// test's did, a short one, and a long one under this test's compaction limit, which the
+/// Continue's browser part resumes.
+const J_LONG: u64 = 114_000;
+const J_SHORT: u64 = 20_000;
+const J_CONTINUED: u64 = 75_000;
+/// A new browser thread's first request stays under this many tokens.
+const J_NEW_THREAD_MAX_TOKENS: u64 = 30_000;
+
+/// J: J1 is the comparison, which the routing step sends to the browser with a build after it,
+/// and J2 its browser part, whose thread's latest request sends 114k input tokens; J3 is "Fill
+/// in what's still missing.", sent to the browser again, and J4 its browser part, which starts a
+/// new browser thread from the chat's replay. In a chat whose browser thread is short (J5 to J8)
+/// the next message's browser part resumes it. In one whose browser part the person stopped (J9
+/// to J12), the Continue under the Stop sends the comparison again, and its browser part resumes
+/// the long thread. The controller lists each chat as Studio left it: the comparison, its card,
+/// its browser part's request and the note its findings moved into, then the next message and
+/// its card.
+async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
+    for (labels, page, latest) in [
+        (["J1", "J2", "J3", "J4"], "page-j1", J_LONG),
+        (["J5", "J6", "J7", "J8"], "page-j5", J_SHORT),
+        (["J9", "J10", "J11", "J12"], "page-j9", J_CONTINUED),
+    ] {
+        let chat = Uuid::new_v4();
+        let continues = latest == J_CONTINUED;
+        let state = harness
+            .run(
+                labels[0],
+                Spec::new(chat, Lane::Default, None)
+                    .asking(J_COMPARE)
+                    .routed(true),
+            )
+            .await;
+        let (card, first_run) = (
+            harness.turn(labels[0]).job_id,
+            harness.turn(labels[0]).run_id,
+        );
+        let task = routed_task(harness, labels[0]);
+        let mut metadata = routed_card_turn(card);
+        metadata["browserHandsBack"] = json!(true);
+        let mut part = Spec::new(chat, Lane::Shared(page), state)
+            .asking(task)
+            .with_metadata(metadata.clone());
+        part.script = vec![
+            Step::Final {
+                total_tokens: latest + 10,
+            };
+            2
+        ];
+        let state = harness.run(labels[1], part).await;
+        let browser_run = harness.turn(labels[1]).run_id;
+        let mut history = vec![
+            json!({"role": "user", "content": format!("[[{}]] {J_COMPARE}", labels[0]), "runId": first_run}),
+            json!({"role": "assistant", "content": "", "runId": first_run, "metadata": {
+                "jobId": card, "messageType": "action_request",
+                "details": {"browserRequest": {"task": task, "routed": true, "continueBuilding": true}},
+            }}),
+            json!({"role": "user", "content": format!("[[{}]] {task}", labels[1]), "runId": browser_run, "lane": "browser",
+                   "metadata": {"prompt_metadata": metadata}}),
+        ];
+        let mut next = Spec::new(chat, Lane::Default, state.clone()).routed(true);
+        if continues {
+            history.push(json!({"role": "assistant", "content": "Stopped this run.", "runId": browser_run, "metadata": {
+                "source": "controller", "kind": "run_cancellation", "details": {
+                    "reason": "Stopped", "runIds": [browser_run], "stopRequested": true, "actorUserId": INITIATOR,
+                },
+            }}));
+            next = next
+                .asking(J_COMPARE)
+                .with_metadata(json!({"continuedRunIds": [browser_run]}));
+        } else {
+            let lines = [
+                json!({"url": "https://laptops.example/thirteen", "title": "Thirteen", "facts": [J_FACT]}),
+                json!({"url": "https://reviews.example/thirteen", "title": "Thirteen review", "facts": [J_REVIEW_FACT]}),
+                json!({"missing": ["Sixteen weight", "Twelve second independent review"]}),
+            ];
+            let note = std::iter::once(J_WORDS.to_string())
+                .chain(lines.iter().map(Value::to_string))
+                .collect::<Vec<_>>()
+                .join("\n");
+            history.push(json!({"role": "assistant", "content": note, "runId": browser_run, "lane": "browser", "metadata": {
+                "source": "agent", "kind": "update", "messageType": "status",
+                "details": {"kind": "agent_message", "browserFindings": {"pages": 2, "pagesRead": 2}},
+            }}));
+            next = next.asking(J_FILL_IN);
+        }
+        let continued = next.metadata.clone();
+        harness.run(labels[2], next).await;
+        let (next_card, next_run) = (
+            harness.turn(labels[2]).job_id,
+            harness.turn(labels[2]).run_id,
+        );
+        let next_task = routed_task(harness, labels[2]);
+        history.push(json!({
+            "role": "user",
+            "content": format!("[[{}]] {}", labels[2], if continues { J_COMPARE } else { J_FILL_IN }),
+            "runId": next_run,
+            "metadata": {"prompt_metadata": continued},
+        }));
+        history.push(json!({"role": "assistant", "content": "", "runId": next_run, "metadata": {
+            "jobId": next_card, "messageType": "action_request",
+            "details": {"browserRequest": {"task": next_task, "routed": true, "continueBuilding": true}},
+        }}));
+        let mut metadata = routed_card_turn(next_card);
+        metadata["browserHandsBack"] = json!(true);
+        harness
+            .run(
+                labels[3],
+                Spec::new(chat, Lane::Shared(page), state)
+                    .asking(next_task)
+                    .with_metadata(metadata)
+                    .with_history(json!(history)),
+            )
+            .await;
+    }
+}
+
+/// The task of the card a message's routing step posted, which its browser part asks.
+fn routed_task(harness: &Harness, label: &str) -> &'static str {
+    let task = harness
+        .turn(label)
+        .final_messages
+        .first()
+        .and_then(|card| card["metadata"]["details"]["browserRequest"]["task"].as_str())
+        .unwrap_or_else(|| panic!("{label} posted no card"))
+        .to_string();
+    Box::leak(task.into_boxed_str())
+}
+
+/// The tokens a request sends, as a provider would count them (`print_costs`).
+fn request_tokens(request: &Value) -> u64 {
+    tokens_of(
+        head_bytes(request)
+            + input_bytes(
+                request["input"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            ),
+    )
+}
+
+/// (xv) Chain J: a new message's browser part leaves a browser thread whose latest request sent
+/// more than 60k input tokens, as Codex recorded it, and starts a new thread from the chat's
+/// replay, whose first request is a fraction of that and carries the chat's findings and what
+/// its browser turns didn't find, quoted as page data, never their words. A short thread, and
+/// the thread a Continue under a Stop goes on with, are resumed.
+fn check_messages_after_a_long_browser_thread(harness: &Harness) -> Result<()> {
+    let thread_of =
+        |label: &str| first_sampling_request(harness.turn(label))["prompt_cache_key"].clone();
+    // Its cost line prints the same count.
+    let fresh = first_sampling_request(harness.turn("J4"));
+    let tokens = request_tokens(fresh);
+    ensure!(
+        harness
+            .turn("J2")
+            .requests
+            .iter()
+            .all(|request| request["prompt_cache_key"] != fresh["prompt_cache_key"]),
+        "J4 resumed J2's browser thread, whose latest request sent {J_LONG} tokens"
+    );
+    ensure!(
+        tokens < J_NEW_THREAD_MAX_TOKENS,
+        "J4's first request sends about {tokens} tokens"
+    );
+    let text = input_text(fresh);
+    for quoted in [
+        J_FACT,
+        J_REVIEW_FACT,
+        "I didn't find Sixteen weight",
+        "I didn't find Twelve second independent review",
+        "[[J3]] Fill in what's still missing.",
+    ] {
+        ensure!(text.contains(quoted), "J4 never read: {quoted}");
+    }
+    ensure!(
+        !text.contains("I also found second independent reviews"),
+        "J4 read its chat's browser part's own words"
+    );
+    for (later, earlier, why) in [
+        ("J8", "J6", "a short browser thread"),
+        (
+            "J12",
+            "J10",
+            "the thread a Continue under a Stop goes on with",
+        ),
+    ] {
+        ensure!(
+            thread_of(later) == thread_of(earlier),
+            "{later} did not resume {why} ({earlier}'s)"
+        );
+    }
+    Ok(())
 }
 
 /// What a message typed in the chat right after a browser turn asks (chain N). A local test,
@@ -3022,6 +3230,8 @@ fn check(harness: &Harness) -> Result<()> {
     check_messages_the_browser_could_not_make(harness)?;
     check_a_fill_in_after_a_reply(harness)?;
     check_parts_that_open_no_page(harness)?;
+    // (xv) A new message after a long browser thread.
+    check_messages_after_a_long_browser_thread(harness)?;
     // (xii) What a browser turn is told it can do.
     check_browser_turns_are_told_only_what_they_can_use(harness)?;
     // (xiii) The tools a browser turn is given, by the names its run text gives them.

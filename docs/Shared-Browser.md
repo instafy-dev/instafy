@@ -1002,7 +1002,9 @@ skills its words route, as a fresh thread's snapshot would carry them: each
 whole, but for the sections and fields a turn with no shell leaves out. A chat's
 browser thread holds only its browser turns: each starts from what it is asked
 (the person's words or a card's task), and a new or lost browser thread is
-given the chat's earlier browser turns and, of the building turns, only the
+given the chat's earlier browser turns, what each was asked and what it found,
+quoted as page data as a building turn reads it (its findings and what it
+didn't find, never its own words), and, of the building turns, only the
 person's own messages that still stand, in their words: never Octo's replies
 there, files, command output or the lines that describe what the person
 attached, nor Studio's words for a Continue, a site's Ask Octo (whose words the
@@ -1017,7 +1019,14 @@ change of, since the first of those turns; a
 restored one is given those since its own last turn, and one that read a
 message of the person's they then stopped, or whose change they undid, starts
 again from the replay, which leaves it out
-([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). Codex withdraws the space's `AGENTS.md` from a
+([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). The browser part
+of a new message the routing step sent to the browser starts again from the
+replay too once its thread's latest request sent more than 60k input tokens,
+as Codex recorded it in the thread's rollout: each request of a resumed thread
+sends every page it read again. A shorter thread is resumed, and so are the
+turns of one message: its second pass, a Continue under a Stop and a Let Octo
+continue. The browser's tabs and a page the person signs in on are no part of
+a thread. Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
 a fact no page read this turn states, where it looked for what it didn't find or

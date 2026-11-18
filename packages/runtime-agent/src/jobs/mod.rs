@@ -767,6 +767,66 @@ fn leave_thread_holding_a_stopped_request(
     (Some(JsonValue::Object(map)), left)
 }
 
+/// A new message's routed browser part starts a new browser thread once the chat's browser
+/// thread's latest request sent more than this many input tokens
+/// ([`leave_a_long_browser_thread_for_a_new_message`]).
+const LONG_BROWSER_THREAD_INPUT_TOKENS: u64 = 60_000;
+
+/// A chat's browser thread holds every page its browser turns read, and each request of a turn
+/// that resumes it sends them all again. A comparison's fill-in resumed a thread whose latest
+/// request was about 114k tokens, made 25 requests of 117k to 193k tokens, nearly all cached, and
+/// cost 49 credits; the seven browser parts of that local test that resumed their chat's thread
+/// cost 122 of its 252 credits (Nov 17). So the browser part of a new message the routing step
+/// sent to the browser (`browser_hand_back::carries_on_a_routed_card`) leaves a thread whose
+/// latest request sent more than [`LONG_BROWSER_THREAD_INPUT_TOKENS`]
+/// (`codex::thread_last_request_input_tokens`): the lane's keys go, as after a Stop
+/// ([`leave_thread_holding_a_stopped_request`]), and the turn starts a new thread from the chat's
+/// replay, which gives it the chat's browser turns, what each was asked and, quoted as builds
+/// read them, its findings and what it didn't find (`conversation_context::parse_lane_history`).
+/// A shorter thread is cheap and holds what the chat's last browser turn just saw, so it is
+/// resumed.
+/// The turns of one message keep their thread: a second pass and the wrap-up run on their turn's
+/// own thread and never come here, and a Continue under a Stop sends the stopped request again
+/// (`conversation_context::routed_card_answers_a_new_message`), as Let Octo continue and a
+/// building turn's card carry on a request of their own. The browser itself (its tabs, a page
+/// the person signs in on) is no part of a thread, and the building thread is untouched. Returns
+/// the state and, when the thread was left, how many input tokens its latest request sent.
+fn leave_a_long_browser_thread_for_a_new_message(
+    state: Option<JsonValue>,
+    job: &LeaseJob,
+    lane: ThreadLane,
+    last_request_input_tokens: impl FnOnce(Option<&JsonValue>) -> Option<u64>,
+) -> (Option<JsonValue>, Option<u64>) {
+    if lane != ThreadLane::SharedBrowser {
+        return (state, None);
+    }
+    let Some(card) = job
+        .payload
+        .get("metadata")
+        .filter(|metadata| browser_hand_back::carries_on_a_routed_card(metadata))
+        .and_then(|metadata| metadata.pointer("/browserCardTurn/cardJobId"))
+        .and_then(JsonValue::as_str)
+    else {
+        return (state, None);
+    };
+    if !conversation_context::routed_card_answers_a_new_message(
+        job.payload.get("conversation_history"),
+        card,
+    ) {
+        return (state, None);
+    }
+    let Some(tokens) = last_request_input_tokens(state.as_ref())
+        .filter(|tokens| *tokens > LONG_BROWSER_THREAD_INPUT_TOKENS)
+    else {
+        return (state, None);
+    };
+    let Some(JsonValue::Object(mut map)) = state else {
+        return (state, None);
+    };
+    let left = leave_lane_thread(&mut map, lane).then_some(tokens);
+    (Some(JsonValue::Object(map)), left)
+}
+
 /// Takes the lane's thread out of a state, so a run of the lane starts a new one: every key of
 /// the thread goes, at the top and in a nested `codex` state. Says whether the state named one.
 fn leave_lane_thread(map: &mut JsonMap<String, JsonValue>, lane: ThreadLane) -> bool {
@@ -8380,6 +8440,21 @@ impl JobProcessor {
                 job_id = %job.id,
                 lane = thread_lane.name(),
                 "the lane's thread holds a request or message the person stopped or undid; this turn starts a new thread from the chat's replay"
+            );
+        }
+        let (stored_provider_conversation_state, left_long_browser_thread) =
+            leave_a_long_browser_thread_for_a_new_message(
+                stored_provider_conversation_state,
+                job,
+                thread_lane,
+                |state| crate::codex::thread_last_request_input_tokens(state, thread_lane),
+            );
+        if let Some(last_request_input_tokens) = left_long_browser_thread {
+            tracing::info!(
+                job_id = %job.id,
+                lane = thread_lane.name(),
+                last_request_input_tokens,
+                "the chat's browser thread is long; this new message's browser part starts a new thread from the chat's replay"
             );
         }
         let final_output_mode = final_output_mode_for_runtime_job(
@@ -27293,6 +27368,182 @@ mod tests {
                 ThreadLane::Building
             ),
             (Some(saved), false)
+        );
+    }
+
+    /// The browser part of a new message the routing step sent to the browser leaves a browser
+    /// thread whose latest request sent more than 60k input tokens: only the browser lane's keys
+    /// go, so the run starts a new browser thread from the chat's replay with the building thread
+    /// riding along. A shorter thread is resumed, and so is the thread of a turn that carries on
+    /// a request of its own: a Continue under a Stop, a Let Octo continue, a building turn's card.
+    /// Only a new message's routed browser part reads the thread's rollout. A local test (Nov 17):
+    /// a comparison's fill-in resumed a thread whose latest request was about 114k tokens, and its
+    /// browser part cost 49 credits.
+    #[test]
+    fn a_new_messages_browser_part_leaves_a_long_browser_thread() {
+        let tmp = tempdir().expect("temp dir");
+        let rollout = tmp.path().join("browser.jsonl");
+        fs::write(&rollout, "").expect("write rollout");
+        let building = Uuid::new_v4().to_string();
+        let browser = Uuid::new_v4().to_string();
+        let state = json!({
+            "provider": "codex-embedded",
+            "defaultThreadId": building,
+            "threadId": building,
+            "defaultThreadMode": "strict_structured",
+            "sharedBrowserThreadId": browser,
+            "sharedBrowserRolloutPath": rollout.display().to_string(),
+            "sharedBrowserThreadRestoreFailed": false,
+            "sharedBrowserHistoryReplayRequired": false,
+            "historyReplayRequired": false,
+        });
+        let card_turn = |card: &str| {
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": format!("job:{card}"),
+                "browserHandsBack": true,
+                "browserCardTurn": {"version": 1, "cardJobId": card, "routed": true},
+            })
+        };
+        let mut history = vec![
+            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-1"}),
+            json!({"role": "assistant", "content": "", "runId": "run-1", "metadata": {"jobId": "card-1", "messageType": "action_request", "details": {"browserRequest": {"task": "Compare the three latest laptops, as a comparison page.", "routed": true}}}}),
+            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-2", "lane": "browser", "metadata": {"prompt_metadata": card_turn("card-1")}}),
+            json!({"role": "assistant", "content": "{\"url\":\"https://maker.example/\",\"title\":\"Laptops\",\"facts\":[\"Lists three laptops.\"]}", "runId": "run-2", "lane": "browser", "metadata": {"details": {"browserFindings": {"pages": 1, "pagesRead": 1}}}}),
+            json!({"role": "user", "content": "Continue building with what the browser turn found.", "runId": "run-3"}),
+            json!({"role": "assistant", "content": "Built the comparison page.", "runId": "run-3", "metadata": {"jobId": "build-1"}}),
+            json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-4"}),
+            json!({"role": "assistant", "content": "", "runId": "run-4", "metadata": {"jobId": "card-2", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}}),
+        ];
+        let job_with = |history: &[JsonValue], metadata: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({"conversation_history": history, "metadata": metadata}),
+            )
+        };
+        let fill_in = job_with(&history, card_turn("card-2"));
+        let long = |_: Option<&JsonValue>| Some(113_864_u64);
+
+        let (left_state, left) = leave_a_long_browser_thread_for_a_new_message(
+            Some(state.clone()),
+            &fill_in,
+            ThreadLane::SharedBrowser,
+            long,
+        );
+        assert_eq!(left, Some(113_864));
+        let left_state = left_state.expect("state");
+        for key in ThreadLane::SharedBrowser.thread_state_keys() {
+            assert!(left_state.get(*key).is_none(), "{key}: {left_state}");
+        }
+        for key in ["defaultThreadId", "threadId", "defaultThreadMode"] {
+            assert_eq!(left_state[key], state[key], "{key}");
+        }
+        let (for_run, _) = provider_conversation_state_for_this_runtime(
+            Some(left_state.clone()),
+            ThreadLane::SharedBrowser,
+        );
+        assert!(!provider_state_claims_restored_thread(
+            for_run.as_ref(),
+            ThreadLane::SharedBrowser
+        ));
+
+        // The thread the rollout says it reads: its latest request, as Codex recorded it.
+        let unchanged = (Some(state.clone()), None);
+        let reads_the_rollout = |state: Option<&JsonValue>| {
+            crate::codex::thread_last_request_input_tokens(state, ThreadLane::SharedBrowser)
+        };
+        assert_eq!(
+            leave_a_long_browser_thread_for_a_new_message(
+                Some(state.clone()),
+                &fill_in,
+                ThreadLane::SharedBrowser,
+                reads_the_rollout
+            ),
+            unchanged.clone(),
+            "an empty rollout records no request"
+        );
+        // A short thread is resumed: what the chat's last browser turn saw is still in it.
+        for tokens in [20_000, LONG_BROWSER_THREAD_INPUT_TOKENS] {
+            assert_eq!(
+                leave_a_long_browser_thread_for_a_new_message(
+                    Some(state.clone()),
+                    &fill_in,
+                    ThreadLane::SharedBrowser,
+                    |_| Some(tokens)
+                ),
+                unchanged.clone(),
+                "{tokens}"
+            );
+        }
+        // No browser thread yet: nothing to leave.
+        assert_eq!(
+            leave_a_long_browser_thread_for_a_new_message(
+                None,
+                &fill_in,
+                ThreadLane::SharedBrowser,
+                long
+            ),
+            (None, None)
+        );
+
+        // Turns that carry on a request of their own keep the thread, and never read its rollout.
+        let never = |_: Option<&JsonValue>| -> Option<u64> { panic!("read the thread's rollout") };
+        let building_turn = job_with(&history, json!({}));
+        let let_octo_continue = job_with(
+            &history,
+            json!({"browserTransport": "shared", "browserContinuesRunId": Uuid::new_v4().to_string()}),
+        );
+        let building_turns_card = job_with(
+            &history,
+            json!({"browserTransport": "shared", "browserRequestOf": "job:build-1", "browserHandsBack": true}),
+        );
+        for (job, lane) in [
+            (&building_turn, ThreadLane::Building),
+            (&fill_in, ThreadLane::Building),
+            (&let_octo_continue, ThreadLane::SharedBrowser),
+            (&building_turns_card, ThreadLane::SharedBrowser),
+        ] {
+            assert_eq!(
+                leave_a_long_browser_thread_for_a_new_message(
+                    Some(state.clone()),
+                    job,
+                    lane,
+                    never
+                ),
+                unchanged.clone()
+            );
+        }
+        // A Continue under a Stop sends the stopped request again, as a message of its own whose
+        // card the routing step posts: its browser part goes on with what that request's turn
+        // did on the thread.
+        history.insert(
+            6,
+            json!({"role": "assistant", "content": "Stopped this run.", "runId": "run-4", "metadata": {
+                "source": "controller", "kind": "run_cancellation", "details": {
+                    "reason": "Stopped", "runIds": ["run-4"], "stopRequested": true, "actorUserId": "person-1",
+                },
+            }}),
+        );
+        history.push(json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-5", "metadata": {"prompt_metadata": {"continuedStopMessageId": "stop-1", "continuedRunIds": ["run-4"]}}}));
+        history.push(json!({"role": "assistant", "content": "", "runId": "run-5", "metadata": {"jobId": "card-3", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}}));
+        assert_eq!(
+            leave_a_long_browser_thread_for_a_new_message(
+                Some(state.clone()),
+                &job_with(&history, card_turn("card-3")),
+                ThreadLane::SharedBrowser,
+                never
+            ),
+            unchanged.clone()
+        );
+        // A card the history doesn't show is no message to start again for.
+        assert_eq!(
+            leave_a_long_browser_thread_for_a_new_message(
+                Some(state.clone()),
+                &job_with(&history, card_turn("card-9")),
+                ThreadLane::SharedBrowser,
+                never
+            ),
+            unchanged
         );
     }
 
