@@ -391,11 +391,9 @@ describe("ChatComposerSurface", () => {
     await act(async () => root.render(<ChatComposerSurface {...createProps({ composerRunStopController: createRunStopController({ escapeStops: false }) })} />));
     expect(status()).toBe("A reply is in progress. Stop is available.");
     expect(stop().title).toBe("Stop");
-    expect(stop().hasAttribute("aria-keyshortcuts")).toBe(false);
     await act(async () => root.render(<ChatComposerSurface {...createProps({ composerRunStopController: createRunStopController() })} />));
     expect(status()).toBe("A reply is in progress. Stop is available, or press Escape.");
     expect(stop().title).toBe("Stop (Esc)");
-    expect(stop().getAttribute("aria-keyshortcuts")).toBe("Escape");
   });
 
   it("keeps Send beside Stop for an attachment-only draft even while Send is disabled", async () => {

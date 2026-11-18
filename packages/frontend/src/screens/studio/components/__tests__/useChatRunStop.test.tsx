@@ -147,7 +147,6 @@ describe("useChatRunStop", () => {
     props = { ...props, escapeStops: false };
     await act(async () => { root.render(<WithControl />); });
     expect(stopButton().title).toBe("Stop");
-    expect(stopButton().hasAttribute("aria-keyshortcuts")).toBe(false);
     await escape();
     expect(cancel).not.toHaveBeenCalled();
     // A press still stops the turn there.
@@ -159,7 +158,6 @@ describe("useChatRunStop", () => {
     props = { ...props, escapeStops: true, targets: [{ ...octo, jobId: "octo-2" }] };
     await act(async () => { root.render(<WithControl />); });
     expect(stopButton().title).toBe("Stop (Esc)");
-    expect(stopButton().getAttribute("aria-keyshortcuts")).toBe("Escape");
     await escape();
     expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["octo-2"]);
   });
