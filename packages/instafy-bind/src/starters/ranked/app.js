@@ -120,7 +120,7 @@
     var facts = items.map(function (i) { return i.price; }).filter(Boolean);
     if (facts.length < 2) return null;
     var page = function (f) { var u = site.safeUrl(f.url); return u ? u.split("#")[0] : "src:" + f.src; };
-    var key = function (f) { return f && f.src && !f.est && site.valueText(f) ? [page(f), f.asof || f.date || "", f.list ? "list" : ""].join("|") : null; };
+    var key = function (f) { return f && f.src && !f.est && site.valueText(f) ? [page(f), f.asof || f.date || "", f.list ? "list" : "", f.viewer || ""].join("|") : null; };
     var k = key(facts[0]);
     return k && facts.every(function (f) { return key(f) === k; }) ? facts[0] : null;
   }

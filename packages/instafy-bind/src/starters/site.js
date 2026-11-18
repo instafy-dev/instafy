@@ -13,7 +13,9 @@
  *   "url" is the page it was read on and "date" the day it was read; each value cites them: "checked 17 Oct on
  *   maker.com ↗" (a price: "seen 17 Oct on shop.com ↗"). Optional "asof": the source's own date, shown in place of
  *   "date" ("seen 5 Aug on …"); a price with an "asof" over 30 days old is muted and says "may have changed", like a
- *   live price past its time. A value that only says nothing is known ("—", "n/a", "?", "unknown") is no value.
+ *   live price past its time. "viewer": "provider search" marks a fact only a web search gave (what the search
+ *   provider wrote, not a page that was read): it reads "from a web search, 17 Oct · maker.com ↗", never "checked"
+ *   or "seen". A value that only says nothing is known ("—", "n/a", "?", "unknown") is no value.
  *   site.trust(fact | record, opts) draws the one trust line: "checked 17 Oct on maker.com ↗", "at Store ↗ · checked
  *   4 min ago", "Estimate", "Price not checked" (nobody checked it), "Not found · checked 16 Oct on maker.com ↗" (a
  *   fact with a source and no value: the source was read and the value not found on it); in a table of options a value nobody
@@ -308,21 +310,29 @@
     var d = parseDate(x.asof);
     return !!d && Date.now() - d.getTime() > OLD_SEED_MS;
   }
-  /** "seen 17 Oct": the source's own date when it gives one, else the day it was read. */
+  /** A fact only a web search gave ("viewer": "provider search"): what the search provider wrote, no page read. */
+  function fromSearch(x) { return !!x && typeof x.viewer === "string" && x.viewer.trim().toLowerCase() === "provider search"; }
+  /** "seen 17 Oct": the source's own date when it gives one, else the day it was read; "from a web search, 17 Oct" for
+   * a fact a web search gave. */
   function seenText(x) {
     var when = x && (x.asof || x.date);
-    return when && date(when) ? "seen " + date(when) : "";
+    return when && date(when) ? (fromSearch(x) ? "from a web search, " : "seen ") + date(when) : "";
   }
   /** Where and when a value was read, as one caption part: "checked 17 Oct on maker.com ↗" (the host links the page it
    * was read on). A price, or a date the source gives ("asof"), is "seen": "seen 5 Aug on reviews.example ↗", never
-   * "checked", so it does not read as today's price. Without a page link it names the source: "Maker · checked 17
-   * Oct". o.price: the value is a price. */
+   * "checked", so it does not read as today's price. A fact a web search gave was read on no page: "from a web search,
+   * 17 Oct · maker.com ↗" (the page the search named), never "checked" or "seen". Without a page link it names the
+   * source: "Maker · checked 17 Oct". o.price: the value is a price. */
   function citeParts(x, o) {
     o = o || {};
     if (!x) return [];
     var when = x.asof || x.date;
-    var day = when && date(when) ? ((o.price || x.asof ? "seen " : "checked ") + date(when)) : "";
+    var search = fromSearch(x);
+    var on = when && date(when) ? date(when) : "";
+    var day = search ? "from a web search" + (on ? ", " + on : "") : on ? (o.price || x.asof ? "seen " : "checked ") + on : "";
     var site = host(x.url);
+    // a web search's page is its own part, after the label: the caption's dot joins them (no line starts with one)
+    if (site && search) return [h("span", { "class": "age", text: day }), link(x.url, site)];
     if (site) return [h("span", { "class": "cite" }, day ? day + " on " : "", link(x.url, site))];
     var out = [];
     if (x.src) out.push(String(x.src));
@@ -418,10 +428,11 @@
     };
     // looked for and not found: the source was read and the value was not found on it ("Not found · checked 16 Oct on
     // maker.com ↗"); the link to the page that was read stays even when the source is named once for the column (then
-    // without the date). It says when the page was checked, never "seen", a price's word for one a page showed.
+    // without the date). It says when the page was checked, never "seen", a price's word for one a page showed; a web
+    // search that didn't find it says so ("from a web search"), since no page was read.
     var notFoundOn = function (note, src, url, fact) {
       add((opts.label ? opts.label + " not found" : "Not found") + (usefulNote(note) ? " · " + usefulNote(note) : ""));
-      if (fact && !opts.shared) citeParts({ src: fact.src, url: fact.url, date: fact.date }).forEach(add);
+      if (fact && !opts.shared) citeParts({ src: fact.src, url: fact.url, date: fact.date, viewer: fact.viewer }).forEach(add);
       else if (safeUrl(url)) add(link(url, host(url) || src));
       else if (src) add(src);
     };
@@ -1142,7 +1153,7 @@
   }
 
   window.site = {
-    version: "1.10.0",
+    version: "1.11.0",
     h: h, append: append, icon: icon, link: link, clip: clip, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
     date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,

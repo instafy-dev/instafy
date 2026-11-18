@@ -748,6 +748,11 @@ const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
     // first, and only for what is fresh or a page no source names when each search costs the
     // person credits, and a site closed to Octo was guided in words with its link.
     include_str!("legacy/web-research-v19.md"),
+    // From before a search's own text was labelled as a web search's, never "checked" (it counted
+    // as a page read), a page kept a search's fact only once its page was read or refused, and a
+    // price no item page gave was searched for as "Finding sources" says, the AI's own web search
+    // first.
+    include_str!("legacy/web-research-v20.md"),
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its
 /// values and the reviews asked for, and what a value nobody found says. A topic of the browser,

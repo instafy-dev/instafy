@@ -419,7 +419,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     }
     expect(research).toContain("compare items as `instafy-comparing` says.");
     for (const rule of [
-      "`instafy web search \"<name> price\" --json`, or `--chain reference-search` for shops' official sites",
+      "search \"<name> price\" (Finding sources), or `--chain reference-search` for shops' official sites",
       "a shop restricted by workspace policy can use Guided mode.",
       "each fact not read marked unknown with why.",
       // a model only a search names is "not checked", said where the searches are

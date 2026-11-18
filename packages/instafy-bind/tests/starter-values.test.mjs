@@ -367,6 +367,87 @@ test("compare: no cell is blank or a dash, and every value cites its page and da
   assert.doesNotMatch(document.getElementById("list").textContent, /^Battery: |Suction: /m);
 });
 
+// A news page (a local test, Nov 17) captioned what a web search's provider wrote "Checked 17 Nov on <site>": no page
+// was read (the reader was refused), and "checked" says one was. A fact only a web search gave keeps "viewer":
+// "provider search", and each of its captions says "from a web search" with the day and the page the search named,
+// never "checked" or "seen"; a fact read on its page keeps "checked <day> on <site>".
+test("a fact only a web search gave reads \"from a web search\", never \"checked\"; one read on its page keeps \"checked\"", async () => {
+  const news = { src: "Example News", url: "https://news.example/markets/chips", date: DAY, viewer: "provider search" };
+  const price = { v: "€479", src: "Shop One", url: "https://shop-one.example/console", date: DAY, viewer: "provider search" };
+  APP.news = `site.start({ data: null, render: function () {
+    var searched = ${JSON.stringify({ v: "Chip shares fell after new export rules", ...news })};
+    var price = ${JSON.stringify(price)};
+    document.getElementById("list").replaceChildren(
+      site.h("p", { id: "searched" }, site.trust(searched)),
+      site.h("p", { id: "read" }, site.trust({ v: "Results come out on 21 Jan", src: "Maker", url: "https://maker.example/investors", date: "${DAY}" })),
+      site.h("p", { id: "inline" }, "Shares: ", site.cite(searched)),
+      site.h("p", { id: "price" }, site.trust(price, { price: true })),
+      site.h("p", { id: "at-store" }, site.trust(price, { price: true, store: { name: "Shop One" } })),
+      site.h("p", { id: "shared" }, "Prices: ", site.seen(price)),
+      site.h("p", { id: "not-found" }, site.trust(${JSON.stringify(news)}, { label: "Price" })),
+      site.h("p", { id: "undated" }, site.trust({ v: "Chip shares fell", src: "Example News", url: "${news.url}", viewer: " Provider search " })));
+  } });`;
+  try {
+    const { document } = await draw("news", null);
+    const text = (id) => document.getElementById(id).textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, "");
+    assert.deepEqual(["searched", "read", "inline", "price", "at-store", "shared", "not-found", "undated"].map(text), [
+      "Chip shares fell after new export rules · from a web search, 27 Oct · news.example ↗",
+      "Results come out on 21 Jan · checked 27 Oct on maker.example ↗",
+      "Shares: from a web search, 27 Oct · news.example ↗",
+      "€479 · from a web search, 27 Oct · shop-one.example ↗",
+      "€479 · at Shop One ↗ · from a web search, 27 Oct",
+      "Prices: from a web search, 27 Oct",
+      "Price not found · from a web search, 27 Oct · news.example ↗",
+      "Chip shares fell · from a web search · news.example ↗",
+    ]);
+    const list = document.getElementById("list").textContent;
+    assert.equal((list.match(/checked/g) || []).length, 1, `only the fact read on its page says "checked": ${list}`);
+    assert.doesNotMatch(list, /\bseen\b/, list);
+  } finally {
+    delete APP.news;
+  }
+});
+
+// Values from one page on one day are cited once under the list. A value only a web search gave, from the same page
+// and day, is not one of them: it keeps its own caption, so the line's "checked" never covers it.
+test("compare: a value only a web search gave keeps its own caption, never cited as checked with the values read", async () => {
+  const specs = (v, extra = {}) => ({ weight: { v, src: "Maker", url: "https://maker.example/specs", date: DAY, ...extra } });
+  const data = {
+    title: "Three readers",
+    sort: [],
+    columns: [{ key: "weight", label: "Weight", type: "text" }],
+    items: [item("a", "Reader A", specs("174 g")), item("b", "Reader B", specs("180 g")), item("c", "Reader C", specs("199 g", { viewer: "provider search" }))],
+  };
+  for (const width of [1280, 390]) {
+    const { document } = await draw("compare", data, { width });
+    const list = document.getElementById("list").textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, "");
+    assert.match(list, /Weight: checked 27 Oct on maker\.example ↗, unless a value says otherwise/, `${width}px: ${list}`);
+    const searched = rowText(document, "option:c").replace(/ 2026\b/g, "");
+    assert.match(searched, /199 g · from a web search, 27 Oct · maker\.example ↗/, `${width}px: ${searched}`);
+    assert.doesNotMatch(searched, /checked/, `${width}px: ${searched}`);
+    assert.doesNotMatch(rowText(document, "option:a"), /from a web search|checked/, `${width}px: the line under the list cites it`);
+  }
+});
+
+// One page on one day giving every price is named once under the list ("Prices: Shop ↗ · seen 27 Oct"); a price only
+// a web search gave is never under it.
+test("ranked: a price only a web search gave is never named with the prices read on its page", async () => {
+  const price = (v, extra = {}) => ({ v, src: "Shop", url: "https://shop.example/prices", date: DAY, ...extra });
+  const data = {
+    title: "Top three",
+    items: [
+      { ref: "option:a", rank: 1, name: "Option A", price: price("$129") },
+      { ref: "option:b", rank: 2, name: "Option B", price: price("$139") },
+      { ref: "option:c", rank: 3, name: "Option C", price: price("$149", { viewer: "provider search" }) },
+    ],
+  };
+  const { document } = await draw("ranked", data);
+  const list = document.getElementById("list").textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, "");
+  assert.doesNotMatch(list, /Prices: Shop ↗/, list);
+  assert.match(rowText(document, "option:c").replace(/ 2026\b/g, ""), /\$149 · from a web search, 27 Oct · shop\.example ↗/);
+  assert.match(rowText(document, "option:a").replace(/ 2026\b/g, ""), /\$129 · seen 27 Oct on shop\.example ↗/);
+});
+
 // A comparison of three laptops with 4 of 15 values found (each CPU, one battery). On a phone every row listed every
 // column with its label and "Unknown" ("Unknown · Two independent reviews not checked"): a stack of unknowns, while the
 // wide table held the same gaps tidily. A phone's row shows the values found, each with its source line, and the page
