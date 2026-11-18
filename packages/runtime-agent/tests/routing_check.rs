@@ -562,8 +562,14 @@ fn expected_answer(case: &Case) -> Value {
         .as_ref()
         .and_then(|allowed| allowed.first().cloned())
         .unwrap_or_else(|| "none".to_string());
+    // The words its summary must name, where a case says them.
+    let summary = if case.expect.summary_names.is_empty() {
+        "The stand-in model's answer.".to_string()
+    } else {
+        case.expect.summary_names.join(" ")
+    };
     json!({
-        "summary": "The stand-in model's answer.",
+        "summary": summary,
         "route": case.expect.route,
         "reason": "The stand-in model answers the expected route.",
         "selectedSkills": [],

@@ -712,6 +712,13 @@ const LEGACY_BROWSER_AUTOMATION_SHA256: &[&str] = &[
     // page stayed `direct` when Octo can search the web and no site needs using first, and the
     // card's section and the browsers' names were shorter.
     "a33825a82341a5ecf662614546a29b02e26f996f725826f2a39a0eff0d858568", // v44
+    // From before the routing section's first rule kept research with Octo unless a site must be
+    // used first (an order's own status or items among them): research answered in a reply, a
+    // rule or policy beside an order number or email among it, and, when Octo can search the web,
+    // availability for dates at places nobody named; research that ends in a page when it
+    // searches first too. A change to another chat's page stayed `direct` with no change, and the
+    // routing step's `summary` named a page a reply here linked by its address.
+    "ee989f9ea7da84be0cd9c8b7b1beb2f4b064a36dcb6dfcf5bbb0bcc5dc47b24b", // v45
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

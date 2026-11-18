@@ -1,5 +1,5 @@
 {
-  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. warranty-from-each-laptops-page and keep-going-after-two-stops-and-an-undo were sent in a fifth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-note was sent in a sixth recorded local test, with the entries its routing step received there. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases. research-in-depth was written for the routing answer's deeperResearch, sent in no recorded test: its person asks in their own words for research in depth, and every other case expects deeperResearch false. Every hand-back's stored prompt, Stop notice, report of what a stopped turn kept, and Undo line carries the metadata the controller writes on it that the runtime reads (the card a hand-back carries on, who stopped which runs, what was kept, which run's change was undone): where a recording kept only its words and kind, the rest is filled in as the controller writes it. The cases from news-today on were written for this check and sent in no recorded test, on subjects none of the recorded tests used: one or more for each rule of the browser skill's routing section, and eight lookups that a search for fresh information changes (news, a recent result, opening hours, news put on a page, a trip on a map, a comparison page, an order in the person's own account, a site opened in the browser). Their chats are built as the runtime receives them, with the metadata the controller writes on a routed card's browser turn and its hand-back. The three after them say which rule decides where two could be read: a note in the person's own words and a place added to a map, after a reply that said a sight wasn't found, and a note in the person's own words on a page, about a value a reply didn't confirm. The last six are sent where Octo can search the web for the message (integratedSearch): news and a comparison put on a page stay direct, while a page that needs prices for dates, a route's page and an order in the person's own account still use the browser, and news answered in a reply stays direct.",
+  "about": "Messages with the chat they were sent in, and the route the routing step should give each. The routing check builds each case's routing input with the runtime's own code and asks the routing model. history holds the chat's earlier entries as the runtime receives them; the message is added after them. Nine cases were sent in a recorded local test, each with the entries its routing step received there: map-trip, comparison-page, comparison-fill-in, page-from-findings, browser-named, browser-follow-up, keep-going-open-route, browser-sign-in and browser-form. keep-going-after-stop-and-undo was not: its chat is keep-going-open-route's up to the first Undo, with the route exchange taken out, the request and reply that named the route edited to match, and that reply's offer of more cut. page-from-unconfirmed-findings and keep-going-route-open-after-stop-and-undo were sent in a later recorded local test, each with the entries its routing step received there, a path's space id replaced as in keep-going-open-route. comparison-fill-in-after-a-reply and keep-going-unconfirmed-route-after-stops-and-undo were sent in a third recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-findings-with-the-route-unconfirmed and keep-going-after-a-page-made-from-findings were sent in a fourth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. warranty-from-each-laptops-page and keep-going-after-two-stops-and-an-undo were sent in a fifth recorded local test, each with the entries its routing step received there, a path's space id replaced as before. page-from-confirmed-findings was not sent: its chat is browser-follow-up's, with a message that asks for a page of the hours alone. map-note was sent in a sixth recorded local test, with the entries its routing step received there. map-weekend was sent in none of them, and plain-answer and rewrite-names-a-map come from the Octo turn eval's cases. research-in-depth was written for the routing answer's deeperResearch, sent in no recorded test: its person asks in their own words for research in depth, and every other case expects deeperResearch false. Every hand-back's stored prompt, Stop notice, report of what a stopped turn kept, and Undo line carries the metadata the controller writes on it that the runtime reads (the card a hand-back carries on, who stopped which runs, what was kept, which run's change was undone): where a recording kept only its words and kind, the rest is filled in as the controller writes it. The cases from news-today on were written for this check and sent in no recorded test, on subjects none of the recorded tests used: one or more for each rule of the browser skill's routing section, and eight lookups that a search for fresh information changes (news, a recent result, opening hours, news put on a page, a trip on a map, a comparison page, an order in the person's own account, a site opened in the browser). Their chats are built as the runtime receives them, with the metadata the controller writes on a routed card's browser turn and its hand-back. The three after them say which rule decides where two could be read: a note in the person's own words and a place added to a map, after a reply that said a sight wasn't found, and a note in the person's own words on a page, about a value a reply didn't confirm. The six after them are sent where Octo can search the web for the message (integratedSearch), four of them where research that ends in a page searches first as well (researchPagesSearchFirst): news and a comparison put on a page stay direct, while a page that needs prices for dates, a route's page and an order in the person's own account still use the browser, and news answered in a reply stays direct. The last nine: a comparison page and news put on a page, the first where research that ends in a page searches first and the second where only replies' research does (a twin of an earlier case each, word for word), a hotel for dates where nobody named one, a question about a shop's policy beside an order number and an email, a news reply's article opened in the browser, whose summary must name the article's address, a change asked in one chat to a page another chat made (pages lists the space's pages and the chat that made each), that policy question again where Octo can search the web (word for word), a question about an order's own status beside its number and an email, and hotels for dates where nobody named them put on a page where only replies' research searches first.",
   "cases": [
     {
       "id": "map-trip",
@@ -2611,6 +2611,7 @@
       "id": "news-then-page-searching",
       "message": "What's the news about Volvo Cars today? Put it on a small page I can share.",
       "integratedSearch": true,
+      "researchPagesSearchFirst": true,
       "expect": {
         "route": "direct",
         "workspaceFileChangeRequirement": [
@@ -2623,6 +2624,7 @@
       "id": "comparison-page-searching",
       "message": "Compare the three latest Sony noise-cancelling headphones: battery life, weight, price, with two independent reviews each, as a comparison page.",
       "integratedSearch": true,
+      "researchPagesSearchFirst": true,
       "expect": {
         "route": "direct",
         "workspaceFileChangeRequirement": [
@@ -2635,6 +2637,7 @@
       "id": "hotels-for-dates-page-searching",
       "message": "Compare the Hotel Sacher, the Hotel Imperial and the Park Hyatt in Vienna for 12 to 14 December: location, what reviewers say and the price for our dates, as a page.",
       "integratedSearch": true,
+      "researchPagesSearchFirst": true,
       "expect": {
         "route": "browser_then_build"
       },
@@ -2644,6 +2647,7 @@
       "id": "route-page-searching",
       "message": "Put the tram route from Zurich main station to the Kunsthaus on a small page I can share.",
       "integratedSearch": true,
+      "researchPagesSearchFirst": true,
       "expect": {
         "route": "browser_then_build"
       },
@@ -2666,6 +2670,187 @@
         "route": "direct"
       },
       "why": "News answered in a reply stays with the building turn, which searches for it when Octo can search the web."
+    },
+    {
+      "id": "comparison-page-watches-searching",
+      "message": "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+      "integratedSearch": true,
+      "researchPagesSearchFirst": true,
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "A comparison page where Octo can search the web for this message and research that ends in a page searches first: specs, listed prices and reviews are looked up and no site needs using first, so the building turn searches and makes the page, with no browser part before it."
+    },
+    {
+      "id": "news-then-page-searching-pages-browse-first",
+      "message": "What's the news about Volvo Cars today? Put it on a small page I can share.",
+      "integratedSearch": true,
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "News put on a page where Octo can search the web for this message but research that ends in a page doesn't search first: such research goes to the browser first, as where Octo can't search, and Octo then makes the page."
+    },
+    {
+      "id": "hotel-for-dates-nobody-named-searching",
+      "message": "Find a hotel in Ghent for 6 to 8 March, 2 adults, under €140 a night.",
+      "integratedSearch": true,
+      "expect": {
+        "route": "direct"
+      },
+      "why": "Availability for dates where nobody named the places, when Octo can search the web for this message: search finds the hotels and their own pages, then at most one card checks those for the dates. No site is used to find them."
+    },
+    {
+      "id": "policy-beside-an-order-number",
+      "message": "My email is ana@example.com and my order is 123-4567. What is IKEA's return policy for it?",
+      "expect": {
+        "route": "direct"
+      },
+      "why": "A question about a shop's policy, beside an order number and an email: the policy is on the shop's public pages, so the building turn reads them and answers. Only an order's own status or items need the person's account."
+    },
+    {
+      "id": "news-then-open-the-article",
+      "history": [
+        {
+          "role": "user",
+          "content": "What happened with Philips today?",
+          "runId": "run-1",
+          "createdAt": "2026-11-17T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "Today's main story about Philips is in [this Reuters article](https://www.reuters.com/business/healthcare-pharmaceuticals/philips-2026-11-17/).",
+          "runId": "run-1",
+          "createdAt": "2026-11-17T09:02:00.000Z"
+        }
+      ],
+      "message": "Open that article in your browser.",
+      "integratedSearch": true,
+      "expect": {
+        "route": "browser",
+        "summaryNames": [
+          "https://www.reuters.com/business/healthcare-pharmaceuticals/philips-2026-11-17/"
+        ]
+      },
+      "why": "The message names Instafy's browser, and the page is the one the reply here linked: the routing summary names it by its address, since the browser turn never reads the reply."
+    },
+    {
+      "id": "change-to-another-chats-page",
+      "history": [
+        {
+          "role": "user",
+          "content": "Make a simple comparison page of the Levoit Core 300 and the Blueair Blue Pure 411 from what you already know, without browsing.",
+          "runId": "run-1",
+          "createdAt": "2026-11-17T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I made “Levoit Core 300 vs Blueair 411” from what I already know. Every value on it says not checked.",
+          "runId": "run-1",
+          "createdAt": "2026-11-17T09:02:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Fill in what's still missing.",
+          "runId": "run-2",
+          "createdAt": "2026-11-17T09:03:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Fill in what's still missing.",
+          "runId": "run-3",
+          "lane": "browser",
+          "createdAt": "2026-11-17T09:03:10.000Z",
+          "metadata": {
+            "prompt_metadata": {
+              "browserTransport": "shared",
+              "browserRequestOf": "job:card-1",
+              "browserAutoStarted": true,
+              "dispatchContent": "Fill in what's still missing.",
+              "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "card-1",
+                "routed": true
+              },
+              "browserHandsBack": true
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I read Levoit's and Blueair's own pages for both purifiers' prices, room sizes and noise levels.",
+          "runId": "run-3",
+          "lane": "browser",
+          "createdAt": "2026-11-17T09:04:00.000Z"
+        },
+        {
+          "role": "user",
+          "content": "Continue building with what the browser turn found.",
+          "runId": "run-4",
+          "createdAt": "2026-11-17T09:05:00.000Z",
+          "metadata": {
+            "browserHandBack": {
+              "version": 1,
+              "cardJobId": "card-1",
+              "browserJobId": "job-run-3"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "I filled in both purifiers' prices, room sizes and noise levels on “Levoit Core 300 vs Blueair 411”, from their makers' own pages.",
+          "runId": "run-4",
+          "createdAt": "2026-11-17T09:06:00.000Z"
+        }
+      ],
+      "pages": [
+        {
+          "title": "Levoit Core 300 vs Blueair 411",
+          "folder": "sites/levoit-blueair",
+          "madeIn": "this chat"
+        },
+        {
+          "title": "Air purifiers: Levoit Core 300 vs Blueair 411 vs Coway Airmega",
+          "folder": "sites/air-purifiers",
+          "madeIn": "another chat"
+        }
+      ],
+      "message": "Add a filter cost column to Air purifiers: Levoit Core 300 vs Blueair 411 vs Coway Airmega.",
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "none"
+        ]
+      },
+      "why": "The page the message names was made in another chat, as the space's pages in the routing input say: it is read-only here, so the building turn answers with no change and no browser part, though this chat has browser work and a page of its own."
+    },
+    {
+      "id": "policy-beside-an-order-number-searching",
+      "message": "My email is ana@example.com and my order is 123-4567. What is IKEA's return policy for it?",
+      "integratedSearch": true,
+      "expect": {
+        "route": "direct"
+      },
+      "why": "The same question about a shop's policy beside an order number and an email, where Octo can search the web for this message: search finds the shop's own policy page, and the building turn reads it and answers. Only an order's own status or items need the person's account."
+    },
+    {
+      "id": "order-status-beside-an-order-number",
+      "message": "Has my IKEA order 123-4567 shipped yet? My email is ana@example.com.",
+      "expect": {
+        "route": "browser"
+      },
+      "why": "An order's own status is in the person's account on the shop's site, a site that must be used first: it goes to the browser, though an order number and an email are beside it as they are beside a question about the shop's policy."
+    },
+    {
+      "id": "hotels-for-dates-nobody-named-page-searching",
+      "message": "Find three hotels in Ghent for 6 to 8 March, 2 adults, under €140 a night, and put them on a small page I can share.",
+      "integratedSearch": true,
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "Availability for dates where nobody named the places, put on a page, where Octo can search the web for this message but research that ends in a page doesn't search first: it is research that ends in a page, which goes to the browser first, and Octo then makes the page. A building turn that makes a page can't ask for the browser, so with no browser part first nothing would check the dates."
     }
   ]
 }

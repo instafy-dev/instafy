@@ -164,20 +164,26 @@ const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 /// How much of the browser skill's "Routing preflight" section the routing step reads: all of the
 /// shipped one, with little to spare, so a rule added there takes one out. A space's longer copy
 /// is cut here and marked.
-const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_180;
+const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_273;
 /// What the routing step reads after the browser skill's routing section when Octo's turn for the
 /// message can search the web: the job's grant lets that turn use the AI's own web search
-/// (`job_proxy_auth`), which the routing step itself never does, and this runtime has
-/// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] on. Only the fact: the section says what it changes
-/// (research whose answer ends in a page searches before the browser, unless a site needs using
-/// first). Without it, which is every turn whose AI has no web search of its own and every turn
-/// while the setting is off, the routing input is as it was.
+/// (`job_proxy_auth`), which the routing step itself never does. Only the fact: the section says
+/// what it changes (availability for dates at places nobody named, answered in a reply, stays
+/// with Octo, which searches first, as other research answered in a reply does, unless a site
+/// must be used first). Without it, which is every turn whose AI has no web search of its own,
+/// the routing input is as it was.
 const ROUTING_SEARCH_FACT: &str = "Octo can search the web for this message.\n";
+/// What the routing step reads after [`ROUTING_SEARCH_FACT`] when this runtime also has
+/// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] on: research that ends in a page then stays with Octo too.
+/// Without it, such research goes to the browser first, as it did before Octo could search, also
+/// where Octo can search for a reply.
+const ROUTING_SEARCH_FIRST_FACT: &str =
+    "Research that ends in a page searches first for this message.\n";
 /// The runtime setting that lets research whose answer ends in a page search before the browser
-/// ([`ROUTING_SEARCH_FACT`]): on only when set to `1`, `true`, `on` or `yes`. Off by default, so
-/// routes stay as they were on release, a person's own ChatGPT login's too, until the comparison
-/// and research-page cases pass with it on; a building turn that makes a page still can't ask for
-/// the browser for what search didn't reach. It can be turned off again at once.
+/// ([`ROUTING_SEARCH_FIRST_FACT`]): on only when set to `1`, `true`, `on` or `yes`. Off by default,
+/// so such routes stay as they were on release, a person's own ChatGPT login's too, until the
+/// comparison and research-page cases pass with it on; a building turn that makes a page still
+/// can't ask for the browser for what search didn't reach. It can be turned off again at once.
 pub(crate) const RESEARCH_PAGES_SEARCH_FIRST_ENV: &str = "INSTAFY_RESEARCH_PAGES_SEARCH_FIRST";
 
 /// Whether this runtime lets research that ends in a page search before the browser
@@ -8288,14 +8294,15 @@ impl JobProcessor {
         let routing_preflight = if skills_kickoff.is_none()
             && should_run_agent_routing_preflight_for_execution(job, prompt_text)
         {
+            let searches = crate::job_proxy_auth::current()
+                .is_some_and(|auth| auth.allows_native_web_search());
             let request = routing_preflight_request(
                 job,
                 &workspace_dir,
                 prompt_text,
                 pending_worker_input.as_ref(),
-                research_pages_search_first()
-                    && crate::job_proxy_auth::current()
-                        .is_some_and(|auth| auth.allows_native_web_search()),
+                searches,
+                research_pages_search_first(),
             );
             browser_routes = request.browser_routes;
             tracing::info!(job_id = %job.id, context = %request.history_metrics, "routing preflight history projection");
@@ -9258,6 +9265,11 @@ impl JobProcessor {
         if hands_the_message_to_the_building_turn {
             final_messages.push(browser_hand_back::build_request_note(job));
         }
+        final_messages.extend(put_back_edit_messages(
+            &held_pages,
+            &workspace_dir,
+            &[&output.events],
+        ));
         let mut final_messages =
             with_runtime_metadata_vec(final_messages, &registration.runtime_id);
         let reported_file_paths = outcome
@@ -10401,6 +10413,11 @@ impl JobProcessor {
             if retry_hands_the_message_to_the_building_turn {
                 retry_final_messages.push(browser_hand_back::build_request_note(job));
             }
+            retry_final_messages.extend(put_back_edit_messages(
+                &held_pages,
+                &workspace_dir,
+                &[&output.events, &retry_output.events],
+            ));
             let retry_final_messages =
                 with_runtime_metadata_vec(retry_final_messages, &registration.runtime_id);
             if retry_generic_mcp_tool_execution_missing {
@@ -18723,26 +18740,39 @@ pub(crate) struct RoutingPreflightRequest {
 }
 
 /// `searches`: Octo's turn for this message can search the web, which the routing step then reads
-/// after the browser skill's routing section ([`ROUTING_SEARCH_FACT`]).
+/// after the browser skill's routing section ([`ROUTING_SEARCH_FACT`]), and `pages_search_first`:
+/// research that ends in a page searches first there too ([`ROUTING_SEARCH_FIRST_FACT`]). With the
+/// browser routes, the routing step also reads the space's pages as a turn that may write files
+/// reads them, each made in this chat or in another and read-only here
+/// ([`space_pages::space_pages_lines`]), after the part every chat shares: a change to another
+/// chat's page is then known for one, never taken for this chat's own page work.
 fn routing_preflight_request(
     job: &LeaseJob,
     workspace_dir: &Path,
     prompt_text: &str,
     pending: Option<&worker_input_routing::PendingContext>,
     searches: bool,
+    pages_search_first: bool,
 ) -> RoutingPreflightRequest {
     let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
     let browser_routes = pending
         .is_none()
         .then(|| browser_routing_snapshot_for_job(job, workspace_dir, prompt_text))
         .flatten()
-        .map(|routes| {
-            if searches {
-                format!("{routes}{ROUTING_SEARCH_FACT}")
-            } else {
-                routes
-            }
+        .map(|routes| match (searches, pages_search_first) {
+            (false, _) => routes,
+            (true, false) => format!("{routes}{ROUTING_SEARCH_FACT}"),
+            (true, true) => format!("{routes}{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}"),
         });
+    let pages = if browser_routes.is_some() {
+        space_pages::space_pages_lines(
+            workspace_dir,
+            job.conversation_id.as_ref(),
+            &space_pages::installed_page_commands(),
+        )
+    } else {
+        String::new()
+    };
     let (shared_start, rest) = agent_routing_preflight_prompt(
         workspace_dir,
         prompt_text,
@@ -18751,7 +18781,7 @@ fn routing_preflight_request(
         browser_routes.as_deref(),
     );
     let (prompt, history_metrics) =
-        agent_routing_primary_prompt(&format!("{shared_start}{rest}"), &job.payload);
+        agent_routing_primary_prompt(&format!("{shared_start}{pages}{rest}"), &job.payload);
     RoutingPreflightRequest {
         prompt,
         shared_start,
@@ -22146,6 +22176,51 @@ fn sanitize_codex_final_json(value: &JsonValue) -> JsonValue {
     }
 
     sanitized
+}
+
+/// One more step message for each of a run's edits that changed a page another chat made, which
+/// the runtime put back as it was ([`space_pages::HeldPages::edits_put_back`]): Studio counts a
+/// step by its newest message, and a declined one for nothing, so the turn's line counts only the
+/// changes it kept. An edit whose every file went back is declined, and its row in Details says
+/// the edit was tried, beside the reply's line that the page was made in another chat. One that
+/// also changed a file the turn kept is done with only the files it kept. `runs` are the events
+/// of each of the turn's runs.
+fn put_back_edit_messages(
+    held_pages: &space_pages::HeldPages,
+    workspace_dir: &Path,
+    runs: &[&[JsonValue]],
+) -> Vec<JobMessage> {
+    runs.iter()
+        .flat_map(|events| held_pages.edits_put_back(workspace_dir, events))
+        .map(|edit| {
+            let (status, paths, content) = if edit.kept.is_empty() {
+                let content = format!("File change put back: {}", edit.paths.join(", "));
+                ("declined", edit.paths, content)
+            } else {
+                let content = format!("Applied file changes: {}", edit.kept.join(", "));
+                ("completed", edit.kept, content)
+            };
+            let distinct = paths
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            let mut metadata = json!({
+                "kind": "codex_file_change",
+                "itemId": edit.id,
+                "eventType": "item.completed",
+                "status": status,
+                "paths": paths,
+            });
+            if let Some(activity) = activity_labels::file_change_activity(distinct) {
+                metadata["activity"] = activity;
+            }
+            JobMessage {
+                content,
+                message_type: Some("file_change".to_string()),
+                metadata: Some(metadata),
+            }
+        })
+        .collect()
 }
 
 fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
