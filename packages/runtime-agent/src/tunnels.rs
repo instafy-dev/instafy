@@ -57,14 +57,6 @@ impl TunnelAssignment {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ControllerTunnelGrant {
-    #[allow(dead_code)]
-    id: String,
-    #[allow(dead_code)]
-    project_id: String,
-    #[allow(dead_code)]
-    runtime_id: Option<String>,
-    #[allow(dead_code)]
-    runtime_lease_id: Option<String>,
     provider: String,
     tunnel_id: String,
     hostname: String,

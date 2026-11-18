@@ -2,13 +2,40 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// How long a managed search waits for the controller's check before it is not run.
+const WEB_SEARCH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct ControllerClient {
     http: Client,
     base_url: String,
     credential_lease_bearer: String,
+}
+
+/// The managed job a search is for, from its verified token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedSearchJob {
+    pub project_id: Uuid,
+    pub job_id: Uuid,
+    pub lease_attempt: i32,
+    pub run_id: Uuid,
+}
+
+/// The controller's answer before a managed job's searches run
+/// (runtime-controller `managed_web_search`): how many may run, the message's
+/// limit, and why fewer may run than were asked (`off`, `ended`, `undecided`
+/// or `used`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedSearchClaim {
+    pub granted: u32,
+    pub limit: u32,
+    #[serde(default)]
+    pub refused: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -138,6 +165,72 @@ impl ControllerClient {
         }
 
         Ok(())
+    }
+
+    /// Asks the controller whether `searches` of a managed job's searches may
+    /// run, as the check `claim_id`: it counts a message's searches across its
+    /// jobs, and refuses them while its `MANAGED_AI_NATIVE_WEB_SEARCH` is off.
+    /// The same check asked again takes nothing more.
+    pub async fn claim_managed_web_searches(
+        &self,
+        job: &ManagedSearchJob,
+        claim_id: Uuid,
+        searches: u32,
+    ) -> Result<ManagedSearchClaim> {
+        let response = self
+            .managed_web_search_request("claim", job, claim_id, ("searches", searches))
+            .await?;
+        if !response.status().is_success() {
+            bail!("controller web search check returned {}", response.status());
+        }
+        Ok(response.json::<ManagedSearchClaim>().await?)
+    }
+
+    /// Tells the controller that `ran` of the check's searches ran: the rest
+    /// go back to the message. A check whose answer was never read is settled
+    /// with none, so it takes nothing even if it lands afterwards. Settling
+    /// again changes nothing more.
+    pub async fn settle_managed_web_searches(
+        &self,
+        job: &ManagedSearchJob,
+        claim_id: Uuid,
+        ran: u32,
+    ) -> Result<()> {
+        let response = self
+            .managed_web_search_request("settle", job, claim_id, ("ran", ran))
+            .await?;
+        if !response.status().is_success() {
+            bail!(
+                "controller web search settle returned {}",
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
+    async fn managed_web_search_request(
+        &self,
+        operation: &str,
+        job: &ManagedSearchJob,
+        claim_id: Uuid,
+        (field, count): (&str, u32),
+    ) -> Result<reqwest::Response> {
+        let url = format!(
+            "{}/internal/managed-web-search/{operation}",
+            self.base_url.trim_end_matches('/')
+        );
+        let mut body = serde_json::to_value(job)?;
+        body["claimId"] = serde_json::json!(claim_id);
+        body[field] = serde_json::json!(count);
+        Ok(self
+            .http
+            .post(url)
+            .bearer_auth(&self.credential_lease_bearer)
+            .header("accept", "application/json")
+            .timeout(WEB_SEARCH_CHECK_TIMEOUT)
+            .json(&body)
+            .send()
+            .await?)
     }
 }
 

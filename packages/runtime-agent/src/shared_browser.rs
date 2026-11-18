@@ -79,7 +79,6 @@ const ALLOWED_SHARED_BROWSER_NODE_BINARIES: [&str; 2] = [
     DEFAULT_SHARED_BROWSER_NODE_BINARY,
     crate::browser_host::mode::HOST_NODE_BINARY,
 ];
-const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_URL_CHARS: usize = 4_096;
 /// The stand-in site a navigation path is checked against before the page,
 /// which the controller resolves it against, is known.
@@ -1974,6 +1973,7 @@ impl SharedBrowserAgentControlGuard {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn acquire_with_path(
         path: PathBuf,
@@ -4142,62 +4142,6 @@ fn mcp_tool_request(name: &str, arguments: Option<JsonObject>) -> Result<SharedB
     })
 }
 
-pub fn is_shared_browser_command(args: &[OsString]) -> bool {
-    args.first().is_some_and(|value| value == "shared-browser")
-}
-
-pub async fn run_cli(args: impl IntoIterator<Item = OsString>) -> Result<()> {
-    let args = args
-        .into_iter()
-        .map(|value| {
-            value
-                .into_string()
-                .map_err(|_| anyhow!("Shared Browser arguments must be valid UTF-8"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let request = parse_request_args(&args)?;
-    let payload = execute_request(&request).await?;
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    Ok(())
-}
-
-fn parse_request_args(args: &[String]) -> Result<SharedBrowserRequest> {
-    if args.first().map(String::as_str) != Some("request") || !(3..=4).contains(&args.len()) {
-        bail!("usage: runtime-agent shared-browser request <GET|POST> </v1/path> [JSON body]");
-    }
-
-    let method = args[1].trim().to_ascii_uppercase();
-    if !matches!(method.as_str(), "GET" | "POST") {
-        bail!("Shared Browser only supports GET and POST");
-    }
-    let path = normalize_allowed_path(method.as_str(), &args[2])?;
-    let body = args
-        .get(3)
-        .map(|raw| {
-            if raw.len() > MAX_REQUEST_BODY_BYTES {
-                bail!("Shared Browser request body is too large");
-            }
-            serde_json::from_str::<JsonValue>(raw)
-                .context("Shared Browser request body must be valid JSON")
-        })
-        .transpose()?;
-
-    if method == "GET" && body.is_some() {
-        bail!("Shared Browser GET requests do not accept a body");
-    }
-    if method == "POST" && body.is_none() {
-        bail!("Shared Browser POST requests require a JSON body");
-    }
-    if body.as_ref().is_some_and(|value| !value.is_object()) {
-        bail!("Shared Browser request body must be a JSON object");
-    }
-    if let Some(body) = body.as_ref() {
-        validate_request_body(&path, body)?;
-    }
-
-    Ok(SharedBrowserRequest { method, path, body })
-}
-
 fn require_only_keys(object: &JsonMap<String, JsonValue>, allowed: &[&str]) -> Result<()> {
     if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
         bail!("Shared Browser request contains unsupported field {key}");
@@ -4383,35 +4327,6 @@ fn validate_request_body(path: &str, body: &JsonValue) -> Result<()> {
         _ => bail!("unsupported Shared Browser method/path combination"),
     }
     Ok(())
-}
-
-fn normalize_allowed_path(method: &str, raw: &str) -> Result<String> {
-    let path = raw.trim();
-    if !path.starts_with('/') || path.starts_with("//") || path.contains(['?', '#']) {
-        bail!("Shared Browser request path must be an exact /v1 endpoint");
-    }
-    let allowed = matches!(
-        (method, path),
-        ("GET", "/v1/status" | "/v1/snapshot" | "/v1/tabs")
-            | (
-                "POST",
-                "/v1/snapshot"
-                    | "/v1/tabs/open"
-                    | "/v1/tabs/select"
-                    | "/v1/tabs/close"
-                    | "/v1/navigate"
-                    | "/v1/click"
-                    | "/v1/type"
-                    | "/v1/choose"
-                    | "/v1/press"
-                    | "/v1/scroll"
-                    | "/v1/request-human-input"
-            )
-    );
-    if !allowed {
-        bail!("unsupported Shared Browser method/path combination");
-    }
-    Ok(path.to_string())
 }
 
 async fn execute_request(request: &SharedBrowserRequest) -> Result<JsonValue> {

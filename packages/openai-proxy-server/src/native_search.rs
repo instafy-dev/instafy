@@ -7,12 +7,15 @@
 //! granted search may search too, through the search bridge
 //! ([`crate::search_bridge`]): OpenAI's hosted `web_search` on the platform's
 //! API key, or a static ChatGPT login's own search (a local stack), one clean
-//! query at a time.
+//! query at a time, and only as many as the controller's check before them
+//! lets run. A managed run's search that may not run is answered, not
+//! refused: the model reads why, and its turn goes on.
 
 use super::*;
 use crate::client::{parse_codex_rate_limit_headers, read_model_error_body};
+use crate::controller_client::{ManagedSearchClaim, ManagedSearchJob};
 use crate::model_transport::ResponseBodyLimit;
-use crate::search_bridge::{self, Engine, RecordScope, SearchCall, SearchRequest};
+use crate::search_bridge::{self, Engine, RecordScope, SearchCall, SearchRequest, Withheld};
 
 fn unavailable() -> AppError {
     AppError {
@@ -51,6 +54,108 @@ enum SearchLane<'a> {
     Managed,
 }
 
+/// A managed run's job token: bound to its job and lease attempt, on the
+/// platform lane (a run id and no credential of its own), whatever its grant
+/// says of search. Only such a run's search is answered with why it may not
+/// run ([`managed_search`]); every other token without search is refused.
+fn managed_job_claims(claims: Option<&ProxyClaims>) -> bool {
+    claims.is_some_and(|claims| {
+        claims.job_id.is_some()
+            && claims.lease_attempt.is_some_and(|attempt| attempt > 0)
+            && credential_id_from_claims(Some(claims)).is_none()
+            && run_id_from_claims(Some(claims)).is_some()
+    })
+}
+
+/// The job a managed run's token names, for the controller's check.
+fn managed_search_job(claims: Option<&ProxyClaims>) -> Option<ManagedSearchJob> {
+    let claims = claims?;
+    let id = |value: &str| Uuid::parse_str(value.trim()).ok();
+    Some(ManagedSearchJob {
+        project_id: id(&claims.project_id)?,
+        job_id: id(claims.job_id.as_deref()?)?,
+        lease_attempt: i32::try_from(claims.lease_attempt?).ok()?,
+        run_id: id(run_id_from_claims(Some(claims))?)?,
+    })
+}
+
+/// How long a background check's search waits for the check's answer to reach
+/// the controller before it is not run. Such a check (an ambient evaluation)
+/// may search once it has answered, and it answers with a short sentence that
+/// its runtime posts while the search it says it will make goes out.
+const UNDECIDED_WAIT: Duration = Duration::from_secs(3);
+/// How often a waiting search asks the controller again.
+const UNDECIDED_POLL: Duration = Duration::from_millis(250);
+
+/// The controller's answer to the check `claim_id`, asked again while the
+/// check is a background check that has not answered yet, for up to
+/// [`UNDECIDED_WAIT`]. None when no answer could be read: the check is then
+/// settled with none, so searches the controller took for it (its answer, not
+/// the check, was lost) go back to the message.
+async fn claim_managed_searches(
+    controller: &ControllerIntegration,
+    job: &ManagedSearchJob,
+    claim_id: Uuid,
+    asked: u32,
+) -> Option<ManagedSearchClaim> {
+    let waits_until = tokio::time::Instant::now() + UNDECIDED_WAIT;
+    loop {
+        match controller
+            .claim_managed_web_searches(job, claim_id, asked)
+            .await
+        {
+            Ok(claim)
+                if claim.refused.as_deref() == Some("undecided")
+                    && tokio::time::Instant::now() + UNDECIDED_POLL <= waits_until =>
+            {
+                tokio::time::sleep(UNDECIDED_POLL).await;
+            }
+            Ok(claim) => return Some(claim),
+            Err(error) => {
+                eprintln!("[proxy] managed web search check failed: {error}");
+                settle_managed_searches(controller, job, claim_id, 0).await;
+                return None;
+            }
+        }
+    }
+}
+
+/// Tells the controller that `ran` of the check's searches ran, so the rest go
+/// back to the message, asking once more if that fails: settling a check
+/// again changes nothing more.
+async fn settle_managed_searches(
+    controller: &ControllerIntegration,
+    job: &ManagedSearchJob,
+    claim_id: Uuid,
+    ran: u32,
+) {
+    for _ in 0..2 {
+        match controller
+            .settle_managed_web_searches(job, claim_id, ran)
+            .await
+        {
+            Ok(()) => return,
+            Err(error) => eprintln!("[proxy] managed web search settle failed: {error}"),
+        }
+    }
+}
+
+/// One log line for searches a managed run's request planned and did not run,
+/// with the job and why, and never a query.
+fn log_withheld(claims: Option<&ProxyClaims>, asked: usize, granted: usize, why: Withheld) {
+    eprintln!(
+        "[proxy] managed web search withheld {}",
+        json!({
+            "jobId": claims.and_then(|claims| claims.job_id.as_deref()),
+            "runId": run_id_from_claims(claims),
+            "leaseAttempt": claims.and_then(|claims| claims.lease_attempt),
+            "asked": asked,
+            "granted": granted,
+            "reason": why.name(),
+        })
+    );
+}
+
 pub(super) async fn search(
     State(state): State<ProxyState>,
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
@@ -64,9 +169,7 @@ pub(super) async fn search(
             return Err(unavailable());
         };
         SearchLane::Own { credential_id }
-    } else if state.managed_native_web_search
-        && managed_native_web_search_claims_allowed(claims.as_ref())
-    {
+    } else if managed_job_claims(claims.as_ref()) {
         SearchLane::Managed
     } else {
         return Err(unavailable());
@@ -224,11 +327,23 @@ pub(super) async fn search(
 /// credentials: OpenAI's hosted search on an API key, as the configured
 /// search model, or a static ChatGPT login's own search (a local stack), as
 /// the pinned model. Each search is recorded. Other credentials get none.
+///
+/// Its searches run only with this proxy's `PROXY_MANAGED_NATIVE_WEB_SEARCH`
+/// on and the grant's search, and only as many as the controller lets run
+/// (runtime-controller `managed_web_search`): it counts a message's searches
+/// across its jobs and refuses them while its own switch is off. Each check is
+/// settled with how many of its searches ran, so those that did not go back to
+/// it. A search that may not run is answered with why, searches nothing and
+/// costs nothing, so the turn goes on.
 async fn managed_search(
     state: &ProxyState,
     claims: Option<&ProxyClaims>,
     payload: &Value,
 ) -> Result<Response, AppError> {
+    if !state.managed_native_web_search || !managed_native_web_search_claims_allowed(claims) {
+        log_withheld(claims, 0, 0, Withheld::Off);
+        return Ok(Json(search_bridge::not_searched(Withheld::Off)).into_response());
+    }
     let request = SearchRequest::read(payload).map_err(AppError::bad_request)?;
     let mut leased = state.lease_for_lane(UpstreamLane::Platform).await?.leased;
     if leased.credentials.is_chatgpt() {
@@ -260,7 +375,7 @@ async fn managed_search(
         }
         _ => return Err(unavailable()),
     };
-    let plan = request.plan(&[leased.credentials.bearer()]);
+    let mut plan = request.plan(&[leased.credentials.bearer()]);
     let transport = ModelTransportConfig::from_env().map_err(AppError::internal)?;
     // No alternate host or redirect may acquire the platform's credentials.
     let http = transport
@@ -268,6 +383,32 @@ async fn managed_search(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(AppError::upstream)?;
+    // Nothing after the controller's check returns before the check is settled.
+    let asked = plan.searches();
+    let job = managed_search_job(claims);
+    let claim_id = Uuid::new_v4();
+    let granted = if asked == 0 {
+        0
+    } else {
+        let claimed = match (state.controller.as_ref(), job.as_ref()) {
+            (Some(controller), Some(job)) => {
+                claim_managed_searches(controller, job, claim_id, asked as u32).await
+            }
+            _ => None,
+        };
+        let (granted, why) = match claimed {
+            Some(claim) => (
+                (claim.granted as usize).min(asked),
+                Withheld::from_refusal(claim.refused.as_deref(), claim.limit),
+            ),
+            None => (0, Withheld::Unchecked),
+        };
+        if granted < asked {
+            log_withheld(claims, asked, granted, why);
+            plan.withhold(granted, why);
+        }
+        granted
+    };
     let call = SearchCall::new(
         &http,
         &leased.credentials,
@@ -276,8 +417,14 @@ async fn managed_search(
         state.service_tier_endpoints,
         transport.max_response_bytes,
     );
-    let answer = search_bridge::answer(&call, &plan, &RecordScope::from_claims(claims))
-        .await
-        .map_err(AppError::upstream)?;
-    Ok(Json(answer).into_response())
+    let answer = search_bridge::answer(&call, &plan, &RecordScope::from_claims(claims)).await;
+    // What the controller let run and did not search (a search that failed)
+    // goes back to the message before the model reads the answer.
+    let ran = answer.as_ref().map_or(0, search_bridge::searches_in);
+    if let (Some(controller), Some(job)) = (state.controller.as_ref(), job.as_ref())
+        && granted > ran
+    {
+        settle_managed_searches(controller, job, claim_id, ran as u32).await;
+    }
+    Ok(Json(answer.map_err(AppError::upstream)?).into_response())
 }
