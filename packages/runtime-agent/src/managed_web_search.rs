@@ -323,16 +323,13 @@ fn fewer_line(ran: u32, limit: u32) -> String {
 }
 
 /// Installs the AI's own web search into a run's registry. With an allowance, its search tool
-/// keeps to it and counts what each search cost; the extension's other parts are its own.
+/// keeps to it and counts what each search cost ([`KeptSearch`]); the extension's other parts are
+/// its own.
 pub(crate) fn install(
     builder: &mut ExtensionRegistryBuilder<Config>,
     auth_manager: Arc<AuthManager>,
     allowance: Option<Arc<ManagedWebSearch>>,
 ) {
-    let Some(allowance) = allowance else {
-        codex_web_search_extension::install(builder, auth_manager);
-        return;
-    };
     let mut own = ExtensionRegistryBuilder::new();
     codex_web_search_extension::install(&mut own, auth_manager);
     let own = own.build();
@@ -343,7 +340,7 @@ pub(crate) fn install(
         builder.config_contributor(contributor.clone());
     }
     for contributor in own.tool_contributors() {
-        builder.tool_contributor(Arc::new(KeptToAllowance {
+        builder.tool_contributor(Arc::new(SearchTools {
             inner: contributor.clone(),
             allowance: allowance.clone(),
         }));
@@ -352,23 +349,20 @@ pub(crate) fn install(
 
 type Executor = Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>;
 
-/// The search extension's tools, its search tool kept to the allowance.
-struct KeptToAllowance {
+/// The search extension's tools, its search tool kept to the allowance where the run has one.
+struct SearchTools {
     inner: Arc<dyn ToolContributor>,
-    allowance: Arc<ManagedWebSearch>,
+    allowance: Option<Arc<ManagedWebSearch>>,
 }
 
-impl KeptToAllowance {
+impl SearchTools {
     fn keep(&self, tools: Vec<Executor>) -> Vec<Executor> {
         let search = ToolName::namespaced(SEARCH_TOOL_NAMESPACE, SEARCH_TOOL_NAME);
         tools
             .into_iter()
-            .map(|tool| -> Executor {
+            .map(|tool| {
                 if tool.tool_name() == search {
-                    Arc::new(KeptSearch {
-                        inner: tool,
-                        allowance: self.allowance.clone(),
-                    })
+                    search_tool(tool, self.allowance.clone())
                 } else {
                     tool
                 }
@@ -377,7 +371,18 @@ impl KeptToAllowance {
     }
 }
 
-impl ToolContributor for KeptToAllowance {
+/// The run's search tool: the extension's, kept to the allowance where the run has one.
+fn search_tool(tool: Executor, allowance: Option<Arc<ManagedWebSearch>>) -> Executor {
+    match allowance {
+        Some(allowance) => Arc::new(KeptSearch {
+            inner: tool,
+            allowance,
+        }),
+        None => tool,
+    }
+}
+
+impl ToolContributor for SearchTools {
     fn prepare_for_step<'a>(&'a self, input: StepPreparationInput<'a>) -> ExtensionFuture<'a, ()> {
         self.inner.prepare_for_step(input)
     }
@@ -801,6 +806,143 @@ mod tests {
         assert_eq!(allowance.take_unreported(), Some(cost(1, 8_000, 100)));
     }
 
+    /// A stand-in for the search extension's tool whose request fails: it starts the call's search
+    /// (`starts`), as Codex's tool does just before it sends the request, then returns the error.
+    struct FailingSearch {
+        starts: bool,
+    }
+
+    impl<'call> ToolExecutor<ToolCall<'call>> for FailingSearch {
+        fn tool_name(&self) -> ToolName {
+            ToolName::namespaced(SEARCH_TOOL_NAMESPACE, SEARCH_TOOL_NAME)
+        }
+
+        fn spec(&self) -> ToolSpec {
+            unreachable!("a call reads no spec")
+        }
+
+        fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
+        where
+            ToolCall<'call>: 'a,
+        {
+            Box::pin(async move {
+                if self.starts {
+                    let begin = codex_protocol::protocol::WebSearchBeginEvent {
+                        call_id: call.call_id.clone(),
+                    };
+                    call.turn_item_emitter
+                        .emit_started(ExtensionTurnItem {
+                            item: serde_json::from_value(
+                                json!({"kind": "clock.sleep", "id": "search", "durationMs": 0}),
+                            )
+                            .unwrap(),
+                            legacy_events: vec![EventMsg::WebSearchBegin(begin)],
+                        })
+                        .await;
+                }
+                Err::<Box<dyn ToolOutput>, _>(FunctionCallError::Fatal(
+                    "unexpected status 502 Bad Gateway".into(),
+                ))
+            })
+        }
+    }
+
+    /// The search events a call emitted, in order: a start's call, and an end's call, words and
+    /// `results`.
+    #[derive(Default)]
+    struct Emitted(Mutex<Vec<(&'static str, String, Option<Vec<JsonValue>>)>>);
+
+    impl Emitted {
+        fn keep(&self, events: Vec<EventMsg>) {
+            for event in events {
+                self.0.lock().push(match event {
+                    EventMsg::WebSearchBegin(begin) => ("started", begin.call_id, None),
+                    EventMsg::WebSearchEnd(end) => {
+                        assert_eq!(end.query, "", "an end with no words");
+                        ("ended", end.call_id, end.results)
+                    }
+                    other => panic!("{other:?}"),
+                });
+            }
+        }
+
+        fn steps(&self) -> Vec<(&'static str, String, Option<Vec<JsonValue>>)> {
+            self.0.lock().clone()
+        }
+    }
+
+    impl TurnItemEmitter for Emitted {
+        fn emit_started<'a>(&'a self, item: ExtensionTurnItem) -> TurnItemEmissionFuture<'a> {
+            self.keep(item.legacy_events);
+            Box::pin(std::future::ready(()))
+        }
+
+        fn emit_completed<'a>(&'a self, item: ExtensionTurnItem) -> TurnItemEmissionFuture<'a> {
+            self.keep(item.legacy_events);
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    /// A call whose request failed after its search started returns its error, which Codex only
+    /// logs before the turn goes on: the run's search tool ends the step its start posted first,
+    /// with no words, as a search that was tried, for a person's own login and for Instafy AI
+    /// alike. Its searches go back to the message, and nothing is charged. A call that asked no
+    /// search (an open) ends as one that searched nothing, and one that failed before it started
+    /// posted no step to end.
+    #[tokio::test]
+    async fn a_search_whose_request_failed_ends_its_step_as_one_that_was_tried() {
+        let started = ("started", "call".to_string(), None);
+        let run =
+            |allowance: Option<Arc<ManagedWebSearch>>, starts: bool, call: ToolCall<'static>| {
+                let emitted = Arc::new(Emitted::default());
+                let mut call = call;
+                call.turn_item_emitter = emitted.clone();
+                async move {
+                    let error = search_tool(Arc::new(FailingSearch { starts }), allowance)
+                        .handle(call)
+                        .await
+                        .err();
+                    assert_eq!(
+                        error,
+                        Some(FunctionCallError::Fatal(
+                            "unexpected status 502 Bad Gateway".into()
+                        ))
+                    );
+                    emitted.steps()
+                }
+            };
+        let managed = Arc::new(ManagedWebSearch::new(SEARCHES_PER_MESSAGE));
+        for allowance in [None, Some(managed.clone())] {
+            assert_eq!(
+                run(allowance, true, search_call(&["museum hours"])).await,
+                [
+                    started.clone(),
+                    (
+                        "ended",
+                        "call".to_string(),
+                        Some(vec![json!({"type": "instafy_search_failed"})])
+                    ),
+                ]
+            );
+        }
+        assert_eq!(managed.hold(SEARCHES_PER_MESSAGE), SEARCHES_PER_MESSAGE);
+        assert_eq!(managed.take_unreported(), None);
+
+        let mut open = search_call(&[]);
+        open.payload = ToolPayload::Function {
+            arguments: json!({"open": [{"ref_id": "https://www.example.org/"}]}).to_string(),
+        };
+        assert_eq!(
+            run(None, true, open).await,
+            [started.clone(), ("ended", "call".to_string(), None)]
+        );
+        assert!(
+            run(None, false, search_call(&["museum hours"]))
+                .await
+                .is_empty()
+        );
+    }
+
     /// A search answered by no bridge (no entry of its own) keeps what it held, and reports
     /// nothing to charge; one answered by a bridge from before `search_usage` counts the queries
     /// it names, with no tokens.
@@ -917,11 +1059,12 @@ mod tests {
         assert_eq!(usage_artifact_of_job(Uuid::new_v4()), None);
     }
 
-    /// Kept to an allowance, the search extension keeps all it registers: its thread and config
-    /// contributors as they are, and its tools behind the allowance. Codex's extension registers
-    /// nothing else; a bump that makes it register more fails here, so the wrapper takes that too.
+    /// With an allowance or without one (a person's own login), the search extension keeps all it
+    /// registers: its thread and config contributors as they are, and its tools behind the
+    /// run's search tool. Codex's extension registers nothing else; a bump that makes it register
+    /// more fails here, so the wrapper takes that too.
     #[test]
-    fn the_search_extension_keeps_all_it_registers_behind_the_allowance() {
+    fn the_search_extension_keeps_all_it_registers_behind_the_runs_search_tool() {
         let auth = || {
             codex_login::AuthManager::from_auth_for_testing(codex_login::CodexAuth::from_api_key(
                 "inert",
@@ -948,13 +1091,14 @@ mod tests {
         codex_web_search_extension::install(&mut codex, auth());
         let codex = codex.build();
         assert_eq!(counts(&codex), [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let mut kept = ExtensionRegistryBuilder::new();
-        install(
-            &mut kept,
-            auth(),
+        for allowance in [
             Some(Arc::new(ManagedWebSearch::new(SEARCHES_PER_MESSAGE))),
-        );
-        assert_eq!(counts(&kept.build()), counts(&codex));
+            None,
+        ] {
+            let mut kept = ExtensionRegistryBuilder::new();
+            install(&mut kept, auth(), allowance);
+            assert_eq!(counts(&kept.build()), counts(&codex));
+        }
     }
 
     /// The line the model reads names the allowance, says how to answer without more searches,

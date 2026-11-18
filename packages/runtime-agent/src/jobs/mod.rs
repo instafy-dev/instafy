@@ -42587,16 +42587,76 @@ mod tests {
         assert_eq!(metadata["activity"]["key"], json!("instafy/web-search"));
     }
 
-    /// A search whose request failed never ends: Codex's turn ends with an error instead. The
-    /// step its start posted then ends as one that was tried, so it never reads "Searching the
-    /// web" on through the run of a retry. A search that had ended keeps its own end, and the
-    /// error stays the run's own message, as before.
+    /// A search whose request failed: Codex only logs the error, answers the call "aborted" for
+    /// the model, and the turn goes on. The run's search tool ends the step its start posted with
+    /// no words (`managed_web_search`), which reads as a search that was tried from then on, never
+    /// "Searching the web" for the rest of the turn, and names nothing of the failure.
+    #[test]
+    fn a_web_search_whose_request_failed_reads_as_tried_once_it_fails() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::Event;
+
+        let mut adapter = CodexEventStreamAdapter::default();
+        let mut events = Vec::new();
+        for msg in [
+            json!({"type": "web_search_begin", "call_id": "search-1"}),
+            json!({"type": "web_search_end", "call_id": "search-1", "query": "",
+                   "action": {"type": "other"}, "results": [{"type": "instafy_search_failed"}]}),
+        ] {
+            events.extend(adapter.collect(&Event {
+                id: "turn-1".into(),
+                msg: serde_json::from_value(msg).unwrap(),
+            }));
+        }
+        let messages = extract_codex_messages(&events);
+        let steps: Vec<(&str, &JsonValue)> = messages
+            .iter()
+            .map(|message| {
+                assert_eq!(message.message_type.as_deref(), Some("web_search"));
+                (
+                    message.content.as_str(),
+                    &message.metadata.as_ref().expect("metadata")["status"],
+                )
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("Web search started", &json!("in_progress")),
+                ("Web search failed", &json!("failed")),
+            ]
+        );
+        let tried = messages[1].metadata.as_ref().unwrap();
+        assert_eq!(tried["itemId"], json!("search-1"));
+        assert_eq!(tried["activity"]["key"], json!("instafy/web-search"));
+        for absent in ["query", "pages", "event"] {
+            assert!(tried.get(absent).is_none(), "{absent} in {tried}");
+        }
+    }
+
+    /// A search its turn ended before it answered (the turn was aborted or failed, or it ended
+    /// with the search still open) ends as one that was tried, so its step never reads "Searching
+    /// the web" on through the run of a retry, nor "Didn't finish searching the web" after a turn
+    /// that ended. A search that had ended keeps its own end, and the turn's own message stays
+    /// its own, as before.
     #[test]
     fn a_web_search_its_run_ended_before_it_answered_reads_as_tried() {
         let started = |id: &str| json!({"type": "item.started", "item": {"id": id, "type": "web_search", "status": "in_progress"}});
-        for end in [
-            json!({"type": "error", "message": "unexpected status 502 Bad Gateway: search failed"}),
-            json!({"type": "turn.failed", "error": {"message": "unexpected status 502 Bad Gateway"}}),
+        for (end, its_own) in [
+            (
+                json!({"type": "error", "message": "Turn aborted (interrupted)"}),
+                "error",
+            ),
+            (
+                json!({"type": "turn.failed", "error": {"message": "unexpected status 502 Bad Gateway"}}),
+                "error",
+            ),
+            (
+                json!({"type": "turn.completed", "usage": {
+                    "input_tokens": 1200, "cached_input_tokens": 0, "output_tokens": 80,
+                }}),
+                "token_usage",
+            ),
         ] {
             let messages = extract_codex_messages(&[
                 started("ws_done"),
@@ -42631,9 +42691,11 @@ mod tests {
             let tried = messages[3].metadata.as_ref().unwrap();
             assert_eq!(messages[3].content, "Web search failed");
             assert_eq!(tried["activity"]["live"], json!("Searching the web"));
-            assert!(!tried.to_string().contains("502"), "{tried}");
+            for absent in ["502", "aborted"] {
+                assert!(!tried.to_string().contains(absent), "{tried}");
+            }
             assert_eq!(messages.len(), 5, "{end}");
-            assert_eq!(messages[4].message_type.as_deref(), Some("error"));
+            assert_eq!(messages[4].message_type.as_deref(), Some(its_own));
         }
         // A reconnect is no end: the search still runs.
         let messages = extract_codex_messages(&[
