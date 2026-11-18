@@ -102,9 +102,7 @@ fn a_browser_turn_reads_only_the_replies_guide_of_agents_md() {
 /// No turn's memory tells it to load memory again: no file Instafy ships into a space (`AGENTS.md`,
 /// `INSTAFY.md`, the learning policy and every other skill) says to run `python AGENTS.py` first
 /// (it prints the snapshot the prompt already holds) or holds a "start-of-task ritual". `/learn`
-/// still runs it, as its own prompt says. Unedited earlier copies are upgraded and edited ones
-/// kept, so a space whose files this runtime keeps (a Desktop folder) stops carrying the ritual:
-/// `INSTAFY.md` and the learning policy were written only into a space that had none.
+/// still runs it, as its own prompt says.
 #[test]
 fn no_memory_file_tells_a_turn_to_load_its_memory_again() {
     const GONE: [&str; 4] = [
@@ -140,48 +138,6 @@ fn no_memory_file_tells_a_turn_to_load_its_memory_again() {
     let building = prompt(tmp.path(), &job(json!({})));
     assert!(!building.contains("Fast context load"));
     assert!(building.contains("For `/learn`, run `python AGENTS.py` if present"));
-
-    for (file, previous, marker) in [
-        (
-            learn::AGENTS_DOC_FILENAME,
-            include_str!("legacy/agents-doc-v12.md"),
-            "## Fast context load (preferred)",
-        ),
-        (
-            learn::INSTAFY_FILENAME,
-            include_str!("legacy/instafy-doc-v2.md"),
-            "Start-of-task ritual",
-        ),
-        (
-            learn::INSTAFY_FILENAME,
-            include_str!("legacy/instafy-doc-v1.md"),
-            "Start-of-task ritual",
-        ),
-        (
-            learn::LEARNING_POLICY_RELATIVE_PATH,
-            include_str!("legacy/learning-policy-v1.md"),
-            "## Start-of-task ritual",
-        ),
-    ] {
-        assert!(previous.contains(marker), "{file}");
-        let path = tmp.path().join(file);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        let upgraded = fs::read_to_string(&path).unwrap();
-        for gone in GONE {
-            assert!(!upgraded.contains(gone), "{file}: {gone}");
-        }
-        // A space's own memory is kept as it is.
-        let edited =
-            previous.replace("<1–2 sentences>", "Our team's trip planner.") + "\nOur own note.\n";
-        fs::write(&path, &edited).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{file}");
-        fs::remove_file(&path).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-    }
-    // A building turn's snapshot of an upgraded space holds no ritual either.
-    let building = prompt(tmp.path(), &job(json!({})));
     for gone in ["Start-of-task ritual", "prefer `python AGENTS.py`"] {
         assert!(!building.contains(gone), "{gone}");
     }

@@ -2823,7 +2823,7 @@ fn pinned_reading_the_web_section(workspace_dir: &Path) -> Option<String> {
     } else if let Some(own) = markdown_section(&text, READING_THE_WEB_SECTION) {
         own
     } else if says_each_rule_of(&text, &current)
-        || learn::earlier_agents_doc_sections(READING_THE_WEB_SECTION)
+        || learn::earlier_reading_the_web_sections()
             .any(|earlier| says_each_rule_of(&text, &earlier))
     {
         current
