@@ -24,6 +24,16 @@ use tracing_subscriber::EnvFilter;
 const APPLY_PATCH_COMMANDS: [&str; 2] = ["apply_patch", "applypatch"];
 
 fn main() -> anyhow::Result<()> {
+    // Codex's command hook (docs/Local-Engine-Turns.md, D22): it runs before each command of a
+    // Codex turn, so it answers before anything else here can fail or slow it down. Codex lets a
+    // command through when its hook fails, so nothing may stand between the flag and the answer.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|flag| flag == runtime_agent::codex_claude_guard::HOOK_FLAG)
+        && std::env::args_os().count() == 2
+    {
+        std::process::exit(runtime_agent::codex_claude_guard::run_hook());
+    }
     // Electron-owned Windows runtimes join a KILL_ON_JOB_CLOSE Job Object
     // before any model-controlled process can spawn. If the Rust root exits,
     // Windows then terminates the full descendant tree as one lifetime unit.
