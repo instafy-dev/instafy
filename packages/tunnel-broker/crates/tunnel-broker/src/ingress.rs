@@ -236,14 +236,12 @@ mod tests {
             token: "tok".into(),
             hostname: hostname.into(),
             visibility: visibility.into(),
-            kind: "tunnel".into(),
         }
     }
 
     fn private_binding() -> RatholeBinding {
         RatholeBinding {
             tunnel_id: Uuid::parse_str(PRIVATE_HEX).unwrap(),
-            kind: "preview".into(),
             ..binding("tunnel_def", 20002, "def.rt.test", "private")
         }
     }
