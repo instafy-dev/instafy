@@ -992,8 +992,8 @@ impl BrowserTried {
 
     /// The addresses at which the run's steps were told `stop`, a stop only the browser can say
     /// (`shared_browser_activity::step_stop`): none when no step was. None when that is not
-    /// known: no Shared Browser step answered, a step of another browser did, or a step was
-    /// told it where its address was not known.
+    /// known: no Shared Browser step answered, a step of another browser did, the browser never
+    /// answered one, or a step was told it where its address was not known.
     pub fn stops_given(&self, stop: &str) -> Option<Vec<&str>> {
         if !self.stepped || self.stops_not_known {
             return None;
@@ -5500,7 +5500,8 @@ impl CodexEventStreamAdapter {
     /// (`shared_browser_activity::step_stop`), at the addresses the step tried, the link it
     /// pressed (by the reading it pressed it on) and the page its tab was on before it, and the
     /// page the browser said its tab is on now, for the next step's. A step of another browser
-    /// says its stops in words of its own, so the run's are not known.
+    /// says its stops in words of its own, and one the browser never answered says none, so the
+    /// run's are not known then.
     fn keep_browser_stop(
         &mut self,
         server: &str,
@@ -5513,7 +5514,13 @@ impl CodexEventStreamAdapter {
         use crate::shared_browser_activity::{
             PressedLink, pressed_link, step_stop, step_tried_addresses,
         };
-        if !server.eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME) {
+        let unanswered = payload.is_none_or(|payload| {
+            payload
+                .get("browserUnavailable")
+                .and_then(JsonValue::as_bool)
+                == Some(true)
+        });
+        if !server.eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME) || unanswered {
             self.browser_tried.stops_not_read();
             return;
         }
@@ -13398,7 +13405,11 @@ required = true
     /// says its stops in words of its own, makes them not known.
     #[test]
     fn the_adapter_keeps_where_a_step_was_told_a_stop_only_the_browser_can_say() {
-        let event = |server: &str, tool: &str, arguments: JsonValue, is_error: bool, structured: JsonValue| Event {
+        let event = |server: &str,
+                     tool: &str,
+                     arguments: JsonValue,
+                     is_error: bool,
+                     structured: JsonValue| Event {
             id: "evt_mcp_end".to_string(),
             msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
                 call_id: format!("call_{tool}"),
@@ -13436,8 +13447,17 @@ required = true
             "interactiveElements": [{"index": 0, "label": "Opening hours", "href": hours}],
         });
         let mut adapter = CodexEventStreamAdapter::default();
-        adapter.collect(&event(shared, "navigate", json!({"url": listing}), false, reading));
-        assert_eq!(adapter.browser_tried().stops_given("timed-out"), Some(Vec::new()));
+        adapter.collect(&event(
+            shared,
+            "navigate",
+            json!({"url": listing}),
+            false,
+            reading,
+        ));
+        assert_eq!(
+            adapter.browser_tried().stops_given("timed-out"),
+            Some(Vec::new())
+        );
         // A click on the listing's link the page did not take in time: its answer names no
         // page, so the page its tab was on and the link it pressed are where it timed out.
         adapter.collect(&event(
@@ -13471,7 +13491,10 @@ required = true
             false,
             json!({"done": "Pressed Tab. The page still reads as it did before this step, 6 seconds after it: this result is the page as it is now.", "activity": {"step": "press", "url": planner}}),
         ));
-        assert_eq!(adapter.browser_tried().stops_given("covered"), Some(Vec::new()));
+        assert_eq!(
+            adapter.browser_tried().stops_given("covered"),
+            Some(Vec::new())
+        );
         // A click a cookie notice covered, on the planner.
         adapter.collect(&event(
             shared,
@@ -13480,7 +13503,10 @@ required = true
             true,
             json!({"error": {"reason": "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked."}}),
         ));
-        assert_eq!(adapter.browser_tried().stops_given("covered"), Some(vec![planner]));
+        assert_eq!(
+            adapter.browser_tried().stops_given("covered"),
+            Some(vec![planner])
+        );
         // None of it is projected.
         let projected = adapter.collect(&event(
             shared,
@@ -13489,7 +13515,10 @@ required = true
             false,
             json!({"activity": {"step": "snapshot", "url": planner}}),
         ));
-        assert!(!format!("{projected:?}").contains("timed-out"), "{projected:?}");
+        assert!(
+            !format!("{projected:?}").contains("timed-out"),
+            "{projected:?}"
+        );
         // A step of the Personal Browser says its stops in words of its own.
         adapter.collect(&event(
             "instafy_personal_browser",
@@ -13499,6 +13528,16 @@ required = true
             json!({"error": {"reason": "Timed out."}}),
         ));
         assert_eq!(adapter.browser_tried().stops_given("timed-out"), None);
+        // And a step the browser never answered says none.
+        let mut unanswered = CodexEventStreamAdapter::default();
+        unanswered.collect(&event(
+            shared,
+            "snapshot",
+            json!({}),
+            true,
+            json!({"error": {"reason": "Instafy's browser could not be reached."}, "browserUnavailable": true}),
+        ));
+        assert_eq!(unanswered.browser_tried().stops_given("timed-out"), None);
     }
 
     /// The addresses the browser refused to open because no message or page gave them, kept

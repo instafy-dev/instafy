@@ -464,27 +464,144 @@ mod tests {
     fn a_step_is_told_a_stop_only_by_the_browsers_own_words() {
         let failed = |reason: &str| json!({ "error": { "reason": reason } });
         for (succeeded, payload, code, stop) in [
-            (false, failed("The page did not take this step in time, so it may not have happened. Take a fresh snapshot to see the page as it is now."), None, Some("timed-out")),
-            (false, failed("The site did not answer in time, so nothing was opened and the page is still blank."), None, Some("timed-out")),
-            (false, failed("The site did not answer in time, so nothing on its page could be read."), None, Some("timed-out")),
-            (false, failed("This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again."), None, Some("timed-out")),
-            (false, failed("This address was still loading after 20 seconds earlier in this turn, so it was not opened again."), None, Some("timed-out")),
-            (false, failed("This step's time ran out, and Shared Browser could not check for windows it opened, so it stopped there."), None, Some("timed-out")),
-            (false, failed("Instafy's browser couldn't reach that site: it did not answer, refused the connection, or is an address the browser does not open."), None, Some("timed-out")),
-            (true, json!({ "stepTimedOut": true, "message": "This step was still running after 20 seconds, so it stopped where it was." }), None, Some("timed-out")),
-            (true, json!({ "done": "\"Opening hours\" did not take the click in time, so its address was opened in this tab instead." }), None, Some("timed-out")),
-            (false, failed("A cookie notice covers this page, and the browser could not decline it, so nothing was clicked."), None, Some("covered")),
-            (false, failed("Something else on the page covers \"Search\" (<div role=\"dialog\"> named \"Choose a time\"), so nothing was clicked."), None, Some("covered")),
-            (false, failed("Something else on the page still covers \"Search\", so nothing was clicked."), None, Some("covered")),
-            (true, json!({ "done": "A cookie notice covers \"All lines\", so its address was opened in this tab instead." }), None, Some("covered")),
-            (false, json!({ "message": "User input is needed." }), Some("cookie_notice_required"), Some("covered")),
-            (true, json!({ "done": "Pressed Tab. The page still reads as it did before this step, 6 seconds after it: this result is the page as it is now." }), None, None),
-            (true, json!({ "message": "The page is still busy, so it could not be read yet. Take a snapshot in a moment." }), None, None),
-            (true, json!({ "visibleText": "Gateway timeout: the server did not answer in time. A cookie notice covers this page." }), None, None),
-            (false, failed("This address has no page. Go on in this turn as \"Finding a page\" says."), None, None),
-            (false, json!({ "message": "The person said no." }), Some("approval_denied"), None),
+            (
+                false,
+                failed(
+                    "The page did not take this step in time, so it may not have happened. Take a fresh snapshot to see the page as it is now.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "The site did not answer in time, so nothing was opened and the page is still blank.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed("The site did not answer in time, so nothing on its page could be read."),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "This address was still loading after 20 seconds earlier in this turn, so it was not opened again.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "This step's time ran out, and Shared Browser could not check for windows it opened, so it stopped there.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "Instafy's browser couldn't reach that site: it did not answer, refused the connection, or is an address the browser does not open.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                true,
+                json!({ "stepTimedOut": true, "message": "This step was still running after 20 seconds, so it stopped where it was." }),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                true,
+                json!({ "done": "\"Opening hours\" did not take the click in time, so its address was opened in this tab instead." }),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked.",
+                ),
+                None,
+                Some("covered"),
+            ),
+            (
+                false,
+                failed(
+                    "Something else on the page covers \"Search\" (<div role=\"dialog\"> named \"Choose a time\"), so nothing was clicked.",
+                ),
+                None,
+                Some("covered"),
+            ),
+            (
+                false,
+                failed(
+                    "Something else on the page still covers \"Search\", so nothing was clicked.",
+                ),
+                None,
+                Some("covered"),
+            ),
+            (
+                true,
+                json!({ "done": "A cookie notice covers \"All lines\", so its address was opened in this tab instead." }),
+                None,
+                Some("covered"),
+            ),
+            (
+                false,
+                json!({ "message": "User input is needed." }),
+                Some("cookie_notice_required"),
+                Some("covered"),
+            ),
+            (
+                true,
+                json!({ "done": "Pressed Tab. The page still reads as it did before this step, 6 seconds after it: this result is the page as it is now." }),
+                None,
+                None,
+            ),
+            (
+                true,
+                json!({ "message": "The page is still busy, so it could not be read yet. Take a snapshot in a moment." }),
+                None,
+                None,
+            ),
+            (
+                true,
+                json!({ "visibleText": "Gateway timeout: the server did not answer in time. A cookie notice covers this page." }),
+                None,
+                None,
+            ),
+            (
+                false,
+                failed("This address has no page. Go on in this turn as \"Finding a page\" says."),
+                None,
+                None,
+            ),
+            (
+                false,
+                json!({ "message": "The person said no." }),
+                Some("approval_denied"),
+                None,
+            ),
         ] {
-            assert_eq!(step_stop(succeeded, Some(&payload), code), stop, "{payload}");
+            assert_eq!(
+                step_stop(succeeded, Some(&payload), code),
+                stop,
+                "{payload}"
+            );
         }
         assert_eq!(step_stop(false, None, None), None);
     }

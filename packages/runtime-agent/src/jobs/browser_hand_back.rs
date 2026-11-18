@@ -1170,7 +1170,7 @@ fn moved_page(asked: &str, ended: &str) -> bool {
 /// route. Another wrote `covered` after a click the page took, and the person was asked to
 /// dismiss a notice that covered nothing (a local test, Nov 17). Such a line stays when the
 /// turn's stops are not known: no Shared Browser step answered, one of another browser did,
-/// or one was told it where its address was not known.
+/// the browser never answered one, or one was told it where its address was not known.
 pub(super) fn leave_out_addresses_never_opened(
     summary: &mut String,
     not_given: &[String],
@@ -1232,12 +1232,10 @@ pub(super) fn leave_out_addresses_never_opened(
         else {
             return false;
         };
-        !given
-            .iter()
-            .any(|address| match site_and_page(address) {
-                Some((Some(given_site), _)) => given_site == site,
-                _ => true,
-            })
+        !given.iter().any(|address| match site_and_page(address) {
+            Some((Some(given_site), _)) => given_site == site,
+            _ => true,
+        })
     };
     // With no address its steps tried known, a stop is left out only for a refusal as not
     // given, a page read at another address, or a stop only the browser can say.

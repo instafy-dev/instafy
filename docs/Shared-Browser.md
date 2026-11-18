@@ -1747,8 +1747,9 @@ person to dismiss a notice. Lines are compared by site, as the person reads
 them ("The page on rejseplan.dk didn't answer in time."). Every other stop, a
 line whose address is no full address, and every line of a turn whose stops
 are not known stay: no Shared Browser step answered, a step of the browser on
-the person's device did (it says its stops in words of its own), or a step
-was told one where its address was not known.
+the person's device did (it says its stops in words of its own), the browser
+never answered a step, or a step was told one where its address was not
+known.
 
 **A page read at another address has a page.** runtime-agent also keeps where
 each `navigate` or `open_tab` left its tab for the address it asked for. A
