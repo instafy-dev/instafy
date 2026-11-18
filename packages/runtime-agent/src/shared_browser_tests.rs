@@ -1633,116 +1633,78 @@ impl EmbeddedControllerFixture {
 }
 
 #[test]
-fn parses_each_supported_high_level_request() {
-    for (method, path, body) in [
-        ("GET", "/v1/status", None),
-        ("GET", "/v1/snapshot", None),
+fn maps_each_supported_high_level_tool_to_its_request() {
+    let object = |value: JsonValue| value.as_object().cloned();
+    for (name, arguments, method, path) in [
+        ("status", None, "GET", "/v1/status"),
+        ("snapshot", None, "GET", "/v1/snapshot"),
         (
+            "navigate",
+            object(json!({ "url": "https://example.com" })),
             "POST",
             "/v1/navigate",
-            Some(r#"{"url":"https://example.com"}"#),
         ),
         (
+            "click",
+            object(json!({ "index": 3, "snapshotId": SNAPSHOT_ID })),
             "POST",
             "/v1/click",
-            Some(
-                r#"{"index":3,"snapshotId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
-            ),
         ),
         (
+            "type",
+            object(json!({ "index": 2, "snapshotId": SNAPSHOT_ID, "text": "hello" })),
             "POST",
             "/v1/type",
-            Some(
-                r#"{"index":2,"snapshotId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","text":"hello"}"#,
-            ),
         ),
         (
+            "press",
+            object(json!({ "index": 2, "snapshotId": SNAPSHOT_ID, "key": "Escape" })),
             "POST",
             "/v1/press",
-            Some(
-                r#"{"index":2,"snapshotId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","key":"Escape"}"#,
-            ),
         ),
-        ("POST", "/v1/scroll", Some(r#"{"x":0,"y":720}"#)),
+        (
+            "scroll",
+            object(json!({ "x": 0, "y": 720 })),
+            "POST",
+            "/v1/scroll",
+        ),
     ] {
-        let mut args = vec!["request", method, path];
-        if let Some(body) = body {
-            args.push(body);
-        }
-        let parsed = parse_request_args(&strings(&args)).expect("supported request");
-        assert_eq!(parsed.path, path);
+        let request = mcp_tool_request(name, arguments).expect(name);
+        assert_eq!(
+            (request.method.as_str(), request.path.as_str()),
+            (method, path),
+            "{name}"
+        );
     }
 }
 
 #[test]
-fn rejects_arbitrary_paths_methods_and_malformed_bodies() {
-    assert!(parse_request_args(&strings(&["request", "DELETE", "/v1/status"])).is_err());
-    assert!(parse_request_args(&strings(&["request", "GET", "https://example.com"])).is_err());
-    assert!(parse_request_args(&strings(&["request", "POST", "/v1/navigate", "nope"])).is_err());
-    assert!(parse_request_args(&strings(&["request", "POST", "/v1/unknown", "{}"])).is_err());
-    assert!(
-        parse_request_args(&strings(&[
-            "request",
-            "POST",
-            "/v1/navigate",
-            r#"{"url":"https://user:secret@example.com"}"#,
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_request_args(&strings(&[
-            "request",
-            "POST",
-            "/v1/press",
-            r#"{"key":"Delete"}"#,
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_request_args(&strings(&[
-            "request",
-            "POST",
-            "/v1/navigate",
-            r#"{"url":"https://example.com","evaluate":"process.env"}"#,
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_request_args(&strings(&[
-            "request",
-            "POST",
-            "/v1/press",
-            r#"{"key":"Control+L"}"#,
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_request_args(&strings(&[
-            "request",
-            "POST",
-            "/v1/click",
-            r#"{"index":1,"selector":"button"}"#,
-        ]))
-        .is_err()
-    );
-    assert!(
-            parse_request_args(&strings(&[
-                "request",
-                "POST",
-                "/v1/click",
-                r#"{"index":1,"snapshotId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","selector":"button"}"#,
-            ]))
-            .is_err()
+fn rejects_unknown_tools_and_malformed_bodies() {
+    let object = |value: JsonValue| value.as_object().cloned();
+    assert!(mcp_tool_request("unknown", object(json!({}))).is_err());
+    for (name, arguments) in [
+        (
+            "navigate",
+            json!({ "url": "https://user:secret@example.com" }),
+        ),
+        ("press", json!({ "key": "Delete" })),
+        (
+            "navigate",
+            json!({ "url": "https://example.com", "evaluate": "process.env" }),
+        ),
+        ("press", json!({ "key": "Control+L" })),
+        ("click", json!({ "index": 1, "selector": "button" })),
+        (
+            "click",
+            json!({ "index": 1, "snapshotId": SNAPSHOT_ID, "selector": "button" }),
+        ),
+        ("click", json!({ "index": 1, "snapshotId": "stale" })),
+    ] {
+        assert!(
+            mcp_tool_request(name, object(arguments.clone())).is_err(),
+            "{name} {arguments}"
         );
-    assert!(
-        parse_request_args(&strings(&[
-            "request",
-            "POST",
-            "/v1/click",
-            r#"{"index":1,"snapshotId":"stale"}"#,
-        ]))
-        .is_err()
-    );
+    }
 }
 
 #[test]
@@ -6319,15 +6281,6 @@ fn choose_requests_name_one_option_of_one_observed_list() {
     .expect("bounded choose");
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/v1/choose");
-    assert!(
-        parse_request_args(&strings(&[
-            "request",
-            "POST",
-            "/v1/choose",
-            &json!({ "index": 4, "snapshotId": SNAPSHOT_ID, "option": "Trindade" }).to_string(),
-        ]))
-        .is_ok()
-    );
     for invalid in [
         json!({ "index": 4, "snapshotId": SNAPSHOT_ID }),
         json!({ "index": 4, "snapshotId": SNAPSHOT_ID, "option": "" }),
@@ -6343,18 +6296,7 @@ fn choose_requests_name_one_option_of_one_observed_list() {
             mcp_tool_request("choose", body(invalid.clone())).is_err(),
             "{invalid}"
         );
-        assert!(
-            parse_request_args(&strings(&[
-                "request",
-                "POST",
-                "/v1/choose",
-                &invalid.to_string()
-            ]))
-            .is_err(),
-            "{invalid}"
-        );
     }
-    assert!(parse_request_args(&strings(&["request", "GET", "/v1/choose"])).is_err());
 }
 
 #[test]
@@ -11416,17 +11358,6 @@ fn tab_tools_map_to_bounded_controller_requests() {
         )
         .is_err()
     );
-    assert!(parse_request_args(&strings(&["request", "GET", "/v1/tabs"])).is_ok());
-    assert!(
-        parse_request_args(&strings(&[
-            "request",
-            "POST",
-            "/v1/tabs/open",
-            r#"{"url":"https://example.test/"}"#
-        ]))
-        .is_ok()
-    );
-    assert!(parse_request_args(&strings(&["request", "POST", "/v1/tabs/new", "{}"])).is_err());
 }
 
 #[test]

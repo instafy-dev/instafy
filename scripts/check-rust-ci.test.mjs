@@ -18,14 +18,22 @@ const agentLinkerDefault = `          if [[ '\${{ runner.environment == 'self-ho
           fi
 `;
 // The dead-code gate: one job-level line in every Rust lane but runtime-agent's,
-// the comment above the Rust aggregate that explains it, and --all-targets in
-// the check lanes it covers.
+// clippy with only the same two lints denied in runtime-agent's check lane, the
+// comment above the Rust aggregate that explains it, and --all-targets in every
+// check lane.
 const deadCodeFlags = '      RUSTFLAGS: "-D dead_code -D unused_imports"\n';
-const deadCodeComment = `  # Every Rust lane but runtime-agent's denies dead code and unused imports, so
-  # what the 2026-11 cleanup removed cannot quietly come back. The check lanes
-  # check all targets: \`--tests\` alone builds binaries only as tests, where code
-  # that only tests call looks used. runtime-agent's lanes join once its own
-  # warnings are gone.
+const agentDeadCodeGate = 'cargo clippy --locked --all-targets --manifest-path packages/runtime-agent/Cargo.toml -- -A clippy::all -D dead_code -D unused_imports';
+const deadCodeComment = `  # Dead code and unused imports fail every Rust crate's CI. rustc counts every
+  # item a library exports as used, so the gate catches dead private and
+  # pub(crate) items but not an unused pub item a pub path exports, such as a
+  # pub fn in one of the pub modules runtime-agent's lib.rs declares; finding
+  # those still takes an audit. The check lanes check all targets: \`--tests\`
+  # alone builds binaries only as tests, where code that only tests call looks
+  # used. Every lane but runtime-agent's denies them through RUSTFLAGS.
+  # runtime-agent's check lane runs clippy with only those two lints denied
+  # instead: Cargo passes RUSTFLAGS to path dependencies uncapped, which would
+  # lint its Codex crates, while clippy lints only runtime-agent itself; and
+  # its test lane links with lld only while RUSTFLAGS is unset.
 `;
 const checks = [
   ['controller', 'runtime controller', 'runtime-controller'],
@@ -177,15 +185,15 @@ test('eleven bounded children independently check out exact source and retain na
   }
 });
 
-test("every Rust lane but runtime-agent's denies dead code and unused imports, and its check covers every target", () => {
+test("every Rust lane denies dead code and unused imports, runtime-agent's through clippy in its check lane, and every check covers all targets", () => {
   assert.equal(source.split(`\n${deadCodeComment}  rust:\n`).length, 2);
   for (const item of children) {
     const text = job(item.key);
     const env = text.match(/^    env:\n((?:      .*\n)+)/mu)?.[1];
     assert.ok(env, `${item.key} env`);
     if (item.pkg === 'runtime-agent') {
-      // Not yet: its own warnings come first, and its test step sets the lld
-      // linker only while RUSTFLAGS is unset.
+      // Never a job-level RUSTFLAGS here: Cargo passes it uncapped to the Codex
+      // path crates, and the test step links with lld only while it is unset.
       assert.doesNotMatch(env, /RUSTFLAGS/u, item.key);
       continue;
     }
@@ -194,12 +202,22 @@ test("every Rust lane but runtime-agent's denies dead code and unused imports, a
     assert.ok(env.endsWith(deadCodeFlags), item.key);
     assert.equal(text.split('RUSTFLAGS').length, 2, item.key);
   }
+  assert.ok(!job('rust-check-agent').includes('RUSTFLAGS'));
   for (const item of checks) {
     const run = step(item.key, 'Check public Rust package').split('        run: |\n')[1];
-    const targets = item.pkg === 'runtime-agent' ? '--tests' : '--all-targets';
-    assert.equal(run.split('\n')[0].trim(), `cargo check --locked ${targets} --manifest-path packages/${item.pkg}/Cargo.toml`);
+    assert.equal(run.split('\n')[0].trim(), item.pkg === 'runtime-agent'
+      ? agentDeadCodeGate : `cargo check --locked --all-targets --manifest-path packages/${item.pkg}/Cargo.toml`);
   }
-  assert.equal(source.split(' --all-targets ').length - 1, 4);
+  assert.equal(source.split(' --all-targets ').length - 1, 5);
+  // Clippy runs in runtime-agent's check lane alone, which adds the component
+  // the minimal profile leaves out. Cargo runs clippy-driver only for
+  // runtime-agent's own targets, so the -D flags reach no path dependency.
+  for (const item of children) {
+    const agentCheck = item.name === 'Rust check runtime agent';
+    assert.equal(step(item.key, 'Set up stable Rust').endsWith('          rustup default stable\n          rustup component add clippy\n'), agentCheck, item.key);
+    assert.equal(job(item.key).split('clippy').length - 1, agentCheck ? 3 : 0, item.key);
+  }
+  assert.equal(source.split('cargo clippy').length, 2);
 });
 
 test('only self-hosted Rust children install the fixed missing native packages within the original thirty-minute job', () => {
@@ -225,21 +243,22 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full reviewed seven check and twenty-three test command lines (not lanes) and working directories are hash-bound', () => {
+test('the full reviewed seven check and twenty-eight test command lines (not lanes) and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b,
   // plus the reviewed runtime-agent proxy_retry_budget, provider_mcp and read-reference selectors,
   // the proxy_retry_budget runs for the own-AI default and gpt-5.5, and the runtime
   // provider core and service unit tests in the provider check, plus the inert
   // native_compaction selector for the real proxy's ChatGPT and API-key paths and
   // the inert native_images, granted_turns, native_subagents, browser_hand_back, stopped_turn, thread_mode, evidence_retry, reply_draft_stream, page_cards and codex_never_starts_claude selectors,
+  // the inert pages_of_their_own_chats, saved_change_reload, turn_wrap_up, client_timezone and proxy_stream selectors,
   // the hermetic local-engine turn targets (claude_code_lane, claude_code_supervision and the live suite's own checks in claude_code_live) and
   // the inert run_instructions target,
   // plus the complete tunnel-broker suite in its own lane,
-  // and --all-targets instead of --tests in every check lane but runtime-agent's.
+  // and --all-targets instead of --tests in every check lane, runtime-agent's as its clippy dead-code gate.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
-    [checks, 'Check public Rust package', '56d9e43b7771706613ef6006df0f999dd70ac7eebb80f8c8c6211c0f55391177', 7],
-    [suites, 'Run database-free Rust test suite', '3f4716e5d0459b5b9b266cc923c97ab83951e49d08fdbc0265ff5cd0e82f0f87', 23],
+    [checks, 'Check public Rust package', 'ef9a05105379dd87a058da083f0986e022fd73766a1b7b252c2db687c4d05ace', 7],
+    [suites, 'Run database-free Rust test suite', '567722190a795d0e29e957a939bdb46f4f6f98bcc02457c8b83f4b8d0291e065', 28],
   ]) {
     const inventory = list.flatMap(item => {
       const part = step(item.key, stepName);
@@ -258,7 +277,7 @@ test('the full reviewed seven check and twenty-three test command lines (not lan
     assert.equal(inventory.length, expectedCount);
     assert.equal(createHash('sha256').update(JSON.stringify(inventory)).digest('hex'), hash);
   }
-  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 28);
+  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|clippy|test) /gmu) ?? []).length, 0), 33);
   // The whole tunnel-broker workspace (broker and its types crate), locked like its check lane.
   assert.match(step('rust-test-broker', 'Run database-free Rust test suite'),
     /run: \|\n          cargo test --locked --manifest-path packages\/tunnel-broker\/Cargo.toml\n/u);
@@ -276,11 +295,87 @@ test('the full reviewed seven check and twenty-three test command lines (not lan
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration reply_draft_stream:: -- --test-threads=1\n/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration page_cards:: -- --test-threads=1\n/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration codex_never_starts_claude:: -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration pages_of_their_own_chats:: -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration saved_change_reload:: -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration turn_wrap_up:: -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration client_timezone:: -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration proxy_stream:: -- --test-threads=1\n/u);
   // The local-engine turn targets run without a Claude login: the live suite's checks of a real
   // claude stay ignored, and run only by hand.
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test claude_code_lane --test claude_code_supervision --test claude_code_live -- --test-threads=1\n/u);
   assert.doesNotMatch(agent, /--ignored|--include-ignored|INSTAFY_CLAUDE_CODE_LIVE/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test run_instructions\n/u);
+});
+
+// What tests/proxy_integration.rs declares that no filter of the runtime-agent
+// test step selects, each with the reason. Everything else there must match a
+// filter, so a new module or top-level test runs in CI or is named here.
+const proxyIntegrationNotRunInCi = {
+  code_mode_host_support: 'shared with proxy_retry_budget, whose whole run in CI covers its one test',
+  codex_embedded_via_proxy_creates_file: 'its default model (gpt-6.1-sol) needs the code-mode host, which it does not stage; not yet shown to pass with the host built',
+  codex_embedded_retries_after_stream_error: 'its default model (gpt-6.1-sol) needs the code-mode host, which it does not stage; not yet shown to pass with the host built',
+  isolated_tool_workers: "its workers run their tools in Codex's sandbox, which on Linux needs bubblewrap and unprivileged user namespaces; no runtime-agent lane installs bubblewrap or lifts Ubuntu's AppArmor restriction on those namespaces, and it has passed only on macOS",
+  codex_proxy_live_creates_file: 'a live probe: it needs RUN_LIVE_PROXY_TEST=1 and the Codex login of the machine',
+  codex_proxy_live_browser_prompt_simulation: 'a live probe: it needs RUN_LIVE_BROWSER_SIM_TEST=1 and the Codex login of the machine',
+  codex_proxy_live_browser_prompt_direct_codex_client_probe: 'a live probe: it needs RUN_LIVE_BROWSER_DIRECT_PROBE_TEST=1 and the Codex login of the machine',
+  codex_proxy_direct_custom_mcp_server_probe: 'a live probe: it needs RUN_CUSTOM_MCP_DIRECT_PROBE_TEST=1 and the Codex login of the machine',
+  codex_proxy_direct_personal_browser_mcp_probe: 'a live probe: it needs RUN_PERSONAL_BROWSER_MCP_DIRECT_PROBE_TEST=1 and the Codex login of the machine',
+};
+
+test('every proxy_integration module and top-level test runs under a CI filter or is named with why it does not', () => {
+  const lines = step('rust-test-agent', 'Run database-free Rust test suite').split('\n')
+    .filter(line => !line.trim().startsWith('#'));
+  // A cargo test that does not name its targets, or names them by pattern, also
+  // runs proxy_integration unfiltered, live probes included.
+  for (const line of lines.filter(line => line.includes('cargo test'))) {
+    const args = line.split(' -- ')[0].trim().split(/\s+/u);
+    if (args.includes('--no-run')) continue;
+    const message = `${line.trim()}: name each target with --lib or --test <name>`;
+    assert.ok(args.includes('--lib') || args.includes('--test'), message);
+    args.forEach((arg, index) => {
+      assert.doesNotMatch(arg, /^--(?:tests|all-targets|test=)/u, message);
+      if (arg === '--test') assert.match(args[index + 1] ?? '', /^\w+$/u, message);
+    });
+  }
+  // Every line that names proxy_integration, whatever its environment prefix or
+  // argument order, runs that target alone with one filter: an unfiltered run
+  // would also start the live probes.
+  const runs = lines.filter(line => line.includes('proxy_integration'));
+  const form = /^          cargo test --manifest-path packages\/runtime-agent\/Cargo\.toml --test proxy_integration (\S+) -- --test-threads=1$/u;
+  for (const line of runs) {
+    assert.match(line, form, `${line.trim()}: run proxy_integration alone, with one filter, in the form the other lines use`);
+  }
+  const filters = runs.map(line => line.match(form)[1]);
+  assert.ok(filters.length > 0);
+  assert.equal(new Set(filters).size, filters.length);
+  const integration = fs.readFileSync(path.join(root, 'packages/runtime-agent/tests/proxy_integration.rs'), 'utf8');
+  const modules = [...integration.matchAll(/^mod (\w+);$/gmu)].map(match => match[1]);
+  const tests = [...integration.matchAll(/^#\[(?:tokio::)?test\b[^\n]*\n(?:#\[[^\n]*\n)*(?:async )?fn (\w+)/gmu)]
+    .map(match => match[1]);
+  // Every module declaration and test attribute at the top level is one of those.
+  assert.equal(modules.length, (integration.match(/^(?:pub(?:\([^)\n]*\))? )?mod \w+/gmu) ?? []).length);
+  assert.equal(tests.length, (integration.match(/^#\[(?:tokio::)?test\b/gmu) ?? []).length);
+  // libtest runs the tests whose name contains the filter: `module::test` for a
+  // module's tests, its own name for a top-level test.
+  const names = [...modules.map(name => `${name}::`), ...tests];
+  for (const name of names) {
+    const key = name.replace(/::$/u, '');
+    const selected = filters.some(filter => name.includes(filter));
+    const named = Object.hasOwn(proxyIntegrationNotRunInCi, key);
+    assert.ok(selected || named,
+      `${key}: give it a filter line in the runtime-agent test step, or name it in proxyIntegrationNotRunInCi with why`);
+    assert.ok(!(selected && named), `${key} is named in proxyIntegrationNotRunInCi, but a filter runs it: drop one`);
+  }
+  for (const [key, reason] of Object.entries(proxyIntegrationNotRunInCi)) {
+    assert.ok(modules.includes(key) || tests.includes(key), `${key} is no longer in tests/proxy_integration.rs`);
+    assert.match(reason, /^\S[^\n]{9,}$/u, key);
+  }
+  // A filter that selects nothing passes without running a test. Each one names a
+  // module (`module::`) or is part of a top-level test's name: a `module::test`
+  // filter would run part of a module that still counts as unselected above.
+  for (const filter of filters) {
+    assert.ok(names.some(name => name.includes(filter)), `${filter} selects no module (module::) or top-level test`);
+  }
 });
 
 test('test children preserve unfiltered frozen Node20 installation and host-only disk cleanup', () => {
@@ -331,6 +426,11 @@ test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux a
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'reply_draft_stream::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'page_cards::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'codex_never_starts_claude::', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'pages_of_their_own_chats::', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'saved_change_reload::', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'turn_wrap_up::', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'client_timezone::', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'proxy_stream::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'claude_code_lane', '--test', 'claude_code_supervision', '--test', 'claude_code_live', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'run_instructions'],
   ];
@@ -427,12 +527,13 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // proxy_retry_budget, provider_mcp and read-reference selectors, the code-mode host build, the
   // per-model proxy_retry_budget runs, the runtime provider core and service unit
   // tests, CLI git wrapper suite, local author pseudonym key test and inert native
-  // compaction, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the hermetic local-engine turn targets and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings and local tunnel suites, and the tunnel
+  // compaction, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the pages of their own chats, saved change reload, turn wrap-up, client time zone and proxy stream selectors, the hermetic local-engine turn targets and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings and local tunnel suites, and the tunnel
   // broker test lane with its Rust tests aggregate entry, and the dead-code gate (RUSTFLAGS in every
-  // lane but runtime-agent's, --all-targets in their check lanes, and its comment): retains all
-  // functional commands, aggregate guards, routing, permissions and other jobs.
+  // lane but runtime-agent's, --all-targets in their check lanes, runtime-agent's clippy check with
+  // its clippy component, and its comment): retains all functional commands, aggregate guards,
+  // routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '6876490a3220a29c7a379f2c7d8b21254ea2717acb412106ba9f3b0b008dc981');
+    '75c31bbf745ec8330481ff5babcafd331a2ea75b9c0e59dfec27cec004b2a0d6');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

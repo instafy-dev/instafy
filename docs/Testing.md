@@ -629,17 +629,56 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 
 | Child | Preserved commands | Runner-label suffix |
 | --- | --- | --- |
-| Rust check runtime controller | Controller `cargo check --locked --tests` | `public-rust-check-controller` |
-| Rust check runtime agent | Agent `cargo check --locked --tests` | `public-rust-check-agent` |
-| Rust check git service | Git service `cargo check --locked --tests` | `public-rust-check-git` |
-| Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
-| Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
+| Rust check runtime controller | Controller `cargo check --locked --all-targets` | `public-rust-check-controller` |
+| Rust check runtime agent | Agent `cargo clippy --locked --all-targets -- -A clippy::all -D dead_code -D unused_imports` | `public-rust-check-agent` |
+| Rust check git service | Git service `cargo check --locked --all-targets` | `public-rust-check-git` |
+| Rust check runtime provider | Provider service `cargo check --locked --all-targets` | `public-rust-check-provider` |
+| Rust check tunnel broker | Tunnel workspace `cargo check --locked --all-targets` | `public-rust-check-tunnel` |
 | Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
-| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test provider_mcp --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `own-ai-default` (the own-AI default, `OWN_AI_DEFAULT_MODEL_ID`) and to `gpt-5.5`, plus `proxy_integration codex_read_reference_`, `proxy_integration native_compaction::`, `proxy_integration native_images::` and `proxy_integration granted_turns::`, each with `--test-threads=1` | `public-rust-test-agent` |
+| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test provider_mcp --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `own-ai-default` (the own-AI default, `OWN_AI_DEFAULT_MODEL_ID`) and to `gpt-5.5`, plus `proxy_integration` once per filter (a module, or a group of top-level tests), the hermetic local-engine turn targets and `run_instructions`, all but the last with `--test-threads=1` | `public-rust-test-agent` |
 | Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
 | Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |
 | Rust test tunnel broker | Complete tunnel-broker workspace suite, `--locked` | `public-rust-test-broker` |
+
+Dead code and unused imports fail the Rust lanes. Every lane but runtime-agent's
+sets `RUSTFLAGS="-D dead_code -D unused_imports"`. runtime-agent's check lane
+denies the same two lints with `cargo clippy --all-targets -- -A clippy::all -D
+dead_code -D unused_imports` instead: Cargo passes RUSTFLAGS uncapped to path
+dependencies, so it would also lint the Codex crates under `codex/`, while clippy
+lints only runtime-agent itself, and runtime-agent's test lane links with lld on
+self-hosted Linux only while RUSTFLAGS is unset. No `Cargo.toml` or crate root
+denies them, so local builds and the Desktop release build still only warn. The
+clippy step builds default features, so code behind `code-mode-host` is not linted
+there. In `packages/runtime-agent`, `cargo clippy --offline --locked --all-targets
+-- -A clippy::all -D dead_code -D unused_imports` reproduces it; in another crate,
+`RUSTFLAGS="-D dead_code -D unused_imports" cargo check --offline --locked
+--all-targets` reproduces its check lane.
+
+rustc counts every item a library crate exports, through pub modules or a
+re-export, as used. So the gate reports dead private and `pub(crate)` items, and
+pub items that nothing exports, but never an uncalled exported one.
+runtime-agent's `lib.rs` declares most of its modules `pub`, so an uncalled pub
+function in one of them passes the gate; finding that code still takes an audit.
+
+Every module that `packages/runtime-agent/tests/proxy_integration.rs` declares, and
+every test at its top level, runs under one filter of the runtime-agent test step or
+is named in `scripts/check-rust-ci.test.mjs` with the reason it does not: the five
+live probes need a switch and the machine's Codex login, the shared code-mode host
+support module's one test runs with `proxy_retry_budget`, the two embedded-proxy
+cases (`codex_embedded_via_proxy_creates_file`, `codex_embedded_retries_after_stream_error`)
+run a code-mode-only default model without staging the code-mode host, and
+`isolated_tool_workers` runs its workers' tools in Codex's sandbox, which on Linux
+needs bubblewrap and unprivileged user namespaces: no runtime-agent lane installs
+bubblewrap or lifts Ubuntu's AppArmor restriction on those namespaces, and the
+module has passed only on macOS. That test fails when one is in neither, or when a
+named one is gone or also run. It also fails when a filter matches no module
+(`module::`) and no top-level test name, when a line of the step that names
+`proxy_integration` is not exactly `cargo test --manifest-path
+packages/runtime-agent/Cargo.toml --test proxy_integration <filter> --
+--test-threads=1`, and when a `cargo test` there that runs tests does not name
+each of its targets with `--lib` or `--test <name>`. A new module gets a filter
+line, its assertions in `check-rust-ci`, and the three `build.yml` pins taken again.
 
 The `native_compaction::` selector runs four isolated, localhost lifecycle
 tests for ChatGPT streaming and API-key JSON responses through the real proxy.
@@ -655,8 +694,10 @@ sends a turn with a downloaded chat image through the real proxy and checks that
 reaches the provider once, as an `input_image` in the user message, and that a resumed
 turn does not send it again.
 
-All eleven original Cargo commands retain their arguments and repository-root
-working directory. Test children also retain the full frozen Node20/pnpm
+All eleven original Cargo commands keep their repository-root working
+directory. The check children now check all targets, runtime-agent's through
+the clippy dead-code gate above, and the test children keep their arguments.
+Test children also retain the full frozen Node20/pnpm
 installation, including the pinned Playwright fixture required by agent tests.
 The later tunnel broker test child runs one `cargo test --locked` over the
 broker workspace and, like the check children, needs no pnpm install or hosted

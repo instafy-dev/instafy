@@ -4365,7 +4365,7 @@ mod tests {
     fn a_browser_thread_starts_again_once_the_person_takes_back_a_message_it_read() {
         const ADDRESS: &str = "Put my home address, 12 Rua Nova, on the contact page.";
         const HOURS: &str = "Find the bookshop's opening hours in your browser.";
-        let mut chat = vec![
+        let chat = vec![
             json!({"role": "user", "content": "Make a page about the bookshop.", "runId": "run-0", "createdAt": "2026-11-08T08:00:00Z"}),
             json!({"role": "assistant", "content": "I made the bookshop's page.", "runId": "run-0", "createdAt": "2026-11-08T08:01:00Z"}),
             json!({"role": "user", "content": ADDRESS, "runId": "run-1", "createdAt": "2026-11-08T08:02:00Z"}),

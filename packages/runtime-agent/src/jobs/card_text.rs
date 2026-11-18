@@ -45,14 +45,6 @@ impl CardTextField {
             CardTextField::WhereToGet => MAX_WHERE_TO_GET_CHARS,
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CardTextField::ValueLabel => "valueLabel",
-            CardTextField::Description => "description",
-            CardTextField::WhereToGet => "whereToGet",
-        }
-    }
 }
 
 /// The curated identity names. A pack may name the product its own card already
@@ -769,9 +761,8 @@ mod tests {
             assert_eq!(
                 actual.as_deref(),
                 expected,
-                "fixture {:?} ({})",
-                case["name"],
-                field.as_str()
+                "fixture {:?} ({field:?})",
+                case["name"]
             );
         }
     }
