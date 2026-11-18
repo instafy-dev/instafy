@@ -1762,13 +1762,12 @@ pub struct GitHistoryEntry {
     /// "assistant" for agent-made conflict resolutions).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_by: Option<String>,
-    /// The commit's first parent, when the listing asked for parents (a
-    /// revert of the commit undoes its change against this one). Absent for
-    /// a root commit and from listings that do not ask.
+    /// The commit's first parent (a revert of the commit undoes its change
+    /// against this one). Absent for a root commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_parent: Option<String>,
-    /// How many parents the commit has, when the listing asked for parents:
-    /// more than one is a merge, which a revert needs a base for.
+    /// How many parents the commit has: more than one is a merge, which a
+    /// revert needs a base for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_count: Option<usize>,
     /// Who made the version, when the listing decides it (see
@@ -2061,39 +2060,6 @@ pub fn summarize_dirty_files(
         page_limit,
         has_more_files: page_offset.saturating_add(page_limit) < total_direct_files,
     }
-}
-
-pub fn list_recent_commits(
-    workspace_root: &Path,
-    limit: usize,
-    bearer_token: Option<&str>,
-) -> Result<Vec<GitHistoryEntry>, OriginError> {
-    if limit == 0 || !is_git_repo(workspace_root) {
-        return Ok(Vec::new());
-    }
-
-    let has_head =
-        git_status_success(workspace_root, &["rev-parse", "--verify", "HEAD"]).unwrap_or(false);
-    if !has_head {
-        return Ok(Vec::new());
-    }
-
-    let max_count = limit.min(25).to_string();
-    let format = HistoryFormat::new();
-    let stdout = git_stdout(
-        workspace_root,
-        &[
-            "log",
-            "--max-count",
-            max_count.as_str(),
-            "--date=iso-strict",
-            &format.pretty_arg(),
-        ],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
-
-    Ok(format.parse(&stdout))
 }
 
 /// The `git log` format of one history listing: per commit the id, short
@@ -4707,44 +4673,6 @@ mod tests {
     }
 
     #[test]
-    fn list_recent_commits_returns_latest_first() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let workspace_dir = sandbox.path().join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-
-        init_repo(&workspace_dir, "main")?;
-        run_git(&workspace_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &workspace_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(workspace_dir.join("README.md"), "first\n")?;
-        run_git(&workspace_dir, &["add", "README.md"])?;
-        run_git(&workspace_dir, &["commit", "-m", "first version"])?;
-        fs::write(workspace_dir.join("README.md"), "second\n")?;
-        run_git(&workspace_dir, &["add", "README.md"])?;
-        run_git(&workspace_dir, &["commit", "-m", "second version"])?;
-
-        fs::create_dir_all(workspace_dir.join(".instafy"))?;
-        fs::rename(
-            workspace_dir.join(".git"),
-            workspace_dir.join(".instafy").join(".git"),
-        )?;
-
-        let history = list_recent_commits(&workspace_dir, 5, None)?;
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].subject, "second version");
-        assert_eq!(history[1].subject, "first version");
-        assert_eq!(history[0].author_name, "Instafy Test");
-        assert_eq!(history[0].author_email, "playwright@instafy.dev");
-        assert!(!history[0].commit.is_empty());
-        assert!(!history[0].short_commit.is_empty());
-        assert!(!history[0].committed_at.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
     fn resolve_history_head_ref_returns_current_branch() -> anyhow::Result<()> {
         let sandbox = tempdir()?;
         let workspace_dir = sandbox.path().join("workspace");
@@ -4822,11 +4750,11 @@ mod tests {
     }
 
     /// Commit text can hold any byte but NUL, including the separator bytes
-    /// the listing once split on: it can neither add a row, nor change a
-    /// field of its own or another commit, and the single-tenant listing
-    /// never carries a first parent.
+    /// the listing once split on: in a checkout's history page it can
+    /// neither add a row nor change a field of its own or another commit.
     #[test]
     fn history_rows_cannot_be_forged_by_commit_text() {
+        use crate::recovery_view::{history_page, HistoryWalk};
         use crate::workspace_git::{GitIdentity, WorkspaceGit};
         let sandbox = tempdir().unwrap();
         let ws = sandbox.path().join("workspace");
@@ -4865,7 +4793,10 @@ mod tests {
         git.update_ref("refs/heads/main", &injected, None, "test")
             .unwrap();
 
-        let entries = list_recent_commits(&ws, 10, None).unwrap();
+        let head = git.commit_id("HEAD").unwrap().unwrap();
+        let entries = history_page(&git, &head, 10, 0, HistoryWalk::All)
+            .unwrap()
+            .entries;
         let ids: Vec<&str> = entries.iter().map(|entry| entry.commit.as_str()).collect();
         assert_eq!(
             ids,
@@ -4893,13 +4824,15 @@ mod tests {
                     .map(str::trim)
                     .find(|line| !line.is_empty())
             );
-            assert_eq!(entry.first_parent, None);
+            assert_eq!(
+                entry.first_parent.as_deref(),
+                field("%P").split_whitespace().next()
+            );
         }
         assert_eq!(entries[1].author_name, format!("Mal\u{1f}lory\u{1e}{fake}"));
 
-        // An ordinary commit serializes exactly as before.
+        // An ordinary root commit serializes with exactly these fields.
         let json = serde_json::to_value(&entries).unwrap();
-        assert!(!json.to_string().contains("firstParent"), "{json}");
         assert_eq!(
             json[2],
             serde_json::json!({
@@ -4909,12 +4842,15 @@ mod tests {
                 "authorName": "Root",
                 "authorEmail": "someone@instafy.dev",
                 "subject": "root",
+                "parentCount": 0,
             })
         );
     }
 
     #[test]
-    fn list_recent_commits_surfaces_resolution_trailer() -> anyhow::Result<()> {
+    fn history_page_surfaces_resolution_trailer() -> anyhow::Result<()> {
+        use crate::recovery_view::{history_page, HistoryWalk};
+        use crate::workspace_git::WorkspaceGit;
         let sandbox = tempdir()?;
         let root = sandbox.path();
         let remote_dir = root.join("remote.git");
@@ -4939,7 +4875,11 @@ mod tests {
             ],
         )?;
 
-        let entries = list_recent_commits(&workspace_dir, 5, None)?;
+        let git = WorkspaceGit::new(&workspace_dir, None);
+        let head = git
+            .commit_id("HEAD")?
+            .context("the checkout has no commit")?;
+        let entries = history_page(&git, &head, 5, 0, HistoryWalk::All)?.entries;
         assert!(!entries.is_empty());
         let tip = &entries[0];
         assert_eq!(tip.resolved_by.as_deref(), Some("assistant"));
