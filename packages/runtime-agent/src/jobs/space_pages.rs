@@ -1287,6 +1287,18 @@ fn shell_commands(script: &str) -> Vec<Vec<Word>> {
     commands
 }
 
+/// An edit step of a turn that changed a file the runtime put back as it was
+/// ([`HeldPages::edits_put_back`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PutBackEdit {
+    /// The step's id, as its own messages carry it.
+    pub(super) id: String,
+    /// The files it changed, as the run named them.
+    pub(super) paths: Vec<String>,
+    /// Those of them the turn kept: none when every one went back.
+    pub(super) kept: Vec<String>,
+}
+
 /// The pages another chat made, held for a turn of this chat that may write files: they are
 /// read-only here ([`super::PAGE_OF_ITS_OWN_CHAT_RULE`]).
 ///
@@ -1627,22 +1639,22 @@ impl HeldPages {
         self.returned.extend(returned);
     }
 
-    /// The run's edit steps (`events`) whose every file went back as it was ([`Self::put_back`]),
-    /// each by its step's id with its paths as the run gave them: the chat's line counts a step by
-    /// its newest message, so each gets one more that says it was declined
-    /// ([`super::put_back_edit_messages`]), and the line counts only the changes the turn kept,
-    /// never "edited a file" for a page that is as it was. An edit step that named a file that is
-    /// still changed, or one outside another chat's page, keeps its own message.
+    /// The run's edit steps (`events`) that changed a file the runtime put back as it was
+    /// ([`Self::put_back`]), each by its step's id with its paths as the run gave them and those
+    /// of them the turn kept: the chat's line counts a step by its newest message, so each gets
+    /// one more ([`super::put_back_edit_messages`]), and the line counts only the changes the turn
+    /// kept, never "edited a file" for a page that is as it was. An edit step none of whose files
+    /// went back keeps its own message.
     pub(super) fn edits_put_back(
         &self,
         workspace_dir: &Path,
         events: &[JsonValue],
-    ) -> Vec<(String, Vec<String>)> {
+    ) -> Vec<PutBackEdit> {
         if self.restored.is_empty() {
             return Vec::new();
         }
         let spellings = Spellings::of(workspace_dir);
-        let mut edits: Vec<(String, Vec<String>)> = Vec::new();
+        let mut edits: Vec<PutBackEdit> = Vec::new();
         for item in events
             .iter()
             .filter(|event| event.get("type").and_then(JsonValue::as_str) == Some("item.completed"))
@@ -1663,14 +1675,18 @@ impl HeldPages {
                 .filter_map(JsonValue::as_str)
                 .map(str::to_string)
                 .collect();
-            let all_back = !paths.is_empty()
-                && paths.iter().all(|raw| {
-                    workspace_path(&spellings, raw)
-                        .is_some_and(|path| self.restored.contains(&path))
-                });
-            if all_back && !edits.iter().any(|(seen, _)| seen == id) {
-                edits.push((id.to_string(), paths));
+            let (back, kept): (Vec<&String>, Vec<&String>) = paths.iter().partition(|raw| {
+                workspace_path(&spellings, raw).is_some_and(|path| self.restored.contains(&path))
+            });
+            if back.is_empty() || edits.iter().any(|edit| edit.id == id) {
+                continue;
             }
+            let kept: Vec<String> = kept.into_iter().cloned().collect();
+            edits.push(PutBackEdit {
+                id: id.to_string(),
+                paths,
+                kept,
+            });
         }
         edits
     }

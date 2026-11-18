@@ -22035,12 +22035,13 @@ fn sanitize_codex_final_json(value: &JsonValue) -> JsonValue {
     sanitized
 }
 
-/// One more step message for each of a run's edits whose every file the runtime put back as it
-/// was, since the page they changed was made in another chat
-/// ([`space_pages::HeldPages::edits_put_back`]): Studio counts a step by its newest message, and a
-/// declined one for nothing, so the turn's line counts only the changes it kept. Its row in
-/// Details says the edit was tried, beside the reply's line that the page was made in another
-/// chat. `runs` are the events of each of the turn's runs.
+/// One more step message for each of a run's edits that changed a page another chat made, which
+/// the runtime put back as it was ([`space_pages::HeldPages::edits_put_back`]): Studio counts a
+/// step by its newest message, and a declined one for nothing, so the turn's line counts only the
+/// changes it kept. An edit whose every file went back is declined, and its row in Details says
+/// the edit was tried, beside the reply's line that the page was made in another chat. One that
+/// also changed a file the turn kept is done with only the files it kept. `runs` are the events
+/// of each of the turn's runs.
 fn put_back_edit_messages(
     held_pages: &space_pages::HeldPages,
     workspace_dir: &Path,
@@ -22048,17 +22049,23 @@ fn put_back_edit_messages(
 ) -> Vec<JobMessage> {
     runs.iter()
         .flat_map(|events| held_pages.edits_put_back(workspace_dir, events))
-        .map(|(item_id, paths)| {
+        .map(|edit| {
+            let (status, paths, content) = if edit.kept.is_empty() {
+                let content = format!("File change put back: {}", edit.paths.join(", "));
+                ("declined", edit.paths, content)
+            } else {
+                let content = format!("Applied file changes: {}", edit.kept.join(", "));
+                ("completed", edit.kept, content)
+            };
             let distinct = paths
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len();
-            let content = format!("File change put back: {}", paths.join(", "));
             let mut metadata = json!({
                 "kind": "codex_file_change",
-                "itemId": item_id,
+                "itemId": edit.id,
                 "eventType": "item.completed",
-                "status": "declined",
+                "status": status,
                 "paths": paths,
             });
             if let Some(activity) = activity_labels::file_change_activity(distinct) {
