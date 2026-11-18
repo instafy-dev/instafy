@@ -126,13 +126,21 @@ async fn provider_request(
     if index == 0 {
         // A background descendant waits too, so canceling only the outer
         // shell/worker cannot accidentally pass the cancellation case.
+        //
+        // The tool still tries to overwrite the outside file, but the host
+        // decides whether that worked. Seatbelt refuses the write. Linux's
+        // bubblewrap view starts from a private tmpfs root and creates the
+        // parents of the workspace binds on it, so the same write lands in a
+        // throwaway file there. Only the host file says whether anything got
+        // out. `cat /dev/null` first proves the read probes can run at all.
         let outside = shell_quote(&state.outside_file);
         let host_auth = shell_quote(&state.host_auth);
         let command = format!(
             "set -eu\n\
+             cat /dev/null\n\
              if cat {outside} >/dev/null 2>&1; then exit 51; fi\n\
              if cat {host_auth} >/dev/null 2>&1; then exit 52; fi\n\
-             if printf forbidden > {outside} 2>/dev/null; then exit 53; fi\n\
+             printf forbidden > {outside} 2>/dev/null || :\n\
              test \"$FIXTURE_JOB_SENTINEL\" = 'job-secret-{lane}'\n\
              test -z \"${{CONTROLLER_ACCESS_TOKEN:-}}\"\n\
              test -z \"${{CONTROLLER_ACCESS_SCOPES:-}}\"\n\
@@ -307,6 +315,11 @@ async fn exercise(case: Case) -> Result<()> {
             handles.iter().flatten().any(|handle| handle.is_finished())
         })
         .await?;
+        // Both tools tried to overwrite it before they started.
+        anyhow::ensure!(
+            fs::read_to_string(&outside_file)? == "outside-preserved",
+            "a sandboxed tool changed a file outside its workspace"
+        );
         for path in &workspaces {
             anyhow::ensure!(
                 !path.join("result.txt").exists(),

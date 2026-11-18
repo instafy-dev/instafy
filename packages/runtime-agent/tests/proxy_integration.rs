@@ -727,6 +727,18 @@ fn stage_code_mode_host() -> Result<()> {
         .map_err(anyhow::Error::msg)
 }
 
+/// An embedded turn's job names no model, so the runtime runs it on the model it falls back
+/// to, the own-AI default, which needs the code-mode host while it is code-mode-only.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stage_code_mode_host_for_own_ai_default() -> Result<()> {
+    if runtime_agent::code_mode_host::bundled_model_is_code_mode_only(
+        runtime_contracts::own_ai_model::OWN_AI_DEFAULT_MODEL_ID,
+    )? {
+        stage_code_mode_host()?;
+    }
+    Ok(())
+}
+
 /// Runs this binary's `test_name` again in a child process that sets
 /// `child_flag=1`, so the child runs the fixture itself. As in
 /// proxy_retry_budget, the whole model-capable run has an owned HOME and an
@@ -1367,6 +1379,8 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
 
 #[test]
 fn codex_embedded_via_proxy_creates_file() -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    stage_code_mode_host_for_own_ai_default()?;
     const STACK_SIZE: usize = 32 * 1024 * 1024;
     let handle = std::thread::Builder::new()
         .name("codex-embedded-proxy-test".to_string())
@@ -1626,6 +1640,8 @@ async fn codex_embedded_via_proxy_creates_file_inner() -> Result<()> {
 
 #[test]
 fn codex_embedded_retries_after_stream_error() -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    stage_code_mode_host_for_own_ai_default()?;
     const STACK_SIZE: usize = 32 * 1024 * 1024;
     let handle = std::thread::Builder::new()
         .name("codex-embedded-retry-test".to_string())
@@ -1821,8 +1837,44 @@ async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn codex_proxy_live_creates_file() -> Result<()> {
+/// Runs a hand-run probe on a thread with the runtime agent's own stack. `#[tokio::test]` would
+/// pin the probe's future on libtest's 2 MiB thread stack, and a probe holds a whole Codex turn:
+/// one too large for that stack overflows before its first line runs, its `RUN_*` gate included,
+/// and aborts every test after it in this binary.
+fn run_probe<Fut>(
+    name: &str,
+    mut runtime: tokio::runtime::Builder,
+    probe: fn() -> Fut,
+) -> Result<()>
+where
+    Fut: std::future::Future<Output = Result<()>> + 'static,
+{
+    const RUNTIME_AGENT_STACK_SIZE: usize = 16 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(RUNTIME_AGENT_STACK_SIZE)
+        .spawn(move || {
+            runtime
+                .enable_all()
+                .thread_stack_size(RUNTIME_AGENT_STACK_SIZE)
+                .build()?
+                .block_on(probe())
+        })
+        .with_context(|| format!("failed to spawn the {name} thread"))?
+        .join()
+        .map_err(|_| anyhow::anyhow!("the {name} thread panicked"))?
+}
+
+#[test]
+fn codex_proxy_live_creates_file() -> Result<()> {
+    run_probe(
+        "live-proxy-test",
+        tokio::runtime::Builder::new_multi_thread(),
+        codex_proxy_live_creates_file_inner,
+    )
+}
+
+async fn codex_proxy_live_creates_file_inner() -> Result<()> {
     let _env_guard = env_guard().await;
     if std::env::var("RUN_LIVE_PROXY_TEST").ok().as_deref() != Some("1") {
         eprintln!(
@@ -2015,8 +2067,16 @@ async fn codex_proxy_live_creates_file() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
+#[test]
+fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
+    run_probe(
+        "live-browser-sim",
+        tokio::runtime::Builder::new_current_thread(),
+        codex_proxy_live_browser_prompt_simulation_inner,
+    )
+}
+
+async fn codex_proxy_live_browser_prompt_simulation_inner() -> Result<()> {
     let _env_guard = env_guard().await;
     if std::env::var("RUN_LIVE_BROWSER_SIM_TEST").ok().as_deref() != Some("1") {
         eprintln!(
@@ -2296,8 +2356,16 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn codex_proxy_live_browser_prompt_direct_codex_client_probe() -> Result<()> {
+#[test]
+fn codex_proxy_live_browser_prompt_direct_codex_client_probe() -> Result<()> {
+    run_probe(
+        "live-browser-direct",
+        tokio::runtime::Builder::new_current_thread(),
+        codex_proxy_live_browser_prompt_direct_codex_client_probe_inner,
+    )
+}
+
+async fn codex_proxy_live_browser_prompt_direct_codex_client_probe_inner() -> Result<()> {
     let _env_guard = env_guard().await;
     if std::env::var("RUN_LIVE_BROWSER_DIRECT_PROBE_TEST")
         .ok()
@@ -2600,8 +2668,16 @@ async fn codex_proxy_live_browser_prompt_direct_codex_client_probe() -> Result<(
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn codex_proxy_direct_custom_mcp_server_probe() -> Result<()> {
+#[test]
+fn codex_proxy_direct_custom_mcp_server_probe() -> Result<()> {
+    run_probe(
+        "custom-mcp-direct",
+        tokio::runtime::Builder::new_current_thread(),
+        codex_proxy_direct_custom_mcp_server_probe_inner,
+    )
+}
+
+async fn codex_proxy_direct_custom_mcp_server_probe_inner() -> Result<()> {
     let _env_guard = env_guard().await;
     if std::env::var("RUN_CUSTOM_MCP_DIRECT_PROBE_TEST")
         .ok()
@@ -2880,23 +2956,11 @@ async fn handle_personal_browser_mcp_probe(
 
 #[test]
 fn codex_proxy_direct_personal_browser_mcp_probe() -> Result<()> {
-    const RUNTIME_AGENT_STACK_SIZE: usize = 16 * 1024 * 1024;
-    let handle = std::thread::Builder::new()
-        .name("personal-browser-mcp-direct-probe".to_string())
-        .stack_size(RUNTIME_AGENT_STACK_SIZE)
-        .spawn(|| {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_stack_size(RUNTIME_AGENT_STACK_SIZE)
-                .build()
-                .expect("failed to build production-shaped runtime for Personal Browser probe");
-            runtime.block_on(codex_proxy_direct_personal_browser_mcp_probe_inner())
-        })
-        .context("failed to spawn Personal Browser probe thread")?;
-
-    handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("Personal Browser probe thread panicked"))?
+    run_probe(
+        "personal-browser-mcp-direct-probe",
+        tokio::runtime::Builder::new_multi_thread(),
+        codex_proxy_direct_personal_browser_mcp_probe_inner,
+    )
 }
 
 async fn codex_proxy_direct_personal_browser_mcp_probe_inner() -> Result<()> {

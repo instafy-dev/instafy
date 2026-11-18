@@ -243,7 +243,7 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full reviewed seven check and twenty-eight test command lines (not lanes) and working directories are hash-bound', () => {
+test('the full reviewed seven check and thirty test command lines (not lanes) and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b,
   // plus the reviewed runtime-agent proxy_retry_budget, provider_mcp and read-reference selectors,
   // the proxy_retry_budget runs for the own-AI default and gpt-5.5, and the runtime
@@ -251,6 +251,7 @@ test('the full reviewed seven check and twenty-eight test command lines (not lan
   // native_compaction selector for the real proxy's ChatGPT and API-key paths and
   // the inert native_images, granted_turns, native_subagents, browser_hand_back, stopped_turn, thread_mode, evidence_retry, reply_draft_stream, page_cards and codex_never_starts_claude selectors,
   // the inert pages_of_their_own_chats, saved_change_reload, turn_wrap_up, client_timezone and proxy_stream selectors,
+  // the inert codex_embedded_ and isolated_tool_workers selectors,
   // the hermetic local-engine turn targets (claude_code_lane, claude_code_supervision and the live suite's own checks in claude_code_live) and
   // the inert run_instructions target,
   // plus the complete tunnel-broker suite in its own lane,
@@ -258,7 +259,7 @@ test('the full reviewed seven check and twenty-eight test command lines (not lan
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
     [checks, 'Check public Rust package', 'ef9a05105379dd87a058da083f0986e022fd73766a1b7b252c2db687c4d05ace', 7],
-    [suites, 'Run database-free Rust test suite', '567722190a795d0e29e957a939bdb46f4f6f98bcc02457c8b83f4b8d0291e065', 28],
+    [suites, 'Run database-free Rust test suite', 'f91d9c89d37538be01e0366f8e430f7d2a5827dfd361ea1057613e6513a9c910', 30],
   ]) {
     const inventory = list.flatMap(item => {
       const part = step(item.key, stepName);
@@ -277,7 +278,7 @@ test('the full reviewed seven check and twenty-eight test command lines (not lan
     assert.equal(inventory.length, expectedCount);
     assert.equal(createHash('sha256').update(JSON.stringify(inventory)).digest('hex'), hash);
   }
-  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|clippy|test) /gmu) ?? []).length, 0), 33);
+  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|clippy|test) /gmu) ?? []).length, 0), 35);
   // The whole tunnel-broker workspace (broker and its types crate), locked like its check lane.
   assert.match(step('rust-test-broker', 'Run database-free Rust test suite'),
     /run: \|\n          cargo test --locked --manifest-path packages\/tunnel-broker\/Cargo.toml\n/u);
@@ -300,6 +301,8 @@ test('the full reviewed seven check and twenty-eight test command lines (not lan
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration turn_wrap_up:: -- --test-threads=1\n/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration client_timezone:: -- --test-threads=1\n/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration proxy_stream:: -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration codex_embedded_ -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration isolated_tool_workers:: -- --test-threads=1\n/u);
   // The local-engine turn targets run without a Claude login: the live suite's checks of a real
   // claude stay ignored, and run only by hand.
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test claude_code_lane --test claude_code_supervision --test claude_code_live -- --test-threads=1\n/u);
@@ -312,9 +315,6 @@ test('the full reviewed seven check and twenty-eight test command lines (not lan
 // filter, so a new module or top-level test runs in CI or is named here.
 const proxyIntegrationNotRunInCi = {
   code_mode_host_support: 'shared with proxy_retry_budget, whose whole run in CI covers its one test',
-  codex_embedded_via_proxy_creates_file: 'its default model (gpt-6.1-sol) needs the code-mode host, which it does not stage; not yet shown to pass with the host built',
-  codex_embedded_retries_after_stream_error: 'its default model (gpt-6.1-sol) needs the code-mode host, which it does not stage; not yet shown to pass with the host built',
-  isolated_tool_workers: "its workers run their tools in Codex's sandbox, which on Linux needs bubblewrap and unprivileged user namespaces; no runtime-agent lane installs bubblewrap or lifts Ubuntu's AppArmor restriction on those namespaces, and it has passed only on macOS",
   codex_proxy_live_creates_file: 'a live probe: it needs RUN_LIVE_PROXY_TEST=1 and the Codex login of the machine',
   codex_proxy_live_browser_prompt_simulation: 'a live probe: it needs RUN_LIVE_BROWSER_SIM_TEST=1 and the Codex login of the machine',
   codex_proxy_live_browser_prompt_direct_codex_client_probe: 'a live probe: it needs RUN_LIVE_BROWSER_DIRECT_PROBE_TEST=1 and the Codex login of the machine',
@@ -431,6 +431,8 @@ test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux a
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'turn_wrap_up::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'client_timezone::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'proxy_stream::', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'codex_embedded_', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'isolated_tool_workers::', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'claude_code_lane', '--test', 'claude_code_supervision', '--test', 'claude_code_live', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'run_instructions'],
   ];
@@ -533,7 +535,7 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // its clippy component, and its comment): retains all functional commands, aggregate guards,
   // routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '75c31bbf745ec8330481ff5babcafd331a2ea75b9c0e59dfec27cec004b2a0d6');
+    '26565e536a5c1dfbd2bcf73728d03f76410e81c94395d5a5021d0bd7d22b745d');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {
