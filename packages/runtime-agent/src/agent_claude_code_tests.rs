@@ -848,9 +848,11 @@ fn a_lane_turn_runs_on_the_persons_claude_code_and_saves_through_the_lane_filter
         assert_eq!(put_back["metadata"]["paths"], json!([HELD_PAGE]));
         assert_eq!(put_back["metadata"]["eventType"], "item.completed");
         assert!(
-            !steps.iter().any(|step| step["message_type"] == "file_change"
-                && step["metadata"]["status"] == "declined"
-                && step["metadata"]["itemId"] != "toolu_page"),
+            !steps
+                .iter()
+                .any(|step| step["message_type"] == "file_change"
+                    && step["metadata"]["status"] == "declined"
+                    && step["metadata"]["itemId"] != "toolu_page"),
             "{steps:#?}"
         );
 
