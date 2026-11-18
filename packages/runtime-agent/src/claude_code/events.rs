@@ -18,7 +18,7 @@
 //! | a text block that a `tool_use` follows in the same message | `item.completed` `agent_message` with `phase: "commentary"`, then [`DRAFT_RESET_EVENT`] when the text was drafted |
 //! | `Bash` or `Monitor`, then its result | `item.started`, `item.completed` `command_execution` |
 //! | `Edit`, `Write`, `NotebookEdit` | `item.completed` `file_change` with paths relative to the folder |
-//! | `WebSearch` | `item.completed` `web_search` `{query}` |
+//! | `WebSearch`, then its result | `item.started`, `item.completed` `web_search` `{query}` |
 //! | `TodoWrite`, or `TaskCreate` and `TaskUpdate` | `item.updated` `todo_list` with the whole list |
 //! | any other tool | `item.started`, `item.completed` `mcp_tool_call` `{server: "claude-code", tool, engine: "claude-code"}` |
 //! | events of Claude Code's subagents (`parent_tool_use_id`) | the same mapping, but never a draft |
@@ -2040,6 +2040,11 @@ impl EventAdapter {
                     "engine": ENGINE,
                 }
             })),
+            // A search's step shows while it runs; its end names the words, as a Codex search's.
+            ToolKind::WebSearch { query } if !query.trim().is_empty() => Some(json!({
+                "type": "item.started",
+                "item": { "id": id, "type": "web_search", "status": "in_progress" }
+            })),
             _ => None,
         };
         if let Some(mut event) = started {
@@ -3660,7 +3665,10 @@ mod tests {
             ]
         );
 
-        adapter.feed(&assistant("m3", json!([{"type": "tool_use", "id": "t_s", "name": "WebSearch", "input": {"query": "vitest config"}}]), None));
+        assert_eq!(
+            adapter.feed(&assistant("m3", json!([{"type": "tool_use", "id": "t_s", "name": "WebSearch", "input": {"query": "vitest config"}}]), None)),
+            [json!({"type": "item.started", "item": {"id": "t_s", "type": "web_search", "status": "in_progress"}})]
+        );
         assert_eq!(
             adapter.feed(&tool_result("t_s", json!("3 results"), false)),
             [

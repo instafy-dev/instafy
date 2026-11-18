@@ -996,6 +996,92 @@ describe("an edit the runtime put back", () => {
   });
 });
 
+// A local test, Nov 17: the line read "Thinking…" through every search the AI
+// ran, since a search's step came only once it ended. The runtime now posts
+// the step as the search starts, with no words yet, and its end fills them in.
+describe("a web search", () => {
+  const started = (itemId: string) =>
+    step("web_search", WEB_SEARCH, { kind: "codex_web_search", itemId, status: "in_progress" });
+
+  it("reads Searching the web while it runs, never Thinking", () => {
+    const start = started("ws_1");
+    const running = summarize([command(WEB_READ), start], "running");
+    expect(running.live).toBe("Searching the web…");
+    const row = running.details.at(-1);
+    expect(row?.kind === "step" && [row.step.state, row.step.label]).toEqual(["running", "Searching the web"]);
+    // Its end fills the same step in.
+    const end = step("web_search", { ...WEB_SEARCH, count: 2 }, {
+      kind: "codex_web_search",
+      itemId: "ws_1",
+      query: "city museum hours · city museum tickets",
+    });
+    expect(summarize([command(WEB_READ), start, end], "running").live).toBe("Thinking…");
+    const done = summarize([start, end]);
+    expect(done.summary).toBe("Searched the web 2 times");
+    expect(done.details).toHaveLength(1);
+  });
+
+  // A call of the search tool that only opened or looked in a page, or whose
+  // every query was refused: the runtime ends the step it started `declined`,
+  // with no words and no label.
+  it("that searched nothing is no step", () => {
+    const start = started("ws_1");
+    const nothing = step("web_search", null, { kind: "codex_web_search", itemId: "ws_1", status: "declined" });
+    const after = summarize([start, nothing], "running");
+    expect(after.live).toBe("Thinking…");
+    expect(after.stepCount).toBe(0);
+    expect(summarize([start, nothing]).summary).toBeNull();
+    expect(summarize([start, nothing]).details).toEqual([]);
+    expect(summarize([start, nothing], "cancelled").summary).toBe("Stopped");
+    expect(summarize([command(WEB_READ), start, nothing]).summary).toBe("Read 6 pages");
+    // After a reload too, as the controller stores the turn's steps with its reply.
+    const reply: ChatMessage = {
+      id: "reply",
+      role: "assistant",
+      content: "The museum is open on Sunday.",
+      timestamp: 99,
+      metadata: {
+        source: "agent",
+        jobId: JOB,
+        outcome: "succeeded",
+        turnSteps: {
+          v: 1,
+          activities: [WEB_READ],
+          steps: [
+            { type: "command_execution", status: "completed", exitCode: 0, activity: 0 },
+            { type: "web_search", status: "declined" },
+          ],
+        },
+      },
+    };
+    const stored = summarize(readTurnStepsRecord(reply, JOB)!);
+    expect(stored.summary).toBe("Read 6 pages");
+    expect(stored.details).toHaveLength(1);
+  });
+
+  // Its request failed, which the runtime ends at once while the turn goes
+  // on, or its turn ended before it answered.
+  it("that never answered was tried", () => {
+    const start = started("ws_1");
+    const failed = step("web_search", WEB_SEARCH, { kind: "codex_web_search", itemId: "ws_1", status: "failed" });
+    expect(summarize([start, failed], "running").live).toBe("Thinking…");
+    expect(summarize([start, failed, command(WEB_READ)], "running").live).toBe("Thinking…");
+    expect(summarize([start, failed]).summary).toBe("Tried searching the web");
+    expect(summarize([start, failed, command(WEB_READ)]).summary).toBe("Read 6 pages");
+  });
+
+  // `instafy web search` exits 2 when the space has no search key
+  // (`no_provider`); a reference search after it that found results exits 0.
+  it("on the command line with no search key is never one that searched", () => {
+    const noKey = command(WEB_SEARCH, { exitCode: 2, command: "bash -lc 'instafy web search \"city museum hours\" --json'" });
+    const reference = command(WEB_SEARCH, {
+      command: "bash -lc 'instafy web search \"city museum\" --chain reference-search --json'",
+    });
+    expect(summarize([noKey]).summary).toBe("Tried searching the web");
+    expect(summarize([noKey, reference]).summary).toBe("Searched the web");
+  });
+});
+
 // A turn whose only commands looked around the workspace (`pwd`, `rg --files`),
 // as the runtime marks them. A local test: two turns that only posted a browser
 // card read "Ran a command".

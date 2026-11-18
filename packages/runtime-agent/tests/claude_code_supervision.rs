@@ -384,6 +384,7 @@ async fn a_turn_streams_its_steps_and_ends_at_its_result() {
             "item.completed file_change",
             "item.started command_execution",
             "item.completed command_execution",
+            "item.started web_search",
             "item.completed web_search",
             "item.updated todo_list",
             "item.updated todo_list",

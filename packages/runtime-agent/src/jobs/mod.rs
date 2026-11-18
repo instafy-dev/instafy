@@ -22411,9 +22411,58 @@ fn put_back_edit_messages(
         .collect()
 }
 
+/// The status that ends the step of a web search that searched nothing: it only opened or looked
+/// in a page, or every query it asked for was refused. Studio shows no step for it, as before it
+/// started (an older Studio a step that was tried, never one that searched).
+const WEB_SEARCH_SEARCHED_NOTHING: &str = "declined";
+
+/// The message of a web search's step that names no words: its start, which shows "Searching the
+/// web" while it runs, or an end that searched nothing ([`WEB_SEARCH_SEARCHED_NOTHING`], no label)
+/// or of a search whose request failed or that never answered (`failed`, "Tried searching the
+/// web").
+fn web_search_step_without_words(item_id: &str, status: &str) -> (String, JsonValue) {
+    let (content, event_type) = match status {
+        "in_progress" => ("Web search started", "item.started"),
+        "failed" => ("Web search failed", "item.completed"),
+        _ => ("Web search searched nothing", "item.completed"),
+    };
+    let mut metadata = json!({
+        "kind": "codex_web_search",
+        "itemId": item_id,
+        "eventType": event_type,
+        "status": status,
+    });
+    if status != WEB_SEARCH_SEARCHED_NOTHING
+        && let Some(activity) = activity_labels::web_search_activity(1)
+    {
+        metadata["activity"] = activity;
+    }
+    (content.to_string(), metadata)
+}
+
+/// Ends the steps of the web searches in `open` as ones that were tried: each started, and its
+/// turn ended before it answered.
+fn end_unanswered_searches(
+    open: &mut Vec<String>,
+    push_message: &mut impl FnMut(String, String, Option<&str>, JsonValue),
+) {
+    for item_id in std::mem::take(open) {
+        let (content, metadata) = web_search_step_without_words(&item_id, "failed");
+        push_message(
+            format!("web_search_failed::{item_id}"),
+            content,
+            Some("web_search"),
+            metadata,
+        );
+    }
+}
+
 fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
     let mut results = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    // The web searches whose step was posted as they started and that have not ended, in the
+    // order they started.
+    let mut open_searches: Vec<String> = Vec::new();
 
     let mut push_message =
         |key: String, content: String, message_type: Option<&str>, metadata: JsonValue| {
@@ -22757,52 +22806,89 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             }),
                         );
                     }
-                    "web_search" if event_type == "item.completed" => {
-                        if let Some(query) =
-                            item.get("query").and_then(JsonValue::as_str).map(str::trim)
-                        {
-                            if query.is_empty() {
-                                continue;
-                            }
-                            let failed =
-                                item.get("status").and_then(JsonValue::as_str) == Some("failed");
-                            // A step that searched several queries at once counts each of
-                            // them ("searched the web 3 times"); its row names them all.
-                            let searches = item
-                                .get("queries")
-                                .and_then(JsonValue::as_array)
-                                .map_or(1, Vec::len);
-                            let key = format!("web_search::{item_id}::{query}");
-                            let mut metadata = json!({
-                                "kind": "codex_web_search",
-                                "itemId": item_id,
-                                "eventType": event_type,
-                                "query": query,
-                                "status": if failed { "failed" } else { "completed" },
-                                "event": event.clone(),
-                            });
-                            // The pages the search returned, which Details lists under it
-                            // (`codex::web_search_step` keeps only public addresses and titles).
-                            if let Some(pages) = item
-                                .get("pages")
-                                .filter(|pages| pages.as_array().is_some_and(|p| !p.is_empty()))
-                            {
-                                metadata["pages"] = pages.clone();
-                            }
-                            if let Some(activity) = activity_labels::web_search_activity(searches) {
-                                metadata["activity"] = activity;
-                            }
-                            push_message(
-                                key,
-                                if failed {
-                                    format!("Web search failed: \"{query}\"")
-                                } else {
-                                    format!("Web search completed: \"{query}\"")
-                                },
-                                Some("web_search"),
-                                metadata,
-                            );
+                    // A search's step shows as it starts, so the line reads "Searching the web"
+                    // while it runs. Its start names only its call (`codex.rs`, `collect`): its
+                    // end fills in the words it searched and the pages it returned.
+                    "web_search" if event_type == "item.started" => {
+                        if item_id.is_empty() || open_searches.iter().any(|open| open == item_id) {
+                            continue;
                         }
+                        open_searches.push(item_id.to_string());
+                        let (content, metadata) =
+                            web_search_step_without_words(item_id, "in_progress");
+                        push_message(
+                            format!("web_search_started::{item_id}"),
+                            content,
+                            Some("web_search"),
+                            metadata,
+                        );
+                    }
+                    "web_search" if event_type == "item.completed" => {
+                        let open = open_searches.iter().position(|open| open == item_id);
+                        let started = open.map(|index| open_searches.remove(index)).is_some();
+                        let query = item
+                            .get("query")
+                            .and_then(JsonValue::as_str)
+                            .map(str::trim)
+                            .filter(|query| !query.is_empty());
+                        let failed =
+                            item.get("status").and_then(JsonValue::as_str) == Some("failed");
+                        // A call that searched nothing (it only opened or looked in a page, or
+                        // every query it asked for was refused) is no step: the step its start
+                        // posted ends as one. A search whose request failed ends with no words
+                        // too (`managed_web_search::EndedSearch`), as one that was tried.
+                        let Some(query) = query else {
+                            if started {
+                                let (key, status) = if failed {
+                                    (format!("web_search_failed::{item_id}"), "failed")
+                                } else {
+                                    (
+                                        format!("web_search_searched_nothing::{item_id}"),
+                                        WEB_SEARCH_SEARCHED_NOTHING,
+                                    )
+                                };
+                                let (content, metadata) =
+                                    web_search_step_without_words(item_id, status);
+                                push_message(key, content, Some("web_search"), metadata);
+                            }
+                            continue;
+                        };
+                        // A step that searched several queries at once counts each of
+                        // them ("searched the web 3 times"); its row names them all.
+                        let searches = item
+                            .get("queries")
+                            .and_then(JsonValue::as_array)
+                            .map_or(1, Vec::len);
+                        let key = format!("web_search::{item_id}::{query}");
+                        let mut metadata = json!({
+                            "kind": "codex_web_search",
+                            "itemId": item_id,
+                            "eventType": event_type,
+                            "query": query,
+                            "status": if failed { "failed" } else { "completed" },
+                            "event": event.clone(),
+                        });
+                        // The pages the search returned, which Details lists under it
+                        // (`codex::web_search_step` keeps only public addresses and titles).
+                        if let Some(pages) = item
+                            .get("pages")
+                            .filter(|pages| pages.as_array().is_some_and(|p| !p.is_empty()))
+                        {
+                            metadata["pages"] = pages.clone();
+                        }
+                        if let Some(activity) = activity_labels::web_search_activity(searches) {
+                            metadata["activity"] = activity;
+                        }
+                        push_message(
+                            key,
+                            if failed {
+                                format!("Web search failed: \"{query}\"")
+                            } else {
+                                format!("Web search completed: \"{query}\"")
+                            },
+                            Some("web_search"),
+                            metadata,
+                        );
                     }
                     "file_change" if event_type == "item.completed" => {
                         let status_raw = item
@@ -22922,6 +23008,8 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                 }
             }
             "turn.completed" => {
+                // The turn ended: a search it started that never answered was tried.
+                end_unanswered_searches(&mut open_searches, &mut push_message);
                 let usage = map.get("usage").cloned().unwrap_or(JsonValue::Null);
                 if let Some(usage_map) = usage.as_object() {
                     let input = usage_map
@@ -22972,6 +23060,10 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     if message.starts_with("Reconnecting...") {
                         continue;
                     }
+                    // The run ended here: a search it started and never answered (the turn was
+                    // aborted or failed) was tried, and never runs on through the rest of the
+                    // message, as through the run of a retry.
+                    end_unanswered_searches(&mut open_searches, &mut push_message);
                     let key = format!("stream_error::{message}");
                     push_message(
                         key,
@@ -22985,6 +23077,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                 }
             }
             "turn.failed" => {
+                end_unanswered_searches(&mut open_searches, &mut push_message);
                 if let Some(message) = map
                     .get("error")
                     .and_then(JsonValue::as_object)
@@ -42395,9 +42488,12 @@ mod tests {
         }
     }
 
-    /// A search the AI ran with its own web search is one search step in the room: "Searched the
+    /// A search the AI ran with its own web search is one search step in the room: "Searching the
+    /// web" from its start, so the line never reads "Thinking…" while it runs; then "Searched the
     /// web" (or "searched the web 2 times" for two queries at once), its words, and the pages it
     /// returned for Details, and nothing else of the search: not what it wrote, nor a tool's name.
+    /// A call that searched nothing ends the step it started with no words and no label, which
+    /// Studio shows as no step.
     #[test]
     fn an_integrated_web_search_is_the_rooms_search_step_with_its_words_and_pages() {
         use crate::codex::CodexEventStreamAdapter;
@@ -42419,7 +42515,7 @@ mod tests {
                 json!({"type": "search", "queries": ["Belém Tower tickets", "Jerónimos tickets"]}),
                 json!([]),
             ),
-            // An open with the search tool may not have run: no step.
+            // An open with the search tool may not have run: no step once it ends.
             (
                 "open-1",
                 json!({"type": "open_page", "url": "https://www.parquesdesintra.pt/en/belem"}),
@@ -42447,15 +42543,74 @@ mod tests {
             );
         }
         let messages = extract_codex_messages(&events);
-        assert_eq!(messages.len(), 2, "{messages:?}");
+        // As the run streams, each event only adds to the messages before it, so the chat gets
+        // each step as it happens.
+        let row = |message: &JobMessage| (message.content.clone(), message.metadata.clone());
+        for streamed in 1..=events.len() {
+            let so_far = extract_codex_messages(&events[..streamed]);
+            assert_eq!(
+                so_far.iter().map(row).collect::<Vec<_>>(),
+                messages[..so_far.len()].iter().map(row).collect::<Vec<_>>()
+            );
+        }
+        let steps: Vec<(&str, JsonValue, JsonValue)> = messages
+            .iter()
+            .map(|message| {
+                assert_eq!(message.message_type.as_deref(), Some("web_search"));
+                let metadata = message.metadata.as_ref().expect("metadata");
+                (
+                    message.content.as_str(),
+                    metadata["itemId"].clone(),
+                    metadata["status"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                (
+                    "Web search started",
+                    json!("search-1"),
+                    json!("in_progress")
+                ),
+                (
+                    "Web search completed: \"Belém Tower opening hours\"",
+                    json!("search-1"),
+                    json!("completed")
+                ),
+                (
+                    "Web search started",
+                    json!("search-2"),
+                    json!("in_progress")
+                ),
+                (
+                    "Web search completed: \"Belém Tower tickets · Jerónimos tickets\"",
+                    json!("search-2"),
+                    json!("completed")
+                ),
+                ("Web search started", json!("open-1"), json!("in_progress")),
+                (
+                    "Web search searched nothing",
+                    json!("open-1"),
+                    json!("declined")
+                ),
+            ]
+        );
         let metadata = |index: usize| messages[index].metadata.clone().expect("metadata");
 
-        assert_eq!(messages[0].message_type.as_deref(), Some("web_search"));
-        assert_eq!(
-            messages[0].content,
-            "Web search completed: \"Belém Tower opening hours\""
-        );
-        let first = metadata(0);
+        // While it runs, the step says what it is doing, with no words yet.
+        let started = metadata(0);
+        assert_eq!(started["activity"]["key"], json!("instafy/web-search"));
+        assert_eq!(started["activity"]["live"], json!("Searching the web"));
+        assert!(started.get("query").is_none(), "{started}");
+        assert!(started.get("pages").is_none(), "{started}");
+        // A call that searched nothing ends its step with no words and no label.
+        let nothing = metadata(5);
+        for absent in ["activity", "query", "pages"] {
+            assert!(nothing.get(absent).is_none(), "{absent} in {nothing}");
+        }
+
+        let first = metadata(1);
         assert_eq!(first["itemId"], json!("search-1"));
         assert_eq!(first["query"], json!("Belém Tower opening hours"));
         assert_eq!(first["status"], json!("completed"));
@@ -42469,7 +42624,7 @@ mod tests {
         assert_eq!(first["activity"]["done"]["one"], json!("searched the web"));
         assert_eq!(first["activity"]["count"], json!(1));
 
-        let second = metadata(1);
+        let second = metadata(3);
         assert_eq!(
             second["query"],
             json!("Belém Tower tickets · Jerónimos tickets")
@@ -42554,6 +42709,124 @@ mod tests {
         let metadata = messages[0].metadata.as_ref().unwrap();
         assert_eq!(metadata["status"], json!("failed"));
         assert_eq!(metadata["activity"]["key"], json!("instafy/web-search"));
+    }
+
+    /// A search whose request failed: Codex only logs the error, answers the call "aborted" for
+    /// the model, and the turn goes on. The run's search tool ends the step its start posted with
+    /// no words (`managed_web_search`), which reads as a search that was tried from then on, never
+    /// "Searching the web" for the rest of the turn, and names nothing of the failure.
+    #[test]
+    fn a_web_search_whose_request_failed_reads_as_tried_once_it_fails() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::Event;
+
+        let mut adapter = CodexEventStreamAdapter::default();
+        let mut events = Vec::new();
+        for msg in [
+            json!({"type": "web_search_begin", "call_id": "search-1"}),
+            json!({"type": "web_search_end", "call_id": "search-1", "query": "",
+                   "action": {"type": "other"}, "results": [{"type": "instafy_search_failed"}]}),
+        ] {
+            events.extend(adapter.collect(&Event {
+                id: "turn-1".into(),
+                msg: serde_json::from_value(msg).unwrap(),
+            }));
+        }
+        let messages = extract_codex_messages(&events);
+        let steps: Vec<(&str, &JsonValue)> = messages
+            .iter()
+            .map(|message| {
+                assert_eq!(message.message_type.as_deref(), Some("web_search"));
+                (
+                    message.content.as_str(),
+                    &message.metadata.as_ref().expect("metadata")["status"],
+                )
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("Web search started", &json!("in_progress")),
+                ("Web search failed", &json!("failed")),
+            ]
+        );
+        let tried = messages[1].metadata.as_ref().unwrap();
+        assert_eq!(tried["itemId"], json!("search-1"));
+        assert_eq!(tried["activity"]["key"], json!("instafy/web-search"));
+        for absent in ["query", "pages", "event"] {
+            assert!(tried.get(absent).is_none(), "{absent} in {tried}");
+        }
+    }
+
+    /// A search its turn ended before it answered (the turn was aborted or failed, or it ended
+    /// with the search still open) ends as one that was tried, so its step never reads "Searching
+    /// the web" on through the run of a retry, nor "Didn't finish searching the web" after a turn
+    /// that ended. A search that had ended keeps its own end, and the turn's own message stays
+    /// its own, as before.
+    #[test]
+    fn a_web_search_its_run_ended_before_it_answered_reads_as_tried() {
+        let started = |id: &str| json!({"type": "item.started", "item": {"id": id, "type": "web_search", "status": "in_progress"}});
+        for (end, its_own) in [
+            (
+                json!({"type": "error", "message": "Turn aborted (interrupted)"}),
+                "error",
+            ),
+            (
+                json!({"type": "turn.failed", "error": {"message": "unexpected status 502 Bad Gateway"}}),
+                "error",
+            ),
+            (
+                json!({"type": "turn.completed", "usage": {
+                    "input_tokens": 1200, "cached_input_tokens": 0, "output_tokens": 80,
+                }}),
+                "token_usage",
+            ),
+        ] {
+            let messages = extract_codex_messages(&[
+                started("ws_done"),
+                json!({"type": "item.completed", "item": {
+                    "id": "ws_done", "type": "web_search", "query": "city museum hours",
+                    "queries": ["city museum hours"], "pages": [], "status": "completed",
+                }}),
+                started("ws_open"),
+                end.clone(),
+            ]);
+            let steps: Vec<(&str, &JsonValue)> = messages
+                .iter()
+                .filter(|message| message.message_type.as_deref() == Some("web_search"))
+                .map(|message| {
+                    let metadata = message.metadata.as_ref().expect("metadata");
+                    (
+                        metadata["itemId"].as_str().unwrap_or_default(),
+                        &metadata["status"],
+                    )
+                })
+                .collect();
+            assert_eq!(
+                steps,
+                [
+                    ("ws_done", &json!("in_progress")),
+                    ("ws_done", &json!("completed")),
+                    ("ws_open", &json!("in_progress")),
+                    ("ws_open", &json!("failed")),
+                ],
+                "{end}"
+            );
+            let tried = messages[3].metadata.as_ref().unwrap();
+            assert_eq!(messages[3].content, "Web search failed");
+            assert_eq!(tried["activity"]["live"], json!("Searching the web"));
+            for absent in ["502", "aborted"] {
+                assert!(!tried.to_string().contains(absent), "{tried}");
+            }
+            assert_eq!(messages.len(), 5, "{end}");
+            assert_eq!(messages[4].message_type.as_deref(), Some(its_own));
+        }
+        // A reconnect is no end: the search still runs.
+        let messages = extract_codex_messages(&[
+            started("ws_open"),
+            json!({"type": "error", "message": "Reconnecting... 1/5"}),
+        ]);
+        assert_eq!(messages.len(), 1, "{messages:?}");
     }
 
     #[test]

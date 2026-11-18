@@ -6642,10 +6642,18 @@ const SEARCHED_QUERIES: &str = "searched_queries";
 /// one whose search failed. A call it searched nothing for is no step. A person's own ChatGPT
 /// login searches the AI's words as they are, so without that report the step names the words of
 /// a search, and opening or finding in a page, and the tool's other commands, show no step.
-/// Nothing else of the search is kept: not what it wrote, a snippet, or the tool's name.
+/// Nothing else of the search is kept: not what it wrote, a snippet, or the tool's name. A search
+/// whose request failed, which the run's search tool ends with no words
+/// (`managed_web_search::SEARCH_FAILED`), is one that was tried.
 fn web_search_step(search: &codex_protocol::protocol::WebSearchEndEvent) -> JsonValue {
-    let ended = json!({ "id": search.call_id, "type": "web_search", "status": "completed" });
     let results = search.results.as_deref().unwrap_or_default();
+    if results.iter().any(|result| {
+        result.get("type").and_then(JsonValue::as_str)
+            == Some(crate::managed_web_search::SEARCH_FAILED)
+    }) {
+        return json!({ "id": search.call_id, "type": "web_search", "status": "failed" });
+    }
+    let ended = json!({ "id": search.call_id, "type": "web_search", "status": "completed" });
     let report = results
         .iter()
         .find(|result| result.get("type").and_then(JsonValue::as_str) == Some(SEARCHED_QUERIES));

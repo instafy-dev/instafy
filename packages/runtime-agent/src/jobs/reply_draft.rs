@@ -863,6 +863,7 @@ mod tests {
                 ("file_change", "Applied file changes: docs/notes.md"),
                 ("command_execution", "tail -f server.log"),
                 ("command_execution", "tail -f server.log"),
+                ("web_search", "Web search started"),
                 ("web_search", "Web search completed: \"vitest config\""),
                 ("todo_list", "Plan update: 1/2 steps complete"),
                 ("todo_list", "Plan update: 0/1 steps complete"),
@@ -890,14 +891,14 @@ mod tests {
         assert_eq!(metadata(7)["kind"], json!("codex_command_execution"));
         // The plan step carries the whole list the task tools built, each time either ran.
         assert_eq!(
-            metadata(13)["items"],
+            metadata(14)["items"],
             json!([
                 {"text": "Check the links", "completed": true},
                 {"text": "Update the docs", "completed": false},
             ])
         );
-        assert_eq!(metadata(15)["tool"], json!("Agent"));
-        assert_eq!(metadata(20)["tool"], json!("Task"));
+        assert_eq!(metadata(16)["tool"], json!("Agent"));
+        assert_eq!(metadata(21)["tool"], json!("Task"));
 
         // Steps, their stored events and drafts name neither the folder nor the home folder,
         // and carry no token.
