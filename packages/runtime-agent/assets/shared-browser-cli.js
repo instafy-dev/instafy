@@ -2453,10 +2453,11 @@ async function typeLikeAPerson(target, text) {
 const FIELD_LIST_WAIT_MS = 3_000;
 const FIELD_LIST_QUIET_MS = 600;
 const FIELD_LIST_EVERY_MS = 150;
-// The page's options, looked for in page order, open shadow roots too, as a
-// reading finds its controls; how many of them a look judges; how many a
-// type step names, and how much of each name.
-const FIELD_LIST_OPTIONS = "[role=option]";
+// The page's options a person can see, looked for in page order, open shadow
+// roots too, as a reading finds its controls (a closed list's hundreds of
+// options never crowd out the ones shown); how many of them a look judges; how
+// many a type step names, and how much of each name.
+const FIELD_LIST_OPTIONS = "[role=option]:visible";
 const MAX_FIELD_LIST_OPTIONS = 400;
 const FIELD_LIST_NAMED = 4;
 const MAX_FIELD_LIST_NAME_CHARS = 80;
