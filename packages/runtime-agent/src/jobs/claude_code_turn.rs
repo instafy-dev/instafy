@@ -515,6 +515,11 @@ impl JobProcessor {
         }
         status_steps.extend(adapter.permission_denials_step());
         status_steps.extend(programs_stopped_step(programs_stopped));
+        status_steps.extend(super::put_back_edit_messages(
+            &held_pages,
+            &folder,
+            &[&events],
+        ));
 
         let messages = with_runtime_metadata_vec(extract_codex_messages(&events), &runtime_id);
         let messages_streamed = steps.as_ref().is_some_and(StepStream::all_streamed);

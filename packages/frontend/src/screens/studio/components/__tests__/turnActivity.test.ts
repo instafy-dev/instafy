@@ -960,6 +960,42 @@ describe("an unlabelled step that failed", () => {
   });
 });
 
+// A turn changed a page another chat made, and the runtime put that page back
+// as it was once the turn's model was done. A local test, Nov 17: the line
+// still read "edited a file". The runtime now sends one more message for each
+// such edit step, after the one that said it was done: declined when every
+// file it changed went back, or done with only the files the turn kept.
+describe("an edit the runtime put back", () => {
+  const EDIT = {
+    v: 1,
+    key: "builtin/edit",
+    role: "content",
+    live: "Editing files",
+    done: { one: "edited a file", other: "edited {n} files", some: "edited files" },
+    count: 1,
+    also: [],
+  };
+
+  it("counts for nothing, and the line counts only what the turn kept", () => {
+    const theirs = step("file_change", EDIT, { itemId: "call_theirs", paths: ["sites/theirs/data.json"] });
+    const putBack = step("file_change", EDIT, { itemId: "call_theirs", status: "declined", paths: ["sites/theirs/data.json"] });
+    expect(summarize([theirs]).summary).toBe("Edited a file");
+    expect(summarize([theirs, putBack]).summary).toBe("Tried editing files");
+    const ours = step("file_change", EDIT, { itemId: "call_ours", paths: ["sites/ours/index.html"] });
+    expect(summarize([theirs, ours, putBack]).summary).toBe("Edited a file");
+    // One step that changed both pages counts only the file the turn kept.
+    const both = step("file_change", { ...EDIT, count: 2 }, {
+      itemId: "call_both",
+      paths: ["sites/theirs/data.json", "sites/ours/data.json"],
+    });
+    const kept = step("file_change", EDIT, { itemId: "call_both", paths: ["sites/ours/data.json"] });
+    expect(summarize([both]).summary).toBe("Edited 2 files");
+    expect(summarize([both, kept]).summary).toBe("Edited a file");
+    // Details has one row for each step, named by its newest message.
+    expect(summarize([theirs, putBack]).details.filter((item) => item.kind === "step")).toHaveLength(1);
+  });
+});
+
 // A turn whose only commands looked around the workspace (`pwd`, `rg --files`),
 // as the runtime marks them. A local test: two turns that only posted a browser
 // card read "Ran a command".

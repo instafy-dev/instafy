@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -66,9 +66,35 @@ pub struct Case {
     /// routing input then says so, after the browser skill's routing section.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub integrated_search: bool,
+    /// Whether research that ends in a page searches first there too, on a runtime with
+    /// `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on: the routing input then says so in a second line.
+    /// Only with `integratedSearch`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub research_pages_search_first: bool,
+    /// The space's pages, as the controller gives a job them: each made in this chat or in
+    /// another one, which the routing input then names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<Page>,
     pub expect: Expect,
     /// Why that route is right.
     pub why: String,
+}
+
+/// One of the space's pages: its title, its folder in the space, and the chat that made it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Page {
+    pub title: String,
+    pub folder: String,
+    pub made_in: MadeIn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum MadeIn {
+    #[serde(rename = "this chat")]
+    ThisChat,
+    #[serde(rename = "another chat")]
+    AnotherChat,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -84,6 +110,11 @@ pub struct Expect {
     /// asking for more shows.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deeper_research: bool,
+    /// What the routing step's `summary` must name where a routed browser turn reads it, in its
+    /// card's task after the person's words, such as the address of a page a reply here linked:
+    /// that turn never reads the reply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summary_names: Vec<String>,
 }
 
 impl Case {
@@ -91,6 +122,12 @@ impl Case {
     pub fn answered_by(&self, answer: &Answer) -> bool {
         answer.route == self.expect.route
             && answer.deeper_research == self.expect.deeper_research
+            && self.expect.summary_names.iter().all(|name| {
+                answer
+                    .browser_task
+                    .as_ref()
+                    .is_some_and(|task| task.contains(name.as_str()))
+            })
             && self
                 .expect
                 .workspace_file_change_requirement
@@ -109,10 +146,18 @@ impl Case {
             Some(allowed) => format!("{} (change: {})", self.expect.route, allowed.join(" or ")),
             None => self.expect.route.clone(),
         };
-        if self.expect.deeper_research {
+        let route = if self.expect.deeper_research {
             format!("{route}, deeper research")
         } else {
             route
+        };
+        if self.expect.summary_names.is_empty() {
+            route
+        } else {
+            format!(
+                "{route}, its summary naming {}",
+                self.expect.summary_names.join(" and ")
+            )
         }
     }
 }
@@ -168,8 +213,35 @@ pub fn parse_cases(text: &str) -> Result<Vec<Case>> {
                 "case {id}: history entry {index} needs a role (user or assistant) and a content"
             );
         }
+        ensure!(
+            case.integrated_search || !case.research_pages_search_first,
+            "case {id}: researchPagesSearchFirst goes with integratedSearch"
+        );
+        let mut folders = HashSet::new();
+        for page in &case.pages {
+            ensure!(
+                !page.title.trim().is_empty() && page_folder(&page.folder).is_some(),
+                "case {id}: a page needs a title and a folder in the space, such as sites/name"
+            );
+            ensure!(
+                folders.insert(page.folder.as_str()),
+                "case {id}: the folder {} is listed twice",
+                page.folder
+            );
+        }
     }
     Ok(file.cases)
+}
+
+/// A page's folder as a path of plain names in the space, at most two deep (`sites/name`).
+fn page_folder(folder: &str) -> Option<&Path> {
+    let path = Path::new(folder);
+    let names = path.components().count();
+    ((1..=2).contains(&names)
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))))
+    .then_some(path)
 }
 
 pub fn load_cases(path: &Path) -> Result<Vec<Case>> {
@@ -191,23 +263,46 @@ pub fn prepare_workspace(dir: &Path) -> Result<()> {
 }
 
 /// The job the person's message makes in this chat, as the runtime leases it: their chat turn,
-/// with the chat's entries and then the message itself.
+/// with the chat's entries and then the message itself, and the space's pages as the controller
+/// gives them, each with the chat that made it.
 fn case_job(case: &Case) -> LeaseJob {
     let mut history = case.history.clone();
     history.push(json!({"role": "user", "content": case.message, "runId": "run-latest"}));
+    let (this_chat, another_chat) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut payload = json!({
+        "prompt_text": case.message,
+        "conversation_history": history,
+        "metadata": {},
+    });
+    if !case.pages.is_empty() {
+        let pages: Vec<JsonValue> = case
+            .pages
+            .iter()
+            .map(|page| {
+                let chat = match page.made_in {
+                    MadeIn::ThisChat => this_chat,
+                    MadeIn::AnotherChat => another_chat,
+                };
+                json!({
+                    "folder": page.folder,
+                    "title": page.title,
+                    "server": ["instafy", "bind"],
+                    "openedAt": "2026-11-17T09:00:00.000Z",
+                    "conversationId": chat.to_string(),
+                })
+            })
+            .collect();
+        payload[super::space_pages::CONTROLLERS_PAGES_KEY] = json!({ "pages": pages });
+    }
     LeaseJob {
         id: Uuid::new_v4(),
         intent: Some("feature".to_string()),
         project_id: Some(Uuid::new_v4()),
         run_id: Some(Uuid::new_v4()),
-        conversation_id: Some(Uuid::new_v4()),
+        conversation_id: Some(this_chat),
         session_id: None,
         credential_id: None,
-        payload: json!({
-            "prompt_text": case.message,
-            "conversation_history": history,
-            "metadata": {},
-        }),
+        payload,
         proxy: None,
         controller_token: None,
         controller_token_scopes: None,
@@ -236,7 +331,9 @@ pub struct RoutingInput {
     pub history_metrics: JsonValue,
 }
 
-/// A case's routing input, built by the job's own code in `workspace`.
+/// A case's routing input, built by the job's own code in `workspace`. A case's pages are the
+/// space's for that case alone: their folders are made, the job takes the controller's pages over
+/// the space's record as a job does before its routing step, and both go once the input is built.
 pub fn routing_input(case: &Case, workspace: &Path) -> Result<RoutingInput> {
     let job = case_job(case);
     ensure!(
@@ -244,19 +341,81 @@ pub fn routing_input(case: &Case, workspace: &Path) -> Result<RoutingInput> {
         "case {}: a turn would skip the routing step",
         case.id
     );
+    let pages = CasePages::lay_out(workspace, &case.pages)
+        .with_context(|| format!("case {}: its pages", case.id))?;
+    super::space_pages::take_the_controllers_pages(workspace, &job.payload);
     let request = super::routing_preflight_request(
         &job,
         workspace,
         &case.message,
         None,
         case.integrated_search,
+        case.research_pages_search_first,
     );
+    drop(pages);
     Ok(RoutingInput {
         prompt: request.prompt,
         shared_start: request.shared_start,
         browser_routes_offered: request.browser_routes.is_some(),
         history_metrics: request.history_metrics,
     })
+}
+
+/// The folders of a case's pages, made in the space for that case alone, and the space's record of
+/// its pages, which the job writes from them: both go when this is dropped.
+struct CasePages {
+    made: Vec<PathBuf>,
+    record: Option<PathBuf>,
+}
+
+impl CasePages {
+    fn lay_out(workspace: &Path, pages: &[Page]) -> Result<Self> {
+        let mut laid_out = Self {
+            made: Vec::new(),
+            record: None,
+        };
+        if pages.is_empty() {
+            return Ok(laid_out);
+        }
+        // The first folder of the record's path the space doesn't have yet, which goes whole.
+        let record_dir = Path::new(super::space_pages::PAGES_RECORD)
+            .parent()
+            .context("the record's folder")?;
+        let mut first_missing = None;
+        let mut dir = workspace.to_path_buf();
+        for name in record_dir.components() {
+            dir.push(name);
+            if !dir.exists() {
+                first_missing = Some(dir.clone());
+                break;
+            }
+        }
+        laid_out.record =
+            Some(first_missing.context("the space already has a record of its pages")?);
+        for page in pages {
+            let mut dir = workspace.to_path_buf();
+            for name in Path::new(&page.folder).components() {
+                dir.push(name);
+                if !dir.exists() {
+                    std::fs::create_dir(&dir)
+                        .with_context(|| format!("failed to create {}", dir.display()))?;
+                    laid_out.made.push(dir.clone());
+                }
+            }
+        }
+        Ok(laid_out)
+    }
+}
+
+impl Drop for CasePages {
+    fn drop(&mut self) {
+        if let Some(record) = &self.record {
+            let _ = std::fs::remove_dir_all(record);
+        }
+        for dir in self.made.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
 }
 
 /// A routing answer, read as the job reads it.
@@ -270,6 +429,10 @@ pub struct Answer {
     pub deeper_research: bool,
     /// The router's own reason.
     pub reason: String,
+    /// On a browser route, the task of the card the job posts: the person's words, then the
+    /// answer's `summary` where the job keeps it (`routed_browser_task`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_task: Option<String>,
 }
 
 /// Reads a routing answer with the job's parser. A browser route the job could not take runs
@@ -282,6 +445,7 @@ pub fn read_answer(final_json: &JsonValue, case: &Case, input: &RoutingInput) ->
         workspace_file_change_requirement: None,
         deeper_research: false,
         reason: reason.to_string(),
+        browser_task: None,
     };
     if super::parse_workspace_file_change_requirement(final_json).is_err() {
         return invalid("the answer has no valid workspaceFileChangeRequirement");
@@ -296,6 +460,14 @@ pub fn read_answer(final_json: &JsonValue, case: &Case, input: &RoutingInput) ->
     {
         preflight.route = AgentRoutingPreflightRoute::Direct;
     }
+    let browser_task =
+        matches!(preflight.route, AgentRoutingPreflightRoute::Browser { .. }).then(|| {
+            super::routed_browser_task(
+                &case_job(case),
+                &case.message,
+                final_json.get("summary").and_then(JsonValue::as_str),
+            )
+        });
     let artifact = super::agent_routing_preflight_artifact(&preflight);
     Answer {
         route: artifact["route"].as_str().unwrap_or("invalid").to_string(),
@@ -304,6 +476,7 @@ pub fn read_answer(final_json: &JsonValue, case: &Case, input: &RoutingInput) ->
             .map(str::to_string),
         deeper_research: preflight.deeper_research,
         reason: preflight.reason,
+        browser_task,
     }
 }
 
@@ -687,6 +860,7 @@ mod tests {
                 workspace_file_change_requirement: Some("required".to_string()),
                 deeper_research: false,
                 reason: format!("routed {route}"),
+                browser_task: None,
             }),
             error: None,
             tokens: Tokens {
@@ -794,6 +968,7 @@ mod tests {
                 workspace_file_change_requirement: Some("none".to_string()),
                 deeper_research: false,
                 reason: format!("routed {route}"),
+                browser_task: None,
             }),
             error: None,
             tokens: Tokens::default(),
@@ -1004,13 +1179,13 @@ mod tests {
         for (case, line, included, ignored) in [
             (
                 &fill_in,
-                "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says)",
+                "Also when the browser part needs what only this space or another chat holds (a page, map or file here)",
                 3,
                 0,
             ),
             (
                 &keep_going,
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on.",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on.",
                 7,
                 11,
             ),
@@ -1020,7 +1195,7 @@ mod tests {
             assert!(input.browser_routes_offered, "{}", case.id);
             assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
             assert!(input.prompt.contains(
-                "A routed browser turn sees only the person's words and this chat's browser turns, with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
+                "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find."
             ));
             assert_eq!(
                 input.history_metrics["includedTurns"],
@@ -1057,13 +1232,13 @@ mod tests {
         for (case, line, included, ignored) in [
             (
                 &page,
-                "and for a page or change made only from what this chat found and confirmed.",
+                "and for a page or change made only from what this chat found and confirmed;",
                 5,
                 2,
             ),
             (
                 &keep_going,
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on.",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on.",
                 7,
                 8,
             ),
@@ -1117,7 +1292,7 @@ mod tests {
         for line in [
             "it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map,",
             "the building turn reads it and answers with a card naming it,",
-            "the building turn reads first and answers, opening the browser itself if a page needs it.",
+            "the building turn reads first, opening the browser itself if a page needs it.",
         ] {
             assert!(input.prompt.contains(line), "{line}: {}", input.prompt);
         }
@@ -1174,7 +1349,7 @@ mod tests {
         assert!(input.browser_routes_offered);
         assert!(
             input.prompt.contains(
-                "and for a page or change made only from what this chat found and confirmed."
+                "and for a page or change made only from what this chat found and confirmed;"
             ),
             "{}",
             input.prompt
@@ -1316,14 +1491,15 @@ mod tests {
     /// reads) keeps both hashes. A change that means to move routes updates them, and its pull
     /// request carries the routing check's table. A message whose turn can search the web shares
     /// a start of its own: the same, with the one line that says so after the browser skill's
-    /// routing section.
+    /// routing section, and one on a runtime where research that ends in a page searches first
+    /// has the next line too. The space's pages, which differ from chat to chat, come after it.
     #[test]
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "80e0abc72beba6dd3ef20a921a873ef7e4020be39c3c600ad4aeed633f435ffd";
+            "339b24c9e853e9c39f8d08098623168f123fce4ccfc5b303e66fd9e63a1e1aca";
         const CASE_PROMPTS_SHA256: &str =
-            "4a145f8e1f712eff1941931faa717401e009f0f6c4ed8d516e377faee549bd97";
+            "20907c67c5846a082e35e8c3b6e268d770f8e00e5988e81a6f8b121923b87a38";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1350,30 +1526,38 @@ mod tests {
             inputs.iter().all(|(_, input)| input.browser_routes_offered),
             "every case is offered the browser routes"
         );
-        assert_eq!(starts.len(), 2, "two starts: with and without search");
-        let searching: HashSet<&str> = shipped()
-            .iter()
-            .filter(|case| case.integrated_search)
-            .map(|case| case.id.as_str())
-            .map(|id| {
-                inputs
-                    .iter()
-                    .find(|(each, _)| each == id)
-                    .map(|(_, input)| input.shared_start.as_str())
-                    .expect("its input")
-            })
-            .collect();
         assert_eq!(
-            searching.len(),
-            1,
-            "every case that searches shares one start"
+            starts.len(),
+            3,
+            "three starts: without search, with it, and with research pages searching first"
         );
-        let search_start = searching.into_iter().next().expect("a start");
-        let start = starts
-            .into_iter()
-            .find(|start| *start != search_start)
-            .expect("the start without search");
-        // The one line is all that tells the two apart.
+        let cases = shipped();
+        let start_where = |searching: bool, pages_first: bool| {
+            let starts: HashSet<&str> = cases
+                .iter()
+                .filter(|case| {
+                    case.integrated_search == searching
+                        && case.research_pages_search_first == pages_first
+                })
+                .map(|case| {
+                    inputs
+                        .iter()
+                        .find(|(each, _)| *each == case.id)
+                        .map(|(_, input)| input.shared_start.as_str())
+                        .expect("its input")
+                })
+                .collect();
+            assert_eq!(
+                starts.len(),
+                1,
+                "every case with search {searching} and pages first {pages_first} shares one start"
+            );
+            starts.into_iter().next().expect("a start")
+        };
+        let start = start_where(false, false);
+        let search_start = start_where(true, false);
+        let pages_start = start_where(true, true);
+        // The one line is all that tells the first two apart, and the next one the last two.
         assert_eq!(
             search_start
                 .matches(super::super::ROUTING_SEARCH_FACT)
@@ -1384,13 +1568,26 @@ mod tests {
             search_start.replacen(super::super::ROUTING_SEARCH_FACT, "", 1),
             start
         );
+        assert_eq!(
+            pages_start
+                .matches(super::super::ROUTING_SEARCH_FIRST_FACT)
+                .count(),
+            1
+        );
+        assert_eq!(
+            pages_start.replacen(super::super::ROUTING_SEARCH_FIRST_FACT, "", 1),
+            search_start
+        );
         assert!(!start.contains(super::super::ROUTING_SEARCH_FACT));
+        assert!(!search_start.contains(super::super::ROUTING_SEARCH_FIRST_FACT));
         let mut prompts = String::new();
         let mut each = String::new();
         for (id, input) in &inputs {
             let prompt = without_counts(&input.prompt);
             assert!(
-                prompt.starts_with(start) || prompt.starts_with(search_start),
+                [start, search_start, pages_start]
+                    .iter()
+                    .any(|start| prompt.starts_with(start)),
                 "{id}: the prompt opens with a start"
             );
             let _ = writeln!(each, "{id}: {}", digest(&prompt));
@@ -1441,6 +1638,8 @@ mod tests {
                 workspace_file_change_requirement: Some("none".to_string()),
                 deeper_research: false,
                 reason: "Because.".to_string(),
+                // A chat with no earlier turn: the card's task is the person's words alone.
+                browser_task: Some(comparison.message.clone()),
             }
         );
         assert!(comparison.answered_by(&answer));
@@ -1509,10 +1708,16 @@ mod tests {
     /// on a map, an order in the person's own account and a site opened in the browser. Where
     /// two rules could both be read as a case's, the case says which one decides: a note in the
     /// person's own words, and a place added to a map, after replies that said something wasn't
-    /// found. The last six are sent where Octo can search the web for the message, which their
-    /// routing input says in one line: news and a comparison put on a page stay `direct`, a page
-    /// that needs prices for dates or a route still browses first, an order in the person's own
-    /// account is still the browser's, and news answered in a reply stays `direct`.
+    /// found. Those sent where Octo can search the web for the message have one line saying so
+    /// in their routing input, and a second where research that ends in a page searches first:
+    /// news and a comparison put on a page stay `direct` only with both, a page that needs prices
+    /// for dates or a route still browses first, an order in the person's own account is still
+    /// the browser's, and news answered in a reply and a hotel for dates nobody named stay
+    /// `direct`, while hotels for dates nobody named put on a page browse first unless research
+    /// that ends in a page searches first. A question about a shop's policy beside an order number
+    /// stays `direct`, with search or without, while that order's own status is the browser's, a
+    /// reply's article opened in the browser goes by its address, and a change to another chat's
+    /// page, which the routing input's pages name, stays `direct` with no change.
     #[test]
     fn every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own() {
         let cases = shipped();
@@ -1523,6 +1728,43 @@ mod tests {
             .map(|(_, section)| section)
             .expect("the routing section");
         let rules: &[(&str, &str, &[&str])] = &[
+            (
+                "name the items, place or site this chat names (by name; a page a reply here linked, by address)",
+                "browser",
+                &["news-then-open-the-article"],
+            ),
+            (
+                "- Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email;",
+                "direct",
+                &[
+                    "news-today",
+                    "score-last-night",
+                    "hours-sunday",
+                    "translate-words-about-the-browser",
+                    "news-today-searching",
+                    "policy-beside-an-order-number",
+                    "policy-beside-an-order-number-searching",
+                ],
+            ),
+            (
+                "when Octo can search the web, availability for dates at places nobody named)",
+                "direct",
+                &["hotel-for-dates-nobody-named-searching"],
+            ),
+            (
+                "or that ends in a page when it searches first, stays `direct`",
+                "direct",
+                &[
+                    "news-then-page-searching",
+                    "comparison-page-searching",
+                    "comparison-page-watches-searching",
+                ],
+            ),
+            (
+                "unless the message names the browser, it carries on this chat's browser work or a site must be used first (availability at a place named, a sign-in or their account, an order's own status or items, a form or planner)",
+                "browser",
+                &["order-status-beside-an-order-number"],
+            ),
             (
                 "the person names Instafy's browser (\"in your browser\")",
                 "browser",
@@ -1544,27 +1786,24 @@ mod tests {
                 &["browser-follow-up-tram"],
             ),
             (
-                "- `browser_then_build`: the same, and Octo then makes or changes something in this space",
+                "- `browser_then_build`: the same, then Octo makes or changes something here",
                 "browser_then_build",
                 &["browser-named-then-page"],
             ),
             (
-                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message,",
+                "So is research that ends in a page (a comparison, prices, a route), from the first message.",
                 "browser_then_build",
                 &[
                     "comparison-page-watches",
                     "news-then-page",
                     "hotels-for-dates-page-searching",
                     "route-page-searching",
+                    "news-then-page-searching-pages-browse-first",
+                    "hotels-for-dates-nobody-named-page-searching",
                 ],
             ),
             (
-                "unless Octo can search the web and no site needs using first (a booking or availability for dates, a sign-in or their account, a form or planner): it then stays `direct`.",
-                "direct",
-                &["news-then-page-searching", "comparison-page-searching"],
-            ),
-            (
-                "So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.",
+                "So is a page or change with values this chat's replies said weren't found or confirmed: the browser looks again first.",
                 "browser_then_build",
                 &[
                     "page-with-a-value-the-browser-did-not-confirm",
@@ -1573,7 +1812,7 @@ mod tests {
                 ],
             ),
             (
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on.",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on.",
                 "browser_then_build",
                 &["keep-going-tram-route-open", "keep-going-page-not-made-yet"],
             ),
@@ -1602,9 +1841,14 @@ mod tests {
                 ],
             ),
             (
-                "and for a page or change made only from what this chat found and confirmed.",
+                "and for a page or change made only from what this chat found and confirmed;",
                 "direct",
                 &["page-from-confirmed-hours"],
+            ),
+            (
+                "(`none`) for a change to another chat's page.",
+                "direct",
+                &["change-to-another-chats-page"],
             ),
             (
                 "when the site runs in this space (a preview card)",
@@ -1617,25 +1861,14 @@ mod tests {
                 &["says-not-to-use-the-browser"],
             ),
             (
-                "Also when the browser part needs what only this space or another chat holds (what a page, map or file here says): the building turn reads it and answers with a card naming it,",
+                "Also when the browser part needs what only this space or another chat holds (a page, map or file here): the building turn reads it and answers with a card naming it,",
                 "direct",
                 &["needs-a-file-here"],
             ),
             (
-                "unless all it needs is what this chat's browser work found: filling in, checking again or going on with that work is `browser_then_build`.",
+                "unless it needs only what this chat's browser work found: filling in, checking again or going on is `browser_then_build`.",
                 "browser_then_build",
                 &["fill-in-after-browser-work-watches"],
-            ),
-            (
-                "- Research whose answer is a reply (facts, a price, opening hours, reviews) stays `direct` when the message does not name the browser",
-                "direct",
-                &[
-                    "news-today",
-                    "score-last-night",
-                    "hours-sunday",
-                    "translate-words-about-the-browser",
-                    "news-today-searching",
-                ],
             ),
         ];
         let mut covered = HashSet::new();
@@ -1648,7 +1881,8 @@ mod tests {
                 assert!(input.browser_routes_offered, "{id}");
                 assert!(input.prompt.contains(rule), "{id} reads: {rule}");
                 // Whether Octo can search the web for the message is one line of the routing
-                // input, after the section, there exactly when the case says so.
+                // input, after the section, there exactly when the case says so, and whether
+                // research that ends in a page searches first is the line after it.
                 let fact = format!("```\n{}", super::super::ROUTING_SEARCH_FACT);
                 assert_eq!(input.prompt.contains(&fact), case.integrated_search, "{id}");
                 assert_eq!(
@@ -1659,18 +1893,112 @@ mod tests {
                     usize::from(case.integrated_search),
                     "{id}"
                 );
+                let both = format!(
+                    "```\n{}{}",
+                    super::super::ROUTING_SEARCH_FACT,
+                    super::super::ROUTING_SEARCH_FIRST_FACT
+                );
+                assert_eq!(
+                    input.prompt.contains(&both),
+                    case.research_pages_search_first,
+                    "{id}"
+                );
+                assert_eq!(
+                    input
+                        .prompt
+                        .matches(super::super::ROUTING_SEARCH_FIRST_FACT)
+                        .count(),
+                    usize::from(case.research_pages_search_first),
+                    "{id}"
+                );
                 covered.insert(case.id);
             }
         }
         // Each case that can search has a twin rule on the same kind of message without it: news
-        // and a comparison put on a page browse first only when Octo can't search.
+        // and a comparison put on a page browse first unless Octo can search the web and
+        // research that ends in a page searches first. Two of them are word for word the same
+        // message, with one line of the routing input more.
         for (searching, without) in [
             ("news-then-page-searching", "news-then-page"),
             ("comparison-page-searching", "comparison-page-watches"),
+            (
+                "comparison-page-watches-searching",
+                "comparison-page-watches",
+            ),
+            (
+                "news-then-page-searching",
+                "news-then-page-searching-pages-browse-first",
+            ),
         ] {
-            assert!(case(&cases, searching).integrated_search, "{searching}");
-            assert!(!case(&cases, without).integrated_search, "{without}");
+            let (searching, without) = (case(&cases, searching), case(&cases, without));
+            assert!(searching.research_pages_search_first, "{}", searching.id);
+            assert!(!without.research_pages_search_first, "{}", without.id);
         }
+        for (one, other) in [
+            (
+                "comparison-page-watches-searching",
+                "comparison-page-watches",
+            ),
+            (
+                "news-then-page-searching",
+                "news-then-page-searching-pages-browse-first",
+            ),
+            (
+                "policy-beside-an-order-number-searching",
+                "policy-beside-an-order-number",
+            ),
+        ] {
+            assert_eq!(case(&cases, one).message, case(&cases, other).message);
+        }
+        // A question about a shop's policy beside an order number stays with Octo whether or not
+        // it can search the web for the message: the twins differ only in that line.
+        let (searching, without) = (
+            case(&cases, "policy-beside-an-order-number-searching"),
+            case(&cases, "policy-beside-an-order-number"),
+        );
+        assert!(searching.integrated_search && !without.integrated_search);
+        assert!(!searching.research_pages_search_first);
+        // Hotels for dates nobody named are research answered in a reply where Octo can search
+        // the web, and research that ends in a page once they go on one: the page browses first
+        // where only replies' research searches first.
+        let (reply, page) = (
+            case(&cases, "hotel-for-dates-nobody-named-searching"),
+            case(&cases, "hotels-for-dates-nobody-named-page-searching"),
+        );
+        assert!(reply.integrated_search && page.integrated_search);
+        assert!(!reply.research_pages_search_first && !page.research_pages_search_first);
+        assert_eq!(page.expect.route, "browser_then_build");
+        // The routing input names the space's pages, each with the chat that made it, after the
+        // part every chat shares; a case with no pages names none.
+        let other = case(&cases, "change-to-another-chats-page");
+        let input = routing_input(&other, workspace.path()).unwrap();
+        let pages = "- The space's pages:\n  - \"Levoit Core 300 vs Blueair 411\", in `sites/levoit-blueair/`: made in this chat.\n  - \"Air purifiers: Levoit Core 300 vs Blueair 411 vs Coway Airmega\", in `sites/air-purifiers/`: made in another chat, read-only here.\n";
+        assert!(input.prompt.contains(pages), "{}", input.prompt);
+        assert!(!input.shared_start.contains("The space's pages"));
+        assert!(input.prompt.starts_with(&input.shared_start));
+        for id in ["comparison-page-watches", "news-then-open-the-article"] {
+            let input = routing_input(&case(&cases, id), workspace.path()).unwrap();
+            assert!(!input.prompt.contains("The space's pages"), "{id}");
+        }
+        // The pages were the space's for that case alone.
+        assert!(!workspace.path().join("sites/air-purifiers").exists());
+        assert!(
+            !workspace
+                .path()
+                .join(super::super::space_pages::PAGES_RECORD)
+                .exists()
+        );
+        // A reply's article goes to the browser by the address the reply linked: the routing
+        // input holds the reply, and the case reads that address in the card's task.
+        let article = case(&cases, "news-then-open-the-article");
+        let address = &article.expect.summary_names[0];
+        let input = routing_input(&article, workspace.path()).unwrap();
+        assert!(input.prompt.contains(address.as_str()), "{}", input.prompt);
+        let mut answer = answer_json("browser", "none");
+        answer["summary"] = json!(format!("Open {address} and read the article."));
+        assert!(article.answered_by(&read_answer(&answer, &article, &input)));
+        answer["summary"] = json!("Open the Reuters article about Philips.");
+        assert!(!article.answered_by(&read_answer(&answer, &article, &input)));
         // The cases from `news-today` on are exactly these, and none is about a subject an
         // earlier case is about.
         let first = cases
