@@ -2403,7 +2403,8 @@ const NOT_SEARCHED = "Nothing was searched yet.";
 const NOT_SENT = "Nothing was sent yet.";
 
 // `listed`, when the field opened a list as it was typed into, is that list's
-// line (fieldListLine), between what was typed and what was not sent.
+// line (fieldListLine), between what was typed and what was not sent; an
+// `unsent` of null says nothing of sending.
 function typedLine(description, text, held, submitted, unsent = NOT_SENT, listed = null) {
   const field = quotedControlLabel(description);
   const count = Array.from(text).length;
@@ -2416,7 +2417,7 @@ function typedLine(description, text, held, submitted, unsent = NOT_SENT, listed
     : held === ""
       ? ", and the field is empty now"
       : `, and the field holds ${characterCount(Array.from(held).length)} now`;
-  return `${did}${holds}. A page's reading never shows typed text. ${listed ? `${listed} ` : ""}${unsent}`;
+  return [`${did}${holds}.`, "A page's reading never shows typed text.", listed, unsent].filter(Boolean).join(" ");
 }
 
 // A type step types as a person does: the text goes in, and its last
@@ -7111,6 +7112,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // options. Typing alone types as a person does, and looks for the list
     // the field opens (fieldListAfterTyping).
     const optionsBefore = submitting ? [] : await optionsShownBefore(page, target);
+    const typedOn = submitting ? null : { url: page.url(), documentId: await documentOf(page) };
     let listed = null;
     if (submitting) {
       await target.locator.fill(body.text);
@@ -7118,6 +7120,11 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       await typeLikeAPerson(target, body.text);
       listed = await fieldListAfterTyping(page, target, optionsBefore);
     }
+    // A page that went on by itself while the step looked for its list (a
+    // search that runs as it is typed) sent what it sends: the step then says
+    // nothing of what was not sent.
+    const wentOn = typedOn !== null && (page.url() !== typedOn.url ||
+      (typedOn.documentId !== null && (await documentOf(page)) !== typedOn.documentId));
     const held = submitting ? null : await heldText(target.locator);
     // Text typed into a site's own search box searched nothing yet: a turn
     // read the list the page still showed as no result. Only where Enter in
@@ -7145,7 +7152,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       body.text,
       held,
       submitting,
-      searchNotSent ? SEARCH_NOT_SENT : typingStep.category === "search" ? NOT_SEARCHED : NOT_SENT,
+      wentOn ? null : searchNotSent ? SEARCH_NOT_SENT : typingStep.category === "search" ? NOT_SEARCHED : NOT_SENT,
       await fieldListLine(target, reading, optionsBefore, listed),
     );
     return withActivity(
