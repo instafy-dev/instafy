@@ -287,6 +287,78 @@ pub(crate) fn step_tried_addresses(
     asked.into_iter().chain(reported).collect()
 }
 
+/// What only the browser can say stopped a step, by the word a browser turn's finding line gives
+/// it (`jobs::browser_hand_back`): the step, or the load it began, didn't answer in time, or the
+/// page was still too busy to be read (`timed-out`), or something on the page covered the control
+/// the step was for (`covered`). Read from the controller's own words for each
+/// (`assets/shared-browser-cli.js`): a failed step's reason, a step's `message` and how a
+/// succeeded step's `done` starts, never the labels and options a `done` quotes from the page;
+/// and from a step whose time ran out (`stepTimedOut`) or that paused on a cookie notice for the
+/// person. A page's reading says neither. Two browser turns wrote `timed-out` and one `covered`
+/// of steps that answered with neither, and the person read that a planner didn't answer in time
+/// (a local test, Nov 17). None for any other step: a link the page did not take a click on,
+/// whose address then opened in the tab, stopped nothing. Kept so that no finding of a browser
+/// turn says a page stopped it so where none of its steps was told so
+/// (`jobs::browser_hand_back::leave_out_addresses_never_opened`), never projected into a
+/// message.
+pub(crate) fn step_stop(
+    succeeded: bool,
+    payload: Option<&JsonValue>,
+    terminal_code: Option<&str>,
+) -> Option<&'static str> {
+    // A step Playwright gave up waiting on; a site that did not answer, then or earlier in the
+    // chat; a page still loading when an earlier step's time ran out, still too busy to be read,
+    // or not read in time; a step whose time ran out; and a site the browser couldn't reach,
+    // which did not answer either.
+    const TIMED_OUT: [&str; 8] = [
+        "did not take this step in time",
+        "did not answer in time",
+        "did not answer in Instafy's browser",
+        "was still loading after",
+        "The page is still busy",
+        "could not be read in time",
+        "time ran out",
+        "it did not answer",
+    ];
+    // A cookie notice the browser could not decline, or anything else over the control.
+    const COVERED: [&str; 2] = ["A cookie notice covers", "Something else on the page"];
+    // The stop the browser's words in `said` give, found in it by `known`.
+    fn stop_by(said: &str, known: impl Fn(&str, &str) -> bool) -> Option<&'static str> {
+        if TIMED_OUT.iter().any(|words| known(said, *words)) {
+            Some("timed-out")
+        } else {
+            COVERED
+                .iter()
+                .any(|words| known(said, *words))
+                .then_some("covered")
+        }
+    }
+    if terminal_code == Some("cookie_notice_required") {
+        return Some("covered");
+    }
+    let payload = payload?;
+    if succeeded && payload.get("stepTimedOut").and_then(JsonValue::as_bool) == Some(true) {
+        return Some("timed-out");
+    }
+    // A succeeded step's `done` names controls and options in the page's own words, after the
+    // browser's: only how it starts is the browser's.
+    if succeeded
+        && let Some(stop) = payload
+            .get("done")
+            .and_then(JsonValue::as_str)
+            .and_then(|done| stop_by(done, |said, words| said.starts_with(words)))
+    {
+        return Some(stop);
+    }
+    let field = if succeeded {
+        "/message"
+    } else {
+        "/error/reason"
+    };
+    let said = payload.pointer(field).and_then(JsonValue::as_str)?;
+    stop_by(said, |said, words| said.contains(words))
+}
+
 /// Where a `navigate` or `open_tab` left its tab for the address it asked for: that address, as
 /// the step wrote it, and the page the browser said the step left the tab on
 /// ([`step_page_address`]). A redirect, or the browser's own reload of a load the network cut,
@@ -396,6 +468,170 @@ pub(crate) fn pressed_link(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A stop only the browser can say is read from its own words for a step, never from what
+    /// a page says: a step that didn't answer in time, a site that didn't, a step whose time ran
+    /// out and a page still too busy to be read are `timed-out`; a click a notice or anything
+    /// else covered, and a pause on a notice for the person, are `covered`; a page that reads as
+    /// before, a link whose address opened in the tab when the page did not take its click, one
+    /// with no page, a page's own text and the labels a step's answer quotes from it are neither.
+    #[test]
+    fn a_step_is_told_a_stop_only_by_the_browsers_own_words() {
+        let failed = |reason: &str| json!({ "error": { "reason": reason } });
+        for (succeeded, payload, code, stop) in [
+            (
+                false,
+                failed(
+                    "The page did not take this step in time, so it may not have happened. Take a fresh snapshot to see the page as it is now.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "The site did not answer in time, so nothing was opened and the page is still blank.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed("The site did not answer in time, so nothing on its page could be read."),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "This address did not answer in Instafy's browser in the last 10 minutes, so it was not opened again.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "This address was still loading after 20 seconds earlier in this turn, so it was not opened again.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "This step's time ran out, and Shared Browser could not check for windows it opened, so it stopped there.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed(
+                    "Instafy's browser couldn't reach that site: it did not answer, refused the connection, or is an address the browser does not open.",
+                ),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                true,
+                json!({ "stepTimedOut": true, "message": "This step was still running after 20 seconds, so it stopped where it was." }),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                true,
+                json!({ "done": "\"Opening hours\" did not take the click in time, so its address was opened in this tab instead." }),
+                None,
+                None,
+            ),
+            (
+                true,
+                json!({ "done": "Typed 7 characters into \"From\". A page's reading never shows typed text. 1 suggestion under \"From\": \"Something else on the page did not answer in time\" (index 3). Click one. Nothing was sent yet." }),
+                None,
+                None,
+            ),
+            (
+                false,
+                failed(
+                    "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked.",
+                ),
+                None,
+                Some("covered"),
+            ),
+            (
+                false,
+                failed(
+                    "Something else on the page covers \"Search\" (<div role=\"dialog\"> named \"Choose a time\"), so nothing was clicked.",
+                ),
+                None,
+                Some("covered"),
+            ),
+            (
+                false,
+                failed(
+                    "Something else on the page still covers \"Search\", so nothing was clicked.",
+                ),
+                None,
+                Some("covered"),
+            ),
+            (
+                true,
+                json!({ "done": "A cookie notice covers \"All lines\", so its address was opened in this tab instead." }),
+                None,
+                Some("covered"),
+            ),
+            (
+                false,
+                json!({ "message": "User input is needed." }),
+                Some("cookie_notice_required"),
+                Some("covered"),
+            ),
+            (
+                true,
+                json!({ "done": "Pressed Tab. The page still reads as it did before this step, 6 seconds after it: this result is the page as it is now." }),
+                None,
+                None,
+            ),
+            (
+                true,
+                json!({ "message": "The page is still busy, so it could not be read yet. Take a snapshot in a moment." }),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                false,
+                failed("The page could not be read in time, so nothing was read. Take a snapshot."),
+                None,
+                Some("timed-out"),
+            ),
+            (
+                true,
+                json!({ "visibleText": "Gateway timeout: the server did not answer in time. A cookie notice covers this page." }),
+                None,
+                None,
+            ),
+            (
+                false,
+                failed("This address has no page. Go on in this turn as \"Finding a page\" says."),
+                None,
+                None,
+            ),
+            (
+                false,
+                json!({ "message": "The person said no." }),
+                Some("approval_denied"),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                step_stop(succeeded, Some(&payload), code),
+                stop,
+                "{payload}"
+            );
+        }
+        assert_eq!(step_stop(false, None, None), None);
+    }
 
     /// A turn's own steps name the pages they left a tab on, a look at a page too busy to
     /// read and a step that moves no tab name none.

@@ -543,7 +543,17 @@ Two steps never ask, in Ask too:
   timeout and returned its call log. A cover that goes within that moment (a
   toast that fades) is waited for. No failed step carries Playwright's call
   log: only its first line, and an action Playwright gave up waiting on says
-  that the page did not take the step in time.
+  that the page did not take the step in time. A plain link the page does not
+  take a click on within 5 seconds (one that keeps moving, or whose events
+  something the click's own look does not see takes) opens its address in the
+  same tab too, as one under a cookie notice does and under the same rules,
+  and the step's `done` says so ("“Opening hours” did not take the click in
+  time, so its address was opened in this tab instead."): a museum's
+  opening-hours link timed out after 17 seconds, and the turn said that page
+  did not finish loading, which the next message opened by its address. The
+  5 seconds bound only the link being in view, still and given the click; a
+  click whose load its site does not answer waits as any click's does, and
+  fails as such a load does.
 - **A cookie banner's accept is never listed, and refused.** In the same
   banner, a button, link or toggle whose words accept, agree or consent
   ("Accept all", "I agree", "Agree and close", "Consent", "Alle akzeptieren",
@@ -1746,6 +1756,34 @@ are not all known, this leaves no line out: no step named an address, or a
 step pressed a control of a page reading the run was not given (a press in the
 browser on the person's device names no reading).
 
+**A stop only the browser can say stands only where a step was told it.** A
+page that didn't answer in time (`timed-out`) or one a notice or dialog
+covered (`covered`) is something only the browser says, in a step's answer;
+nothing on a page says it. runtime-agent keeps, for each run, the addresses
+at which a Shared Browser step was told one: by the controller's own words
+for a step Playwright gave up waiting on, a site that did not answer or was
+not reached, a page still loading when an earlier step's time ran out, still
+too busy to be read or not read in time, a step whose time ran out, and a
+click a cookie notice or anything else covered, or a pause on a notice for the
+person; at the addresses the step tried, the link it pressed and the page its
+tab was on before it. Those words are a failed step's reason, a step's
+`message` and how a step's `done` starts, never a label or an option a `done`
+quotes from the page; a link whose address opened in the tab when the page
+did not take its click was told no stop. A `timed-out` or `covered` line for a
+site where no step was told it is left out, of any pass of the turn, at an
+address a step opened too: a planner's route turn pressed Tab, was told the
+page read as before, wrote `timed-out` though no step had, and the reply said
+the planner gave no route; another wrote `covered` after a click the page
+took, and asked the person to dismiss a notice. A page that stayed too busy
+to be read keeps its line, so the person hears why it is missing. Lines are
+compared by site, as the person reads them ("The page on planner.example
+didn't answer in time."). Every other stop, a
+line whose address is no full address, and every line of a turn whose stops
+are not known stay: no Shared Browser step answered, a step of the browser on
+the person's device did (it says its stops in words of its own), the browser
+never answered a step, or a step was told one where its address was not
+known.
+
 **A page read at another address has a page.** runtime-agent also keeps where
 each `navigate` or `open_tab` left its tab for the address it asked for. A
 `no-page` line for an address whose open ended on that page at another address
@@ -2139,9 +2177,11 @@ most a second, for running transitions and animations that end, so a menu that
 opens with a transition is observed where it lands. A result a page draws in
 place (a planner's route, a search's list) loads no new document, so a click,
 a key, a choice or a sent search that leaves the page on the same document,
-reading as it did before the step, reads it again for up to about 3 seconds:
+reading as it did before the step, reads it again for up to about 6 seconds:
 a click read a planner before its route was drawn, and the turn said the
-planner showed none. The same document is the one the browser names by its
+planner showed none. The look holds the snapshot the step's answer once left
+to the turn ("take a snapshot before saying nothing appeared"), which turns
+never took: they ended on a guess, one that a planner gave no route. The same document is the one the browser names by its
 loader id: at the same address, or at one the page wrote into its address
 bar itself (a search that puts its words there and draws its list after). A
 new document is read once it has loaded and settled, one at the same address
@@ -2163,9 +2203,12 @@ first, as the press is about to put them, and a key with the focus on its
 control: read before them, a tip shown on hover, or a field's suggestions
 closed as it lost focus, read as the page answering, and the click returned
 before the route was drawn. A page
-that still reads as it did then says so
-in the step's `done`: "The page reads as it did before this step. What it
-loads may still be coming: take a snapshot before saying nothing appeared."
+that still reads as it did then, in the reading the step answers with too,
+says so in the step's `done`, and that this reading is the page as it is
+now: "The page still reads as it did before this step, 6 seconds after it:
+this result is the page as it is now." A list that came between the look and
+that reading was in the result while its answer said the page read as
+before, so the words go only with a reading that reads so too.
 `omittedControls` counts
 the controls left out, so a list cut short by a closed menu, or by a box the
 page scrolls itself, does not read as the whole page; it counts the controls
@@ -2225,7 +2268,41 @@ field and "Nothing was sent yet." for any other ("Typed 12 characters into
 yet."): a turn typed into a site's search, never sent it, and wrote that the
 page returned no results. Where Enter, as the box holds the text, is a site
 search that goes without a prompt (below), it reads "Nothing was searched
-yet: press Enter to search (no prompt needed).". A
+yet: press Enter to search (no prompt needed).". A `type` step without
+`submit` types as a person does: the text is set, then its last character is
+typed over itself as a key press, so a field that opens its list as keys are
+pressed (a planner's stops, a search's suggestions) opens it. Setting the
+value alone pressed no key: a planner's stop lists never opened, and turns
+pressed Tab or the wrong button, then said the planner gave no route. The key
+is the browser's own for a character a US keyboard has no key for ("ö", "é"),
+which Playwright would type with no key press. A field whose value no key
+types (a date, a time, a colour, a number), an empty text and a text whose
+last character is a key of its own (a new line, a tab) are only set, so
+typing never presses Enter or moves the focus; `submit` sets the text and
+presses Enter as before, and what sends a form keeps its own prompt. So is a
+field the page moved on from as the text was set: one no longer focused, with
+its caret off the end, or no longer in the page (a page that moves the focus
+to a suggestion, opens a search field of its own, or replaces the field). The
+key never goes to what the page focused instead, and a field the key left
+holding anything else is set again, so typing never leaves a field short or
+out of order. The step then looks for the list its field opens: the options
+(`role="option"`) of a list the field, or the combobox it sits in, names as
+its own (`aria-controls`, `aria-owns`, the list its active option is in) or
+holds, all of them once they differ from what that list showed before the
+step (a list the text narrowed is named whole); else, for a field that names
+no list, options shown that were not before it typed. Another list on the
+page is never the field's: a field's options were named under another field,
+and a page's "Sort by" under a search. An option turned off (a list's
+"Searching…" or "No matching stops" row) is none, and the step keeps looking
+past it. It looks for up to 3 seconds when the field says it opens a list (a
+combobox, `aria-autocomplete`, `aria-haspopup`, `aria-expanded`) and 0.6
+seconds otherwise, until the options stop changing. Its `done` names how many
+there are and the first four, by the names and indices of the reading it
+answers with: "Typed 7 characters into
+"From". A page's reading never shows typed text. 3 suggestions under "From":
+"Central Station" (index 3), "Central Square" (index 4), "Old Central Park"
+(index 5). Click one. Nothing was sent yet." On a page that may show a
+secret it names none. A
 click on a checkbox, a radio button or a switch says whether it is checked now.
 A `choose` step's `done` names the option and the list by its own name
 ("Chose "Aliados" in "End"."). For a list in a form that has a button of its

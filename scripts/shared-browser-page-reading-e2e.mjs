@@ -71,13 +71,20 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 // 10. A step's reading waits for what it draws: a click whose result the page
 //    draws in place a moment later reads it, whatever the click changed
 //    first (a hidden field, a tip on hover, a suggestion dropped as a field
-//    loses focus, the address), one whose page still reads as before a few
-//    seconds on says so and to take a snapshot before saying nothing
-//    appeared, and a click that changes the page, shows a part of it (a
-//    section, a menu, a drawer, a carousel's next item) or turns a switch on,
-//    opens a page or loads the same one again, a type step and a choice
-//    answer at once. A search typed and not sent says nothing was searched
-//    yet, and a field that is no search that nothing was sent yet.
+//    loses focus, the address), one whose result comes 5 seconds on reads it
+//    too, one whose page still reads as before 6 seconds on says so and that
+//    its reading is the page as it is now, and a click that changes the page,
+//    shows a part of it (a section, a menu, a drawer, a carousel's next item)
+//    or turns a switch on, opens a page or loads the same one again, a type
+//    step and a choice answer at once. A search typed and not sent says
+//    nothing was searched yet, and a field that is no search that nothing was
+//    sent yet. A type step types as a person does, ending on a key press (one
+//    a US keyboard has no key for too), and names the first options of the
+//    list its field opens then, sending nothing: its own list whole once it
+//    changed, never another list on the page nor a row turned off. A page that
+//    moves the focus, opens a field of its own or replaces the field as text
+//    goes in keeps the whole text, in order. A click on a plain link the page
+//    does not take in time opens the link's address in the tab.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -115,8 +122,11 @@ const COVERED_LINK_WORDS = (label) => `A cookie notice covers "${label}", so its
 // What the action policy answers a press of a notice's accept a step still
 // reaches: the Personal Browser's policy gives the same.
 const ACCEPT_WORDS = "Octo never accepts cookies, so nothing was pressed. Carry on under the notice from a fresh snapshot. If it covers what you need, open that link by its address, or another official source.";
-// What a step's result says when its page still reads as it did before it.
-const UNCHANGED_WORDS = "The page reads as it did before this step. What it loads may still be coming: take a snapshot before saying nothing appeared.";
+// What a step's result says when its page still reads as it did before it,
+// once the step has looked for 6 seconds (UNCHANGED_LOOK_MS).
+const UNCHANGED_WORDS = "The page still reads as it did before this step, 6 seconds after it: this result is the page as it is now.";
+// What a click on a plain link the page did not take in time says.
+const NOT_TAKEN_LINK_WORDS = (label) => `"${label}" did not take the click in time, so its address was opened in this tab instead.`;
 // The reading's text cap (MAX_VISIBLE_TEXT_CHARS in the controller).
 const TEXT_CAP = 12_000;
 // Values fields hold, which no reading may carry. Assembled at run time so the
@@ -418,14 +428,16 @@ const DRESSED_SIGN_IN = `<h1>Your account</h1>
 </div>`;
 // A journey planner that draws its route in place, without a new document:
 // 1.5 s after its button, 5 s after a slow one, and at once for its fares;
-// a button that only scrolls to its end; a link to another page and one to
-// itself; a search box with no form, a field and a list.
+// a button that changes nothing; a button that only scrolls to its end; a
+// link to another page and one to itself; a search box with no form, a field
+// and a list.
 const DRAWS = `<h1>Journey planner</h1>
 <p><input aria-label="From" name="from" value="São Bento"> <select aria-label="Day"><option>Monday</option><option>Tuesday</option></select></p>
 <p><input type="search" aria-label="Search stops"></p>
 <p><button type="button" onclick="setTimeout(() => { document.getElementById('route').textContent = 'Route: Line D towards Hospital São João, 2 stops'; }, 1500)">Plan journey</button>
 <button type="button" onclick="setTimeout(() => { document.getElementById('route').textContent = 'Route: Line A towards Senhor de Matosinhos, 5 stops'; }, 5000)">Plan the slow way</button>
 <button type="button" onclick="document.getElementById('route').textContent = 'Fares: Z2 1.40 euros'">Show fares</button>
+<button type="button">Check for delays</button>
 <button type="button" onclick="window.scrollTo(0, document.body.scrollHeight)">Go to the end</button>
 <a href="/reading/visit">Plan your visit</a> <a href="/reading/draws">Start over</a></p>
 <p id="route"></p><div style="height:3000px"></div><p>End of the planner</p>`;
@@ -463,7 +475,111 @@ const REVEALS = `<style>#specs{max-height:0;overflow:hidden}#specs.open{max-heig
 <div id="drawer"><p>Price under 1000 euros</p></div>
 <div id="view"><div id="track"><p>Review one: a great keyboard</p><p>Review two: the battery lasts long</p><p>Review three: loud fans</p></div></div>`;
 const DRAW_ROUTE = "setTimeout(() => { document.getElementById('route').textContent = 'Route: Line D towards Hospital São João, 2 stops'; }, 1500)";
-const HIDDEN_FIELD = `<h1>Journey planner</h1><input type="hidden" id="place">
+// A planner whose fields open their stop lists only as keys are pressed, as a
+// person types, never on a value set alone, and send nothing until its button
+// is pressed: "From" is a combobox that names its list and fills it 1.2 s
+// after the key (a site's answer); "To" names none, and its options show
+// 0.3 s after the key, under it.
+const KEY_LISTS = `<h1>Journey planner</h1>
+<form action="/reading/journey" method="get">
+<p><label for="from">From</label><input id="from" name="from" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="from-stops" autocomplete="off"></p>
+<ul id="from-stops" role="listbox" hidden></ul>
+<p><label for="to">To</label><input id="to" name="to" autocomplete="off"></p>
+<div id="to-stops"></div>
+<p><button>Plan journey</button></p></form>
+<script>
+const STOPS = ["Central Station", "Central Square", "Old Central Park", "Harbour", "Harbour (Metro)", "Old Town"];
+const matching = (text) => STOPS.filter((stop) => stop.toLowerCase().includes(text.toLowerCase().slice(0, 4)));
+const from = document.getElementById("from");
+const fromStops = document.getElementById("from-stops");
+from.addEventListener("keyup", () => {
+  const text = from.value;
+  setTimeout(() => {
+    fromStops.innerHTML = matching(text).map((stop) => '<li role="option">' + stop + '</li>').join("");
+    fromStops.hidden = false;
+    from.setAttribute("aria-expanded", "true");
+  }, 1200);
+});
+const to = document.getElementById("to");
+to.addEventListener("keyup", () => {
+  const text = to.value;
+  setTimeout(() => {
+    document.getElementById("to-stops").innerHTML = matching(text).map((stop) => '<button type="button" role="option">' + stop + '</button>').join(" ");
+  }, 300);
+});
+</script>`;
+// A link that keeps moving, which the page never lets a click take, to a
+// page that loads at once.
+const MOVING_LINK = `<style>@keyframes sway { from { transform: translateX(0); } to { transform: translateX(24px); } }
+#hours { display: inline-block; animation: sway 0.3s infinite alternate; }</style>
+<h1>Museum</h1><p><a id="hours" href="/reading/visit">Opening hours</a></p>`;
+// A stop search whose combobox fills its list only on a key, counting them:
+// a row turned off says it is searching at once, the matching stops come a
+// second after the last key, and a row turned off says when none match.
+const KEY_ONLY_LIST = `<h1>Find a stop</h1>
+<form action="/reading/journey" method="get">
+<p><label for="stop">Stop</label><input id="stop" name="stop" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="stop-list" autocomplete="off"></p>
+<ul id="stop-list" role="listbox"></ul>
+<p><button>Find</button></p></form>
+<script>
+const NAMES = ["Market Café", "Museum Café", "Harbour Market"];
+const stop = document.getElementById("stop");
+const list = document.getElementById("stop-list");
+let answer;
+window.keys = 0;
+stop.addEventListener("keyup", () => {
+  window.keys += 1;
+  const text = stop.value.toLowerCase();
+  list.innerHTML = '<li role="option" aria-disabled="true">Searching…</li>';
+  stop.setAttribute("aria-expanded", "true");
+  clearTimeout(answer);
+  answer = setTimeout(() => {
+    const found = NAMES.filter((name) => name.toLowerCase().includes(text));
+    list.innerHTML = found.length
+      ? found.map((name) => '<li role="option">' + name + '</li>').join("")
+      : '<li role="option" aria-disabled="true">No matching stops</li>';
+  }, 1000);
+});
+</script>`;
+// A search that says it opens a list and never does, beside a list of its
+// own the page always shows.
+const SORTED_SEARCH = `<h1>Museums</h1>
+<p><input aria-label="Search museums" aria-haspopup="listbox" aria-expanded="false" autocomplete="off"></p>
+<div role="listbox" aria-label="Sort by"><div role="option" aria-selected="true">Most visited</div><div role="option">Newest</div></div>`;
+// Fields whose page moves on as text goes in: one moves the focus to its
+// first suggestion, one opens a search field of its own with the words and
+// moves the focus there, and one is replaced by a new field holding the
+// words.
+const MOVING_FIELDS = `<h1>Find a place</h1>
+<p><label for="place">Place</label><input id="place" autocomplete="off"></p>
+<div id="places"></div>
+<p><label for="start">Start</label><input id="start" autocomplete="off"></p>
+<p id="panel" hidden><label for="panel-search">Search stops</label><input id="panel-search" autocomplete="off"></p>
+<p><label for="find">Find</label><input id="find" autocomplete="off"></p>
+<script>
+const place = document.getElementById("place");
+place.addEventListener("input", () => {
+  document.getElementById("places").innerHTML = '<button type="button" role="option">' + place.value + ' (area)</button>';
+  document.querySelector("#places button").focus();
+});
+const start = document.getElementById("start");
+start.addEventListener("input", () => {
+  document.getElementById("panel").hidden = false;
+  const search = document.getElementById("panel-search");
+  search.value = start.value;
+  search.focus();
+});
+const find = document.getElementById("find");
+find.addEventListener("input", () => {
+  const field = document.createElement("input");
+  field.id = "find";
+  field.autocomplete = "off";
+  field.value = find.value;
+  find.replaceWith(field);
+  field.focus();
+}, { once: true });
+</script>`;
+const HIDDEN_FIELD =`<h1>Journey planner</h1><input type="hidden" id="place">
 <p><button type="button" onclick="document.getElementById('place').value = '41.15,-8.61'; ${DRAW_ROUTE}">Plan journey</button></p><p id="route"></p>`;
 const HOVER_TIP = `<style>#tip{display:none}button:hover + #tip{display:inline}</style><h1>Journey planner</h1>
 <p><button type="button" onclick="${DRAW_ROUTE}">Plan journey</button><span id="tip">Plans the fastest trip</span></p><p id="route"></p>`;
@@ -557,6 +673,11 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/hover-tip": page("Journey planner", HOVER_TIP),
       "site.test /reading/blur-suggestion": page("Journey planner", BLUR_SUGGESTION),
       "site.test /reading/address-search": page("Journey planner", ADDRESS_SEARCH),
+      "site.test /reading/key-lists": page("Journey planner", KEY_LISTS),
+      "site.test /reading/moving-link": page("Museum", MOVING_LINK),
+      "site.test /reading/key-only-list": page("Find a stop", KEY_ONLY_LIST),
+      "site.test /reading/sorted-search": page("Museums", SORTED_SEARCH),
+      "site.test /reading/moving-fields": page("Find a place", MOVING_FIELDS),
       "site.test /reading/presentation-cover": page("Timetable", PRESENTATION_COVER),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
       "frame.test /banner": page("Cookies", BANNER("frame_consent")),
@@ -1190,18 +1311,23 @@ export async function runSharedBrowserPageReadingFixture() {
     measurements.drawnLaterClickMs = Date.now() - started;
     assert.match(drawn.visibleText, /Route: Line D towards Hospital São João, 2 stops/u, "the click read the page before its route was drawn");
     assert.equal(drawn.done, undefined, drawn.done);
-    // b. One whose page still reads as it did after a few seconds says so,
-    // and to take a snapshot before saying nothing appeared; a snapshot then
-    // reads the route.
+    // b. One whose route comes 5 s after it reads that route itself: its
+    // step looks for as long as the snapshot it once left to the turn, which
+    // turns never took. One whose page still reads as it did 6 s on says so,
+    // and that its reading is the page as it is now: no snapshot is left to
+    // take.
     reading = await read("/reading/draws");
     started = Date.now();
     const slow = await ok("POST", "/v1/click", { index: control(reading, "Plan the slow way").index, snapshotId: reading.snapshotId });
+    measurements.slowClickMs = Date.now() - started;
+    assert.match(slow.visibleText, /Route: Line A towards Senhor de Matosinhos, 5 stops/u, "the step's reading was not the page as it came");
+    assert.equal(slow.done, undefined, slow.done);
+    reading = await read("/reading/draws");
+    started = Date.now();
+    const unchangedClick = await ok("POST", "/v1/click", { index: control(reading, "Check for delays").index, snapshotId: reading.snapshotId });
     measurements.unchangedClickMs = Date.now() - started;
-    assert.equal(slow.done, `Clicked "Plan the slow way". ${UNCHANGED_WORDS}`);
-    assert.doesNotMatch(slow.visibleText, /Route:/u);
-    await delay(3_000);
-    const later = await ok("GET", "/v1/snapshot");
-    assert.match(later.visibleText, /Route: Line A towards Senhor de Matosinhos, 5 stops/u, "the slow route never came");
+    assert.equal(unchangedClick.done, `Clicked "Check for delays". ${UNCHANGED_WORDS}`);
+    assert.doesNotMatch(unchangedClick.done, /snapshot/u);
     // c. A click that changes the page, in place, by scrolling it or by
     // opening another, answers at once.
     reading = await read("/reading/draws");
@@ -1303,6 +1429,122 @@ export async function runSharedBrowserPageReadingFixture() {
       assert.match(routed.visibleText, /Route: Line D towards Hospital São João, 2 stops/u, `${pathname}: the click read the page before its route was drawn`);
       assert.equal(routed.done, undefined, `${pathname}: ${routed.done}`);
     }
+    // g. A type step types as a person does, ending on a key press, and names
+    // the first options of the list its field opens then: a planner's stop
+    // lists opened only as keys were pressed, the step set the value alone,
+    // and turns pressed Tab or the wrong button and said the planner gave no
+    // route. A field that names its list (a combobox) is waited for as long as
+    // its site takes; one that names none, for a moment. Typing sends nothing:
+    // the planner's form goes only with its button.
+    reading = await read("/reading/key-lists");
+    requests.length = 0;
+    started = Date.now();
+    const typedFromStop = await ok("POST", "/v1/type", { index: control(reading, "From").index, snapshotId: reading.snapshotId, text: "Central" });
+    measurements.typeListMs = Date.now() - started;
+    const fromStops = typedFromStop.interactiveElements.filter((entry) => entry.role === "option");
+    assert.deepEqual(fromStops.map((entry) => entry.label), ["Central Station", "Central Square", "Old Central Park"], "the list the field opens as keys are pressed never opened");
+    assert.equal(
+      typedFromStop.done,
+      `Typed 7 characters into "From". A page's reading never shows typed text. 3 suggestions under "From": ${fromStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
+    );
+    // Typed into again, the field's own list it narrows is named whole: an
+    // option it showed before the step is still one of its suggestions.
+    const typedRefined = await ok("POST", "/v1/type", { index: control(typedFromStop, "From").index, snapshotId: typedFromStop.snapshotId, text: "Old" });
+    const refinedStops = typedRefined.interactiveElements.filter((entry) => entry.role === "option");
+    assert.deepEqual(refinedStops.map((entry) => entry.label), ["Old Central Park", "Old Town"]);
+    assert.equal(
+      typedRefined.done,
+      `Typed 3 characters into "From". A page's reading never shows typed text. 2 suggestions under "From": ${refinedStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
+      "a list the field narrowed was named in part",
+    );
+    const typedToStop = await ok("POST", "/v1/type", { index: control(typedRefined, "To").index, snapshotId: typedRefined.snapshotId, text: "Harbour" });
+    const toStops = typedToStop.interactiveElements.filter((entry) => entry.role === "option" && entry.tag === "button");
+    assert.deepEqual(toStops.map((entry) => entry.label), ["Harbour", "Harbour (Metro)"]);
+    assert.equal(
+      typedToStop.done,
+      `Typed 7 characters into "To". A page's reading never shows typed text. 2 suggestions under "To": ${toStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
+      "a field that names no list did not name the options that came under it",
+    );
+    // A text that ends on a key of its own (a new line) is set, never typed:
+    // its Enter would send the form.
+    const typedNewLine = await ok("POST", "/v1/type", { index: control(typedToStop, "To").index, snapshotId: typedToStop.snapshotId, text: "Harbour\n" });
+    assert.match(typedNewLine.done, /^Typed 8 characters into "To", and the field holds 7 characters now\./u, typedNewLine.done);
+    // A field whose own list shows nothing names nothing, though another
+    // field's list still shows: those are not its suggestions.
+    const typedNoStop = await ok("POST", "/v1/type", { index: control(typedNewLine, "From").index, snapshotId: typedNewLine.snapshotId, text: "Zzzz" });
+    assert.equal(
+      typedNoStop.done,
+      `Typed 4 characters into "From". A page's reading never shows typed text. Nothing was sent yet.`,
+      "another field's options were named as this field's suggestions",
+    );
+    assert.equal(new URL(runPage.url()).pathname, "/reading/key-lists", "typing sent the planner's form");
+    assert.deepEqual(requests, [], "typing sent something");
+    // A field whose list fills only on a key opens it for a text that ends on
+    // a letter a US keyboard has no key for. A row turned off (a list's
+    // "Searching…", or its "No matching stops") is never a suggestion: the
+    // step waits past it for the stops, and names nothing when only it shows.
+    reading = await read("/reading/key-only-list");
+    requests.length = 0;
+    const typedAccent = await ok("POST", "/v1/type", { index: control(reading, "Stop").index, snapshotId: reading.snapshotId, text: "Café" });
+    assert.equal(await runPage.evaluate(() => window.keys), 1, "the text's last letter went in with no key");
+    const accentStops = typedAccent.interactiveElements.filter((entry) => entry.role === "option");
+    assert.deepEqual(accentStops.map((entry) => entry.label), ["Market Café", "Museum Café"], "the list a key opens never opened");
+    assert.equal(
+      typedAccent.done,
+      `Typed 4 characters into "Stop". A page's reading never shows typed text. 2 suggestions under "Stop": ${accentStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
+    );
+    const typedLoading = await ok("POST", "/v1/type", { index: control(typedAccent, "Stop").index, snapshotId: typedAccent.snapshotId, text: "Harbour" });
+    const loadedStops = typedLoading.interactiveElements.filter((entry) => entry.role === "option");
+    assert.deepEqual(loadedStops.map((entry) => entry.label), ["Harbour Market"], "the step answered before the stops came");
+    assert.equal(
+      typedLoading.done,
+      `Typed 7 characters into "Stop". A page's reading never shows typed text. 1 suggestion under "Stop": "Harbour Market" (index ${loadedStops[0].index}). Click one. Nothing was sent yet.`,
+    );
+    const typedUnmatched = await ok("POST", "/v1/type", { index: control(typedLoading, "Stop").index, snapshotId: typedLoading.snapshotId, text: "Zzzz" });
+    assert.equal(
+      typedUnmatched.done,
+      `Typed 4 characters into "Stop". A page's reading never shows typed text. Nothing was sent yet.`,
+      "a row turned off was named as a suggestion",
+    );
+    assert.deepEqual(requests, [], "typing sent something");
+    // A field that says it opens a list and opens none names nothing: a list
+    // the page always shows beside it is not its suggestions.
+    reading = await read("/reading/sorted-search");
+    const typedSorted = await ok("POST", "/v1/type", { index: control(reading, "Search museums").index, snapshotId: reading.snapshotId, text: "modern art" });
+    assert.match(typedSorted.done, /^Typed 10 characters into "Search museums"\. /u, typedSorted.done);
+    assert.doesNotMatch(typedSorted.done, /suggestion/u, "a list the field never opened was named as its suggestions");
+    // A page that moves the focus to a suggestion, opens a search field of its
+    // own with the words, or replaces the field as text goes in keeps the
+    // whole text, in order, as setting it left it: no key goes in before the
+    // text, and the step does not fail half-typed.
+    reading = await read("/reading/moving-fields");
+    const typedPlace = await ok("POST", "/v1/type", { index: control(reading, "Place").index, snapshotId: reading.snapshotId, text: "Riverside" });
+    assert.equal(await runPage.evaluate(() => document.getElementById("place").value), "Riverside", "the last key went in before the text");
+    assert.match(typedPlace.done, /^Typed 9 characters into "Place"\. /u, typedPlace.done);
+    const typedStart = await ok("POST", "/v1/type", { index: control(typedPlace, "Start").index, snapshotId: typedPlace.snapshotId, text: "Central" });
+    assert.deepEqual(
+      await runPage.evaluate(() => ["start", "panel-search"].map((id) => document.getElementById(id).value)),
+      ["Central", "Central"],
+      "the last key went in before the text",
+    );
+    assert.match(typedStart.done, /^Typed 7 characters into "Start"\. /u, typedStart.done);
+    const typedFind = await ok("POST", "/v1/type", { index: control(typedStart, "Find").index, snapshotId: typedStart.snapshotId, text: "Old Town" });
+    assert.equal(await runPage.evaluate(() => document.getElementById("find").value), "Old Town", "the field the page put in was left short");
+    assert.match(typedFind.done, /^Typed 8 characters into "Find"\. /u, typedFind.done);
+    // h. A click on a plain link the page does not take in time (one that
+    // keeps moving) opens the link's address in the tab, as a link under a
+    // cookie notice does: a museum's hours link timed out, and the turn said
+    // its page did not finish loading.
+    reading = await read("/reading/moving-link");
+    requests.length = 0;
+    started = Date.now();
+    const movingLink = await ok("POST", "/v1/click", { index: control(reading, "Opening hours").index, snapshotId: reading.snapshotId });
+    measurements.movingLinkMs = Date.now() - started;
+    assert.equal(movingLink.done, NOT_TAKEN_LINK_WORDS("Opening hours"));
+    assert.equal(new URL(movingLink.url).pathname, "/reading/visit", "the link's address did not open");
+    assert.equal(new URL(runPage.url()).pathname, "/reading/visit", "the link's address opened elsewhere than its tab");
+    assert.deepEqual(requests, [`GET ${sites().site}/reading/visit`], "the link's address was not opened once");
+    assert.ok(measurements.movingLinkMs < 12_000, `the moving link waited ${measurements.movingLinkMs} ms`);
     for (const [name, ms] of [
       ["a click that changed the page", measurements.changedClickMs],
       ["a click that scrolled the page", measurements.scrolledClickMs],
@@ -1329,7 +1571,8 @@ export async function runSharedBrowserPageReadingFixture() {
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so (a link to the page itself is refused as a button is), a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never Octo's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's settings or limited accept is a cookie notice's pause, while one on a refusal no list knows or a booking's button in small print that speaks of cookies is a step of the person's, the booking's button scrolled into view, each outlined and published with fixed labels and nothing pressed; a pause on an account's deletion dressed up as a notice is refused, outlining and publishing nothing, as is any pause in Octo's own tab; under a bar whose only button accepts the planner's own button works with no prompt",
-        "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first; one whose page still reads as before a few seconds on says so and to take a snapshot before saying nothing appeared, and a snapshot then reads the result; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
+        "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first, and one whose result comes 5 s later reads it too; one whose page still reads as before 6 s on says so and that its reading is the page as it is now, leaving no snapshot to take; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
+        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; a click on a plain link that keeps moving opens the link's address in the tab, once",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

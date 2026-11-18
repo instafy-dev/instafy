@@ -1154,6 +1154,16 @@ fn moved_page(asked: &str, ended: &str) -> bool {
 /// on another page, such as the home page a shop sends a product it no longer sells to, and one
 /// whose open ended on a page the answer gives nothing of. A path an open asked for is a page of
 /// the site its tab ended on, so a `no-page` for the same path on another site stays.
+///
+/// Nor does a stop only the browser can say ([`BROWSER_STOPS`]: a page that didn't answer in
+/// time, or one a notice covered) stand for a site where none of the turn's steps was told it
+/// (`BrowserTried::stops_given`), at an address it opened too: the browser says so in the step's
+/// answer, and nothing on a page does. A planner's route turn pressed Tab, was told the page read
+/// as before, and wrote `timed-out` though no step had; the reply said the planner gave no
+/// route. Another wrote `covered` after a click the page took, and the person was asked to
+/// dismiss a notice that covered nothing (a local test, Nov 17). Such a line stays when the
+/// turn's stops are not known: no Shared Browser step answered, one of another browser did,
+/// the browser never answered one, or one was told it where its address was not known.
 pub(super) fn leave_out_addresses_never_opened(
     summary: &mut String,
     not_given: &[String],
@@ -1202,11 +1212,29 @@ pub(super) fn leave_out_addresses_never_opened(
             (moved && read_there).then_some(((asked_site, asked_page), (ended_site, ended_page)))
         })
         .collect();
+    // A stop only the browser can say, on a site none of the turn's steps was told it at.
+    let stops_read = BROWSER_STOPS
+        .iter()
+        .any(|stop| tried.stops_given(stop).is_some());
+    let not_told = |stop: &str, url: &str| {
+        let stop = stop.trim().to_ascii_lowercase();
+        if !BROWSER_STOPS.contains(&stop.as_str()) {
+            return false;
+        }
+        let (Some(given), Some((Some(site), _))) = (tried.stops_given(&stop), site_and_page(url))
+        else {
+            return false;
+        };
+        !given.iter().any(|address| match site_and_page(address) {
+            Some((Some(given_site), _)) => given_site == site,
+            _ => true,
+        })
+    };
     // With no address its steps tried known, a stop is left out only for a refusal as not
-    // given, or a page read at another address.
+    // given, a page read at another address, or a stop only the browser can say.
     let tried = tried.known();
     let steps_known = !tried.is_empty();
-    if not_given.is_empty() && !steps_known && read_elsewhere.is_empty() {
+    if not_given.is_empty() && !steps_known && read_elsewhere.is_empty() && !stops_read {
         return;
     }
     let comparable = |addresses: &[String]| -> Vec<String> {
@@ -1233,6 +1261,9 @@ pub(super) fn leave_out_addresses_never_opened(
             else {
                 return false;
             };
+            if not_told(stop, url) {
+                return true;
+            }
             let as_written = comparable_address(url);
             if opened_as_written.contains(&as_written) {
                 return false;
@@ -1569,6 +1600,9 @@ const STOP_WORDS: [(&str, &str); 11] = [
 /// The stop of a page on a site Octo only links to: the one stop a turn gives without trying
 /// the address ([`leave_out_addresses_never_opened`]).
 const LINK_ONLY_STOP: &str = "link-only";
+/// The stops only the browser can say of a step (`shared_browser_activity::step_stop`): a page
+/// that didn't answer in time, and one a notice or dialog covered.
+const BROWSER_STOPS: [&str; 2] = ["timed-out", "covered"];
 /// The stop of an address with no page, which no page the turn read at another address has
 /// ([`leave_out_addresses_never_opened`]).
 const NO_PAGE_STOP: &str = "no-page";
@@ -3717,6 +3751,98 @@ mod tests {
         let mut summary = answer.clone();
         leave_out_addresses_never_opened(&mut summary, &[], &[], &BrowserTried::default());
         assert_eq!(summary, answer);
+    }
+
+    /// A stop only the browser can say (a page that didn't answer in time, or one a notice
+    /// covered) stands only on a site where one of the turn's steps was told it, at a page the
+    /// turn opened too: a planner's route turn pressed Tab, was told the page read as before, and
+    /// wrote `timed-out`, and another wrote `covered` after a click the page took (a local test,
+    /// Nov 17). Any other stop, a line with no full address, and a turn whose stops are not known
+    /// keep their lines.
+    #[test]
+    fn a_stop_only_the_browser_can_say_stands_only_where_a_step_was_told_it() {
+        let planner = "https://www.planner.example/web/explore";
+        let hotels = "https://www.hotels.example/index.html";
+        let listing = "https://www.visit.example/planning/the-museum";
+        let line = |url: &str, stop: &str| format!("{{\"url\":\"{url}\",\"stopped\":\"{stop}\"}}");
+        let answer = [
+            "I couldn't get the planner to return a route.".to_string(),
+            "{\"url\":\"https://www.planner.example/web/explore\",\"title\":\"Journey planner\",\"facts\":[\"The planner asks for a start and a destination.\"]}".to_string(),
+            line(planner, "timed-out"),
+            line(hotels, "Covered"),
+            line(planner, "captcha"),
+            "{\"stopped\":\"timed-out\"}".to_string(),
+            line("/web/explore", "covered"),
+            "{\"missing\":[\"public-transport route\"]}".to_string(),
+        ]
+        .join("\n");
+        let opened = [planner.to_string(), hotels.to_string()];
+        let without = |summary: &str, lines: &[String]| {
+            lines.iter().fold(summary.to_string(), |summary, line| {
+                summary.replace(&format!("{line}\n"), "")
+            })
+        };
+        // Steps that answered and were told neither: both lines go, though the turn opened
+        // both pages.
+        let mut told_nothing = BrowserTried::from(opened.to_vec());
+        told_nothing.keep_step(None, Vec::new());
+        let mut summary = answer.clone();
+        leave_out_addresses_never_opened(&mut summary, &[], &opened, &told_nothing);
+        assert_eq!(
+            summary,
+            without(
+                &answer,
+                &[line(planner, "timed-out"), line(hotels, "Covered")]
+            )
+        );
+        // Told at a page of another site: the planner's line still goes.
+        let mut told_elsewhere = told_nothing.clone();
+        told_elsewhere.keep_step(Some("timed-out"), vec![listing.to_string()]);
+        let mut summary = answer.clone();
+        leave_out_addresses_never_opened(&mut summary, &[], &opened, &told_elsewhere);
+        assert!(!summary.contains(&line(planner, "timed-out")), "{summary}");
+        // Told at a page of each site, whatever page: both stay.
+        let mut told = told_nothing.clone();
+        told.keep_step(
+            Some("timed-out"),
+            vec!["https://planner.example/web/".to_string()],
+        );
+        told.keep_step(Some("covered"), vec![hotels.to_string()]);
+        let mut summary = answer.clone();
+        leave_out_addresses_never_opened(&mut summary, &[], &opened, &told);
+        assert_eq!(summary, answer);
+        // Not known: a step told one where its address was not known, one of another browser,
+        // or no Shared Browser step at all.
+        let mut nowhere = told_nothing.clone();
+        nowhere.keep_step(Some("timed-out"), Vec::new());
+        nowhere.keep_step(Some("covered"), Vec::new());
+        let mut other_browser = told_nothing.clone();
+        other_browser.stops_not_read();
+        for tried in [nowhere, other_browser, BrowserTried::from(opened.to_vec())] {
+            let mut summary = answer.clone();
+            leave_out_addresses_never_opened(&mut summary, &[], &opened, &tried);
+            assert_eq!(summary, answer, "{tried:?}");
+        }
+        // Another pass of the same turn that was told it keeps the line.
+        let merged = told_nothing.with(&told);
+        let mut summary = answer.clone();
+        leave_out_addresses_never_opened(&mut summary, &[], &opened, &merged);
+        assert_eq!(summary, answer);
+        // A page that stayed too busy to be read was told so in the browser's own words: its
+        // line stays, so the person hears why that page is missing.
+        let busy = json!({
+            "url": planner,
+            "message": "The page is still busy, so it could not be read yet. Take a snapshot in a moment.",
+        });
+        let mut told_busy = told_nothing.clone();
+        told_busy.keep_step(
+            crate::shared_browser_activity::step_stop(true, Some(&busy), None),
+            vec![planner.to_string()],
+        );
+        let mut summary = answer.clone();
+        leave_out_addresses_never_opened(&mut summary, &[], &opened, &told_busy);
+        assert!(summary.contains(&line(planner, "timed-out")), "{summary}");
+        assert!(!summary.contains(&line(hotels, "Covered")), "{summary}");
     }
 
     /// A finding that stops a page at an address none of the turn's steps tried is no finding:
