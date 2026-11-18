@@ -3772,13 +3772,13 @@ mod tests {
     /// keep their lines.
     #[test]
     fn a_stop_only_the_browser_can_say_stands_only_where_a_step_was_told_it() {
-        let planner = "https://www.rejseplan.dk/web/explore";
-        let hotels = "https://www.booking.com/index.html";
-        let listing = "https://www.visitcopenhagen.com/copenhagen/planning/the-national-museum";
+        let planner = "https://www.planner.example/web/explore";
+        let hotels = "https://www.hotels.example/index.html";
+        let listing = "https://www.visit.example/planning/the-museum";
         let line = |url: &str, stop: &str| format!("{{\"url\":\"{url}\",\"stopped\":\"{stop}\"}}");
         let answer = [
             "I couldn't get the planner to return a route.".to_string(),
-            "{\"url\":\"https://www.rejseplan.dk/web/explore\",\"title\":\"Rejseplan\",\"facts\":[\"The planner asks for a start and a destination.\"]}".to_string(),
+            "{\"url\":\"https://www.planner.example/web/explore\",\"title\":\"Journey planner\",\"facts\":[\"The planner asks for a start and a destination.\"]}".to_string(),
             line(planner, "timed-out"),
             line(hotels, "Covered"),
             line(planner, "captcha"),
@@ -3816,7 +3816,7 @@ mod tests {
         let mut told = told_nothing.clone();
         told.keep_step(
             Some("timed-out"),
-            vec!["https://rejseplan.dk/web/".to_string()],
+            vec!["https://planner.example/web/".to_string()],
         );
         told.keep_step(Some("covered"), vec![hotels.to_string()]);
         let mut summary = answer.clone();

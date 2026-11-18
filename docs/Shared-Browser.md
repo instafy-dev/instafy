@@ -1744,7 +1744,7 @@ too: a planner's route turn pressed Tab, was told the page read as before,
 wrote `timed-out` though no step had, and the reply said the planner gave no
 route; another wrote `covered` after a click the page took, and asked the
 person to dismiss a notice. Lines are compared by site, as the person reads
-them ("The page on rejseplan.dk didn't answer in time."). Every other stop, a
+them ("The page on planner.example didn't answer in time."). Every other stop, a
 line whose address is no full address, and every line of a turn whose stops
 are not known stay: no Shared Browser step answered, a step of the browser on
 the person's device did (it says its stops in words of its own), the browser
@@ -2254,7 +2254,7 @@ the field says it opens a list (a combobox, `aria-autocomplete`,
 changing. Its `done` names how many there are and the first four, by the
 names and indices of the reading it answers with: "Typed 7 characters into
 "From". A page's reading never shows typed text. 3 suggestions under "From":
-"Aliados" (index 3), "Aliados (Metro)" (index 4), "Avenida dos Aliados"
+"Central Station" (index 3), "Central Square" (index 4), "Old Central Park"
 (index 5). Click one. Nothing was sent yet." On a page that may show a
 secret it names none. A
 click on a checkbox, a radio button or a switch says whether it is checked now.

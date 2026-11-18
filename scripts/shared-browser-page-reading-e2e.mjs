@@ -485,7 +485,7 @@ const KEY_LISTS = `<h1>Journey planner</h1>
 <div id="to-stops"></div>
 <p><button>Plan journey</button></p></form>
 <script>
-const STOPS = ["Aliados", "Aliados (Metro)", "Avenida dos Aliados", "Trindade", "Trindade (Metro)", "São Bento"];
+const STOPS = ["Central Station", "Central Square", "Old Central Park", "Harbour", "Harbour (Metro)", "Old Town"];
 const matching = (text) => STOPS.filter((stop) => stop.toLowerCase().includes(text.toLowerCase().slice(0, 4)));
 const from = document.getElementById("from");
 const fromStops = document.getElementById("from-stops");
@@ -1367,26 +1367,26 @@ export async function runSharedBrowserPageReadingFixture() {
     reading = await read("/reading/key-lists");
     requests.length = 0;
     started = Date.now();
-    const typedFromStop = await ok("POST", "/v1/type", { index: control(reading, "From").index, snapshotId: reading.snapshotId, text: "Aliados" });
+    const typedFromStop = await ok("POST", "/v1/type", { index: control(reading, "From").index, snapshotId: reading.snapshotId, text: "Central" });
     measurements.typeListMs = Date.now() - started;
     const fromStops = typedFromStop.interactiveElements.filter((entry) => entry.role === "option");
-    assert.deepEqual(fromStops.map((entry) => entry.label), ["Aliados", "Aliados (Metro)", "Avenida dos Aliados"], "the list the field opens as keys are pressed never opened");
+    assert.deepEqual(fromStops.map((entry) => entry.label), ["Central Station", "Central Square", "Old Central Park"], "the list the field opens as keys are pressed never opened");
     assert.equal(
       typedFromStop.done,
       `Typed 7 characters into "From". A page's reading never shows typed text. 3 suggestions under "From": ${fromStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
     );
-    const typedToStop = await ok("POST", "/v1/type", { index: control(typedFromStop, "To").index, snapshotId: typedFromStop.snapshotId, text: "Trindade" });
+    const typedToStop = await ok("POST", "/v1/type", { index: control(typedFromStop, "To").index, snapshotId: typedFromStop.snapshotId, text: "Harbour" });
     const toStops = typedToStop.interactiveElements.filter((entry) => entry.role === "option" && entry.tag === "button");
-    assert.deepEqual(toStops.map((entry) => entry.label), ["Trindade", "Trindade (Metro)"]);
+    assert.deepEqual(toStops.map((entry) => entry.label), ["Harbour", "Harbour (Metro)"]);
     assert.equal(
       typedToStop.done,
-      `Typed 8 characters into "To". A page's reading never shows typed text. 2 suggestions under "To": ${toStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
+      `Typed 7 characters into "To". A page's reading never shows typed text. 2 suggestions under "To": ${toStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
       "a field that names no list did not name the options that came under it",
     );
     // A text that ends on a key of its own (a new line) is set, never typed:
     // its Enter would send the form.
-    const typedNewLine = await ok("POST", "/v1/type", { index: control(typedToStop, "To").index, snapshotId: typedToStop.snapshotId, text: "Trindade\n" });
-    assert.match(typedNewLine.done, /^Typed 9 characters into "To", and the field holds 8 characters now\./u, typedNewLine.done);
+    const typedNewLine = await ok("POST", "/v1/type", { index: control(typedToStop, "To").index, snapshotId: typedToStop.snapshotId, text: "Harbour\n" });
+    assert.match(typedNewLine.done, /^Typed 8 characters into "To", and the field holds 7 characters now\./u, typedNewLine.done);
     assert.equal(new URL(runPage.url()).pathname, "/reading/key-lists", "typing sent the planner's form");
     assert.deepEqual(requests, [], "typing sent something");
     // h. A click on a plain link the page does not take in time (one that
