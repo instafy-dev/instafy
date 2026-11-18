@@ -1160,6 +1160,7 @@ async fn managed_ai_refund_is_idempotent_across_sinks() -> anyhow::Result<()> {
             &fixture.org_id,
             None,
             &fixture.prompt_id,
+            &fixture.job_id,
             "runtime_not_ready",
         )
         .await

@@ -886,6 +886,7 @@ pub(crate) async fn give_back_reserve(
     let outcome = refund_in_savepoint(
         transaction,
         project_id,
+        job_id,
         run_id,
         &prompt_id,
         leased_runtime_id,
@@ -938,6 +939,7 @@ pub(crate) async fn give_back_reserve(
 async fn refund_in_savepoint(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
+    job_id: &Uuid,
     run_id: Option<Uuid>,
     prompt_id: &Uuid,
     leased_runtime_id: Option<Uuid>,
@@ -953,6 +955,7 @@ async fn refund_in_savepoint(
         &org_id,
         leased_runtime_id,
         prompt_id,
+        job_id,
         reason,
     )
     .await?
