@@ -30,7 +30,7 @@ function sharedRun(
 }
 
 function resolveOwner(
-  activeRuns: Array<Pick<RunRecord, "metadata" | "status">>,
+  activeRuns: Array<Pick<RunRecord, "metadata" | "status"> & Partial<Pick<RunRecord, "id">>>,
   target: { browserPageId?: string | null; browserRuntimeId?: string | null } = {},
 ) {
   return resolveSharedBrowserControlOwner({
@@ -119,6 +119,17 @@ describe("Shared Browser control ownership", () => {
         sharedRun("in_progress", { agent: { displayName: "Executing agent" } }),
       ]),
     ).toEqual({ kind: "agent", displayName: "Executing agent" });
+  });
+
+  // The Browser view tells the turn that paused on the person's fields, while
+  // it ends, from a newer turn of the chat (BrowserSessionModal).
+  it("names the run that holds the browser", () => {
+    expect(
+      resolveOwner([
+        { ...sharedRun("queued"), id: "run-queued" },
+        { ...sharedRun("in_progress"), id: "run-executing" },
+      ]),
+    ).toEqual({ kind: "agent", displayName: "Octo", runId: "run-executing" });
   });
 
   it("preserves hidden-tab input semantics for either owner", () => {
