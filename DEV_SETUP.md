@@ -14,7 +14,6 @@ Install the tooling below before you start:
 - **Node.js** 18 or newer (ships with a compatible `npm`)
 - **Supabase CLI** `>=1.165` (requires Docker when you run `pnpm supabase:up`, which wraps `supabase start`)
 - **Git** and a terminal with `bash`/`zsh`
-- *(Optional)* **Ollama** for local LLMs
 - **Rust toolchain** (stable) for the controller and runtime binaries. The desktop shell is Electron.
 
 > Tip: the project uses ES modules; ensure your Node install is recent enough to support them.
@@ -377,46 +376,7 @@ settings until it is stopped, so stop the space's machine (or start a new
 space) after switching. An explicit `RUNTIME_AGENT_IMAGE` or
 `HOSTED_BROWSER_HOST` is kept.
 
-## 7. Browser Editing with WebContainers (optional but recommended)
-
-1. Install the API dependency (already checked in, but rerun if you reset `node_modules`):
-   ```bash
-   pnpm add -D @webcontainer/api
-   ```
-2. Ensure cross-origin isolation so WebContainers can boot. In `vite.config.ts`:
-   ```ts
-   export default defineConfig({
-     server: {
-       headers: {
-         'Cross-Origin-Opener-Policy': 'same-origin',
-         'Cross-Origin-Embedder-Policy': 'require-corp'
-       }
-     }
-   });
-   ```
-   Mirror the same COOP/COEP headers on the production Studio origin.
-3. Enable the driver:
-   ```bash
-   VITE_USE_WEBCONTAINERS=1
-   ```
-
-The Studio now ships with a prebuilt React/Vite snapshot (deps + template). On first run we expand it inside WebContainers, cache the exported tree in `localStorage`, and reuse it on subsequent runs so installs are skipped. Each prompt overwrites `App.tsx`, runs `pnpm run generate` + `pnpm run build`, and streams logs into the chat. If the runtime can’t start, a toast appears and we fall back to the Supabase edge driver automatically.
-
-See `docs/Architecture.md` for WebContainer architecture details and follow-up tasks (snapshot persistence, richer logging).
-
-Secrets never live in the browser container. Use only public data (e.g. Supabase anon key).
-
-## 8. Module-driven Content
-
-Instafy keeps project content intentionally open-ended. Modules define their own schema via `packages/frontend/src/data/modules.ts`, then map settings into the generic `state.content` object using `contentPath`.
-
-- Add or edit module settings in that file; avoid hard-coding industry-specific fields in global types.
-- When reading from `state.content`, use optional chaining or sensible fallbacks (e.g. `content.heroImage ?? defaultImage`).
-- Preview components and tests should tolerate missing fields, since modules populate them lazily.
-
-This pattern lets new verticals ship as module packs without touching shared typings.
-
-## 9. AI Providers
+## 7. AI Providers
 
 Studio sends model work through the runtime controller and AI proxy. Managed-AI configuration is
 server-side (`MANAGED_AI_MODEL_ID` plus the proxy configuration); provider credentials must never
@@ -427,7 +387,7 @@ The old Ollama/OpenAI Supabase Edge Function generation lane has been removed; i
 template is not exported and those variables are not read by the controller-backed path.
 
 
-## 10. GitHub Version Control (optional)
+## 8. GitHub Version Control (optional)
 
 1. Create a GitHub App with repository permissions for the organisation where Instafy should provision code.
 2. Add the credentials to `supabase/.env.dev.local`:
@@ -443,12 +403,11 @@ template is not exported and those variables are not read by the controller-back
 
 
 
-## 11. Troubleshooting
+## 9. Troubleshooting
 
 | Issue | Fix |
 | ----- | ---- |
 | `supabase start is not running` | Run `pnpm supabase:up` (wraps `supabase start --debug`) or inspect `pnpm supabase:down && pnpm supabase:up` for fresh logs. |
-| `Ollama API error` | Ensure `ollama serve` is running and the model is pulled; verify `OLLAMA_API_URL`. |
 | `GitHub link failed` | Confirm the GitHub App credentials and that the app has access to the target organisation. |
 | `Credits panel disabled` | Ensure `VITE_CONTROLLER_URL` is set and the controller is running; sign in so the browser can fetch a Supabase session token for `/credits/status`. |
 | Dev server port conflict | Pass `--host`/`--port` to `vite` or set `PORT` env variable. |
@@ -456,7 +415,7 @@ template is not exported and those variables are not read by the controller-back
 
 ---
 
-## 12. Credits, Billing & Domains
+## 10. Credits, Billing & Domains
 
 Org credits live behind the runtime controller’s `/credits` API. The Studio UI reads that state directly from the controller, and `/billing/checkout` now supports multiple processors:
 
@@ -506,7 +465,7 @@ Domain purchase/availability helpers also moved out of Supabase Edge; keep regis
 
 ---
 
-## 12. Useful Scripts
+## 11. Useful Scripts
 
 | Command | Description |
 | ------- | ----------- |
@@ -518,30 +477,9 @@ Domain purchase/availability helpers also moved out of Supabase Edge; keep regis
 
 Happy building! If you add migrations or scripts, mirror their setup steps here so the rest of the team can iterate quickly.
 
-> **Migration note:** the release script relies on Supabase CLI migrations under `supabase/migrations/`. Convert any ad-hoc SQL in `supabase/sql/` into versioned migrations before shipping.
+> **Migration note:** the release script relies on Supabase CLI migrations under `supabase/migrations/`.
 
-## 13. Apply Credit Ledger Schema
-
-This repo ships with `supabase/migrations/20250919121107_credit-ledger.sql`. Apply it to your project with:
-
-```bash
-npx supabase db push
-```
-
-If you need to evolve the schema, generate a follow-up migration:
-
-```bash
-npx supabase migration new credit-ledger-update
-# edit the generated file with your changes, then push again
-npx supabase db push
-```
-
-Credits are served by the runtime controller's authenticated `/credits` API; there is no public
-`credits` Edge Function to deploy.
-
-> RLS policies for the credit tables are still pending — restrict access to project/org owners before going live.
-
-### Tests
+## 12. End-to-end Tests
 
 End-to-end UI checks use Playwright. After completing the steps above, run:
 
