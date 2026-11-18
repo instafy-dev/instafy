@@ -22243,10 +22243,10 @@ fn web_search_step_without_words(item_id: &str, status: &str) -> (String, JsonVa
         "eventType": event_type,
         "status": status,
     });
-    if status != WEB_SEARCH_SEARCHED_NOTHING {
-        if let Some(activity) = activity_labels::web_search_activity(1) {
-            metadata["activity"] = activity;
-        }
+    if status != WEB_SEARCH_SEARCHED_NOTHING
+        && let Some(activity) = activity_labels::web_search_activity(1)
+    {
+        metadata["activity"] = activity;
     }
     (content.to_string(), metadata)
 }
