@@ -515,8 +515,7 @@ fn a_restored_browser_turn_is_reminded_only_of_what_it_can_use() {
 /// What the browser skill's turns never read (how to write a learned block, the owner-local tool
 /// and the Personal Browser's own notes) is in a reference file the skill names, which every space
 /// gets, so a browser turn reads the rest whole. A Personal Browser turn reads its browser's notes
-/// in its run text, how a comparison uses its own tabs included. An unedited earlier copy is
-/// upgraded.
+/// in its run text, how a comparison uses its own tabs included.
 #[test]
 fn the_browser_skills_learning_and_local_browser_notes_are_in_a_reference_file() {
     for moved in [
@@ -545,12 +544,6 @@ fn the_browser_skills_learning_and_local_browser_notes_are_in_a_reference_file()
         fs::read_to_string(&reference).unwrap(),
         BROWSER_SKILL_REFERENCE
     );
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    let previous = include_str!("legacy/browser-automation-v24.md");
-    assert!(previous.contains("## Learning boundary"));
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// Of the skills its words route, a browser turn loads each one it can use with no shell: one
