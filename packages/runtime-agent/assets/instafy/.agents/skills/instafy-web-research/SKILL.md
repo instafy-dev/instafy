@@ -113,7 +113,7 @@ Search, in a site's own search box too, only with words from the person's reques
 ## Citing
 
 - From a page read: "checked 26 Oct on <host>", linked to it; from a search's text: "a web search on 26 Oct found: … (<source> ↗, <article date>)".
-- A price is the amount and currency, "seen 26 Oct", and a link to the shop's or operator's page. Never call it live or current.
+- A price read on a page is the amount and currency, "seen 26 Oct", and a link to the shop's or operator's page. Never call it live or current.
 - Link out instead of copying listings, reviews, photos or descriptions: a short fact in your own words plus the link.
 - Keep the attribution and licence a source states (OpenStreetMap: "© OpenStreetMap contributors", ODbL; Wikipedia and Wikivoyage: CC BY-SA).
 

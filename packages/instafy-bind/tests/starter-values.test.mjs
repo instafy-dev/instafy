@@ -448,6 +448,126 @@ test("ranked: a price only a web search gave is never named with the prices read
   assert.match(rowText(document, "option:a").replace(/ 2026\b/g, ""), /\$129 · seen 27 Oct on shop\.example ↗/);
 });
 
+// Values read on one page on one day share its line under the list whichever reader read them ("viewer": "server
+// fetch", "shared browser", or none): keyed on the reader's name, one reader of a different name broke the line into
+// a caption on every row. Only a value a web search gave keeps a caption of its own.
+test("compare and ranked: values read on one page share its line whatever read them; a web search's keeps its own", async () => {
+  const specs = (v, viewer) => ({ weight: { v, src: "Maker", url: "https://maker.example/specs", date: DAY, ...(viewer ? { viewer } : {}) } });
+  const data = {
+    title: "Four readers",
+    sort: [],
+    columns: [{ key: "weight", label: "Weight", type: "text" }],
+    items: [item("a", "Reader A", specs("174 g", "server fetch")), item("b", "Reader B", specs("180 g", "shared browser")),
+      item("c", "Reader C", specs("185 g")), item("d", "Reader D", specs("199 g", "provider search"))],
+  };
+  for (const width of [1280, 390]) {
+    const { document } = await draw("compare", data, { width });
+    const list = document.getElementById("list").textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, "");
+    assert.match(list, /Weight: checked 27 Oct on maker\.example ↗, unless a value says otherwise/, `${width}px: ${list}`);
+    for (const ref of ["option:a", "option:b", "option:c"]) assert.doesNotMatch(rowText(document, ref), /checked|from a web search/, `${width}px: ${ref}`);
+    assert.match(rowText(document, "option:d").replace(/ 2026\b/g, ""), /199 g · from a web search, 27 Oct · maker\.example ↗/, `${width}px`);
+  }
+  const price = (v, viewer) => ({ v, src: "Shop", url: "https://shop.example/prices", date: DAY, ...(viewer ? { viewer } : {}) });
+  const { document } = await draw("ranked", {
+    title: "Top three",
+    items: [
+      { ref: "option:a", rank: 1, name: "Option A", price: price("$129", "server fetch") },
+      { ref: "option:b", rank: 2, name: "Option B", price: price("$139", "shared browser") },
+      { ref: "option:c", rank: 3, name: "Option C", price: price("$149") },
+    ],
+  });
+  assert.match(document.getElementById("list").textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, ""), /Prices: Shop ↗ · seen 27 Oct/);
+  for (const ref of ["option:a", "option:b", "option:c"]) assert.doesNotMatch(rowText(document, ref), /seen|from a web search/, ref);
+});
+
+// A price only a web search gave is no price read this turn ("Search never proves live stock or prices"): its row
+// shows it with its label, and a stated limit lists the row apart ("Price unknown"), never within it, the line under
+// the title never names it the lowest, and a sort puts it after the prices read, as it does a price that may have
+// changed. A probe of a compare page (Nov 18): a search's €479 was listed as "€500 or less", and a search's €399 made
+// the line under the title read "Lowest price: Searched Console".
+test("compare and ranked: a price only a web search gave is never within a stated limit, nor named the lowest", async () => {
+  const at = (v, host, extra = {}) => ({ v, src: host, url: `https://${host}/console`, date: DAY, ...extra });
+  const searched = { viewer: "provider search" };
+  const consoles = () => ({
+    title: "Consoles",
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }],
+    columns: [{ key: "price", label: "Price", type: "price" }],
+    filter: { key: "price", max: 500, label: "€500 or less", rest: "over €500" },
+    items: [
+      item("read", "Read Console", { price: at("€449", "shop-one.example") }),
+      item("searched", "Searched Console", { price: at("€479", "shop-two.example", searched) }),
+      item("unknown", "Unknown Console", { price: { note: "no shop's page gave a price" } }),
+    ],
+  });
+  for (const width of [1280, 390]) {
+    const { document } = await draw("compare", consoles(), { width });
+    assert.deepEqual(rows(document), { within: ["option:read"], apart: ["option:searched", "option:unknown"], heading: "Price unknown" }, `${width}px`);
+    assert.match(rowText(document, "option:searched").replace(/ 2026\b/g, ""), /€479 · from a web search, 27 Oct · shop-two\.example ↗/, `${width}px`);
+    assert.match(document.getElementById("group-unknown").textContent, /Not counted as €500 or less/, `${width}px`);
+  }
+  // both priced, the search's the lowest: the line under the title names nobody; read on its page, it names it
+  const lede = async (searchedPrice) => {
+    const data = { ...consoles(), filter: null };
+    data.items = [data.items[0], item("searched", "Searched Console", { price: searchedPrice })];
+    return (await draw("compare", data)).document.getElementById("lede").textContent;
+  };
+  assert.equal(await lede(at("€399", "shop-two.example", searched)), "");
+  assert.equal(await lede(at("€399", "shop-two.example")), "Lowest price: Searched Console");
+  // five options sorted by price: the search's comes after the prices read
+  const five = {
+    ...consoles(),
+    filter: null,
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }, { key: "weight", label: "Weight, light first", dir: "asc" }],
+    columns: [{ key: "price", label: "Price", type: "price" }, { key: "weight", label: "Weight", type: "number" }],
+    items: [["a", "€469"], ["b", "€459"], ["c", "€399", searched], ["d", "€479"], ["e", "€449"]]
+      .map(([ref, v, extra]) => item(ref, `Console ${ref.toUpperCase()}`, { price: at(v, `shop-${ref}.example`, extra) })),
+  };
+  assert.deepEqual(rows((await draw("compare", five)).document).within, ["option:e", "option:b", "option:a", "option:d", "option:c"]);
+  // a ranked page's stated limit lists it apart too
+  const ranked = await draw("ranked", {
+    title: "Top two",
+    filter: { key: "price", max: 500, label: "€500 or less" },
+    items: [
+      { ref: "option:a", rank: 1, name: "Option A", price: at("€449", "shop-one.example") },
+      { ref: "option:b", rank: 2, name: "Option B", price: at("€399", "shop-two.example", searched) },
+    ],
+  });
+  assert.deepEqual(rows(ranked.document), { within: ["option:a"], apart: ["option:b"], heading: "Price unknown" });
+});
+
+// A news item a web search gave, with its article's own date ("asof"): the label keeps the day of the search, and the
+// article's date follows its page, as a reply gives them ("a web search on 27 Oct found: … (Example News ↗, 15 Oct)").
+// It read "from a web search, 15 Oct" for a search made on 27 Oct. A search's price at a store with no day still says
+// it is a web search's: it read only "€479 · at Shop One ↗", as a price read there.
+test("a web search's fact keeps the search's day in its label and its article's date beside its page", async () => {
+  const news = { v: "Chip shares fell", src: "Example News", url: "https://news.example/markets/chips", date: DAY, asof: "2026-10-15", viewer: "provider search" };
+  const unlinked = { ...news };
+  delete unlinked.url;
+  const undated = { v: "€479", src: "Shop One", url: "https://shop-one.example/console", viewer: "provider search" };
+  APP.dated = `site.start({ data: null, render: function () {
+    var news = ${JSON.stringify(news)};
+    document.getElementById("list").replaceChildren(
+      site.h("p", { id: "trust" }, site.trust(news)),
+      site.h("p", { id: "cite" }, "News: ", site.cite(news)),
+      site.h("p", { id: "seen" }, "News: ", site.seen(news)),
+      site.h("p", { id: "unlinked" }, site.trust(${JSON.stringify(unlinked)})),
+      site.h("p", { id: "at-store" }, site.trust(${JSON.stringify(undated)}, { price: true, store: { name: "Shop One" } })));
+  } });`;
+  try {
+    const { document } = await draw("dated", null);
+    const text = (id) => document.getElementById(id).textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, "");
+    assert.deepEqual(["trust", "cite", "seen", "unlinked", "at-store"].map(text), [
+      "Chip shares fell · from a web search, 27 Oct · news.example ↗, 15 Oct",
+      "News: from a web search, 27 Oct · news.example ↗, 15 Oct",
+      "News: from a web search, 27 Oct",
+      "Chip shares fell · Example News, 15 Oct · from a web search, 27 Oct",
+      "€479 · at Shop One ↗ · from a web search",
+    ]);
+  } finally {
+    delete APP.dated;
+  }
+});
+
 // A comparison of three laptops with 4 of 15 values found (each CPU, one battery). On a phone every row listed every
 // column with its label and "Unknown" ("Unknown · Two independent reviews not checked"): a stack of unknowns, while the
 // wide table held the same gaps tidily. A phone's row shows the values found, each with its source line, and the page
@@ -1001,6 +1121,7 @@ test("site.within: only a value the page shows is within a limit; everything unk
     ["n/a", fact({ v: "n/a" }), "unknown"],
     ["unknown", fact({ v: "Unknown" }), "unknown"],
     ["a price without its page", { v: "€399" }, "unknown"],
+    ["a price only a web search gave", fact({ v: "€549", viewer: "provider search" }), "unknown"],
     ["text without a number", fact({ v: "ask in store" }), "unknown"],
     ["a live offer", offer(579), "in"],
     ["a check that could not read it", claim("uncertain"), "unknown"],

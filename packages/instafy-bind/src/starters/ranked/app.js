@@ -5,8 +5,8 @@
  *   title, lede     the page title and its one-line answer (the verdict, and the biggest unknown if there is one)
  *   basis           how it is ranked, one line: "Ranked by safety reviews, then price."
  *   filter (only for a constraint the person stated): {key: "price", max: 300, label: "Under $300", unknown?:
- *            "Price unknown"}. Only a price the page shows counts: a row without one is never listed as under $300;
- *            it is listed apart, under "Price unknown".
+ *            "Price unknown"}. Only a price the page shows counts, and not one only a web search gave: a row
+ *            without one is never listed as under $300; it is listed apart, under "Price unknown".
  *   items: [{ref: "option:a", rank, name, why (one short line), badge?, specs: [fact] (at most 3), price?: fact,
  *            store?: {name, url, readable}, details?: [{label, fact}], sources?: [{name, url}]}]
  *   badge: only for a label the person must notice. "Our pick" only when it is your own pick and "why" says why;
@@ -120,7 +120,7 @@
     var facts = items.map(function (i) { return i.price; }).filter(Boolean);
     if (facts.length < 2) return null;
     var page = function (f) { var u = site.safeUrl(f.url); return u ? u.split("#")[0] : "src:" + f.src; };
-    var key = function (f) { return f && f.src && !f.est && site.valueText(f) ? [page(f), f.asof || f.date || "", f.list ? "list" : "", f.viewer || ""].join("|") : null; };
+    var key = function (f) { return f && f.src && !f.est && site.valueText(f) ? [page(f), f.asof || f.date || "", f.list ? "list" : "", site.fromSearch(f) ? "search" : ""].join("|") : null; };
     var k = key(facts[0]);
     return k && facts.every(function (f) { return key(f) === k; }) ? facts[0] : null;
   }

@@ -1353,7 +1353,7 @@ fn anything_not_read_on_a_page_says_not_checked_or_stays_out() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     // One wording, the replies guide's, which every turn reads (a browser turn its "Replies"
     // section): the browser skill said it a second way, and the research skill a third.
-    let line = "- A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.";
+    let line = "- A fact or tip you add to the reply or a page says \"not checked\" or which web search found it, or stays out, unless the person, a page you read this turn or Instafy's browser's findings gave it.";
     let agents = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/assets/instafy/AGENTS.md"
@@ -1542,15 +1542,16 @@ fn the_research_skill_searches_with_instafy_web_search() {
 }
 
 /// A search's own text is what the search provider wrote, not a page Octo read: a fact from it
-/// reads "a web search on <date> found: … (<source> ↗, <article date>)", and "checked" is only
-/// for a page that was read. A page keeps a search's fact only once its page is read, or with
-/// viewer `provider search` when the reader refused it; a reply gives every link it says it
-/// gives; and a price no item page gave is looked for as "Finding sources" says, the AI's own web
-/// search first. A local test, Nov 17: the skill said a search's text "counts as a read", so news
-/// and review answers stated it as read, a page said "Checked 17 Nov on <site>" for it, and a
-/// reply said links "are included here" that weren't. Old words make room for the new ones: the
-/// skills a lookup loads after this one keep theirs (the topic room's test). A building turn reads
-/// the skill whole, and an unedited earlier copy is upgraded.
+/// reads "a web search on <date> found: … (<source> ↗, <article date>)", a price too, and
+/// "checked" is only for a page that was read, "seen" for a price one showed. A page keeps a
+/// search's fact only once its page is read, or with viewer `provider search` when the reader
+/// refused it; a reply gives every link it says it gives; and a price no item page gave is looked
+/// for as "Finding sources" says, the AI's own web search first. A local test, Nov 17: the skill
+/// said a search's text "counts as a read", so news and review answers stated it as read, a page
+/// said "Checked 17 Nov on <site>" for it, and a reply said links "are included here" that
+/// weren't. Old words make room for the new ones: the skills a lookup loads after this one keep
+/// theirs (the topic room's test). A building turn reads the skill whole, and an unedited earlier
+/// copy is upgraded.
 #[test]
 fn a_searchs_text_is_labelled_as_one_and_checked_is_only_for_a_page_read() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1561,6 +1562,7 @@ fn a_searchs_text_is_labelled_as_one_and_checked_is_only_for_a_page_read() {
         "Show \"checked 26 Oct on <host>\" next to the fact",
         "each fact with its \"checked\" note",
         "`instafy web search \"<name> price\" --json`",
+        "A price is the amount and currency",
     ] {
         assert!(!research.contains(gone), "{gone}");
     }
@@ -1569,6 +1571,8 @@ fn a_searchs_text_is_labelled_as_one_and_checked_is_only_for_a_page_read() {
         "- Search never proves live stock or prices.",
         "- No price on an item's pages: search \"<name> price\" (Finding sources), or `--chain reference-search` for shops' official sites;",
         "- From a page read: \"checked 26 Oct on <host>\", linked to it; from a search's text: \"a web search on 26 Oct found: … (<source> ↗, <article date>)\".",
+        // "seen" is a price's word for one a page showed, as "checked" is a fact's
+        "- A price read on a page is the amount and currency, \"seen 26 Oct\", and a link to the shop's or operator's page.",
         "and a link only to a page you read, or one the reader refused (its fact keeps viewer `provider search`).",
         "Lead with the answer, each fact with its note and every link you say you give; then what was not read and why, and what is not checked.",
     ];
@@ -1600,6 +1604,25 @@ fn a_searchs_text_is_labelled_as_one_and_checked_is_only_for_a_page_read() {
     fs::write(&skill, previous).unwrap();
     learn::ensure_project_memory_scaffold(tmp.path());
     assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
+
+    // A page's fact a web search gave keeps that viewer, as the bound-sites cheat sheet says, so
+    // the starter draws it "from a web search", never "checked". The sheet from before is
+    // upgraded.
+    let sheet = include_str!(
+        "../../assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
+    );
+    assert!(
+        flat(sheet).contains(
+            "A fact only a web search gave, its page not read, keeps `\"viewer\": \"provider search\"`: it reads \"from a web search, 17 Oct · fleetfeet.com ↗\", and no limit or sort counts it."
+        ),
+        "{sheet}"
+    );
+    let previous_sheet = include_str!("legacy/bound-sites-cheatsheet-v7.md");
+    assert!(!previous_sheet.contains("provider search"));
+    let sheet_path = tmp.path().join(learn::BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
+    fs::write(&sheet_path, previous_sheet).unwrap();
+    learn::ensure_project_memory_scaffold(tmp.path());
+    assert_eq!(fs::read_to_string(&sheet_path).unwrap(), sheet);
 }
 
 /// Reference search: Wikipedia, Wikivoyage and Wikidata's official websites through `instafy web search --chain

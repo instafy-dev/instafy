@@ -14,16 +14,18 @@
  *   maker.com ↗" (a price: "seen 17 Oct on shop.com ↗"). Optional "asof": the source's own date, shown in place of
  *   "date" ("seen 5 Aug on …"); a price with an "asof" over 30 days old is muted and says "may have changed", like a
  *   live price past its time. "viewer": "provider search" marks a fact only a web search gave (what the search
- *   provider wrote, not a page that was read): it reads "from a web search, 17 Oct · maker.com ↗", never "checked"
- *   or "seen". A value that only says nothing is known ("—", "n/a", "?", "unknown") is no value.
+ *   provider wrote, not a page that was read): it reads "from a web search, 17 Oct · maker.com ↗" (the day of the
+ *   search; a source's own date follows its page: "maker.com ↗, 5 Oct"), never "checked" or "seen", and no filter or
+ *   sort counts it as read. A value that only says nothing is known ("—", "n/a", "?", "unknown") is no value.
  *   site.trust(fact | record, opts) draws the one trust line: "checked 17 Oct on maker.com ↗", "at Store ↗ · checked
  *   4 min ago", "Estimate", "Price not checked" (nobody checked it), "Not found · checked 16 Oct on maker.com ↗" (a
  *   fact with a source and no value: the source was read and the value not found on it); in a table of options a value nobody
  *   found reads opts.unknown, "Unknown · why" ("Price unknown"). A price fact with "list": true is that source's
  *   list price, never a store's price now: "$900 · list price on babygearlab.com ↗ · seen 5 Aug".
  * - Filters: site.within(value, filter) is "in", "out" or "unknown" for the page's one filter ({key, max, min}), and
- *   site.byFilter(rows, filter, valueOf) splits rows into {in, unknown, out}. Only a value the page shows counts: a
- *   row without one is never "under $140"; the starters list it apart ("Price unknown").
+ *   site.byFilter(rows, filter, valueOf) splits rows into {in, unknown, out}. Only a value the page shows counts, and
+ *   not one only a web search gave: a row without one is never "under $140"; the starters list it apart ("Price
+ *   unknown").
  * - Live checks: site.checkAll(rows) is the page's one primary button ("Check all prices", with two or more checkable
  *   rows). trust(value, {ref, intent, store, seed}) ends a row's caption in its one quiet action: "Check price" (only
  *   without "Check all prices"), "Try again" after an error, "Open store ↗" when the store can't be read. While a
@@ -276,10 +278,11 @@
   /** The number of a value the page shows (shown), else null: no filter or sort counts anything else. */
   function known(x) { return shown(x) ? num(x) : null; }
   /** Where a value stands against the page's one filter ({key, max?, min?}): "in", "out", or "unknown" when the page
-   * has no number for it. Unknown is never "in": a row without a price is not "under $140". */
+   * has no number for it, or only a web search's (no page was read for it). Unknown is never "in": a row without a
+   * price is not "under $140". */
   function within(x, filter) {
     if (!filter) return "in";
-    var n = known(x);
+    var n = fromSearch(x) ? null : known(x);
     if (n == null) return "unknown";
     var max = filter.max == null || filter.max === "" ? null : Number(filter.max);
     var min = filter.min == null || filter.min === "" ? null : Number(filter.min);
@@ -312,27 +315,34 @@
   }
   /** A fact only a web search gave ("viewer": "provider search"): what the search provider wrote, no page read. */
   function fromSearch(x) { return !!x && typeof x.viewer === "string" && x.viewer.trim().toLowerCase() === "provider search"; }
-  /** "seen 17 Oct": the source's own date when it gives one, else the day it was read; "from a web search, 17 Oct" for
-   * a fact a web search gave. */
+  /** A web search's label: "from a web search, 17 Oct", the day of the search ("date"); without a day, just that. */
+  function searchText(x) { return "from a web search" + (date(x.date) ? ", " + date(x.date) : ""); }
+  /** "seen 17 Oct": the source's own date when it gives one, else the day it was read; a fact a web search gave reads
+   * its label ("from a web search, 17 Oct"), with a day or without. */
   function seenText(x) {
+    if (fromSearch(x)) return searchText(x);
     var when = x && (x.asof || x.date);
-    return when && date(when) ? (fromSearch(x) ? "from a web search, " : "seen ") + date(when) : "";
+    return when && date(when) ? "seen " + date(when) : "";
   }
   /** Where and when a value was read, as one caption part: "checked 17 Oct on maker.com ↗" (the host links the page it
    * was read on). A price, or a date the source gives ("asof"), is "seen": "seen 5 Aug on reviews.example ↗", never
    * "checked", so it does not read as today's price. A fact a web search gave was read on no page: "from a web search,
-   * 17 Oct · maker.com ↗" (the page the search named), never "checked" or "seen". Without a page link it names the
-   * source: "Maker · checked 17 Oct". o.price: the value is a price. */
+   * 17 Oct · maker.com ↗" (the day of the search, and the page the search named, with the source's own date after it:
+   * "maker.com ↗, 5 Aug"), never "checked" or "seen". Without a page link it names the source: "Maker · checked 17
+   * Oct". o.price: the value is a price. */
   function citeParts(x, o) {
     o = o || {};
     if (!x) return [];
-    var when = x.asof || x.date;
-    var search = fromSearch(x);
-    var on = when && date(when) ? date(when) : "";
-    var day = search ? "from a web search" + (on ? ", " + on : "") : on ? (o.price || x.asof ? "seen " : "checked ") + on : "";
     var site = host(x.url);
-    // a web search's page is its own part, after the label: the caption's dot joins them (no line starts with one)
-    if (site && search) return [h("span", { "class": "age", text: day }), link(x.url, site)];
+    if (fromSearch(x)) {
+      // its page is its own part, after the label: the caption's dot joins them (no line starts with one)
+      var dated = date(x.asof) ? ", " + date(x.asof) : "";
+      var named = site ? h("span", null, link(x.url, site), dated) : x.src ? String(x.src) + dated : null;
+      var label = h("span", { "class": "age", text: searchText(x) });
+      return site ? [label, named] : named ? [named, label] : [label];
+    }
+    var when = x.asof || x.date;
+    var day = when && date(when) ? ((o.price || x.asof ? "seen " : "checked ") + date(when)) : "";
     if (site) return [h("span", { "class": "cite" }, day ? day + " on " : "", link(x.url, site))];
     var out = [];
     if (x.src) out.push(String(x.src));
@@ -1155,7 +1165,7 @@
   window.site = {
     version: "1.11.0",
     h: h, append: append, icon: icon, link: link, clip: clip, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
-    date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText,
+    date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText, fromSearch: fromSearch,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,
     live: live, trust: trust, rowAction: rowAction, checkButton: checkButton, checkAll: checkAll, canCheck: canCheck,
     anyPending: anyPending, priceNotice: priceNotice, storesBlocked: storesBlocked, blocked: blockedRecord, tidy: tidyCaptions, remember: remember, recall: recall,
