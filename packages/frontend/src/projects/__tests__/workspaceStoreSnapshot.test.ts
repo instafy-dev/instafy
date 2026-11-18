@@ -17,7 +17,6 @@ describe("workspace store snapshots", () => {
       metadata: { ...initialState.state.metadata, projectName: "Earlier space" },
       // Saved by earlier builds, like the fields below. Nothing reads them now.
       code: { ...initialState.state.code, provider: null },
-      billing: initialState.state.billing,
       org: { id: "org-1", name: "Earlier team" },
       content: { headline: "Hello" },
       deployment: { subdomain: "", hostingPlan: "instafy" },
