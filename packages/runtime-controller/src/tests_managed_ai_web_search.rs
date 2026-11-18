@@ -366,6 +366,29 @@ async fn settle(state: &crate::AppState, check: Check, ran: u32) -> anyhow::Resu
     Ok(send(state, SETTLE, check.body("ran", ran)).await?.0)
 }
 
+/// What the runtime that holds `job_id`'s lease tells the controller about its web searches.
+async fn report(
+    state: &crate::AppState,
+    job_id: uuid::Uuid,
+    agent_token: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<StatusCode> {
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/agent/jobs/{job_id}/web-searches"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {agent_token}"),
+        )
+        .body(axum::body::Body::from(body.to_string()))?;
+    Ok(crate::managed_web_search::router()
+        .with_state(state.clone())
+        .oneshot(request)
+        .await?
+        .status())
+}
+
 /// What the proxy sends the controller, and what it reads back.
 async fn send(
     state: &crate::AppState,
@@ -585,22 +608,16 @@ async fn an_ambient_check_searches_only_once_it_answers_and_deeper_research_runs
         assert_eq!(claim(&state, Check::of(job), 1).await?.1["granted"], 1);
 
         // Deeper research, from the runtime that holds the lease.
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri(format!("/agent/jobs/{}/deeper-research", fixture.job_id))
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .header(
-                axum::http::header::AUTHORIZATION,
-                format!("Bearer {agent_token}"),
+        assert_eq!(
+            report(
+                &state,
+                fixture.job_id,
+                &agent_token,
+                json!({"lease_attempt": 1, "deeper_research": true}),
             )
-            .body(axum::body::Body::from(
-                json!({"lease_attempt": 1}).to_string(),
-            ))?;
-        let response = crate::managed_web_search::router()
-            .with_state(state.clone())
-            .oneshot(request)
-            .await?;
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            .await?,
+            StatusCode::NO_CONTENT
+        );
         assert_eq!(
             claim(&state, Check::of(job), 4).await?,
             (StatusCode::OK, json!({"granted": 4, "limit": 8}))
@@ -637,9 +654,11 @@ async fn an_ambient_check_searches_only_once_it_answers_and_deeper_research_runs
 }
 
 /// A turn put back in the queue (its machine stopped, its lease lapsed, or a short rate limit)
-/// runs again as the job's next lease attempt, and no completion charged the attempt before it:
-/// when the new attempt first asks, the earlier attempt's searches go back to the message, so it
-/// may search again, within the message's limit. The earlier attempt can no longer search.
+/// runs again as the job's next lease attempt. On the runtime that ran the attempt before, it
+/// goes on with that attempt's searches, which still count. Another runtime holds none of them,
+/// and no completion charged them: it says the attempt starts over, the earlier attempt's
+/// searches go back to the message, and it may search again, within the message's limit. The
+/// earlier attempt can no longer search.
 #[tokio::test]
 async fn a_turn_put_back_in_the_queue_may_search_again_when_it_runs_again() -> anyhow::Result<()> {
     let Some(fixture) = seed_reserved_managed_ai_prompt("web-search-requeue").await? else {
@@ -647,7 +666,7 @@ async fn a_turn_put_back_in_the_queue_may_search_again_when_it_runs_again() -> a
         return Ok(());
     };
     let outcome = async {
-        lease_for_search(&fixture).await?;
+        let agent_token = lease_for_search(&fixture).await?;
         let mut state = fixture.state.clone();
         state.config.managed_ai_native_web_search = true;
         let job = (fixture.project_id, fixture.job_id, fixture.run_id);
@@ -672,6 +691,33 @@ async fn a_turn_put_back_in_the_queue_may_search_again_when_it_runs_again() -> a
                 json!({"granted": 0, "limit": 2, "refused": "ended"})
             ),
             "the earlier attempt"
+        );
+        // Until the new attempt says it starts over, the earlier attempt's searches count, as
+        // they do where the runtime that ran them goes on with them.
+        assert_eq!(
+            claim(&state, Check::of_attempt(job, 2), 1).await?.1["granted"],
+            0
+        );
+        // An attempt that no longer holds the lease cannot say so.
+        assert_eq!(
+            report(
+                &state,
+                fixture.job_id,
+                &agent_token,
+                json!({"lease_attempt": 1, "starts_over": true}),
+            )
+            .await?,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            report(
+                &state,
+                fixture.job_id,
+                &agent_token,
+                json!({"lease_attempt": 2, "starts_over": true}),
+            )
+            .await?,
+            StatusCode::NO_CONTENT
         );
         assert_eq!(
             claim(&state, Check::of_attempt(job, 2), 1).await?,

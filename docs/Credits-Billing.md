@@ -400,10 +400,7 @@ charges for it, passed through:
   turn that costs nothing (one Instafy started that ended without a reply and left nothing, a
   failed turn that left nothing) is not charged its searches either; a search step is a step that
   worked, so a turn that searched leaves something. A turn the person stopped sends no
-  completion, so its searches are not charged, and neither are those of a turn put back in the
-  queue (its machine stopped, its lease lapsed, or a short rate limit): its attempt sends no
-  completion, or one the requeue sets aside, and the attempt that runs again is charged for what
-  it searches itself. Only a job charged as Instafy AI
+  completion, so its searches are not charged. Only a job charged as Instafy AI
   (`managedAiUsed`) is charged its searches. A background check that may decline (an ambient
   evaluation, whose charge waits for it to speak: `managedAiBillingDeferred`) gets no search
   until it answers (below), and one that declines is charged nothing, its searches included. A
@@ -414,7 +411,7 @@ charges for it, passed through:
 **At most 2 searches a message.** A message runs at most 2 searches in all, or 8 when the person's
 own words in it ask to research in depth or to search further or more thoroughly (a comparison,
 reviews or a page to make do not by themselves): its routing step says so (`deeperResearch` in its
-answer), and its job tells the controller (`POST /agent/jobs/:job_id/deeper-research`). The
+answer), and its job tells the controller (`POST /agent/jobs/:job_id/web-searches`). The
 controller keeps the message's count, and the proxy asks it before each search
 (`POST /internal/managed-web-search/claim`, runtime-controller `managed_web_search.rs`):
 
@@ -438,19 +435,22 @@ controller keeps the message's count, and the proxy asks it before each search
 - a native helper, and a recovery retry of the turn, search from the turn's searches. A retry
   that starts afresh, on a new thread, reads what the earlier attempt's searches answered and the
   pages it read, and does not search: the message's searches are charged once;
-- a turn put back in the queue runs again as the job's next lease attempt. No completion charged
-  the attempt before it, so that attempt's searches go back to the message when the new attempt
-  first asks, and the new attempt may search again, on whichever machine runs it. It does not
-  read what the earlier attempt found, which only that attempt's machine had;
+- a turn put back in the queue (its machine stopped, its lease lapsed, or a short rate limit) runs
+  again as the job's next lease attempt. On the machine that ran the attempt before, it goes on
+  with that attempt's searches, as before. Any other machine, or that one after it started again,
+  holds none of them, and no completion charged them: the job tells the controller the attempt
+  starts over (`starts_over`, with the same report), those searches go back to the message, and
+  the attempt may search again, charged for what it searches. It does not read what the earlier
+  attempt found, which only that attempt's machine had;
 - a background check that may decline (an ambient evaluation) is not let search until it answers:
   the model reads that, to answer, it says in a short sentence what it will look up, unless it
   already has, and then searches like any turn. That sentence reaches the controller as the
   search goes out, so a search the check makes waits up to 3 seconds for it before it is refused.
 
 The runtime keeps to the limit as well, for the turns it runs itself: a hand-back goes on with
-the allowance of the turn whose card it carries on, and a recovery retry with its first try's,
-while the runtime that ran them is up; a later lease attempt starts over, as on another machine.
-Searches a call held and did not run go back to the message. The limits are `MANAGED_WEB_SEARCHES_PER_MESSAGE` and
+the allowance of the turn whose card it carries on, and a job's later attempt with its earlier
+attempt's, while the runtime that ran them is up. Searches a call held and did not run go back to
+the message. The limits are `MANAGED_WEB_SEARCHES_PER_MESSAGE` and
 `MANAGED_WEB_SEARCHES_FOR_DEEPER_RESEARCH` in `runtime-contracts` (`research.rs`).
 
 **Turning it on.** OpenAI bills the platform key for each search, and each costs the person

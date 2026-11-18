@@ -18,13 +18,13 @@
 //! - `POST /internal/managed-web-search/settle`: the proxy says how many of a check's searches
 //!   ran, and the rest go back to the message. A check whose answer the proxy never read (it
 //!   timed out) is settled with none, so it takes nothing even if it lands afterwards.
-//! - `POST /agent/jobs/:job_id/deeper-research`: the runtime that holds a job's lease says its
-//!   routing step read the person's own words as asking for deeper research.
-//!
-//! A job put back in the queue (its machine stopped, its lease lapsed, or a short rate limit)
-//! runs again as a new lease attempt. No completion charged the attempt before it, so its
-//! searches go back to the message when the new attempt first asks: that attempt starts over,
-//! searching as it needs to, and is charged for what it runs.
+//! - `POST /agent/jobs/:job_id/web-searches`: the runtime that holds a job's lease says its
+//!   routing step read the person's own words as asking for deeper research (`deeper_research`),
+//!   or that this lease attempt starts over (`starts_over`). A job put back in the queue (its
+//!   machine stopped, its lease lapsed, or a short rate limit) runs again as a new lease attempt.
+//!   A runtime that ran the attempt before goes on with that attempt's searches, and its
+//!   completion reports them. Any other runtime holds none of them, and no completion charged
+//!   them, so it says the attempt starts over, and they go back to the message.
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -56,7 +56,7 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/internal/managed-web-search/claim", post(claim))
         .route("/internal/managed-web-search/settle", post(settle))
-        .route("/agent/jobs/:job_id/deeper-research", post(deeper_research))
+        .route("/agent/jobs/:job_id/web-searches", post(web_searches))
 }
 
 /// The proxy's check before a managed job's searches: the job, as the proxy read it from the
@@ -129,9 +129,7 @@ fn limit(count: &WebSearches) -> u32 {
 }
 
 /// Takes up to `asked` of the message's searches for the check `claim` (its id, its job and
-/// lease attempt). The same check again takes nothing more. An earlier lease attempt of the same
-/// job gives its searches back first: it ended without a completion that charged them (a
-/// completion that charges ends the job, and a requeue charges nothing).
+/// lease attempt). The same check again takes nothing more.
 fn take(count: &mut WebSearches, claim: ClaimedSearches, asked: u32) -> Claimed {
     let limit = limit(count);
     if let Some(kept) = count.claims.iter().find(|kept| kept.id == claim.id) {
@@ -141,9 +139,6 @@ fn take(count: &mut WebSearches, claim: ClaimedSearches, asked: u32) -> Claimed 
             refused: (kept.searches < asked).then_some(Refusal::Used),
         };
     }
-    count
-        .claims
-        .retain(|kept| kept.job_id != claim.job_id || kept.lease_attempt >= claim.lease_attempt);
     let granted = asked.min(limit.saturating_sub(count.used()));
     if granted > 0 {
         keep(
@@ -178,6 +173,15 @@ fn settle_claim(count: &mut WebSearches, claim: ClaimedSearches, ran: u32) {
             },
         ),
     }
+}
+
+/// Gives back to the message the searches of `job_id`'s lease attempts before `lease_attempt`,
+/// which starts over on a runtime that holds none of them. No completion charged them: a
+/// completion that charges ends the job, and a requeue charges nothing.
+fn start_over(count: &mut WebSearches, job_id: Uuid, lease_attempt: i32) {
+    count
+        .claims
+        .retain(|kept| kept.job_id != job_id || kept.lease_attempt >= lease_attempt);
 }
 
 /// Keeps `claim`, dropping the oldest checks that hold no search past [`MAX_KEPT_CLAIMS`].
@@ -380,17 +384,25 @@ async fn settle(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// What a lease attempt of a job changes about its message's web searches, from the runtime
+/// that holds the lease.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DeeperResearch {
+struct WebSearchReport {
     lease_attempt: i32,
+    /// The routing step read the person's own words as asking for deeper research.
+    #[serde(default)]
+    deeper_research: bool,
+    /// The attempt holds none of an earlier attempt's searches.
+    #[serde(default)]
+    starts_over: bool,
 }
 
-async fn deeper_research(
+async fn web_searches(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(job_id): AxumPath<Uuid>,
-    Json(request): Json<DeeperResearch>,
+    Json(request): Json<WebSearchReport>,
 ) -> ApiResult<StatusCode> {
     let token = crate::agent::extract_agent_token(&headers)?;
     let claims =
@@ -424,7 +436,12 @@ async fn deeper_research(
     };
     let counted_with = counting_job(&tx, &claims.project_id, &job_id, &payload).await?;
     change_web_searches(&tx, claims.project_id, counted_with, |count| {
-        count.deeper_research = true;
+        if request.deeper_research {
+            count.deeper_research = true;
+        }
+        if request.starts_over {
+            start_over(count, job_id, request.lease_attempt);
+        }
     })
     .await?;
     tx.commit()
@@ -501,16 +518,23 @@ mod tests {
         assert_eq!(take(&mut deeper, check(worker, 1), 4).granted, 2);
     }
 
-    /// A job put back in the queue runs again as a new lease attempt, and no completion charged
-    /// the one before: when the new attempt first asks, the earlier attempt's searches go back,
-    /// so it may search again. Another job's searches, and the new attempt's own, still count.
+    /// A job put back in the queue runs again as a new lease attempt. On the runtime that ran
+    /// the attempt before, it goes on with that attempt's searches, which its completion
+    /// reports: they still count. On any other, it starts over: no completion charged the
+    /// earlier attempt's searches, so they go back, and it may search again. Another job's
+    /// searches, and the new attempt's own, still count.
     #[test]
-    fn a_later_lease_attempt_gets_back_what_its_earlier_attempt_took() {
+    fn a_later_lease_attempt_that_starts_over_gets_back_what_its_earlier_attempt_took() {
         let (lead, worker) = (Uuid::new_v4(), Uuid::new_v4());
         let mut message = WebSearches::default();
         assert_eq!(take(&mut message, check(lead, 1), 2).granted, 2);
         assert_eq!(take(&mut message, check(worker, 1), 1).granted, 0);
-        // The lead's machine stopped, and its turn runs again.
+        // It runs again where it ran before: the searches it ran there still count.
+        let mut ran_here = message.clone();
+        assert_eq!(take(&mut ran_here, check(lead, 2), 1).granted, 0);
+        assert_eq!(ran_here.used(), 2);
+        // It runs again elsewhere, and starts over.
+        start_over(&mut message, lead, 2);
         assert_eq!(
             take(&mut message, check(lead, 2), 1),
             Claimed {
@@ -525,11 +549,10 @@ mod tests {
             0,
             "the message's two"
         );
+        // Starting over again changes nothing of the attempt's own, or of another job's.
+        start_over(&mut message, lead, 2);
+        start_over(&mut message, worker, 1);
         assert_eq!(message.used(), 2);
-        // An earlier attempt's late check takes nothing back from the attempt after it.
-        let mut later = message.clone();
-        assert_eq!(take(&mut later, check(lead, 1), 1).granted, 0);
-        assert_eq!(later.used(), 2);
     }
 
     /// A check whose answer the proxy never read (it timed out, or the answer was lost) is

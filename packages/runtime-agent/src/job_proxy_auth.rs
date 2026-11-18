@@ -246,13 +246,24 @@ impl JobProxyAuth {
         Ok(())
     }
 
-    /// Tells the controller that this job's routing step read the person's own words as asking
-    /// for deeper research, for the message's count of web searches, which the proxy asks it
-    /// for before each one. Fenced to this job's lease attempt, as a renewal is.
-    pub(crate) async fn report_deeper_research(&self) -> anyhow::Result<()> {
+    /// Tells the controller, for the message's count of web searches, which the proxy asks it
+    /// for before each one, that this job's routing step read the person's own words as asking
+    /// for deeper research, or that this lease attempt starts over, holding none of an earlier
+    /// attempt's searches. Fenced to this job's lease attempt, as a renewal is.
+    pub(crate) async fn report_web_searches(
+        &self,
+        deeper_research: bool,
+        starts_over: bool,
+    ) -> anyhow::Result<()> {
         self.ensure_active()?;
         self.client
-            .report_deeper_research(&self.registration, self.job_id, self.scope.lease_attempt)
+            .report_web_searches(
+                &self.registration,
+                self.job_id,
+                self.scope.lease_attempt,
+                deeper_research,
+                starts_over,
+            )
             .await
     }
 

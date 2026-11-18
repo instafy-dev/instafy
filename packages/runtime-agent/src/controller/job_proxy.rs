@@ -81,15 +81,19 @@ impl ControllerClient {
             .map_err(|_| JobProxyTokenError::TimedOut)?
     }
 
-    /// Tells the controller that this job's routing step read the person's own words as asking
-    /// for deeper research, so the message's Instafy AI web searches, which the controller counts
-    /// and the proxy asks it for, go up to its larger limit. Fenced to the job's lease attempt
-    /// and authenticated with the machine bearer, as a renewal is.
-    pub async fn report_deeper_research(
+    /// Tells the controller what this lease attempt of a job changes about its message's
+    /// Instafy AI web searches, which the controller counts and the proxy asks it for: the
+    /// routing step read the person's own words as asking for deeper research, so they go up to
+    /// the larger limit; or the attempt starts over, holding none of an earlier attempt's
+    /// searches, which go back to the message. Fenced to the job's lease attempt and
+    /// authenticated with the machine bearer, as a renewal is.
+    pub async fn report_web_searches(
         &self,
         registration: &Registration,
         job_id: Uuid,
         lease_attempt: i32,
+        deeper_research: bool,
+        starts_over: bool,
     ) -> Result<()> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -97,11 +101,16 @@ impl ControllerClient {
             .build()?;
         let url = self
             .base_url
-            .join(&format!("/agent/jobs/{job_id}/deeper-research"))?;
+            .join(&format!("/agent/jobs/{job_id}/web-searches"))?;
+        let body = json!({
+            "lease_attempt": lease_attempt,
+            "deeper_research": deeper_research,
+            "starts_over": starts_over,
+        });
         let send = || {
             http.post(url.clone())
                 .bearer_auth(self.bearer_for_agent(registration))
-                .json(&json!({ "lease_attempt": lease_attempt }))
+                .json(&body)
                 .send()
         };
         let mut response = send().await?;
@@ -114,7 +123,7 @@ impl ControllerClient {
         }
         if !response.status().is_success() {
             anyhow::bail!(
-                "the controller refused the deeper research report (status={})",
+                "the controller refused the web search report (status={})",
                 response.status().as_u16()
             );
         }
@@ -200,11 +209,11 @@ pub(crate) mod tests {
         server.abort();
     }
 
-    /// The runtime tells the controller about a job's deeper research at the job's own path,
-    /// fenced to its lease attempt, with the machine bearer; a refusal is an error, so the
-    /// message keeps to the smaller limit.
+    /// The runtime tells the controller about a job's web searches (deeper research, or an
+    /// attempt that starts over) at the job's own path, fenced to its lease attempt, with the
+    /// machine bearer; a refusal is an error, so nothing changes.
     #[tokio::test]
-    async fn deeper_research_is_reported_for_the_jobs_lease_attempt() {
+    async fn web_searches_are_reported_for_the_jobs_lease_attempt() {
         use axum::{
             extract::{Path, State},
             http::HeaderMap,
@@ -215,7 +224,7 @@ pub(crate) mod tests {
         let seen: Seen = Arc::default();
         let app = axum::Router::new()
             .route(
-                "/agent/jobs/:id/deeper-research",
+                "/agent/jobs/:id/web-searches",
                 post(
                     |State(seen): State<Seen>,
                      Path(id): Path<String>,
@@ -243,21 +252,32 @@ pub(crate) mod tests {
         *client.current_agent_token.lock() = Some("test-current-agent".into());
         let job_id = Uuid::new_v4();
         client
-            .report_deeper_research(&registration, job_id, 2)
+            .report_web_searches(&registration, job_id, 2, true, false)
+            .await
+            .expect("reported");
+        client
+            .report_web_searches(&registration, job_id, 2, false, true)
             .await
             .expect("reported");
         assert_eq!(
             *seen.lock(),
-            [(
-                job_id.to_string(),
-                "Bearer test-current-agent".to_string(),
-                json!({"lease_attempt": 2})
-            )]
+            [
+                (
+                    job_id.to_string(),
+                    "Bearer test-current-agent".to_string(),
+                    json!({"lease_attempt": 2, "deeper_research": true, "starts_over": false})
+                ),
+                (
+                    job_id.to_string(),
+                    "Bearer test-current-agent".to_string(),
+                    json!({"lease_attempt": 2, "deeper_research": false, "starts_over": true})
+                )
+            ]
         );
         // A lease that has moved on is refused.
         assert!(
             client
-                .report_deeper_research(&registration, job_id, 3)
+                .report_web_searches(&registration, job_id, 3, false, true)
                 .await
                 .is_err()
         );

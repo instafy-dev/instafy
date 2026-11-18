@@ -3528,10 +3528,8 @@ fn attach_task_usage(result: Result<JobExecution>, task_usage: &TaskUsage) -> Re
 /// What an Instafy AI job's web searches cost (`managed_web_search`), on its completion whether
 /// it succeeded or failed: a turn that searched and then ended in an error or its time limit has
 /// no `turn.completed`, and its searches still ran and cost what they cost. The searches of every
-/// run of the job's lease attempt are in it, a recovery retry's too. A job that lost its lease
-/// sends no completion, so what that attempt searched is not charged: the job's next attempt
-/// starts over (`managed_web_search::allowance_for_job`), and the controller gives those searches
-/// back to the message when it first asks.
+/// run of the job are in it, a recovery retry's too. A job that lost its lease sends no
+/// completion: what it searched is kept for the job's next attempt on this runtime.
 fn attach_web_search_usage(result: Result<JobExecution>, job_id: Uuid) -> Result<JobExecution> {
     if result
         .as_ref()
@@ -5220,12 +5218,11 @@ fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text:
 /// None where the job's grant lets no managed run search: a person's own ChatGPT login searches
 /// on their own plan. It holds more searches when the turn's routing step read the person's own
 /// words as asking for deeper research (`deeper_research`). A hand-back goes on with the allowance
-/// of the turn whose card it carries on, and a recovery retry with its first try's, so the message
-/// keeps to one allowance here; a later lease attempt of the job starts over with its own. The
-/// controller counts the message's searches across all its jobs, and the proxy asks it before
-/// each one: a team's jobs skip the routing step, so each holds
-/// [`crate::managed_web_search::SEARCHES_PER_MESSAGE`] here, and the controller keeps the team to
-/// the message's.
+/// of the turn whose card it carries on, and a job's later attempt on this runtime with its
+/// earlier attempt's, so the message keeps to one allowance here. The controller counts the
+/// message's searches across all its jobs, and the proxy asks it before each one: a team's jobs
+/// skip the routing step, so each holds [`crate::managed_web_search::SEARCHES_PER_MESSAGE`] here,
+/// and the controller keeps the team to the message's.
 fn managed_web_search_allowance(
     job: &LeaseJob,
     deeper_research: bool,
@@ -5238,30 +5235,68 @@ fn managed_web_search_allowance(
     };
     Some(crate::managed_web_search::allowance_for_job(
         job.id,
-        job.lease_attempts,
         browser_hand_back::card_job_of(job),
         limit,
     ))
 }
 
 /// Tells the controller, which counts an Instafy AI message's web searches across its jobs and
-/// which the proxy asks before each one, that the message's routing step read the person's own
-/// words as asking for deeper research, so the message may run
-/// [`crate::managed_web_search::SEARCHES_FOR_DEEPER_RESEARCH`]. A job on a person's own login, or
-/// whose grant lets no managed run search, says nothing. If the controller cannot be told, the
-/// message keeps to the smaller limit.
-async fn report_deeper_research(job: &LeaseJob) {
+/// which the proxy asks before each one, what this lease attempt of the job changes about them,
+/// before the attempt's first search ([`WebSearchReport`]). A job on a person's own login, or
+/// whose grant lets no managed run search, says nothing, and neither does an attempt with
+/// nothing to say. If the controller cannot be told, the message keeps to the smaller limit, and
+/// an earlier attempt's searches still count.
+async fn report_web_searches(job: &LeaseJob, deeper_research: bool) {
     let Some(auth) =
         crate::job_proxy_auth::current().filter(|auth| auth.allows_managed_web_search())
     else {
         return;
     };
-    if let Err(error) = auth.report_deeper_research().await {
+    let report = WebSearchReport::of(job, deeper_research);
+    if !report.says_something() {
+        return;
+    }
+    if let Err(error) = auth
+        .report_web_searches(report.deeper_research, report.starts_over)
+        .await
+    {
         warn!(
             job_id = %job.id,
+            deeper_research = report.deeper_research,
+            starts_over = report.starts_over,
             %error,
-            "could not tell the controller the message asks for deeper research; its searches keep to the smaller limit"
+            "could not tell the controller about the message's web searches; its searches keep to the smaller limit and an earlier attempt's still count"
         );
+    }
+}
+
+/// What a lease attempt of an Instafy AI job tells the controller about its message's web
+/// searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WebSearchReport {
+    /// The routing step read the person's own words as asking for deeper research, so the
+    /// message may run [`crate::managed_web_search::SEARCHES_FOR_DEEPER_RESEARCH`].
+    deeper_research: bool,
+    /// A later attempt of the job (it went back to the queue: its machine stopped, its lease
+    /// lapsed, or a short rate limit) that this runtime holds no allowance for: another runtime,
+    /// or this one before it started again, ran the attempt before it, and no completion charged
+    /// that attempt's searches. The controller gives them back to the message, so this attempt
+    /// may search again. An attempt this runtime ran before goes on with its allowance, and its
+    /// completion reports what that attempt searched.
+    starts_over: bool,
+}
+
+impl WebSearchReport {
+    fn of(job: &LeaseJob, deeper_research: bool) -> Self {
+        Self {
+            deeper_research,
+            starts_over: job.lease_attempts > 1
+                && !crate::managed_web_search::remembers_job(job.id),
+        }
+    }
+
+    fn says_something(&self) -> bool {
+        self.deeper_research || self.starts_over
     }
 }
 
@@ -8476,12 +8511,13 @@ impl JobProcessor {
         } else {
             None
         };
-        if routing_preflight
-            .as_ref()
-            .is_some_and(|preflight| preflight.deeper_research)
-        {
-            report_deeper_research(job).await;
-        }
+        report_web_searches(
+            job,
+            routing_preflight
+                .as_ref()
+                .is_some_and(|preflight| preflight.deeper_research),
+        )
+        .await;
         // A message the routing step sent straight to Instafy's browser ends here with its card.
         // A browser route that was not offered, or does not apply, is read as `direct`.
         let routing_preflight = match routing_preflight {
@@ -24611,8 +24647,8 @@ mod tests {
     /// An Instafy AI job's completion says what its web searches cost, whether the job succeeded
     /// or failed: a turn that searched and then ended in an error or its time limit has no
     /// `turn.completed`, and a recovery retry's searches are its job's too. Each search is
-    /// reported once. A job that lost its lease sends no completion, and its next attempt starts
-    /// over, reporting only what it searched itself.
+    /// reported once. A job that lost its lease sends no completion, so what it searched waits
+    /// for its next attempt.
     #[test]
     fn a_jobs_completion_says_what_its_web_searches_cost_whether_it_succeeded_or_failed() {
         use crate::managed_web_search::{
@@ -24634,7 +24670,7 @@ mod tests {
 
         // A turn that searched once, and its recovery retry that searched once more.
         let succeeded = Uuid::new_v4();
-        let allowance = allowance_for_job(succeeded, 1, None, SEARCHES_PER_MESSAGE);
+        let allowance = allowance_for_job(succeeded, None, SEARCHES_PER_MESSAGE);
         record_searches_for_test(&allowance, 1, 8_412, 391);
         record_searches_for_test(&allowance, 1, 8_412, 391);
         // Beside the receipt of the job's model calls, as every completion carries it.
@@ -24660,7 +24696,7 @@ mod tests {
         // A turn that searched twice and then lost its stream.
         let failed = Uuid::new_v4();
         record_searches_for_test(
-            &allowance_for_job(failed, 1, None, SEARCHES_PER_MESSAGE),
+            &allowance_for_job(failed, None, SEARCHES_PER_MESSAGE),
             2,
             16_824,
             782,
@@ -24680,11 +24716,10 @@ mod tests {
             Some("stream disconnected before completion")
         );
 
-        // A job that lost its lease sends nothing. Its next attempt starts over: its completion
-        // carries only what that attempt searched.
+        // A job that lost its lease: nothing now, all of it with its next attempt's completion.
         let lost = Uuid::new_v4();
         record_searches_for_test(
-            &allowance_for_job(lost, 1, None, SEARCHES_PER_MESSAGE),
+            &allowance_for_job(lost, None, SEARCHES_PER_MESSAGE),
             2,
             16_824,
             782,
@@ -24696,22 +24731,55 @@ mod tests {
         )
         .unwrap_err();
         assert!(extract_job_failure_artifacts(&error).is_none());
-        let next_attempt = allowance_for_job(lost, 2, None, SEARCHES_PER_MESSAGE);
-        let next_attempt_ran =
+        let next_attempt =
             attach_job_receipts(Ok(execution()), &TaskUsage::default(), lost).unwrap();
-        assert_eq!(next_attempt_ran.artifacts.len(), 1, "nothing searched yet");
-        record_searches_for_test(&next_attempt, 2, 16_824, 782);
-        let next_attempt_ran =
-            attach_job_receipts(Ok(execution()), &TaskUsage::default(), lost).unwrap();
-        assert_eq!(next_attempt_ran.artifacts.last(), Some(&two_searches));
+        assert_eq!(next_attempt.artifacts.last(), Some(&two_searches));
 
         // A job with no allowance (a person's own login), or that searched nothing, says nothing.
         let unsearched = Uuid::new_v4();
-        allowance_for_job(unsearched, 1, None, SEARCHES_PER_MESSAGE);
+        allowance_for_job(unsearched, None, SEARCHES_PER_MESSAGE);
         for job in [unsearched, Uuid::new_v4()] {
             let result = attach_job_receipts(Ok(execution()), &TaskUsage::default(), job).unwrap();
             assert_eq!(result.artifacts.len(), 1);
         }
+    }
+
+    /// A job's later lease attempt that this runtime holds no allowance for (another runtime ran
+    /// the attempt before it, or this one did before it started again) tells the controller it
+    /// starts over, so that attempt's searches, which no completion charged, go back to the
+    /// message. One that ran here before goes on with its allowance and says nothing of it, and
+    /// a first attempt says only whether the person asked for deeper research.
+    #[test]
+    fn a_later_attempt_that_ran_elsewhere_tells_the_controller_it_starts_over() {
+        use crate::managed_web_search::{SEARCHES_PER_MESSAGE, allowance_for_job};
+        let attempt = |lease_attempts: i32| {
+            let mut job = test_lease_job(Some("feature"), json!({}));
+            job.lease_attempts = lease_attempts;
+            job
+        };
+        let first = attempt(1);
+        assert_eq!(
+            WebSearchReport::of(&first, false),
+            WebSearchReport {
+                deeper_research: false,
+                starts_over: false
+            }
+        );
+        assert!(!WebSearchReport::of(&first, false).says_something());
+        assert!(WebSearchReport::of(&first, true).says_something());
+
+        let ran_elsewhere = attempt(2);
+        assert_eq!(
+            WebSearchReport::of(&ran_elsewhere, false),
+            WebSearchReport {
+                deeper_research: false,
+                starts_over: true
+            }
+        );
+
+        let ran_here = attempt(2);
+        allowance_for_job(ran_here.id, None, SEARCHES_PER_MESSAGE);
+        assert!(!WebSearchReport::of(&ran_here, false).says_something());
     }
 
     /// Only a managed job (Instafy AI: a run and no credential of its own, with the grant's
