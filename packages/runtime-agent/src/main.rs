@@ -11,7 +11,10 @@ use codex_arg0::arg0_dispatch;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use runtime_agent::{
-    agent::{AgentExit, RuntimeAgent, SPACE_DELETED_EXIT_CODE, exits_when_space_deleted},
+    agent::{
+        AgentExit, MACHINE_LIFETIME_ENDED_EXIT_CODE, RuntimeAgent, SPACE_DELETED_EXIT_CODE,
+        exits_when_machine_lifetime_ends, exits_when_space_deleted,
+    },
     code_mode_host, config,
     config::Config,
     local_browser, loopback_proxy, personal_browser, process_hardening, provider_mcp,
@@ -140,6 +143,10 @@ fn main() -> anyhow::Result<()> {
     if exit == AgentExit::SpaceDeleted {
         drop(pack_bins);
         std::process::exit(SPACE_DELETED_EXIT_CODE);
+    }
+    if exit == AgentExit::MachineLifetimeEnded {
+        drop(pack_bins);
+        std::process::exit(MACHINE_LIFETIME_ENDED_EXIT_CODE);
     }
     Ok(())
 }
@@ -310,6 +317,7 @@ async fn run_runtime_agent() -> Result<AgentExit> {
     runtime_agent::skill_packs::report_startup();
 
     let exit_when_space_deleted = exits_when_space_deleted(&config);
+    let exit_when_machine_lifetime_ends = exits_when_machine_lifetime_ends(&config);
     let agent = RuntimeAgent::new(config);
     let shutdown = agent.shutdown_handle();
     let mut agent_task = tokio::spawn(agent.run());
@@ -325,6 +333,17 @@ async fn run_runtime_agent() -> Result<AgentExit> {
                     return Ok(AgentExit::SpaceDeleted);
                 }
                 info!("this runtime's space was deleted; waiting for its provider to release it");
+            }
+            if matches!(exit, Ok(AgentExit::MachineLifetimeEnded)) {
+                if exit_when_machine_lifetime_ends {
+                    info!(
+                        "runtime-agent exiting: this machine's credentials reached the end of their lifetime, so a new runtime token must be minted"
+                    );
+                    return Ok(AgentExit::MachineLifetimeEnded);
+                }
+                info!(
+                    "this machine's credentials reached the end of their lifetime; waiting for its provider to release it"
+                );
             }
             // An agent that stopped on its own keeps the process up until it
             // is signalled, as it always has.

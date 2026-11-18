@@ -1,18 +1,20 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+use chrono::{Duration as ChronoDuration, Utc};
 use runtime_contracts::AccessTokenClaims;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::auth::{authenticate_request, require_user_session, RequestContext};
+use crate::auth::{authenticate_request_with_expiry, require_user_session, RequestContext};
 use crate::config::ClaudeCodeLaneUsers;
 #[cfg(test)]
 use crate::projects::ensure_scoped_claims_allow_requested_scopes;
 use crate::tokens::{
-    mint_scoped_token_with_runtime_generation, MintedAccessToken, ScopedTokenRequest,
+    mint_runtime_machine_token, mint_scoped_token_with_runtime_generation, MintedAccessToken,
+    ScopedTokenRequest,
 };
 use crate::{
     bad_request, ensure_project_write_access, forbidden, internal_error, load_project_record,
@@ -217,10 +219,15 @@ fn normalize_runtime_token_scopes(
     Ok(scopes)
 }
 
-/// A runtime token's TTL: the requested one within the hard bounds, or the
-/// default. No parent token's lifetime limits it, because a scoped access
-/// token never mints one (`mint_runtime_access_token`).
-fn resolve_runtime_token_ttl(requested: Option<i64>) -> Result<i64, (StatusCode, Json<ApiError>)> {
+/// The lifetime of a minted runtime token: `requested` within the hard
+/// bounds, or an hour, and never past `session_limit`, the seconds left on the
+/// session that mints it. A runtime token must never outlive the credential
+/// that authorized it. A session with less than a minute left is refused as
+/// expired, which the CLI answers by refreshing it and minting again.
+fn resolve_runtime_token_ttl(
+    requested: Option<i64>,
+    session_limit: Option<i64>,
+) -> Result<i64, (StatusCode, Json<ApiError>)> {
     if let Some(value) = requested {
         if !(MIN_RUNTIME_TOKEN_TTL_SECONDS..=MAX_RUNTIME_TOKEN_TTL_SECONDS).contains(&value) {
             return Err(bad_request(format!(
@@ -228,7 +235,21 @@ fn resolve_runtime_token_ttl(requested: Option<i64>) -> Result<i64, (StatusCode,
             )));
         }
     }
-    Ok(requested.unwrap_or(DEFAULT_RUNTIME_TOKEN_TTL_SECONDS))
+    let limit = session_limit
+        .unwrap_or(MAX_RUNTIME_TOKEN_TTL_SECONDS)
+        .min(MAX_RUNTIME_TOKEN_TTL_SECONDS);
+    if limit < MIN_RUNTIME_TOKEN_TTL_SECONDS {
+        return Err(unauthorized(
+            "The session has nearly expired; refresh it to mint a runtime token",
+        ));
+    }
+    let ttl = requested.unwrap_or(DEFAULT_RUNTIME_TOKEN_TTL_SECONDS.min(limit));
+    if ttl > limit {
+        return Err(forbidden(
+            "Runtime token cannot outlive the session that mints it",
+        ));
+    }
+    Ok(ttl)
 }
 
 pub(crate) fn runtime_generation_from_capabilities(
@@ -397,6 +418,10 @@ pub(crate) struct RuntimeTokenResponse {
     pub(crate) runtime_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) git_remote_url: Option<String>,
+    /// When a person's machine stops renewing its credentials and must be
+    /// minted again: on a machine mint for a person only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) machine_expires_at: Option<String>,
 }
 
 #[instrument(skip_all)]
@@ -406,7 +431,8 @@ pub(super) async fn mint_runtime_access_token(
     headers: HeaderMap,
     Json(body): Json<RuntimeTokenRequest>,
 ) -> Result<Json<RuntimeTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers).await?;
+    let (context, credential_expires_at) =
+        authenticate_request_with_expiry(&state.config, &headers).await?;
     // Shipped production behavior (shared-browser collaboration): a scoped
     // access token may never mint a runtime access token. Runtime tokens carry
     // the machine-identity, lease and self-hosted generation bounds that a
@@ -482,8 +508,25 @@ pub(super) async fn mint_runtime_access_token(
         .as_ref()
         .map(|id| id.to_string())
         .unwrap_or_else(|| project_id.to_string());
-    let ttl_seconds = resolve_runtime_token_ttl(body.ttl_seconds)?;
+    // A person's mint never outlives the session that made it. Service
+    // automation's secrets do not expire.
+    let session_ttl_limit = credential_expires_at
+        .filter(|_| !context.is_service_role)
+        .map(|expires_at| expires_at.saturating_sub(Utc::now().timestamp()));
+    let ttl_seconds = resolve_runtime_token_ttl(body.ttl_seconds, session_ttl_limit)?;
     let successor_generation = (lease_id.is_none() && mints_runtime_machine).then(Uuid::new_v4);
+    // The person an unleased machine mint admits a machine for: its subject,
+    // unless that is the controller's own service identity. Such a machine
+    // renews its credentials only until its lifetime ends
+    // (`super::register`), and a new one waits as a pending mint until its
+    // first registration (`super::revocation`).
+    let machine_person = unleased_runtime_machine_mint
+        .then(|| Uuid::parse_str(subject.trim()).ok())
+        .flatten()
+        .and_then(|owner| super::revocation::self_hosted_person_owner(&state, Some(owner)));
+    let machine_expires_at = machine_person.map(|_| {
+        Utc::now() + ChronoDuration::seconds(state.config.self_hosted_machine_lifetime_seconds)
+    });
 
     let mut connection = state
         .pool
@@ -494,16 +537,15 @@ pub(super) async fn mint_runtime_access_token(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start project lookup: {error}")))?;
-    // A person's machine mint admits a machine for them: serialize it with a
+    // A machine mint admits a machine for its person: serialize it with a
     // membership change's fence for that person (see `super::revocation`).
-    if human_runtime_machine_mint {
-        if let Some(person) = context.user_id {
-            super::revocation::share_runtime_owner_lock(&transaction, person).await?;
-        }
+    if let Some(person) = machine_person {
+        super::revocation::share_runtime_owner_lock(&transaction, person).await?;
     }
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, None).await?;
     let mut successor_capabilities = None;
+    let mut runtime_row_exists = false;
     if let Some(runtime_id) = runtime_id {
         let existing = transaction
             .query_opt(
@@ -520,6 +562,7 @@ pub(super) async fn mint_runtime_access_token(
                 ))
             })?;
         if let Some(existing) = existing {
+            runtime_row_exists = true;
             let provider: String = existing.get("provider");
             let active_lease_id: Option<uuid::Uuid> = existing.get("active_lease_id");
             let capabilities: JsonValue = existing.get("capabilities");
@@ -571,23 +614,47 @@ pub(super) async fn mint_runtime_access_token(
         }
     }
 
-    let minted = mint_scoped_token_with_runtime_generation(
-        &state.config,
-        ScopedTokenRequest {
-            audience,
-            subject,
-            project_id: project_id.to_string(),
-            origin_id: None,
-            runtime_id: runtime_id.map(|id| id.to_string()),
-            protocol: None,
-            scopes: scopes.clone(),
-            lease_id: lease_id.map(|id| id.to_string()),
-            run_id: None,
-            prefer_runtime: None,
-            ttl_seconds: Some(ttl_seconds),
-        },
-        successor_generation,
-    )?;
+    let request = ScopedTokenRequest {
+        audience,
+        subject,
+        project_id: project_id.to_string(),
+        origin_id: None,
+        runtime_id: runtime_id.map(|id| id.to_string()),
+        protocol: None,
+        scopes: scopes.clone(),
+        lease_id: lease_id.map(|id| id.to_string()),
+        run_id: None,
+        prefer_runtime: None,
+        ttl_seconds: Some(ttl_seconds),
+    };
+    let minted = match machine_expires_at {
+        Some(machine_expires_at) => mint_runtime_machine_token(
+            &state.config,
+            request,
+            successor_generation,
+            machine_expires_at,
+        )?,
+        None => {
+            mint_scoped_token_with_runtime_generation(&state.config, request, successor_generation)?
+        }
+    };
+    // A new machine of a person has no runtime row to rotate until it
+    // registers: record it, so a membership change can still end it.
+    if let (Some(person), Some(runtime_id), Some(generation)) =
+        (machine_person, runtime_id, successor_generation)
+    {
+        if !runtime_row_exists {
+            super::revocation::record_pending_machine_mint(
+                &transaction,
+                runtime_id,
+                project_id,
+                person,
+                generation,
+                minted.expires_at,
+            )
+            .await?;
+        }
+    }
 
     if let (Some(mut capabilities), Some(generation), Some(runtime_id)) =
         (successor_capabilities, successor_generation, runtime_id)
@@ -637,6 +704,7 @@ pub(super) async fn mint_runtime_access_token(
         expires_in: ttl,
         runtime_id,
         git_remote_url,
+        machine_expires_at: machine_expires_at.map(|expires_at| expires_at.to_rfc3339()),
     }))
 }
 
@@ -910,13 +978,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_token_ttl_is_strictly_bounded() {
-        assert!(resolve_runtime_token_ttl(Some(59)).is_err());
-        assert!(resolve_runtime_token_ttl(Some(3_601)).is_err());
-        assert_eq!(resolve_runtime_token_ttl(Some(60)).unwrap(), 60);
-        assert_eq!(resolve_runtime_token_ttl(Some(600)).unwrap(), 600);
-        assert_eq!(resolve_runtime_token_ttl(Some(3_600)).unwrap(), 3_600);
-        assert_eq!(resolve_runtime_token_ttl(None).unwrap(), 3_600);
+    fn runtime_token_ttl_is_strictly_bounded_and_cannot_outlive_its_session() {
+        assert!(resolve_runtime_token_ttl(Some(59), None).is_err());
+        assert!(resolve_runtime_token_ttl(Some(3_601), None).is_err());
+        assert!(resolve_runtime_token_ttl(Some(301), Some(300)).is_err());
+        assert_eq!(resolve_runtime_token_ttl(None, Some(300)).unwrap(), 300);
+        assert_eq!(resolve_runtime_token_ttl(Some(60), None).unwrap(), 60);
+        assert_eq!(resolve_runtime_token_ttl(Some(600), None).unwrap(), 600);
+        assert_eq!(resolve_runtime_token_ttl(Some(3_600), None).unwrap(), 3_600);
+        assert_eq!(resolve_runtime_token_ttl(None, None).unwrap(), 3_600);
     }
 
     #[test]

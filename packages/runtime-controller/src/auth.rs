@@ -52,8 +52,7 @@ struct SupabaseClaims {
     user_id: Option<String>,
     role: Option<String>,
     aud: Option<String>,
-    #[serde(rename = "exp")]
-    _exp: Option<i64>,
+    exp: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -155,16 +154,30 @@ pub(crate) async fn authenticate_request(
 ) -> Result<RequestContext, (StatusCode, Json<ApiError>)> {
     authenticate_request_with_credential(config, headers)
         .await
-        .map(|(context, _)| context)
+        .map(|(context, _, _)| context)
 }
 
-/// Authenticate a request and say which credential did it. Each return tags
-/// the credential beside the context it builds, from the same parse of the
-/// header, so the two cannot disagree.
+/// Authenticate a request, and say when the credential that did it expires
+/// (its signed `exp`, in seconds since the epoch). `None` for no credential
+/// and for the controller's own secrets, which do not expire. Both come from
+/// the same parse of the header, so they cannot disagree.
+pub(crate) async fn authenticate_request_with_expiry(
+    config: &AppConfig,
+    headers: &HeaderMap,
+) -> Result<(RequestContext, Option<i64>), (StatusCode, Json<ApiError>)> {
+    authenticate_request_with_credential(config, headers)
+        .await
+        .map(|(context, _, expires_at)| (context, expires_at))
+}
+
+/// Authenticate a request and say which credential did it and when that
+/// credential expires ([`authenticate_request_with_expiry`]). Each return tags
+/// the credential and its expiry beside the context it builds, from the same
+/// parse of the header, so they cannot disagree.
 async fn authenticate_request_with_credential(
     config: &AppConfig,
     headers: &HeaderMap,
-) -> Result<(RequestContext, RequestCredential), (StatusCode, Json<ApiError>)> {
+) -> Result<(RequestContext, RequestCredential, Option<i64>), (StatusCode, Json<ApiError>)> {
     let Some(raw_value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -178,6 +191,7 @@ async fn authenticate_request_with_credential(
                 scoped_claims: None,
             },
             RequestCredential::Anonymous,
+            None,
         ));
     };
 
@@ -205,6 +219,7 @@ async fn authenticate_request_with_credential(
                     scoped_claims: None,
                 },
                 RequestCredential::ServiceSecret,
+                None,
             ));
         }
     }
@@ -219,12 +234,13 @@ async fn authenticate_request_with_credential(
                     scoped_claims: None,
                 },
                 RequestCredential::ServiceSecret,
+                None,
             ));
         }
     }
 
     match decode_controller_user_token(config, &token) {
-        Ok(Some(user_id)) => {
+        Ok(Some((user_id, expires_at))) => {
             return Ok((
                 RequestContext {
                     user_id: Some(user_id),
@@ -232,6 +248,7 @@ async fn authenticate_request_with_credential(
                     scoped_claims: None,
                 },
                 RequestCredential::ControllerSession,
+                Some(expires_at),
             ));
         }
         Ok(None) => {}
@@ -298,6 +315,7 @@ async fn authenticate_request_with_credential(
                                 scoped_claims: None,
                             },
                             RequestCredential::Supabase,
+                            claims.exp,
                         ));
                     }
                     Err(error) => match error.kind() {
@@ -343,6 +361,7 @@ async fn authenticate_request_with_credential(
     };
 
     let user_id = Uuid::from_str(claims.sub.trim()).ok();
+    let expires_at = claims.exp;
     Ok((
         RequestContext {
             user_id,
@@ -350,6 +369,7 @@ async fn authenticate_request_with_credential(
             scoped_claims: Some(claims),
         },
         RequestCredential::Scoped,
+        Some(expires_at),
     ))
 }
 
@@ -521,10 +541,12 @@ pub(crate) fn issue_controller_token(
     })
 }
 
+/// The user and expiry of a session token this controller issued, `None`
+/// for any other token.
 fn decode_controller_user_token(
     config: &AppConfig,
     token: &str,
-) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
+) -> Result<Option<(Uuid, i64)>, (StatusCode, Json<ApiError>)> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     validation.leeway = 30;
@@ -538,7 +560,7 @@ fn decode_controller_user_token(
         Ok(data) => {
             let user_id = Uuid::from_str(&data.claims.sub)
                 .map_err(|_| unauthorized("invalid controller token subject"))?;
-            Ok(Some(user_id))
+            Ok(Some((user_id, data.claims.exp)))
         }
         Err(error) => match error.kind() {
             JwtErrorKind::ExpiredSignature => Err(unauthorized("controller token expired")),
@@ -574,7 +596,7 @@ pub(crate) async fn create_controller_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ControllerSessionResponse>, (StatusCode, Json<ApiError>)> {
-    let (context, credential) =
+    let (context, credential, _) =
         authenticate_request_with_credential(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
     if credential != RequestCredential::Supabase {
@@ -1054,6 +1076,8 @@ mod tests {
             proxy_credential_lease_token: None,
             supabase_service_role_key: None,
             agent_token_ttl_seconds: 900,
+            self_hosted_machine_lifetime_seconds:
+                crate::config::DEFAULT_SELF_HOSTED_MACHINE_LIFETIME_SECONDS,
             user_token_ttl_seconds: 900,
             user_token_secret: TEST_SUPABASE_SECRET.to_string(),
             origin_token_private_key: Some(test_origin_private_key().to_string()),
@@ -2467,7 +2491,7 @@ mod tests {
         ];
         for (bearer, expected) in cases {
             let headers = bearer.as_deref().map(header_with_token).unwrap_or_default();
-            let (_, credential) = authenticate_request_with_credential(&config, &headers)
+            let (_, credential, _) = authenticate_request_with_credential(&config, &headers)
                 .await
                 .expect("credential accepted");
             assert_eq!(credential, expected, "bearer {bearer:?}");

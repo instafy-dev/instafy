@@ -15,6 +15,9 @@ const REGISTER_DELAY: Duration = Duration::from_millis(300);
 /// The controller's refusal of a deleted space's runtime.
 const SPACE_DELETED_BODY: &str = r#"{"message":"This space was deleted.","code":"space_deleted"}"#;
 
+/// The controller's refusal to renew a machine whose lifetime ended.
+const LIFETIME_ENDED_BODY: &str = r#"{"message":"This machine's credentials reached the end of their lifetime; mint a new runtime token to keep it running.","code":"runtime_machine_lifetime_ended"}"#;
+
 /// A renewed registration the cycle adopts: one of a runtime without a local-engine lane, as every
 /// runtime of these tests is, so it carried no `claudeCode` capability.
 fn adopted(registration: Registration) -> Registered {
@@ -28,11 +31,13 @@ fn adopted(registration: Registration) -> Registered {
 /// (when it arrives and when it is answered), each presence beat with its
 /// status, each lease and every other call, and refuses every lease with
 /// 401. For a deleted space it refuses runtime registrations and leases with
-/// the controller's 410 instead.
+/// the controller's 410 instead, and for a machine whose lifetime ended it
+/// refuses runtime registrations with the controller's 401 for that.
 #[derive(Clone, Default)]
 struct StandIn {
     events: Arc<std::sync::Mutex<Vec<String>>>,
     space_deleted: bool,
+    lifetime_ended: bool,
 }
 
 impl StandIn {
@@ -79,6 +84,10 @@ async fn stand_in_controller(
         stand_in.push("register runtime".into());
         return (StatusCode::GONE, SPACE_DELETED_BODY.into());
     }
+    if path == "runtime/register" && stand_in.lifetime_ended {
+        stand_in.push("register runtime".into());
+        return (StatusCode::UNAUTHORIZED, LIFETIME_ENDED_BODY.into());
+    }
     stand_in.push(format!("other:{path}"));
     (StatusCode::NOT_FOUND, "{}".into())
 }
@@ -105,6 +114,14 @@ impl Fixture {
     async fn for_deleted_space() -> Self {
         Self::start(StandIn {
             space_deleted: true,
+            ..StandIn::default()
+        })
+        .await
+    }
+
+    async fn for_ended_lifetime() -> Self {
+        Self::start(StandIn {
+            lifetime_ended: true,
             ..StandIn::default()
         })
         .await
@@ -365,9 +382,90 @@ async fn a_registration_refused_for_a_deleted_space_ends_the_agent() {
 async fn only_a_runtime_without_a_provider_lease_exits_for_a_deleted_space() {
     let fixture = Fixture::new().await;
     assert!(exits_when_space_deleted(&fixture.config));
+    assert!(exits_when_machine_lifetime_ends(&fixture.config));
     let mut leased = (*fixture.config).clone();
     leased.runtime_lease_id = Some(Uuid::new_v4());
     assert!(!exits_when_space_deleted(&leased));
+    assert!(!exits_when_machine_lifetime_ends(&leased));
+}
+
+/// A registration refused because the machine's lifetime ended ends the
+/// agent at once: no other credential is tried, and it does not register
+/// again every five seconds.
+#[tokio::test]
+async fn a_registration_refused_for_an_ended_lifetime_ends_the_agent() {
+    let fixture = Fixture::for_ended_lifetime().await;
+    let executor = Arc::new(AgentExecutor::new(fixture.config.clone()));
+    let client = Arc::new(ControllerClient::new(&fixture.config).unwrap());
+    let exit = tokio::time::timeout(
+        Duration::from_secs(4),
+        Box::pin(RuntimeAgent::run_registration_loop(
+            fixture.config.clone(),
+            client.clone(),
+            executor,
+            ShutdownSignal::new(),
+            Arc::new(Mutex::new(HashSet::new())),
+        )),
+    )
+    .await
+    .expect("the agent ends without waiting to register again")
+    .expect("the agent ends cleanly");
+    assert_eq!(exit, AgentExit::MachineLifetimeEnded);
+    assert!(client.machine_lifetime_ended());
+    assert_eq!(
+        fixture.stand_in.events(),
+        vec!["register runtime".to_string()]
+    );
+}
+
+/// Once a renewal was refused for its lifetime, the running cycle leases no
+/// more jobs: it stops at its next idle point like a shutdown stops the
+/// runtime, with its origin's offline beat, while its tokens still work.
+#[tokio::test]
+async fn a_machine_whose_lifetime_ended_stops_at_its_next_idle_point() {
+    let fixture = Fixture::for_ended_lifetime().await;
+    let executor = Arc::new(AgentExecutor::new(fixture.config.clone()));
+    let client = Arc::new(ControllerClient::new(&fixture.config).unwrap());
+    // The renewal a running cycle makes, refused.
+    let refused = client.register_runtime(&fixture.config).await;
+    assert!(
+        refused.is_err_and(|error| error.is::<MachineLifetimeEnded>()),
+        "the refusal names the ended lifetime"
+    );
+    let mut registration = fixture.registration.clone();
+    registration.stop_url = Some(
+        fixture
+            .config
+            .controller_base_url
+            .join("/agent/stop")
+            .unwrap(),
+    );
+    let outcome = Box::pin(RuntimeAgent::register_and_process(
+        fixture.config.clone(),
+        client,
+        executor,
+        ShutdownSignal::new(),
+        Arc::new(Mutex::new(HashSet::new())),
+        Some(adopted(registration)),
+    ))
+    .await;
+    assert!(
+        matches!(outcome, Ok(RegistrationOutcome::MachineLifetimeEnded)),
+        "an ended lifetime ends the cycle for good"
+    );
+    let events = fixture.stand_in.events();
+    assert!(
+        !events.iter().any(|event| event == "lease"),
+        "a machine nothing renews leases no more jobs: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event == "beat:offline"),
+        "the origin went away without its offline beat: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event == "other:agent/stop"),
+        "the runtime was not stopped like a shutdown stops it: {events:?}"
+    );
 }
 
 /// Instafy's browser on the space's own machine belongs to the process, not

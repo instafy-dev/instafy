@@ -45,54 +45,54 @@ use super::{
     MembershipChangeScope, RUNTIME_OWNER_ACCESS_REVOKED_CODE,
 };
 
-const SELF_HOSTED: &str = "self-hosted";
-const SERVICE_ROLE: &str = "service-role-token";
-const STALE_GENERATION: &str = "runtime token generation is no longer current";
+pub(super) const SELF_HOSTED: &str = "self-hosted";
+pub(super) const SERVICE_ROLE: &str = "service-role-token";
+pub(super) const STALE_GENERATION: &str = "runtime token generation is no longer current";
 
 /// A request running on a task of its own.
 type PendingCall = JoinHandle<anyhow::Result<(StatusCode, JsonValue)>>;
 
 #[derive(Clone, Copy)]
-struct People {
+pub(super) struct People {
     /// Owns both spaces and the team.
-    owner: Uuid,
+    pub(super) owner: Uuid,
     /// A builder of the team, and a direct builder of the first space only.
-    teammate: Uuid,
+    pub(super) teammate: Uuid,
     /// The controller's service runtime user.
-    service: Uuid,
+    pub(super) service: Uuid,
 }
 
 /// A runtime its person started: minted with their session, then registered.
-struct Machine {
-    project_id: Uuid,
-    runtime_id: Uuid,
+pub(super) struct Machine {
+    pub(super) project_id: Uuid,
+    pub(super) runtime_id: Uuid,
     /// The runtime token the registration renewed.
-    renewed: String,
+    pub(super) renewed: String,
     /// The agent token the registration issued.
-    agent: String,
+    pub(super) agent: String,
 }
 
-struct Space {
-    pool: PgPool,
-    config: AppConfig,
-    state: AppState,
+pub(super) struct Space {
+    pub(super) pool: PgPool,
+    pub(super) config: AppConfig,
+    pub(super) state: AppState,
     app: Router,
-    org_id: Uuid,
+    pub(super) org_id: Uuid,
     /// The team space the teammate is also a direct builder of.
-    project_id: Uuid,
+    pub(super) project_id: Uuid,
     /// A team space the teammate writes only through the team.
-    team_only_project_id: Uuid,
-    people: People,
+    pub(super) team_only_project_id: Uuid,
+    pub(super) people: People,
 }
 
 impl Space {
-    fn person_token(&self, user: Uuid) -> anyhow::Result<String> {
+    pub(super) fn person_token(&self, user: Uuid) -> anyhow::Result<String> {
         Ok(crate::auth::issue_controller_token(&self.config, &user)
             .map_err(|error| anyhow::anyhow!("failed to issue a session token: {error:?}"))?
             .token)
     }
 
-    async fn call(
+    pub(super) async fn call(
         &self,
         method: &str,
         uri: &str,
@@ -116,7 +116,7 @@ impl Space {
     }
 
     /// `POST /projects/:id/runtime/token` with `user`'s session.
-    async fn mint(
+    pub(super) async fn mint(
         &self,
         user: Uuid,
         project_id: Uuid,
@@ -144,7 +144,7 @@ impl Space {
     }
 
     /// `POST /runtime/register` for a self-hosted runtime.
-    async fn register(
+    pub(super) async fn register(
         &self,
         token: &str,
         project_id: Uuid,
@@ -160,7 +160,7 @@ impl Space {
     }
 
     /// [`Self::register`], which must succeed.
-    async fn registered(
+    pub(super) async fn registered(
         &self,
         token: &str,
         project_id: Uuid,
@@ -187,13 +187,17 @@ impl Space {
 
     /// `user` starts a machine in `project_id` the way Desktop does: a mint
     /// with the default scopes and no runtime id, then a registration.
-    async fn start_machine(&self, user: Uuid, project_id: Uuid) -> anyhow::Result<Machine> {
+    pub(super) async fn start_machine(
+        &self,
+        user: Uuid,
+        project_id: Uuid,
+    ) -> anyhow::Result<Machine> {
         let (token, runtime_id) = self.mint(user, project_id, json!({})).await?;
         self.registered(&token, project_id, runtime_id).await
     }
 
     /// `POST /projects/:id/git/access_token` for `git.read` with `token`.
-    async fn git_read(
+    pub(super) async fn git_read(
         &self,
         token: &str,
         project_id: Uuid,
@@ -208,7 +212,7 @@ impl Space {
     }
 
     /// The runtime's stored token generation.
-    async fn generation(&self, runtime_id: Uuid) -> anyhow::Result<Option<String>> {
+    pub(super) async fn generation(&self, runtime_id: Uuid) -> anyhow::Result<Option<String>> {
         Ok(self
             .pool
             .get()
@@ -221,7 +225,7 @@ impl Space {
             .get(0))
     }
 
-    async fn status(&self, runtime_id: Uuid) -> anyhow::Result<String> {
+    pub(super) async fn status(&self, runtime_id: Uuid) -> anyhow::Result<String> {
         Ok(self
             .pool
             .get()
@@ -304,7 +308,7 @@ impl Space {
     }
 
     /// A runtime token the controller signs for its own service identity.
-    fn service_runtime_token(&self, runtime_id: Uuid) -> anyhow::Result<String> {
+    pub(super) fn service_runtime_token(&self, runtime_id: Uuid) -> anyhow::Result<String> {
         Ok(mint_scoped_token(
             &self.config,
             ScopedTokenRequest {
@@ -326,7 +330,12 @@ impl Space {
     }
 }
 
-fn assert_refused(status: StatusCode, body: &JsonValue, expected: StatusCode, label: &str) {
+pub(super) fn assert_refused(
+    status: StatusCode,
+    body: &JsonValue,
+    expected: StatusCode,
+    label: &str,
+) {
     assert_eq!(status, expected, "{label}: {body}");
     if expected == StatusCode::FORBIDDEN {
         assert_eq!(
@@ -412,7 +421,20 @@ async fn until_waiting_or_done(
 }
 
 /// Runs `body` on a fresh team with two spaces, then deletes it.
-async fn with_space<F, Fut>(label: &str, body: F) -> anyhow::Result<()>
+pub(super) async fn with_space<F, Fut>(label: &str, body: F) -> anyhow::Result<()>
+where
+    F: FnOnce(Space) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    with_configured_space(label, |_| {}, body).await
+}
+
+/// [`with_space`], with `configure` applied to the controller's config.
+pub(super) async fn with_configured_space<F, Fut>(
+    label: &str,
+    configure: impl FnOnce(&mut AppConfig),
+    body: F,
+) -> anyhow::Result<()>
 where
     F: FnOnce(Space) -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
@@ -429,6 +451,7 @@ where
     let team_only_project_id = Uuid::new_v4();
     let mut config = build_app_config(test_origin_private_key(), test_origin_public_key(), label);
     config.service_runtime_user_id = Some(people.service);
+    configure(&mut config);
     for user in [people.owner, people.teammate] {
         ensure_test_user(&pool, &user).await?;
     }

@@ -119,6 +119,63 @@ export function refuseDotSegments(target: string): void {
   }
 }
 
+/** When a JWT access token expires, from its `exp` claim, or null when it has none to read. */
+export function accessTokenExpiresAtMs(accessToken: string): number | null {
+  const payloadSegment = accessToken.split(".")[1];
+  if (!payloadSegment) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(payloadSegment, "base64url").toString("utf8")) as unknown;
+    if (!payload || typeof payload !== "object") return null;
+    const exp = (payload as Record<string, unknown>)["exp"];
+    return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The saved session's access token, refreshed first when it ends within `marginMs`. A runtime
+ * token minted from a person's session ends no later than the session, so one minted from a
+ * session about to end could expire before its runtime registers, as after a slow image pull.
+ * Only a saved session is refreshed: any other token, one with no expiry to read, or a refresh
+ * that does not land leaves the token as it was.
+ */
+export async function freshenStoredAccessToken(params: {
+  url: string;
+  accessToken: string;
+  tokenSource: AccessTokenSource;
+  profile?: string | null;
+  cwd?: string | null;
+  marginMs: number;
+  nowMs?: number;
+}): Promise<string> {
+  if (params.tokenSource !== "config") return params.accessToken;
+  const expiresAtMs = accessTokenExpiresAtMs(params.accessToken);
+  if (expiresAtMs === null || expiresAtMs - (params.nowMs ?? Date.now()) > params.marginMs) {
+    return params.accessToken;
+  }
+  const stored = assertStoredTokenOrigin(params);
+  if (!stored) return params.accessToken;
+  let refreshed: Awaited<ReturnType<typeof refreshStoredSupabaseSession>> = null;
+  try {
+    refreshed = await refreshStoredSupabaseSession({
+      profile: stored.profile,
+      cwd: params.cwd ?? null,
+      expected: authSnapshot(stored.config),
+    });
+  } catch {
+    // The request that follows refreshes on its own if the controller finds the token expired.
+    return params.accessToken;
+  }
+  if (!refreshed?.accessToken) return params.accessToken;
+  assertStoredTokenOrigin({
+    ...params,
+    profile: stored.profile,
+    accessToken: refreshed.accessToken,
+  });
+  return refreshed.accessToken;
+}
+
 export async function fetchWithControllerAuth(params: {
   url: string;
   init?: RequestInit;

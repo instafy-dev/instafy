@@ -16,7 +16,11 @@ import {
 import { formatAuthRejectedError } from "./errors.js";
 import { findProjectManifest, type ProjectManifest } from "./project-manifest.js";
 import { resolveSpaceId } from "./space-id.js";
-import { fetchWithControllerAuth, refuseDotSegments } from "./controller-fetch.js";
+import {
+  fetchWithControllerAuth,
+  freshenStoredAccessToken,
+  refuseDotSegments,
+} from "./controller-fetch.js";
 
 export interface RuntimeStartOptions {
   project?: string;
@@ -168,6 +172,92 @@ function stopDockerContainer(containerId: string): void {
   } catch {
     // ignore
   }
+}
+
+/** The exit status of a container that stopped, or null while it runs or cannot be read. */
+function dockerContainerExitCode(containerId: string): number | null {
+  const id = containerId.trim();
+  if (!id) {
+    return null;
+  }
+  try {
+    const result = spawnSync(
+      "docker",
+      ["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", id],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (result.status !== 0) {
+      return null;
+    }
+    const [running, code] = String(result.stdout ?? "").trim().split(/\s+/);
+    const exitCode = Number(code);
+    return running === "false" && Number.isInteger(exitCode) ? exitCode : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The exit status runtime-agent uses when the controller would not renew its machine token
+ * because the machine's lifetime ended (`MACHINE_LIFETIME_ENDED_EXIT_CODE` in
+ * packages/runtime-agent/src/agent.rs).
+ */
+export const RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE = 4;
+
+/** How long after one restart for an ended lifetime `runtime start` refuses another. */
+export const RUNTIME_LIFETIME_RESTART_SPACING_MS = 10 * 60 * 1000;
+
+/** A saved session that ends within this long is refreshed before a runtime token is minted from it. */
+const RUNTIME_MINT_SESSION_MARGIN_MS = 15 * 60 * 1000;
+
+export type RuntimeLifetimeRestartDecision =
+  | { restart: true }
+  | { restart: false; reason: "other_exit" | "runtime_token_given" | "restarted_recently" };
+
+/**
+ * Whether `runtime start` mints a new runtime token and starts the agent again after it exited:
+ * only for the exit that says its machine's lifetime ended, only when this command minted the
+ * agent's token from a person's sign-in (a runtime token it was given is the person's to renew),
+ * and not again within the spacing. A new start begins a new lifetime, so a second end that soon
+ * means something else is wrong.
+ */
+export function decideRuntimeLifetimeRestart(params: {
+  exitCode: number | null;
+  runtimeTokenMinted: boolean;
+  lastRestartAtMs: number | null;
+  nowMs: number;
+}): RuntimeLifetimeRestartDecision {
+  if (params.exitCode !== RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE) {
+    return { restart: false, reason: "other_exit" };
+  }
+  if (!params.runtimeTokenMinted) {
+    return { restart: false, reason: "runtime_token_given" };
+  }
+  if (
+    params.lastRestartAtMs !== null &&
+    params.nowMs - params.lastRestartAtMs < RUNTIME_LIFETIME_RESTART_SPACING_MS
+  ) {
+    return { restart: false, reason: "restarted_recently" };
+  }
+  return { restart: true };
+}
+
+/**
+ * The agent's environment with a newly minted runtime token wherever the one whose lifetime
+ * ended was: as its runtime token and, unless one was given separately, as its origin's tokens.
+ */
+export function withRemintedRuntimeToken(
+  env: NodeJS.ProcessEnv,
+  previousToken: string,
+  nextToken: string,
+): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env, RUNTIME_ACCESS_TOKEN: nextToken };
+  for (const key of ["ORIGIN_ACCESS_TOKEN", "ORIGIN_INTERNAL_TOKEN"]) {
+    if (previousToken && next[key] === previousToken) {
+      next[key] = nextToken;
+    }
+  }
+  return next;
 }
 
 function printStatus(label: string, value: string) {
@@ -834,7 +924,16 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     }
   }
 
+  let runtimeTokenMinted = false;
   if (!runtimeAccessToken && controllerAccessToken) {
+    controllerAccessToken = await freshenStoredAccessToken({
+      url: env["CONTROLLER_BASE_URL"],
+      accessToken: controllerAccessToken,
+      tokenSource: controllerAccessTokenSource,
+      profile,
+      cwd,
+      marginMs: RUNTIME_MINT_SESSION_MARGIN_MS,
+    });
     const mintedIdentity = await mintPrivateRuntimeIdentity({
       controllerUrl: env["CONTROLLER_BASE_URL"],
       controllerAccessToken,
@@ -847,6 +946,7 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     });
     runtimeAccessToken = mintedIdentity.token;
     env["RUNTIME_ID"] = mintedIdentity.runtimeId;
+    runtimeTokenMinted = true;
   }
   if (runtimeAccessToken) {
     env["RUNTIME_ACCESS_TOKEN"] = runtimeAccessToken;
@@ -926,6 +1026,91 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     env["ORIGIN_INTERNAL_TOKEN"] = originToken;
   }
 
+  // The same person's sign-in mints this runtime a new token, under the same runtime id.
+  const remintRuntimeToken = async (): Promise<string> => {
+    const current = resolveControllerAccessTokenForCliWithSource(
+      options,
+      env,
+      supabaseAccessToken,
+      profile,
+      cwd,
+    );
+    if (!current.token) {
+      throw new Error("Login required. Run `instafy login`, then `instafy runtime start`.");
+    }
+    const controllerUrl = env["CONTROLLER_BASE_URL"] ?? "";
+    const accessToken = await freshenStoredAccessToken({
+      url: controllerUrl,
+      accessToken: current.token,
+      tokenSource: current.source,
+      profile,
+      cwd,
+      marginMs: RUNTIME_MINT_SESSION_MARGIN_MS,
+    });
+    const minted = await mintPrivateRuntimeIdentity({
+      controllerUrl,
+      controllerAccessToken: accessToken,
+      projectId,
+      runtimeId,
+      leaseId: env["RUNTIME_LEASE_ID"],
+      tokenSource: current.source,
+      profile,
+      cwd,
+    });
+    if (minted.runtimeId !== runtimeId) {
+      throw new Error(
+        "Controller runtime token identity does not match the runtime it starts again.",
+      );
+    }
+    return minted.token;
+  };
+  let lastLifetimeRestartAtMs: number | null = null;
+  // After the agent exits: when its machine's lifetime ended, mint a new token and start it again.
+  const restartAfterEndedLifetime = async (exitCode: number | null, relaunch: () => void) => {
+    const nowMs = Date.now();
+    const decision = decideRuntimeLifetimeRestart({
+      exitCode,
+      runtimeTokenMinted,
+      lastRestartAtMs: lastLifetimeRestartAtMs,
+      nowMs,
+    });
+    if (decision.restart === false) {
+      if (decision.reason === "runtime_token_given") {
+        console.error(
+          kleur.yellow(
+            "The runtime's machine lifetime ended. Mint a new runtime token (`instafy runtime token`) and start it again.",
+          ),
+        );
+      } else if (decision.reason === "restarted_recently") {
+        console.error(
+          kleur.yellow(
+            "The runtime's machine lifetime ended again soon after it started again, so it stays stopped. Start it again with `instafy runtime start`.",
+          ),
+        );
+      }
+      if (decision.reason !== "other_exit") {
+        process.exitCode = RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE;
+      }
+      return;
+    }
+    lastLifetimeRestartAtMs = nowMs;
+    console.log(
+      kleur.yellow("The runtime's machine lifetime ended: minting a new runtime token to start it again."),
+    );
+    try {
+      const nextToken = await remintRuntimeToken();
+      Object.assign(env, withRemintedRuntimeToken(env, env["RUNTIME_ACCESS_TOKEN"] ?? "", nextToken));
+      relaunch();
+    } catch (error) {
+      console.error(
+        kleur.red(
+          `The runtime did not start again: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+      process.exitCode = RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE;
+    }
+  };
+
   if (!useDocker) {
     if (!env["ORIGIN_ENDPOINT"]) {
       const ratholeResolved = await resolveRatholeBinaryForCli({
@@ -967,7 +1152,6 @@ export async function runtimeStart(options: RuntimeStartOptions) {
       stdio = ["ignore", out, out];
     }
 
-    const childEnvironment = buildRuntimeChildEnvironment(env);
     // Only a local process can read a file under this HOME; a container cannot.
     const sessionFile = runtimeAgentSessionFile({
       env,
@@ -976,39 +1160,46 @@ export async function runtimeStart(options: RuntimeStartOptions) {
       tokenSource: controllerAccessTokenSource,
       runtimeTokenGiven: Boolean(givenRuntimeToken),
     });
-    if (sessionFile) {
-      childEnvironment["INSTAFY_CLI_CONFIG"] = sessionFile;
-    }
-    const spawnOptions: SpawnOptions = { env: childEnvironment, stdio, detached };
-    const child = spawn(bin, spawnOptions);
-
-    if (detached) {
-      child.unref();
-    }
-
-    const startedAt = new Date().toISOString();
-    writeState({
-      runner: "process",
-      pid: child.pid ?? -1,
-      projectId,
-      workspace,
-      controllerUrl: env["CONTROLLER_BASE_URL"],
-      originId,
-      runtimeId: env["RUNTIME_ID"] ?? null,
-      displayName: env["RUNTIME_DISPLAY_NAME"],
-      startedAt,
-      logFile,
-      detached,
-    });
-
-    child.on("exit", (code, signal) => {
-      const msg = code !== null ? `code ${code}` : `signal ${signal}`;
-      console.log(kleur.yellow(`runtime-agent exited (${msg})`));
-      const current = readState();
-      if (current && current.pid === child.pid) {
-        clearState();
+    const launch = () => {
+      const childEnvironment = buildRuntimeChildEnvironment(env);
+      if (sessionFile) {
+        childEnvironment["INSTAFY_CLI_CONFIG"] = sessionFile;
       }
-    });
+      const spawnOptions: SpawnOptions = { env: childEnvironment, stdio, detached };
+      const child = spawn(bin, spawnOptions);
+
+      if (detached) {
+        child.unref();
+      }
+
+      const startedAt = new Date().toISOString();
+      writeState({
+        runner: "process",
+        pid: child.pid ?? -1,
+        projectId,
+        workspace,
+        controllerUrl: env["CONTROLLER_BASE_URL"],
+        originId,
+        runtimeId: env["RUNTIME_ID"] ?? null,
+        displayName: env["RUNTIME_DISPLAY_NAME"],
+        startedAt,
+        logFile,
+        detached,
+      });
+
+      child.on("exit", (code, signal) => {
+        const msg = code !== null ? `code ${code}` : `signal ${signal}`;
+        console.log(kleur.yellow(`runtime-agent exited (${msg})`));
+        const current = readState();
+        if (current && current.pid === child.pid) {
+          clearState();
+        }
+        if (!detached) {
+          void restartAfterEndedLifetime(code, launch);
+        }
+      });
+    };
+    launch();
     return;
   }
 
@@ -1017,66 +1208,71 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   const hostPort = String(options.bindPort ?? env["ORIGIN_BIND_PORT"] ?? 54332);
   const hostBindHost = options.bindHost ?? "127.0.0.1";
 
-  const dockerEnv = buildRuntimeChildEnvironment(env);
-  dockerEnv["WORKSPACE_DIR"] = "/workspace";
-  dockerEnv["CODEX_HOME"] = "/workspace/.codex";
-  dockerEnv["TMPDIR"] = "/tmp";
-  dockerEnv["TMP"] = "/tmp";
-  dockerEnv["TEMP"] = "/tmp";
-  dockerEnv["ORIGIN_BIND_HOST"] = "0.0.0.0";
-  dockerEnv["CONTROLLER_BASE_URL"] = normalizeControllerUrlForDocker(env["CONTROLLER_BASE_URL"] ?? "");
+  const runContainer = (): string => {
+    const dockerEnv = buildRuntimeChildEnvironment(env);
+    dockerEnv["WORKSPACE_DIR"] = "/workspace";
+    dockerEnv["CODEX_HOME"] = "/workspace/.codex";
+    dockerEnv["TMPDIR"] = "/tmp";
+    dockerEnv["TMP"] = "/tmp";
+    dockerEnv["TEMP"] = "/tmp";
+    dockerEnv["ORIGIN_BIND_HOST"] = "0.0.0.0";
+    dockerEnv["CONTROLLER_BASE_URL"] = normalizeControllerUrlForDocker(env["CONTROLLER_BASE_URL"] ?? "");
 
-  const envArgs: string[] = [];
-  for (const [key, value] of Object.entries(dockerEnv)) {
-    if (typeof value !== "string" || value.length === 0) continue;
-    envArgs.push("-e", `${key}=${value}`);
-  }
+    const envArgs: string[] = [];
+    for (const [key, value] of Object.entries(dockerEnv)) {
+      if (typeof value !== "string" || value.length === 0) continue;
+      envArgs.push("-e", `${key}=${value}`);
+    }
 
-  const runArgs = buildRuntimeDockerRunArgs({
-    containerName,
-    hostBindHost,
-    hostPort,
-    workspace,
-    envArgs,
-    image,
-  });
+    const runArgs = buildRuntimeDockerRunArgs({
+      containerName,
+      hostBindHost,
+      hostPort,
+      workspace,
+      envArgs,
+      image,
+    });
+
+    const started = spawnSync("docker", runArgs, { encoding: "utf8" });
+    if (started.status !== 0) {
+      const stderr = String(started.stderr ?? "").trim();
+      const normalized = (stderr || "").toLowerCase();
+      const hints: string[] = [];
+      if (image.startsWith("ghcr.io/") && (normalized.includes("not found") || normalized.includes("denied") || normalized.includes("unauthorized") || normalized.includes("manifest unknown"))) {
+        hints.push("If this is a GHCR image, ensure it's published and you are authenticated (`docker login ghcr.io`).");
+      }
+      hints.push("Override the image with `INSTAFY_RUNTIME_AGENT_IMAGE=... instafy runtime start`.");
+      const suffix = hints.length > 0 ? `\n\nNext:\n- ${hints.join("\n- ")}` : "";
+      throw new Error(`docker run failed: ${stderr || "unknown error"}${suffix}`);
+    }
+    const startedId = String(started.stdout ?? "").trim();
+    if (!startedId) {
+      throw new Error("docker run did not return a container id");
+    }
+
+    const startedAt = new Date().toISOString();
+    writeState({
+      runner: "docker",
+      pid: -1,
+      projectId,
+      workspace,
+      controllerUrl: env["CONTROLLER_BASE_URL"],
+      originId,
+      runtimeId: env["RUNTIME_ID"] ?? null,
+      displayName: env["RUNTIME_DISPLAY_NAME"],
+      startedAt,
+      detached: Boolean(options.detach),
+      containerId: startedId,
+      containerName,
+    });
+    return startedId;
+  };
 
   printStatus("Starting runtime-agent (docker):", image);
   printStatus("Space:", projectId);
   printStatus("Workspace:", workspace);
   printStatus("Origin:", originId);
-  const started = spawnSync("docker", runArgs, { encoding: "utf8" });
-  if (started.status !== 0) {
-    const stderr = String(started.stderr ?? "").trim();
-    const normalized = (stderr || "").toLowerCase();
-    const hints: string[] = [];
-    if (image.startsWith("ghcr.io/") && (normalized.includes("not found") || normalized.includes("denied") || normalized.includes("unauthorized") || normalized.includes("manifest unknown"))) {
-      hints.push("If this is a GHCR image, ensure it's published and you are authenticated (`docker login ghcr.io`).");
-    }
-    hints.push("Override the image with `INSTAFY_RUNTIME_AGENT_IMAGE=... instafy runtime start`.");
-    const suffix = hints.length > 0 ? `\n\nNext:\n- ${hints.join("\n- ")}` : "";
-    throw new Error(`docker run failed: ${stderr || "unknown error"}${suffix}`);
-  }
-  const containerId = String(started.stdout ?? "").trim();
-  if (!containerId) {
-    throw new Error("docker run did not return a container id");
-  }
-
-  const startedAt = new Date().toISOString();
-  writeState({
-    runner: "docker",
-    pid: -1,
-    projectId,
-    workspace,
-    controllerUrl: env["CONTROLLER_BASE_URL"],
-    originId,
-    runtimeId: env["RUNTIME_ID"] ?? null,
-    displayName: env["RUNTIME_DISPLAY_NAME"],
-    startedAt,
-    detached: Boolean(options.detach),
-    containerId,
-    containerName,
-  });
+  let containerId = runContainer();
 
   if (options.detach) {
     printStatus("Container:", containerId);
@@ -1084,25 +1280,37 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     return;
   }
 
-  const logs = spawn("docker", ["logs", "-f", containerId], { stdio: "inherit" });
-  const handleExit = async () => {
-    stopDockerContainer(containerId);
+  let stopping = false;
+  const removeContainer = (id: string) => {
+    stopDockerContainer(id);
     const current = readState();
-    if (current?.containerId === containerId) {
+    if (current?.containerId === id) {
       clearState();
     }
   };
+  const follow = (id: string) => {
+    const logs = spawn("docker", ["logs", "-f", id], { stdio: "inherit" });
+    logs.on("exit", () => {
+      // Read how it exited before the container, and its exit status, are removed.
+      const exitCode = stopping ? null : dockerContainerExitCode(id);
+      removeContainer(id);
+      if (stopping) {
+        return;
+      }
+      void restartAfterEndedLifetime(exitCode, () => {
+        containerId = runContainer();
+        follow(containerId);
+      });
+    });
+  };
+  const handleSignal = () => {
+    stopping = true;
+    removeContainer(containerId);
+  };
 
-  process.once("SIGINT", () => {
-    void handleExit();
-  });
-  process.once("SIGTERM", () => {
-    void handleExit();
-  });
-
-  logs.on("exit", () => {
-    void handleExit();
-  });
+  process.once("SIGINT", handleSignal);
+  process.once("SIGTERM", handleSignal);
+  follow(containerId);
 }
 
 function formatStatus(state: RuntimeState, running: boolean) {

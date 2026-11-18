@@ -7,7 +7,7 @@ use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header as JwtHeader, Validation,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -16,10 +16,11 @@ use crate::{config::AppConfig, internal_error, unauthorized, ApiError};
 use runtime_contracts::AccessTokenClaims;
 
 /// The signed payload: the shared claims plus the optional author claims of
-/// a workspace-write token. The author claims are serialized next to the
-/// shared ones instead of extending [`AccessTokenClaims`], so no other crate
-/// that builds or checks those claims changes; origins that do not read
-/// `author_name` / `author_email` ignore them.
+/// a workspace-write token and the machine expiry of a person's private
+/// self-hosted machine. These are serialized next to the shared claims
+/// instead of extending [`AccessTokenClaims`], so no other crate that builds
+/// or checks those claims changes; a reader that does not know one ignores
+/// it.
 #[derive(Serialize)]
 struct SignedAccessTokenClaims<'a> {
     #[serde(flatten)]
@@ -28,6 +29,30 @@ struct SignedAccessTokenClaims<'a> {
     author_name: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author_email: Option<&'a str>,
+    /// See [`DecodedScopedToken::machine_expires_at`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine_expires_at: Option<i64>,
+}
+
+/// A verified scoped token: the shared claims, and the controller-only claim
+/// registration reads.
+#[derive(Debug, Clone)]
+pub struct DecodedScopedToken {
+    pub claims: AccessTokenClaims,
+    /// When a person's private self-hosted machine stops renewing its
+    /// credentials, in seconds since the epoch. The runtime token mint sets it
+    /// for such a machine and every renewal carries it unchanged
+    /// (`crate::runtime::register`), so it counts from the mint a person
+    /// made. `None` on every other token and on one minted before it existed.
+    pub machine_expires_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct DecodedScopedTokenClaims {
+    #[serde(flatten)]
+    claims: AccessTokenClaims,
+    #[serde(default)]
+    machine_expires_at: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -68,7 +93,28 @@ pub fn mint_scoped_token(
     config: &AppConfig,
     request: ScopedTokenRequest,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token_inner(config, request, None, None, None, None, None)
+    mint_scoped_token_inner(config, request, None, None, None, None, None, None)
+}
+
+/// Mint the runtime token of a person's private self-hosted machine: bound to
+/// its generation, carrying the machine expiry
+/// ([`DecodedScopedToken::machine_expires_at`]) and never outliving it.
+pub fn mint_runtime_machine_token(
+    config: &AppConfig,
+    request: ScopedTokenRequest,
+    runtime_generation: Option<Uuid>,
+    machine_expires_at: DateTime<Utc>,
+) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
+    mint_scoped_token_inner(
+        config,
+        request,
+        runtime_generation,
+        Some(machine_expires_at),
+        None,
+        None,
+        None,
+        Some(machine_expires_at.timestamp()),
+    )
 }
 
 /// Mint a workspace-write token that names the user the origin should
@@ -79,7 +125,7 @@ pub fn mint_scoped_token_with_author(
     request: ScopedTokenRequest,
     author: Option<AuthorClaims>,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token_inner(config, request, None, None, None, None, author)
+    mint_scoped_token_inner(config, request, None, None, None, None, author, None)
 }
 
 pub fn mint_scoped_token_with_runtime_generation(
@@ -87,7 +133,16 @@ pub fn mint_scoped_token_with_runtime_generation(
     request: ScopedTokenRequest,
     runtime_generation: Option<Uuid>,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token_inner(config, request, runtime_generation, None, None, None, None)
+    mint_scoped_token_inner(
+        config,
+        request,
+        runtime_generation,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Mint a runtime-scoped token with controller-attested collaborative browser
@@ -110,6 +165,7 @@ pub fn mint_scoped_token_with_browser_actor(
         actor_label,
         browser_session_id,
         author,
+        None,
     )
 }
 
@@ -132,6 +188,7 @@ pub fn mint_scoped_token_expires_no_later_than(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -143,6 +200,7 @@ fn mint_scoped_token_inner(
     actor_label: Option<String>,
     browser_session_id: Option<String>,
     author: Option<AuthorClaims>,
+    machine_expires_at: Option<i64>,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
     let private_key_pem = config
         .origin_token_private_key
@@ -205,6 +263,7 @@ fn mint_scoped_token_inner(
         claims: &claims,
         author_name: author.as_ref().map(|author| author.name.as_str()),
         author_email: author.as_ref().map(|author| author.email.as_str()),
+        machine_expires_at,
     };
     let token = encode(&header, &signed, &encoding_key)
         .map_err(|error| internal_error(format!("failed to sign access token: {error}")))?;
@@ -224,6 +283,28 @@ pub fn decode_scoped_token(
     token: &str,
     token_label: &str,
 ) -> Result<AccessTokenClaims, (StatusCode, Json<ApiError>)> {
+    decode_verified_scoped_token(config, token, token_label)
+}
+
+/// [`decode_scoped_token`], with the controller-only claims too.
+pub fn decode_scoped_token_in_full(
+    config: &AppConfig,
+    token: &str,
+    token_label: &str,
+) -> Result<DecodedScopedToken, (StatusCode, Json<ApiError>)> {
+    let decoded: DecodedScopedTokenClaims =
+        decode_verified_scoped_token(config, token, token_label)?;
+    Ok(DecodedScopedToken {
+        claims: decoded.claims,
+        machine_expires_at: decoded.machine_expires_at,
+    })
+}
+
+fn decode_verified_scoped_token<T: serde::de::DeserializeOwned>(
+    config: &AppConfig,
+    token: &str,
+    token_label: &str,
+) -> Result<T, (StatusCode, Json<ApiError>)> {
     let decoding_source = config
         .origin_token_public_key
         .as_ref()
@@ -240,12 +321,11 @@ pub fn decode_scoped_token(
     validation.validate_exp = true;
     validation.validate_aud = false;
 
-    let token_data = decode::<AccessTokenClaims>(token, &decoding_key, &validation).map_err(
-        |error| match error.kind() {
+    let token_data =
+        decode::<T>(token, &decoding_key, &validation).map_err(|error| match error.kind() {
             JwtErrorKind::ExpiredSignature => unauthorized(format!("{token_label} expired")),
             _ => unauthorized(format!("invalid {token_label}")),
-        },
-    )?;
+        })?;
 
     Ok(token_data.claims)
 }
@@ -333,6 +413,59 @@ mod tests {
         assert_eq!(
             claims.runtime_generation.as_deref(),
             Some(runtime_generation.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn a_machine_token_carries_its_expiry_and_never_outlives_it() {
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "scoped-token-machine-expiry",
+        );
+        let generation = Uuid::new_v4();
+        let machine_expires_at = Utc::now() + ChronoDuration::seconds(1800);
+        let minted = mint_runtime_machine_token(
+            &config,
+            request(3600),
+            Some(generation),
+            machine_expires_at,
+        )
+        .expect("mint a machine token");
+        let decoded = decode_scoped_token_in_full(&config, &minted.token, "machine token")
+            .expect("decode a machine token in full");
+        assert_eq!(
+            decoded.machine_expires_at,
+            Some(machine_expires_at.timestamp())
+        );
+        assert!(decoded.claims.exp <= machine_expires_at.timestamp());
+        assert_eq!(
+            signed_payload(&minted.token)["machine_expires_at"],
+            serde_json::json!(machine_expires_at.timestamp())
+        );
+        // The shared claims read the same either way.
+        let claims = decode_scoped_token(&config, &minted.token, "machine token")
+            .expect("decode a machine token");
+        assert_eq!(claims, decoded.claims);
+        assert_eq!(
+            claims.runtime_generation.as_deref(),
+            Some(generation.to_string().as_str())
+        );
+
+        // Every other token carries none.
+        let ordinary =
+            mint_scoped_token_with_runtime_generation(&config, request(600), Some(generation))
+                .expect("mint an ordinary token");
+        assert!(signed_payload(&ordinary.token)
+            .get("machine_expires_at")
+            .is_none());
+        let decoded = decode_scoped_token_in_full(&config, &ordinary.token, "ordinary token")
+            .expect("decode an ordinary token in full");
+        assert_eq!(decoded.machine_expires_at, None);
+        assert_eq!(
+            decoded.claims,
+            decode_scoped_token(&config, &ordinary.token, "ordinary token")
+                .expect("decode an ordinary token")
         );
     }
 

@@ -758,6 +758,49 @@ pub fn managed_ai_credential_id() -> Uuid {
     Uuid::from_u128(0x4d41_4e41_4745_4441_8949_4e53_5441_4659)
 }
 
+/// The default of `SELF_HOSTED_MACHINE_LIFETIME_SECONDS`: seven days.
+pub const DEFAULT_SELF_HOSTED_MACHINE_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
+/// The longest `SELF_HOSTED_MACHINE_LIFETIME_SECONDS` accepted: 365 days.
+pub const MAX_SELF_HOSTED_MACHINE_LIFETIME_SECONDS: i64 = 365 * 24 * 60 * 60;
+/// The shortest renewed runtime token, which `crate::runtime::register` mints
+/// with max(`AGENT_TOKEN_TTL_SECONDS`, this).
+pub const RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS: i64 = 3600;
+
+/// Read `SELF_HOSTED_MACHINE_LIFETIME_SECONDS`: how long a person's private
+/// self-hosted machine keeps renewing its credentials after its runtime token
+/// was minted. Unset or blank means seven days, or twice the renewed runtime
+/// token's lifetime (max(`AGENT_TOKEN_TTL_SECONDS`, an hour)) when that is
+/// longer, so an upgrade never fails to start. A set value must be a whole
+/// number of seconds, at most 365 days and at least that twice, because
+/// renewal stops once a renewed token would outlive it; anything else fails
+/// startup rather than quietly running with a lifetime nobody chose.
+pub fn parse_self_hosted_machine_lifetime_seconds(
+    raw: Option<&str>,
+    agent_token_ttl_seconds: i64,
+) -> anyhow::Result<i64> {
+    let renewed_ttl = agent_token_ttl_seconds.max(RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS);
+    let minimum = renewed_ttl.saturating_mul(2);
+    let lifetime = match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => return Ok(DEFAULT_SELF_HOSTED_MACHINE_LIFETIME_SECONDS.max(minimum)),
+        Some(value) => value.parse::<i64>().map_err(|_| {
+            anyhow::anyhow!(
+                "SELF_HOSTED_MACHINE_LIFETIME_SECONDS must be a whole number of seconds"
+            )
+        })?,
+    };
+    if lifetime > MAX_SELF_HOSTED_MACHINE_LIFETIME_SECONDS {
+        anyhow::bail!(
+            "SELF_HOSTED_MACHINE_LIFETIME_SECONDS must be at most {MAX_SELF_HOSTED_MACHINE_LIFETIME_SECONDS} (365 days)"
+        );
+    }
+    if lifetime < minimum {
+        anyhow::bail!(
+            "SELF_HOSTED_MACHINE_LIFETIME_SECONDS must be at least {minimum}: twice the renewed runtime token's lifetime, max(AGENT_TOKEN_TTL_SECONDS, 3600)"
+        );
+    }
+    Ok(lifetime)
+}
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub port: u16,
@@ -783,6 +826,12 @@ pub struct AppConfig {
     pub proxy_credential_lease_token: Option<String>,
     pub supabase_service_role_key: Option<String>,
     pub agent_token_ttl_seconds: i64,
+    /// How long, in seconds, a private self-hosted machine of a person keeps
+    /// renewing its credentials after its runtime token was minted
+    /// (`SELF_HOSTED_MACHINE_LIFETIME_SECONDS`, see
+    /// [`parse_self_hosted_machine_lifetime_seconds`]). Registration stops
+    /// renewing once a renewed token would outlive it.
+    pub self_hosted_machine_lifetime_seconds: i64,
     pub user_token_ttl_seconds: i64,
     pub user_token_secret: String,
     /// PEM encoded Ed25519 private key for origin access token signing.
@@ -1480,6 +1529,12 @@ impl AppConfig {
             .and_then(|raw| raw.parse::<i64>().ok())
             .filter(|ttl| *ttl > 0)
             .unwrap_or(3600);
+        let self_hosted_machine_lifetime_seconds = parse_self_hosted_machine_lifetime_seconds(
+            std::env::var("SELF_HOSTED_MACHINE_LIFETIME_SECONDS")
+                .ok()
+                .as_deref(),
+            agent_token_ttl_seconds,
+        )?;
         let user_token_ttl_seconds = std::env::var("USER_TOKEN_TTL_SECONDS")
             .ok()
             .and_then(|raw| raw.parse::<i64>().ok())
@@ -1916,6 +1971,7 @@ impl AppConfig {
             proxy_credential_lease_token,
             supabase_service_role_key,
             agent_token_ttl_seconds,
+            self_hosted_machine_lifetime_seconds,
             user_token_ttl_seconds,
             user_token_secret,
             origin_token_private_key,
@@ -2144,6 +2200,32 @@ mod tests {
     use uuid::Uuid;
 
     const STRONG_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn a_machine_lifetime_defaults_to_a_week_and_refuses_one_nobody_chose() {
+        use super::{
+            parse_self_hosted_machine_lifetime_seconds as parse,
+            DEFAULT_SELF_HOSTED_MACHINE_LIFETIME_SECONDS as DEFAULT,
+            MAX_SELF_HOSTED_MACHINE_LIFETIME_SECONDS as MAX,
+        };
+        assert_eq!(DEFAULT, 7 * 24 * 60 * 60);
+        assert_eq!(parse(None, 3600).unwrap(), DEFAULT);
+        assert_eq!(parse(Some("  "), 3600).unwrap(), DEFAULT);
+        assert_eq!(parse(Some(" 7200 "), 3600).unwrap(), 7200);
+        assert_eq!(parse(Some(&MAX.to_string()), 3600).unwrap(), MAX);
+        // At least twice the renewed token's hour, or its longer agent TTL.
+        assert!(parse(Some("7199"), 3600).is_err());
+        assert!(parse(Some("7199"), 300).is_err());
+        assert!(parse(Some("7200"), 7200).is_err());
+        assert_eq!(parse(Some("14400"), 7200).unwrap(), 14400);
+        // Unset, it grows to fit a long agent TTL rather than failing startup.
+        let five_days = 5 * 24 * 60 * 60;
+        assert_eq!(parse(None, five_days).unwrap(), 2 * five_days);
+        assert!(parse(Some(&DEFAULT.to_string()), five_days).is_err());
+        for invalid in ["-1", "0", "7d", "1e9", &(MAX + 1).to_string()] {
+            assert!(parse(Some(invalid), 3600).is_err(), "{invalid}");
+        }
+    }
 
     fn tunnel_settings(value: &str) -> super::PreviewSettings {
         super::PreviewSettings::from_values(None, None, None, Some(value))
