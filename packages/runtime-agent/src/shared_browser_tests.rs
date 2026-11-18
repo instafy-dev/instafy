@@ -922,6 +922,11 @@ const makePage = (targetId, opened = null) => {
     fill: async (text) => {
       typedText = text;
     },
+    // A type step ends on a key press: the last character typed after the rest
+    // is set.
+    type: async (text) => {
+      typedText += text;
+    },
     // What the field holds once a step typed into it: "field-reformats" is a
     // phone field that formats the digits typed, "field-empties" a page that
     // clears what was typed, and "editable-area" an editable element that is
@@ -986,7 +991,9 @@ const makePage = (targetId, opened = null) => {
               mode === "carousel-offer-next"
             ? "Red mug Add to cart" : "Blue mug Add to cart" }
           : controlsFor(targetId)[ordinal],
-    click: async () => {
+    // A trial click (a plain link's look before its click) clicks nothing.
+    click: async (options) => {
+      if (options && options.trial === true) return;
       if (clickLogPath) fs.appendFileSync(clickLogPath, `${ordinal}\n`);
       return handle.click();
     },
@@ -14053,6 +14060,16 @@ fn a_covered_click_is_refused_at_once_in_words() {
         assert!(started.elapsed() < Duration::from_secs(5), "{mode} waited");
         let stderr = failure_of(&output);
         assert!(stderr.contains(words), "{mode}: {stderr}");
+        // The turn's findings read a cover only the browser can say from these words.
+        assert_eq!(
+            crate::shared_browser_activity::step_stop(
+                false,
+                Some(&json!({ "error": { "reason": stderr } })),
+                None
+            ),
+            Some("covered"),
+            "{mode}"
+        );
         // A cookie notice is never the person's step: no cover's words send
         // the turn to pause on it.
         assert!(!stderr.contains("request_human_input"), "{stderr}");
@@ -14085,17 +14102,19 @@ fn routine_click(fixture: &EmbeddedControllerFixture, mode: &str, body: &str) ->
 
 /// Playwright's own errors carry a call log of every retry, in terminal colours and naming the
 /// page's markup. A failed step keeps only its first line, and an action Playwright gave up
-/// waiting on says so in words.
+/// waiting on says so in words, which the turn's findings read as a step that timed out.
 #[test]
 fn a_failed_step_never_carries_playwrights_call_log() {
-    for (mode, words) in [
+    for (mode, words, stop) in [
         (
             "click-playwright-log",
             "Shared Browser command failed: elementHandle.click: Element is not attached to the DOM\n",
+            None,
         ),
         (
             "click-times-out",
             "Shared Browser command failed: The page did not take this step in time, so it may not have happened. Take a fresh snapshot to see the page as it is now.\n",
+            Some("timed-out"),
         ),
     ] {
         let fixture = EmbeddedControllerFixture::new();
@@ -14103,6 +14122,15 @@ fn a_failed_step_never_carries_playwrights_call_log() {
         let body = json!({ "index": 0, "snapshotId": snapshot["snapshotId"] }).to_string();
         let stderr = failure_of(&routine_click(&fixture, mode, &body));
         assert!(stderr.contains(words), "{mode}: {stderr}");
+        assert_eq!(
+            crate::shared_browser_activity::step_stop(
+                false,
+                Some(&json!({ "error": { "reason": stderr } })),
+                None
+            ),
+            stop,
+            "{mode}"
+        );
         for raw in [
             "Call log",
             "intercepts pointer events",

@@ -955,12 +955,21 @@ pub struct CodexRunOutput {
 /// The addresses a run's own browser steps tried (`CodexRunOutput::browser_tried`), and whether
 /// those are all of them: a step that pressed a control of a page reading the run was not given
 /// may have tried an address the run cannot name. And where each open's tab ended for the
-/// address it asked for (`shared_browser_activity::step_ended_at`).
+/// address it asked for (`shared_browser_activity::step_ended_at`), and what only the browser
+/// can say stopped a step (`shared_browser_activity::step_stop`), at each address the step tried
+/// or its tab was on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BrowserTried {
     addresses: Vec<String>,
     one_not_known: bool,
     ended: Vec<(String, String)>,
+    /// Each such stop with an address it was given at, or none when the step's address was not
+    /// known.
+    stops: Vec<(String, Option<String>)>,
+    /// Whether a Shared Browser step answered in the run, whose stops are read from its words.
+    stepped: bool,
+    /// Whether a step of another browser answered, which says its stops in words of its own.
+    stops_not_known: bool,
 }
 
 impl BrowserTried {
@@ -981,6 +990,23 @@ impl BrowserTried {
         &self.ended
     }
 
+    /// The addresses at which the run's steps were told `stop`, a stop only the browser can say
+    /// (`shared_browser_activity::step_stop`): none when no step was. None when that is not
+    /// known: no Shared Browser step answered, a step of another browser did, or a step was
+    /// told it where its address was not known.
+    pub fn stops_given(&self, stop: &str) -> Option<Vec<&str>> {
+        if !self.stepped || self.stops_not_known {
+            return None;
+        }
+        let mut given = Vec::new();
+        for (said, address) in &self.stops {
+            if said == stop {
+                given.push(address.as_deref()?);
+            }
+        }
+        Some(given)
+    }
+
     /// These and the ones another pass of the same turn tried.
     pub fn with(&self, other: &Self) -> Self {
         let mut all = self.clone();
@@ -991,6 +1017,11 @@ impl BrowserTried {
         for (asked, ended) in &other.ended {
             all.keep_ended(asked.clone(), ended.clone());
         }
+        for (stop, address) in &other.stops {
+            all.keep_stop(stop, address.clone());
+        }
+        all.stepped |= other.stepped;
+        all.stops_not_known |= other.stops_not_known;
         all
     }
 
@@ -1006,14 +1037,41 @@ impl BrowserTried {
             self.ended.push(pair);
         }
     }
+
+    pub(crate) fn keep_stop(&mut self, stop: &str, address: Option<String>) {
+        let pair = (stop.to_string(), address);
+        if !self.stops.contains(&pair) {
+            self.stops.push(pair);
+        }
+    }
+
+    /// A Shared Browser step answered; with `stop`, the stop it was told, at `addresses` (the
+    /// ones it tried and the page its tab was on before it), or where its address was not known
+    /// when it names none.
+    pub(crate) fn keep_step(&mut self, stop: Option<&str>, addresses: Vec<String>) {
+        self.stepped = true;
+        let Some(stop) = stop else {
+            return;
+        };
+        if addresses.is_empty() {
+            self.keep_stop(stop, None);
+        }
+        for address in addresses {
+            self.keep_stop(stop, Some(address));
+        }
+    }
+
+    /// A step of a browser that says its stops in words of its own answered.
+    pub(crate) fn stops_not_read(&mut self) {
+        self.stops_not_known = true;
+    }
 }
 
 impl From<Vec<String>> for BrowserTried {
     fn from(addresses: Vec<String>) -> Self {
         Self {
             addresses,
-            one_not_known: false,
-            ended: Vec::new(),
+            ..Self::default()
         }
     }
 }
@@ -5357,6 +5415,9 @@ pub(crate) struct CodexEventStreamAdapter {
     /// (`shared_browser_activity::step_page_links`), for the address of one a step presses;
     /// never projected.
     browser_links: Option<crate::shared_browser_activity::PageLinks>,
+    /// The page the browser last said a step's tab was on, for a later step whose answer names
+    /// none (a failed click); never projected.
+    browser_page: Option<String>,
     /// The run's workspace folder, as given and with its links followed. A command's folder is
     /// projected as a path of it ([`Self::command_folder`]), never as the folder's own path on
     /// this machine.
@@ -5394,6 +5455,7 @@ impl CodexEventStreamAdapter {
             browser_not_given: Vec::new(),
             browser_tried: BrowserTried::default(),
             browser_links: None,
+            browser_page: None,
             workspace: None,
         }
     }
@@ -5429,6 +5491,44 @@ impl CodexEventStreamAdapter {
             crate::shared_browser_activity::step_tried_addresses(tool, arguments, payload)
         {
             self.browser_tried.keep(address);
+        }
+    }
+
+    /// Keeps what only the browser can say stopped a Shared Browser step
+    /// (`shared_browser_activity::step_stop`), at the addresses the step tried, the link it
+    /// pressed (by the reading it pressed it on) and the page its tab was on before it, and the
+    /// page the browser said its tab is on now, for the next step's. A step of another browser
+    /// says its stops in words of its own, so the run's are not known.
+    fn keep_browser_stop(
+        &mut self,
+        server: &str,
+        tool: &str,
+        arguments: Option<&JsonValue>,
+        succeeded: bool,
+        payload: Option<&JsonValue>,
+        terminal_code: Option<&str>,
+    ) {
+        use crate::shared_browser_activity::{
+            PressedLink, pressed_link, step_stop, step_tried_addresses,
+        };
+        if !server.eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME) {
+            self.browser_tried.stops_not_read();
+            return;
+        }
+        let stop = step_stop(succeeded, payload, terminal_code);
+        let mut addresses = Vec::new();
+        if stop.is_some() {
+            addresses.extend(step_tried_addresses(tool, arguments, payload));
+            if let PressedLink::Address(link) =
+                pressed_link(tool, arguments, self.browser_links.as_ref())
+            {
+                addresses.push(link);
+            }
+            addresses.extend(self.browser_page.clone());
+        }
+        self.browser_tried.keep_step(stop, addresses);
+        if let Some(page) = step_tried_addresses(tool, None, payload).pop() {
+            self.browser_page = Some(page);
         }
     }
 
@@ -5854,6 +5954,17 @@ impl CodexEventStreamAdapter {
                     {
                         self.browser_tried.keep_ended(asked, ended);
                     }
+                    // What only the browser can say stopped the step, at the addresses it tried,
+                    // the link it pressed and the page its tab was on: no finding of the turn
+                    // says a page stopped it so where no step was told so.
+                    self.keep_browser_stop(
+                        &tool_call.invocation.server,
+                        &tool_call.invocation.tool,
+                        tool_call.invocation.arguments.as_ref(),
+                        tool_call.is_success(),
+                        payload,
+                        terminal_code,
+                    );
                     // The links of the page it read, for a later step that presses one.
                     if let Some(links) = crate::shared_browser_activity::step_page_links(payload) {
                         self.browser_links = Some(links);
@@ -13056,6 +13167,117 @@ required = true
                 "https://reviews.example/laptop-13",
             ]
         );
+    }
+
+    /// What only the browser can say stopped a Shared Browser step (it didn't answer in time, or
+    /// something covered its control) is kept, unprojected, at the addresses the step tried, the
+    /// link it pressed and the page its tab was on before it, which a failed click names none of:
+    /// the turn's findings say a page stopped it so only where a step was told so. A step told
+    /// neither keeps nothing but that a step answered, and one of the Personal Browser, which
+    /// says its stops in words of its own, makes them not known.
+    #[test]
+    fn the_adapter_keeps_where_a_step_was_told_a_stop_only_the_browser_can_say() {
+        let event = |server: &str, tool: &str, arguments: JsonValue, is_error: bool, structured: JsonValue| Event {
+            id: "evt_mcp_end".to_string(),
+            msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                call_id: format!("call_{tool}"),
+                invocation: McpInvocation {
+                    server: server.to_string(),
+                    tool: tool.to_string(),
+                    arguments: Some(arguments),
+                },
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                duration: Duration::from_millis(1),
+                result: Ok(CallToolResult {
+                    content: vec![json!({"type": "text", "text": "step"})],
+                    structured_content: Some(structured),
+                    is_error: Some(is_error),
+                    meta: None,
+                }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let shared = "instafy_shared_browser";
+        let listing = "https://visit.example/museum";
+        let hours = "https://museum.example/opening-hours";
+        let planner = "https://planner.example/explore";
+        let reading = json!({
+            "snapshotId": "reading-1",
+            "url": listing,
+            "activity": {"step": "navigate", "url": listing},
+            "interactiveElements": [{"index": 0, "label": "Opening hours", "href": hours}],
+        });
+        let mut adapter = CodexEventStreamAdapter::default();
+        adapter.collect(&event(shared, "navigate", json!({"url": listing}), false, reading));
+        assert_eq!(adapter.browser_tried().stops_given("timed-out"), Some(Vec::new()));
+        // A click on the listing's link the page did not take in time: its answer names no
+        // page, so the page its tab was on and the link it pressed are where it timed out.
+        adapter.collect(&event(
+            shared,
+            "click",
+            json!({"index": 0, "snapshotId": "reading-1"}),
+            true,
+            json!({"error": {"reason": "The page did not take this step in time, so it may not have happened. Take a fresh snapshot to see the page as it is now."}}),
+        ));
+        assert_eq!(
+            adapter.browser_tried().stops_given("timed-out"),
+            Some(vec![hours, listing])
+        );
+        // A step whose time ran out, on the planner it opened.
+        adapter.collect(&event(
+            shared,
+            "navigate",
+            json!({"url": planner}),
+            false,
+            json!({"stepTimedOut": true, "activity": {"step": "snapshot", "url": planner}}),
+        ));
+        assert_eq!(
+            adapter.browser_tried().stops_given("timed-out"),
+            Some(vec![hours, listing, planner])
+        );
+        // A key the page took, which reads as before, says no stop.
+        adapter.collect(&event(
+            shared,
+            "press",
+            json!({"index": 4, "snapshotId": "reading-2", "key": "Tab"}),
+            false,
+            json!({"done": "Pressed Tab. The page still reads as it did before this step, 6 seconds after it: this result is the page as it is now.", "activity": {"step": "press", "url": planner}}),
+        ));
+        assert_eq!(adapter.browser_tried().stops_given("covered"), Some(Vec::new()));
+        // A click a cookie notice covered, on the planner.
+        adapter.collect(&event(
+            shared,
+            "click",
+            json!({"index": 7, "snapshotId": "reading-2"}),
+            true,
+            json!({"error": {"reason": "A cookie notice covers this page, and the browser could not decline it, so nothing was clicked."}}),
+        ));
+        assert_eq!(adapter.browser_tried().stops_given("covered"), Some(vec![planner]));
+        // None of it is projected.
+        let projected = adapter.collect(&event(
+            shared,
+            "snapshot",
+            json!({}),
+            false,
+            json!({"activity": {"step": "snapshot", "url": planner}}),
+        ));
+        assert!(!format!("{projected:?}").contains("timed-out"), "{projected:?}");
+        // A step of the Personal Browser says its stops in words of its own.
+        adapter.collect(&event(
+            "instafy_personal_browser",
+            "click",
+            json!({"index": 0}),
+            true,
+            json!({"error": {"reason": "Timed out."}}),
+        ));
+        assert_eq!(adapter.browser_tried().stops_given("timed-out"), None);
     }
 
     /// The addresses the browser refused to open because no message or page gave them, kept
