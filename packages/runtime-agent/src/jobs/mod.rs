@@ -22143,6 +22143,12 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                         }
                     }
                     "reasoning" => {
+                        // A summary streams in as fragments, one `item.updated` per delta, and
+                        // then comes once whole as `item.completed`. A row per fragment made one
+                        // summary ~60 rows, posted one at a time ahead of the reply.
+                        if event_type == "item.updated" {
+                            continue;
+                        }
                         let status = item
                             .get("status")
                             .and_then(JsonValue::as_str)
@@ -41162,6 +41168,112 @@ mod tests {
             metadata.get("status").and_then(JsonValue::as_str),
             Some("in_progress")
         );
+    }
+
+    /// Codex streams a reasoning summary as deltas (`ReasoningContentDelta`) and then sends it
+    /// whole (`AgentReasoning`). Each delta was a reasoning row of its own: on Nov 18 one summary
+    /// of a "hello" turn made 61 rows of fragments ("schema", "JSON"), posted one at a time, and
+    /// the reply waited 41 s behind them. The chat gets the summary once, whole, then the reply.
+    #[test]
+    fn a_streamed_reasoning_summary_reaches_the_chat_as_one_row() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::{
+            AgentMessageEvent, AgentReasoningEvent, Event, EventMsg, ReasoningContentDeltaEvent,
+        };
+
+        let fragments = [
+            "**Reading",
+            " the schema**",
+            "\n\nThe JSON",
+            " needs a summary.",
+        ];
+        let summary = fragments.concat();
+        let mut turn: Vec<EventMsg> = fragments
+            .iter()
+            .map(|delta| {
+                EventMsg::ReasoningContentDelta(ReasoningContentDeltaEvent {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    item_id: "rs_1".to_string(),
+                    delta: delta.to_string(),
+                    summary_index: 0,
+                })
+            })
+            .collect();
+        turn.push(EventMsg::AgentReasoning(AgentReasoningEvent {
+            text: summary.clone(),
+        }));
+        turn.push(EventMsg::AgentMessage(AgentMessageEvent {
+            message: "Hello! What are we building?".to_string(),
+            phase: None,
+            memory_citation: None,
+            delivery: None,
+            questions: None,
+        }));
+
+        let mut adapter = CodexEventStreamAdapter::default();
+        let (progress, mut receiver) = test_progress();
+        let mut steps = StepStream::of(&progress);
+        let runtime_id = Uuid::new_v4();
+        let mut events = Vec::new();
+        for msg in turn {
+            for event in adapter.collect(&Event {
+                id: "turn-1".to_string(),
+                msg,
+            }) {
+                stream_turn_event(
+                    &event,
+                    None,
+                    Some(&mut steps),
+                    &extract_codex_messages,
+                    &runtime_id,
+                    Uuid::new_v4(),
+                );
+                events.push(event);
+            }
+        }
+        // The run log still holds every delta; only the chat leaves them out.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "item.updated")
+                .count(),
+            fragments.len(),
+            "{events:?}"
+        );
+
+        let mut sent = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            sent.push(message);
+        }
+        let rows = sent
+            .iter()
+            .map(|message| {
+                (
+                    message.message_type.as_deref().unwrap_or_default(),
+                    message.content.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                ("reasoning", summary.as_str()),
+                ("status", "Hello! What are we building?"),
+            ],
+            "{sent:?}"
+        );
+        assert_eq!(
+            sent[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("status"))
+                .and_then(JsonValue::as_str),
+            Some("completed")
+        );
+        assert!(steps.all_streamed());
+        // The turn's final list is the same two rows, so nothing is posted again at its end.
+        assert_eq!(extract_codex_messages(&events).len(), sent.len());
     }
 
     #[test]

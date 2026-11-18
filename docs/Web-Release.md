@@ -89,8 +89,8 @@ Do not enter any secret until steps 1 and 2 are done and read back.
 
 Browser configuration comes from repository variables `VITE_SUPABASE_URL`,
 `VITE_SUPABASE_ANON_KEY` (publishable key only), `VITE_CONTROLLER_URL`, and the
-optional `VITE_REQUIRE_AUTH`, `VITE_USE_WEBCONTAINER` and
-`VITE_INSTAFY_ENABLE_GOOGLE_AUTH` (kill switch, default `1`).
+optional `VITE_REQUIRE_AUTH` and `VITE_INSTAFY_ENABLE_GOOGLE_AUTH` (kill switch,
+default `1`).
 
 ## Stale, duplicate and failed publications
 
