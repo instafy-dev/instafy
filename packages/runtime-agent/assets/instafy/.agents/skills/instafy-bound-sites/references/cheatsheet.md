@@ -225,7 +225,9 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
 - `url` is the page you read and `date` the day you read it: each value cites them ("checked 17 Oct on
   fleetfeet.com ↗"; a price "seen 17 Oct"); add `asof` when the source dates the fact itself
   (shown instead: "seen 5 Aug"; a price over 30 days old also says "may have changed"), so an old list price never
-  looks fresh. A store known to block checks gets `"readable": false` from the start (no button that will fail).
+  looks fresh. A fact only a web search gave, its page not read, keeps `"viewer": "provider search"`: it reads "from
+  a web search, 17 Oct · fleetfeet.com ↗", and no limit or sort counts it. A store known to block checks gets
+  `"readable": false` from the start (no button that will fail).
 - When every price or most of a column comes from one page on one date, the starters say it once under the list.
 - No value is a dash, "n/a" or "?": leave out `v` and say why in `note` ("price not found on maker.com's page");
   the page reads "Unknown · why".

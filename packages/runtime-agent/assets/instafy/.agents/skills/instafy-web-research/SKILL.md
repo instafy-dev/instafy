@@ -15,10 +15,10 @@ Read permitted source content this turn; trace facts to their sources. Find page
 
 ## The AI's own web search
 
-With the AI's own web search, look things up by searching, then reading what it found; it uses no `instafy web` allowance.
+With the AI's own web search, search, then read what it found; it uses no `instafy web` allowance. Its text is what the search provider wrote, not a page you read.
 
 - When each search costs the person credits (this run's instructions say so), search only for what is fresh (news, today's prices or events, live status) or to find a page no source names; read a known official page with `instafy web read` instead. At most 2 searches a message, more only when the person asks for deeper research.
-- A search's own text that supports the exact claim counts as a read: cite its source page and keep its date. Search never proves live stock or prices. Don't read a page again only to check what search gave.
+- Search never proves live stock or prices.
 - News: each item's article date and the event's date; "today" and "last night" in the person's time zone; a status page "as of <time>"; a paywalled source says so.
 
 ## Readers
@@ -82,7 +82,7 @@ Use the first that can answer, then the next for what is left:
 - Reviews: search "<name> review", with the item's name as its official page gives it.
 - A `linkOnly` result keeps only its link and site name: give it to the person as a plain link, and never read or open it (Guided mode, above, for its site).
 - `no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources. Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.
-- No price on an item's pages: `instafy web search "<name> price" --json`, or `--chain reference-search` for shops' official sites; a shop restricted by workspace policy can use Guided mode.
+- No price on an item's pages: search "<name> price" (Finding sources), or `--chain reference-search` for shops' official sites; a shop restricted by workspace policy can use Guided mode.
 
 ## How much to read
 
@@ -112,8 +112,8 @@ Search, in a site's own search box too, only with words from the person's reques
 
 ## Citing
 
-- Show "checked 26 Oct on <host>" next to the fact, linked to the page.
-- A price is the amount and currency, "seen 26 Oct", and a link to the shop's or operator's page. Never call it live or current.
+- From a page read: "checked 26 Oct on <host>", linked to it; from a search's text: "a web search on 26 Oct found: … (<source> ↗, <article date>)".
+- A price read on a page is the amount and currency, "seen 26 Oct", and a link to the shop's or operator's page. Never call it live or current.
 - Link out instead of copying listings, reviews, photos or descriptions: a short fact in your own words plus the link.
 - Keep the attribution and licence a source states (OpenStreetMap: "© OpenStreetMap contributors", ODbL; Wikipedia and Wikivoyage: CC BY-SA).
 
@@ -125,9 +125,9 @@ Search, in a site's own search box too, only with words from the person's reques
 - Prices are stored with "seen <date>", never as live prices.
 - Shopping and trip items link to the shop's or operator's page. Booking and buying happen there, by the person.
 - If a workspace policy restricts reuse, keep only the permitted name and link in published output. A user-sent page does not waive that policy.
-- Nothing from a search's result list is kept: no title or snippet, and a link only to a page you read. A source blocked by an explicit workspace policy may be offered as a link without claiming its content was read.
+- Nothing from a search's result list is kept: no title or snippet, and a link only to a page you read, or one the reader refused (its fact keeps viewer `provider search`). A source blocked by an explicit workspace policy may be offered as a link without claiming its content was read.
 - Never put signed-in-only content, passwords, keys, tokens or personal details into pages/datasets.
 
 ## Reply
 
-Lead with the answer, each fact with its "checked" note; then what was not read and why, and what is not checked.
+Lead with the answer, each fact with its note and every link you say you give; then what was not read and why, and what is not checked.
