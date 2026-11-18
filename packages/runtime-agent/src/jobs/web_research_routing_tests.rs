@@ -1679,8 +1679,14 @@ fn a_step_only_the_person_may_do_is_highlighted_or_said_with_the_pages_link() {
     let highlighted = "On a page you may use, highlight it with `request_human_input` and end the turn; they choose Let Octo continue.";
     let said = "Else, as after a bot check or on a link-only site (take no step there), say what to do and where (\"press + beside Adult\", the box a `[frame not read]` marks) with the page's link, never that it isn't accessible.";
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
-    assert!(carried.contains(&format!("{highlighted} {said}")), "{carried}");
-    for gone in ["say it in words and give its link", "Say exactly what to do"] {
+    assert!(
+        carried.contains(&format!("{highlighted} {said}")),
+        "{carried}"
+    );
+    for gone in [
+        "say it in words and give its link",
+        "Say exactly what to do",
+    ] {
         assert!(!flat(BROWSER_SKILL).contains(gone), "{gone}");
     }
     // The reading's own marker, with the frame's site and without it.
