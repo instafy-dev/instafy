@@ -331,6 +331,10 @@ const COMMENTARY_ONLY_FINAL_ASSISTANT_MESSAGE_SUMMARY_PREFIX: &str = "Codex auto
 pub(crate) enum CodexFallbackSummaryKind {
     MissingFinalAssistantMessage,
     InvalidFinalAssistantMessageJson,
+    /// The answer is only the decline word (`NO_RESPONSE`) on a turn the controller did not let
+    /// decline (`jobs::declined_a_turn_that_needs_an_answer`). Its summary is the model's own, so
+    /// `classify_internal_codex_fallback_summary` never returns it.
+    DeclinedATurnThatNeedsAnAnswer,
 }
 
 pub(crate) fn classify_internal_codex_fallback_summary(
