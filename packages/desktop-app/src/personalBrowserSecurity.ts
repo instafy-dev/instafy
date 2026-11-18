@@ -55,8 +55,6 @@ export function normalizePersonalBrowserKnownHosts(value: unknown): string[] {
   return hosts;
 }
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 export type PersonalBrowserBounds = {
   x: number;
   y: number;
@@ -246,13 +244,6 @@ export function normalizePersonalBrowserProfileKey(value: unknown): string {
     throw new Error("Personal Browser profile key must be between 1 and 512 characters.");
   }
   return normalized;
-}
-
-export function normalizePersonalBrowserProfileUserId(value: unknown): string {
-  if (typeof value !== "string" || !UUID_PATTERN.test(value.trim())) {
-    throw new Error("Personal Browser requires a valid profileUserId UUID.");
-  }
-  return value.trim().toLowerCase();
 }
 
 export function derivePersonalBrowserPartition(profileKey: unknown): string {

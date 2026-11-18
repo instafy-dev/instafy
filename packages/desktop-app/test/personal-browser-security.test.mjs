@@ -21,7 +21,6 @@ const {
   normalizePersonalBrowserKnownHosts,
   normalizePersonalBrowserPressKey,
   PERSONAL_BROWSER_APPROVAL_POLICY_VERSION,
-  normalizePersonalBrowserProfileUserId,
   normalizePersonalBrowserScroll,
   normalizePersonalBrowserUrl,
   readPersonalBrowserBearerToken,
@@ -278,15 +277,6 @@ test("Personal Browser partitions are persistent, deterministic hashes without r
   assert.equal(first.startsWith(PERSONAL_BROWSER_PARTITION_PREFIX), true);
   assert.equal(first.includes("user-123"), false);
   assert.match(first, /^persist:instafy-personal-[a-f0-9]{40}$/);
-});
-
-test("Personal Browser preload identity accepts only canonical UUID account identifiers", () => {
-  assert.equal(
-    normalizePersonalBrowserProfileUserId(" AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE "),
-    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-  );
-  assert.throws(() => normalizePersonalBrowserProfileUserId("user@example.test"));
-  assert.throws(() => normalizePersonalBrowserProfileUserId("../../another-partition"));
 });
 
 test("Personal Browser URL policy allows only credential-free http(s) and exact about:blank", () => {

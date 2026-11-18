@@ -1277,9 +1277,10 @@ pub(super) fn leave_out_addresses_never_opened(
 
 /// What the second pass of a browser turn whose findings go back to the building turn reads
 /// (`jobs::read_the_unread_pages`): only the pages its unread line named, as it wrote them,
-/// and to end as before, its missing line with them ([`MISSING_LINE`]). A page it read already is
-/// opened again only for a tab or link the line names on it, such as a product page's Specs tab
-/// ([`UNREAD_LINE`]). Its own unread line starts no third pass.
+/// and to end as before, its missing line with them ([`MISSING_LINE`]), which names each value
+/// still missing and so replaces the first pass's ([`add_the_second_pass`]). A page it read
+/// already is opened again only for a tab or link the line names on it, such as a product page's
+/// Specs tab ([`UNREAD_LINE`]). Its own unread line starts no third pass.
 pub(super) fn unread_pages_prompt(pages: &[String]) -> String {
     let named = serde_json::to_string(pages)
         .unwrap_or_default()
@@ -1294,7 +1295,12 @@ pub(super) fn unread_pages_prompt(pages: &[String]) -> String {
 /// both. Each pass's lines are its own: one that wrote none adds the pages its own steps opened
 /// (`opened`), by address ([`finding_lines_from_pages`]), as the end of a turn with none does, so
 /// no page it read is lost beside the other pass's lines; one that opened none either adds
-/// nothing. Its unread line is taken out like the first's.
+/// nothing. Its unread line is taken out like the first's. Its missing line names what is still
+/// missing after both passes ([`unread_pages_prompt`]), so the first's goes, and stays only when
+/// the second wrote none: kept beside it, a comparison's first pass named ten values missing, its
+/// second pass found most of them in the reviews it read and named the three still missing, and
+/// the build, told it didn't find twelve, printed values the second pass found as not found (a
+/// local test, Nov 17).
 pub(super) fn add_the_second_pass(summary: &mut String, answer: &str, opened: &[String]) {
     let mut answer = answer.to_string();
     take_unread_pages(&mut answer);
@@ -1308,8 +1314,11 @@ pub(super) fn add_the_second_pass(summary: &mut String, answer: &str, opened: &[
             None => return,
         },
     };
-    let (first_words, first_lines) =
+    let (mut first_words, first_lines) =
         split_findings(summary).unwrap_or_else(|| (summary.trim().to_string(), Vec::new()));
+    if words.lines().any(|line| missing_line(line).is_some()) {
+        take_missing_names(&mut first_words);
+    }
     let words = [first_words, words]
         .into_iter()
         .filter(|words| !words.is_empty())
@@ -3163,8 +3172,9 @@ mod tests {
     /// keeps it after the finding lines, in one line, where the controller reads it for the
     /// hand-back and the browser turns since, and a replay reads it. Its names are
     /// the turn's own line's alone: a fact that quotes such a line, or a finding line with a
-    /// `missing` key, names none. A line whose `missing` is no list of text names none, and a
-    /// second pass's line adds its names to the first's.
+    /// `missing` key, names none. A line whose `missing` is no list of text names none, and two
+    /// lines of one answer name each value once (a second pass's replaces the first's,
+    /// [`add_the_second_pass`]).
     #[test]
     fn a_missing_line_leaves_the_reply_for_the_note() {
         let hands_back = reading_the_note(browser_job(json!({
@@ -3209,7 +3219,7 @@ mod tests {
                 format!("{read}\n{stopped}\n{{\"missing\":[\"warranty\"]}}")
             );
         }
-        // Both passes' lines, each name once; a line whose names are no list of text names none
+        // Two lines, each name once; a line whose names are no list of text names none
         // and still leaves the reply.
         for (lines, expected) in [
             (
@@ -4507,6 +4517,131 @@ mod tests {
         let mut summary = first.clone();
         add_the_second_pass(&mut summary, "I couldn't open them.", &[]);
         assert_eq!(summary, first);
+    }
+
+    /// A second pass's missing line replaces the first's ([`add_the_second_pass`]): the build
+    /// after it is told it didn't find only what the second pass names still missing, as a replay
+    /// of the chat reads it, and every value either pass found reaches it as found. The first's
+    /// stays when the second wrote none, and one naming nothing leaves nothing.
+    #[test]
+    fn a_second_passs_missing_line_replaces_the_firsts() {
+        let first_missing = [
+            "Laptop 12 screen",
+            "Laptop 12 battery life",
+            "Laptop 12 weight",
+            "Laptop 13 screen",
+            "Laptop 13 battery life",
+            "Laptop 13 weight",
+            "Laptop 12 warranty",
+            "Laptop 13 warranty",
+            "Laptop 12 independent reviews (two)",
+            "Laptop 13 independent reviews (two)",
+        ];
+        let first = [
+            "Read 3 pages on maker.example.".to_string(),
+            r#"{"url": "https://maker.example/laptops", "title": "Laptops", "facts": ["Lists the Laptop 12 and the Laptop 13."]}"#.to_string(),
+            r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Price: 1,099 euros"]}"#.to_string(),
+            r#"{"url": "https://maker.example/laptop-13", "title": "Laptop 13", "facts": ["Price: 1,399 euros"]}"#.to_string(),
+            json!({ "missing": first_missing }).to_string(),
+            json!({ "unread": ["reviews.example's Laptops link on its home page"] }).to_string(),
+        ]
+        .join("\n");
+        // The second pass finds six of the ten in the reviews it reads, and one review of each.
+        let found = [
+            r#"{"url": "https://reviews.example/laptops", "title": "Laptop reviews", "facts": ["Links one review of the Laptop 12 and one of the Laptop 13."]}"#,
+            r#"{"url": "https://reviews.example/laptop-12", "title": "Laptop 12 review", "facts": ["Screen: 13.5-inch OLED", "Battery: up to 14 hours", "Weight: 1.3 kg"]}"#,
+            r#"{"url": "https://reviews.example/laptop-13", "title": "Laptop 13 review", "facts": ["Screen: 14-inch IPS", "Battery: up to 11 hours", "Weight: 1.5 kg"]}"#,
+        ]
+        .join("\n");
+        let still_missing = [
+            "Laptop 12 warranty",
+            "Laptop 13 warranty",
+            "a second independent review of each laptop",
+        ];
+        let hands_back = reading_the_note(browser_job(json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": true,
+        })));
+        // As the runtime ends the turn: its unread line out, the second pass's answer added, then
+        // the note the controller reads.
+        let note_after = |second: &str| {
+            let mut summary = first.clone();
+            assert_eq!(take_unread_pages(&mut summary).len(), 1);
+            add_the_second_pass(&mut summary, second, &[]);
+            let mut turn = execution(&summary);
+            move_findings_into_details(&hands_back, &mut turn);
+            assert_eq!(turn.summary, "");
+            turn.final_messages[0].content.clone()
+        };
+        // The build's hand-back, as the controller stamps it from the note: the findings, and the
+        // names of its missing line (runtime-controller `browser_hand_back::missing_from_reply`).
+        let section_of = |note: &str| {
+            let mut record = fixtures()["stampedRecord"].clone();
+            record["findings"] = finding_values(note)
+                .into_iter()
+                .map(|mut finding| {
+                    finding["readAt"] = json!("2026-10-26T09:30:00Z");
+                    finding["viewer"] = json!("Instafy's browser in the workspace");
+                    finding
+                })
+                .collect();
+            record["missing"] = json!(missing_names_in(note));
+            format_browser_hand_back_section(Some(&json!({ "browserHandBack": record })))
+                .expect("section")
+        };
+
+        let note = note_after(&format!(
+            "Read 3 pages on reviews.example.\n{found}\n{}\n{{\"unread\": []}}",
+            json!({ "missing": still_missing })
+        ));
+        assert_eq!(
+            note.lines()
+                .filter(|line| missing_line(line).is_some())
+                .count(),
+            1,
+            "{note}"
+        );
+        let data = fenced_data(&section_of(&note));
+        let not_found = json!([
+            "I didn't find Laptop 12 warranty",
+            "I didn't find Laptop 13 warranty",
+            "I didn't find a second independent review of each laptop",
+        ]);
+        assert_eq!(data["notFound"], not_found, "{note}");
+        // A replay of the chat reads the same.
+        assert_eq!(json!(not_found_of(&note)), not_found);
+        // Every value either pass found reaches the build, and none is one Octo didn't find.
+        let findings = data["findings"].to_string();
+        for fact in [
+            "Price: 1,099 euros",
+            "Price: 1,399 euros",
+            "Screen: 13.5-inch OLED",
+            "Battery: up to 11 hours",
+            "Weight: 1.5 kg",
+        ] {
+            assert!(findings.contains(fact), "{fact}: {findings}");
+        }
+        for value in ["screen", "battery", "weight", "price", "(two)"] {
+            assert!(
+                !data["notFound"].to_string().to_lowercase().contains(value),
+                "{value}: {}",
+                data["notFound"]
+            );
+        }
+
+        // A second pass that wrote no missing line leaves the first's.
+        let note = note_after(&format!("Read 3 pages on reviews.example.\n{found}"));
+        assert_eq!(missing_names_in(&note), first_missing);
+        // One that names nothing leaves nothing Octo didn't find.
+        let note = note_after(&format!(
+            "Read 3 pages on reviews.example.\n{found}\n{{\"missing\": []}}"
+        ));
+        assert!(missing_names_in(&note).is_empty(), "{note}");
+        assert!(
+            fenced_data(&section_of(&note)).get("notFound").is_none(),
+            "{note}"
+        );
     }
 
     /// A second pass that stopped for the person ends the turn with what they do next, and every

@@ -2273,7 +2273,9 @@ impl CodexClient {
             let _ = config.features.disable(Feature::MultiAgentV2);
             let _ = config.features.disable(Feature::Apps);
             let _ = config.features.disable(Feature::Plugins);
-            let _ = config.features.disable(Feature::CodexHooks);
+            // Hooks stay on: the hardened loader admits only managed ones, so the worker runs the
+            // guard that keeps Codex from starting `claude` (`harness_requirements`) and no hook
+            // the workspace or the person wrote.
             let _ = config.features.disable(Feature::PluginHooks);
             config
                 .permissions
@@ -7139,17 +7141,85 @@ const CLAUDE_REFUSAL_JUSTIFICATION: &str = "This runtime does not let an agent s
 const HARNESS_REQUIREMENTS_ID: &str = "instafy-runtime-agent";
 const HARNESS_REQUIREMENTS_NAME: &str = "Instafy runtime";
 
-/// The requirement as Codex's `requirements.toml` writes it: one `prefix_rule` on the program,
-/// forbidden, with every spelling of [`claude_program_spellings`] as the first token.
-fn harness_requirements_toml() -> String {
+/// The tool name Codex gives a command in its hook input (`exec_command`, a code-mode cell's
+/// included), which the guard's hook matches.
+const CLAUDE_GUARD_MATCHER: &str = "Bash";
+
+/// How long Codex waits for the guard's hook before it gives up on it, and lets the command run.
+/// The hook reads one command and answers in milliseconds.
+const CLAUDE_GUARD_TIMEOUT_SECONDS: u64 = 30;
+
+/// The program Codex's command hook starts, when not this process's own executable.
+static CLAUDE_GUARD_PROGRAM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Makes Codex's command hook start `program`, runtime-agent's own executable, rather than this
+/// process's. Only for a process that is not runtime-agent's executable, such as an integration
+/// test's, which does not know the hook's flag. The first call wins.
+#[doc(hidden)]
+pub fn use_claude_guard_program(program: PathBuf) {
+    let _ = CLAUDE_GUARD_PROGRAM.set(program);
+}
+
+/// The shell command Codex starts the guard's hook with ([`crate::codex_claude_guard`]): this
+/// runtime's own executable, quoted for the shell Codex runs hooks in, and the hook's flag.
+#[cfg(unix)]
+fn claude_guard_command() -> std::io::Result<String> {
+    let program = match CLAUDE_GUARD_PROGRAM.get() {
+        Some(program) => program.clone(),
+        None => std::env::current_exe()?,
+    };
+    let program = program
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("the runtime-agent executable's path is not UTF-8"))?;
+    Ok(claude_guard_command_for(program))
+}
+
+/// `program`, single-quoted for a POSIX shell, and the hook's flag.
+#[cfg(unix)]
+fn claude_guard_command_for(program: &str) -> String {
+    format!(
+        "'{}' {}",
+        program.replace('\'', "'\\''"),
+        crate::codex_claude_guard::HOOK_FLAG
+    )
+}
+
+/// Which loader a requirement is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HarnessLoader {
+    /// [`load_runtime_codex_config`] and its fallback.
+    Ordinary,
+    /// [`load_hardened_codex_config`], whose turns run no hook the workspace or the person wrote.
+    Hardened,
+}
+
+/// The requirement as Codex's `requirements.toml` writes it:
+/// - one `prefix_rule` on the program, forbidden, with every spelling of
+///   [`claude_program_spellings`] as the first token;
+/// - on Unix, the guard's `PreToolUse` hook on every command (`guard_command`), for the forms the
+///   rule cannot see ([`crate::codex_claude_guard`]);
+/// - for a hardened loader, `allow_managed_hooks_only`, so that its turns run that hook and no hook
+///   of the workspace's, the person's or a plugin's.
+fn harness_requirements_toml(guard_command: Option<&str>, loader: HarnessLoader) -> String {
     let spellings = claude_program_spellings()
         .iter()
         .map(|spelling| format!("\"{spelling}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    format!(
+    let mut requirements = String::new();
+    if loader == HarnessLoader::Hardened {
+        requirements.push_str("allow_managed_hooks_only = true\n\n");
+    }
+    requirements.push_str(&format!(
         "[[rules.prefix_rules]]\npattern = [{{ any_of = [{spellings}] }}]\ndecision = \"forbidden\"\njustification = \"{CLAUDE_REFUSAL_JUSTIFICATION}\"\n"
-    )
+    ));
+    if let Some(command) = guard_command {
+        let command = codex_config::TomlValue::String(command.to_string());
+        requirements.push_str(&format!(
+            "\n[[hooks.PreToolUse]]\nmatcher = \"{CLAUDE_GUARD_MATCHER}\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = {CLAUDE_GUARD_TIMEOUT_SECONDS}\n"
+        ));
+    }
+    requirements
 }
 
 /// Codex may not start the person's own `claude` (docs/Local-Engine-Turns.md, D22). A Codex turn
@@ -7173,48 +7243,59 @@ fn harness_requirements_toml() -> String {
 /// - each such command inside a `bash -lc`, `zsh -lc` or `sh -c` script that Codex can split
 ///   into plain commands, which it then checks one by one.
 ///
-/// It does not refuse a direct launch Codex checks as one shell command: a script with a
+/// The rule does not refuse a direct launch Codex checks as one shell command: a script with a
 /// redirection (`claude -p … 2>&1 | tail`), a substitution, a heredoc, a variable set before the
 /// name, a quoted name, or a word with a glob, `~` or `$` (`~/.local/bin/claude`). Nor a
 /// `bash -c 'claude …'` nested in a script, or text written into a terminal session the turn
-/// opened (`write_stdin`). Closing those direct forms is a phase 8 gate (docs/Local-Engine-Turns.md
-/// 1.2 and phase 8). An absolute path also escapes it when a user or project rules file names that
-/// exact path, or narrows the name with `host_executable`, since Codex then never falls back to the
-/// file name.
+/// opened (`write_stdin`). An absolute path also escapes it when a user or project rules file
+/// names that exact path, or narrows the name with `host_executable`, since Codex then never falls
+/// back to the file name. On Unix, the same requirement adds a `PreToolUse` hook that closes those
+/// direct forms (docs/Local-Engine-Turns.md, phase 8): before every command, runtime-agent's own
+/// executable reads the script as Codex's shell parser does and refuses each of them, and a shell
+/// that would read commands the turn writes into it later ([`crate::codex_claude_guard`]).
 ///
-/// The owner accepted that a prefix rule cannot stop every indirect launch (D22): a relative path
-/// (`./claude`), another name for the same file (a link), a program that starts it (`env claude`,
-/// `npx @anthropic-ai/claude-code`, `node cli.js`), a script that builds the name, and starts that
-/// Codex's own configuration makes (an MCP server's `command`, `notify`, hooks).
-fn harness_exec_policy() -> codex_config::CloudConfigBundleLoader {
+/// The owner accepted that neither can stop every indirect launch (D22): another name for the same
+/// file (a link), a program that starts it (`node cli.js`, a script file), a script that builds the
+/// name, and starts that Codex's own configuration makes (an MCP server's `command`, `notify`,
+/// other hooks).
+fn harness_requirements(
+    loader: HarnessLoader,
+) -> std::io::Result<codex_config::CloudConfigBundleLoader> {
+    #[cfg(unix)]
+    let guard_command = Some(claude_guard_command()?);
+    // Windows has no lane (D18); there only the rule holds.
+    #[cfg(not(unix))]
+    let guard_command: Option<String> = None;
     let bundle = codex_config::CloudConfigBundle {
         config_toml: codex_config::CloudConfigTomlBundle::default(),
         requirements_toml: codex_config::CloudRequirementsTomlBundle {
             enterprise_managed: vec![codex_config::CloudRequirementsFragment {
                 id: HARNESS_REQUIREMENTS_ID.to_string(),
                 name: HARNESS_REQUIREMENTS_NAME.to_string(),
-                contents: harness_requirements_toml(),
+                contents: harness_requirements_toml(guard_command.as_deref(), loader),
             }],
         },
     };
-    codex_config::CloudConfigBundleLoader::new(async move {
+    Ok(codex_config::CloudConfigBundleLoader::new(async move {
         Ok::<_, codex_config::CloudConfigBundleLoadError>(Some(bundle))
-    })
+    }))
 }
 
 /// Every Codex config a turn runs with starts here: [`load_runtime_codex_config`], its
 /// [`load_fallback_codex_config`] and [`load_hardened_codex_config`]. So each one carries
-/// [`harness_exec_policy`].
+/// [`harness_requirements`]. A runtime whose own executable cannot be named has no guard to give
+/// Codex, so it runs no Codex turn.
 fn runtime_codex_config_builder(
     codex_home: &Path,
     cli_overrides: Vec<(String, codex_config::TomlValue)>,
     overrides: ConfigOverrides,
-) -> ConfigBuilder {
-    ConfigBuilder::default()
+    loader: HarnessLoader,
+) -> std::io::Result<ConfigBuilder> {
+    Ok(ConfigBuilder::default()
         .codex_home(codex_home.to_path_buf())
         .cli_overrides(cli_overrides)
         .harness_overrides(overrides)
-        .cloud_config_bundle(harness_exec_policy())
+        .cloud_config_bundle(harness_requirements(loader)?))
 }
 
 async fn load_runtime_codex_config(
@@ -7225,9 +7306,14 @@ async fn load_runtime_codex_config(
     // Codex's default loader discovers the desktop user's home independently
     // of resolve_codex_home. Pin the same runtime home that we repair and trust,
     // so an ordinary Chat turn cannot inherit unrelated host tools or plugins.
-    runtime_codex_config_builder(codex_home, cli_overrides, overrides)
-        .build()
-        .await
+    runtime_codex_config_builder(
+        codex_home,
+        cli_overrides,
+        overrides,
+        HarnessLoader::Ordinary,
+    )?
+    .build()
+    .await
 }
 
 /// The config of a turn whose own Codex home would not load, or cannot be written: the ordinary
@@ -7242,22 +7328,28 @@ async fn load_fallback_codex_config(
 
 /// The config of a turn that must not run what the workspace's own Codex config adds, such as a
 /// `notify` hook, a telemetry exporter or a model provider: built-in defaults and the runtime's
-/// overrides only, with no user or project `config.toml` or exec policy rules.
+/// overrides only, with no user or project `config.toml` or exec policy rules, and no hooks but
+/// managed ones, the guard's among them.
 async fn load_hardened_codex_config(
     codex_home: &Path,
     cli_overrides: Vec<(String, codex_config::TomlValue)>,
     overrides: ConfigOverrides,
 ) -> std::io::Result<Config> {
-    runtime_codex_config_builder(codex_home, cli_overrides, overrides)
-        .loader_overrides(codex_config::LoaderOverrides {
-            ignore_user_config: true,
-            ignore_project_config: true,
-            ignore_user_and_project_exec_policy_rules: true,
-            ..Default::default()
-        })
-        .strict_config(true)
-        .build()
-        .await
+    runtime_codex_config_builder(
+        codex_home,
+        cli_overrides,
+        overrides,
+        HarnessLoader::Hardened,
+    )?
+    .loader_overrides(codex_config::LoaderOverrides {
+        ignore_user_config: true,
+        ignore_project_config: true,
+        ignore_user_and_project_exec_policy_rules: true,
+        ..Default::default()
+    })
+    .strict_config(true)
+    .build()
+    .await
 }
 
 fn ensure_runtime_codex_home(workspace_dir: &Path) -> Result<PathBuf> {
@@ -9597,12 +9689,12 @@ mod tests {
         assert_sessions_refuse_starting_claude(&config, false).await;
     }
 
-    /// The rule is all the harness adds: Codex's own load of the same home, overrides and loader
-    /// settings has the same config layers, every other requirement and the same config, for an
-    /// ordinary and a hardened turn; the rule is one requirement, named as the runtime's, the
-    /// same in every loader.
+    /// The rule and the guard's hook are all the harness adds: Codex's own load of the same home,
+    /// overrides and loader settings has the same config layers, every other requirement and the
+    /// same config, for an ordinary and a hardened turn; the rule is one requirement, named as the
+    /// runtime's, the same in every loader.
     #[tokio::test]
-    async fn the_claude_rule_is_all_a_runtime_codex_config_adds() {
+    async fn the_claude_rule_and_guard_are_all_a_runtime_codex_config_adds() {
         let home = tempfile::tempdir().expect("codex home");
         fs::write(
             home.path().join("config.toml"),
@@ -9616,8 +9708,12 @@ mod tests {
         let besides_the_rule = |config: &Config| {
             let mut requirements = config.config_layer_stack.requirements().clone();
             requirements.exec_policy = None;
+            requirements.managed_hooks = None;
+            requirements.allow_managed_hooks_only = None;
             let mut requirements_toml = config.config_layer_stack.requirements_toml().clone();
             requirements_toml.rules = None;
+            requirements_toml.hooks = None;
+            requirements_toml.allow_managed_hooks_only = None;
             let layers: Vec<_> = config
                 .config_layer_stack
                 .all_layers_low_to_high()
@@ -9687,6 +9783,131 @@ mod tests {
         }
         assert_eq!(claude_program_spellings().len(), 64);
         assert!(claude_program_spellings().contains(&"cLAUDE".to_string()));
+    }
+
+    /// The guard's hook (docs/Local-Engine-Turns.md, phase 8): every loader's requirements run
+    /// runtime-agent's own executable with the hook's flag before each command, as one managed
+    /// `PreToolUse` hook named as the runtime's, and a hardened loader's turns run no hook but
+    /// managed ones.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_runtime_codex_config_runs_the_claude_guard_before_each_command() {
+        let home = tempfile::tempdir().expect("codex home");
+        fs::write(home.path().join("config.toml"), "").expect("user config");
+        let overrides = || ConfigOverrides {
+            cwd: Some(home.path().to_path_buf()),
+            ..Default::default()
+        };
+        let ordinary = load_runtime_codex_config(home.path(), Vec::new(), overrides())
+            .await
+            .expect("ordinary config");
+        let fallback = load_fallback_codex_config(home.path(), Vec::new(), overrides())
+            .await
+            .expect("fallback config");
+        let hardened = load_hardened_codex_config(home.path(), Vec::new(), overrides())
+            .await
+            .expect("hardened config");
+        let expected_command = claude_guard_command().expect("the guard's command");
+        assert!(
+            expected_command.ends_with(&format!("' {}", crate::codex_claude_guard::HOOK_FLAG)),
+            "{expected_command}"
+        );
+        for (loader, config) in [
+            ("ordinary", &ordinary),
+            ("fallback", &fallback),
+            ("hardened", &hardened),
+        ] {
+            let requirements = config.config_layer_stack.requirements();
+            let hooks = requirements
+                .managed_hooks
+                .as_ref()
+                .unwrap_or_else(|| panic!("{loader}: the guard's hook"));
+            assert!(
+                hooks
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.to_string().contains(HARNESS_REQUIREMENTS_NAME)),
+                "{loader}: {:?}",
+                hooks.source
+            );
+            let groups = &hooks.get().hooks.pre_tool_use;
+            let guard: Vec<_> = groups
+                .iter()
+                .filter(|group| group.matcher.as_deref() == Some(CLAUDE_GUARD_MATCHER))
+                .flat_map(|group| &group.hooks)
+                .filter_map(|handler| match handler {
+                    codex_config::HookHandlerConfig::Command {
+                        command,
+                        timeout_sec,
+                        r#async,
+                        ..
+                    } => Some((command.clone(), *timeout_sec, *r#async)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                guard,
+                vec![(
+                    expected_command.clone(),
+                    Some(CLAUDE_GUARD_TIMEOUT_SECONDS),
+                    false
+                )],
+                "{loader}: {groups:?}"
+            );
+            let managed_only = requirements
+                .allow_managed_hooks_only
+                .as_ref()
+                .is_some_and(|requirement| requirement.value);
+            assert_eq!(managed_only, loader == "hardened", "{loader}");
+        }
+        // Codex runs hooks in an ordinary turn unless a pin turns them off (codex_policy).
+        assert!(ordinary.features.enabled(Feature::CodexHooks));
+    }
+
+    /// A shell runs the guard's command as the executable with the hook's flag alone, even from a
+    /// folder whose name has a space and a quote, and the requirement's TOML keeps the command as
+    /// it is.
+    #[cfg(unix)]
+    #[test]
+    fn the_guards_command_runs_the_executable_from_any_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().expect("folder");
+        let app = folder.path().join("It's Instafy.app");
+        fs::create_dir_all(&app).expect("app folder");
+        let program = app.join("runtime-agent");
+        let arguments = folder.path().join("arguments");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$@\" > '{}'\n",
+                arguments.display()
+            ),
+        )
+        .expect("stand-in");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
+        let command = claude_guard_command_for(program.to_str().expect("UTF-8 path"));
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&command)
+            .status()
+            .expect("the shell runs");
+        assert!(status.success(), "{command}");
+        assert_eq!(
+            fs::read_to_string(&arguments).expect("the stand-in ran"),
+            format!("1\n{}\n", crate::codex_claude_guard::HOOK_FLAG)
+        );
+
+        let requirements = harness_requirements_toml(Some(&command), HarnessLoader::Ordinary);
+        let written = requirements
+            .lines()
+            .find_map(|line| line.strip_prefix("command = "))
+            .expect("the hook's command");
+        let read: codex_config::TomlValue = written.parse().expect("a TOML string");
+        assert_eq!(read.as_str(), Some(command.as_str()));
+        assert!(!requirements.contains("allow_managed_hooks_only"));
+        let hardened = harness_requirements_toml(None, HarnessLoader::Hardened);
+        assert!(hardened.starts_with("allow_managed_hooks_only = true\n"));
+        assert!(!hardened.contains("[[hooks.PreToolUse]]"));
     }
 
     #[test]

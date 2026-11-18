@@ -305,11 +305,3 @@ export async function resolveProviderHealthSnapshot(client, provider) {
     discoveredProvider,
   };
 }
-
-export function providerHostJsonRequest(baseUrl, path, init, options = {}) {
-  const client = createProviderHostClient({
-    baseUrl,
-    fetch: options.fetch,
-  });
-  return client.jsonRequest(path, init);
-}

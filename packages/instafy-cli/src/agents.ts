@@ -7,7 +7,6 @@ type AgentCommonOptions = {
   project?: string;
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
   json?: boolean;
 };
 
@@ -221,7 +220,6 @@ export async function agentsList(options: AgentListOptions): Promise<void> {
     query: [`projectId=${projectId}`],
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
 
   if (options.json) {
@@ -280,7 +278,6 @@ export async function agentSettings(options: AgentSettingsOptions): Promise<void
     path: `/projects/${encodeURIComponent(projectId)}/multi-agent-settings`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   };
   let settings = await requestControllerApiJson<ControllerAgentSettings>({ ...request, method: "GET" });
   if ((options.interactive || Object.keys(patch).length) && !settings.canManage) {
@@ -355,7 +352,6 @@ export async function agentContextsList(options: AgentContextListOptions): Promi
     query: buildContextQuery(options),
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
 
   if (options.json) {
@@ -397,7 +393,6 @@ export async function agentContextPut(options: AgentContextPutOptions): Promise<
     path: `/projects/${encodeURIComponent(projectId)}/agent-contexts`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     jsonBody: {
       agent,
       agentId,
@@ -439,7 +434,6 @@ export async function agentPlanGroupStatus(
     path: `/agent/plan-groups/${encodeURIComponent(groupId)}/status`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
 
   if (options.json) {
@@ -498,7 +492,6 @@ export async function agentJobsCancel(options: AgentJobsCancelOptions): Promise<
       : `/jobs/${encodeURIComponent(jobId as string)}/cancel`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     jsonBody: reason ? { reason } : {},
   });
 
