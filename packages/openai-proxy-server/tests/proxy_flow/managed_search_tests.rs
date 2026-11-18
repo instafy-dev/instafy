@@ -253,7 +253,13 @@ async fn the_controllers_switch_off_refuses_the_next_search_and_the_turn_goes_on
         output.starts_with("Web search: nothing was searched."),
         "{output}"
     );
-    assert!(output.ends_with(SEARCH_OFF_LINE), "{output}");
+    for told in [
+        "Query 1 was not searched.",
+        "Query 2 was not searched.",
+        SEARCH_OFF_LINE,
+    ] {
+        assert!(output.contains(told), "{told}\n---\n{output}");
+    }
     assert_eq!(answer["results"], nothing_searched());
     assert_eq!(
         responses_requests(&upstream).len(),
