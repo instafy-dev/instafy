@@ -1,22 +1,11 @@
-mod auth;
-// config, db, error, hooks, listening and tokens are also the lib's, which the
-// sidecar binaries use. Items only a sidecar or the lib calls say so where they
-// allow dead code.
-mod config;
-mod db;
-mod error;
-mod hooks;
-mod listening;
-mod routes;
-mod state;
-mod tokens;
-
 use anyhow::Result;
 use axum::Router;
-use config::BrokerConfig;
-use state::AppState;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tunnel_broker::{
+    connect_pool, ensure_ingress, ensure_pdns_domain, router, run_migrations, AppState,
+    BrokerConfig,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -30,12 +19,12 @@ async fn main() -> Result<()> {
         .init();
 
     let config = BrokerConfig::from_env()?;
-    let pool = db::connect_pool(&config.database_url, config.database_pool_size).await?;
-    db::run_migrations(&pool).await?;
+    let pool = connect_pool(&config.database_url, config.database_pool_size).await?;
+    run_migrations(&pool).await?;
 
-    let _ = db::ensure_pdns_domain(&pool, &config).await?;
+    let _ = ensure_pdns_domain(&pool, &config).await?;
     if config.ingress_ipv4.is_some() || config.ingress_ipv6.is_some() {
-        let _ = db::ensure_ingress(&pool, &config).await?;
+        let _ = ensure_ingress(&pool, &config).await?;
     }
     let state = AppState::new(pool, config.clone());
 
@@ -48,5 +37,5 @@ async fn main() -> Result<()> {
 }
 
 fn build_router(state: AppState) -> Router {
-    routes::router(state).layer(TraceLayer::new_for_http())
+    router(state).layer(TraceLayer::new_for_http())
 }

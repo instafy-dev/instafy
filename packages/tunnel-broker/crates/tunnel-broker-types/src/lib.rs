@@ -44,8 +44,6 @@ pub struct CreateTunnelRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelResponse {
     pub tunnel: TunnelDescriptor,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credit: Option<CreditSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,14 +64,6 @@ pub struct TunnelDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     pub client: RatholeClientConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreditSnapshot {
-    pub balance: i32,
-    pub credit_limit: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub balance_after: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
