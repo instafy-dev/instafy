@@ -17,6 +17,11 @@ export interface ActiveWorkspaceVersioning extends WorkspaceVersioningState {
    * `desktop` for the current origin. A first-paint guess never routes.
    */
   historyReady: boolean;
+  /**
+   * The controller has not answered for this project's origin yet (a load
+   * or a switch). Without an origin and not pending, the space has none.
+   */
+  originPending: boolean;
 }
 
 export function resolveChromeMode(
@@ -96,14 +101,13 @@ export function useWorkspaceVersioningForProject({
     origin: originForProject(projectId, desktopOrigin, desktopOriginProjectId),
     enabled,
   });
-  const chromeMode = resolveChromeMode({
-    ...state,
-    originPending: projectId !== null && desktopOriginAnsweredProjectId !== projectId,
-  });
+  const originPending = projectId !== null && desktopOriginAnsweredProjectId !== projectId;
+  const chromeMode = resolveChromeMode({ ...state, originPending });
   return {
     ...state,
     projectId,
     chromeMode,
     historyReady: state.resolved && state.originId !== null && isHistoryMode(state.mode),
+    originPending,
   };
 }

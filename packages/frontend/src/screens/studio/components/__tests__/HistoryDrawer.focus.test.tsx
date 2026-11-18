@@ -157,6 +157,7 @@ function versioning(overrides: Partial<ActiveWorkspaceVersioning> = {}): ActiveW
     projectId: "project-1",
     chromeMode: "stateless",
     historyReady: true,
+    originPending: false,
     ...overrides,
   };
 }

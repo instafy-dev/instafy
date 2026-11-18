@@ -39,7 +39,7 @@ describe("sidebarOrgSnapshot storage key", () => {
 
 describe("writeSidebarOrgSnapshot", () => {
   it("persists only the fields the rail renders, after a successful fetch", () => {
-    writeSidebarOrgSnapshot(USER, ORGS, 3);
+    writeSidebarOrgSnapshot(USER, ORGS);
 
     const stored = JSON.parse(window.localStorage.getItem(KEY) ?? "null");
     expect(stored).toEqual({
@@ -48,13 +48,12 @@ describe("writeSidebarOrgSnapshot", () => {
         { id: "org-a", name: "Alpha", slug: "alpha", avatarUrl: "https://cdn/a.png" },
         { id: "org-b", name: "Beta", slug: "beta", avatarUrl: null },
       ],
-      railChipCount: 3,
     });
     // The server's `role` is not rail data and must not be persisted.
     expect(Object.keys(stored.orgs[0])).not.toContain("role");
   });
 
-  it("caps the stored array and the chip count", () => {
+  it("caps the stored array", () => {
     const many = Array.from({ length: 60 }, (_, index) => ({
       id: `org-${index}`,
       slug: `slug-${index}`,
@@ -62,15 +61,14 @@ describe("writeSidebarOrgSnapshot", () => {
       avatarUrl: null,
     }));
 
-    writeSidebarOrgSnapshot(USER, many, 5000);
+    writeSidebarOrgSnapshot(USER, many);
 
     const stored = JSON.parse(window.localStorage.getItem(KEY) ?? "null");
     expect(stored.orgs).toHaveLength(24);
-    expect(stored.railChipCount).toBe(99);
   });
 
   it("writes nothing when there is no signed-in user", () => {
-    writeSidebarOrgSnapshot(null, ORGS, 3);
+    writeSidebarOrgSnapshot(null, ORGS);
     expect(window.localStorage.length).toBe(0);
   });
 
@@ -80,7 +78,7 @@ describe("writeSidebarOrgSnapshot", () => {
       throw new DOMException("QuotaExceededError");
     };
     try {
-      expect(() => writeSidebarOrgSnapshot(USER, ORGS, 3)).not.toThrow();
+      expect(() => writeSidebarOrgSnapshot(USER, ORGS)).not.toThrow();
     } finally {
       window.localStorage.setItem = original;
     }
@@ -89,11 +87,10 @@ describe("writeSidebarOrgSnapshot", () => {
 
 describe("readSidebarOrgSnapshot", () => {
   it("hydrates a matching snapshot round-trip", () => {
-    writeSidebarOrgSnapshot(USER, ORGS, 3);
+    writeSidebarOrgSnapshot(USER, ORGS);
 
     const snapshot = readSidebarOrgSnapshot(USER);
     expect(snapshot?.user).toBe(USER);
-    expect(snapshot?.railChipCount).toBe(3);
     expect(readCachedControllerOrgs(USER)).toEqual([
       { id: "org-a", slug: "alpha", name: "Alpha", avatarUrl: "https://cdn/a.png" },
       { id: "org-b", slug: "beta", name: "Beta", avatarUrl: null },
@@ -101,12 +98,12 @@ describe("readSidebarOrgSnapshot", () => {
   });
 
   it("matches case-insensitively so the same person keeps their rail", () => {
-    writeSidebarOrgSnapshot("Member@Instafy.dev", ORGS, 2);
+    writeSidebarOrgSnapshot("Member@Instafy.dev", ORGS);
     expect(readCachedControllerOrgs(USER)).toHaveLength(2);
   });
 
   it("ignores a snapshot belonging to a different user", () => {
-    writeSidebarOrgSnapshot(USER, ORGS, 3);
+    writeSidebarOrgSnapshot(USER, ORGS);
 
     expect(readSidebarOrgSnapshot(OTHER_USER)).toBeNull();
     expect(readCachedControllerOrgs(OTHER_USER)).toEqual([]);
@@ -115,7 +112,7 @@ describe("readSidebarOrgSnapshot", () => {
   it("ignores a snapshot whose payload names a different owner than its key", () => {
     window.localStorage.setItem(
       KEY,
-      JSON.stringify({ user: OTHER_USER, orgs: ORGS, railChipCount: 3 }),
+      JSON.stringify({ user: OTHER_USER, orgs: ORGS }),
     );
 
     expect(readSidebarOrgSnapshot(USER)).toBeNull();
@@ -138,7 +135,7 @@ describe("readSidebarOrgSnapshot", () => {
     }
   });
 
-  it("drops individual malformed org entries and bad counts", () => {
+  it("drops individual malformed org entries", () => {
     window.localStorage.setItem(
       KEY,
       JSON.stringify({
@@ -150,7 +147,6 @@ describe("readSidebarOrgSnapshot", () => {
           null,
           "nope",
         ],
-        railChipCount: "three",
       }),
     );
 
@@ -158,7 +154,6 @@ describe("readSidebarOrgSnapshot", () => {
     expect(snapshot?.orgs).toEqual([
       { id: "org-a", name: "Alpha", slug: "alpha", avatarUrl: null },
     ]);
-    expect(snapshot?.railChipCount).toBe(0);
   });
 
   it("returns nothing when there is no cache entry at all", () => {
@@ -177,7 +172,7 @@ describe("readSidebarOrgSnapshot", () => {
     try {
       expect(readSidebarOrgSnapshot(USER)).toBeNull();
       expect(readCachedControllerOrgs(USER)).toEqual([]);
-      expect(() => writeSidebarOrgSnapshot(USER, ORGS, 3)).not.toThrow();
+      expect(() => writeSidebarOrgSnapshot(USER, ORGS)).not.toThrow();
     } finally {
       if (descriptor) {
         Object.defineProperty(window, "localStorage", descriptor);
@@ -188,7 +183,7 @@ describe("readSidebarOrgSnapshot", () => {
 
 
 it("keeps valid org accents across reloads and discards unsupported cached values", () => {
-  writeSidebarOrgSnapshot(USER, [{ ...ORGS[0], accentColor: "teal" }, { ...ORGS[1], accentColor: "url(unsafe)" }], 2);
+  writeSidebarOrgSnapshot(USER, [{ ...ORGS[0], accentColor: "teal" }, { ...ORGS[1], accentColor: "url(unsafe)" }]);
   expect(readCachedControllerOrgs(USER)[0].accentColor).toBe("teal");
   expect(readCachedControllerOrgs(USER)[1].accentColor).toBeUndefined();
   const stored = JSON.parse(window.localStorage.getItem(KEY)!);

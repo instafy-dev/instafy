@@ -8,36 +8,36 @@ pub struct BrokerConfig {
     pub database_pool_size: u32,
     pub rathole_config_notify_channel: String,
     pub http_bind: String,
-    pub tunnel_domain: String,
-    pub ingress_host: String,
-    pub ingress_port: u16,
+    pub(crate) tunnel_domain: String,
+    pub(crate) ingress_host: String,
+    pub(crate) ingress_port: u16,
     /// Public-facing ingress port for end-user URLs (may differ from rathole control port).
-    pub public_ingress_port: u16,
+    pub(crate) public_ingress_port: u16,
     pub ingress_ipv4: Option<IpAddr>,
     pub ingress_ipv6: Option<IpAddr>,
-    pub rathole_shared_token: Option<String>,
-    pub rathole_port_range_start: i32,
-    pub rathole_port_range_end: i32,
-    pub default_ttl_seconds: i32,
-    pub token_signing_key: String,
-    pub api_tokens: Vec<String>,
-    pub token_issuer: String,
-    pub token_audience: Option<String>,
-    pub token_ttl_seconds: i64,
+    pub(crate) rathole_shared_token: Option<String>,
+    pub(crate) rathole_port_range_start: i32,
+    pub(crate) rathole_port_range_end: i32,
+    pub(crate) default_ttl_seconds: i32,
+    pub(crate) token_signing_key: String,
+    pub(crate) api_tokens: Vec<String>,
+    pub(crate) token_issuer: String,
+    pub(crate) token_audience: Option<String>,
+    pub(crate) token_ttl_seconds: i64,
     /// Optional Traefik certificate resolver name (e.g. "le") to include in rendered dynamic
     /// config. When unset, sidecars omit TLS config so plain HTTP routes work without ACME.
-    pub traefik_cert_resolver: Option<String>,
-    pub acl_hook: Option<HookConfig>,
+    pub(crate) traefik_cert_resolver: Option<String>,
+    pub(crate) acl_hook: Option<HookConfig>,
     pub event_hook: Option<HookConfig>,
     /// Private preview routing. `None` when `PREVIEW_DOMAIN` or `PREVIEW_AUTH_ADDRESS` is unset
     /// or invalid; private bindings then render no router and private tunnels are refused.
-    pub preview: Option<PreviewConfig>,
+    pub(crate) preview: Option<PreviewConfig>,
     /// Controller hook that decides each preview capability (`PREVIEW_AUTH_HOOK_URL`, called
     /// with the `ACL_HOOK_TOKEN` bearer). Without a URL and a token every preview request is
     /// denied; read it through `ready_preview_auth_hook`.
-    pub preview_auth_hook: Option<HookConfig>,
+    pub(crate) preview_auth_hook: Option<HookConfig>,
     /// Upper bound for `labels.kind == "preview"` tunnels, which outlive the token TTL cap.
-    pub preview_max_ttl_seconds: i64,
+    pub(crate) preview_max_ttl_seconds: i64,
     /// Host the broker dials to probe a binding's rathole port, and the host the ingress
     /// sidecar dials to record whether each of its tunnels answers.
     pub rathole_upstream_host: String,
@@ -49,8 +49,8 @@ pub struct BrokerConfig {
 
 #[derive(Debug, Clone)]
 pub struct HookConfig {
-    pub url: String,
-    pub token: Option<String>,
+    pub(crate) url: String,
+    pub(crate) token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,7 +59,6 @@ pub struct PreviewConfig {
     pub domain: String,
     /// Broker base URL as Traefik sees it; serves `/preview-auth` and `/preview-error/:status`.
     /// Only the ingress renderer reads it.
-    #[allow(dead_code)] // The renderer is the lib's; this binary has no reader.
     pub auth_address: String,
 }
 
@@ -209,13 +208,13 @@ impl BrokerConfig {
 
     /// Private tunnels need a routable preview domain and an auth hook; without either the
     /// broker refuses to issue one rather than leave it reachable or permanently 401.
-    pub fn private_previews_enabled(&self) -> bool {
+    pub(crate) fn private_previews_enabled(&self) -> bool {
         self.preview.is_some() && self.ready_preview_auth_hook().is_some()
     }
 
     /// The preview auth hook, only when it has a bearer token to send. The hook decides who may
     /// open a member-only site, so it is never called unauthenticated.
-    pub fn ready_preview_auth_hook(&self) -> Option<&HookConfig> {
+    pub(crate) fn ready_preview_auth_hook(&self) -> Option<&HookConfig> {
         self.preview_auth_hook.as_ref().filter(|hook| {
             hook.token
                 .as_deref()
@@ -225,20 +224,20 @@ impl BrokerConfig {
 
     /// How long a listening fact the ingress sidecar recorded still answers a probe: three
     /// sidecar rounds, so one slow or missed round does not flip a live site to down.
-    pub fn listening_max_age(&self) -> chrono::Duration {
+    pub(crate) fn listening_max_age(&self) -> chrono::Duration {
         let refresh = self.rathole_config_refresh_seconds.clamp(1, 86_400) as i64;
         chrono::Duration::seconds(refresh * 3)
     }
 
     /// The ingress row this broker registers (`ensure_ingress`); ids derive from host and port.
-    pub fn ingress_id(&self) -> Uuid {
+    pub(crate) fn ingress_id(&self) -> Uuid {
         Uuid::new_v5(
             &Uuid::NAMESPACE_DNS,
             format!("{}:{}", self.ingress_host, self.ingress_port).as_bytes(),
         )
     }
 
-    pub fn hostname_for(&self, tunnel_id: &Uuid) -> String {
+    pub(crate) fn hostname_for(&self, tunnel_id: &Uuid) -> String {
         format!("{}.{}", tunnel_id.simple(), self.tunnel_domain)
     }
 
@@ -246,7 +245,7 @@ impl BrokerConfig {
     /// label under the current `TUNNEL_DOMAIN`, the shape [`Self::hostname_for`] mints, and not
     /// a `p-` label reserved for capability hosts when `PREVIEW_DOMAIN` is the same domain. A
     /// hostname minted under a domain the operator has since changed fails this check.
-    pub fn hostname_in_tunnel_domain(&self, hostname: &str) -> bool {
+    pub(crate) fn hostname_in_tunnel_domain(&self, hostname: &str) -> bool {
         let domain = normalize_domain(&self.tunnel_domain);
         let host = normalize_domain(hostname);
         let Some(label) = host
@@ -271,12 +270,7 @@ impl BrokerConfig {
         valid_label && !capability_label
     }
 
-    #[cfg(test)]
-    pub fn ingress_url(&self) -> String {
-        format!("{}:{}", self.ingress_host, self.ingress_port)
-    }
-
-    pub fn tunnel_url(&self, hostname: &str) -> String {
+    pub(crate) fn tunnel_url(&self, hostname: &str) -> String {
         let tls_enabled = self.traefik_cert_resolver.as_deref().is_some();
         let (scheme, port) = if tls_enabled {
             ("https", self.public_ingress_port)
@@ -573,7 +567,6 @@ mod tests {
 
         let id = Uuid::nil();
         assert_eq!(cfg.hostname_for(&id), format!("{}.rt.test", id.simple()));
-        assert_eq!(cfg.ingress_url(), "ingress.rt.test:443".to_string());
         assert_eq!(
             cfg.tunnel_url("abc.rt.test"),
             "http://abc.rt.test".to_string()

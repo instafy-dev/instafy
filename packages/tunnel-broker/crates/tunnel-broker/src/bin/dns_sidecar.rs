@@ -4,8 +4,9 @@ use std::time::Duration;
 use tokio::time::interval;
 use tracing::{info, warn};
 
-use tunnel_broker::config::BrokerConfig;
-use tunnel_broker::db::{connect_pool, ensure_dns_node, ensure_pdns_domain, run_migrations};
+use tunnel_broker::{
+    connect_pool, ensure_dns_node, ensure_pdns_domain, run_migrations, BrokerConfig,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {

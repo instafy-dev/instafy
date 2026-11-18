@@ -83,7 +83,7 @@ const MAX_RECORDED: usize = 100;
 const MAX_TITLE_CHARS: usize = 120;
 /// The job payload's key for the space's pages as the controller holds them (its
 /// `previews/pages.rs`): `{"pages": [{"folder", "title", "server", "openedAt", "conversationId"?}]}`.
-const CONTROLLERS_PAGES_KEY: &str = "space_pages";
+pub(crate) const CONTROLLERS_PAGES_KEY: &str = "space_pages";
 /// The folders that were in the workspace as the turn began, next to the record: the CLI reads a
 /// page folder among them as there before the turn (its `space-pages.ts`).
 const TURN_FOLDERS_FILE: &str = "turn-folders.json";
@@ -1287,6 +1287,18 @@ fn shell_commands(script: &str) -> Vec<Vec<Word>> {
     commands
 }
 
+/// An edit step of a turn that changed a file the runtime put back as it was
+/// ([`HeldPages::edits_put_back`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PutBackEdit {
+    /// The step's id, as its own messages carry it.
+    pub(super) id: String,
+    /// The files it changed, as the run named them.
+    pub(super) paths: Vec<String>,
+    /// Those of them the turn kept: none when every one went back.
+    pub(super) kept: Vec<String>,
+}
+
 /// The pages another chat made, held for a turn of this chat that may write files: they are
 /// read-only here ([`super::PAGE_OF_ITS_OWN_CHAT_RULE`]).
 ///
@@ -1625,6 +1637,58 @@ impl HeldPages {
             false
         });
         self.returned.extend(returned);
+    }
+
+    /// The run's edit steps (`events`) that changed a file the runtime put back as it was
+    /// ([`Self::put_back`]), each by its step's id with its paths as the run gave them and those
+    /// of them the turn kept: the chat's line counts a step by its newest message, so each gets
+    /// one more ([`super::put_back_edit_messages`]), and the line counts only the changes the turn
+    /// kept, never "edited a file" for a page that is as it was. An edit step none of whose files
+    /// went back keeps its own message.
+    pub(super) fn edits_put_back(
+        &self,
+        workspace_dir: &Path,
+        events: &[JsonValue],
+    ) -> Vec<PutBackEdit> {
+        if self.restored.is_empty() {
+            return Vec::new();
+        }
+        let spellings = Spellings::of(workspace_dir);
+        let mut edits: Vec<PutBackEdit> = Vec::new();
+        for item in events
+            .iter()
+            .filter(|event| event.get("type").and_then(JsonValue::as_str) == Some("item.completed"))
+            .filter_map(|event| event.get("item"))
+            .filter(|item| {
+                item.get("type").and_then(JsonValue::as_str) == Some("file_change")
+                    && item.get("status").and_then(JsonValue::as_str) == Some("completed")
+            })
+        {
+            let Some(id) = item.get("id").and_then(JsonValue::as_str) else {
+                continue;
+            };
+            let paths: Vec<String> = item
+                .get("paths")
+                .and_then(JsonValue::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(JsonValue::as_str)
+                .map(str::to_string)
+                .collect();
+            let (back, kept): (Vec<&String>, Vec<&String>) = paths.iter().partition(|raw| {
+                workspace_path(&spellings, raw).is_some_and(|path| self.restored.contains(&path))
+            });
+            if back.is_empty() || edits.iter().any(|edit| edit.id == id) {
+                continue;
+            }
+            let kept: Vec<String> = kept.into_iter().cloned().collect();
+            edits.push(PutBackEdit {
+                id: id.to_string(),
+                paths,
+                kept,
+            });
+        }
+        edits
     }
 
     /// Whether the turn changed a held page, or may have: what it changed there went back, was
@@ -2697,6 +2761,62 @@ mod tests {
         assert_eq!(
             held.restored,
             BTreeSet::from(["sites/framework-laptops/data.json".to_string()])
+        );
+        // The chat's line counts a step by its newest message, so it counts only what the turn
+        // kept: an edit step whose every file went back gets one more message that says it was
+        // declined, one that also changed this chat's own page one that names only what it kept,
+        // and the edit of this chat's own page alone keeps its own message.
+        let mut theirs = edit_step(&their_data.display().to_string());
+        theirs["item"]["id"] = json!("theirs");
+        let mut ours = edit_step("sites/framework-13-16/data.json");
+        ours["item"]["id"] = json!("ours");
+        let mut both = edit_step("sites/framework-13-16/data.json");
+        both["item"]["id"] = json!("both");
+        both["item"]["paths"] = json!([
+            "sites/framework-laptops/data.json",
+            "sites/framework-13-16/data.json"
+        ]);
+        let mut started = edit_step("sites/framework-laptops/data.json");
+        started["type"] = json!("item.started");
+        started["item"]["status"] = json!("in_progress");
+        let events = [started, theirs, ours, both];
+        let messages = super::super::put_back_edit_messages(&held, ws, &[&events]);
+        let steps: Vec<(String, String, JsonValue, String, JsonValue)> = messages
+            .iter()
+            .map(|message| {
+                let metadata = message.metadata.clone().expect("its metadata");
+                assert_eq!(message.message_type.as_deref(), Some("file_change"));
+                assert_eq!(metadata["kind"], "codex_file_change");
+                assert_eq!(metadata["eventType"], "item.completed");
+                assert_eq!(metadata["activity"]["key"], "builtin/edit");
+                (
+                    metadata["itemId"].as_str().unwrap().to_string(),
+                    metadata["status"].as_str().unwrap().to_string(),
+                    metadata["paths"].clone(),
+                    message.content.clone(),
+                    metadata["activity"]["count"].clone(),
+                )
+            })
+            .collect();
+        let theirs_path = their_data.display().to_string();
+        assert_eq!(
+            steps,
+            [
+                (
+                    "theirs".to_string(),
+                    "declined".to_string(),
+                    json!([theirs_path]),
+                    format!("File change put back: {theirs_path}"),
+                    json!(1),
+                ),
+                (
+                    "both".to_string(),
+                    "completed".to_string(),
+                    json!(["sites/framework-13-16/data.json"]),
+                    "Applied file changes: sites/framework-13-16/data.json".to_string(),
+                    json!(1),
+                ),
+            ]
         );
         assert_eq!(held.reply_line().as_deref(), Some(NOT_CHANGED));
         let artifact = held.artifact().unwrap();

@@ -1008,8 +1008,6 @@ pub fn ensure_git_checkout(
     let workspace_root = config.workspace_root.as_path();
     validate_instafy_git_layout(workspace_root)
         .map_err(|error| OriginError::internal(error.to_string()))?;
-    maybe_migrate_legacy_git_dir(workspace_root, &config.git_remote_name, remote_url)
-        .map_err(|error| OriginError::internal(error.to_string()))?;
     let mut stale_cleanup_error: Option<String> = None;
     let instafy_git_dir_exists = WorkspaceDir::open(workspace_root)
         .and_then(|workspace| workspace.entry_kind(".instafy/.git"))
@@ -1348,52 +1346,6 @@ pub fn cleanup_origin_staging(workspace_root: &Path) -> Result<(), OriginError> 
         .map_err(|error| {
             OriginError::internal(format!("failed to recreate origin staging dir: {error}"))
         })?;
-
-    Ok(())
-}
-
-fn maybe_migrate_legacy_git_dir(
-    workspace_root: &Path,
-    remote_name: &str,
-    remote_url: &str,
-) -> Result<()> {
-    let workspace = WorkspaceDir::open(workspace_root)
-        .with_context(|| format!("failed to open workspace {:?}", workspace_root))?;
-    if matches!(
-        workspace.entry_kind(".instafy/.git"),
-        Ok(WorkspaceEntryKind::Directory)
-    ) {
-        return Ok(());
-    }
-
-    if !matches!(
-        workspace.entry_kind(".git"),
-        Ok(WorkspaceEntryKind::Directory)
-    ) {
-        return Ok(());
-    }
-
-    let mut command = server_git_command();
-    pin_command_cwd(&mut command, &workspace)?;
-    let output = command
-        .args(["remote", "get-url", remote_name])
-        .output()
-        .with_context(|| format!("failed to query legacy git remote {remote_name:?}"))?;
-    if !output.status.success() {
-        return Ok(());
-    }
-
-    let legacy_remote = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if legacy_remote.trim_end_matches('/') != remote_url.trim().trim_end_matches('/') {
-        return Ok(());
-    }
-
-    workspace
-        .create_dir_all(".instafy")
-        .context("failed to create protected instafy dir")?;
-    workspace
-        .rename(".git", ".instafy/.git")
-        .context("failed to migrate legacy git dir into protected metadata")?;
 
     Ok(())
 }

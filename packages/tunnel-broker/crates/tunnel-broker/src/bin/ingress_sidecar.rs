@@ -8,14 +8,11 @@ use tokio::process::Command;
 use tokio::time::interval;
 use tracing::{info, warn};
 
-use tunnel_broker::config::BrokerConfig;
-use tunnel_broker::db::{
-    connect_pool, ensure_ingress, list_active_rathole_bindings_for_ingress,
-    revoke_expired_tunnels_for_ingress, run_migrations,
+use tunnel_broker::{
+    connect_pool, emit_event, ensure_ingress, list_active_rathole_bindings_for_ingress,
+    probe_and_record, render_rathole_server_config, render_traefik_dynamic_config,
+    revoke_expired_tunnels_for_ingress, run_migrations, BrokerConfig, EventPayload,
 };
-use tunnel_broker::hooks::{emit_event, EventPayload};
-use tunnel_broker::ingress::{render_rathole_server_config, render_traefik_dynamic_config};
-use tunnel_broker::listening::probe_and_record;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -51,6 +51,8 @@ const HISTORY_PROBE_ANSWERED_COPY = "Loading saved versions…";
 const HISTORY_BUSY_ERROR_COPY = "The space is busy saving changes. Try Refresh in a moment.";
 const HISTORY_MORE_BUSY_COPY = "The space is busy saving changes. Try Show more again in a moment.";
 const HISTORY_NO_MORE_COPY = "No more saved versions.";
+/** The mode check answered: History can't list this space's versions. */
+export const HISTORY_UNAVAILABLE_COPY = "This space's saved versions can't be shown here. Save a version from Files.";
 
 function loadedMoreVersionsCopy(count: number): string {
   return `Loaded ${count} more saved ${count === 1 ? "version" : "versions"}.`;
@@ -142,6 +144,12 @@ export function HistoryDrawer({
   // asked (`failed: null`), the probe made on opening decides.
   const [probe, setProbe] = useState<ProbeState>(IDLE_PROBE);
   const probeUnanswered = !ready && (probe.failed ?? probeFailed);
+  // The mode check answered and History has nothing it can list: the space
+  // keeps versions the old way (Files saves a draft, then a version; an older
+  // gateway, or a cloud machine's own origin on a controller without the
+  // Workspace Gateway), or the controller says it has no origin.
+  const historyUnavailable = !ready && !probeUnanswered && projectId !== null && versioning.mode === "legacy" &&
+    (originId !== null ? versioning.resolved : !versioning.originPending);
   // A Refresh while the mode is known: the button stays focusable and pending.
   const [refreshing, setRefreshing] = useState(false);
   const focusCommitRef = useRef<string | null>(null);
@@ -311,7 +319,8 @@ export function HistoryDrawer({
   // Retry goes away once a probe answers. With the list showing, focus goes
   // to Saved versions. While the list is not ready yet, focus waits on the
   // drawer's title (always there), the status says what happens next, and
-  // Saved versions takes focus over from the title once it shows.
+  // Saved versions takes focus over from the title once it shows. When the
+  // answer is a mode History can't list, the status says that instead.
   const probeRowRef = useRef<"none" | "shown" | "parked">("none");
   useEffect(() => {
     if (probeUnanswered) {
@@ -333,11 +342,16 @@ export function HistoryDrawer({
       return;
     }
     if (probeRowRef.current === "shown") {
-      probeRowRef.current = "parked";
       restoreLostFocus(title);
+    }
+    if (historyUnavailable) {
+      probeRowRef.current = "none";
+      setNotice({ tone: "info", text: HISTORY_UNAVAILABLE_COPY });
+    } else if (probeRowRef.current === "shown") {
+      probeRowRef.current = "parked";
       setNotice({ tone: "info", text: HISTORY_PROBE_ANSWERED_COPY });
     }
-  }, [drawerTitleId, focusSavedVersionsHeading, probeUnanswered, ready, savedVersionsLabelId, setNotice]);
+  }, [drawerTitleId, focusSavedVersionsHeading, historyUnavailable, probeUnanswered, ready, savedVersionsLabelId, setNotice]);
 
   // Show more keeps focus on the first new row.
   useEffect(() => {
@@ -360,8 +374,10 @@ export function HistoryDrawer({
           if (!mountedRef.current) {
             return;
           }
-          setProbe({ running: null, failed: result === null });
-          if (result === null) {
+          // Without an origin there is nothing to ask, so no answer is no failure.
+          const failed = result === null && versioning.originId !== null;
+          setProbe({ running: null, failed });
+          if (failed) {
             reportFailure();
             // A new node each time, so a second failure is announced too.
             setNotice({ tone: "error", text: HISTORY_PROBE_ERROR_COPY });
@@ -653,6 +669,10 @@ export function HistoryDrawer({
             >
               Retry
             </Button>
+          </div>
+        ) : historyUnavailable ? workspaceIssue ? null : (
+          <div className="flex items-center justify-center px-2 py-10" data-testid="history-unavailable">
+            <Text tone="muted">{HISTORY_UNAVAILABLE_COPY}</Text>
           </div>
         ) : !ready ? workspaceIssue ? null : (
           <div className="flex items-center justify-center px-2 py-10">

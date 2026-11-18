@@ -3,9 +3,7 @@
 //! a read asked for). It is disposable: deleting any of it, or all of it,
 //! only costs a fetch.
 //!
-//! Layout under `<root>/.git-cache/` (all private to the server, none of it
-//! named like a space, so no older gateway image ever treats it as a
-//! checkout):
+//! Layout under `<root>/.git-cache/` (all private to the server):
 //!
 //! - `<space id>.git`: the mirror. `instafy-last-use` in it is touched when
 //!   a request lets go of it, for the sweeper.
@@ -58,7 +56,6 @@ use uuid::Uuid;
 
 use super::answers::{is_disk_full, or_disk_full};
 use super::disk::{ensure_private_dir, modified, remove_entry, rename_no_replace, tree_size};
-use super::legacy::LEGACY_DIR;
 use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git_tokens;
@@ -111,8 +108,6 @@ pub(crate) const EVICT_IDLE_AFTER: Duration = Duration::from_secs(3600);
 pub(crate) const MISSING_REV_MEMORY: Duration = Duration::from_secs(30);
 /// At most this many such commits are remembered.
 const MISSING_REVS_REMEMBERED: usize = 4096;
-/// How often the size of `.legacy/` is measured, at most.
-const LEGACY_MEASURE_EVERY: Duration = Duration::from_secs(3600);
 /// Scratch older than this belongs to a request that is gone.
 const SCRATCH_STALE_AFTER: Duration = Duration::from_secs(3600);
 /// Below this much free space on the cache's disk the sweeper removes
@@ -390,8 +385,6 @@ pub(crate) struct MirrorCache {
     packing: Mutex<()>,
     /// Mirrors whose last packing changed nothing, and when that was.
     pack_skipped: Mutex<HashMap<Uuid, Instant>>,
-    /// The size of `.legacy/` and when it was measured.
-    legacy_bytes: Mutex<Option<(Instant, Option<u64>)>>,
     #[cfg(test)]
     test_packed_while_sweeping: Mutex<Option<bool>>,
     #[cfg(test)]
@@ -516,7 +509,6 @@ impl MirrorCache {
             sweep_again: AtomicBool::new(false),
             packing: Mutex::new(()),
             pack_skipped: Mutex::new(HashMap::new()),
-            legacy_bytes: Mutex::new(None),
             #[cfg(test)]
             test_packed_while_sweeping: Mutex::new(None),
             #[cfg(test)]
@@ -1409,11 +1401,9 @@ impl MirrorCache {
                 evicted.push(project);
             }
         }
-        // A disk short of space (the cache shares it with `.legacy/` and
-        // anything else): mirrors nobody holds go, least recently used
-        // first, however recently used. Deleting one only costs a fetch.
-        // `.legacy/` (working copies of the old gateway) is never touched
-        // here; its size is reported.
+        // A disk short of space (the cache may share it with anything
+        // else): mirrors nobody holds go, least recently used first, however
+        // recently used. Deleting one only costs a fetch.
         if let Some(free) = (self.free_space)(&self.root).filter(|free| *free < self.min_free_bytes)
         {
             let left: Vec<MirrorStat> = stats
@@ -1428,15 +1418,11 @@ impl MirrorCache {
                     evicted.push(project);
                 }
             }
-            let legacy_bytes = self.legacy_size();
-            report.legacy_bytes = legacy_bytes;
             warn!(
                 free,
                 floor = self.min_free_bytes,
                 removed = freed,
-                legacy_bytes,
-                "the mirror cache's disk is low on space; removed mirrors nobody holds \
-                 (.legacy/ is kept)"
+                "the mirror cache's disk is low on space; removed mirrors nobody holds"
             );
         }
         let kept: u64 = stats
@@ -1453,25 +1439,6 @@ impl MirrorCache {
         }
         report.evicted.extend(evicted);
         stats
-    }
-
-    /// The size of `.legacy/` next to the cache, measured at most once an
-    /// hour (`None`: there is none).
-    fn legacy_size(&self) -> Option<u64> {
-        let mut known = locked(&self.legacy_bytes);
-        if let Some((measured, bytes)) = *known {
-            if measured.elapsed() < LEGACY_MEASURE_EVERY {
-                return bytes;
-            }
-        }
-        let legacy = self.root.parent().map(|root| root.join(LEGACY_DIR));
-        let bytes = legacy
-            .filter(|legacy| {
-                std::fs::symlink_metadata(legacy).is_ok_and(|metadata| metadata.is_dir())
-            })
-            .map(|legacy| tree_size(&legacy));
-        *known = Some((Instant::now(), bytes));
-        bytes
     }
 
     /// Whether `project`'s mirror is left unpacked for now (its last
@@ -2238,9 +2205,6 @@ pub(crate) struct SweepReport {
     pub packed: Vec<Uuid>,
     /// The mirrors' total size before any was removed.
     pub total_bytes: u64,
-    /// The size of `.legacy/`, reported (never reduced) when the disk is
-    /// short of space.
-    pub legacy_bytes: Option<u64>,
 }
 
 /// The mirrors to remove to free `needed` bytes on a disk short of space:

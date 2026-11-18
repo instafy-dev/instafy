@@ -5,7 +5,6 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  claimResolutionAlerts: vi.fn(),
   listReports: vi.fn(),
 }));
 
@@ -15,7 +14,6 @@ vi.mock("@capacitor/core", () => ({
 vi.mock("../../../../sdk/instafy", () => ({
   controllerClient: {
     bugReports: {
-      claimResolutionAlerts: mocks.claimResolutionAlerts,
       listPage: mocks.listReports,
     },
   },
@@ -43,19 +41,18 @@ import { StatusProvider } from "../../../../status/StatusProvider";
 import { useStudioBugReportController } from "../useStudioBugReportController";
 import { NOTIFICATION_FEED_CHANGED_EVENT } from "../../../../notifications/notificationFeedEvents";
 
-function page(unreadCount: number, unnotifiedResolutionCount: number) {
+function page(unreadCount: number, unreadResolutionCount: number) {
   return {
     reports: [],
     hasMore: false,
     nextCursor: null,
     unreadCount,
-    unreadResolutionCount: unnotifiedResolutionCount,
-    unnotifiedResolutionCount,
+    unreadResolutionCount,
   };
 }
 
 function Harness({ userId }: { userId: string | null }) {
-  useStudioBugReportController({
+  const support = useStudioBugReportController({
     currentUserId: userId,
     activeProjectId: null,
     activeConversationId: null,
@@ -63,7 +60,7 @@ function Harness({ userId }: { userId: string | null }) {
     activeRuntimeId: null,
     controllerProjectMissing: false,
   });
-  return null;
+  return <output data-testid="support-unread-count">{support.supportUnreadCount}</output>;
 }
 
 async function flushAsyncEffects() {
@@ -75,7 +72,7 @@ async function flushAsyncEffects() {
   });
 }
 
-describe("support resolution alerts with the real status queue", () => {
+describe("support resolutions with the real status queue", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -85,7 +82,6 @@ describe("support resolution alerts with the real status queue", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    mocks.claimResolutionAlerts.mockReset();
     mocks.listReports.mockReset();
   });
 
@@ -96,22 +92,11 @@ describe("support resolution alerts with the real status queue", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("removes every visible or queued alert when the signed-in account changes", async () => {
+  it("counts resolutions for the signed-in account and queues no toast for them", async () => {
     mocks.listReports
       .mockResolvedValueOnce(page(1, 1))
-      .mockResolvedValueOnce(page(2, 1))
+      .mockResolvedValueOnce(page(2, 2))
       .mockResolvedValue(page(0, 0));
-    mocks.claimResolutionAlerts
-      .mockResolvedValueOnce({
-        claimedCount: 1,
-        latestReportId: "11111111-1111-4111-8111-111111111111",
-        latestResolvedAt: "2026-09-05T12:00:00Z",
-      })
-      .mockResolvedValueOnce({
-        claimedCount: 1,
-        latestReportId: "22222222-2222-4222-8222-222222222222",
-        latestResolvedAt: "2026-09-05T12:01:00Z",
-      });
 
     const render = async (userId: string) => {
       await act(async () => {
@@ -124,19 +109,21 @@ describe("support resolution alerts with the real status queue", () => {
       });
       await flushAsyncEffects();
     };
+    const unreadCount = () => document.querySelector('[data-testid="support-unread-count"]')?.textContent;
 
     await render("user-a");
-    expect(document.body.textContent).toContain("Your Instafy support report was resolved.");
+    expect(unreadCount()).toBe("1");
+    expect(document.querySelector('[data-testid="status-toast"]')).toBeNull();
 
     await act(async () => window.dispatchEvent(new Event(NOTIFICATION_FEED_CHANGED_EVENT)));
     await flushAsyncEffects();
-    expect(mocks.claimResolutionAlerts).toHaveBeenNthCalledWith(1, "user-a");
-    expect(mocks.claimResolutionAlerts).toHaveBeenNthCalledWith(2, "user-a");
-    expect(document.querySelectorAll('[data-testid="status-toast"]')).toHaveLength(1);
+    expect(mocks.listReports).toHaveBeenNthCalledWith(2, 100, null, "user-a");
+    expect(unreadCount()).toBe("2");
+    expect(document.querySelector('[data-testid="status-toast"]')).toBeNull();
 
     await render("user-b");
-
-    expect(document.body.textContent).not.toContain("Your Instafy support report was resolved.");
+    expect(mocks.listReports).toHaveBeenLastCalledWith(100, null, "user-b");
+    expect(unreadCount()).toBe("0");
     expect(document.querySelector('[data-testid="status-toast"]')).toBeNull();
   });
 });
