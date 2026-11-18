@@ -5,6 +5,13 @@ pub const DEFAULT_MAX_PAGE_LOADS: u32 = 100;
 pub const DEFAULT_MAX_PAGE_LOADS_PER_SITE: u32 = 25;
 pub const MAX_PAGE_LOADS: u32 = 200;
 pub const RESEARCH_RESERVE_SCOPE: &str = "research.reserve";
+/// The web searches one message may run with Instafy AI, in total across its turns: the jobs
+/// that share its task budget (a team plan's, its several agents') and the build Instafy starts
+/// after the browser. The controller counts them and the proxy asks before each search.
+pub const MANAGED_WEB_SEARCHES_PER_MESSAGE: u32 = 2;
+/// The web searches a message may run when its routing step read the person's own words in it
+/// as asking for deeper research.
+pub const MANAGED_WEB_SEARCHES_FOR_DEEPER_RESEARCH: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "ResearchSettingsWire", into = "ResearchSettingsWire")]

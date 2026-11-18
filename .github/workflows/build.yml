@@ -814,11 +814,17 @@ jobs:
         working-directory: packages/browser-webrtc-sender
         run: go test ./...
 
-  # Every Rust lane but runtime-agent's denies dead code and unused imports, so
-  # what the 2026-11 cleanup removed cannot quietly come back. The check lanes
-  # check all targets: `--tests` alone builds binaries only as tests, where code
-  # that only tests call looks used. runtime-agent's lanes join once its own
-  # warnings are gone.
+  # Dead code and unused imports fail every Rust crate's CI. rustc counts every
+  # item a library exports as used, so the gate catches dead private and
+  # pub(crate) items but not an unused pub item a pub path exports, such as a
+  # pub fn in one of the pub modules runtime-agent's lib.rs declares; finding
+  # those still takes an audit. The check lanes check all targets: `--tests`
+  # alone builds binaries only as tests, where code that only tests call looks
+  # used. Every lane but runtime-agent's denies them through RUSTFLAGS.
+  # runtime-agent's check lane runs clippy with only those two lints denied
+  # instead: Cargo passes RUSTFLAGS to path dependencies uncapped, which would
+  # lint its Codex crates, while clippy lints only runtime-agent itself; and
+  # its test lane links with lld only while RUSTFLAGS is unset.
   rust:
     name: Rust packages
     needs:
@@ -1091,6 +1097,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          rustup component add clippy
 
       - name: Restore cargo cache without saving
         if: runner.environment == 'self-hosted' || github.ref != 'refs/heads/main'
@@ -1116,7 +1123,7 @@ jobs:
 
       - name: Check public Rust package
         run: |
-          cargo check --locked --tests --manifest-path packages/runtime-agent/Cargo.toml
+          cargo clippy --locked --all-targets --manifest-path packages/runtime-agent/Cargo.toml -- -A clippy::all -D dead_code -D unused_imports
 
   rust-check-git:
     name: Rust check git service
@@ -1922,6 +1929,11 @@ jobs:
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration reply_draft_stream:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration page_cards:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration codex_never_starts_claude:: -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration pages_of_their_own_chats:: -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration saved_change_reload:: -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration turn_wrap_up:: -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration client_timezone:: -- --test-threads=1
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration proxy_stream:: -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test claude_code_lane --test claude_code_supervision --test claude_code_live -- --test-threads=1
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --test run_instructions
 

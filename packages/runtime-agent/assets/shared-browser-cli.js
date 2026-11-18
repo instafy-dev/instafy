@@ -230,6 +230,9 @@ function assertStepOnTime() {
 
 // The run's page as resolveExpectedPage last found it.
 let resolvedPage = null;
+// The controls of the reading this step last gave (snapshot), in its order,
+// for a step that names some of them in its answer (fieldListLine).
+let readingControls = null;
 // The page this command acts on: the page the person chose for the run
 // (EXPECTED_BROWSER_PAGE_ID), or one of the tabs Octo opened in this run and
 // selected (tabs.json). Snapshots, targets, approvals and the action feed are
@@ -2399,7 +2402,10 @@ const SEARCH_NOT_SENT = "Nothing was searched yet: press Enter to search (no pro
 const NOT_SEARCHED = "Nothing was searched yet.";
 const NOT_SENT = "Nothing was sent yet.";
 
-function typedLine(description, text, held, submitted, unsent = NOT_SENT) {
+// `listed`, when the field opened a list as it was typed into, is that list's
+// line (fieldListLine), between what was typed and what was not sent; an
+// `unsent` of null says nothing of sending.
+function typedLine(description, text, held, submitted, unsent = NOT_SENT, listed = null) {
   const field = quotedControlLabel(description);
   const count = Array.from(text).length;
   if (submitted) {
@@ -2411,7 +2417,280 @@ function typedLine(description, text, held, submitted, unsent = NOT_SENT) {
     : held === ""
       ? ", and the field is empty now"
       : `, and the field holds ${characterCount(Array.from(held).length)} now`;
-  return `${did}${holds}. A page's reading never shows typed text. ${unsent}`;
+  return [`${did}${holds}.`, "A page's reading never shows typed text.", listed, unsent].filter(Boolean).join(" ");
+}
+
+// A type step types as a person does: the text is set, and its last
+// character typed over itself as a key press, so a field that opens its list
+// as keys are pressed (a planner's stops, a search's suggestions) opens it.
+// Setting the value alone presses no key: a planner's stop lists never
+// opened, and turns pressed Tab or the wrong button, then said the planner
+// gave no route (a local test, Nov 17). A field whose value no key types (a
+// date, a time, a colour, a number), an empty text and a text whose last
+// character is a key of its own (a new line, a tab) or no key's (an accent
+// alone) are only set, so typing never presses Enter or moves the focus: what
+// sends a form stays the person's or its own step's. So is a field the page
+// moved on from as the text was set (lastKeyInPage): the key never goes to
+// what the page focused instead, which was never the step's control.
+const SET_VALUE_INPUT_TYPES = new Set(["color", "date", "datetime-local", "month", "number", "range", "time", "week"]);
+const KEY_TYPED_CHARACTER = /^[\p{L}\p{N}\p{P}\p{S} ]$/u;
+// The characters Playwright's keyboard has a key for. It types any other with
+// no key press at all, so a field whose list a key opens never opened it for
+// a text ending on "ö" (pressLastKey).
+const KEYBOARD_CHARACTER = /^[\x20-\x7e]$/u;
+
+async function typeLikeAPerson(page, target, text) {
+  await target.locator.fill(text);
+  const characters = Array.from(text);
+  const last = characters[characters.length - 1];
+  const inputType = String(target.description.inputType || "").toLowerCase();
+  if (last === undefined || SET_VALUE_INPUT_TYPES.has(inputType) || !KEY_TYPED_CHARACTER.test(last)) return;
+  const filled = await within(FIELD_READ_MS, target.locator.evaluate(lastKeyInPage, { kind: "last-key", last }).catch(() => null), null);
+  if (typeof filled !== "string") return;
+  await pressLastKey(page, target, last).catch(() => {});
+  // A key that did not land as it should never leaves the field changed or
+  // out of order: the text is set again, as setting it left the field.
+  if ((await heldText(target.locator)) !== filled) await target.locator.fill(text).catch(() => {});
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether the type step's text field, once its text is
+// set, takes that text's last character as a key: it is still in the page and
+// the focused element (as Playwright judges one, or its key would first move
+// the caret to the start), its caret is at the end, and what it holds ends
+// with that character. If so, that character is selected, for the key to type
+// it over itself, and the answer is what the field holds; null otherwise.
+// Neither changes what the field holds, however late the page runs it. A
+// page that moved the focus to a suggestion, opened a field of its own or
+// replaced the field as the text went in keeps the text as set.
+function lastKeyInPage(element, request) {
+  try {
+    const last = typeof request?.last === "string" ? request.last : "";
+    const doc = element.ownerDocument;
+    const view = doc?.defaultView;
+    if (!last || !view || !element.isConnected || element.readOnly || element.disabled) return null;
+    const textField = element instanceof view.HTMLTextAreaElement ||
+      (element instanceof view.HTMLInputElement && ["text", "search", "url", "tel"].includes(element.type));
+    if (!textField || element.getRootNode().activeElement !== element || !doc.hasFocus()) return null;
+    const value = String(element.value);
+    if (!value.endsWith(last) || element.selectionStart !== value.length || element.selectionEnd !== value.length) {
+      return null;
+    }
+    element.setSelectionRange(value.length - last.length, value.length);
+    return value;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Presses the key that types `last` over the field's selected last
+// character: Playwright's own for a character its keyboard has
+// (KEYBOARD_CHARACTER), which focuses the field first; for any other, the
+// browser's key event with that character, as a keyboard that has it sends
+// one, to the field lastKeyInPage just found focused.
+async function pressLastKey(page, target, last) {
+  if (KEYBOARD_CHARACTER.test(last)) {
+    await target.locator.type(last);
+    return;
+  }
+  const session = await page.context().newCDPSession(page);
+  try {
+    const still = await target.locator.evaluate((element, length) =>
+      element.getRootNode().activeElement === element && element.ownerDocument.hasFocus() &&
+      element.selectionEnd === element.value.length && element.selectionEnd - element.selectionStart === length, last.length)
+      .catch(() => false);
+    if (still !== true) return;
+    await session.send("Input.dispatchKeyEvent", { type: "keyDown", key: last, text: last, unmodifiedText: last });
+    await session.send("Input.dispatchKeyEvent", { type: "keyUp", key: last });
+  } finally {
+    await session.detach().catch(() => {});
+  }
+}
+
+// How long a type step looks for the list its field opens as a person types,
+// and how often: as long as such a list takes to come from the site when the
+// field says it opens one (a combobox), and a moment otherwise. A planner's
+// stops came 1.5 to 3 seconds after a key in a field that said so (a local
+// test, Nov 17).
+const FIELD_LIST_WAIT_MS = 3_000;
+const FIELD_LIST_QUIET_MS = 600;
+const FIELD_LIST_EVERY_MS = 150;
+// The page's options a person can see, looked for in page order, open shadow
+// roots too, as a reading finds its controls (a closed list's hundreds of
+// options never crowd out the ones shown); how many of them a look judges; how
+// many a type step names, and how much of each name.
+const FIELD_LIST_OPTIONS = "[role=option]:visible";
+const MAX_FIELD_LIST_OPTIONS = 400;
+const FIELD_LIST_NAMED = 4;
+const MAX_FIELD_LIST_NAME_CHARS = 80;
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Of `request.elements`, the options a person can see and
+// choose in the list `field` opens as they type (a combobox's suggestions).
+// When the field, or the combobox it sits in, names a list of its own
+// (aria-controls, aria-owns, the list its active option sits in) or holds
+// one (`own`), those of that list (`listed`); when it names none, the
+// options shown anywhere that were not before the step typed (`fresh`;
+// `request.before` holds the words of those that were). Another list on the
+// page is never the field's: a step named a field's options under another
+// field, and a page's "Sort by" under a search. An option turned off (a
+// list's "Searching…" or "No matches" row) is none. Once the step typed
+// (`request.typed`), the field counts with the one the page moved the focus
+// to (a planner that opens its search in a field of its own). Answers too
+// whether a field says it opens a list (`named`), the words of each set
+// (`ownWords`, `freshWords`) and of every option shown (`shown`). Those words
+// never leave the step: it only compares them.
+function fieldListInPage(field, request) {
+  const answer = { kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [] };
+  try {
+    const elements = Array.isArray(request && request.elements) ? request.elements.slice(0, 400) : [];
+    const before = new Set(Array.isArray(request && request.before) ? request.before.slice(0, 400) : []);
+    const doc = field.ownerDocument;
+    const view = doc.defaultView;
+    const wordsOf = (element) => String(element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200);
+    const shown = (element) => {
+      const box = element.getBoundingClientRect();
+      if (!(box.width > 0 && box.height > 0)) return false;
+      const style = view.getComputedStyle(element);
+      return style.visibility !== "hidden" && style.display !== "none";
+    };
+    let focused = doc.activeElement;
+    for (let depth = 0; focused && focused.shadowRoot && focused.shadowRoot.activeElement && depth < 32; depth += 1) {
+      focused = focused.shadowRoot.activeElement;
+    }
+    const fields = [field];
+    if (request && request.typed === true && focused && focused !== field && focused instanceof view.Element &&
+      focused.matches("input, textarea, [contenteditable], [role=combobox], [role=searchbox], [role=textbox]")) {
+      fields.push(focused);
+    }
+    const lists = [];
+    for (const each of fields) {
+      const combobox = each.closest("[role=combobox]");
+      for (const node of [each, combobox]) {
+        if (!node) continue;
+        const attribute = (name) => String(node.getAttribute(name) || "").toLowerCase().trim();
+        if (attribute("role") === "combobox" || ["list", "both", "inline"].includes(attribute("aria-autocomplete")) ||
+          (attribute("aria-haspopup") !== "" && attribute("aria-haspopup") !== "false") || node.hasAttribute("aria-expanded")) {
+          answer.named = true;
+        }
+        const root = node.getRootNode();
+        const byId = (id) => typeof root.getElementById === "function" ? root.getElementById(id) : doc.getElementById(id);
+        for (const name of ["aria-controls", "aria-owns"]) {
+          for (const id of String(node.getAttribute(name) || "").split(/\s+/).filter(Boolean).slice(0, 16)) {
+            const list = byId(id);
+            if (list) {
+              lists.push(list);
+              answer.named = true;
+            }
+          }
+        }
+        const activeId = node.getAttribute("aria-activedescendant");
+        const active = activeId ? byId(activeId) : null;
+        if (active) lists.push(active.closest("[role=listbox], [role=grid], [role=tree], [role=menu]") || active);
+        if (node === combobox && combobox !== each) lists.push(combobox);
+      }
+    }
+    const inside = (element, list) => {
+      for (let node = element, depth = 0; node && depth < 512; node = node.parentNode || node.host, depth += 1) {
+        if (node === list) return true;
+      }
+      return false;
+    };
+    const options = elements.filter((element) =>
+      element instanceof view.Element && element.matches("[role=option]") && shown(element));
+    const usable = options.filter((option) => !option.matches(":disabled") && !option.closest("[aria-disabled=true]"));
+    const own = lists.length ? usable.filter((option) => lists.some((list) => inside(option, list))) : [];
+    const fresh = lists.length ? [] : usable.filter((option) => !before.has(wordsOf(option)));
+    answer.own = lists.length > 0;
+    answer.listed = elements.map((element) => own.includes(element));
+    answer.fresh = elements.map((element) => fresh.includes(element));
+    answer.ownWords = own.map(wordsOf);
+    answer.freshWords = fresh.map(wordsOf);
+    answer.shown = options.map(wordsOf);
+    return answer;
+  } catch (_) {
+    return { kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [] };
+  }
+}
+
+// What fieldListInPage answers for the type step's field of `elements`, once
+// the step typed or before (`typed`), or null when the page cannot say in
+// time.
+async function fieldListOf(target, elements, before, typed) {
+  return await within(FIELD_READ_MS, (async () => {
+    const answer = await target.locator.evaluate(fieldListInPage, { kind: "field-list", elements, before, typed });
+    return answer && answer.kind === "field-list" &&
+      ["listed", "fresh", "ownWords", "freshWords", "shown"].every((key) => Array.isArray(answer[key]))
+      ? answer
+      : null;
+  })().catch(() => null), null);
+}
+
+// The page's options, for a look at the list a field opens.
+async function shownOptions(page) {
+  return (await page.locator(FIELD_LIST_OPTIONS).elementHandles().catch(() => [])).slice(0, MAX_FIELD_LIST_OPTIONS);
+}
+
+// What the page shows before a type step types: the words of every option
+// (`shown`, the `before` of fieldListInPage) and of those of the field's own
+// list (`own`), or none when it cannot say.
+async function optionsShownBefore(page, target) {
+  const answer = await fieldListOf(target, await shownOptions(page), [], false);
+  return { shown: answer ? answer.shown : [], own: answer ? answer.ownWords : [] };
+}
+
+// Waits, after a type step, for the list its field opens as a person types:
+// its own list's options once they differ from what it showed before the
+// step (one it narrowed is named whole), or else the options that came
+// (fieldListInPage), until they stop changing, for up to FIELD_LIST_WAIT_MS
+// when the field says it opens one or options came, and FIELD_LIST_QUIET_MS
+// otherwise. While only rows turned off show (a list's "Searching…"), it
+// keeps looking. Answers which of fieldListInPage's sets the step names
+// ("listed" or "fresh"), or null when no list came.
+async function fieldListAfterTyping(page, target, before) {
+  const started = Date.now();
+  let last = null;
+  for (;;) {
+    const now = await fieldListOf(target, await shownOptions(page), before.shown, true);
+    if (!now) return null;
+    const set = now.own ? "listed" : "fresh";
+    const words = (now.own ? now.ownWords : now.freshWords).join("\n");
+    const came = words !== "" && words !== (now.own ? before.own.join("\n") : "");
+    if (came && last === words) return set;
+    const waited = Date.now() - started;
+    if (waited >= (now.named || came ? FIELD_LIST_WAIT_MS : FIELD_LIST_QUIET_MS) || stepClock.isUp()) {
+      return came ? set : null;
+    }
+    last = came ? words : null;
+    await page.waitForTimeout(FIELD_LIST_EVERY_MS).catch(() => {});
+  }
+}
+
+// The words of the list a field opened as it was typed into, from the reading
+// the type step answers with (readingControls): how many options it shows and
+// the first ones, by the names and indices that reading gives them, of the set
+// fieldListAfterTyping chose. A planner that lists a stop's names as a person
+// types sends nothing until one is chosen. Null when the reading lists none
+// of them, or withholds the page.
+async function fieldListLine(target, reading, before, set) {
+  const controls = readingControls;
+  if (!set || !before || !controls || !reading || reading.secretScreen === true ||
+    !Array.isArray(reading.interactiveElements) || reading.interactiveElements.length !== controls.length) {
+    return null;
+  }
+  const answer = await fieldListOf(target, controls.map(({ locator }) => locator), before.shown, true);
+  if (!answer) return null;
+  const options = reading.interactiveElements.filter((_, index) => answer[set][index] === true);
+  if (!options.length) return null;
+  const name = (label) => {
+    const characters = Array.from(String(label || ""));
+    return characters.length > MAX_FIELD_LIST_NAME_CHARS
+      ? `${characters.slice(0, MAX_FIELD_LIST_NAME_CHARS).join("")}…`
+      : characters.join("");
+  };
+  const named = options.slice(0, FIELD_LIST_NAMED).map((option) => `"${name(option.label)}" (index ${option.index})`);
+  const count = options.length === 1 ? "1 suggestion" : `${options.length} suggestions`;
+  return `${count} under ${quotedControlLabel(target.description)}: ${named.join(", ")}${options.length > FIELD_LIST_NAMED ? ", …" : ""}. Click one.`;
 }
 
 function isCheckableDescription(description) {
@@ -3297,6 +3576,7 @@ async function declineCookieBanner(page, interactive, leftOut = []) {
 // when it lists a refusal beside an accept (declineCookieBanner), and reads
 // the page again after it.
 async function snapshot(page, { withhold = false, decline = false } = {}) {
+  readingControls = null;
   const startUrl = page.url();
   refuseLinkOnlyPage(page);
   const hiddenNames = [];
@@ -3393,6 +3673,7 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
   recordObservedFields(snapshotId, rawUrl, interactive);
   await recordObservedControls(page, snapshotId, rawUrl, interactive, view.names);
   rememberGivenAddresses(rawUrl, interactive, view.secretScreen ? "" : view.text);
+  readingControls = interactive;
   return {
     snapshotId,
     browserPageId: EXPECTED_BROWSER_PAGE_ID,
@@ -3499,6 +3780,7 @@ function blankPageResult(page, extra = {}) {
 }
 
 async function snapshotForResult(page, options = {}) {
+  readingControls = null;
   if (isBlankPage(page)) {
     return blankPageResult(page);
   }
@@ -3768,7 +4050,7 @@ const COVER_LOOK_MS = 100;
 const CONSENT_COVER_MESSAGE = `A cookie notice covers this page, and the browser could not decline it, so nothing was clicked. ${HOME_PAGE_OPENS} ${NEXT_SOURCE}`;
 // What a click a cookie notice keeps from its control throws (refuseCovered),
 // in the notice's words. The click step catches it for a plain link and opens
-// the link's address instead (openCoveredLink).
+// the link's address instead (openLinkInstead).
 class CoveredByNotice extends Error {
   constructor() {
     super(CONSENT_COVER_MESSAGE);
@@ -3797,18 +4079,40 @@ async function clickLanding(target) {
 // notice covered, which was then refused, and the turn's line still said they
 // allowed a click. Answers with the page as it was right before the click
 // (readingBefore), with the pointer over the control and the focus on it
-// (pointAtControl), for the step's settle.
-async function clickControlItself(page, target) {
-  await refuseUnlandableClick(page, target);
+// (pointAtControl), for the step's settle. `wait.timeout`, when given (a plain
+// link's LINK_CLICK_MS), bounds how long the page has to take the click, in
+// view and still, before the click is made; the click's own wait for the
+// load it starts is the click's as ever. A page that does not take it in
+// that time throws ClickNotTaken.
+async function clickControlItself(page, target, wait = {}) {
+  await refuseUnlandableClick(page, target, wait);
   await pointAtControl(target);
   const before = await readingBefore(page);
+  if (wait.timeout) {
+    await target.locator.click({ trial: true, timeout: wait.timeout }).catch((error) => {
+      throw notTaken(error);
+    });
+  }
   await target.locator.click();
   return before;
 }
 
+// What a click on a plain link throws when the page does not take it in time
+// (clickControlItself): the link keeps moving, or something the click's own
+// look does not see takes its events. Nothing was clicked, so no load began;
+// the click step opens the link's address instead (openLinkInstead).
+class ClickNotTaken extends Error {
+  constructor() {
+    super("The page did not take this step in time, so it may not have happened. Take a fresh snapshot to see the page as it is now.");
+  }
+}
+function notTaken(error) {
+  return error && error.name === "TimeoutError" ? new ClickNotTaken() : error;
+}
+
 // Refuses a click that would not land on its control (clickControlItself).
-async function refuseUnlandableClick(page, target) {
-  const landing = await settledLanding(page, target);
+async function refuseUnlandableClick(page, target, wait = {}) {
+  const landing = await settledLanding(page, target, wait);
   if (landing.other) {
     throw new Error(
       `A click in the middle of ${quotedControlLabel(target.description)} would land on something else inside it (another control, or a frame), so nothing was done. Click that control itself, or another control, from a fresh snapshot.`,
@@ -3819,8 +4123,10 @@ async function refuseUnlandableClick(page, target) {
 
 // Where a click on the control lands, once it is in view and what covers it
 // had a moment to go.
-async function settledLanding(page, target) {
-  await target.locator.scrollIntoViewIfNeeded();
+async function settledLanding(page, target, wait = {}) {
+  await target.locator.scrollIntoViewIfNeeded(wait).catch((error) => {
+    throw wait.timeout ? notTaken(error) : error;
+  });
   let landing = await clickLanding(target);
   if (landing && landing.covered === true) {
     await target.locator
@@ -4850,11 +5156,18 @@ function focusLikeAPressInPage(element) {
 }
 
 // How long a step whose page still reads as it did before it reads the page
-// again, and how often.
-const UNCHANGED_LOOK_MS = 3_000;
+// again, and how often. The look holds the snapshot the step's answer once
+// left to the turn ("take a snapshot before saying nothing appeared"): turns
+// took none and ended on a guess, one that a planner gave no route, and a list
+// that came 4 seconds after a key press was in the step's reading while its
+// answer said the page read as before (a local test, Nov 17). So the step
+// looks as long as the turn's snapshot would have come, and answers with the
+// page as it is then.
+const UNCHANGED_LOOK_MS = 6_000;
 const UNCHANGED_EVERY_MS = 250;
-// What a step's result says when its page still reads as it did before it.
-const PAGE_UNCHANGED = "The page reads as it did before this step. What it loads may still be coming: take a snapshot before saying nothing appeared.";
+// What a step's result says when its page still reads as it did before it,
+// in the reading the result gives too (stillAsBefore).
+const PAGE_UNCHANGED = `The page still reads as it did before this step, ${UNCHANGED_LOOK_MS / 1000} seconds after it: this result is the page as it is now.`;
 
 // The page's reading as a step finds it (pageReadingInPage), or null when the
 // page cannot say in time.
@@ -4949,6 +5262,14 @@ async function settleAfterAction(page, before = null) {
     if (last) return true;
     await page.waitForTimeout(UNCHANGED_EVERY_MS).catch(() => {});
   }
+}
+
+// Whether a step whose look found its page as it was before it
+// (settleAfterAction: `unchanged`) still finds it so once it has read the page
+// its result gives: a list that came between the look and that reading was in
+// the result while its answer said the page read as before.
+async function stillAsBefore(page, before, unchanged) {
+  return Boolean(unchanged && before && page.url() === before.url && (await readingOf(page)) === before.reading);
 }
 
 function resolvedTargetDestination(description, currentUrl) {
@@ -6409,17 +6730,19 @@ async function openPageStep(browser, page, rawUrl) {
 }
 
 // A click on a plain link that a cookie notice the browser could not decline
-// keeps from its control (CoveredByNotice) opens the link's address in the
-// same tab instead, as a navigate step to that address does and under its
-// rules: the address is judged, its site asked for when the run has not used
-// it, and a risky one asks the person. Its result says so.
-async function openCoveredLink(browser, page, target, url) {
+// keeps from its control (CoveredByNotice), or that the page did not take in
+// time, opens the link's address in the same tab instead, as a navigate step
+// to that address does and under its rules: the address is judged, its site
+// asked for when the run has not used it, and a risky one asks the person.
+// Its result says so, after `why`.
+async function openLinkInstead(browser, page, url, why) {
   const opened = await openPageStep(browser, page, url);
-  return {
-    ...opened,
-    done: `A cookie notice covers ${quotedControlLabel(target.description)}, so its address was opened in this tab instead.`,
-  };
+  return { ...opened, done: `${why}, so its address was opened in this tab instead.` };
 }
+// How long a click on a plain link waits for the page to take it (the link in
+// view, still and given the click) before its address opens instead: the
+// rest of the step's time is the load's.
+const LINK_CLICK_MS = 5_000;
 
 async function executeOnPage(browser, method, requestPath, body, page, tabs, documents = null) {
   if (method === "GET" && requestPath === "/v1/status") {
@@ -6625,15 +6948,32 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // A plain link: one that leads to an http(s) address other than the page
     // it is on, sends no form, downloads nothing and names no risk
     // (routineCovers). A cookie notice the browser could not decline over it
-    // opens that address instead (openCoveredLink); any other control under
+    // opens that address instead (openLinkInstead); any other control under
     // one is refused in its words, a link to the page it is on too: one whose
     // `href="#"` only runs the page's script, opened as an address, moved
     // within the page, ran nothing, and the step said its address was opened.
+    // So does a plain link the page does not take a click on in time
+    // (ClickNotTaken: one that keeps moving, or whose events something else
+    // takes): a museum's "Opening hours" link timed out after 17 seconds, the
+    // turn said that page did not finish loading, and the next message read
+    // the hours at the link's address (a local test, Nov 17). A link whose
+    // click began a load its site does not answer fails as such a load does,
+    // and its address is not asked for again.
     const plainLink = Boolean(target.description.href) && Boolean(rawDestination) &&
       addressWithoutFragment(rawDestination) !== addressWithoutFragment(page.url()) && !clickSubmission &&
       !isFormSubmissionControl(target.description) && target.description.policy?.download !== true &&
       !WITHHOLDING_CATEGORIES.has(step.category) && routineCovers(step, target.description);
-    const coveredLink = (error) => error instanceof CoveredByNotice && plainLink;
+    const linkWait = plainLink ? { timeout: LINK_CLICK_MS } : {};
+    const openedInstead = async (error) => {
+      if (!plainLink) return null;
+      if (error instanceof CoveredByNotice) {
+        return await openLinkInstead(browser, page, rawDestination, `A cookie notice covers ${quotedControlLabel(target.description)}`);
+      }
+      if (error instanceof ClickNotTaken) {
+        return await openLinkInstead(browser, page, rawDestination, `${quotedControlLabel(target.description)} did not take the click in time`);
+      }
+      return null;
+    };
     // A click that asks the person is looked at where it would land first, so
     // nobody is asked about a click that cannot land; one nobody is asked
     // about is looked at right before it is made (clickControlItself). The
@@ -6641,9 +6981,10 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // the control into view, and the page may have answered that.
     if (!consentRejection && !(readingStep && approvalProtocol.routineBrowsingAllowed())) {
       try {
-        await refuseUnlandableClick(page, target);
+        await refuseUnlandableClick(page, target, linkWait);
       } catch (error) {
-        if (coveredLink(error)) return await openCoveredLink(browser, page, target, rawDestination);
+        const opened = await openedInstead(error);
+        if (opened) return opened;
         throw error;
       }
       target = { ...target, asked: await askedNow(page, target) };
@@ -6705,9 +7046,10 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const beforeUrl = page.url();
     let before;
     try {
-      before = await clickControlItself(page, target);
+      before = await clickControlItself(page, target, linkWait);
     } catch (error) {
-      if (coveredLink(error)) return await openCoveredLink(browser, page, target, rawDestination);
+      const opened = await openedInstead(error);
+      if (opened) return opened;
       throw error;
     }
     const unchanged = await settleAfterAction(page, before);
@@ -6721,11 +7063,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // A click that checks or unchecks a box, a radio button or a switch on the
     // page it was on chooses an option: Details name it with the form's typing.
     const chose = !moved && isCheckableDescription(target.description);
-    const done = unchanged
+    const reading = await snapshotAfterStep(page, withholding);
+    const done = (await stillAsBefore(page, before, unchanged))
       ? `${checked || `Clicked ${quotedControlLabel(target.description)}.`} ${PAGE_UNCHANGED}`
       : checked;
     return withActivity(
-      { ...await snapshotAfterStep(page, withholding), ...(done ? { done } : {}) },
+      { ...reading, ...(done ? { done } : {}) },
       freeSearch ? stepActivity(page, "search", "free") : stepActivity(page, chose ? "choose" : "click", stepApproval()),
     );
   }
@@ -6840,7 +7183,24 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ? FREE_SEARCH_POST_ORIGINS
       : stepPostOrigins(readingStep, sourceOrigin, typeSubmission, destination));
     assertStepOnTime();
-    await target.locator.fill(body.text);
+    // Typing with submit sets the text and presses Enter, as before: a list
+    // that opened as keys were pressed could take that Enter for one of its
+    // options. Typing alone types as a person does, and looks for the list
+    // the field opens (fieldListAfterTyping).
+    const optionsBefore = submitting ? null : await optionsShownBefore(page, target);
+    const typedOn = submitting ? null : { url: page.url(), documentId: await documentOf(page) };
+    let listed = null;
+    if (submitting) {
+      await target.locator.fill(body.text);
+    } else {
+      await typeLikeAPerson(page, target, body.text);
+      listed = await fieldListAfterTyping(page, target, optionsBefore);
+    }
+    // A page that went on by itself while the step looked for its list (a
+    // search that runs as it is typed) sent what it sends: the step then says
+    // nothing of what was not sent.
+    const wentOn = typedOn !== null && (page.url() !== typedOn.url ||
+      (typedOn.documentId !== null && (await documentOf(page)) !== typedOn.documentId));
     const held = submitting ? null : await heldText(target.locator);
     // Text typed into a site's own search box searched nothing yet: a turn
     // read the list the page still showed as no result. Only where Enter in
@@ -6849,9 +7209,10 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const searchNotSent = !submitting && held === body.text && held !== "" && documents !== null &&
       (await within(FIELD_READ_MS, freeSiteSearch(page, target, null).catch(() => false), false));
     let unchanged = false;
+    let before = null;
     if (submitting) {
       assertStepOnTime();
-      const before = await readingBefore(page);
+      before = await readingBefore(page);
       await target.locator.press("Enter");
       unchanged = await settleAfterAction(page, before);
       page = await resolveExpectedPage(browser);
@@ -6861,17 +7222,19 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // Typing with submit into a search field is a search, whoever allowed it;
     // into any other field it sends a form.
     const typeKind = submitting ? (step.category === "search" ? "search" : "submit") : "type";
+    const reading = await snapshotAfterStep(page, withholding);
     const typed = typedLine(
       target.description,
       body.text,
       held,
       submitting,
-      searchNotSent ? SEARCH_NOT_SENT : typingStep.category === "search" ? NOT_SEARCHED : NOT_SENT,
+      wentOn ? null : searchNotSent ? SEARCH_NOT_SENT : typingStep.category === "search" ? NOT_SEARCHED : NOT_SENT,
+      await fieldListLine(target, reading, optionsBefore, listed),
     );
     return withActivity(
       {
-        ...await snapshotAfterStep(page, withholding),
-        done: unchanged ? `${typed} ${PAGE_UNCHANGED}` : typed,
+        ...reading,
+        done: (await stillAsBefore(page, before, unchanged)) ? `${typed} ${PAGE_UNCHANGED}` : typed,
       },
       stepActivity(page, typeKind, freeSearch ? "free" : stepApproval()),
     );
@@ -6984,13 +7347,15 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const stayed = before !== null && before.documentId !== null && page.url() === before.url &&
       (await documentOf(page)) === before.documentId;
     const unsent = stayed ? await unsentFormLine(page, target, documents) : null;
-    const done = [chosenLine(option.label, listName), unsent, unchanged ? PAGE_UNCHANGED : null]
+    const reading = await snapshotAfterStep(page, withholding);
+    const done = [
+      chosenLine(option.label, listName),
+      unsent,
+      (await stillAsBefore(page, before, unchanged)) ? PAGE_UNCHANGED : null,
+    ]
       .filter(Boolean)
       .join(" ");
-    return withActivity(
-      { ...await snapshotAfterStep(page, withholding), done },
-      stepActivity(page, "choose", stepApproval()),
-    );
+    return withActivity({ ...reading, done }, stepActivity(page, "choose", stepApproval()));
   }
 
   if (method === "POST" && requestPath === "/v1/press") {
@@ -7099,8 +7464,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     // Enter in a search field is a search, whoever allowed it.
     const pressKind = pressKey === "Enter" && step.category === "search" ? "search" : "press";
+    const reading = await snapshotAfterStep(page, withholding);
     return withActivity(
-      { ...await snapshotAfterStep(page, withholding), ...(unchanged ? { done: `Pressed ${pressKey}. ${PAGE_UNCHANGED}` } : {}) },
+      { ...reading, ...((await stillAsBefore(page, before, unchanged)) ? { done: `Pressed ${pressKey}. ${PAGE_UNCHANGED}` } : {}) },
       stepActivity(page, pressKind, freeSearch ? "free" : stepApproval()),
     );
   }

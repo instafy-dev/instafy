@@ -209,6 +209,79 @@ struct BudgetState {
     loads: BTreeMap<Uuid, Load>,
     hosts: BTreeMap<String, Host>,
     grants: BTreeMap<Uuid, Grant>,
+    /// The Instafy AI web searches of the message the task's jobs serve
+    /// (`managed_web_search`): every job bound here counts against them.
+    #[serde(skip_serializing_if = "WebSearches::is_unused")]
+    web_searches: WebSearches,
+}
+
+/// A message's Instafy AI web searches, kept with its task budget.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct WebSearches {
+    /// Whether the message's routing step read the person's own words as asking
+    /// for deeper research.
+    pub(crate) deeper_research: bool,
+    /// The proxy's checks that took searches, or that it gave up on, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) claims: Vec<ClaimedSearches>,
+}
+
+/// One of the proxy's checks before a managed job's searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClaimedSearches {
+    /// The id the proxy gave the check.
+    pub(crate) id: Uuid,
+    /// The job, and its lease attempt, the check was for.
+    pub(crate) job_id: Uuid,
+    pub(crate) lease_attempt: i32,
+    /// The searches it took, less those that did not run.
+    pub(crate) searches: u32,
+}
+
+impl WebSearches {
+    fn is_unused(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The searches the message has used.
+    pub(crate) fn used(&self) -> u32 {
+        self.claims.iter().map(|claim| claim.searches).sum()
+    }
+}
+
+/// Applies `change` to the web searches of the message `job_id` serves: those of
+/// the budget the job is bound to, under the row lock that page loads are
+/// reserved under, so jobs on different runtimes and controller nodes count
+/// one after another.
+pub(crate) async fn change_web_searches<T>(
+    tx: &Transaction<'_>,
+    project_id: Uuid,
+    job_id: Uuid,
+    change: impl FnOnce(&mut WebSearches) -> T,
+) -> ApiResult<T> {
+    let budget = ensure_binding(tx, project_id, job_id).await?;
+    let row = tx
+        .query_typed_one(
+            "select state from agent_research_budgets where id=$1 for update",
+            typed![&budget],
+        )
+        .await
+        .map_err(|e| internal_error(format!("lock research budget: {e}")))?;
+    let mut saved: BudgetState = serde_json::from_value(row.get("state"))
+        .map_err(|e| internal_error(format!("invalid research budget state: {e}")))?;
+    let before = saved.web_searches.clone();
+    let result = change(&mut saved.web_searches);
+    if saved.web_searches != before {
+        tx.execute_typed(
+            "update agent_research_budgets set state=$2 where id=$1",
+            typed![&budget, &PgJson(&saved)],
+        )
+        .await
+        .map_err(|e| internal_error(format!("save web searches: {e}")))?;
+    }
+    Ok(result)
 }
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Load {

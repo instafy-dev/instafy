@@ -80,6 +80,55 @@ impl ControllerClient {
             .await
             .map_err(|_| JobProxyTokenError::TimedOut)?
     }
+
+    /// Tells the controller what this lease attempt of a job changes about its message's
+    /// Instafy AI web searches, which the controller counts and the proxy asks it for: the
+    /// routing step read the person's own words as asking for deeper research, so they go up to
+    /// the larger limit; or the attempt starts over, holding none of an earlier attempt's
+    /// searches, which go back to the message. Fenced to the job's lease attempt and
+    /// authenticated with the machine bearer, as a renewal is.
+    pub async fn report_web_searches(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        lease_attempt: i32,
+        deeper_research: bool,
+        starts_over: bool,
+    ) -> Result<()> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/web-searches"))?;
+        let body = json!({
+            "lease_attempt": lease_attempt,
+            "deeper_research": deeper_research,
+            "starts_over": starts_over,
+        });
+        let send = || {
+            http.post(url.clone())
+                .bearer_auth(self.bearer_for_agent(registration))
+                .json(&body)
+                .send()
+        };
+        let mut response = send().await?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) && self.refresh_credentials_once().await
+        {
+            response = send().await?;
+        }
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "the controller refused the web search report (status={})",
+                response.status().as_u16()
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +206,81 @@ pub(crate) mod tests {
             ["Bearer test-current-agent", "Bearer test-renewed-agent"]
         );
         assert!(!format!("{error:?} {error}").contains("must-not-appear"));
+        server.abort();
+    }
+
+    /// The runtime tells the controller about a job's web searches (deeper research, or an
+    /// attempt that starts over) at the job's own path, fenced to its lease attempt, with the
+    /// machine bearer; a refusal is an error, so nothing changes.
+    #[tokio::test]
+    async fn web_searches_are_reported_for_the_jobs_lease_attempt() {
+        use axum::{
+            extract::{Path, State},
+            http::HeaderMap,
+            routing::post,
+        };
+        use std::sync::Arc;
+        type Seen = Arc<Mutex<Vec<(String, String, JsonValue)>>>;
+        let seen: Seen = Arc::default();
+        let app = axum::Router::new()
+            .route(
+                "/agent/jobs/:id/web-searches",
+                post(
+                    |State(seen): State<Seen>,
+                     Path(id): Path<String>,
+                     headers: HeaderMap,
+                     axum::Json(body): axum::Json<JsonValue>| async move {
+                        let refused = body["lease_attempt"] == json!(3);
+                        seen.lock().push((
+                            id,
+                            headers["authorization"].to_str().unwrap().to_owned(),
+                            body,
+                        ));
+                        if refused {
+                            axum::http::StatusCode::CONFLICT
+                        } else {
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (client, registration) = proxy_test_client(base);
+        *client.current_agent_token.lock() = Some("test-current-agent".into());
+        let job_id = Uuid::new_v4();
+        client
+            .report_web_searches(&registration, job_id, 2, true, false)
+            .await
+            .expect("reported");
+        client
+            .report_web_searches(&registration, job_id, 2, false, true)
+            .await
+            .expect("reported");
+        assert_eq!(
+            *seen.lock(),
+            [
+                (
+                    job_id.to_string(),
+                    "Bearer test-current-agent".to_string(),
+                    json!({"lease_attempt": 2, "deeper_research": true, "starts_over": false})
+                ),
+                (
+                    job_id.to_string(),
+                    "Bearer test-current-agent".to_string(),
+                    json!({"lease_attempt": 2, "deeper_research": false, "starts_over": true})
+                )
+            ]
+        );
+        // A lease that has moved on is refused.
+        assert!(
+            client
+                .report_web_searches(&registration, job_id, 3, false, true)
+                .await
+                .is_err()
+        );
         server.abort();
     }
 

@@ -121,6 +121,10 @@ pub struct JobProxyAuth {
     revoked: Arc<tokio::sync::Notify>,
     cancel_signal: Option<JobCancelSignal>,
     clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+    /// Set once a renewal took search away from a job that started with it (the controller's
+    /// `MANAGED_AI_NATIVE_WEB_SEARCH` went off): the job goes on, and no later run of it is
+    /// offered search.
+    search_withdrawn: AtomicBool,
 }
 
 impl fmt::Debug for JobProxyAuth {
@@ -151,9 +155,11 @@ impl JobProxyAuth {
     /// credential of its own), which the controller grants only with its
     /// `MANAGED_AI_NATIVE_WEB_SEARCH` switch on. The proxy verifies the signature again, and the
     /// stored ChatGPT credential or its own `PROXY_MANAGED_NATIVE_WEB_SEARCH` switch, before
-    /// running any search.
+    /// running any search, and asks the controller before each managed one. A renewal that took
+    /// search away leaves it off for the rest of the job.
     pub(crate) fn allows_native_web_search(&self) -> bool {
         self.scope.native_web_search
+            && !self.search_withdrawn.load(Ordering::SeqCst)
             && (self.scope.credential_id.is_some() || self.scope.run_id.is_some())
     }
 
@@ -220,6 +226,7 @@ impl JobProxyAuth {
             revoked: revoked.clone(),
             cancel_signal,
             clock,
+            search_withdrawn: AtomicBool::new(false),
         });
         Ok((auth, JobProxyAuthGuard { active, revoked }))
     }
@@ -237,6 +244,27 @@ impl JobProxyAuth {
             ));
         }
         Ok(())
+    }
+
+    /// Tells the controller, for the message's count of web searches, which the proxy asks it
+    /// for before each one, that this job's routing step read the person's own words as asking
+    /// for deeper research, or that this lease attempt starts over, holding none of an earlier
+    /// attempt's searches. Fenced to this job's lease attempt, as a renewal is.
+    pub(crate) async fn report_web_searches(
+        &self,
+        deeper_research: bool,
+        starts_over: bool,
+    ) -> anyhow::Result<()> {
+        self.ensure_active()?;
+        self.client
+            .report_web_searches(
+                &self.registration,
+                self.job_id,
+                self.scope.lease_attempt,
+                deeper_research,
+                starts_over,
+            )
+            .await
     }
 
     /// Direct HTTP workers use the same renewable source as native Codex.
@@ -293,12 +321,13 @@ impl JobProxyAuth {
                 .map_err(|error| io::Error::other(error.to_string()))
                 .and_then(|envelope| {
                     let (url, mut claims, grant) = parse_grant(&envelope)?;
-                    // A rolling controller upgrade may first advertise search on renewal. Keep
-                    // this job's initial tool policy (off) without rejecting an otherwise equal
-                    // grant. Withdrawal from a job that started with search still fails closed.
-                    if !self.scope.native_web_search {
-                        claims.scope.native_web_search = false;
-                    }
+                    // Search is the one part of the boundary a renewal may change, and only
+                    // to off. A grant renewed without it (the controller's switch went off)
+                    // keeps the job running: the proxy answers its later searches as not run.
+                    // A rolling controller upgrade may first advertise search on renewal: the
+                    // job keeps its initial tool policy (off).
+                    let withdrawn = self.scope.native_web_search && !claims.scope.native_web_search;
+                    claims.scope.native_web_search = self.scope.native_web_search;
                     if url != self.url || claims.scope != self.scope {
                         return Err(invalid_grant(
                             "renewed job proxy grant changed its boundary",
@@ -307,12 +336,18 @@ impl JobProxyAuth {
                     if grant.expires_at <= (self.clock)() {
                         return Err(invalid_grant("renewed job proxy grant is expired"));
                     }
-                    Ok(grant)
+                    Ok((grant, withdrawn))
                 });
             match replacement {
-                Ok(grant) => {
+                Ok((grant, withdrawn)) => {
                     *cached = grant;
                     self.generation.fetch_add(1, Ordering::SeqCst);
+                    if withdrawn && !self.search_withdrawn.swap(true, Ordering::SeqCst) {
+                        tracing::info!(
+                            job_id = %self.job_id,
+                            "the renewed proxy grant has no web search: the job goes on, and its later searches are not run"
+                        );
+                    }
                 }
                 Err(error) => {
                     // A failed renewal must not fall back to an older cached
@@ -958,25 +993,39 @@ mod tests {
         }
     }
 
+    /// A renewal never turns search on for a job that started without it (a rolling controller
+    /// upgrade), and a renewal that takes it away (the controller's switch went off) keeps the
+    /// job running: it is not cancelled, its renewed grant is used, and no later run of it is
+    /// offered search.
     #[tokio::test]
-    async fn renewal_keeps_the_initial_search_policy_across_controller_upgrades() {
-        for (initial, renewed, accepted) in [
-            (None, true, true),
-            (Some(false), true, true),
+    async fn renewal_keeps_the_job_running_when_search_is_taken_away() {
+        for (initial, renewed, searches_after) in [
+            (None, true, false),
+            (Some(false), true, false),
             (Some(true), true, true),
             (Some(true), false, false),
         ] {
             let fixture = Fixture::with_native_search(initial).await;
-            fixture.advance(1740);
-            let mut replacement = fixture.replacement();
-            change_claim(&mut replacement, "native_web_search", json!(renewed));
-            fixture.reply(replacement);
-            assert_eq!(fixture.auth.resolve().await.is_ok(), accepted);
             assert_eq!(
                 fixture.auth.allows_native_web_search(),
                 initial.unwrap_or(false)
             );
-            assert_eq!(fixture.signal.is_canceled(), !accepted);
+            fixture.advance(1740);
+            let mut replacement = fixture.replacement();
+            change_claim(&mut replacement, "native_web_search", json!(renewed));
+            fixture.reply(replacement.clone());
+            let renewed_auth = fixture
+                .auth
+                .resolve()
+                .await
+                .expect("the job keeps its grant");
+            assert_eq!(
+                renewed_auth.get_token().unwrap(),
+                replacement.token,
+                "the renewed grant is the one used"
+            );
+            assert_eq!(fixture.auth.allows_native_web_search(), searches_after);
+            assert!(!fixture.signal.is_canceled(), "{initial:?} -> {renewed}");
         }
     }
 

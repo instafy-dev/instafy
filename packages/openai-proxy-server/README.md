@@ -109,7 +109,7 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `PROXY_CREDENTIAL_LEASE_TOKEN` | Dedicated bearer used only for controller credential leases | `None` |
 | `PROXY_PINNED_MODEL` | The only model static credentials serve managed runs as (set it to the controller's `MANAGED_AI_MODEL_ID`); see [Model selection](#model-selection) | `None` |
 | `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` | Which upstream endpoints get the platform lane's `service_tier: "default"`: `openai` (only hosts under `openai.com`), `all` (any endpoint that takes a tier) or `none`; any other value stops the proxy at startup. See [Service tier](#service-tier) | `openai` |
-| `PROXY_MANAGED_NATIVE_WEB_SEARCH` | Lets a managed run the controller granted native search use `/v1/alpha/search` through the search bridge: OpenAI's hosted web search on an API key, or a static ChatGPT login's own search. A value that is not a boolean stops the proxy at startup. See [Native search for managed runs](#native-search-for-managed-runs) | Off |
+| `PROXY_MANAGED_NATIVE_WEB_SEARCH` | Lets a managed run the controller granted native search use `/v1/alpha/search` through the search bridge: OpenAI's hosted web search on an API key, or a static ChatGPT login's own search, as many searches as the controller's check lets run. Read at startup; a value that is not a boolean stops the proxy. See [Native search for managed runs](#native-search-for-managed-runs) | Off |
 | `PROXY_MANAGED_WEB_SEARCH_MODEL` | The model the search bridge's hosted web search runs as; unset uses the managed run's pinned model. A value that is not a model id stops the proxy at startup | `None` |
 | `CODEX_PROXY_CHATGPT_ENDPOINT` | Upstream ChatGPT Codex Responses endpoint | `https://chatgpt.com/backend-api/codex/responses` |
 | `PROXY_STREAM_PASSTHROUGH` | `0`, `false`, `no` or `off` makes a streaming `/v1/responses` request wait for the whole upstream response again; see [Streaming](#streaming) | On |
@@ -211,14 +211,33 @@ inferred from API web-search prices.
 
 ### Native search for managed runs
 
-`PROXY_MANAGED_NATIVE_WEB_SEARCH` (off by default) lets a managed run search through
-`POST /v1/alpha/search` when the controller granted its job native search: a job-bound token
-with `native_web_search`, a `run_id` and no `credential_id`. The controller grants native search
-to managed runs only with its own `MANAGED_AI_NATIVE_WEB_SEARCH` on (off by default), so a managed
-run searches only with both settings on; `docs/Credits-Billing.md` ("Web search for Instafy AI")
-says how to turn them on in a test environment. Turning the proxy's setting off refuses every
-managed search at once with 403 `native_web_search_unavailable`. Hosted `web_search` in a model
-request stays off on the platform lane either way.
+`PROXY_MANAGED_NATIVE_WEB_SEARCH` (off by default, read when the proxy starts) lets a managed run
+search through `POST /v1/alpha/search` when the controller granted its job native search: a
+job-bound token with `native_web_search`, a `run_id` and no `credential_id`. The controller grants
+native search to managed runs only with its own `MANAGED_AI_NATIVE_WEB_SEARCH` on (off by
+default), so a managed run searches only with both settings on; `docs/Credits-Billing.md` ("Web
+search for Instafy AI") says how to turn them on in a test environment. Hosted `web_search` in a
+model request stays off on the platform lane either way.
+
+Before a managed run's searches go upstream, the proxy asks the controller how many may run
+(`POST /internal/managed-web-search/claim` with the credential-lease bearer, the job named by its
+verified token, and a new `claimId` for the request), and runs only those. The controller counts a
+message's searches across its jobs (2 a message, or 8 when the person asked for deeper research)
+and refuses every one while its `MANAGED_AI_NATIVE_WEB_SEARCH` is off, so that switch turns search
+off for the next search on every machine. The proxy then settles the check with how many of its
+searches ran (`POST /internal/managed-web-search/settle`, `ran`), asking once more if that fails,
+and the rest (a search that failed) go back to the message. A check whose answer it could not read
+(an error, or no answer within 5 seconds) is settled with none, so what the controller took for it
+goes back, and the same check landing afterwards takes nothing. A background check that has not
+answered yet (`undecided`) is asked again every 250 ms for up to 3 seconds, for its answer to reach
+the controller, before its search is refused. A managed job's search that may not run (this
+proxy's setting off, a grant renewed without `native_web_search`, the controller's refusal, or a
+controller that could not be asked) is answered, not refused: `200` with nothing searched,
+`search_usage.searches` 0, and an `output` that says why and how to answer without it, so the
+turn goes on and nothing is charged. Such a request logs one
+`[proxy] managed web search withheld {…}` line with `jobId`, `runId`, `leaseAttempt`, `asked`,
+`granted` and `reason` (`off`, `ended`, `undecided`, `used` or `unchecked`), never a query. Every
+other token without the capability is refused with 403 `native_web_search_unavailable`.
 
 A managed run's search goes through the search bridge, which works the same on either kind of
 platform credential:
@@ -241,8 +260,8 @@ platform credential:
   and says what was removed, refused or not run; `encrypted_output` is `null`. `results`, which
   codex hands to its clients and never to the model, starts with
   `{"type": "searched_queries", "queries": […]}`: the queries that searched, as they were sent
-  (not one refused, repeated, past the limit or not run, nor one whose search failed), which the
-  chat shows in place of the words codex asked for. Next comes
+  (not one refused, repeated, past the limit, withheld by the controller or not run, nor one
+  whose search failed), which the chat shows in place of the words codex asked for. Next comes
   `{"type": "search_usage", "searches": n, "input_tokens": …, "cached_input_tokens": …, "output_tokens": …}`:
   one search for each query named before it, and the tokens of their requests as the provider
   reported them, the search content among the input (0 on a ChatGPT login, whose search reports

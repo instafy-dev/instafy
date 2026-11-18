@@ -754,6 +754,17 @@ impl ProtocolWriter {
 }
 
 pub async fn run_cli(request: IsolatedToolWorkerRequest) -> Result<()> {
+    // The turn runs on a runtime worker thread, whose stack main.rs sizes for Codex as it does
+    // for the runtime's own turns. Polled on the process's main thread instead, a debug build's
+    // turn overflowed that thread's smaller stack before its first model request.
+    match tokio::spawn(run_turn(request)).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => Err(error).context("isolated worker turn did not finish"),
+    }
+}
+
+async fn run_turn(request: IsolatedToolWorkerRequest) -> Result<()> {
     let cancel = JobCancelSignal::new();
     let monitor_cancel = cancel.clone();
     let input = tokio::spawn(async move {

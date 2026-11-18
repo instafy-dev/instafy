@@ -343,7 +343,7 @@ fn plan_normalization_retains_tool_requirements_and_legacy_workers_keep_file_gen
         {"handle":"format", "prompt":"Format supplied facts."},
         {"handle":"invalid", "prompt":"Invalid requirement.", "requiresTools":"yes"}
     ], "lead":{"leadHandle":"octo", "continuationPrompt":"Combine."}});
-    let (plan, _, _) = parse_codex_multi_agent_plan_action(payload.as_object().unwrap()).unwrap();
+    let (plan, _) = parse_codex_multi_agent_plan_action(payload.as_object().unwrap()).unwrap();
     assert_eq!(plan["agents"][0]["requiresTools"], true);
     assert!(plan["agents"][1].get("requiresTools").is_none());
     assert_eq!(plan["agents"][2]["requiresTools"], "yes");
