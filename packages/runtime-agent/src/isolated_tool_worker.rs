@@ -479,10 +479,10 @@ pub async fn run_with_program(
         .unwrap_or_default();
     if cleanup.is_err() || !matches!(reaped, Ok(Ok(_))) {
         mark_cleanup_unconfirmed();
-        // The tree's only failure is descendants that outlived termination.
+        // The tree fails only when it cannot confirm that its descendants are gone.
         let cleanup_message = cleanup
             .err()
-            .map(|_| "isolated worker descendants survived termination".to_string())
+            .map(|_| "isolated worker descendants could not be confirmed gone".to_string())
             .unwrap_or_else(|| "isolated worker could not be reaped".into());
         let (usage_artifact, codex_error_info, prior_error) = match &result {
             Ok(output) => (output.usage_artifact.clone(), None, None),
