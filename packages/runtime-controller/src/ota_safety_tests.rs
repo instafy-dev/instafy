@@ -33,7 +33,7 @@ async fn wait_for_channel_lock_waiters(
 async fn assert_concurrent_channel_cas(
     first: OtaRegistry,
     second: OtaRegistry,
-    pool: Option<PgPool>,
+    pool: PgPool,
 ) -> anyhow::Result<()> {
     let app_a = app_for(first.clone()).await?;
     let app_b = app_for(second).await?;
@@ -48,19 +48,11 @@ async fn assert_concurrent_channel_cas(
     }
     let path = format!("/ota/channels/ios/{channel}/activate");
     // Deliberately queue independent controllers behind the same lock while the channel is absent.
-    let mut connection = match &pool {
-        Some(pool) => Some(pool.get().await?),
-        None => None,
-    };
-    let transaction = match connection.as_mut() {
-        Some(connection) => Some(connection.transaction().await?),
-        None => None,
-    };
-    if let Some(transaction) = &transaction {
-        lock_channel(transaction, OtaPlatform::Ios, &channel)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    }
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    lock_channel(&transaction, OtaPlatform::Ios, &channel)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let task_a = tokio::spawn({
         let app = app_a.clone();
         let path = path.clone();
@@ -87,13 +79,8 @@ async fn assert_concurrent_channel_cas(
             .await
         }
     });
-    let waiting = match &pool {
-        Some(pool) => wait_for_channel_lock_waiters(pool, &channel, 2).await,
-        None => Ok(()),
-    };
-    if let Some(transaction) = transaction {
-        transaction.commit().await?;
-    }
+    let waiting = wait_for_channel_lock_waiters(&pool, &channel, 2).await;
+    transaction.commit().await?;
     let results = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         Ok::<_, anyhow::Error>([task_a.await??, task_b.await??])
     })
@@ -202,21 +189,11 @@ async fn assert_concurrent_registration(
 }
 
 #[tokio::test]
-async fn concurrent_channel_cas_in_memory() -> anyhow::Result<()> {
-    let registry = OtaRegistry::new_in_memory();
-    assert_concurrent_channel_cas(registry.clone(), registry, None).await
-}
-#[tokio::test]
 async fn concurrent_channel_cas_postgres() -> anyhow::Result<()> {
     let Some((first, second, pool)) = postgres_registries().await? else {
         return Ok(());
     };
-    assert_concurrent_channel_cas(first, second, Some(pool)).await
-}
-#[tokio::test]
-async fn concurrent_registration_in_memory() -> anyhow::Result<()> {
-    let registry = OtaRegistry::new_in_memory();
-    assert_concurrent_registration(registry.clone(), registry).await
+    assert_concurrent_channel_cas(first, second, pool).await
 }
 #[tokio::test]
 async fn concurrent_registration_postgres() -> anyhow::Result<()> {
@@ -304,7 +281,7 @@ async fn post(
 }
 
 async fn app_for(registry: OtaRegistry) -> anyhow::Result<Router> {
-    let (mut state, _temp_dir) = super::tests::test_state().await?;
+    let mut state = super::tests::test_state(super::tests::build_dummy_pool()?);
     state.ota_registry = registry;
     Ok(router().with_state(state))
 }
@@ -558,10 +535,6 @@ async fn assert_immutable_registration(registry: OtaRegistry) -> anyhow::Result<
 }
 
 #[tokio::test]
-async fn native_build_guards_in_memory() -> anyhow::Result<()> {
-    assert_native_build_guards(OtaRegistry::new_in_memory()).await
-}
-#[tokio::test]
 async fn native_build_guards_postgres() -> anyhow::Result<()> {
     let Some((registry, _, _)) = postgres_registries().await? else {
         return Ok(());
@@ -569,19 +542,11 @@ async fn native_build_guards_postgres() -> anyhow::Result<()> {
     assert_native_build_guards(registry).await
 }
 #[tokio::test]
-async fn channel_cas_in_memory() -> anyhow::Result<()> {
-    assert_channel_cas(OtaRegistry::new_in_memory()).await
-}
-#[tokio::test]
 async fn channel_cas_postgres() -> anyhow::Result<()> {
     let Some((registry, _, _)) = postgres_registries().await? else {
         return Ok(());
     };
     assert_channel_cas(registry).await
-}
-#[tokio::test]
-async fn immutable_registration_in_memory() -> anyhow::Result<()> {
-    assert_immutable_registration(OtaRegistry::new_in_memory()).await
 }
 #[tokio::test]
 async fn immutable_registration_postgres() -> anyhow::Result<()> {

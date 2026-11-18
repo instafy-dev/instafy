@@ -2,8 +2,6 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
-#[cfg(test)]
-use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
@@ -13,8 +11,6 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use tokio::sync::RwLock;
 use tokio_postgres::types::Json as PgJson;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::Row;
@@ -34,8 +30,6 @@ const MAX_LIST_DEVICE_STATES_LIMIT: i64 = 500;
 const MAX_LIST_CHANNEL_HISTORY_LIMIT: i64 = 100;
 const MAX_DOWNLOAD_INSIGHTS_DAYS: i64 = 90;
 const MAX_STORED_EVENTS: i64 = 5_000;
-#[cfg(test)]
-const MAX_STORED_CHANNEL_HISTORY: usize = 2_000;
 const EVENT_RETENTION_DAYS: i32 = 30;
 
 pub(crate) fn router() -> Router<AppState> {
@@ -62,15 +56,7 @@ pub(crate) fn router() -> Router<AppState> {
 
 #[derive(Clone)]
 pub(crate) struct OtaRegistry {
-    backend: OtaRegistryBackend,
-}
-
-#[derive(Clone)]
-enum OtaRegistryBackend {
-    // The tests' backend; the server always uses Postgres.
-    #[cfg(test)]
-    InMemory(Arc<RwLock<OtaRegistrySnapshot>>),
-    Postgres(PostgresOtaRegistry),
+    store: PostgresOtaRegistry,
 }
 
 #[derive(Clone)]
@@ -106,43 +92,18 @@ struct ResolvedDownloadInsightsParams {
 }
 
 impl OtaRegistry {
-    #[cfg(test)]
-    pub(crate) fn new_in_memory() -> Self {
-        Self {
-            backend: OtaRegistryBackend::InMemory(Arc::new(RwLock::new(
-                OtaRegistrySnapshot::default(),
-            ))),
-        }
-    }
-
     pub(crate) fn new_postgres(pool: PgPool) -> Self {
         Self {
-            backend: OtaRegistryBackend::Postgres(PostgresOtaRegistry { pool }),
+            store: PostgresOtaRegistry { pool },
         }
     }
 
     async fn list_releases(&self) -> Result<Vec<OtaReleaseRecord>, OtaRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                let mut releases = guard.releases.values().cloned().collect::<Vec<_>>();
-                releases.sort_by(|left, right| right.published_at.cmp(&left.published_at));
-                Ok(releases)
-            }
-            OtaRegistryBackend::Postgres(store) => store.list_releases().await,
-        }
+        self.store.list_releases().await
     }
 
     async fn list_channels(&self) -> Result<Vec<OtaChannelAssignment>, OtaRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                Ok(guard.channels.values().cloned().collect())
-            }
-            OtaRegistryBackend::Postgres(store) => store.list_channels().await,
-        }
+        self.store.list_channels().await
     }
 
     async fn list_channel_history(
@@ -151,74 +112,30 @@ impl OtaRegistry {
         channel: String,
         limit: i64,
     ) -> Result<Vec<OtaChannelHistoryEntry>, OtaRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                let mut history = guard
-                    .channel_history
-                    .iter()
-                    .filter(|entry| entry.platform == platform && entry.channel == channel)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                history.sort_by(|left, right| right.activated_at.cmp(&left.activated_at));
-                history.truncate(limit as usize);
-                Ok(history)
-            }
-            OtaRegistryBackend::Postgres(store) => {
-                store.list_channel_history(platform, channel, limit).await
-            }
-        }
+        self.store
+            .list_channel_history(platform, channel, limit)
+            .await
     }
 
     async fn list_device_states(
         &self,
         params: ResolvedDeviceStateListParams,
     ) -> Result<Vec<OtaDeviceState>, OtaRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                let mut devices = guard.device_states.values().cloned().collect::<Vec<_>>();
-                devices.sort_by(|left, right| right.last_seen_at.cmp(&left.last_seen_at));
-                devices.retain(|device| device_matches_filters(device, &params));
-                devices.truncate(params.limit as usize);
-                Ok(devices)
-            }
-            OtaRegistryBackend::Postgres(store) => store.list_device_states(params).await,
-        }
+        self.store.list_device_states(params).await
     }
 
     async fn list_events(
         &self,
         params: ResolvedEventListParams,
     ) -> Result<Vec<OtaUpdateEvent>, OtaRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                let mut events = guard.recent_events.clone();
-                events.sort_by(|left, right| right.occurred_at.cmp(&left.occurred_at));
-                events.retain(|event| event_matches_filters(event, &params));
-                events.truncate(params.limit as usize);
-                Ok(events)
-            }
-            OtaRegistryBackend::Postgres(store) => store.list_events(params).await,
-        }
+        self.store.list_events(params).await
     }
 
     async fn get_download_insights(
         &self,
         params: ResolvedDownloadInsightsParams,
     ) -> Result<OtaDownloadInsights, OtaRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                build_download_insights_from_events(&guard.recent_events, params)
-            }
-            OtaRegistryBackend::Postgres(store) => store.get_download_insights(params).await,
-        }
+        self.store.get_download_insights(params).await
     }
 
     async fn register_release(
@@ -226,21 +143,7 @@ impl OtaRegistry {
         mut release: OtaReleaseRecord,
     ) -> Result<OtaReleaseRecord, OtaRegistryError> {
         normalize_release(&mut release)?;
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                let mut guard = store.write().await;
-                if let Some(existing) = guard.releases.get(&release.release_id) {
-                    ensure_same_release_identity(existing, &release)?;
-                    return Ok(existing.clone());
-                }
-                guard
-                    .releases
-                    .insert(release.release_id.clone(), release.clone());
-                Ok(release)
-            }
-            OtaRegistryBackend::Postgres(store) => store.register_release(release).await,
-        }
+        self.store.register_release(release).await
     }
 
     async fn activate_channel(
@@ -249,15 +152,9 @@ impl OtaRegistry {
         channel: String,
         request: ActivateChannelRequest,
     ) -> Result<OtaChannelAssignment, OtaRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                activate_channel_in_memory(store, platform, channel, request).await
-            }
-            OtaRegistryBackend::Postgres(store) => {
-                store.activate_channel(platform, channel, request).await
-            }
-        }
+        self.store
+            .activate_channel(platform, channel, request)
+            .await
     }
 
     async fn rollback_channel(
@@ -266,15 +163,9 @@ impl OtaRegistry {
         channel: String,
         request: RollbackChannelRequest,
     ) -> Result<OtaChannelAssignment, OtaRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => {
-                rollback_channel_in_memory(store, platform, channel, request).await
-            }
-            OtaRegistryBackend::Postgres(store) => {
-                store.rollback_channel(platform, channel, request).await
-            }
-        }
+        self.store
+            .rollback_channel(platform, channel, request)
+            .await
     }
 
     async fn check_for_update(
@@ -282,11 +173,7 @@ impl OtaRegistry {
         mut request: OtaCheckRequest,
     ) -> Result<OtaCheckResponse, OtaRegistryError> {
         normalize_check_request(&mut request)?;
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => check_for_update_in_memory(store, request).await,
-            OtaRegistryBackend::Postgres(store) => store.check_for_update(request).await,
-        }
+        self.store.check_for_update(request).await
     }
 
     async fn record_event(
@@ -294,11 +181,7 @@ impl OtaRegistry {
         mut event: OtaUpdateEvent,
     ) -> Result<OtaUpdateEvent, OtaRegistryError> {
         normalize_event(&mut event)?;
-        match &self.backend {
-            #[cfg(test)]
-            OtaRegistryBackend::InMemory(store) => record_event_in_memory(store, event).await,
-            OtaRegistryBackend::Postgres(store) => store.record_event(event).await,
-        }
+        self.store.record_event(event).await
     }
 }
 
@@ -1212,17 +1095,6 @@ impl PostgresOtaRegistry {
     }
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(default)]
-struct OtaRegistrySnapshot {
-    releases: BTreeMap<String, OtaReleaseRecord>,
-    channels: BTreeMap<String, OtaChannelAssignment>,
-    device_states: BTreeMap<String, OtaDeviceState>,
-    recent_events: Vec<OtaUpdateEvent>,
-    channel_history: Vec<OtaChannelHistoryEntry>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum OtaPlatform {
@@ -2115,71 +1987,6 @@ fn build_download_insight_query_parts(
     (clauses, bindings)
 }
 
-#[cfg(test)]
-fn build_download_insights_from_events(
-    events: &[OtaUpdateEvent],
-    params: ResolvedDownloadInsightsParams,
-) -> Result<OtaDownloadInsights, OtaRegistryError> {
-    let (start_day, end_day, start_at, end_exclusive) = resolve_download_window(params.days)?;
-    let mut by_day = BTreeMap::<NaiveDate, OtaDownloadInsightCounts>::new();
-    let mut by_channel = BTreeMap::<String, OtaDownloadInsightCounts>::new();
-    let mut by_platform = BTreeMap::<String, OtaDownloadInsightCounts>::new();
-    let mut by_country = BTreeMap::<String, OtaDownloadInsightCounts>::new();
-
-    for event in events {
-        if event.occurred_at < start_at || event.occurred_at >= end_exclusive {
-            continue;
-        }
-        if let Some(platform) = params.platform {
-            if event.platform != platform {
-                continue;
-            }
-        }
-        if let Some(channel) = &params.channel {
-            if &event.channel != channel {
-                continue;
-            }
-        }
-
-        let day = event.occurred_at.date_naive();
-        let channel_counts = by_channel.entry(event.channel.clone()).or_default();
-        let platform_counts = by_platform.entry(event.platform.to_string()).or_default();
-        let country_counts = by_country
-            .entry(
-                event
-                    .country_code
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("unknown")
-                    .to_string(),
-            )
-            .or_default();
-        let day_counts = by_day.entry(day).or_default();
-        for counts in [day_counts, channel_counts, platform_counts, country_counts] {
-            match event.event_type {
-                OtaEventType::DownloadStarted => counts.started += 1,
-                OtaEventType::DownloadCompleted => counts.completed += 1,
-                OtaEventType::UpdateAvailable => counts.available += 1,
-                OtaEventType::DownloadFailed
-                | OtaEventType::InstallFailed
-                | OtaEventType::RollbackTriggered => counts.failures += 1,
-                _ => {}
-            }
-        }
-    }
-
-    Ok(build_download_insights_response(
-        params,
-        start_day,
-        end_day,
-        by_day.into_iter().collect(),
-        by_channel.into_iter().collect(),
-        by_platform.into_iter().collect(),
-        by_country.into_iter().collect(),
-    ))
-}
-
 fn build_download_insights_response(
     params: ResolvedDownloadInsightsParams,
     start_day: NaiveDate,
@@ -2255,416 +2062,6 @@ fn build_download_insights_response(
             })
             .collect(),
     }
-}
-
-#[cfg(test)]
-fn device_matches_filters(device: &OtaDeviceState, params: &ResolvedDeviceStateListParams) -> bool {
-    if let Some(platform) = &params.platform {
-        if &device.platform != platform {
-            return false;
-        }
-    }
-    if let Some(channel) = &params.channel {
-        if &device.channel != channel {
-            return false;
-        }
-    }
-    if let Some(before_seen_at) = params.before_seen_at {
-        if device.last_seen_at >= before_seen_at {
-            return false;
-        }
-    }
-    if params.attention_only && !device_attention(device) {
-        return false;
-    }
-    if let Some(query) = &params.query {
-        let lower = query.to_lowercase();
-        if ![
-            device.device_id.as_str(),
-            device.channel.as_str(),
-            device.current_bundle_version.as_deref().unwrap_or_default(),
-            device.current_git_sha.as_deref().unwrap_or_default(),
-            device.last_user_id.as_deref().unwrap_or_default(),
-        ]
-        .iter()
-        .any(|value| value.to_lowercase().contains(&lower))
-        {
-            return false;
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-fn event_matches_filters(event: &OtaUpdateEvent, params: &ResolvedEventListParams) -> bool {
-    if let Some(platform) = &params.platform {
-        if &event.platform != platform {
-            return false;
-        }
-    }
-    if let Some(channel) = &params.channel {
-        if &event.channel != channel {
-            return false;
-        }
-    }
-    if let Some(event_type) = &params.event_type {
-        if &event.event_type != event_type {
-            return false;
-        }
-    }
-    if let Some(before_occurred_at) = params.before_occurred_at {
-        if event.occurred_at >= before_occurred_at {
-            return false;
-        }
-    }
-    if let Some(query) = &params.query {
-        let lower = query.to_lowercase();
-        if ![
-            event.event_type.to_string(),
-            event.device_id.clone(),
-            event.channel.clone(),
-            event.bundle_version.clone().unwrap_or_default(),
-            event.session_id.clone().unwrap_or_default(),
-        ]
-        .iter()
-        .any(|value| value.to_lowercase().contains(&lower))
-        {
-            return false;
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-fn device_attention(device: &OtaDeviceState) -> bool {
-    matches!(
-        device.last_event_type,
-        None | Some(OtaEventType::DownloadFailed)
-            | Some(OtaEventType::InstallFailed)
-            | Some(OtaEventType::RollbackTriggered)
-    ) || device.current_bundle_version.is_none()
-}
-
-#[cfg(test)]
-async fn activate_channel_in_memory(
-    store: &Arc<RwLock<OtaRegistrySnapshot>>,
-    platform: OtaPlatform,
-    channel: String,
-    request: ActivateChannelRequest,
-) -> Result<OtaChannelAssignment, OtaRegistryError> {
-    let activated_by = normalize_non_empty(&request.activated_by, "activated_by")?;
-    let release_id = normalize_non_empty(&request.release_id, "release_id")?;
-    let mut guard = store.write().await;
-    let assignment_key = channel_key(platform, &channel);
-    let existing = guard.channels.get(&assignment_key).cloned();
-    check_expected_active_release(&request.expected_active_release_id, existing.as_ref())?;
-    let release = guard.releases.get(&release_id).cloned().ok_or_else(|| {
-        OtaRegistryError::NotFound(format!("unknown release_id '{}'", release_id))
-    })?;
-    if release.platform != platform {
-        return Err(OtaRegistryError::Invalid(format!(
-            "release '{}' targets platform '{}' not '{}'",
-            release_id, release.platform, platform
-        )));
-    }
-    if release.channel != channel {
-        return Err(OtaRegistryError::Invalid(format!(
-            "release '{}' targets channel '{}' not '{}'",
-            release_id, release.channel, channel
-        )));
-    }
-
-    let previous_release_id = if let Some(existing_assignment) = existing.as_ref() {
-        if existing_assignment.active_release_id != release_id {
-            if let Some(previous_release) = guard
-                .releases
-                .get_mut(&existing_assignment.active_release_id)
-            {
-                if previous_release.status == OtaReleaseStatus::Live {
-                    previous_release.status = OtaReleaseStatus::Paused;
-                }
-            }
-            Some(existing_assignment.active_release_id.clone())
-        } else {
-            existing_assignment.previous_release_id.clone()
-        }
-    } else {
-        None
-    };
-
-    let rollout_percentage = request
-        .rollout_percentage
-        .unwrap_or(release.rollout_percentage);
-    if let Some(active_release) = guard.releases.get_mut(&release_id) {
-        active_release.rollout_percentage = rollout_percentage;
-        active_release.status = OtaReleaseStatus::Live;
-    }
-
-    let assignment = OtaChannelAssignment {
-        platform,
-        channel: channel.clone(),
-        active_release_id: release_id,
-        previous_release_id,
-        rollout_percentage,
-        activated_at: Utc::now(),
-        activated_by,
-    };
-    guard.channels.insert(assignment_key, assignment.clone());
-    guard.channel_history.push(OtaChannelHistoryEntry {
-        history_id: Uuid::new_v4().to_string(),
-        platform,
-        channel,
-        action: OtaChannelHistoryAction::Activate,
-        previous_release_id: assignment.previous_release_id.clone(),
-        next_release_id: assignment.active_release_id.clone(),
-        rollout_percentage: assignment.rollout_percentage,
-        activated_at: assignment.activated_at,
-        activated_by: assignment.activated_by.clone(),
-    });
-    if guard.channel_history.len() > MAX_STORED_CHANNEL_HISTORY {
-        let overflow = guard.channel_history.len() - MAX_STORED_CHANNEL_HISTORY;
-        guard.channel_history.drain(0..overflow);
-    }
-    Ok(assignment)
-}
-
-#[cfg(test)]
-async fn rollback_channel_in_memory(
-    store: &Arc<RwLock<OtaRegistrySnapshot>>,
-    platform: OtaPlatform,
-    channel: String,
-    request: RollbackChannelRequest,
-) -> Result<OtaChannelAssignment, OtaRegistryError> {
-    let activated_by = normalize_non_empty(&request.activated_by, "activated_by")?;
-    let assignment_key = channel_key(platform, &channel);
-    let mut guard = store.write().await;
-    let existing_assignment = guard.channels.get(&assignment_key).cloned();
-    check_expected_active_release(
-        &request.expected_active_release_id,
-        existing_assignment.as_ref(),
-    )?;
-    let existing_assignment = existing_assignment
-        .ok_or_else(|| OtaRegistryError::NotFound("no active release for channel".to_string()))?;
-
-    let target_release_id = if let Some(explicit) = request.release_id.as_ref() {
-        normalize_non_empty(explicit, "release_id")?
-    } else if let Some(previous) = existing_assignment.previous_release_id.as_ref() {
-        previous.clone()
-    } else {
-        return Err(OtaRegistryError::Invalid(
-            "rollback requires release_id when no previous release exists".to_string(),
-        ));
-    };
-
-    let target_release = guard
-        .releases
-        .get(&target_release_id)
-        .cloned()
-        .ok_or_else(|| {
-            OtaRegistryError::NotFound(format!("unknown release_id '{}'", target_release_id))
-        })?;
-    if target_release.platform != platform {
-        return Err(OtaRegistryError::Invalid(format!(
-            "release '{}' targets platform '{}' not '{}'",
-            target_release_id, target_release.platform, platform
-        )));
-    }
-    if target_release.channel != channel {
-        return Err(OtaRegistryError::Invalid(format!(
-            "release '{}' targets channel '{}' not '{}'",
-            target_release_id, target_release.channel, channel
-        )));
-    }
-
-    if let Some(current_release) = guard
-        .releases
-        .get_mut(&existing_assignment.active_release_id)
-    {
-        current_release.status = OtaReleaseStatus::RolledBack;
-    }
-    if let Some(restored_release) = guard.releases.get_mut(&target_release_id) {
-        restored_release.status = OtaReleaseStatus::Live;
-    }
-
-    let assignment = OtaChannelAssignment {
-        platform,
-        channel: channel.clone(),
-        active_release_id: target_release_id,
-        previous_release_id: Some(existing_assignment.active_release_id),
-        rollout_percentage: target_release.rollout_percentage,
-        activated_at: Utc::now(),
-        activated_by,
-    };
-    guard.channels.insert(assignment_key, assignment.clone());
-    guard.channel_history.push(OtaChannelHistoryEntry {
-        history_id: Uuid::new_v4().to_string(),
-        platform,
-        channel,
-        action: OtaChannelHistoryAction::Rollback,
-        previous_release_id: assignment.previous_release_id.clone(),
-        next_release_id: assignment.active_release_id.clone(),
-        rollout_percentage: assignment.rollout_percentage,
-        activated_at: assignment.activated_at,
-        activated_by: assignment.activated_by.clone(),
-    });
-    if guard.channel_history.len() > MAX_STORED_CHANNEL_HISTORY {
-        let overflow = guard.channel_history.len() - MAX_STORED_CHANNEL_HISTORY;
-        guard.channel_history.drain(0..overflow);
-    }
-    Ok(assignment)
-}
-
-#[cfg(test)]
-async fn check_for_update_in_memory(
-    store: &Arc<RwLock<OtaRegistrySnapshot>>,
-    request: OtaCheckRequest,
-) -> Result<OtaCheckResponse, OtaRegistryError> {
-    let assignment_key = channel_key(request.platform, &request.channel);
-    let device_key = device_key(request.platform, &request.channel, &request.device_id);
-    let now = Utc::now();
-    let mut guard = store.write().await;
-    let response = match guard.channels.get(&assignment_key).cloned() {
-        Some(assignment) => match guard.releases.get(&assignment.active_release_id).cloned() {
-            Some(release) => {
-                if !native_build_is_compatible(&request, &release) {
-                    OtaCheckResponse::not_available("native_build_incompatible")
-                } else if !version_is_compatible(
-                    &request.native_version,
-                    &release.min_supported_native_version,
-                ) {
-                    OtaCheckResponse::not_available("native_version_too_old")
-                } else if request
-                    .current_bundle_version
-                    .as_ref()
-                    .is_some_and(|value| value == &release.bundle_version)
-                    || request
-                        .current_git_sha
-                        .as_ref()
-                        .is_some_and(|value| value == &release.git_sha)
-                {
-                    OtaCheckResponse::not_available("already_active")
-                } else if !device_is_in_rollout(
-                    &request.device_id,
-                    &release.release_id,
-                    assignment.rollout_percentage,
-                ) {
-                    OtaCheckResponse::not_available("rollout_excluded")
-                } else {
-                    OtaCheckResponse {
-                        update_available: true,
-                        reason: "update_available".to_string(),
-                        required_native_build: release.required_native_build.clone(),
-                        release_id: Some(release.release_id.clone()),
-                        bundle_version: Some(release.bundle_version.clone()),
-                        git_sha: Some(release.git_sha.clone()),
-                        artifact_url: Some(release.artifact_url.clone()),
-                        artifact_sha256: Some(release.artifact_sha256.clone()),
-                        artifact_size_bytes: Some(release.artifact_size_bytes),
-                        artifact_type: Some(release.artifact_type.clone()),
-                        signature: release.signature.clone(),
-                        rollout_percentage: Some(assignment.rollout_percentage),
-                    }
-                }
-            }
-            None => OtaCheckResponse::not_available("active_release_missing"),
-        },
-        None => OtaCheckResponse::not_available("channel_not_configured"),
-    };
-
-    guard.device_states.insert(
-        device_key,
-        OtaDeviceState {
-            device_id: request.device_id,
-            platform: request.platform,
-            channel: request.channel,
-            native_version: request.native_version,
-            native_build: request.native_build,
-            current_bundle_version: request.current_bundle_version,
-            current_git_sha: request.current_git_sha,
-            last_seen_at: now,
-            last_check_at: Some(now),
-            last_event_type: Some(if response.update_available {
-                OtaEventType::UpdateAvailable
-            } else {
-                OtaEventType::UpdateNotAvailable
-            }),
-            last_event_at: Some(now),
-            last_release_id: response.release_id.clone(),
-            last_session_id: None,
-            last_user_id: None,
-            last_space_id: None,
-        },
-    );
-
-    Ok(response)
-}
-
-#[cfg(test)]
-async fn record_event_in_memory(
-    store: &Arc<RwLock<OtaRegistrySnapshot>>,
-    event: OtaUpdateEvent,
-) -> Result<OtaUpdateEvent, OtaRegistryError> {
-    let device_key = device_key(event.platform, &event.channel, &event.device_id);
-    let mut guard = store.write().await;
-    let existing = guard.device_states.get(&device_key).cloned();
-    let release_id = event.bundle_version.as_ref().and_then(|bundle_version| {
-        guard.releases.values().find_map(|release| {
-            if release.platform == event.platform
-                && release.channel == event.channel
-                && release.bundle_version == *bundle_version
-            {
-                Some(release.release_id.clone())
-            } else {
-                None
-            }
-        })
-    });
-
-    guard.device_states.insert(
-        device_key,
-        OtaDeviceState {
-            device_id: event.device_id.clone(),
-            platform: event.platform,
-            channel: event.channel.clone(),
-            native_version: event.native_version.clone(),
-            native_build: event.native_build.clone(),
-            current_bundle_version: event.bundle_version.clone().or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|state| state.current_bundle_version.clone())
-            }),
-            current_git_sha: event.git_sha.clone().or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|state| state.current_git_sha.clone())
-            }),
-            last_seen_at: event.occurred_at,
-            last_check_at: existing.as_ref().and_then(|state| state.last_check_at),
-            last_event_type: Some(event.event_type.clone()),
-            last_event_at: Some(event.occurred_at),
-            last_release_id: release_id.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|state| state.last_release_id.clone())
-            }),
-            last_session_id: event.session_id.clone(),
-            last_user_id: event.user_id.clone(),
-            last_space_id: event.space_id.clone(),
-        },
-    );
-
-    guard
-        .recent_events
-        .retain(|existing_event| existing_event.event_id != event.event_id);
-    guard.recent_events.push(event.clone());
-    guard
-        .recent_events
-        .sort_by(|left, right| left.occurred_at.cmp(&right.occurred_at));
-    if guard.recent_events.len() > MAX_STORED_EVENTS as usize {
-        let overflow = guard.recent_events.len() - MAX_STORED_EVENTS as usize;
-        guard.recent_events.drain(0..overflow);
-    }
-    Ok(event)
 }
 
 fn map_release_row(row: Row) -> Result<OtaReleaseRecord, OtaRegistryError> {
@@ -3082,16 +2479,6 @@ fn normalize_channel(value: &str) -> Result<String, OtaRegistryError> {
     Ok(normalize_non_empty(value, "channel")?.to_ascii_lowercase())
 }
 
-#[cfg(test)]
-fn channel_key(platform: OtaPlatform, channel: &str) -> String {
-    format!("{platform}:{channel}")
-}
-
-#[cfg(test)]
-fn device_key(platform: OtaPlatform, channel: &str, device_id: &str) -> String {
-    format!("{platform}:{channel}:{}", device_id.trim())
-}
-
 fn device_is_in_rollout(device_id: &str, release_id: &str, rollout_percentage: u8) -> bool {
     if rollout_percentage >= 100 {
         return true;
@@ -3164,14 +2551,14 @@ mod safety_tests;
 mod tests {
     use super::*;
     use crate::tests::{
-        build_app_config, build_test_state, test_origin_private_key, test_origin_public_key,
+        build_app_config, build_test_state, setup_origin_test_pool, test_origin_private_key,
+        test_origin_public_key, with_empty_keyed_tables,
     };
     use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
-    use tempfile::TempDir;
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -3199,7 +2586,26 @@ mod tests {
         }
     }
 
-    fn build_dummy_pool() -> anyhow::Result<crate::config::PgPool> {
+    /// A channel no other test or earlier run uses, so that the releases,
+    /// assignments, history, device states and events a test makes on it are
+    /// its own on the shared test database.
+    fn unique_channel(name: &str) -> String {
+        format!("{name}-{}", Uuid::new_v4().simple())
+    }
+
+    /// [`sample_release`] on `channel`, under a release id of that channel.
+    fn sample_release_on(channel: &str) -> OtaReleaseRecord {
+        let mut release = sample_release();
+        release.release_id = format!("ios-{channel}-20260318");
+        release.channel = channel.to_string();
+        release
+    }
+
+    /// A pool that never connects, for a state whose own pool the test never
+    /// uses: either the operator check refuses the request before the registry
+    /// is reached, or the test swaps in a registry of its own and calls the
+    /// routes as the service role (`safety_tests::app_for`).
+    pub(super) fn build_dummy_pool() -> anyhow::Result<crate::config::PgPool> {
         let manager = PostgresConnectionManager::new_from_stringlike(
             "postgresql://ignored:ignored@127.0.0.1:1/postgres",
             crate::config::database_tls(),
@@ -3207,16 +2613,14 @@ mod tests {
         Ok(Pool::builder().max_size(1).build_unchecked(manager))
     }
 
-    pub(super) async fn test_state() -> anyhow::Result<(AppState, TempDir)> {
-        let temp_dir = tempfile::tempdir()?;
+    /// The routes' state, with the controller's OTA registry over `pool`.
+    pub(super) fn test_state(pool: crate::config::PgPool) -> AppState {
         let config = build_app_config(
             test_origin_private_key(),
             test_origin_public_key(),
             "test-origin-key",
         );
-        let mut state = build_test_state(build_dummy_pool()?, config);
-        state.ota_registry = OtaRegistry::new_in_memory();
-        Ok((state, temp_dir))
+        build_test_state(pool, config)
     }
 
     fn service_role_header() -> (&'static str, &'static str) {
@@ -3237,7 +2641,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_release_requires_operator_access() -> anyhow::Result<()> {
-        let (state, _temp_dir) = test_state().await?;
+        let state = test_state(build_dummy_pool()?);
 
         let response = router()
             .with_state(state)
@@ -3256,10 +2660,15 @@ mod tests {
 
     #[tokio::test]
     async fn register_release_allows_allowed_operator_user() -> anyhow::Result<()> {
-        let (mut state, _temp_dir) = test_state().await?;
+        let Some(pool) = setup_origin_test_pool().await? else {
+            eprintln!("skipping OTA operator release test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let mut state = test_state(pool);
         let operator_user_id = Uuid::new_v4();
         state.config.operator_console_allowed_user_ids = vec![operator_user_id];
         let auth_header = controller_user_header(&state.config, operator_user_id)?;
+        let release = sample_release_on(&unique_channel("stable"));
 
         let response = router()
             .with_state(state)
@@ -3269,7 +2678,7 @@ mod tests {
                     .uri("/ota/releases")
                     .header("content-type", "application/json")
                     .header(auth_header.0, auth_header.1)
-                    .body(Body::from(serde_json::to_vec(&sample_release())?))?,
+                    .body(Body::from(serde_json::to_vec(&release)?))?,
             )
             .await?;
 
@@ -3280,7 +2689,7 @@ mod tests {
     #[tokio::test]
     async fn register_release_rejects_scoped_token_for_allowed_operator_user() -> anyhow::Result<()>
     {
-        let (mut state, _temp_dir) = test_state().await?;
+        let mut state = test_state(build_dummy_pool()?);
         let operator_user_id = Uuid::new_v4();
         state.config.operator_console_allowed_user_ids = vec![operator_user_id];
         let scoped = mint_scoped_token(
@@ -3319,10 +2728,14 @@ mod tests {
 
     #[tokio::test]
     async fn register_activate_and_check_returns_update() -> anyhow::Result<()> {
-        let (state, _temp_dir) = test_state().await?;
+        let Some(pool) = setup_origin_test_pool().await? else {
+            eprintln!("skipping OTA update check test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let state = test_state(pool);
 
         let app = router().with_state(state.clone());
-        let release = sample_release();
+        let release = sample_release_on(&unique_channel("stable"));
 
         let register_response = app
             .clone()
@@ -3347,7 +2760,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/ota/channels/ios/stable/activate")
+                    .uri(format!("/ota/channels/ios/{}/activate", release.channel))
                     .header("content-type", "application/json")
                     .header(service_role_header().0, service_role_header().1)
                     .body(Body::from(serde_json::to_vec(&activate_body)?))?,
@@ -3358,7 +2771,7 @@ mod tests {
         let check_body = serde_json::json!({
             "device_id": "device-1",
             "platform": "ios",
-            "channel": "stable",
+            "channel": release.channel,
             "native_version": "1.2.0"
         });
         let check_response = app
@@ -3374,7 +2787,10 @@ mod tests {
         let payload: OtaCheckResponse =
             serde_json::from_slice(&to_bytes(check_response.into_body(), usize::MAX).await?)?;
         assert!(payload.update_available);
-        assert_eq!(payload.release_id.as_deref(), Some("ios-stable-20260318"));
+        assert_eq!(
+            payload.release_id.as_deref(),
+            Some(release.release_id.as_str())
+        );
         assert_eq!(payload.bundle_version.as_deref(), Some("2026.03.18.1"));
 
         Ok(())
@@ -3382,10 +2798,14 @@ mod tests {
 
     #[tokio::test]
     async fn check_respects_rollout_gate() -> anyhow::Result<()> {
-        let (state, _temp_dir) = test_state().await?;
+        let Some(pool) = setup_origin_test_pool().await? else {
+            eprintln!("skipping OTA rollout gate test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let state = test_state(pool);
 
         let app = router().with_state(state.clone());
-        let release = sample_release();
+        let release = sample_release_on(&unique_channel("stable"));
 
         let _ = app
             .clone()
@@ -3409,7 +2829,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/ota/channels/ios/stable/activate")
+                    .uri(format!("/ota/channels/ios/{}/activate", release.channel))
                     .header("content-type", "application/json")
                     .header(service_role_header().0, service_role_header().1)
                     .body(Body::from(serde_json::to_vec(&activate_body)?))?,
@@ -3419,7 +2839,7 @@ mod tests {
         let check_body = serde_json::json!({
             "device_id": "device-rollout",
             "platform": "ios",
-            "channel": "stable",
+            "channel": release.channel,
             "native_version": "1.2.0"
         });
         let check_response = app
@@ -3441,89 +2861,107 @@ mod tests {
 
     #[tokio::test]
     async fn record_event_updates_device_state() -> anyhow::Result<()> {
-        let (state, _temp_dir) = test_state().await?;
+        if std::env::var("TEST_DATABASE_URL").is_err() {
+            eprintln!("skipping OTA device state test: TEST_DATABASE_URL not set");
+            return Ok(());
+        }
+        // The listing below asks for every device state, with no parameters,
+        // so this test's event goes to empty copies of the tables an event is
+        // recorded in.
+        with_empty_keyed_tables(&["ota_events", "ota_device_states"], |pool| async move {
+            let state = test_state(pool);
 
-        let app = router().with_state(state.clone());
-        let event = serde_json::json!({
-            "event_id": "evt-1",
-            "event_type": "install_completed",
-            "occurred_at": Utc::now(),
-            "device_id": "device-42",
-            "platform": "ios",
-            "channel": "stable",
-            "native_version": "1.2.0",
-            "bundle_version": "2026.03.18.1",
-            "git_sha": "abcdef123456",
-            "session_id": "session-1",
-            "properties": {
-                "apply_ms": 3200
-            }
-        });
+            let app = router().with_state(state.clone());
+            let event = serde_json::json!({
+                "event_id": "evt-1",
+                "event_type": "install_completed",
+                "occurred_at": Utc::now(),
+                "device_id": "device-42",
+                "platform": "ios",
+                "channel": "stable",
+                "native_version": "1.2.0",
+                "bundle_version": "2026.03.18.1",
+                "git_sha": "abcdef123456",
+                "session_id": "session-1",
+                "properties": {
+                    "apply_ms": 3200
+                }
+            });
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/ota/events")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&event)?))?,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/ota/events")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&event)?))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-        let devices_response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/ota/device-states")
-                    .header(service_role_header().0, service_role_header().1)
-                    .body(Body::empty())?,
-            )
-            .await?;
-        assert_eq!(devices_response.status(), StatusCode::OK);
-        let payload: Vec<OtaDeviceState> =
-            serde_json::from_slice(&to_bytes(devices_response.into_body(), usize::MAX).await?)?;
-        assert_eq!(payload.len(), 1);
-        assert_eq!(payload[0].device_id, "device-42");
-        assert_eq!(
-            payload[0].current_bundle_version.as_deref(),
-            Some("2026.03.18.1")
-        );
-        assert_eq!(
-            payload[0].last_event_type,
-            Some(OtaEventType::InstallCompleted)
-        );
+            let devices_response = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/ota/device-states")
+                        .header(service_role_header().0, service_role_header().1)
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert_eq!(devices_response.status(), StatusCode::OK);
+            let payload: Vec<OtaDeviceState> =
+                serde_json::from_slice(&to_bytes(devices_response.into_body(), usize::MAX).await?)?;
+            assert_eq!(payload.len(), 1);
+            assert_eq!(payload[0].device_id, "device-42");
+            assert_eq!(
+                payload[0].current_bundle_version.as_deref(),
+                Some("2026.03.18.1")
+            );
+            assert_eq!(
+                payload[0].last_event_type,
+                Some(OtaEventType::InstallCompleted)
+            );
 
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     #[tokio::test]
     async fn list_events_applies_filters_and_cursor() -> anyhow::Result<()> {
-        let (state, _temp_dir) = test_state().await?;
+        let Some(pool) = setup_origin_test_pool().await? else {
+            eprintln!("skipping OTA event list test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let state = test_state(pool);
         let app = router().with_state(state.clone());
         let older_time = Utc::now() - chrono::Duration::minutes(2);
         let newer_time = Utc::now() - chrono::Duration::minutes(1);
+        // Both events' channels carry the suffix, and both reads search for
+        // it, which keeps them to this test's events on the shared database.
+        let suffix = Uuid::new_v4().simple().to_string();
+        let old_event_id = format!("evt-old-{suffix}");
 
         for event in [
             serde_json::json!({
-                "event_id": "evt-old",
+                "event_id": old_event_id,
                 "event_type": "install_failed",
                 "occurred_at": older_time,
                 "device_id": "device-old",
                 "platform": "ios",
-                "channel": "stable",
+                "channel": format!("stable-{suffix}"),
                 "native_version": "1.2.0",
                 "bundle_version": "2026.03.18.0",
                 "session_id": "session-old"
             }),
             serde_json::json!({
-                "event_id": "evt-new",
+                "event_id": format!("evt-new-{suffix}"),
                 "event_type": "install_completed",
                 "occurred_at": newer_time,
                 "device_id": "device-new",
                 "platform": "android",
-                "channel": "beta",
+                "channel": format!("beta-{suffix}"),
                 "native_version": "1.2.0",
                 "bundle_version": "2026.03.18.1",
                 "session_id": "session-new"
@@ -3547,7 +2985,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/ota/events?platform=ios&event_type=install_failed&limit=1")
+                    .uri(format!(
+                        "/ota/events?platform=ios&event_type=install_failed&limit=1&query={suffix}"
+                    ))
                     .header(service_role_header().0, service_role_header().1)
                     .body(Body::empty())?,
             )
@@ -3556,7 +2996,7 @@ mod tests {
         let filtered: Vec<OtaUpdateEvent> =
             serde_json::from_slice(&to_bytes(filtered_response.into_body(), usize::MAX).await?)?;
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].event_id, "evt-old");
+        assert_eq!(filtered[0].event_id, old_event_id);
 
         let encoded_time = newer_time.to_rfc3339();
         let cursor = urlencoding::encode(&encoded_time);
@@ -3564,7 +3004,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/ota/events?before_occurred_at={cursor}&limit=10"))
+                    .uri(format!(
+                        "/ota/events?before_occurred_at={cursor}&limit=10&query={suffix}"
+                    ))
                     .header(service_role_header().0, service_role_header().1)
                     .body(Body::empty())?,
             )
@@ -3573,153 +3015,166 @@ mod tests {
         let paged: Vec<OtaUpdateEvent> =
             serde_json::from_slice(&to_bytes(paged_response.into_body(), usize::MAX).await?)?;
         assert_eq!(paged.len(), 1);
-        assert_eq!(paged[0].event_id, "evt-old");
+        assert_eq!(paged[0].event_id, old_event_id);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn download_insights_aggregate_recent_ota_download_events() -> anyhow::Result<()> {
-        let (state, _temp_dir) = test_state().await?;
-        let app = router().with_state(state.clone());
-        let now = Utc::now();
+        if std::env::var("TEST_DATABASE_URL").is_err() {
+            eprintln!("skipping OTA download insights test: TEST_DATABASE_URL not set");
+            return Ok(());
+        }
+        // The insights count every event in their window, so this test's
+        // events go to empty copies of the tables an event is recorded in.
+        with_empty_keyed_tables(&["ota_events", "ota_device_states"], |pool| async move {
+            let state = test_state(pool);
+            let app = router().with_state(state.clone());
+            let now = Utc::now();
 
-        for (event, country) in [
-            (
-                serde_json::json!({
-                    "event_id": "evt-ota-available",
-                    "event_type": "update_available",
-                    "occurred_at": now - chrono::Duration::hours(6),
-                    "device_id": "device-ota-1",
-                    "platform": "ios",
-                    "channel": "stable",
-                    "native_version": "1.2.0",
-                    "bundle_version": "2026.03.22.1"
-                }),
-                "AT",
-            ),
-            (
-                serde_json::json!({
-                    "event_id": "evt-ota-started",
-                    "event_type": "download_started",
-                    "occurred_at": now - chrono::Duration::hours(5),
-                    "device_id": "device-ota-1",
-                    "platform": "ios",
-                    "channel": "stable",
-                    "native_version": "1.2.0",
-                    "bundle_version": "2026.03.22.1"
-                }),
-                "AT",
-            ),
-            (
-                serde_json::json!({
-                    "event_id": "evt-ota-completed",
-                    "event_type": "download_completed",
-                    "occurred_at": now - chrono::Duration::hours(4),
-                    "device_id": "device-ota-1",
-                    "platform": "ios",
-                    "channel": "stable",
-                    "native_version": "1.2.0",
-                    "bundle_version": "2026.03.22.1"
-                }),
-                "AT",
-            ),
-            (
-                serde_json::json!({
-                    "event_id": "evt-ota-failed",
-                    "event_type": "download_failed",
-                    "occurred_at": now - chrono::Duration::hours(3),
-                    "device_id": "device-ota-2",
-                    "platform": "android",
-                    "channel": "beta",
-                    "native_version": "1.2.0",
-                    "bundle_version": "2026.03.22.1"
-                }),
-                "US",
-            ),
-        ] {
+            for (event, country) in [
+                (
+                    serde_json::json!({
+                        "event_id": "evt-ota-available",
+                        "event_type": "update_available",
+                        "occurred_at": now - chrono::Duration::hours(6),
+                        "device_id": "device-ota-1",
+                        "platform": "ios",
+                        "channel": "stable",
+                        "native_version": "1.2.0",
+                        "bundle_version": "2026.03.22.1"
+                    }),
+                    "AT",
+                ),
+                (
+                    serde_json::json!({
+                        "event_id": "evt-ota-started",
+                        "event_type": "download_started",
+                        "occurred_at": now - chrono::Duration::hours(5),
+                        "device_id": "device-ota-1",
+                        "platform": "ios",
+                        "channel": "stable",
+                        "native_version": "1.2.0",
+                        "bundle_version": "2026.03.22.1"
+                    }),
+                    "AT",
+                ),
+                (
+                    serde_json::json!({
+                        "event_id": "evt-ota-completed",
+                        "event_type": "download_completed",
+                        "occurred_at": now - chrono::Duration::hours(4),
+                        "device_id": "device-ota-1",
+                        "platform": "ios",
+                        "channel": "stable",
+                        "native_version": "1.2.0",
+                        "bundle_version": "2026.03.22.1"
+                    }),
+                    "AT",
+                ),
+                (
+                    serde_json::json!({
+                        "event_id": "evt-ota-failed",
+                        "event_type": "download_failed",
+                        "occurred_at": now - chrono::Duration::hours(3),
+                        "device_id": "device-ota-2",
+                        "platform": "android",
+                        "channel": "beta",
+                        "native_version": "1.2.0",
+                        "bundle_version": "2026.03.22.1"
+                    }),
+                    "US",
+                ),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/ota/events")
+                            .header("content-type", "application/json")
+                            .header("CF-IPCountry", country)
+                            .body(Body::from(serde_json::to_vec(&event)?))?,
+                    )
+                    .await?;
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+            }
+
             let response = app
-                .clone()
                 .oneshot(
                     Request::builder()
-                        .method("POST")
-                        .uri("/ota/events")
-                        .header("content-type", "application/json")
-                        .header("CF-IPCountry", country)
-                        .body(Body::from(serde_json::to_vec(&event)?))?,
+                        .method("GET")
+                        .uri("/ota/download-insights?days=7")
+                        .header(service_role_header().0, service_role_header().1)
+                        .body(Body::empty())?,
                 )
                 .await?;
-            assert_eq!(response.status(), StatusCode::ACCEPTED);
-        }
+            assert_eq!(response.status(), StatusCode::OK);
+            let payload: OtaDownloadInsights =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/ota/download-insights?days=7")
-                    .header(service_role_header().0, service_role_header().1)
-                    .body(Body::empty())?,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::OK);
-        let payload: OtaDownloadInsights =
-            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+            assert_eq!(payload.days, 7);
+            assert_eq!(payload.totals.started, 1);
+            assert_eq!(payload.totals.completed, 1);
+            assert_eq!(payload.totals.available, 1);
+            assert_eq!(payload.totals.failures, 1);
+            assert!(payload.by_channel.iter().any(|row| row.key == "stable"
+                && row.counts.started == 1
+                && row.counts.completed == 1));
+            assert!(payload
+                .by_channel
+                .iter()
+                .any(|row| row.key == "beta" && row.counts.failures == 1));
+            assert!(payload
+                .by_platform
+                .iter()
+                .any(|row| row.key == "ios" && row.counts.available == 1));
+            assert!(payload
+                .by_platform
+                .iter()
+                .any(|row| row.key == "android" && row.counts.failures == 1));
+            assert!(payload.by_country.iter().any(|row| row.key == "AT"
+                && row.counts.started == 1
+                && row.counts.completed == 1));
+            assert!(payload
+                .by_country
+                .iter()
+                .any(|row| row.key == "US" && row.counts.failures == 1));
 
-        assert_eq!(payload.days, 7);
-        assert_eq!(payload.totals.started, 1);
-        assert_eq!(payload.totals.completed, 1);
-        assert_eq!(payload.totals.available, 1);
-        assert_eq!(payload.totals.failures, 1);
-        assert!(payload.by_channel.iter().any(|row| row.key == "stable"
-            && row.counts.started == 1
-            && row.counts.completed == 1));
-        assert!(payload
-            .by_channel
-            .iter()
-            .any(|row| row.key == "beta" && row.counts.failures == 1));
-        assert!(payload
-            .by_platform
-            .iter()
-            .any(|row| row.key == "ios" && row.counts.available == 1));
-        assert!(payload
-            .by_platform
-            .iter()
-            .any(|row| row.key == "android" && row.counts.failures == 1));
-        assert!(payload
-            .by_country
-            .iter()
-            .any(|row| row.key == "AT" && row.counts.started == 1 && row.counts.completed == 1));
-        assert!(payload
-            .by_country
-            .iter()
-            .any(|row| row.key == "US" && row.counts.failures == 1));
-
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     #[tokio::test]
     async fn list_device_states_applies_attention_filter() -> anyhow::Result<()> {
-        let (state, _temp_dir) = test_state().await?;
+        let Some(pool) = setup_origin_test_pool().await? else {
+            eprintln!("skipping OTA device attention test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let state = test_state(pool);
         let app = router().with_state(state.clone());
+        let channel = unique_channel("stable");
 
         for event in [
             serde_json::json!({
-                "event_id": "evt-device-failed",
+                "event_id": format!("evt-device-failed-{channel}"),
                 "event_type": "install_failed",
                 "occurred_at": Utc::now() - chrono::Duration::minutes(3),
                 "device_id": "device-failed",
                 "platform": "ios",
-                "channel": "stable",
+                "channel": channel,
                 "native_version": "1.2.0",
                 "bundle_version": "2026.03.18.1"
             }),
             serde_json::json!({
-                "event_id": "evt-device-healthy",
+                "event_id": format!("evt-device-healthy-{channel}"),
                 "event_type": "install_completed",
                 "occurred_at": Utc::now() - chrono::Duration::minutes(1),
                 "device_id": "device-healthy",
                 "platform": "ios",
-                "channel": "stable",
+                "channel": channel,
                 "native_version": "1.2.0",
                 "bundle_version": "2026.03.18.2"
             }),
@@ -3741,7 +3196,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/ota/device-states?platform=ios&attention_only=true&limit=10")
+                    .uri(format!(
+                        "/ota/device-states?platform=ios&channel={channel}&attention_only=true&limit=10"
+                    ))
                     .header(service_role_header().0, service_role_header().1)
                     .body(Body::empty())?,
             )
@@ -3761,12 +3218,17 @@ mod tests {
 
     #[tokio::test]
     async fn channel_history_tracks_activate_and_rollback() -> anyhow::Result<()> {
-        let (state, _temp_dir) = test_state().await?;
+        let Some(pool) = setup_origin_test_pool().await? else {
+            eprintln!("skipping OTA channel history test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let state = test_state(pool);
         let app = router().with_state(state.clone());
 
-        let release_a = sample_release();
-        let mut release_b = sample_release();
-        release_b.release_id = "ios-stable-20260319".to_string();
+        let channel = unique_channel("stable");
+        let release_a = sample_release_on(&channel);
+        let mut release_b = sample_release_on(&channel);
+        release_b.release_id = format!("ios-{channel}-20260319");
         release_b.bundle_version = "2026.03.19.1".to_string();
         release_b.git_sha = "fedcba654321".to_string();
 
@@ -3802,7 +3264,7 @@ mod tests {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri("/ota/channels/ios/stable/activate")
+                        .uri(format!("/ota/channels/ios/{channel}/activate"))
                         .header("content-type", "application/json")
                         .header(service_role_header().0, service_role_header().1)
                         .body(Body::from(serde_json::to_vec(&body)?))?,
@@ -3816,7 +3278,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/ota/channels/ios/stable/rollback")
+                    .uri(format!("/ota/channels/ios/{channel}/rollback"))
                     .header("content-type", "application/json")
                     .header(service_role_header().0, service_role_header().1)
                     .body(Body::from(serde_json::to_vec(&serde_json::json!({
@@ -3830,7 +3292,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/ota/channels/ios/stable/history?limit=10")
+                    .uri(format!("/ota/channels/ios/{channel}/history?limit=10"))
                     .header(service_role_header().0, service_role_header().1)
                     .body(Body::empty())?,
             )
@@ -3843,7 +3305,7 @@ mod tests {
         assert_eq!(history[0].next_release_id, release_a.release_id);
         assert_eq!(
             history[0].previous_release_id.as_deref(),
-            Some("ios-stable-20260319")
+            Some(release_b.release_id.as_str())
         );
         assert_eq!(history[1].action, OtaChannelHistoryAction::Activate);
         assert_eq!(history[1].next_release_id, release_b.release_id);

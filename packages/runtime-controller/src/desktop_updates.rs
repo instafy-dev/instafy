@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
-#[cfg(test)]
-use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
@@ -11,8 +9,6 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-#[cfg(test)]
-use tokio::sync::RwLock;
 use tokio_postgres::types::{Json as PgJson, ToSql};
 use tokio_postgres::Row;
 use uuid::Uuid;
@@ -55,28 +51,12 @@ pub(crate) fn router() -> Router<AppState> {
 
 #[derive(Clone)]
 pub(crate) struct DesktopUpdateRegistry {
-    backend: DesktopUpdateRegistryBackend,
-}
-
-#[derive(Clone)]
-enum DesktopUpdateRegistryBackend {
-    // The tests' backend; the server always uses Postgres.
-    #[cfg(test)]
-    InMemory(Arc<RwLock<DesktopUpdateSnapshot>>),
-    Postgres(PostgresDesktopUpdateRegistry),
+    store: PostgresDesktopUpdateRegistry,
 }
 
 #[derive(Clone)]
 struct PostgresDesktopUpdateRegistry {
     pool: crate::config::PgPool,
-}
-
-#[cfg(test)]
-#[derive(Default, Clone)]
-struct DesktopUpdateSnapshot {
-    device_states: BTreeMap<String, DesktopUpdateDeviceState>,
-    recent_events: Vec<DesktopUpdateEvent>,
-    promotions: Vec<DesktopPromotionRecord>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,18 +92,9 @@ struct ResolvedDesktopDownloadInsightsParams {
 }
 
 impl DesktopUpdateRegistry {
-    #[cfg(test)]
-    pub(crate) fn new_in_memory() -> Self {
-        Self {
-            backend: DesktopUpdateRegistryBackend::InMemory(Arc::new(RwLock::new(
-                DesktopUpdateSnapshot::default(),
-            ))),
-        }
-    }
-
     pub(crate) fn new_postgres(pool: crate::config::PgPool) -> Self {
         Self {
-            backend: DesktopUpdateRegistryBackend::Postgres(PostgresDesktopUpdateRegistry { pool }),
+            store: PostgresDesktopUpdateRegistry { pool },
         }
     }
 
@@ -131,72 +102,28 @@ impl DesktopUpdateRegistry {
         &self,
         params: ResolvedDesktopDeviceStateListParams,
     ) -> Result<Vec<DesktopUpdateDeviceState>, DesktopUpdateRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            DesktopUpdateRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                let mut rows = guard.device_states.values().cloned().collect::<Vec<_>>();
-                rows.sort_by(|left, right| right.last_seen_at.cmp(&left.last_seen_at));
-                rows.retain(|row| desktop_device_matches_filters(row, &params));
-                rows.truncate(params.limit as usize);
-                Ok(rows)
-            }
-            DesktopUpdateRegistryBackend::Postgres(store) => store.list_device_states(params).await,
-        }
+        self.store.list_device_states(params).await
     }
 
     async fn list_events(
         &self,
         params: ResolvedDesktopEventListParams,
     ) -> Result<Vec<DesktopUpdateEvent>, DesktopUpdateRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            DesktopUpdateRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                let mut rows = guard.recent_events.clone();
-                rows.sort_by(|left, right| right.occurred_at.cmp(&left.occurred_at));
-                rows.retain(|row| desktop_event_matches_filters(row, &params));
-                rows.truncate(params.limit as usize);
-                Ok(rows)
-            }
-            DesktopUpdateRegistryBackend::Postgres(store) => store.list_events(params).await,
-        }
+        self.store.list_events(params).await
     }
 
     async fn list_promotions(
         &self,
         params: ResolvedDesktopPromotionListParams,
     ) -> Result<Vec<DesktopPromotionRecord>, DesktopUpdateRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            DesktopUpdateRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                let mut rows = guard.promotions.clone();
-                rows.sort_by(|left, right| right.requested_at.cmp(&left.requested_at));
-                rows.retain(|row| desktop_promotion_matches_filters(row, &params));
-                rows.truncate(params.limit as usize);
-                Ok(rows)
-            }
-            DesktopUpdateRegistryBackend::Postgres(store) => store.list_promotions(params).await,
-        }
+        self.store.list_promotions(params).await
     }
 
     async fn get_promotion(
         &self,
         request_id: &str,
     ) -> Result<Option<DesktopPromotionRecord>, DesktopUpdateRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            DesktopUpdateRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                Ok(guard
-                    .promotions
-                    .iter()
-                    .find(|row| row.request_id == request_id)
-                    .cloned())
-            }
-            DesktopUpdateRegistryBackend::Postgres(store) => store.get_promotion(request_id).await,
-        }
+        self.store.get_promotion(request_id).await
     }
 
     async fn record_event(
@@ -204,13 +131,7 @@ impl DesktopUpdateRegistry {
         mut event: DesktopUpdateEvent,
     ) -> Result<DesktopUpdateEvent, DesktopUpdateRegistryError> {
         normalize_desktop_event(&mut event)?;
-        match &self.backend {
-            #[cfg(test)]
-            DesktopUpdateRegistryBackend::InMemory(store) => {
-                record_event_in_memory(store, event).await
-            }
-            DesktopUpdateRegistryBackend::Postgres(store) => store.record_event(event).await,
-        }
+        self.store.record_event(event).await
     }
 
     async fn record_promotion(
@@ -218,31 +139,14 @@ impl DesktopUpdateRegistry {
         mut promotion: DesktopPromotionRecord,
     ) -> Result<DesktopPromotionRecord, DesktopUpdateRegistryError> {
         normalize_desktop_promotion(&mut promotion)?;
-        match &self.backend {
-            #[cfg(test)]
-            DesktopUpdateRegistryBackend::InMemory(store) => {
-                record_promotion_in_memory(store, promotion).await
-            }
-            DesktopUpdateRegistryBackend::Postgres(store) => {
-                store.record_promotion(promotion).await
-            }
-        }
+        self.store.record_promotion(promotion).await
     }
 
     async fn get_download_insights(
         &self,
         params: ResolvedDesktopDownloadInsightsParams,
     ) -> Result<DesktopDownloadInsights, DesktopUpdateRegistryError> {
-        match &self.backend {
-            #[cfg(test)]
-            DesktopUpdateRegistryBackend::InMemory(store) => {
-                let guard = store.read().await;
-                build_download_insights_from_events(&guard.recent_events, params)
-            }
-            DesktopUpdateRegistryBackend::Postgres(store) => {
-                store.get_download_insights(params).await
-            }
-        }
+        self.store.get_download_insights(params).await
     }
 }
 
@@ -1380,203 +1284,6 @@ fn parse_desktop_download_insights_params(
     })
 }
 
-#[cfg(test)]
-fn desktop_device_matches_filters(
-    device: &DesktopUpdateDeviceState,
-    params: &ResolvedDesktopDeviceStateListParams,
-) -> bool {
-    if let Some(channel) = params.channel {
-        if device.channel != channel {
-            return false;
-        }
-    }
-    if let Some(before_seen_at) = params.before_seen_at {
-        if device.last_seen_at >= before_seen_at {
-            return false;
-        }
-    }
-    if params.attention_only
-        && device.phase != DesktopUpdatePhase::Error
-        && device.last_error.is_none()
-    {
-        return false;
-    }
-    if let Some(query) = params.query.as_ref() {
-        let haystack = [
-            device.device_id.as_str(),
-            &device.channel.to_string(),
-            device.current_version.as_str(),
-            device.available_version.as_deref().unwrap_or(""),
-            device.last_error.as_deref().unwrap_or(""),
-        ]
-        .join(" ")
-        .to_ascii_lowercase();
-        if !tokenize(query).iter().all(|term| haystack.contains(term)) {
-            return false;
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-fn desktop_event_matches_filters(
-    event: &DesktopUpdateEvent,
-    params: &ResolvedDesktopEventListParams,
-) -> bool {
-    if let Some(channel) = params.channel {
-        if event.channel != channel {
-            return false;
-        }
-    }
-    if let Some(event_type) = params.event_type {
-        if event.event_type != event_type {
-            return false;
-        }
-    }
-    if let Some(before_occurred_at) = params.before_occurred_at {
-        if event.occurred_at >= before_occurred_at {
-            return false;
-        }
-    }
-    if let Some(query) = params.query.as_ref() {
-        let haystack = [
-            event.device_id.as_str(),
-            &event.channel.to_string(),
-            event.current_version.as_str(),
-            event.available_version.as_deref().unwrap_or(""),
-            &event.phase.to_string(),
-            &event.event_type.to_string(),
-        ]
-        .join(" ")
-        .to_ascii_lowercase();
-        if !tokenize(query).iter().all(|term| haystack.contains(term)) {
-            return false;
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-fn desktop_promotion_matches_filters(
-    promotion: &DesktopPromotionRecord,
-    params: &ResolvedDesktopPromotionListParams,
-) -> bool {
-    if let Some(target_channel) = params.target_channel {
-        if promotion.target_channel != target_channel {
-            return false;
-        }
-    }
-    if let Some(before_requested_at) = params.before_requested_at {
-        if promotion.requested_at >= before_requested_at {
-            return false;
-        }
-    }
-    if let Some(query) = params.query.as_ref() {
-        let haystack = [
-            &promotion.source_channel.to_string(),
-            &promotion.target_channel.to_string(),
-            promotion.requested_by.as_str(),
-            promotion.workflow_ref.as_str(),
-            promotion.notes.as_deref().unwrap_or(""),
-        ]
-        .join(" ")
-        .to_ascii_lowercase();
-        if !tokenize(query).iter().all(|term| haystack.contains(term)) {
-            return false;
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-async fn record_event_in_memory(
-    store: &Arc<RwLock<DesktopUpdateSnapshot>>,
-    event: DesktopUpdateEvent,
-) -> Result<DesktopUpdateEvent, DesktopUpdateRegistryError> {
-    let mut guard = store.write().await;
-    let event_type = event.event_type;
-    let occurred_at = event.occurred_at;
-    let last_error = extract_reason(&event.properties);
-    let last_checked_at = if matches!(
-        event_type,
-        DesktopUpdateEventType::UpdateAvailable | DesktopUpdateEventType::UpdateNotAvailable
-    ) {
-        Some(occurred_at)
-    } else {
-        None
-    };
-    let last_downloaded_at = if matches!(
-        event_type,
-        DesktopUpdateEventType::DownloadCompleted
-            | DesktopUpdateEventType::UpdateReady
-            | DesktopUpdateEventType::InstallApplied
-    ) {
-        Some(occurred_at)
-    } else {
-        None
-    };
-
-    let row = guard
-        .device_states
-        .entry(event.device_id.clone())
-        .or_insert_with(|| DesktopUpdateDeviceState {
-            device_id: event.device_id.clone(),
-            channel: event.channel,
-            current_version: event.current_version.clone(),
-            phase: event.phase,
-            feed_url: event.feed_url.clone(),
-            platform: event.platform.clone(),
-            arch: event.arch.clone(),
-            available_version: event.available_version.clone(),
-            last_seen_at: occurred_at,
-            last_event_type: Some(event_type),
-            last_event_at: Some(occurred_at),
-            last_checked_at,
-            last_downloaded_at,
-            last_error: last_error.clone(),
-        });
-    row.channel = event.channel;
-    row.current_version = event.current_version.clone();
-    row.phase = event.phase;
-    row.feed_url = event.feed_url.clone();
-    row.platform = event.platform.clone();
-    row.arch = event.arch.clone();
-    if event.available_version.is_some() {
-        row.available_version = event.available_version.clone();
-    }
-    row.last_seen_at = occurred_at;
-    row.last_event_type = Some(event_type);
-    row.last_event_at = Some(occurred_at);
-    if last_checked_at.is_some() {
-        row.last_checked_at = last_checked_at;
-    }
-    if last_downloaded_at.is_some() {
-        row.last_downloaded_at = last_downloaded_at;
-    }
-    row.last_error = last_error;
-
-    guard.recent_events.push(event.clone());
-    guard
-        .recent_events
-        .sort_by(|left, right| right.occurred_at.cmp(&left.occurred_at));
-    guard.recent_events.truncate(MAX_STORED_EVENTS as usize);
-    Ok(event)
-}
-
-#[cfg(test)]
-async fn record_promotion_in_memory(
-    store: &Arc<RwLock<DesktopUpdateSnapshot>>,
-    promotion: DesktopPromotionRecord,
-) -> Result<DesktopPromotionRecord, DesktopUpdateRegistryError> {
-    let mut guard = store.write().await;
-    guard.promotions.push(promotion.clone());
-    guard
-        .promotions
-        .sort_by(|left, right| right.requested_at.cmp(&left.requested_at));
-    guard.promotions.truncate(MAX_STORED_PROMOTIONS as usize);
-    Ok(promotion)
-}
-
 fn normalize_desktop_event(
     event: &mut DesktopUpdateEvent,
 ) -> Result<(), DesktopUpdateRegistryError> {
@@ -1619,95 +1326,6 @@ fn normalize_optional(value: &Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-}
-
-#[cfg(test)]
-fn tokenize(value: &str) -> Vec<String> {
-    value
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_ascii_lowercase())
-        .collect()
-}
-
-#[cfg(test)]
-fn extract_reason(properties: &BTreeMap<String, JsonValue>) -> Option<String> {
-    properties
-        .get("reason")
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-#[cfg(test)]
-fn build_download_insights_from_events(
-    events: &[DesktopUpdateEvent],
-    params: ResolvedDesktopDownloadInsightsParams,
-) -> Result<DesktopDownloadInsights, DesktopUpdateRegistryError> {
-    let (start_day, end_day, start_at, end_exclusive) = resolve_download_window(params.days)?;
-    let mut daily_rows = Vec::new();
-    let mut by_channel = BTreeMap::<String, DesktopDownloadInsightCounts>::new();
-    let mut by_platform = BTreeMap::<String, DesktopDownloadInsightCounts>::new();
-    let mut by_country = BTreeMap::<String, DesktopDownloadInsightCounts>::new();
-
-    for event in events {
-        if event.occurred_at < start_at || event.occurred_at >= end_exclusive {
-            continue;
-        }
-        if let Some(channel) = params.channel {
-            if event.channel != channel {
-                continue;
-            }
-        }
-        let mut counts = DesktopDownloadInsightCounts::default();
-        if !apply_download_event_type(&mut counts, event.event_type) {
-            continue;
-        }
-        daily_rows.push((event.occurred_at.date_naive(), counts.clone()));
-        increment_counts(
-            by_channel.entry(event.channel.to_string()).or_default(),
-            &counts,
-        );
-        increment_counts(
-            by_platform
-                .entry(
-                    event
-                        .platform
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                )
-                .or_default(),
-            &counts,
-        );
-        increment_counts(
-            by_country
-                .entry(
-                    event
-                        .country_code
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                )
-                .or_default(),
-            &counts,
-        );
-    }
-
-    let daily = collapse_daily_rows(daily_rows);
-    Ok(build_download_insights_response(
-        params,
-        start_day,
-        end_day,
-        daily,
-        by_channel.into_iter().collect(),
-        by_platform.into_iter().collect(),
-        by_country.into_iter().collect(),
-    ))
 }
 
 fn build_download_insights_response(
@@ -1846,17 +1464,6 @@ fn resolve_download_window(
     Ok((start_day, end_day, start_at, end_exclusive))
 }
 
-#[cfg(test)]
-fn collapse_daily_rows(
-    rows: Vec<(NaiveDate, DesktopDownloadInsightCounts)>,
-) -> Vec<(NaiveDate, DesktopDownloadInsightCounts)> {
-    let mut out = BTreeMap::<NaiveDate, DesktopDownloadInsightCounts>::new();
-    for (day, counts) in rows {
-        increment_counts(out.entry(day).or_default(), &counts);
-    }
-    out.into_iter().collect()
-}
-
 fn increment_counts(
     target: &mut DesktopDownloadInsightCounts,
     source: &DesktopDownloadInsightCounts,
@@ -1866,24 +1473,6 @@ fn increment_counts(
     target.ready += source.ready;
     target.applied += source.applied;
     target.errors += source.errors;
-}
-
-#[cfg(test)]
-fn apply_download_event_type(
-    counts: &mut DesktopDownloadInsightCounts,
-    event_type: DesktopUpdateEventType,
-) -> bool {
-    match event_type {
-        DesktopUpdateEventType::DownloadStarted => counts.started += 1,
-        DesktopUpdateEventType::DownloadCompleted => counts.completed += 1,
-        DesktopUpdateEventType::UpdateReady => counts.ready += 1,
-        DesktopUpdateEventType::InstallApplied => counts.applied += 1,
-        DesktopUpdateEventType::UpdateError => counts.errors += 1,
-        DesktopUpdateEventType::UpdateAvailable | DesktopUpdateEventType::UpdateNotAvailable => {
-            return false;
-        }
-    }
-    true
 }
 
 fn parse_query_map(uri: &Uri) -> Result<BTreeMap<String, String>, DesktopUpdateRegistryError> {
@@ -2082,6 +1671,7 @@ mod tests {
     use super::*;
     use crate::tests::{
         build_app_config, build_test_state, test_origin_private_key, test_origin_public_key,
+        with_empty_keyed_tables,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -2131,6 +1721,8 @@ mod tests {
         event
     }
 
+    /// A pool that never connects, for the tests that the operator check
+    /// refuses before the registry is reached.
     fn build_dummy_pool() -> anyhow::Result<crate::config::PgPool> {
         let manager = PostgresConnectionManager::new_from_stringlike(
             "postgresql://ignored:ignored@127.0.0.1:1/postgres",
@@ -2139,15 +1731,15 @@ mod tests {
         Ok(Pool::builder().max_size(1).build_unchecked(manager))
     }
 
-    async fn test_state() -> anyhow::Result<AppState> {
+    /// The routes' state, with the controller's desktop update registry over
+    /// `pool`.
+    fn test_state(pool: crate::config::PgPool) -> AppState {
         let config = build_app_config(
             test_origin_private_key(),
             test_origin_public_key(),
             "test-origin-key",
         );
-        let mut state = build_test_state(build_dummy_pool()?, config);
-        state.desktop_update_registry = DesktopUpdateRegistry::new_in_memory();
-        Ok(state)
+        build_test_state(pool, config)
     }
 
     fn service_role_header() -> (&'static str, &'static str) {
@@ -2204,42 +1796,53 @@ mod tests {
 
     #[tokio::test]
     async fn posting_event_updates_device_state() -> anyhow::Result<()> {
-        let state = test_state().await?;
-        let app = router().with_state(state.clone());
+        if std::env::var("TEST_DATABASE_URL").is_err() {
+            eprintln!("skipping desktop update device state test: TEST_DATABASE_URL not set");
+            return Ok(());
+        }
+        // The listing below asks for every device state, with no parameters,
+        // so this test's event goes to empty copies of the tables an event is
+        // recorded in.
+        let tables = ["desktop_update_events", "desktop_update_device_states"];
+        with_empty_keyed_tables(&tables, |pool| async move {
+            let state = test_state(pool);
+            let app = router().with_state(state.clone());
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/desktop-updates/events")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&sample_event())?))?,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/desktop-updates/events")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&sample_event())?))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-        let list_response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/desktop-updates/device-states")
-                    .header(service_role_header().0, service_role_header().1)
-                    .body(Body::empty())?,
-            )
-            .await?;
-        assert_eq!(list_response.status(), StatusCode::OK);
-        let body = to_bytes(list_response.into_body(), usize::MAX).await?;
-        let devices: Vec<DesktopUpdateDeviceState> = serde_json::from_slice(&body)?;
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].current_version, "0.1.2");
-        assert_eq!(devices[0].available_version.as_deref(), Some("0.1.3"));
-        Ok(())
+            let list_response = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/desktop-updates/device-states")
+                        .header(service_role_header().0, service_role_header().1)
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert_eq!(list_response.status(), StatusCode::OK);
+            let body = to_bytes(list_response.into_body(), usize::MAX).await?;
+            let devices: Vec<DesktopUpdateDeviceState> = serde_json::from_slice(&body)?;
+            assert_eq!(devices.len(), 1);
+            assert_eq!(devices[0].current_version, "0.1.2");
+            assert_eq!(devices[0].available_version.as_deref(), Some("0.1.3"));
+            Ok(())
+        })
+        .await
     }
 
     #[tokio::test]
     async fn listing_promotions_requires_operator_access() -> anyhow::Result<()> {
-        let state = test_state().await?;
+        let state = test_state(build_dummy_pool()?);
 
         let response = router()
             .with_state(state)
@@ -2257,135 +1860,145 @@ mod tests {
 
     #[tokio::test]
     async fn download_insights_aggregate_recent_download_events() -> anyhow::Result<()> {
-        let state = test_state().await?;
-        let app = router().with_state(state.clone());
-        let now = Utc::now();
-        let events = vec![
-            (
-                sample_event_with(
-                    DesktopUpdateEventType::DownloadStarted,
-                    now - Duration::days(1),
-                    DesktopReleaseChannel::Internal,
-                    "darwin",
+        if std::env::var("TEST_DATABASE_URL").is_err() {
+            eprintln!("skipping desktop update download insights test: TEST_DATABASE_URL not set");
+            return Ok(());
+        }
+        // The insights count every event in their window, so this test's
+        // events go to empty copies of the tables an event is recorded in.
+        let tables = ["desktop_update_events", "desktop_update_device_states"];
+        with_empty_keyed_tables(&tables, |pool| async move {
+            let state = test_state(pool);
+            let app = router().with_state(state.clone());
+            let now = Utc::now();
+            let events = vec![
+                (
+                    sample_event_with(
+                        DesktopUpdateEventType::DownloadStarted,
+                        now - Duration::days(1),
+                        DesktopReleaseChannel::Internal,
+                        "darwin",
+                    ),
+                    "AT",
                 ),
-                "AT",
-            ),
-            (
-                sample_event_with(
-                    DesktopUpdateEventType::DownloadCompleted,
-                    now - Duration::days(1),
-                    DesktopReleaseChannel::Internal,
-                    "darwin",
+                (
+                    sample_event_with(
+                        DesktopUpdateEventType::DownloadCompleted,
+                        now - Duration::days(1),
+                        DesktopReleaseChannel::Internal,
+                        "darwin",
+                    ),
+                    "AT",
                 ),
-                "AT",
-            ),
-            (
-                sample_event_with(
-                    DesktopUpdateEventType::DownloadStarted,
-                    now,
-                    DesktopReleaseChannel::Stable,
-                    "windows",
+                (
+                    sample_event_with(
+                        DesktopUpdateEventType::DownloadStarted,
+                        now,
+                        DesktopReleaseChannel::Stable,
+                        "windows",
+                    ),
+                    "US",
                 ),
-                "US",
-            ),
-            (
-                sample_event_with(
-                    DesktopUpdateEventType::UpdateError,
-                    now,
-                    DesktopReleaseChannel::Stable,
-                    "windows",
+                (
+                    sample_event_with(
+                        DesktopUpdateEventType::UpdateError,
+                        now,
+                        DesktopReleaseChannel::Stable,
+                        "windows",
+                    ),
+                    "US",
                 ),
-                "US",
-            ),
-            (
-                sample_event_with(
-                    DesktopUpdateEventType::UpdateReady,
-                    now,
-                    DesktopReleaseChannel::Stable,
-                    "linux",
+                (
+                    sample_event_with(
+                        DesktopUpdateEventType::UpdateReady,
+                        now,
+                        DesktopReleaseChannel::Stable,
+                        "linux",
+                    ),
+                    "DE",
                 ),
-                "DE",
-            ),
-            (
-                sample_event_with(
-                    DesktopUpdateEventType::DownloadStarted,
-                    now - Duration::days(12),
-                    DesktopReleaseChannel::Stable,
-                    "darwin",
+                (
+                    sample_event_with(
+                        DesktopUpdateEventType::DownloadStarted,
+                        now - Duration::days(12),
+                        DesktopReleaseChannel::Stable,
+                        "darwin",
+                    ),
+                    "AT",
                 ),
-                "AT",
-            ),
-        ];
+            ];
 
-        for (event, country) in events {
+            for (event, country) in events {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/desktop-updates/events")
+                            .header("content-type", "application/json")
+                            .header("CF-IPCountry", country)
+                            .body(Body::from(serde_json::to_vec(&event)?))?,
+                    )
+                    .await?;
+                assert_eq!(response.status(), StatusCode::ACCEPTED);
+            }
+
             let response = app
-                .clone()
                 .oneshot(
                     Request::builder()
-                        .method("POST")
-                        .uri("/desktop-updates/events")
-                        .header("content-type", "application/json")
-                        .header("CF-IPCountry", country)
-                        .body(Body::from(serde_json::to_vec(&event)?))?,
+                        .method("GET")
+                        .uri("/desktop-updates/download-insights?days=7")
+                        .header(service_role_header().0, service_role_header().1)
+                        .body(Body::empty())?,
                 )
                 .await?;
-            assert_eq!(response.status(), StatusCode::ACCEPTED);
-        }
+            assert_eq!(response.status(), StatusCode::OK);
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/desktop-updates/download-insights?days=7")
-                    .header(service_role_header().0, service_role_header().1)
-                    .body(Body::empty())?,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await?;
+            let insights: DesktopDownloadInsights = serde_json::from_slice(&body)?;
 
-        let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let insights: DesktopDownloadInsights = serde_json::from_slice(&body)?;
+            assert_eq!(insights.days, 7);
+            assert_eq!(insights.daily.len(), 7);
+            assert_eq!(insights.totals.started, 2);
+            assert_eq!(insights.totals.completed, 1);
+            assert_eq!(insights.totals.ready, 1);
+            assert_eq!(insights.totals.errors, 1);
+            assert_eq!(insights.by_channel.len(), 2);
+            assert_eq!(
+                insights
+                    .by_channel
+                    .iter()
+                    .find(|entry| entry.key == "stable")
+                    .map(|entry| entry.counts.errors),
+                Some(1)
+            );
+            assert_eq!(
+                insights
+                    .by_platform
+                    .iter()
+                    .find(|entry| entry.key == "windows")
+                    .map(|entry| entry.counts.started),
+                Some(1)
+            );
+            assert_eq!(
+                insights
+                    .by_country
+                    .iter()
+                    .find(|entry| entry.key == "AT")
+                    .map(|entry| entry.counts.completed),
+                Some(1)
+            );
+            assert_eq!(
+                insights
+                    .by_country
+                    .iter()
+                    .find(|entry| entry.key == "US")
+                    .map(|entry| entry.counts.errors),
+                Some(1)
+            );
 
-        assert_eq!(insights.days, 7);
-        assert_eq!(insights.daily.len(), 7);
-        assert_eq!(insights.totals.started, 2);
-        assert_eq!(insights.totals.completed, 1);
-        assert_eq!(insights.totals.ready, 1);
-        assert_eq!(insights.totals.errors, 1);
-        assert_eq!(insights.by_channel.len(), 2);
-        assert_eq!(
-            insights
-                .by_channel
-                .iter()
-                .find(|entry| entry.key == "stable")
-                .map(|entry| entry.counts.errors),
-            Some(1)
-        );
-        assert_eq!(
-            insights
-                .by_platform
-                .iter()
-                .find(|entry| entry.key == "windows")
-                .map(|entry| entry.counts.started),
-            Some(1)
-        );
-        assert_eq!(
-            insights
-                .by_country
-                .iter()
-                .find(|entry| entry.key == "AT")
-                .map(|entry| entry.counts.completed),
-            Some(1)
-        );
-        assert_eq!(
-            insights
-                .by_country
-                .iter()
-                .find(|entry| entry.key == "US")
-                .map(|entry| entry.counts.errors),
-            Some(1)
-        );
-
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 }

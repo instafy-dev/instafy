@@ -367,7 +367,9 @@ pub(crate) fn build_test_state(pool: PgPool, config: AppConfig) -> AppState {
         .unwrap_or_else(|| "default".to_string());
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, default_provider_id);
-    let ota_registry = crate::ota::OtaRegistry::new_in_memory();
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
 
     let events = crate::state::EventHub::new();
     AppState {
@@ -387,15 +389,10 @@ pub(crate) fn build_test_state(pool: PgPool, config: AppConfig) -> AppState {
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     }
-}
-
-fn test_ota_registry(config: &AppConfig) -> crate::ota::OtaRegistry {
-    let _ = config;
-    crate::ota::OtaRegistry::new_in_memory()
 }
 
 #[test]
@@ -2357,6 +2354,34 @@ where
     F: FnOnce(PgPool) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
+    with_table_copies(tables, "including defaults", body).await
+}
+
+/// [`with_empty_tables`] for a body that writes to the copies: each also
+/// keeps the real table's checks and indexes, its keys among them, so an
+/// upsert finds the key its `on conflict` names. No copy has a foreign key.
+///
+/// A read of every row, such as the OTA and desktop update download insights
+/// or an unfiltered device state listing, then sees only the rows the body
+/// wrote.
+pub(crate) async fn with_empty_keyed_tables<F, Fut>(tables: &[&str], body: F) -> anyhow::Result<()>
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    with_table_copies(tables, "including all", body).await
+}
+
+/// Makes each copy as `like public.<table> <like_options>`.
+async fn with_table_copies<F, Fut>(
+    tables: &[&str],
+    like_options: &str,
+    body: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
     use futures_util::FutureExt;
 
     // Creates the shared schema the copies are made from.
@@ -2368,7 +2393,7 @@ where
     let mut statements = vec![format!("create schema {schema}")];
     for table in tables {
         statements.push(format!(
-            "create table {schema}.{table} (like public.{table} including defaults)"
+            "create table {schema}.{table} (like public.{table} {like_options})"
         ));
     }
     client.batch_execute(&statements.join("; ")).await?;
@@ -10704,7 +10729,9 @@ async fn tunnel_routes_issue_list_revoke() -> anyhow::Result<()> {
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
     let http_client = reqwest::Client::new();
     let tunnel_broker: DynTunnelBroker = Arc::new(StubTunnelBroker::default());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
     let state = AppState {
         config: config.clone(),
         pool: pool.clone(),
@@ -10722,7 +10749,7 @@ async fn tunnel_routes_issue_list_revoke() -> anyhow::Result<()> {
         tunnel_broker: Some(tunnel_broker.clone()),
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -11689,7 +11716,9 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
     provider_configs.insert("instafy-cloud".to_string(), instafy_cloud_provider.clone());
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
 
     let state = AppState {
         config,
@@ -11708,7 +11737,7 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -11867,7 +11896,9 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
     let state = AppState {
         config,
         pool: pool.clone(),
@@ -11885,7 +11916,7 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -12090,7 +12121,9 @@ async fn tunnel_request_burns_credits_when_not_using_broker_hook() -> anyhow::Re
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
     let tunnel_broker: DynTunnelBroker = Arc::new(StubTunnelBroker::default());
     let state = AppState {
         config,
@@ -12109,7 +12142,7 @@ async fn tunnel_request_burns_credits_when_not_using_broker_hook() -> anyhow::Re
         tunnel_broker: Some(tunnel_broker.clone()),
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -12232,7 +12265,9 @@ async fn tunnel_request_rejects_insufficient_credits_without_reporting_a_burn_fa
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
     let tunnel_broker: DynTunnelBroker = Arc::new(StubTunnelBroker::default());
     let state = AppState {
         config,
@@ -12251,7 +12286,7 @@ async fn tunnel_request_rejects_insufficient_credits_without_reporting_a_burn_fa
         tunnel_broker: Some(tunnel_broker.clone()),
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -12392,7 +12427,9 @@ async fn post_commit_receipt_emits_workspace_commit_event() -> anyhow::Result<()
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
 
     let state = AppState {
         config,
@@ -12411,7 +12448,7 @@ async fn post_commit_receipt_emits_workspace_commit_event() -> anyhow::Result<()
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -15634,7 +15671,9 @@ async fn post_origin_register_upserts_origin() -> anyhow::Result<()> {
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
 
     let state = AppState {
         config,
@@ -15653,7 +15692,7 @@ async fn post_origin_register_upserts_origin() -> anyhow::Result<()> {
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -16006,7 +16045,9 @@ async fn post_origin_register_updates_origin_instance_state() -> anyhow::Result<
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
     let state = AppState {
         config,
         pool: pool.clone(),
@@ -16024,7 +16065,7 @@ async fn post_origin_register_updates_origin_instance_state() -> anyhow::Result<
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -18490,7 +18531,9 @@ async fn post_access_token_mints_signed_token_and_publishes_event() -> anyhow::R
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
 
     let state = AppState {
         config,
@@ -18509,7 +18552,7 @@ async fn post_access_token_mints_signed_token_and_publishes_event() -> anyhow::R
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -18777,7 +18820,9 @@ async fn post_access_token_recovers_stale_service_runtime_user_id() -> anyhow::R
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
 
     let state = AppState {
         config,
@@ -18796,7 +18841,7 @@ async fn post_access_token_recovers_stale_service_runtime_user_id() -> anyhow::R
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -18956,7 +19001,9 @@ async fn post_access_token_requires_managed_cloud_for_browser_runtime_origin() -
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
 
     let state = AppState {
         config,
@@ -18975,7 +19022,7 @@ async fn post_access_token_requires_managed_cloud_for_browser_runtime_origin() -
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -19264,7 +19311,9 @@ async fn post_access_token_prefers_hosted_origin_when_prefer_hosted_is_set() -> 
     );
     let provider_registry =
         crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
-    let ota_registry = test_ota_registry(&config);
+    let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+    let desktop_update_registry =
+        crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
 
     let state = AppState {
         config,
@@ -19283,7 +19332,7 @@ async fn post_access_token_prefers_hosted_origin_when_prefer_hosted_is_set() -> 
         tunnel_broker: None,
         device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
         ota_registry,
-        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        desktop_update_registry,
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
         runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
@@ -34407,7 +34456,9 @@ mod billing_service_tests {
         let provider_registry =
             crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
         let http_client = reqwest::Client::new();
-        let ota_registry = test_ota_registry(&config);
+        let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+        let desktop_update_registry =
+            crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
         let state = AppState {
             config: config.clone(),
             pool: pool.clone(),
@@ -34425,7 +34476,7 @@ mod billing_service_tests {
             tunnel_broker: None,
             device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
             ota_registry,
-            desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+            desktop_update_registry,
             credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
             runtime_drain: crate::runtime::RuntimeDrainState::default(),
         };
@@ -34537,7 +34588,9 @@ mod billing_service_tests {
         let provider_registry =
             crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
         let http_client = reqwest::Client::new();
-        let ota_registry = test_ota_registry(&config);
+        let ota_registry = crate::ota::OtaRegistry::new_postgres(pool.clone());
+        let desktop_update_registry =
+            crate::desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone());
         let state = AppState {
             config: config.clone(),
             pool: pool.clone(),
@@ -34555,7 +34608,7 @@ mod billing_service_tests {
             tunnel_broker: None,
             device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
             ota_registry,
-            desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+            desktop_update_registry,
             credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
             runtime_drain: crate::runtime::RuntimeDrainState::default(),
         };
