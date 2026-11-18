@@ -615,7 +615,7 @@ async fn delete_users(users: &[Uuid]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A credit stop (or the idle reaper, or an ensure replacement) mid-turn,
+/// A credit stop (or an idle stop, or an ensure replacement) mid-turn,
 /// with the owner holding the workspace lease: the controller mints an
 /// fs.write token for that holder and calls `/git/flush` with `turnActive`
 /// before the quarantine. The origin can mint git.write with that token,

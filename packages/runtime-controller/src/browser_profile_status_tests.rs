@@ -2,6 +2,7 @@
 //! Missing TEST_DATABASE_URL is a failure, not a skipped or passing fixture.
 
 use super::*;
+use crate::config::PgPool;
 use axum::body::to_bytes;
 use axum::http::Request;
 use serde_json::{json, Value};
@@ -20,7 +21,6 @@ impl Fixture {
     async fn new(enabled: bool) -> anyhow::Result<Self> {
         let pool =
             crate::tests::require_origin_test_pool("browser profile status HTTP tests").await?;
-        ensure_browser_profiles_table(&pool).await?;
         let users = std::array::from_fn(|_| Uuid::new_v4());
         for user in &users {
             crate::tests::ensure_test_user(&pool, user).await?;

@@ -626,7 +626,6 @@ async fn finish_parent_plan_job(
     }
     if let Some(message) = refusal_message {
         crate::conversations::publish_conversation_message_event(&state.events, &message);
-        crate::notifications::enqueue_message_push_notifications(state.clone(), message);
     }
 
     let Some(completed_row) = completed_row else {
@@ -1880,7 +1879,6 @@ async fn record_lead_checkpoint_notice(
     })?;
     if let Some(message) = message {
         crate::conversations::publish_conversation_message_event(&state.events, &message);
-        crate::notifications::enqueue_message_push_notifications(state.clone(), message);
     }
     if let Some(conversation) = blocked_goal.as_ref() {
         crate::conversation_goals::state::publish_update(state, conversation);

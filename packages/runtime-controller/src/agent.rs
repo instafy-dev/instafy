@@ -2529,7 +2529,6 @@ pub(crate) async fn agent_message(
     if let Some(conversation) = goal_update.as_ref() {
         crate::conversation_goals::state::publish_update(&state, conversation);
     }
-    crate::notifications::enqueue_message_push_notifications(state.clone(), message_row);
     // After the message broadcast: the org project lookup must not delay it.
     if let Some(org_id) = deferred_credit_org_id {
         crate::credits::publish_credits_updated(
@@ -4044,12 +4043,10 @@ pub(crate) async fn agent_complete(
     );
     if let Some(message) = token_usage_message.as_ref() {
         publish_conversation_message_event(&state.events, message);
-        crate::notifications::enqueue_message_push_notifications(state.clone(), message.clone());
     }
 
     if let Some(message) = assistant_message.as_ref() {
         publish_conversation_message_event(&state.events, message);
-        crate::notifications::enqueue_message_push_notifications(state.clone(), message.clone());
     }
 
     if let Some(run_uuid) = run_id {

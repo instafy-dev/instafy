@@ -1630,7 +1630,6 @@ pub(crate) async fn record_conversation_message_only(
 
     let message = map_conversation_message_row(&row);
     publish_conversation_message_event(&state.events, &message);
-    crate::notifications::enqueue_message_push_notifications(state.clone(), message.clone());
     Ok(Json(message_row_to_payload(&message)))
 }
 
@@ -2284,10 +2283,6 @@ where
     .await;
 
     publish_conversation_message_event(&state.events, &cancellation.notice);
-    crate::notifications::enqueue_message_push_notifications(
-        state.clone(),
-        cancellation.notice.clone(),
-    );
     crate::send_intents::publish_job_input_state_updates(
         state,
         &cancellation.job_input_state_updates,

@@ -59,7 +59,6 @@ async fn shared_profile_browser_runtime_lifecycle_e2e() -> anyhow::Result<()> {
         checked_migrations > 0,
         "committed migration inventory must not be empty"
     );
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
     let project_id = Uuid::new_v4();
     let user_id = Uuid::new_v4();
     ensure_test_user(&pool, &user_id).await?;

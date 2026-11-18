@@ -127,11 +127,9 @@ interface RunEventData {
   job_id?: string | null;
   percent?: number | null;
   stage?: string | null;
-  message?: string | null;
   status?: string | null;
   runStatus?: string | null;
   finalStatus?: string | null;
-  previewUrl?: string | null;
 }
 
 export interface ControllerRunResultData extends Record<string, unknown> {}
@@ -999,12 +997,6 @@ function handleControllerEvent(
     if (typeof data?.stage === "string" || data?.stage === null) {
       patch.progressStage = data.stage || null;
     }
-    if (typeof data?.previewUrl === "string" || data?.previewUrl === null) {
-      patch.previewUrl = data.previewUrl || null;
-    }
-    if (typeof data?.message === "string" || data?.message === null) {
-      patch.lastMessage = data.message || null;
-    }
     const jobId = getEventJobId(event, data);
     if (jobId) patch.metadata = { jobId };
     onRunPatch(patch);
@@ -1017,9 +1009,9 @@ function handleControllerEvent(
       if (typeof event.conversation_id === "string") {
         runRecord.conversationId = event.conversation_id;
       }
-      // A callback may load the already-canceled authoritative snapshot but
-      // still publish its earlier lease/progress envelope. Keep the stop's
-      // fields and database time instead of reviving it with that envelope.
+      // A lease may load the already-canceled authoritative snapshot but
+      // still publish its own in-progress envelope. Keep the stop's fields
+      // and database time instead of reviving it with that envelope.
       const canceledSnapshot = runRecord.status === "canceled";
       if (!canceledSnapshot && typeof data.percent === "number") {
         runRecord.progress = data.percent;
@@ -1027,18 +1019,12 @@ function handleControllerEvent(
       if (!canceledSnapshot && typeof data.stage === "string") {
         runRecord.progressStage = data.stage || null;
       }
-      if (!canceledSnapshot && typeof data.message === "string") {
-        runRecord.lastMessage = data.message || null;
-      }
       const statusOverride = data.runStatus ?? data.finalStatus ?? data.status;
       if (
         !canceledSnapshot && typeof statusOverride === "string" &&
         statusOverride.trim().length > 0
       ) {
         runRecord.status = normalizeRunStatus(statusOverride) ?? runRecord.status;
-      }
-      if (typeof data.previewUrl === "string") {
-        runRecord.previewUrl = data.previewUrl;
       }
       if (!canceledSnapshot && event.timestamp && typeof event.timestamp === "string") {
         runRecord.updatedAt = event.timestamp;

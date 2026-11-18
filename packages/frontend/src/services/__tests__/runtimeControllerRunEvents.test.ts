@@ -883,7 +883,7 @@ describe("runtime controller run event streaming", () => {
       streamingRequests[0].write(`data: ${JSON.stringify({
         kind: "run.progress", project_id: projectId, run_id: runId,
         timestamp: "2026-10-13T12:00:15.000Z",
-        data: { status: "in_progress", stage: "agent:leased", percent: 1, message: "Working",
+        data: { status: "in_progress", stage: "agent:leased", percent: 1,
           run: { id: runId, project_id: projectId, run_type: "prompt", status: "canceled",
             progress: 100, progress_stage: "canceled", last_message: "Stop requested", updated_at: stoppedAt } },
       })}\n\n`);
@@ -943,7 +943,7 @@ describe("runtime controller run event streaming", () => {
     streamingRequests[0].write(`data: ${JSON.stringify({
       kind: "run.progress", project_id: projectId, run_id: runId,
       timestamp: "2026-10-08T12:03:00.004Z",
-      data: { status: "in_progress", percent: 90, message: "Writing the summary" },
+      data: { status: "in_progress", percent: 90 },
     })}\n\n`);
     await vi.waitFor(() => expect(state.runs[runId]?.status).toBe("in_progress"));
     streamingRequests[0].write(`data: ${JSON.stringify({
@@ -1009,15 +1009,15 @@ describe("runtime controller run event streaming", () => {
       });
       expect(state.latestRunIds).toEqual({ [runType]: hydrated.id });
 
-      // An older controller can send a job association or preview without status.
+      // An older controller can send a job association without status.
       streamingRequests[0].write(`data: ${JSON.stringify({
         kind: "run.preview", run_id: hydrated.id, job_id: "job-2",
-        data: { previewUrl: null },
+        data: {},
       })}\n\n`);
       await vi.waitFor(() => expect(onRunPatch).toHaveBeenCalledTimes(2));
       expect(state.runs[hydrated.id]).toEqual({
         ...hydrated, status: "success", progress: 1, updatedAt: timestamp,
-        previewUrl: null, metadata: { ...hydrated.metadata, jobId: "job-2" },
+        metadata: { ...hydrated.metadata, jobId: "job-2" },
       });
 
       // Full snapshots still own all fields, including explicit nulls.

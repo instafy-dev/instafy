@@ -709,7 +709,7 @@ enum StopReasonBucket {
     Other,
 }
 
-// Reasons are written by the idle reaper and the sweeps (runtime/sweeps.rs,
+// Reasons are written by the sweeps and the stop routes (runtime/sweeps.rs,
 // runtime/stop.rs); anything unrecognised, including a missing reason, is
 // `other` so the daily total still adds up.
 fn classify_stop_reason(reason: Option<&str>) -> StopReasonBucket {

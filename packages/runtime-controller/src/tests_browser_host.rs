@@ -578,7 +578,6 @@ async fn shared_dispatch_to_a_browser_host_follows_the_policy() -> anyhow::Resul
 #[tokio::test]
 async fn a_registered_host_on_a_covered_space_uses_the_profile_store() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("browser host profile test").await?;
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
     let project_id = Uuid::new_v4();
     let fixture = SharedDbFixture {
         projects: vec![project_id],
