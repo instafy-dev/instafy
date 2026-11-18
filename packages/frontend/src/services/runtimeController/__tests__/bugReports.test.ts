@@ -11,7 +11,6 @@ vi.mock("../core", () => ({
 
 import {
   acknowledgeControllerBugReportActivity,
-  claimControllerSupportResolutionAlerts,
   getControllerBugReport,
   listControllerBugReportMessagePage,
   listControllerBugReportMessages,
@@ -131,7 +130,6 @@ describe("customer support report client", () => {
           ],
           unreadCount: 3,
           unreadResolutionCount: 2,
-          unnotifiedResolutionCount: 1,
         }),
       )
       .mockResolvedValueOnce(
@@ -194,23 +192,14 @@ describe("customer support report client", () => {
     expect("dataBase64" in detail.screenshots[0]).toBe(false);
   });
 
-  it("acknowledges an observed support cursor and atomically claims resolution alerts", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse({
-          acknowledgedThrough: "2026-09-05T11:00:00Z",
-          hasUnreadSupportActivity: false,
-          hasUnreadResolution: false,
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          claimedCount: 2,
-          latestReportId: REPORT_ID,
-          latestResolvedAt: "2026-09-05T11:05:00Z",
-        }),
-      );
+  it("acknowledges an observed support cursor", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        acknowledgedThrough: "2026-09-05T11:00:00Z",
+        hasUnreadSupportActivity: false,
+        hasUnreadResolution: false,
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
@@ -220,23 +209,13 @@ describe("customer support report client", () => {
       hasUnreadSupportActivity: false,
       hasUnreadResolution: false,
     });
-    await expect(claimControllerSupportResolutionAlerts("user-a")).resolves.toEqual({
-      claimedCount: 2,
-      latestReportId: REPORT_ID,
-      latestResolvedAt: "2026-09-05T11:05:00Z",
-    });
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       `http://controller.test/support/reports/${REPORT_ID}/acknowledge`,
-      "http://controller.test/support/resolution-alerts/claim",
     ]);
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({ seenThrough: "2026-09-05T11:00:00Z" }),
-    });
-    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
-      method: "POST",
-      body: JSON.stringify({ expectedUserId: "user-a" }),
     });
   });
 

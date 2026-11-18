@@ -110,6 +110,7 @@ function versioning(overrides: Partial<ActiveWorkspaceVersioning> = {}): ActiveW
     projectId: "project-1",
     chromeMode: "stateless",
     historyReady: true,
+    originPending: false,
     ...overrides,
   };
 }
@@ -344,6 +345,101 @@ describe("HistoryDrawer", () => {
     expect(document.activeElement).toBe(refresh);
     // The failure is no longer true: the status says what happens next.
     expect(q(container, "history-status")?.textContent).toBe("Loading saved versions…");
+  });
+
+  it("says it can't list a space whose mode check answered legacy, and asks the origin nothing", async () => {
+    const legacy = versioning({
+      mode: "legacy", resolved: true, firstPaintMode: "legacy", chromeMode: "legacy", stateless: false, historyReady: false,
+    });
+    const onRequestClose = vi.fn();
+    mocks.probe.mockResolvedValue({ mode: "legacy" });
+    await render(legacy, onRequestClose);
+    expect(q(container, "history-unavailable")?.textContent).toBe(
+      "This space's saved versions can't be shown here. Save a version from Files.");
+    expect(container.textContent).not.toContain("Loading history");
+    // Refresh asks the mode again and the answer stands; Close still closes.
+    const refresh = q<HTMLButtonElement>(container, "source-control-refresh");
+    await act(async () => refresh?.click());
+    await flush();
+    expect(mocks.probe).toHaveBeenCalledTimes(1);
+    expect(q(container, "history-unavailable")).not.toBeNull();
+    expect(q(container, "history-probe-retry")).toBeNull();
+    expect(q(container, "history-status")?.textContent).toBe("");
+    await act(async () => q<HTMLButtonElement>(container, "source-control-close")?.click());
+    expect(onRequestClose).toHaveBeenCalledOnce();
+    expect(mocks.fetchHistory).not.toHaveBeenCalled();
+    expect(mocks.fetchStatus).not.toHaveBeenCalled();
+    expect(mocks.fetchRecovery).not.toHaveBeenCalled();
+  });
+
+  it("keeps Loading history while a legacy guess is unanswered or the space's origin is still loading", async () => {
+    await render(versioning({ mode: "legacy", resolved: false, chromeMode: "legacy", stateless: false, historyReady: false }));
+    expect(container.textContent).toContain("Loading history");
+    expect(q(container, "history-unavailable")).toBeNull();
+    await render(versioning({
+      originId: null, mode: "legacy", resolved: false, chromeMode: "legacy", stateless: false, historyReady: false, originPending: true,
+    }));
+    expect(container.textContent).toContain("Loading history");
+    expect(q(container, "history-unavailable")).toBeNull();
+    expect(mocks.fetchHistory).not.toHaveBeenCalled();
+  });
+
+  it("says it can't list a space that has no origin, also after Refresh", async () => {
+    await render(versioning({
+      originId: null, mode: "legacy", resolved: false, chromeMode: "legacy", stateless: false, historyReady: false, originPending: false,
+    }));
+    expect(q(container, "history-unavailable")?.textContent).toBe(
+      "This space's saved versions can't be shown here. Save a version from Files.");
+    // With no origin the mode check asks nothing; that is not a failure.
+    await act(async () => q<HTMLButtonElement>(container, "source-control-refresh")?.click());
+    await flush();
+    expect(mocks.probe).toHaveBeenCalledTimes(1);
+    expect(q(container, "history-unavailable")).not.toBeNull();
+    expect(q(container, "history-probe-retry")).toBeNull();
+    expect(q(container, "history-status")?.textContent).toBe("");
+    expect(mocks.fetchHistory).not.toHaveBeenCalled();
+  });
+
+  it("announces that it can't list the space when a mode check answers legacy after Retry", async () => {
+    const onRequestClose = vi.fn();
+    await render(versioning({ resolved: false, historyReady: false }), onRequestClose, { probeFailed: true });
+    const retry = q<HTMLButtonElement>(container, "history-probe-retry");
+    mocks.probe.mockResolvedValueOnce({ mode: "legacy" });
+    await act(async () => retry?.focus());
+    await act(async () => retry?.click());
+    await flush();
+    const title = container.querySelector("h2");
+    expect(document.activeElement).toBe(title);
+    // The drawer learns the answer: the status says History can't list it.
+    await act(async () =>
+      root.render(<HistoryDrawer versioning={versioning({
+        mode: "legacy", resolved: true, chromeMode: "legacy", stateless: false, historyReady: false,
+      })} onRequestClose={onRequestClose} probeFailed />),
+    );
+    await flush();
+    expect(q(container, "history-status")?.textContent).toBe(
+      "This space's saved versions can't be shown here. Save a version from Files.");
+    expect(q(container, "history-unavailable")).not.toBeNull();
+    expect(q(container, "history-probe-retry")).toBeNull();
+    expect(document.activeElement).toBe(title);
+    expect(mocks.fetchHistory).not.toHaveBeenCalled();
+  });
+
+  it("announces it at once when the drawer learns a legacy answer while Retry shows", async () => {
+    const onRequestClose = vi.fn();
+    await render(versioning({ resolved: false, historyReady: false }), onRequestClose, { probeFailed: true });
+    await act(async () => q<HTMLButtonElement>(container, "history-probe-retry")?.focus());
+    await act(async () =>
+      root.render(<HistoryDrawer versioning={versioning({
+        mode: "legacy", resolved: true, chromeMode: "legacy", stateless: false, historyReady: false,
+      })} onRequestClose={onRequestClose} probeFailed={false} />),
+    );
+    await flush();
+    expect(q(container, "history-probe-retry")).toBeNull();
+    expect(document.activeElement).toBe(container.querySelector("h2"));
+    expect(q(container, "history-status")?.textContent).toBe(
+      "This space's saved versions can't be shown here. Save a version from Files.");
+    expect(q(container, "history-unavailable")).not.toBeNull();
   });
 
   it("describes Retry with the failure it retries, also after a repeated failure", async () => {

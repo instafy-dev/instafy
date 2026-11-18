@@ -23,8 +23,6 @@ class SupportControllerFixture {
   submissions: Record<string, unknown>[] = [];
   replies: Record<string, unknown>[] = [];
   acknowledgements: string[] = [];
-  claims = 0;
-  pendingResolution = false;
   requests: string[] = [];
   olderReportCount = 0;
   private clock = Date.parse("2026-09-05T12:00:00Z");
@@ -77,7 +75,6 @@ class SupportControllerFixture {
       id: `resolved-${createdAt}`, authorType: "system",
       body: "Support marked this report resolved.", createdAt,
     });
-    this.pendingResolution = true;
   }
 
   async install(page: Page): Promise<void> {
@@ -121,18 +118,6 @@ class SupportControllerFixture {
           hasMore: false, nextCursor: null,
           unreadCount: Number(this.report?.hasUnreadSupportActivity ?? false),
           unreadResolutionCount: Number(this.report?.hasUnreadResolution ?? false),
-          unnotifiedResolutionCount: Number(this.pendingResolution),
-        });
-      }
-      if (pathname === "/support/resolution-alerts/claim" && method === "POST") {
-        expect(request.postDataJSON()).toEqual({ expectedUserId: USER_ID });
-        const claimed = this.pendingResolution;
-        this.pendingResolution = false;
-        if (claimed) this.claims += 1;
-        return json({
-          claimedCount: Number(claimed),
-          latestReportId: claimed ? this.report?.id : null,
-          latestResolvedAt: claimed ? this.report?.resolvedAt : null,
         });
       }
       if (pathname === `/support/reports/${REPORT_ID}` && method === "GET") {
@@ -198,7 +183,6 @@ async function mountSupport(page: Page): Promise<string[]> {
       createRequestId: support.createControllerBugReportRequestId,
       get: support.getControllerBugReport,
       acknowledgeActivity: support.acknowledgeControllerBugReportActivity,
-      claimResolutionAlerts: support.claimControllerSupportResolutionAlerts,
       listPage: support.listControllerBugReportPage,
       listMessagePage: support.listControllerBugReportMessagePage,
       postMessage: support.postControllerBugReportMessage,
@@ -246,13 +230,16 @@ async function mountSupport(page: Page): Promise<string[]> {
               onThemeModeChange: noop, showInstallEntry: false, shouldRenderUpdateEntry: false,
               updatePresentation: null, onUpdateEntryClick: noop, onUpdateEntryContextMenu: noop,
               onUpdateEntryPointerDown: noop, clearUpdateLongPress: noop,
-              onOpenSupport: support.onOpenBugReportInbox, supportUnreadCount: support.supportUnreadCount,
+              onOpenSupport: support.onOpenBugReportInbox,
               notificationsPending: false, notificationsEnabled: false, onToggleNotifications: noop,
               onOpenDiagnostics: noop, hasAppLogErrors: false, updateDialogOpen: false,
               onUpdateDialogOpenChange: noop, updateMetadata: null, updateDialogShowDetails: false,
               onUpdateDialogShowDetailsChange: noop, onUpdatePrimaryAction: noop, updateActionPending: false,
             }),
           ),
+          // The support hook's unread count; Home lists those reports. The
+          // profile menu no longer shows a count.
+          h("output", { "data-testid": "fixture-support-unread", className: "sr-only" }, String(support.supportUnreadCount)),
         ),
         support.dialogs,
         h(Status),
@@ -310,8 +297,13 @@ async function expectSupportHeaderUsable(page: Page): Promise<void> {
   await expectReachable(page, dialog.getByRole("button", { name: "Close support", exact: true }));
 }
 
-async function pollOnFocus(page: Page): Promise<void> {
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+// Support replies and resolutions reach Studio as notifications: the
+// notification center's check announces a changed feed, and the support hook
+// reads the reports again. A focus alone no longer does (#738).
+async function announceNotificationFeedChange(page: Page): Promise<void> {
+  await page.evaluate((userId) => window.dispatchEvent(
+    new CustomEvent("instafy:notification-feed-changed", { detail: { userId } }),
+  ), USER_ID);
 }
 
 async function expectReachable(page: Page, locator: Locator): Promise<void> {
@@ -380,26 +372,25 @@ for (const viewport of [
     await page.getByRole("button", { name: "Close support", exact: true }).click();
 
     controller.publishSupportReply("We reproduced this. Please try the updated preview.");
-    await pollOnFocus(page);
-    await expect(page.getByTestId("profile-support-indicator")).toBeVisible();
-    await page.getByTestId("sidebar-profile-menu").click();
-    await expect(page.getByTestId("profile-support-unread-count")).toHaveText("1");
-    await page.getByTestId("profile-support-button").click();
+    await announceNotificationFeedChange(page);
+    const unread = page.getByTestId("fixture-support-unread");
+    await expect(unread).toHaveText("1");
+    await openSupport(page);
     await expect(page.getByTestId("support-report-detail-status")).toHaveText("Waiting for you");
     await expect(page.getByTestId("support-message-timeline")).toContainText("We reproduced this.");
     await expect.poll(() => controller.acknowledgements.length).toBe(1);
-    await expect(page.getByTestId("profile-support-indicator")).toHaveCount(0);
+    await expect(unread).toHaveText("0");
     await page.getByRole("button", { name: "Close support", exact: true }).click();
 
     controller.resolve();
     controller.holdTimeline();
-    await pollOnFocus(page);
-    const resolvedToast = page.getByTestId("status-toast").filter({ hasText: "Your Instafy support report was resolved." });
-    await expect(resolvedToast).toBeVisible();
-    await expect(page.getByTestId("profile-support-indicator")).toBeVisible();
-    await expectReachable(page, resolvedToast.getByRole("button", { name: "View report" }));
-    await capture(page, testInfo, "resolution-alert");
-    await resolvedToast.getByRole("button", { name: "View report" }).click();
+    await announceNotificationFeedChange(page);
+    // A resolution counts as unread support activity, like a reply. It raises
+    // no toast and asks the controller for nothing but the reports.
+    await expect(unread).toHaveText("1");
+    const resolvedToast = page.getByTestId("status-toast").filter({ hasText: /resolved/i });
+    await expect(resolvedToast).toHaveCount(0);
+    await openSupport(page);
     await expect(page.getByTestId("support-report-detail-status")).toHaveText("Resolved");
     // Opening a dialog alone cannot clear the durable unread state: the current
     // timeline must finish loading and become visible first.
@@ -408,8 +399,7 @@ for (const viewport of [
     controller.releaseTimeline();
     await expect(page.getByTestId("support-message-timeline")).toContainText("Support marked this report resolved.");
     await expect.poll(() => controller.acknowledgements.length).toBe(2);
-    await expect(page.getByTestId("profile-support-indicator")).toHaveCount(0);
-    expect(controller.claims).toBe(1);
+    await expect(unread).toHaveText("0");
     await capture(page, testInfo, "resolved-timeline");
     await page.getByTestId("support-reply").scrollIntoViewIfNeeded();
     await capture(page, testInfo, "resolved-conversation");
@@ -423,17 +413,21 @@ for (const viewport of [
     await page.getByRole("button", { name: "Close support", exact: true }).click();
 
     controller.resolve();
-    await pollOnFocus(page);
-    await expect(resolvedToast).toBeVisible();
-    expect(controller.claims).toBe(2);
-    await resolvedToast.getByRole("button", { name: "View report" }).click();
+    await announceNotificationFeedChange(page);
+    await expect(unread).toHaveText("1");
+    await openSupport(page);
     await expect(page.getByTestId("support-report-detail-status")).toHaveText("Resolved");
     await expect.poll(() => controller.acknowledgements.length).toBe(3);
-    await expect(page.getByTestId("profile-support-indicator")).toHaveCount(0);
+    await expect(unread).toHaveText("0");
     await page.getByRole("button", { name: "Close support", exact: true }).click();
-    await pollOnFocus(page);
+    // Read the reports once more: still nothing to show, and no toast.
+    const listReads = () => controller.requests.filter((request) => request === "GET /support/reports").length;
+    const listReadsBefore = listReads();
+    await announceNotificationFeedChange(page);
+    await expect.poll(listReads).toBeGreaterThan(listReadsBefore);
+    await expect(unread).toHaveText("0");
     await expect(resolvedToast).toHaveCount(0);
-    expect(controller.claims).toBe(2);
+    expect(controller.requests.filter((request) => !request.includes(" /support/reports"))).toEqual([]);
     expect(controller.replies).toHaveLength(2);
     expect(controller.replies[0].clientRequestId).not.toBe(controller.replies[1].clientRequestId);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);

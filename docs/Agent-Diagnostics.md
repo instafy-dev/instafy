@@ -18,8 +18,8 @@ checks again on startup, at once when a push arrives or the notification center 
 feed changed, and otherwise every 5 minutes while active (15 once idle, never while hidden).
 Customer-visible support replies and real resolution transitions also create durable entries in
 the [notification center](Notifications.md), with account preferences controlling Web Push, iOS
-APNs, and local presentation. Updated Studio uses this platform for transient alerts and disables
-its legacy resolution-claim toast. The migration reserves the legacy alert claim atomically with
+APNs, and local presentation. Studio uses this platform for transient alerts and has no
+resolution toast of its own. The migration reserves the legacy alert claim atomically with
 each new durable resolution event, preventing older clients from also showing that resolution
 toast. The compatibility endpoint still handles eligible earlier resolutions. A notification's
 read state is separate from the support unread badge, which remains until
@@ -81,7 +81,7 @@ metadata are behind an **Include diagnostics** checkbox that is off by default. 
 account identity and email snapshot are attached to the support case for ownership/contact and are
 disclosed separately from diagnostics. Page metadata removes URL query parameters and fragments,
 and the browser does not duplicate the account email inside the diagnostic payload. Report
-creation, inbox listing, and resolution-alert claims carry the account identity observed by Studio;
+creation and inbox listing carry the account identity observed by Studio;
 the controller rejects the request if the authenticated account changed while an asynchronous
 request was being prepared.
 

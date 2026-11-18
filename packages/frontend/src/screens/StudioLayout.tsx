@@ -487,7 +487,6 @@ function StudioLayoutInner() {
   useEffect(() => { setDiagnosticsOpen(false); }, [currentUserId]);
   const bugReportController = useStudioBugReportController({
     onOpenDiagnostics: openDiagnostics,
-    legacyResolutionToasts: false,
     currentUserId,
     activeProjectId,
     activeConversationId: activeConversation?.controllerId ?? null,
@@ -1475,7 +1474,7 @@ function StudioLayoutInner() {
     ? desktopDrawerHeaderTarget : null;
 
   const renderSpaceIndependentPanel = (panel: StudioPanel, organizationId: string | null) => panel === "home" ? (
-    <HomePanel canResumeConversation={projectReadyForWorkspace && !controllerProjectMissing} inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} notifications={notificationCenter} supportReports={bugReportController.supportUnreadReports} supportLoading={bugReportController.supportNotificationsLoading} supportError={bugReportController.supportNotificationsError} refreshSupport={() => bugReportController.refreshSupportNotifications(false)} onOpenSupport={bugReportController.onOpenBugReportInbox} />
+    <HomePanel canResumeConversation={projectReadyForWorkspace && !controllerProjectMissing} inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} notifications={notificationCenter} supportReports={bugReportController.supportUnreadReports} supportLoading={bugReportController.supportNotificationsLoading} supportError={bugReportController.supportNotificationsError} refreshSupport={() => bugReportController.refreshSupportNotifications()} onOpenSupport={bugReportController.onOpenBugReportInbox} />
   ) : panel === "team" ? (
     <TeamPanel organizationId={navigationScope.orgKey === "personal" ? null : navigationScope.orgKey} />
   ) : panel === "settings" ? (

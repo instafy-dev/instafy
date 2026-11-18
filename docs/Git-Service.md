@@ -193,9 +193,11 @@ Native environments can choose:
 ### Saving files in Studio
 Studio picks how the Files editor saves from the space's default origin (the controller's
 `GET /projects/:id/origin`), probing `GET /git/status?limit=1` for a hosted origin:
-- **Stateful gateway** (an older gateway image: no `stateless: true` in the status, or unknown):
-  Save draft and Save version, exactly as before. The gateway built from this repository always
-  answers `stateless: true`.
+- **Stateful origin** (no `stateless: true` in the status, or unknown): Save draft and Save version,
+  exactly as before. That is an older gateway image, and a cloud machine's own origin, which is
+  every cloud space's default origin on a controller without the Workspace Gateway
+  (`HOSTED_ORIGIN_ENDPOINT` unset, as with `GIT_CANONICAL=0`). The gateway built from this
+  repository always answers `stateless: true`.
 - **Stateless gateway** (`stateless: true`) and **Desktop origins**: one Save (Cmd/Ctrl+S, also
   Shift+Cmd/Ctrl+S). Each save is one `/apply` manifest pinned to the origin the file was read
   from, and checked the way that origin checks it, even after the default origin changed (the
@@ -551,9 +553,11 @@ canonical.
 
 The source-control drawer is History. It sends requests only once the project's default origin
 is known to keep versions: a cloud space whose gateway answers `/git/status` with
-`stateless: true`, or a Desktop space. Until then (the mode is still being checked, the space has
-no origin, or its gateway is an older, stateful one) History lists nothing and offers Retry when
-the check got no answer; the nav item keeps the name Changes on those spaces.
+`stateless: true`, or a Desktop space. While the mode is still being checked, History says it is
+loading and offers Retry when the check got no answer. On a space with a stateful origin (see
+[Saving files in Studio](#saving-files-in-studio)) or with no origin, History lists nothing and
+says that this space's saved versions can't be shown there, pointing to Save version in Files;
+the nav item keeps the name Changes on those spaces.
 
 - **History**: saved versions read from the default origin, 20 per page with Show more where
   the origin pages history. Each version can be reviewed or reverted; Revert saves a new version

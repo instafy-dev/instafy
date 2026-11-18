@@ -253,8 +253,8 @@ activity timestamp. The cursor advances monotonically; a stale acknowledgement c
 support activity, and a report owned by another account returns the same not-found boundary as
 other customer report reads.
 
-Updated Studio uses the [durable notification platform](../../docs/Notifications.md) for
-customer-visible replies and resolution transitions, and disables the legacy resolution toast.
+Studio uses the [durable notification platform](../../docs/Notifications.md) for
+customer-visible replies and resolution transitions and has no resolution toast of its own.
 The notification recipient's read state is independent of the report's support-activity cursor.
 
 Older clients can claim a newly resolved report for an in-app alert by sending

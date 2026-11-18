@@ -716,8 +716,8 @@ export function StudioSidebar({
     if (!runtimeControllerEnabled || orgsFetchState !== "ready") {
       return;
     }
-    writeSidebarOrgSnapshot(userEmail, controllerOrgs, orgDeckTeams.length);
-  }, [controllerOrgs, orgDeckTeams.length, orgsFetchState, userEmail]);
+    writeSidebarOrgSnapshot(userEmail, controllerOrgs);
+  }, [controllerOrgs, orgsFetchState, userEmail]);
   const selectedWorkspaceOrg = useMemo(
     () => orgOptions.find((org) => org.key === workspaceOrgKey) ?? null,
     [orgOptions, workspaceOrgKey],

@@ -117,7 +117,7 @@ export const filesControllerExtras = {
 function initialWorkspace(): CodeWorkspace {
   return {
     files: [], activeFileId: null, lastPrompt: "", lastGeneratedAt: null,
-    summary: "", status: "idle", provider: null, error: null,
+    summary: "", status: "idle", error: null,
     installedDependencies: [], lastAppliedAt: null,
   };
 }

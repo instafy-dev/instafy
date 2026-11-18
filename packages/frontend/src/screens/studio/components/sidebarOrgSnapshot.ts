@@ -7,8 +7,8 @@ import type { ControllerOrgSummary } from "../../../sdk/instafy";
  * The rail is rendered from `listControllerOrganizations()`, which cannot even
  * start until auth resolves. Without a cache the first paint reserves zero
  * height and the rail pops in, shoving everything below it down. We persist the
- * bare minimum needed to paint the rail at the right size and identity, keyed
- * per user, and hydrate from it on mount.
+ * bare minimum needed to paint the rail's teams, keyed per user, and hydrate
+ * from it on mount.
  *
  * Every read/write is best-effort: a missing, foreign, malformed or
  * unwritable store degrades silently to the pre-cache behaviour (no rail).
@@ -17,8 +17,6 @@ import type { ControllerOrgSummary } from "../../../sdk/instafy";
 const STORAGE_KEY_PREFIX = "instafy:sidebar-orgs:v1:";
 /** Storing more orgs than the rail could ever consult is pure bloat. */
 const MAX_CACHED_ORGS = 24;
-/** Guards against a corrupt/absurd count reserving a screen-high gap. */
-const MAX_RAIL_CHIP_COUNT = 99;
 
 /** The only org fields the rail (and its labels) actually read. */
 export interface CachedSidebarOrg {
@@ -33,12 +31,6 @@ export interface SidebarOrgSnapshot {
   /** Normalized owner of the snapshot; re-checked on read, not just via the key. */
   user: string;
   orgs: CachedSidebarOrg[];
-  /**
-   * How many chips the rail rendered last time (`teamRailTeams.length`).
-   * `> 1` doubles as the "this user has a team rail" flag and gives the
-   * loading placeholder the right height in the collapsed (stacked) layout.
-   */
-  railChipCount: number;
 }
 
 export function normalizeSidebarOrgUser(userEmail: string | null | undefined): string | null {
@@ -114,12 +106,7 @@ export function readSidebarOrgSnapshot(
           .filter((org): org is CachedSidebarOrg => org !== null)
           .slice(0, MAX_CACHED_ORGS)
       : [];
-    const rawCount = record.railChipCount;
-    const railChipCount =
-      typeof rawCount === "number" && Number.isFinite(rawCount) && rawCount > 0
-        ? Math.min(Math.floor(rawCount), MAX_RAIL_CHIP_COUNT)
-        : 0;
-    return { user, orgs, railChipCount };
+    return { user, orgs };
   } catch {
     // Malformed JSON, a hostile value, a throwing storage — treat as no cache.
     return null;
@@ -147,7 +134,6 @@ export function readCachedControllerOrgs(
 export function writeSidebarOrgSnapshot(
   userEmail: string | null | undefined,
   orgs: readonly ControllerOrgSummary[],
-  railChipCount: number,
 ): void {
   const user = normalizeSidebarOrgUser(userEmail);
   const key = sidebarOrgSnapshotStorageKey(userEmail);
@@ -164,10 +150,6 @@ export function writeSidebarOrgSnapshot(
       avatarUrl: org.avatarUrl ?? null,
       ...(normalizeOrgAccent(org.accentColor) ? { accentColor: normalizeOrgAccent(org.accentColor) } : {}),
     })),
-    railChipCount:
-      Number.isFinite(railChipCount) && railChipCount > 0
-        ? Math.min(Math.floor(railChipCount), MAX_RAIL_CHIP_COUNT)
-        : 0,
   };
   try {
     storage.setItem(key, JSON.stringify(snapshot));
