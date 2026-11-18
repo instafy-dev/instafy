@@ -2,11 +2,10 @@ use anyhow::Result;
 use std::env;
 use std::fs;
 
-use tunnel_broker::config::BrokerConfig;
-use tunnel_broker::db::{
-    connect_pool, ensure_ingress, list_active_rathole_bindings_for_ingress, run_migrations,
+use tunnel_broker::{
+    connect_pool, ensure_ingress, list_active_rathole_bindings_for_ingress,
+    render_rathole_server_config, run_migrations, BrokerConfig,
 };
-use tunnel_broker::ingress::render_rathole_server_config;
 
 #[tokio::main]
 async fn main() -> Result<()> {

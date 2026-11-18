@@ -120,7 +120,6 @@ pub async fn probe_bindings(
 
 /// The ingress sidecar's round: probe this ingress's live bindings and record what answered.
 /// Returns the tunnels that just became active.
-#[allow(dead_code)] // The ingress sidecar calls it through the lib.
 pub async fn probe_and_record(
     pool: &DbPool,
     upstream_host: &str,
@@ -192,7 +191,6 @@ mod tests {
             token: "tok".into(),
             hostname: "abc.rt.test".into(),
             visibility: "public".into(),
-            kind: "tunnel".into(),
         }
     }
 

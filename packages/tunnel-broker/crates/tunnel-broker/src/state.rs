@@ -27,19 +27,19 @@ impl AppState {
         }
     }
 
-    pub fn pool(&self) -> &PgPool {
+    pub(crate) fn pool(&self) -> &PgPool {
         &self.inner.pool
     }
 
-    pub fn config(&self) -> &BrokerConfig {
+    pub(crate) fn config(&self) -> &BrokerConfig {
         &self.inner.config
     }
 
-    pub fn http(&self) -> &Client {
+    pub(crate) fn http(&self) -> &Client {
         &self.inner.http
     }
 
-    pub fn preview_auth_cache(&self) -> &DecisionCache {
+    pub(crate) fn preview_auth_cache(&self) -> &DecisionCache {
         &self.inner.preview_auth_cache
     }
 }

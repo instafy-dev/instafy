@@ -36,8 +36,6 @@ describe("CodeProvider and the store's code", () => {
       state: spaceA,
       projects: { "space-a": spaceA, "space-b": spaceB },
       activeProjectId: "space-a",
-      history: [],
-      future: [],
     });
     container = document.createElement("div");
     document.body.appendChild(container);

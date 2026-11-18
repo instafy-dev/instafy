@@ -7,62 +7,52 @@ use uuid::Uuid;
 
 pub type DbPool = PgPool;
 
-// Mirrors the ingress_nodes row; not every column is read.
-#[allow(dead_code)]
+/// The `ingress_nodes` columns the broker reads; `FromRow` skips the rest of the row.
 #[derive(Debug, Clone, FromRow)]
 pub struct IngressRecord {
     pub id: Uuid,
-    pub name: String,
-    pub host: String,
-    pub port: i32,
-    pub ipv4: Option<String>,
-    pub ipv6: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub(crate) host: String,
+    pub(crate) port: i32,
+    pub(crate) ipv4: Option<String>,
+    pub(crate) ipv6: Option<String>,
 }
 
-#[allow(dead_code)] // The DNS sidecar reads it through the lib.
+/// The `dns_nodes` columns the DNS sidecar reads; `FromRow` skips the rest of the row.
 #[derive(Debug, Clone, FromRow)]
 pub struct DnsNodeRecord {
-    pub id: Uuid,
     pub hostname: String,
     pub ipv4: Option<String>,
     pub ipv6: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow)]
 pub struct TunnelRecord {
-    pub id: Uuid,
+    pub(crate) id: Uuid,
     pub project_id: Uuid,
     pub org_id: Option<Uuid>,
     pub runtime_id: Option<Uuid>,
     pub lease_id: Option<Uuid>,
-    pub idempotency_key: Option<String>,
-    pub ingress_id: Uuid,
-    pub hostname: String,
-    pub rathole_service: Option<String>,
-    pub rathole_port: Option<i32>,
-    pub status: String,
-    pub token: String,
-    pub token_expires_at: Option<DateTime<Utc>>,
-    pub url: Option<String>,
-    pub created_at: DateTime<Utc>,
-    #[allow(dead_code)] // Mirrors the tunnels row; nothing reads it.
-    pub updated_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub metadata: Option<serde_json::Value>,
+    pub(crate) idempotency_key: Option<String>,
+    pub(crate) ingress_id: Uuid,
+    pub(crate) hostname: String,
+    pub(crate) rathole_service: Option<String>,
+    pub(crate) rathole_port: Option<i32>,
+    pub(crate) status: String,
+    pub(crate) token: String,
+    pub(crate) token_expires_at: Option<DateTime<Utc>>,
+    pub(crate) url: Option<String>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) expires_at: Option<DateTime<Utc>>,
+    pub(crate) metadata: Option<serde_json::Value>,
     /// When the ingress sidecar last probed this tunnel's site ([`record_tunnel_listening`]).
-    pub listening_checked_at: Option<DateTime<Utc>>,
+    pub(crate) listening_checked_at: Option<DateTime<Utc>>,
     /// The HTTP status that probe got back, or `None` when nothing answered.
-    pub listening_status: Option<i32>,
+    pub(crate) listening_status: Option<i32>,
 }
 
 /// An active public tunnel row for handler tests.
 #[cfg(test)]
 pub(crate) fn test_tunnel_record() -> TunnelRecord {
-    let now = Utc::now();
     TunnelRecord {
         id: Uuid::new_v4(),
         project_id: Uuid::new_v4(),
@@ -78,8 +68,7 @@ pub(crate) fn test_tunnel_record() -> TunnelRecord {
         token: "tok".into(),
         token_expires_at: None,
         url: None,
-        created_at: now,
-        updated_at: now,
+        created_at: Utc::now(),
         expires_at: None,
         metadata: None,
         listening_checked_at: None,
@@ -458,7 +447,6 @@ async fn replace_record(
     Ok(())
 }
 
-#[allow(dead_code)] // The DNS sidecar calls it through the lib.
 pub async fn ensure_dns_node(
     pool: &DbPool,
     hostname: &str,
@@ -1028,7 +1016,6 @@ pub async fn revoke_tunnel(
     Ok(record)
 }
 
-#[allow(dead_code)] // The ingress sidecar calls it through the lib.
 pub async fn revoke_expired_tunnels_for_ingress(
     pool: &DbPool,
     _cfg: &BrokerConfig,
@@ -1064,29 +1051,25 @@ pub async fn revoke_expired_tunnels_for_ingress(
     Ok(revoked)
 }
 
-#[allow(dead_code)] // The lib's ingress renderer reads it; this binary only probes it.
 #[derive(Debug, Clone, FromRow)]
 pub struct RatholeBinding {
-    pub tunnel_id: Uuid,
-    pub rathole_service: String,
-    pub rathole_port: i32,
-    pub token: String,
-    pub hostname: String,
+    pub(crate) tunnel_id: Uuid,
+    pub(crate) rathole_service: String,
+    pub(crate) rathole_port: i32,
+    pub(crate) token: String,
+    pub(crate) hostname: String,
     /// `labels.visibility`, `public` when unset.
-    pub visibility: String,
-    /// `labels.kind`, `tunnel` when unset.
-    pub kind: String,
+    pub(crate) visibility: String,
 }
 
-#[allow(dead_code)] // The lib's ingress renderer calls these.
 impl RatholeBinding {
     /// Anything other than an explicit `public` routes through preview auth.
-    pub fn is_private(&self) -> bool {
+    pub(crate) fn is_private(&self) -> bool {
         visibility_is_private(&self.visibility)
     }
 
     /// The tunnel id as it appears in preview hostnames.
-    pub fn tunnel_hex(&self) -> String {
+    pub(crate) fn tunnel_hex(&self) -> String {
         self.tunnel_id.simple().to_string()
     }
 }
@@ -1098,10 +1081,8 @@ pub fn visibility_is_private(visibility: &str) -> bool {
 /// The binding query's columns, so routing never sees a binding without its labels.
 const RATHOLE_BINDING_COLUMNS: &str =
     "id as tunnel_id, rathole_service, rathole_port, token, hostname, \
-    coalesce(metadata->'labels'->>'visibility', 'public') as visibility, \
-    coalesce(metadata->'labels'->>'kind', 'tunnel') as kind";
+    coalesce(metadata->'labels'->>'visibility', 'public') as visibility";
 
-#[allow(dead_code)] // The ingress sidecar and render-rathole call it through the lib.
 pub async fn list_active_rathole_bindings_for_ingress(
     pool: &DbPool,
     ingress_id: Uuid,
@@ -1237,13 +1218,11 @@ mod tests {
     }
 
     #[test]
-    fn binding_queries_read_visibility_and_kind_from_labels() {
+    fn binding_query_reads_visibility_from_labels() {
         let source = include_str!("db.rs");
         assert!(RATHOLE_BINDING_COLUMNS.contains("id as tunnel_id"));
         assert!(RATHOLE_BINDING_COLUMNS
             .contains("coalesce(metadata->'labels'->>'visibility', 'public') as visibility"));
-        assert!(RATHOLE_BINDING_COLUMNS
-            .contains("coalesce(metadata->'labels'->>'kind', 'tunnel') as kind"));
         let uses = ["select {", "RATHOLE_BINDING_COLUMNS}"].concat();
         // The one binding query, `list_active_rathole_bindings_for_ingress`.
         assert_eq!(source.matches(&uses).count(), 1);
@@ -1258,7 +1237,6 @@ mod tests {
             token: "tok".into(),
             hostname: "abc.rt.test".into(),
             visibility: visibility.into(),
-            kind: "preview".into(),
         };
         assert!(!binding("public").is_private());
         assert!(!binding(" Public ").is_private());

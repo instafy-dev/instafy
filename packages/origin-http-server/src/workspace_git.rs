@@ -195,8 +195,8 @@ impl<'a> WorkspaceGit<'a> {
         self
     }
 
-    /// The workspace root of a checkout. Only checkout code (publish, stale
-    /// copy repair) asks for it; a bare repository has no workspace, and
+    /// The workspace root of a checkout. Only checkout code (publish and
+    /// working state) asks for it; a bare repository has no workspace, and
     /// asking is a programming error.
     #[track_caller]
     pub(crate) fn root(&self) -> &'a Path {

@@ -153,7 +153,6 @@ import {
   acceptControllerOrgInvitation,
   previewControllerOrgInvitation,
   acknowledgeControllerBugReportActivity,
-  claimControllerSupportResolutionAlerts,
   getControllerBugReport,
   listControllerBugReportMessagePage,
   listControllerBugReportMessages,
@@ -442,7 +441,6 @@ export const controllerClient = createControllerClient({
   bugReports: Object.freeze({
     submit: submitControllerBugReport,
     acknowledgeActivity: acknowledgeControllerBugReportActivity,
-    claimResolutionAlerts: claimControllerSupportResolutionAlerts,
     list: listControllerBugReports,
     get: getControllerBugReport,
     listPage: listControllerBugReportPage,

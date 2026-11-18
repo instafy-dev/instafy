@@ -1382,13 +1382,6 @@ export function FilesPanel({
     ]
   );
 
-  const openChanges = useCallback(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    window.dispatchEvent(new CustomEvent("instafy:open-source-control"));
-  }, []);
-
   const writeActiveFileToWorkspace = useCallback(async (): Promise<ControllerWorkspaceWriteResponse> => {
     if (!activeProjectId || !activeFile) {
       throw new Error("Missing active file.");
@@ -1561,11 +1554,7 @@ export function FilesPanel({
         }
 
         if (result?.conflict) {
-          showStatus(detail ? `Conflicts detected. ${detail}` : "Conflicts detected while saving a version.", "error", 8000, {
-            actionLabel: "Resolve",
-            onAction: openChanges
-          });
-          openChanges();
+          showStatus(detail ? `Conflicts detected. ${detail}` : "Conflicts detected while saving a version.", "error", 8000);
         } else {
           showStatus(detail ? `Unable to save version. ${detail}` : "Unable to save version.", "error", 6500);
         }
@@ -1596,7 +1585,6 @@ export function FilesPanel({
     getPendingActiveFileContent,
     legacySaveBlockedByOrigin,
     noteLegacySave,
-    openChanges,
     projectWriteDisabled,
     workspaceWritesBlocked,
     saveMode,

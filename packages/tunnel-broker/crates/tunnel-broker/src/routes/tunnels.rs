@@ -101,10 +101,7 @@ pub async fn create(
                         ))
                     })?;
                     let descriptor = existing.into_descriptor(state.config(), &ingress);
-                    return Ok(Json(TunnelResponse {
-                        tunnel: descriptor,
-                        credit: None,
-                    }));
+                    return Ok(Json(TunnelResponse { tunnel: descriptor }));
                 }
                 Reuse::Refresh => refresh_existing = Some(existing),
             }
@@ -241,10 +238,7 @@ pub async fn create(
         .await;
     }
 
-    Ok(Json(TunnelResponse {
-        tunnel: descriptor,
-        credit: None,
-    }))
+    Ok(Json(TunnelResponse { tunnel: descriptor }))
 }
 
 pub async fn get(
@@ -258,10 +252,7 @@ pub async fn get(
         .await?
         .ok_or_else(|| AppError::internal("ingress not found for tunnel"))?;
     let tunnel = record.into_descriptor(state.config(), &ingress);
-    Ok(Json(TunnelResponse {
-        tunnel,
-        credit: None,
-    }))
+    Ok(Json(TunnelResponse { tunnel }))
 }
 
 pub async fn revoke(
@@ -296,10 +287,7 @@ pub async fn revoke(
         .await;
     }
 
-    Ok(Json(TunnelResponse {
-        tunnel: descriptor,
-        credit: None,
-    }))
+    Ok(Json(TunnelResponse { tunnel: descriptor }))
 }
 
 /// `tunnel.revoked` for a tunnel retired by a replacement, shaped like the revoke route's.

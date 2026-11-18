@@ -1181,13 +1181,9 @@ async fn handle_git_status(
     };
 
     let canonical_root = Arc::new(workspace_root);
-    let status_config = state.config.clone();
     let dirty = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
-        // Count changes only after copies an older sync left behind have
-        // been put right.
-        publish::repair_stale_checkout(&status_config, canonical_root.as_path())?;
         git::list_dirty_files(canonical_root.as_path(), None)
     })
     .await

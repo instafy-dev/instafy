@@ -34,7 +34,6 @@ mod route_auth;
 pub mod routes;
 mod safe_fs;
 pub mod server;
-mod stale_align;
 #[cfg(test)]
 mod test_support;
 mod tree_merge;

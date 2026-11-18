@@ -1012,7 +1012,9 @@ skills its words route, as a fresh thread's snapshot would carry them: each
 whole, but for the sections and fields a turn with no shell leaves out. A chat's
 browser thread holds only its browser turns: each starts from what it is asked
 (the person's words or a card's task), and a new or lost browser thread is
-given the chat's earlier browser turns and, of the building turns, only the
+given the chat's earlier browser turns, what each was asked and what it found,
+quoted as page data as a building turn reads it (its findings and what it
+didn't find, never its own words), and, of the building turns, only the
 person's own messages that still stand, in their words: never Octo's replies
 there, files, command output or the lines that describe what the person
 attached, nor Studio's words for a Continue, a site's Ask Octo (whose words the
@@ -1027,7 +1029,18 @@ change of, since the first of those turns; a
 restored one is given those since its own last turn, and one that read a
 message of the person's they then stopped, or whose change they undid, starts
 again from the replay, which leaves it out
-([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). Codex withdraws the space's `AGENTS.md` from a
+([Chat activity](Chat-Activity.md#a-stopped-turns-changes)). The browser part
+of a new message the routing step sent to the browser starts again from the
+replay too once its thread's latest request sent more than 60k input tokens,
+as Codex recorded it in the thread's rollout: each request of a resumed thread
+sends every page it read again. A shorter thread is resumed, and so are the
+turns of one message: its second pass, a Let Octo continue, and a Continue
+under a Stop whose thread ran a turn of the stopped message (its latest request
+came after the person sent it). A part the person stopped saves no thread, so
+when it had left a long one, or never began, its Continue leaves that earlier
+message's thread too; a part that fails after leaving one reports the state
+without it, so its Try again starts again from the replay. The browser's tabs
+and a page the person signs in on are no part of a thread. Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
 a fact no page read this turn states, where it looked for what it didn't find or
@@ -1442,15 +1455,30 @@ browser has no web search, but it opens the company's own site, while a
 building turn that must make a page can't ask for the browser and, on an AI
 with no web search of its own, reads only pages whose addresses it already
 knows. When Octo can search the web for the message (the job's grant lets its
-turn use the AI's own web search) on a runtime with
-`INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on, the routing step reads one line that
-says so, after the section, and such research stays with Octo, which searches
-first, unless a site needs using first (a booking or availability for dates, a
-sign-in or the person's account, a form or a planner). Without that line, on
-every AI with no web search of its own and on every runtime while the setting
-is off, which it is unless set, the routing input is as it was: a building
-turn that makes a page still can't ask for the browser for what search didn't
-reach. A change that needs
+turn use the AI's own web search), the routing step reads one line that says
+so, after the section: availability for dates where nobody named the places,
+answered in a reply, then stays with Octo, as other research answered in a
+reply does, and searches first (search finds the places, then at most one card
+checks their pages). On a runtime with `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST`
+on, a second line says research that ends in a page searches first too, and
+such research stays with Octo as well. Without the first line, on every AI
+with no web search of its own, the routing input is as it was, and without the
+second, which is every runtime while the setting is off, research that ends in
+a page goes to the browser first, availability for dates put on a page among
+it: a building turn that makes a page can't ask for the browser for what
+search didn't reach, so nothing would check the dates. These are the section's
+first rule, ahead of the routes: as an exception in the middle of the
+`browser_then_build` line, a comparison page went to the browser though its
+routing input said Octo could search (a local test, Nov 17). Its exception is
+the whole rule's, with search or without: a site that must be used first
+(availability at a place named, a sign-in or the person's account, an order's
+own status or items, a form or a planner) keeps a message out of it. So a
+question about a rule or policy stays with Octo beside an order number or an
+email, while that order's own status goes to the browser. A change asked in
+one chat to a page another chat made stays with Octo with no change: the
+routing step reads the space's pages as a turn that may write files does, each
+made in this chat or in another and read-only here, after the part of its
+input every chat shares. A change that needs
 what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,
