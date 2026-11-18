@@ -454,7 +454,6 @@ impl Reply {
                 preflight,
                 json!({"kind":"agent/worker-input-reply","receipt":receipt}),
             ],
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: vec![],
             messages_streamed: false,

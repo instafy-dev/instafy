@@ -11,7 +11,7 @@ pub mod own_ai_model;
 pub mod proxy_route;
 pub mod research;
 pub mod types;
-pub use types::{AccessTokenClaims, CreditSnapshotPayload, ProxyEnvelopePayload};
+pub use types::{AccessTokenClaims, ProxyEnvelopePayload};
 
 /// Destructive Git cleanup is a deliberately exact controller-to-service
 /// capability shared by the token minter, edge, and shard.

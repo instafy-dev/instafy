@@ -1634,7 +1634,6 @@ Conversation: {conversation_id}\n\
         suggested_replies: Vec::new(),
         provider: "learn-scan".to_string(),
         artifacts: Vec::new(),
-        credit_snapshot: None,
         provider_conversation_state: None,
         messages: Vec::new(),
         messages_streamed: false,

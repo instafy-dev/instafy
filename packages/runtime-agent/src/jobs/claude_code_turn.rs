@@ -528,7 +528,6 @@ impl JobProcessor {
             suggested_replies: Vec::new(),
             provider: PROVIDER.to_string(),
             artifacts,
-            credit_snapshot: None,
             provider_conversation_state: adapter.conversation_state(registration.runtime_id),
             messages,
             messages_streamed,

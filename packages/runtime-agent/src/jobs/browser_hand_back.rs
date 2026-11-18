@@ -3131,7 +3131,6 @@ mod tests {
             suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts: Vec::new(),
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: Vec::new(),
             messages_streamed: false,
