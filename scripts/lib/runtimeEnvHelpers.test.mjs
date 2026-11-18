@@ -393,9 +393,7 @@ test("relocateRuntimeCheckouts moves runtime checkouts out of the gateway's fold
   assert.equal(fs.readFileSync(path.join(to, taken, "a.md"), "utf8"), "new\n");
   assert.equal(fs.readFileSync(path.join(from, taken, "a.md"), "utf8"), "old\n");
   // A stamp follows its checkout. The stamp of a checkout that stayed stays
-  // with it, and so do the provider's folders: they are what makes the
-  // gateway refuse to start on this folder instead of moving that checkout
-  // into its .legacy/ (park_legacy_checkouts).
+  // with it, and so do the provider's folders.
   assert.ok(fs.existsSync(path.join(to, ".instafy-checkout-stamps", idle)));
   assert.ok(!fs.existsSync(path.join(from, ".instafy-checkout-stamps", idle)));
   assert.ok(fs.existsSync(path.join(from, ".instafy-checkout-stamps", running)));
@@ -422,7 +420,7 @@ test("relocateRuntimeCheckouts moves runtime checkouts out of the gateway's fold
   assert.deepEqual(relocateRuntimeCheckouts({ from: to, to, log }).moved, []);
 });
 
-test("relocateRuntimeCheckouts keeps the gateway refusing while a runtime checkout stays in its folder", (t) => {
+test("relocateRuntimeCheckouts keeps the provider's folders in the gateway's folder while a runtime checkout stays there", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-checkouts-test-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const from = path.join(dir, "origin-gateway-workspaces");
@@ -452,7 +450,7 @@ test("relocateRuntimeCheckouts keeps the gateway refusing while a runtime checko
   assert.deepEqual(fs.readdirSync(path.join(from, ".instafy-evicted")), []);
   assert.equal(fs.readFileSync(path.join(from, busy, "draft.md"), "utf8"), "unsaved work\n");
   assert.ok(
-    messages.some((line) => line.includes(".instafy-checkout-stamps") && line.includes("refuses to start")),
+    messages.some((line) => line.includes(".instafy-checkout-stamps") && line.includes("while runtime checkouts stay in")),
     messages.join("\n")
   );
 
@@ -533,7 +531,7 @@ test("relocateRuntimeCheckouts moves nothing from under a provider that is alrea
   assert.equal(fs.readFileSync(path.join(from, idle, "a.md"), "utf8"), "idle\n");
   assert.equal(fs.readFileSync(path.join(from, busy, "draft.md"), "utf8"), "unsaved work\n");
   assert.ok(fs.existsSync(path.join(from, ".instafy-evicted", `${gone}-1`)));
-  // The stamp folder keeps the gateway from moving them into its .legacy/.
+  // The stamp folder is made in the gateway's folder.
   assert.deepEqual(fs.readdirSync(path.join(from, ".instafy-checkout-stamps")), []);
   assert.ok(
     messages.some(
@@ -550,7 +548,7 @@ test("relocateRuntimeCheckouts moves nothing from under a provider that is alrea
   assert.deepEqual(fs.readdirSync(from), []);
 });
 
-test("relocateRuntimeCheckouts keeps the gateway off its folder under a reused provider whose folder is unknown", (t) => {
+test("relocateRuntimeCheckouts makes the stamp folder under a reused provider whose folder is unknown", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-checkouts-test-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const from = path.join(dir, "origin-gateway-workspaces");

@@ -15,9 +15,6 @@ This is **not GitHub**: we host the git servers and expose standard git remotes 
 ## Where files live at rest
 - **At rest**: `git-shard` volume(s) store bare repos, e.g. `/var/lib/instafy-git/repos/<project_id>.git`.
 - **Not at rest**: the workspace gateway's mirror cache (`<workspace root>/.git-cache/`; deleting any of it only costs a fetch) and runtime checkouts (working copies on ephemeral disk).
-- **Disposable**: `<workspace root>/.legacy/` on the gateway's volume holds the working copies that
-  earlier, stateful gateway images kept per space. Nothing reads them; see
-  [Retiring gateway working copies](#retiring-gateway-working-copies).
 - **Backups**: shard volume snapshots plus periodic encrypted copies to independent durable
   storage. Replication is a later upgrade.
 
@@ -334,31 +331,10 @@ address `origin@instafy.dev` is replaced by `gateway@instafy.dev` with a warning
 the address is `gateway@instafy.dev`. The gateway recognizes its own commits by that address (import
 receipts, restores), so choose it once.
 
-Before it listens, the gateway:
-
-1. Moves every working copy an earlier, stateful gateway image left in its workspace root
-   (`ORIGIN_WORKSPACE_ROOT`) to `.legacy/`. A direct child of the root counts when its name is
-   exactly a space id as that gateway wrote it (a lower-case, hyphenated UUID) and it is a folder or
-   a link. It goes to `.legacy/<id>`, or `.legacy/<id>-<UTC time>` when that name is taken; nothing
-   is replaced, a link is moved as a link and never followed, and an empty folder is removed.
-   `.legacy/` is created with mode 0700. An older gateway image started on the same volume later,
-   such as an automatic rollback, finds no working copy there and clones each space fresh instead
-   of saving old drafts over newer work. When anything cannot be moved, the gateway does not start.
-2. Opens its mirror cache, `.git-cache/` under the same root (mode 0700; a link in its place is
-   refused), empties the cache's scratch folders, and removes the locks a git process that was
-   killed left in any mirror.
-
-`ORIGIN_WORKSPACE_ROOT` must be a folder of the gateway's own, never a runtime provider's
-checkout folder (`DOCKER_REPO_HOST`). A provider keeps each runtime's checkout there under the
-space id, the name step 1 moves, and such a checkout can hold work no runtime has pushed yet. So
-before it moves anything, the gateway refuses to start on a root that holds the provider's
-`.instafy-checkout-stamps/` or `.instafy-evicted/`, or a space folder whose `.instafy/.git` holds a
-runtime's clean-stop marker (`instafy-stopped-clean`) or a local recovery ref
-(`refs/instafy/local-recovery*`, loose or packed); it follows no link to find them. It then logs
-`could not move old gateway working copies to .legacy; refusing to start`, caused by an error that
-names the root and what was found there and ends with
-`ORIGIN_WORKSPACE_ROOT must be a folder of the gateway's own, never the providers' DOCKER_REPO_HOST`,
-and exits with status 1.
+Before it listens, the gateway opens its mirror cache, `.git-cache/` under its workspace root
+(`ORIGIN_WORKSPACE_ROOT`; mode 0700, and a link in its place is refused), empties the cache's
+scratch folders, and removes the locks a git process that was killed left in any mirror. It
+touches nothing else in the workspace root.
 
 Run the gateway with an init as PID 1 (`docker run --init`, or `init: true` in Compose, as
 `docker/docker-compose.runtime.yml` does), so any process the server leaves behind is reaped.
@@ -401,10 +377,8 @@ only costs a fetch.
   exceed `ORIGIN_CACHE_MAX_BYTES` (default 20 GiB), the least recently used mirror that nobody
   has used for an hour. The cap is soft: mirrors in use are never removed for it. When the cache's
   disk has less than 2 GiB free, the sweep removes mirrors nobody holds, however recently used,
-  until it has that much again. `.legacy/` is never touched; when the disk is short of space, the
-  warning reports its size (measured at most once an hour). The sweep
-  also packs a mirror past git's own `gc --auto` limits (about 6,700 loose objects or 50 packs);
-  git never runs maintenance in a mirror on its own.
+  until it has that much again. The sweep also packs a mirror past git's own `gc --auto` limits
+  (about 6,700 loose objects or 50 packs); git never runs maintenance in a mirror on its own.
 
 The 503 answers (`fetch_pending`, `mirror_reset`, `disk_full`, and `writes_busy` below) carry
 `Retry-After: 2`, which browsers can read: the gateway exposes `Retry-After`, `X-Instafy-Rev` and
@@ -503,41 +477,6 @@ refused write leaves nothing behind.
   `Retry-After`, the four 503 codes above, and 409 `main_busy`). Its managed-files bootstrap reports
   `workspace-busy` on a 503 and is tried again later.
 
-## Retiring gateway working copies
-
-Earlier gateway images kept one working copy per space at `<root>/<space id>` and saved from it.
-The stateless gateway moves those copies to `<root>/.legacy/` before it serves (see
-[Configuration and start](#configuration-and-start)), and no gateway image reads `.legacy/`
-again. The copies are disposable: once the switch is done, an operator may delete `.legacy/`.
-Copy a file out by hand first only when a space's owner asks for a draft that never reached
-canonical.
-
-### Switching a deployment
-
-1. Drain imports. The stateful gateway kept import receipts inside each working copy, and the
-   stateless gateway finds a receipt only as its own commit on `main`. An import the controller
-   resumes after the switch (a retry with the same key) finds no receipt there: one not yet
-   recorded as applied is applied again, over anything saved since, and one recorded as applied
-   fails unless its commit is on `main`. Run this right before the image changes, and start no
-   import between the two:
-   ```sql
-   select id, project_id, status, claim_expires_at, error_message
-     from public.github_import_operations
-    where status in ('pending', 'applied')
-       or (status = 'failed' and prepared_json is not null);
-   ```
-   Wait for each `pending` or `applied` row whose claim is live (`claim_expires_at` in the future)
-   to finish. A row whose claim has expired is an import that stopped part way (at a controller
-   restart, for example), and a retry with the same key resumes it: have it retried while the
-   stateful gateway still serves, so that it finishes there, or, when it cannot be, check on that
-   gateway whether its files were applied and tell the space's owner before you switch. A `failed`
-   row the query lists kept its preparation (`prepared_json`) and is resumed the same way when its
-   import is retried; one that failed while its apply was under way (a timeout, for example) may
-   already have been applied on the stateful gateway. Treat these rows like the expired ones: have
-   them retried on the stateful gateway, or check there whether their files were applied, before
-   you switch.
-2. Deploy the stateless gateway image. Its start moves the working copies to `.legacy/`.
-
 ## Concurrency (human-style)
 - Agents/runtimes work on branches or local commits.
 - To update `main`, they: `fetch main → merge → push` (FF-only). The local commits keep their ids
@@ -634,10 +573,9 @@ when the browser refuses storage.
 - The Compose `origin-gateway` service is the multi-tenant Workspace Gateway
   (`ORIGIN_MULTI_TENANT=1`, `ORIGIN_GIT_REMOTE_BASE_URL=http://git-edge:8080`, no
   `ORIGIN_GIT_REMOTE_URL`). In its workspace root, `tmp/origin-gateway-workspaces/` by default
-  (`ORIGIN_GATEWAY_WORKSPACE_VOLUME`), the gateway keeps `.git-cache/` and, after an upgrade from
-  an older gateway, the disposable `.legacy/`. Runtime checkouts do not belong there: the local
-  provider keeps them in `tmp/runtime-checkouts/<project_id>` (`DOCKER_REPO_HOST` overrides it;
-  see [Local Development](Local-Dev.md#git-canonical-local-git-service)).
+  (`ORIGIN_GATEWAY_WORKSPACE_VOLUME`), the gateway keeps `.git-cache/`. The local provider keeps
+  runtime checkouts in `tmp/runtime-checkouts/<project_id>` (`DOCKER_REPO_HOST` overrides it; see
+  [Local Development](Local-Dev.md#git-canonical-local-git-service)).
 
 Why `<project_id>.git`?
 - Instafy already keys everything by `project_id` internally (JWT claims, workspace paths, controller APIs). Using it as the repo name avoids a second identifier during v0.
@@ -652,10 +590,8 @@ Why `<project_id>.git`?
 - Run each stateful `git-shard` with a persistent volume mounted at
   `/var/lib/instafy-git`; expose shards only to the private service network.
 - Keep routing deterministic per repository as described above.
-- Run the Workspace Gateway with a persistent volume of its own as its workspace root, never the
-  runtime provider's checkout folder (`DOCKER_REPO_HOST`), and an init as PID 1. Its mirror cache
-  is disposable, and so are the working copies an upgrade from a stateful gateway image leaves in
-  `.legacy/` (see [Retiring gateway working copies](#retiring-gateway-working-copies)). See
+- Run the Workspace Gateway with a persistent volume as its workspace root and an init as PID 1.
+  Its mirror cache is disposable. See
   [docker/README.md](../docker/README.md#deployment-and-self-hosting).
 
 ## Backups

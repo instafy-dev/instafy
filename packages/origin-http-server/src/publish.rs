@@ -41,10 +41,11 @@ use crate::recovery_view::{
     restore_commit_message, without_origin_trailers, NotRestored, RecoveryRef, ViewError,
 };
 use crate::restore_plan::{self, PathRoots, PlanError, RestoreInput};
-use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from, tree_without};
 use crate::workspace_fs::WorkspaceDir;
-use crate::workspace_git::{nul_list, temp_index_dir, GitIdentity, RunOpts, WorkspaceGit};
+use crate::workspace_git::{
+    nul_list, temp_index_dir, GitIdentity, RunOpts, TreeEntry, WorkspaceGit,
+};
 
 /// Local ref marking the last commit whose history was replayed onto an
 /// unrelated `main`, so a later publish never replays it again.
@@ -420,22 +421,6 @@ struct Restored {
     ref_deleted: bool,
 }
 
-/// Run the one-time repair of copies an older sync left behind (see
-/// [`crate::stale_align`]). Callers hold the apply lock. Desktop status
-/// counts call this before listing changes.
-pub fn repair_stale_checkout(
-    config: &ServerConfig,
-    workspace_root: &Path,
-) -> Result<(), OriginError> {
-    let git = WorkspaceGit::new(workspace_root, None);
-    if git.commit_id("HEAD").map_err(internal)?.is_none() {
-        return Ok(());
-    }
-    stale_align::repair_once(&git, config)
-        .map(|_| ())
-        .map_err(internal)
-}
-
 pub(crate) struct Publisher<'a> {
     pub(crate) git: WorkspaceGit<'a>,
     pub(crate) config: &'a ServerConfig,
@@ -548,11 +533,9 @@ impl<'a> Publisher<'a> {
         self.finish()
     }
 
-    /// Repair, fetch, retire dismissed work, and push parked work. The fetch
-    /// comes first: what was dismissed decides what may be pushed.
+    /// Fetch, retire dismissed work, and push parked work. The fetch comes
+    /// first: what was dismissed decides what may be pushed.
     fn prepare(&mut self) -> Result<()> {
-        let repair = stale_align::repair_once(&self.git, self.config)?;
-        self.report.note_recovery(repair.parked, false);
         let mut dismissal = Ok(false);
         match self.fetch(true) {
             Ok(_) => {
@@ -2133,7 +2116,7 @@ impl<'a> Publisher<'a> {
         if changed.is_empty() {
             return Ok(false);
         }
-        let worktree = stale_align::worktree_entries(&self.git, from, &changed)?;
+        let worktree = worktree_entries(&self.git, from, &changed)?;
         let target = self.git.tree_entries(to, &changed)?;
         let current = self.git.tree_entries(from, &changed)?;
         let mut same = Vec::new();
@@ -2270,7 +2253,7 @@ impl<'a> Publisher<'a> {
             bail!("the local branch moved during the update");
         }
         let changed = changed_paths(&self.git, from, to)?;
-        let worktree = stale_align::worktree_entries(&self.git, from, &changed)?;
+        let worktree = worktree_entries(&self.git, from, &changed)?;
         let current = self.git.tree_entries(from, &changed)?;
         let untouched: Vec<String> = changed
             .iter()
@@ -2298,10 +2281,6 @@ impl<'a> Publisher<'a> {
     fn flush(&mut self, turn_active: bool) -> Result<FlushReport> {
         let mut flush = FlushReport::default();
         // 1. Store everything locally, before any network call.
-        let repair = stale_align::repair_once(&self.git, self.config)?;
-        if let Some(parked) = repair.parked {
-            flush.recovery_refs.push(parked);
-        }
         let parked = self.park_for_stop(turn_active, &mut flush)?;
 
         // 2. Best effort, with write access: notice dismissed work, publish
@@ -3137,6 +3116,85 @@ fn parse_ident(value: &str) -> Option<GitIdentity> {
         email,
         date: (!date.is_empty()).then(|| date.to_string()),
     })
+}
+
+/// `(mode, oid)` of each path as `git add` would record it; absent paths are
+/// missing from the map.
+fn worktree_entries(
+    git: &WorkspaceGit<'_>,
+    head: &str,
+    paths: &[String],
+) -> Result<BTreeMap<String, TreeEntry>> {
+    let scratch = temp_index_dir(git)?;
+    let index = scratch.path().join("index");
+    let opts = RunOpts {
+        index_file: Some(&index),
+        ..RunOpts::default()
+    };
+    git.ok_opts(&["read-tree", head], &opts)?;
+    // `add` refuses a pathspec that matches nothing, so only name paths that
+    // exist on disk or in HEAD; the rest are absent either way.
+    let in_head = git.tree_entries(head, paths)?;
+    let known: Vec<String> = paths
+        .iter()
+        .filter(|path| {
+            in_head.contains_key(*path) || std::fs::symlink_metadata(git.root().join(path)).is_ok()
+        })
+        .cloned()
+        .collect();
+    if !known.is_empty() {
+        let list = nul_list(&known);
+        git.ok_opts(
+            &[
+                "add",
+                "-A",
+                "--ignore-errors",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            &RunOpts {
+                index_file: Some(&index),
+                stdin: Some(&list),
+                literal_pathspecs: true,
+                ..RunOpts::default()
+            },
+        )?;
+    }
+    let mut entries = BTreeMap::new();
+    for chunk in paths.chunks(256) {
+        let mut args: Vec<&str> = vec!["ls-files", "-s", "-z", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        let raw = git.bytes_opts(
+            &args,
+            &RunOpts {
+                index_file: Some(&index),
+                literal_pathspecs: true,
+                ..RunOpts::default()
+            },
+        )?;
+        for record in raw.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
+            let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+                continue;
+            };
+            let meta = String::from_utf8_lossy(&record[..tab]).to_string();
+            let path = String::from_utf8_lossy(&record[tab + 1..]).to_string();
+            let mut fields = meta.split(' ');
+            let mode = fields.next().unwrap_or_default().to_string();
+            let oid = fields.next().unwrap_or_default().to_string();
+            if chunk.iter().any(|wanted| wanted == &path) {
+                entries.insert(
+                    path.clone(),
+                    TreeEntry {
+                        kind: if mode == "160000" { "commit" } else { "blob" }.to_string(),
+                        mode,
+                        oid,
+                        path,
+                    },
+                );
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// The files of the checkout `git` that changing its files from `HEAD`'s
