@@ -73,6 +73,28 @@ describe("ledgerActivityRows", () => {
     ]);
   });
 
+  // A message to two agents on Instafy AI holds one reserve: the first reply
+  // to end settles it, and the other is charged in full on an adjustment of
+  // its own, which names the message's reserve.
+  it("adds up every reply of a message to several agents, and leaves one out without its reserve", () => {
+    const laterReply = (row: CreditLedgerEntry): CreditLedgerEntry => ({
+      ...row,
+      metadata: {
+        ...row.metadata,
+        reserveIdempotencyKey: `managed-ai-prompt:${String(row.metadata?.["promptId"])}`,
+        cost: { reservedUnits: 0, chargedUnits: -row.delta },
+      },
+    });
+    const rows = ledgerActivityRows([
+      laterReply(entry("managed_ai_adjustment", -5, "2026-10-29T10:22:00Z", "p1", "Release plan")),
+      entry("managed_ai_adjustment", -13, "2026-10-29T10:21:00Z", "p1", "Release plan"),
+      entry("managed_ai_prompt", -1, "2026-10-29T10:20:00Z", "p1", "Release plan"),
+      // The oldest row loaded: this message's reserve and first reply came before it.
+      laterReply(entry("managed_ai_adjustment", -7, "2026-10-29T10:09:00Z", "p2", "Compare vacuums")),
+    ], label);
+    expect(rows.map(({ label, delta }) => [label, delta])).toEqual([["Release plan", -19]]);
+  });
+
   it("keeps two turns of one chat apart", () => {
     const rows = ledgerActivityRows([
       entry("managed_ai_prompt", -1, "2026-10-29T10:20:00Z", "p5", "Hello page"),

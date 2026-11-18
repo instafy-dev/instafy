@@ -1950,6 +1950,101 @@ pub(crate) fn partial_burn_units(units: i32, available: i32) -> Option<i32> {
     (partial > 0).then_some(partial)
 }
 
+/// The reserve row's `billingKind` once a turn's usage has settled it.
+const TOKEN_USAGE_RECONCILED: &str = "token_usage_reconciled";
+
+/// What settling one Instafy AI turn's usage wrote: its charge, and the key
+/// of its adjustment.
+#[derive(Debug, Clone)]
+pub(crate) struct ManagedAiSettlement {
+    pub(crate) charge: ManagedAiUsageCharge,
+    /// The prompt's own adjustment key when this turn settled the reserve,
+    /// else a key of the turn's own.
+    pub(crate) adjustment_key: String,
+}
+
+/// Takes the prompt's row lock, so the settlements and refunds of one
+/// message's Instafy AI turns take turns: exactly one settlement goes against
+/// the reserve, and no refund races a settlement or another refund.
+async fn lock_prompt_for_managed_ai_billing(
+    transaction: &Transaction<'_>,
+    prompt_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    transaction
+        .execute(
+            "select 1 from prompts where id = $1 for update",
+            &[prompt_id],
+        )
+        .await
+        .inspect_err(crate::errors::note_sql_state)
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to lock prompt {prompt_id} for managed AI billing: {error}"
+            ))
+        })?;
+    Ok(())
+}
+
+/// Which turn's settlement the prompt's reserve went to: `None` while no
+/// settlement has, `Some(Some(job))` once one has, and `Some(None)` for one
+/// from before settlements named their turn. The reserve row names it
+/// (`settledJobId`); for a prompt without a reserve row, the first
+/// settlement's own adjustment row does (`jobId`).
+async fn managed_ai_reserve_settled_by(
+    transaction: &Transaction<'_>,
+    org_id: &Uuid,
+    project_id: &Uuid,
+    prompt_id: &Uuid,
+    reserve_metadata: Option<&JsonValue>,
+) -> Result<Option<Option<Uuid>>, (StatusCode, Json<ApiError>)> {
+    let named_job = |metadata: &JsonValue, key: &str| {
+        metadata
+            .get(key)
+            .and_then(JsonValue::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+    };
+    if let Some(metadata) = reserve_metadata {
+        if let Some(job_id) = named_job(metadata, "settledJobId") {
+            return Ok(Some(Some(job_id)));
+        }
+        if metadata.get("billingKind").and_then(JsonValue::as_str) == Some(TOKEN_USAGE_RECONCILED) {
+            return Ok(Some(None));
+        }
+    }
+    let adjustment = transaction
+        .query_opt(
+            "select metadata from org_credit_ledger
+             where org_id = $1 and project_id = $2 and idempotency_key = $3
+             limit 1",
+            &[
+                org_id,
+                project_id,
+                &format!("managed-ai-adjustment:{prompt_id}"),
+            ],
+        )
+        .await
+        .inspect_err(crate::errors::note_sql_state)
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to load managed AI adjustment ledger row for prompt {prompt_id}: {error}"
+            ))
+        })?;
+    Ok(adjustment.map(|row| {
+        row.get::<_, Option<PgJson<JsonValue>>>("metadata")
+            .and_then(|metadata| named_job(&metadata.0, "jobId"))
+    }))
+}
+
+/// Settles one Instafy AI turn's usage, `job_id`'s, against its prompt.
+///
+/// A message to several agents on Instafy AI holds one reserve and one daily
+/// prompt slot. The first of its turns to settle settles against the reserve,
+/// under the prompt's own adjustment key, and the reserve row records it
+/// (`settledJobId`). Each later turn is charged its whole cost under a key of
+/// its own (`managed-ai-adjustment:{prompt_id}:{job_id}`), so the message is
+/// charged every reply's tokens. A turn settled again (a retried completion)
+/// takes the same key and writes nothing new.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_managed_ai_usage_charge(
     transaction: &Transaction<'_>,
     config: &AppConfig,
@@ -1957,16 +2052,18 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
     org_id: &Uuid,
     runtime_id: Option<Uuid>,
     prompt_id: &Uuid,
+    job_id: &Uuid,
     provider: Option<&str>,
     managed_ai_label: Option<&str>,
     usage: ManagedAiTokenUsage,
-) -> Result<ManagedAiUsageCharge, (StatusCode, Json<ApiError>)> {
+) -> Result<ManagedAiSettlement, (StatusCode, Json<ApiError>)> {
     let charge = calculate_managed_ai_usage_charge(config, usage);
     let base_idempotency_key = format!("managed-ai-prompt:{prompt_id}");
 
-    let reserved_units = transaction
+    lock_prompt_for_managed_ai_billing(transaction, prompt_id).await?;
+    let reserve = transaction
         .query_opt(
-            "select abs(delta) as reserved_units
+            "select abs(delta) as reserved_units, metadata
              from org_credit_ledger
              where org_id = $1 and project_id = $2 and idempotency_key = $3
              limit 1",
@@ -1977,9 +2074,38 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
             internal_error(format!(
                 "failed to load managed AI reserve ledger row for prompt {prompt_id}: {error}"
             ))
-        })?
-        .map(|row| row.get::<_, i32>("reserved_units"))
-        .unwrap_or(0);
+        })?;
+    let reserve_metadata = reserve
+        .as_ref()
+        .and_then(|row| row.get::<_, Option<PgJson<JsonValue>>>("metadata"))
+        .map(|metadata| metadata.0);
+    let settles_reserve = match managed_ai_reserve_settled_by(
+        transaction,
+        org_id,
+        project_id,
+        prompt_id,
+        reserve_metadata.as_ref(),
+    )
+    .await?
+    {
+        None => true,
+        Some(settled_by) => settled_by == Some(*job_id),
+    };
+    let (reserved_units, adjustment_key) = if settles_reserve {
+        (
+            reserve
+                .as_ref()
+                .map(|row| row.get::<_, i32>("reserved_units"))
+                .unwrap_or(0),
+            format!("managed-ai-adjustment:{prompt_id}"),
+        )
+    } else {
+        (0, format!("managed-ai-adjustment:{prompt_id}:{job_id}"))
+    };
+    // An adjustment names its message's reserve, so the Credits log can leave
+    // out a later reply whose reserve is older than the rows it loaded, as it
+    // leaves out a turn whose settled reserve is (`cost.reservedUnits`).
+    let reserve_reference = reserve.as_ref().map(|_| base_idempotency_key.clone());
 
     let adjustment_units = charge.charged_units - reserved_units;
     let managed_ai_label = managed_ai_label
@@ -1989,7 +2115,8 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
 
     let base_metadata_patch = json!({
         "category": "ai_usage",
-        "billingKind": "token_usage_reconciled",
+        "billingKind": TOKEN_USAGE_RECONCILED,
+        "settledJobId": job_id,
         "managedAiLabel": managed_ai_label,
         "managedAiProvider": DEFAULT_MANAGED_AI_PROVIDER_ID,
         "managedAiModelLabel": config.managed_ai_model_label,
@@ -2030,6 +2157,8 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
             "managedAiModelLabel": config.managed_ai_model_label,
             "provider": provider,
             "promptId": prompt_id,
+            "jobId": job_id,
+            "reserveIdempotencyKey": reserve_reference,
             "usage": {
                 "input_tokens": usage.input_tokens,
                 "cached_input_tokens": usage.cached_input_tokens,
@@ -2042,7 +2171,6 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
                 "adjustmentUnits": adjustment_units,
             }
         });
-        let adjustment_key = format!("managed-ai-adjustment:{prompt_id}");
         // The turn has already run, so its cost is owed whatever the balance.
         // A refused burn used to write nothing at all: a 173-unit turn on a
         // 75-unit balance cost its 1-unit reserve. Take what the org holds
@@ -2118,6 +2246,8 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
             "managedAiModelLabel": config.managed_ai_model_label,
             "provider": provider,
             "promptId": prompt_id,
+            "jobId": job_id,
+            "reserveIdempotencyKey": reserve_reference,
             "usage": {
                 "input_tokens": usage.input_tokens,
                 "cached_input_tokens": usage.cached_input_tokens,
@@ -2138,32 +2268,38 @@ pub(crate) async fn reconcile_managed_ai_usage_charge(
             adjustment_units.abs(),
             None,
             "managed_ai_adjustment",
-            Some(&format!("managed-ai-adjustment:{prompt_id}")),
+            Some(&adjustment_key),
             &mut metadata,
         )
         .await?;
         ledger_row_written = credit_ledger_row_written(&metadata);
     }
 
-    // The reserve row carries the turn's whole cost; what the org could not
-    // pay is stated there too, so the ledger never claims an adjustment that
-    // was not written.
-    base_metadata_patch["cost"]["unpaidUnits"] = json!(unpaid_units);
-    merge_credit_ledger_metadata_by_idempotency_key(
-        transaction,
-        org_id,
-        project_id,
-        &base_idempotency_key,
-        &base_metadata_patch,
-    )
-    .await?;
+    // The reserve row carries the cost of the turn that settled it; what the
+    // org could not pay is stated there too, so the ledger never claims an
+    // adjustment that was not written. A later turn's cost and unpaid part
+    // stay on its own adjustment row.
+    if settles_reserve {
+        base_metadata_patch["cost"]["unpaidUnits"] = json!(unpaid_units);
+        merge_credit_ledger_metadata_by_idempotency_key(
+            transaction,
+            org_id,
+            project_id,
+            &base_idempotency_key,
+            &base_metadata_patch,
+        )
+        .await?;
+    }
 
-    Ok(ManagedAiUsageCharge {
-        reserve_units: reserved_units,
-        adjustment_units,
-        unpaid_units,
-        ledger_row_written,
-        ..charge
+    Ok(ManagedAiSettlement {
+        charge: ManagedAiUsageCharge {
+            reserve_units: reserved_units,
+            adjustment_units,
+            unpaid_units,
+            ledger_row_written,
+            ..charge
+        },
+        adjustment_key,
     })
 }
 
@@ -2182,6 +2318,49 @@ pub(crate) enum ManagedAiRefundOutcome {
     AlreadyRefunded(CreditLedgerReference),
 }
 
+/// Whether another Instafy AI turn of `prompt_id`'s message than `job_id`'s
+/// can still use its reserve: one that answered, or one that has not ended
+/// (queued, held by a runtime). One that failed, expired or was canceled
+/// holds it no longer, and neither does a queued one no runtime has held in
+/// a deleted space, which never runs: a space delete marks the space deleted
+/// before it cancels the space's work, in the same transaction. A turn on
+/// its own credential (`credential_id`) never holds the reserve.
+async fn other_instafy_ai_turns_hold_reserve(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    prompt_id: &Uuid,
+    job_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select exists (
+                 select 1 from agent_jobs aj
+                  where aj.project_id = $1
+                    and aj.prompt_id = $2
+                    and aj.id <> $3
+                    and aj.credential_id is null
+                    and aj.status not in ('failed', 'expired', 'canceled', 'cancelled')
+                    and not (
+                        aj.status = 'queued'
+                        and aj.lease_attempts = 0
+                        and exists (
+                            select 1 from projects p
+                             where p.id = aj.project_id and p.status = 'deleted'
+                        )
+                    )
+             )",
+            &[project_id, prompt_id, job_id],
+        )
+        .await
+        .map(|row| row.get::<_, bool>(0))
+        .inspect_err(crate::errors::note_sql_state)
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to read the other Instafy AI turns of prompt {prompt_id}: {error}"
+            ))
+        })
+}
+
 /// Give a managed-AI prompt reserve back when the run never reached a model.
 ///
 /// The reserve is burned at dispatch under `managed-ai-prompt:{prompt_id}`
@@ -2192,6 +2371,12 @@ pub(crate) enum ManagedAiRefundOutcome {
 /// refills dedupe on the key alone, so reusing the burn key would no-op) and
 /// is skipped when no reserve exists or a usage adjustment already settled it.
 ///
+/// `job_id` is the turn whose end would give the reserve back. A message to
+/// several agents on Instafy AI holds one reserve for all of their turns, so
+/// it comes back only when no other of them can still use it
+/// ([`other_instafy_ai_turns_hold_reserve`]): with the last of them to end,
+/// when none answered.
+///
 /// A repeated call reports `AlreadyRefunded` with the existing refund row so
 /// callers can tell a fresh refund from a dedupe and skip their side effects.
 pub(crate) async fn refund_unused_managed_ai_prompt(
@@ -2200,8 +2385,10 @@ pub(crate) async fn refund_unused_managed_ai_prompt(
     org_id: &Uuid,
     runtime_id: Option<Uuid>,
     prompt_id: &Uuid,
+    job_id: &Uuid,
     refund_reason: &str,
 ) -> Result<ManagedAiRefundOutcome, (StatusCode, Json<ApiError>)> {
+    lock_prompt_for_managed_ai_billing(transaction, prompt_id).await?;
     let reserve_key = format!("managed-ai-prompt:{prompt_id}");
     let Some(reserve) = load_credit_ledger_reference_by_idempotency_key(
         transaction,
@@ -2218,17 +2405,32 @@ pub(crate) async fn refund_unused_managed_ai_prompt(
         return Ok(ManagedAiRefundOutcome::NotRefundable);
     }
 
-    // An adjustment row means usage reconciliation ran: a model turn happened
-    // and the reserve was settled against real tokens. Nothing to give back.
-    let adjustment_key = format!("managed-ai-adjustment:{prompt_id}");
-    if load_credit_ledger_reference_by_idempotency_key(
+    // A settlement means usage reconciliation ran: a model turn happened and
+    // the reserve was settled against real tokens. Nothing to give back.
+    let reserve_metadata = transaction
+        .query_one(
+            "select metadata from org_credit_ledger where id = $1",
+            &[&reserve.ledger_id],
+        )
+        .await
+        .inspect_err(crate::errors::note_sql_state)
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to load managed AI reserve metadata for prompt {prompt_id}: {error}"
+            ))
+        })?
+        .get::<_, Option<PgJson<JsonValue>>>("metadata")
+        .map(|metadata| metadata.0);
+    if managed_ai_reserve_settled_by(
         transaction,
         org_id,
         project_id,
-        &adjustment_key,
+        prompt_id,
+        reserve_metadata.as_ref(),
     )
     .await?
     .is_some()
+        || other_instafy_ai_turns_hold_reserve(transaction, project_id, prompt_id, job_id).await?
     {
         return Ok(ManagedAiRefundOutcome::NotRefundable);
     }
@@ -3222,6 +3424,7 @@ mod tests {
             &org_id,
             None,
             &prompt_id,
+            &Uuid::new_v4(),
             "proxy_auth_rejected",
         )
         .await
@@ -3253,6 +3456,7 @@ mod tests {
             &org_id,
             None,
             &prompt_id,
+            &Uuid::new_v4(),
             "runtime_not_ready",
         )
         .await
@@ -3359,12 +3563,14 @@ mod tests {
             &org_id,
             None,
             &prompt_id,
+            &Uuid::new_v4(),
             None,
             None,
             usage,
         )
         .await
-        .map_err(|error| credit_error("partial adjustment", error))?;
+        .map_err(|error| credit_error("partial adjustment", error))?
+        .charge;
         assert_eq!(charge.charged_units, 100);
         assert_eq!(charge.adjustment_units, 99);
         assert_eq!(charge.unpaid_units, 91);
@@ -3429,12 +3635,14 @@ mod tests {
             &org_id,
             None,
             &second_prompt,
+            &Uuid::new_v4(),
             None,
             None,
             usage,
         )
         .await
-        .map_err(|error| credit_error("unpaid adjustment", error))?;
+        .map_err(|error| credit_error("unpaid adjustment", error))?
+        .charge;
         assert_eq!(charge.unpaid_units, 99);
         assert!(!charge.ledger_row_written);
         tx.commit().await?;
@@ -3471,6 +3679,7 @@ mod tests {
             &org_id,
             None,
             &prompt_id,
+            &Uuid::new_v4(),
             "proxy_auth_rejected",
         )
         .await
@@ -3518,6 +3727,7 @@ mod tests {
             &project_id,
             &org_id,
             None,
+            &Uuid::new_v4(),
             &Uuid::new_v4(),
             "runtime_not_ready",
         )
@@ -3762,6 +3972,7 @@ mod tests {
                     &org_id,
                     None,
                     &prompt_id,
+                    &Uuid::new_v4(),
                     "proxy_auth_rejected",
                 )
                 .await

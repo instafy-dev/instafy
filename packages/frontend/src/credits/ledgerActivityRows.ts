@@ -37,13 +37,18 @@ function turnIdOf(entry: CreditLedgerEntry): string | null {
 
 /**
  * Whether a turn's later row says the turn has a reserve row: a refund gives
- * a reserve back, and an adjustment records the reserve it settled
- * (`cost.reservedUnits`).
+ * a reserve back, an adjustment records the reserve it settled
+ * (`cost.reservedUnits`), and an adjustment names its message's reserve
+ * (`reserveIdempotencyKey`). In a message to several agents on Instafy AI,
+ * a later reply's adjustment settles no reserve of its own but names the
+ * message's.
  */
 function saysTurnHasReserve(entry: CreditLedgerEntry): boolean {
   const reason = entry.reason.trim();
   if (reason === "managed_ai_refund") return true;
   if (reason !== "managed_ai_adjustment") return false;
+  const reserveKey = entry.metadata?.["reserveIdempotencyKey"];
+  if (typeof reserveKey === "string" && reserveKey.trim()) return true;
   const cost = entry.metadata?.["cost"];
   const reserved = cost && typeof cost === "object" ? (cost as Record<string, unknown>)["reservedUnits"] : null;
   return typeof reserved === "number" && reserved > 0;
