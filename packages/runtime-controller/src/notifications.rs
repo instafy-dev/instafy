@@ -1,9 +1,5 @@
-#[cfg(test)]
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(test)]
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
@@ -17,8 +13,6 @@ use base64::Engine;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-#[cfg(test)]
-use once_cell::sync::Lazy;
 use p256::ecdh::EphemeralSecret;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::Signature;
@@ -32,23 +26,10 @@ use tokio_postgres::types::Json as PgJson;
 use uuid::Uuid;
 
 use crate::auth::{authenticate_request, require_user_session};
-use crate::conversations::{load_conversation_record, ConversationMessageRow};
+use crate::conversations::load_conversation_record;
 use crate::load_project_record;
 use crate::projects::ensure_project_access;
 use crate::{bad_request, internal_error, not_found, ApiError, AppState};
-
-#[cfg(test)]
-static TEST_PUSH_ENQUEUE_COUNTS: Lazy<StdMutex<HashMap<Uuid, usize>>> =
-    Lazy::new(|| StdMutex::new(HashMap::new()));
-
-#[cfg(test)]
-pub(crate) fn take_test_push_enqueue_count(conversation_id: Uuid) -> usize {
-    TEST_PUSH_ENQUEUE_COUNTS
-        .lock()
-        .expect("test push enqueue counter lock")
-        .remove(&conversation_id)
-        .unwrap_or(0)
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -566,94 +547,6 @@ fn format_notification_body(content: &str) -> Option<String> {
     let mut truncated = normalized.chars().take(max_length - 1).collect::<String>();
     truncated.push('…');
     Some(truncated)
-}
-
-// Product producers write the durable notification outbox in their database transaction.
-// This legacy hook remains solely for existing producer suppression regression assertions.
-pub(crate) fn enqueue_message_push_notifications(
-    _state: AppState,
-    _message: ConversationMessageRow,
-) {
-    #[cfg(test)]
-    {
-        *TEST_PUSH_ENQUEUE_COUNTS
-            .lock()
-            .expect("test push enqueue counter lock")
-            .entry(_message.conversation_id)
-            .or_default() += 1;
-    }
-}
-
-// Only the tests call this now; see `enqueue_message_push_notifications`.
-#[cfg(test)]
-pub(crate) async fn load_notification_recipients(
-    transaction: &tokio_postgres::Transaction<'_>,
-    conversation: &crate::conversations::ConversationRecord,
-    message_created_by: Option<Uuid>,
-) -> anyhow::Result<Vec<Uuid>> {
-    let mut candidates: HashSet<Uuid> = HashSet::new();
-    if let Some(owner) = conversation.created_by {
-        candidates.insert(owner);
-    }
-    let rows = transaction
-        .query(
-            "select user_id from conversation_participants where conversation_id = $1",
-            &[&conversation.id],
-        )
-        .await?;
-    for row in rows {
-        let user_id: Uuid = row.get("user_id");
-        candidates.insert(user_id);
-    }
-
-    if let Some(sender) = message_created_by {
-        candidates.remove(&sender);
-    }
-
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Conversation participation alone is not durable project access. A user
-    // can remain in `conversation_participants` after their direct or
-    // organization membership is revoked, so resolve push recipients against
-    // the same current project grants used by controller authorization before
-    // any private message content leaves the service.
-    let candidate_ids: Vec<Uuid> = candidates.into_iter().collect();
-    let rows = transaction
-        .query(
-            "select candidate.user_id
-             from unnest($1::uuid[]) as candidate(user_id)
-             join projects p on p.id = $2
-             where p.status <> 'deleted'
-               and (
-                 p.owner_user_id = candidate.user_id
-                 or exists (
-                   select 1
-                   from project_memberships pm
-                   where pm.project_id = p.id
-                     and pm.user_id = candidate.user_id
-                     and lower(pm.role) in ('viewer', 'builder')
-                 )
-                 or exists (
-                   select 1
-                   from org_memberships om
-                   where p.org_id is not null
-                     and om.org_id = p.org_id
-                     and om.user_id = candidate.user_id
-                     and lower(om.role) in ('viewer', 'builder', 'admin', 'owner')
-                 )
-               )",
-            &[&candidate_ids, &conversation.project_id],
-        )
-        .await?;
-
-    let mut list: Vec<Uuid> = rows
-        .into_iter()
-        .map(|row| row.get::<_, Uuid>("user_id"))
-        .collect();
-    list.sort();
-    Ok(list)
 }
 
 /// Only registry-generated display text and canonical resource links belong in this envelope.

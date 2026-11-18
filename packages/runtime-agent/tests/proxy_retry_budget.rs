@@ -400,6 +400,25 @@ async fn responses(
                 ),
             };
         }
+        // A one-on-one "hello" whose answer is only the decline word; its retry answers, or
+        // gives the word again.
+        "direct_decline" | "direct_decline_twice" => {
+            let decline = json!({"summary":"NO_RESPONSE", "files":[]}).to_string();
+            return match ordinal {
+                1 => answer(
+                    &json!({
+                        "summary":"A greeting.", "route":"direct", "reason":"Answer directly.",
+                        "selectedSkills":[], "confidence":0.9,
+                        "requiresContextLookup":false, "requiresCommandExecution":false,
+                        "requiresWorkspaceFileChanges":false, "observationCommands":[]
+                    })
+                    .to_string(),
+                ),
+                2 => answer(&decline),
+                _ if state.scenario == "direct_decline_twice" => answer(&decline),
+                _ => answer(&json!({"summary":FINAL_TEXT, "files":[]}).to_string()),
+            };
+        }
         // The routing preflight reads a follow-up as a file write, and every
         // answer is a step for the person with no file.
         "skill_setup_write_guess" | "chat_write_guess" => {
@@ -1349,6 +1368,17 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
             "a failed routing request must not start a main request"
         );
     }
+    // The retry asks the same request again and says the turn needs an answer.
+    if scenario.starts_with("direct_decline") {
+        let retry = requests[2]["input"].to_string();
+        assert!(retry.contains("hello"), "{retry}");
+        assert!(retry.contains("Do not answer `NO_RESPONSE`."), "{retry}");
+        assert!(
+            !requests[1]["input"]
+                .to_string()
+                .contains("Do not answer `NO_RESPONSE`.")
+        );
+    }
     if scenario == "ambient_decline" {
         assert!(
             requests[0]
@@ -1624,6 +1654,19 @@ scenario_test!(
     "ambient_decline",
     2
 );
+// Nov 18: "hello" in a one-on-one chat got the reply "NO_RESPONSE". A turn the controller did not
+// dispatch as an evaluation needs an answer: its decline gets one retry, told to answer, and a
+// second decline fails the turn, so the word is never the reply.
+scenario_test!(
+    a_direct_turn_that_declines_is_retried_and_answers,
+    "direct_decline",
+    3
+);
+scenario_test!(
+    a_direct_turn_that_declines_twice_fails_without_the_word,
+    "direct_decline_twice",
+    3
+);
 // Oct 18: a skill-setup follow-up the routing preflight read as a file write
 // was answered with a step for the person, retried, then failed with the
 // answer hidden. It now finishes with that answer on its first attempt.
@@ -1892,6 +1935,8 @@ async fn isolated_retry_child() -> Result<()> {
         scenario.as_str(),
         "routing"
             | "ambient_decline"
+            | "direct_decline"
+            | "direct_decline_twice"
             | "retry_usage"
             | "direct_usage"
             | "finalization_usage"
@@ -2401,6 +2446,15 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                 "groupParticipation":{"decision":"agent_evaluation", "reason":"skill_mode_ambient", "enforcedBy":"runtime-controller"}}
         });
     }
+    // A one-on-one chat's message as the controller dispatches it: Octo answers it.
+    if scenario.starts_with("direct_decline") {
+        payload = json!({
+            "prompt_text":"hello",
+            "metadata":{"groupParticipation":{"decision":"respond",
+                "reason":"single_human_conversation", "domain":"direct", "participantCount":1,
+                "confidence":100, "enforcedBy":"runtime-controller"}}
+        });
+    }
     // A chat message as the controller leases it: the Studio grants write
     // access and sends no file-change expectation of its own. Only the
     // conversation's opener differs between the two scenarios.
@@ -2439,13 +2493,16 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
         "run_id":Uuid::new_v4(), "conversation_id":Uuid::new_v4(), "payload":payload
     }))?;
     let processor = JobProcessor::new(config);
-    // The retry scenario streams, so the retry's rows also take the streamed path.
+    // The retry scenarios stream, so the retry's rows also take the streamed path.
     let (sender, mut progress_messages) = tokio::sync::mpsc::unbounded_channel();
-    let progress = (scenario == "retry_usage").then(|| JobProgress {
-        sender,
-        status: Arc::new(AtomicBool::new(true)),
-        reply_draft: None,
-    });
+    let progress =
+        (scenario == "retry_usage" || scenario.starts_with("direct_decline")).then(|| {
+            JobProgress {
+                sender,
+                status: Arc::new(AtomicBool::new(true)),
+                reply_draft: None,
+            }
+        });
     // These scenarios commit to the workspace, as a chat turn does: only then
     // does a turn expected to change files retry without one, and only then
     // does a turn list the files it changed.
@@ -2466,6 +2523,8 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
     let expected_phases = match scenario {
         "routing" => vec![Some("routing")],
         "retry_usage"
+        | "direct_decline"
+        | "direct_decline_twice"
         | "failed_recovery_usage"
         | "chat_write_guess"
         | "chat_write_blocked"
@@ -2654,6 +2713,47 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
                 "the turn must list {path} its command wrote; listed {listed:?}"
             );
         }
+        return Ok(());
+    }
+    // The retry's answer is the turn's, and the decline word is in none of its rows.
+    if scenario == "direct_decline" {
+        let execution = result?;
+        assert_eq!(execution.summary, FINAL_TEXT);
+        let mut streamed = Vec::new();
+        while let Ok(message) = progress_messages.try_recv() {
+            streamed.push(message);
+        }
+        assert!(
+            streamed.iter().any(|message| message
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata["kind"] == "codex_retry"
+                    && metadata["reason"] == "declined_a_turn_that_needs_an_answer")),
+            "{streamed:?}"
+        );
+        assert!(
+            !streamed
+                .iter()
+                .chain(execution.messages.iter())
+                .chain(execution.final_messages.iter())
+                .any(|message| message.content.contains("NO_RESPONSE")),
+            "{streamed:?}"
+        );
+        return Ok(());
+    }
+    // The word again after the retry fails the turn: it is never the reply.
+    if scenario == "direct_decline_twice" {
+        let error = match result {
+            Ok(execution) => bail!(
+                "a second decline must fail the turn, but this stood: {}",
+                execution.summary
+            ),
+            Err(error) => error,
+        };
+        let message = runtime_agent::jobs::extract_job_failure_message(&error)
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        assert!(message.contains("again after retry"), "{message}");
         return Ok(());
     }
     if matches!(scenario, "direct_usage" | "finalization_usage") {

@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
+#[cfg(test)]
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, State};
@@ -12,7 +13,6 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
-use tokio::sync::OnceCell;
 #[cfg(test)]
 use tokio::sync::RwLock;
 use tokio_postgres::types::Json as PgJson;
@@ -76,7 +76,6 @@ enum OtaRegistryBackend {
 #[derive(Clone)]
 struct PostgresOtaRegistry {
     pool: PgPool,
-    tables_ready: Arc<OnceCell<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,10 +117,7 @@ impl OtaRegistry {
 
     pub(crate) fn new_postgres(pool: PgPool) -> Self {
         Self {
-            backend: OtaRegistryBackend::Postgres(PostgresOtaRegistry {
-                pool,
-                tables_ready: Arc::new(OnceCell::new()),
-            }),
+            backend: OtaRegistryBackend::Postgres(PostgresOtaRegistry { pool }),
         }
     }
 
@@ -307,18 +303,7 @@ impl OtaRegistry {
 }
 
 impl PostgresOtaRegistry {
-    async fn ensure_tables(&self) -> Result<(), OtaRegistryError> {
-        self.tables_ready
-            .get_or_try_init(|| async {
-                ensure_ota_tables(&self.pool).await.map_err(ota_internal)?;
-                Ok(())
-            })
-            .await
-            .map(|_| ())
-    }
-
     async fn list_releases(&self) -> Result<Vec<OtaReleaseRecord>, OtaRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(ota_internal)?;
         let rows = connection
             .query(
@@ -336,7 +321,6 @@ impl PostgresOtaRegistry {
     }
 
     async fn list_channels(&self) -> Result<Vec<OtaChannelAssignment>, OtaRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(ota_internal)?;
         let rows = connection
             .query(
@@ -357,7 +341,6 @@ impl PostgresOtaRegistry {
         channel: String,
         limit: i64,
     ) -> Result<Vec<OtaChannelHistoryEntry>, OtaRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(ota_internal)?;
         let rows = connection
             .query(
@@ -378,7 +361,6 @@ impl PostgresOtaRegistry {
         &self,
         params: ResolvedDeviceStateListParams,
     ) -> Result<Vec<OtaDeviceState>, OtaRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(ota_internal)?;
         let mut bindings: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
         let mut clauses = Vec::new();
@@ -440,7 +422,6 @@ impl PostgresOtaRegistry {
         &self,
         params: ResolvedEventListParams,
     ) -> Result<Vec<OtaUpdateEvent>, OtaRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(ota_internal)?;
         let mut bindings: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
         let mut clauses = Vec::new();
@@ -499,7 +480,6 @@ impl PostgresOtaRegistry {
         &self,
         params: ResolvedDownloadInsightsParams,
     ) -> Result<OtaDownloadInsights, OtaRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(ota_internal)?;
         let (start_day, end_day, start_at, end_exclusive) = resolve_download_window(params.days)?;
 
@@ -666,7 +646,6 @@ impl PostgresOtaRegistry {
         &self,
         release: OtaReleaseRecord,
     ) -> Result<OtaReleaseRecord, OtaRegistryError> {
-        self.ensure_tables().await?;
         let mut connection = self.pool.get().await.map_err(ota_internal)?;
         let transaction = connection.transaction().await.map_err(ota_internal)?;
         let inserted = transaction
@@ -682,7 +661,7 @@ impl PostgresOtaRegistry {
                     $10, $11, $12, $13,
                     $14, $15, $16, $17, $18
                  )
-                 on conflict (release_id) do nothing
+                 on conflict do nothing
                  returning release_id, platform, channel, bundle_version, git_sha, native_version,
                            min_supported_native_version, artifact_url, artifact_sha256,
                            artifact_size_bytes, artifact_type, signature, rollout_percentage,
@@ -713,8 +692,21 @@ impl PostgresOtaRegistry {
         let stored = if let Some(row) = inserted {
             map_release_row(row)?
         } else {
-            // A separate READ COMMITTED statement sees the winning concurrent insert.
-            let existing = load_release_for_update(&transaction, &release.release_id).await?;
+            // With no conflict target, a conflict on either unique index (release_id, or
+            // platform, channel and bundle_version) skips the insert, after waiting for a
+            // concurrent insert to commit, instead of failing it. A separate READ COMMITTED
+            // statement sees the row that won.
+            let existing = match load_release_for_update(&transaction, &release.release_id).await {
+                Ok(existing) => existing,
+                Err(OtaRegistryError::NotFound(_)) => {
+                    return Err(OtaRegistryError::Conflict(format!(
+                        "bundle_version '{}' is already registered for {} channel '{}' under \
+                         another release_id",
+                        release.bundle_version, release.platform, release.channel
+                    )));
+                }
+                Err(error) => return Err(error),
+            };
             ensure_same_release_identity(&existing, &release)?;
             existing
         };
@@ -728,7 +720,6 @@ impl PostgresOtaRegistry {
         channel: String,
         request: ActivateChannelRequest,
     ) -> Result<OtaChannelAssignment, OtaRegistryError> {
-        self.ensure_tables().await?;
         let activated_by = normalize_non_empty(&request.activated_by, "activated_by")?;
         let release_id = normalize_non_empty(&request.release_id, "release_id")?;
         let mut connection = self.pool.get().await.map_err(ota_internal)?;
@@ -859,7 +850,6 @@ impl PostgresOtaRegistry {
         channel: String,
         request: RollbackChannelRequest,
     ) -> Result<OtaChannelAssignment, OtaRegistryError> {
-        self.ensure_tables().await?;
         let activated_by = normalize_non_empty(&request.activated_by, "activated_by")?;
         let mut connection = self.pool.get().await.map_err(ota_internal)?;
         let transaction = connection.transaction().await.map_err(ota_internal)?;
@@ -982,7 +972,6 @@ impl PostgresOtaRegistry {
         &self,
         request: OtaCheckRequest,
     ) -> Result<OtaCheckResponse, OtaRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(ota_internal)?;
         let joined = connection
             .query_opt(
@@ -1106,7 +1095,6 @@ impl PostgresOtaRegistry {
         &self,
         event: OtaUpdateEvent,
     ) -> Result<OtaUpdateEvent, OtaRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(ota_internal)?;
         let release_id = if let Some(bundle_version) = event.bundle_version.as_ref() {
             connection
@@ -2869,141 +2857,6 @@ async fn load_channel_assignment_for_update(
         .await
         .map_err(ota_internal)?;
     row.map(map_channel_assignment_row).transpose()
-}
-
-async fn ensure_ota_tables(pool: &PgPool) -> anyhow::Result<()> {
-    let connection = pool.get().await?;
-    connection
-        .batch_execute(
-            "
-            create table if not exists ota_releases (
-              release_id text primary key,
-              platform text not null check (platform in ('ios', 'android')),
-              channel text not null,
-              bundle_version text not null,
-              git_sha text not null,
-              native_version text not null,
-              min_supported_native_version text not null,
-              artifact_url text not null,
-              artifact_sha256 text not null,
-              artifact_size_bytes bigint not null check (artifact_size_bytes >= 0),
-              artifact_type text not null check (artifact_type = 'zip'),
-              signature text,
-              rollout_percentage integer not null check (rollout_percentage between 0 and 100),
-              status text not null check (status in ('draft', 'live', 'paused', 'rolled_back', 'archived')),
-              published_at timestamptz not null,
-              published_by text not null,
-              notes text,
-              created_at timestamptz not null default now(),
-              updated_at timestamptz not null default now()
-            );
-
-            create table if not exists ota_channel_assignments (
-              platform text not null check (platform in ('ios', 'android')),
-              channel text not null,
-              active_release_id text not null references ota_releases(release_id) on delete restrict,
-              previous_release_id text references ota_releases(release_id) on delete set null,
-              rollout_percentage integer not null check (rollout_percentage between 0 and 100),
-              activated_at timestamptz not null,
-              activated_by text not null,
-              created_at timestamptz not null default now(),
-              updated_at timestamptz not null default now(),
-              primary key (platform, channel)
-            );
-
-            create table if not exists ota_channel_history (
-              history_id text primary key,
-              platform text not null check (platform in ('ios', 'android')),
-              channel text not null,
-              action text not null check (action in ('activate', 'rollback')),
-              previous_release_id text references ota_releases(release_id) on delete set null,
-              next_release_id text not null references ota_releases(release_id) on delete restrict,
-              rollout_percentage integer not null check (rollout_percentage between 0 and 100),
-              activated_at timestamptz not null,
-              activated_by text not null,
-              created_at timestamptz not null default now()
-            );
-
-            create table if not exists ota_device_states (
-              platform text not null check (platform in ('ios', 'android')),
-              channel text not null,
-              device_id text not null,
-              native_version text not null,
-              current_bundle_version text,
-              current_git_sha text,
-              last_seen_at timestamptz not null,
-              last_check_at timestamptz,
-              last_event_type text,
-              last_event_at timestamptz,
-              last_release_id text references ota_releases(release_id) on delete set null,
-              last_session_id text,
-              last_user_id text,
-              last_space_id text,
-              created_at timestamptz not null default now(),
-              updated_at timestamptz not null default now(),
-              primary key (platform, channel, device_id)
-            );
-
-            create table if not exists ota_events (
-              event_id text primary key,
-              event_type text not null,
-              occurred_at timestamptz not null,
-              device_id text not null,
-              platform text not null check (platform in ('ios', 'android')),
-              channel text not null,
-              native_version text not null,
-              bundle_version text,
-              git_sha text,
-              space_id text,
-              user_id text,
-              session_id text,
-              country_code text,
-              properties jsonb not null default '{}'::jsonb,
-              created_at timestamptz not null default now()
-            );
-
-            alter table ota_events
-              add column if not exists country_code text;
-
-            alter table ota_releases
-              add column if not exists required_native_build text;
-            alter table ota_device_states
-              add column if not exists native_build text;
-            alter table ota_events
-              add column if not exists native_build text;
-
-            create index if not exists ota_releases_platform_channel_published_idx
-              on ota_releases (platform, channel, published_at desc);
-            create unique index if not exists ota_releases_platform_channel_bundle_version_idx
-              on ota_releases (platform, channel, bundle_version);
-            create index if not exists ota_channel_assignments_active_release_idx
-              on ota_channel_assignments (active_release_id);
-            create index if not exists ota_channel_history_lookup_idx
-              on ota_channel_history (platform, channel, activated_at desc);
-            create index if not exists ota_device_states_last_seen_idx
-              on ota_device_states (last_seen_at desc);
-            create index if not exists ota_events_occurred_at_idx
-              on ota_events (occurred_at desc);
-            create index if not exists ota_events_platform_channel_idx
-              on ota_events (platform, channel, occurred_at desc);
-            create index if not exists ota_events_device_idx
-              on ota_events (device_id, occurred_at desc);
-
-            alter table ota_releases enable row level security;
-            alter table ota_channel_assignments enable row level security;
-            alter table ota_channel_history enable row level security;
-            alter table ota_device_states enable row level security;
-            alter table ota_events enable row level security;
-
-            revoke all privileges on table ota_releases from anon, authenticated;
-            revoke all privileges on table ota_channel_assignments from anon, authenticated;
-            revoke all privileges on table ota_channel_history from anon, authenticated;
-            revoke all privileges on table ota_device_states from anon, authenticated;
-            revoke all privileges on table ota_events from anon, authenticated;
-        ",
-        )
-        .await?;
-    Ok(())
 }
 
 async fn prune_recent_events(

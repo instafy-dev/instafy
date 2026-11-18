@@ -684,13 +684,24 @@ depends on the turn's lane (runtime-agent `final_output_mode_for_runtime_job` an
 
 Each chat keeps two Codex threads (runtime-agent `ThreadLane`). Its Shared Browser turns resume its
 browser thread, which holds only those turns: each starts from what it is asked (the person's words
-or a card's task), and a new or lost browser thread is given the chat's earlier browser turns and
-nothing else. Every other turn resumes the building thread, which never holds a page: what the
-browser read reaches it only as quoted page data. A building turn on a restored thread reads the
-browser turns since that thread's last turn (each one's request and reply, bounded and labelled as
-a hand-back's record is), a hand-back reads its checked record, and a new or lost building thread
-reads the same turns quoted in its replay of the chat. A chat whose turns shared one thread before
-starts both threads again once.
+or a card's task), and a new or lost browser thread is given the chat's earlier browser turns (what
+each was asked, and what it found quoted as a building turn reads it: its findings and what it
+didn't find) and of the rest only the person's own messages. Each request of a resumed browser
+thread sends every page its turns read again: a comparison's fill-in on a thread whose latest
+request was about 114k tokens made 25 requests of 117k to 193k tokens, nearly all cached, and cost
+49 credits. So the browser part of a new message the routing step sent to the browser starts a new
+browser thread from the chat's replay once the thread's latest request sent more than 60k input
+tokens; a shorter thread is resumed, and so are the turns of one message (its second pass, a Let
+Octo continue, and a Continue under a Stop whose thread ran a turn of the stopped message). A
+stopped or failed part saves no thread, so a Continue whose thread's latest request came before
+the person sent the message it carries on, and the Try again of a part that failed after leaving a
+long thread, start a new thread too.
+How a turn is charged is unchanged. Every other turn
+resumes the building thread, which never holds a page: what the browser read reaches it only as
+quoted page data. A building turn on a restored thread reads the browser turns since that thread's
+last turn (each one's request and reply, bounded and labelled as a hand-back's record is), a
+hand-back reads its checked record, and a new or lost building thread reads the same turns quoted in
+its replay of the chat. A chat whose turns shared one thread before starts both threads again once.
 
 So a turn's requests reuse its own lane's earlier requests, and only while the provider still holds
 them (a few minutes). Moving between building and browsing no longer sends the other lane's turns

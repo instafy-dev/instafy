@@ -812,7 +812,6 @@ pub struct AppConfig {
     /// Spaces whose own managed machine is launched ready to host Instafy's
     /// browser (`HOSTED_BROWSER_HOST`). Off by default.
     pub hosted_browser_host: HostedBrowserHostPolicy,
-    pub progress_callback_secret: Option<String>,
     pub git_remote_base_url: Option<String>,
     pub git_remote_public_base_url: Option<String>,
     pub git_shards: Vec<String>,
@@ -1581,11 +1580,6 @@ impl AppConfig {
         };
         let hosted_browser_host = HostedBrowserHostPolicy::from_env()?;
 
-        let progress_callback_secret = std::env::var("PROGRESS_CALLBACK_SECRET")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-
         let git_remote_base_url = read_first_env(&["GIT_REMOTE_BASE_URL"])
             .map(|value| value.trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty());
@@ -1938,7 +1932,6 @@ impl AppConfig {
             browser_profile_persist_project_ids,
             browser_profile_snapshot_secs,
             hosted_browser_host,
-            progress_callback_secret,
             git_remote_base_url,
             git_remote_public_base_url,
             git_shards,

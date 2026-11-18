@@ -45,7 +45,6 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/projects/:id/conversations/blank` | Creates a conversation. Private chats accept `initialParticipantUserIds` and return the IDs committed atomically with the conversation. |
 | POST | `/conversations/:id/messages/record` | Records a user or assistant message; human metadata may include canonical `mentionedUserIds`. |
 | POST | `/conversations/:id/stop` | Human-only, project-write and conversation-access checked. Accepts `{jobIds: UUID[]}` (1–100 exact IDs); atomically cancels selected queued/leased jobs and returns `{ok, canceledJobIds, canceledRunIds, alreadyFinishedJobIds}`. Foreign/missing IDs reject the entire request. |
-| POST | `/progress-callback` | Receives build/job progress (ephemeral JWT). Broadcasts progress events and updates runs. |
 | GET | `/events` | SSE stream; filters by `projectId`, `sessionId`, `conversationId`, `runId`, or `kinds`. |
 | GET | `/runs` | List runs for a project/session. |
 | GET | `/runs/:run_id/result` | Fetch stored result JSON (fallback if SSE missed). |
@@ -66,7 +65,7 @@ This document explains how the Instafy runtime controller is structured and how 
 | GET | `/operator/credential-encryption/census` | Service-role only. Read-only count of stored secrets per table by the key that opens them. See [Rotating the credential encryption key](#rotating-the-credential-encryption-key). |
 | POST | `/operator/credential-encryption/reencrypt` | Service-role only. Rewrites stored secrets still under a previous key with the primary key. |
 
-Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
+Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`).
 
 Project Secrets requests initialize missing controller-owned secret and grant tables
 after checking project access, in the same database transaction as the request.
@@ -328,7 +327,6 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 
   The controller validates that browser grants target the selected project's online runtime origin. It derives an expiring HMAC-SHA1 coturn credential bound to that project/runtime on every proxied capabilities and offer request, while the allocator's initial metadata remains only a boot-time safety configuration. Managed sessions overwrite provider ICE data, require authenticated TURN, and negotiate relay-only ICE in both Studio and the runtime sender. The shared secret is redacted from controller debug output and is never sent to the provider, runtime, origin, or Studio.
 - `HOSTED_BROWSER_HOST` (`off`, the default, `projects` or `all`) and `HOSTED_BROWSER_HOST_PROJECT_IDS` (comma-separated UUIDs, required with `projects`) choose the spaces whose own managed machine is launched ready to host the Shared Browser on first use. A covered space's new leases carry the controller-owned `_instafyManagedBrowserHost` attestation and launch with the boot-time browser off, CDP screencast on and WebRTC off, even when managed TURN serves the project (root model shells share the machine, and the origin hands relay credentials to a loopback sender); the origin proxy then mints no relay credential for that machine. A machine that reports `browserHost` `{"version":1,"modes":["lazy"]}` on such a lease gets Shared Browser agent consent and a stored `browserHost` for that generation; runtime status then adds `sharedBrowserHost` to its entry while the policy covers the space, and every status response carries `sharedBrowserHostPolicy` (`covered` or `off`). Turning the policy off makes Shared dispatch to a host answer 409 at once. A covered space also keeps its browser sign-ins through the durable profile store, as `BROWSER_PROFILE_PERSIST_PROJECT_IDS` does. Any other value fails startup. See "Browser on the space's own machine" in `docs/Shared-Browser.md`.
-- `PROGRESS_CALLBACK_SECRET` — HMAC for verifying GitHub/webhook callbacks.
 - `SANDBOX_CREDIT_SEED_AMOUNT` & `SANDBOX_CREDIT_SEED_LIMIT` — initial credit grants for new sandboxes.
 - `GITHUB_DEFAULT_*` variables — legacy defaults for `/build/dispatch`; omit when running without GitHub integration.
 - `RUNTIME_SIGNING_PRIVATE_KEY` / `RUNTIME_SIGNING_PUBLIC_KEY` / `RUNTIME_SIGNING_KEY_ID` — env names for the Ed25519 key pair + optional kid used to sign controller-issued origin and runtime agent tokens.
