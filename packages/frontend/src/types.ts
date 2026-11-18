@@ -3,13 +3,6 @@ export type ProjectType = string;
 
 export type AIModelChoice = string;
 
-export type ProjectContent = Record<string, unknown>;
-
-export interface DeploymentOptions {
-  subdomain: string;
-  hostingPlan: "instafy" | "self-host";
-}
-
 export interface BuildLogEntry {
   id: string;
   message: string;
@@ -55,31 +48,6 @@ export interface RunRecord {
 }
 
 export type RunRecordPatch = Pick<RunRecord, "id"> & Partial<Omit<RunRecord, "id">>;
-
-export interface VersionControlSettings {
-  enabled: boolean;
-  provider: "github";
-  mode: "managed" | "advanced";
-  organization?: string;
-  repository?: string;
-  branch?: string;
-  status: "idle" | "provisioning" | "linked" | "error";
-  lastSyncedAt: string | null;
-  automationEnabled: boolean;
-  error?: string | null;
-  repoUrl?: string | null;
-}
-
-export interface CollaborationSettings {
-  enabled: boolean;
-  inviteToken: string | null;
-  allowGuestEditors: boolean;
-  pendingInvites: Array<{
-    email: string;
-    status: "pending" | "accepted" | "expired";
-    invitedAt: string;
-  }>;
-}
 
 export interface BillingSubscriptionSummary {
   planId: string;
@@ -165,7 +133,6 @@ export interface CodeWorkspace {
   lastGeneratedAt: string | null;
   summary: string;
   status: "idle" | "pending" | "succeeded" | "failed";
-  provider: "openai" | "ollama" | "fallback" | "webcontainer" | "manual" | null;
   error: string | null;
   installedDependencies: string[];
   lastAppliedAt: string | null;
@@ -173,11 +140,7 @@ export interface CodeWorkspace {
 
 export interface SiteBuilderState {
   metadata: ProjectMetadata;
-  content: ProjectContent;
-  deployment: DeploymentOptions;
   code: CodeWorkspace;
-  versionControl: VersionControlSettings;
-  collaboration: CollaborationSettings;
   billing: BillingState;
   org: ProjectOrgInfo;
 }

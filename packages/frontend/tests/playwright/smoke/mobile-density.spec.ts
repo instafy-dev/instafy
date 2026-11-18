@@ -113,7 +113,6 @@ test.describe("Narrow-phone Studio density", () => {
 
     await headerPicker.click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
-    await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
     await page.getByTestId("sidebar-nav-history").click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     await expect(page.getByTestId("conversation-history-panel")).toBeVisible();

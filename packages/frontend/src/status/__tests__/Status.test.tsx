@@ -207,16 +207,17 @@ describe("Status toast presentations", () => {
   it("queues a non-preemptive background alert behind a visible warning", async () => {
     await act(async () => {
       statusContext?.showStatus("Publishing failed.", "error", 0);
-      statusContext?.showStatus("Your support report was resolved.", "success", 12_000, {
-        id: "support-resolution:report-1",
-        actionLabel: "View report",
+      // A notification arriving while the person is in Studio.
+      statusContext?.showStatus("There is a new reply in \u201cLaunch plan\u201d.", "info", 10_000, {
+        id: "notification:user-1:notification-1",
+        actionLabel: "View",
         nonPreemptive: true,
         onAction: vi.fn(),
       });
     });
 
     expect(document.body.textContent).toContain("Publishing failed.");
-    expect(document.body.textContent).not.toContain("Your support report was resolved.");
+    expect(document.body.textContent).not.toContain("There is a new reply in");
     expect(statusContext?.queue?.visibleToasts).toHaveLength(1);
 
     await act(async () => {
@@ -225,8 +226,8 @@ describe("Status toast presentations", () => {
     });
 
     expect(document.body.textContent).not.toContain("Publishing failed.");
-    expect(document.body.textContent).toContain("Your support report was resolved.");
-    expect(document.body.textContent).toContain("View report");
+    expect(document.body.textContent).toContain("There is a new reply in \u201cLaunch plan\u201d.");
+    expect(document.body.textContent).toContain("View");
   });
   it("calls onShow only after a queued notification becomes visible", async () => {
     const shown = vi.fn();

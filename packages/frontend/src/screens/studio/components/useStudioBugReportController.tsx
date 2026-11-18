@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps 
 import { logAppInfo, logAppWarn } from "../../../debug/appLogs";
 import { useAppLogs } from "../../../debug/useAppLogs";
 import { useStatus } from "../../../status/useStatus";
-import { statusBehavior } from "../../../status/statusBehavior";
 import { BugReportDialog } from "./BugReportDialog";
 import { BugReportInboxDialog } from "./BugReportInboxDialog";
 import { captureCurrentScreenBugReportDraft } from "./bugReportCapture";
@@ -45,7 +44,6 @@ interface UseStudioBugReportControllerOptions {
   activeConversationLocalId: string | null;
   activeRuntimeId: string | null;
   controllerProjectMissing: boolean;
-  legacyResolutionToasts?: boolean;
   onOpenDiagnostics?: () => void;
 }
 
@@ -56,10 +54,9 @@ export function useStudioBugReportController({
   activeConversationLocalId,
   activeRuntimeId,
   controllerProjectMissing,
-  legacyResolutionToasts = true,
   onOpenDiagnostics,
 }: UseStudioBugReportControllerOptions) {
-  const { hideStatus, showStatus } = useStatus();
+  const { showStatus } = useStatus();
   const [bugReportOpenForUserId, setBugReportOpenForUserId] = useState<string | null>(null);
   const [bugReportInboxOpenForUserId, setBugReportInboxOpenForUserId] = useState<string | null>(
     null,
@@ -80,7 +77,6 @@ export function useStudioBugReportController({
   }>({ userId: null, count: 0, reports: EMPTY_SUPPORT_REPORTS, loading: false, error: null });
   const supportPollGenerationRef = useRef(0);
   const currentUserIdRef = useRef(currentUserId);
-  const resolutionToastUsersRef = useRef(new Map<string, string>());
   const [bugReportSeed, setBugReportSeed] = useState<OpenBugReportDetail | null>(null);
   const [bugReportSessionKey, setBugReportSessionKey] = useState(0);
   const [bugReportInitialScreenshots, setBugReportInitialScreenshots] = useState<
@@ -130,7 +126,7 @@ export function useStudioBugReportController({
   );
 
   const refreshSupportNotifications = useCallback(
-    async (notifyAboutResolution = true) => {
+    async () => {
       const requestUserId = currentUserId;
       if (!requestUserId) {
         setSupportUnreadSnapshot({ userId: null, count: 0, reports: EMPTY_SUPPORT_REPORTS, loading: false, error: null });
@@ -144,7 +140,6 @@ export function useStudioBugReportController({
         reports: previous.userId === requestUserId ? previous.reports : EMPTY_SUPPORT_REPORTS,
         loading: true, error: null,
       }));
-      let reportsLoaded = false;
       try {
         const firstPage = await controllerClient.bugReports.listPage(100, null, requestUserId);
         if (!current()) return;
@@ -165,39 +160,8 @@ export function useStudioBugReportController({
           }
         }
         setSupportUnreadSnapshot({ userId: requestUserId, count: firstPage.unreadCount, reports: [...reports.values()], loading: false, error: null });
-        reportsLoaded = true;
-        if (!legacyResolutionToasts || !notifyAboutResolution || firstPage.unnotifiedResolutionCount <= 0) return;
-        const claim = await controllerClient.bugReports.claimResolutionAlerts(requestUserId);
-        if (currentUserIdRef.current !== requestUserId || claim.claimedCount <= 0) return;
-        const toastId = `support-resolution:${claim.latestReportId ?? "reports"}:${
-          claim.latestResolvedAt ?? "latest"
-        }`;
-        resolutionToastUsersRef.current.set(toastId, requestUserId);
-        showStatus(
-          claim.claimedCount === 1
-            ? "Your Instafy support report was resolved."
-            : `${claim.claimedCount} of your Instafy support reports were resolved.`,
-          "success",
-          12_000,
-          {
-            id: toastId,
-            behavior: statusBehavior.informational,
-            actionLabel: claim.claimedCount === 1 ? "View report" : "View reports",
-            nonPreemptive: true,
-            onClose: () => {
-              if (resolutionToastUsersRef.current.get(toastId) === requestUserId) {
-                resolutionToastUsersRef.current.delete(toastId);
-              }
-            },
-            onAction: () => {
-              if (currentUserIdRef.current === requestUserId) {
-                handleOpenBugReportInbox(claim.latestReportId);
-              }
-            },
-          },
-        );
       } catch {
-        if (!reportsLoaded && current()) {
+        if (current()) {
           // Home can retain the last successful rows and expose a quiet retry
           // without presenting a failed request as an empty account.
           setSupportUnreadSnapshot(previous => previous.userId === requestUserId ? {
@@ -206,11 +170,11 @@ export function useStudioBugReportController({
         }
       }
     },
-    [currentUserId, handleOpenBugReportInbox, legacyResolutionToasts, showStatus],
+    [currentUserId],
   );
 
   const handleSupportActivityAcknowledged = useCallback(() => {
-    void refreshSupportNotifications(false);
+    void refreshSupportNotifications();
   }, [refreshSupportNotifications]);
 
   useEffect(() => {
@@ -221,12 +185,12 @@ export function useStudioBugReportController({
     }
     const refreshWhenVisible = () => {
       if (typeof document === "undefined" || document.visibilityState !== "hidden") {
-        void refreshSupportNotifications(true);
+        void refreshSupportNotifications();
       }
     };
     refreshWhenVisible();
     supportPollRef.current = refreshWhenVisible;
-    const refreshReadState = () => { void refreshSupportNotifications(false); };
+    const refreshReadState = () => { void refreshSupportNotifications(); };
     window.addEventListener(NOTIFICATION_RECEIVED_EVENT, refreshReadState);
     window.addEventListener(NOTIFICATION_FEED_CHANGED_EVENT, refreshWhenVisible);
     return () => {
@@ -244,18 +208,6 @@ export function useStudioBugReportController({
     idleMs: SUPPORT_POLL_IDLE_MS,
     wakeAfterMs: SUPPORT_POLL_ACTIVE_MS,
   });
-
-  useEffect(() => {
-    const resolutionToastUsers = resolutionToastUsersRef.current;
-    return () => {
-      for (const [toastId, toastUserId] of resolutionToastUsers) {
-        if (toastUserId === currentUserId) {
-          hideStatus(toastId);
-          resolutionToastUsers.delete(toastId);
-        }
-      }
-    };
-  }, [currentUserId, hideStatus]);
 
   const waitForAnimationFrames = useCallback(async (count = 2) => {
     if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {

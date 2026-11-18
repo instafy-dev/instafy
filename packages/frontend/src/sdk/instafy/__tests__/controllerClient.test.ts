@@ -46,7 +46,6 @@ describe("instafy sdk controller client", () => {
     expect(typeof controllerClient.browserSessions.decideApproval).toBe("function");
     expect(typeof controllerClient.bugReports.listPage).toBe("function");
     expect(typeof controllerClient.bugReports.acknowledgeActivity).toBe("function");
-    expect(typeof controllerClient.bugReports.claimResolutionAlerts).toBe("function");
     expect(typeof controllerClient.bugReports.listMessages).toBe("function");
     expect(typeof controllerClient.bugReports.listMessagePage).toBe("function");
     expect(typeof controllerClient.bugReports.postMessage).toBe("function");

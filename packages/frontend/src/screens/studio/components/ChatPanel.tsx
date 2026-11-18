@@ -1554,13 +1554,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           testId: "workspace-git-conflict-resolve",
         },
         {
-          id: "open-changes",
-          label: "Open Changes",
-          variant: "outline",
-          event: "instafy:open-source-control",
-          testId: "workspace-git-conflict-open-changes",
-        },
-        {
           id: "dismiss",
           label: "Dismiss",
           variant: "ghost",

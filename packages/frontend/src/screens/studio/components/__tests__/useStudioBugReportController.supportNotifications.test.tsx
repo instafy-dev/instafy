@@ -8,8 +8,6 @@ import { NOTIFICATION_RECEIVED_EVENT } from "../../../../notifications/notificat
 import { NOTIFICATION_FEED_CHANGED_EVENT } from "../../../../notifications/notificationFeedEvents";
 
 const mocks = vi.hoisted(() => ({
-  claimResolutionAlerts: vi.fn(),
-  hideStatus: vi.fn(),
   listReports: vi.fn(),
   showStatus: vi.fn(),
 }));
@@ -20,13 +18,12 @@ vi.mock("@capacitor/core", () => ({
 vi.mock("../../../../sdk/instafy", () => ({
   controllerClient: {
     bugReports: {
-      claimResolutionAlerts: mocks.claimResolutionAlerts,
       listPage: mocks.listReports,
     },
   },
 }));
 vi.mock("../../../../status/useStatus", () => ({
-  useStatus: () => ({ hideStatus: mocks.hideStatus, showStatus: mocks.showStatus }),
+  useStatus: () => ({ showStatus: mocks.showStatus }),
 }));
 vi.mock("../../../../debug/useAppLogs", () => ({
   useAppLogs: () => ({ logs: [] }),
@@ -39,11 +36,15 @@ vi.mock("../BugReportInboxDialog", () => ({
     initialReportRequest,
     isOpen,
   }: {
-    initialReportRequest?: { reportId: string } | null;
+    initialReportRequest?: { reportId: string; requestKey: number } | null;
     isOpen: boolean;
   }) =>
     isOpen ? (
-      <div data-testid="mock-support-inbox" data-report-id={initialReportRequest?.reportId ?? ""} />
+      <div
+        data-testid="mock-support-inbox"
+        data-report-id={initialReportRequest?.reportId ?? ""}
+        data-request-key={initialReportRequest?.requestKey ?? ""}
+      />
     ) : null,
 }));
 vi.mock("../shakeReportPreference", () => ({
@@ -59,18 +60,17 @@ import { useStudioBugReportController } from "../useStudioBugReportController";
 
 const REPORT_ID = "11111111-1111-4111-8111-111111111111";
 
-function page(unreadCount: number, unnotifiedResolutionCount: number) {
+function page(unreadCount: number, unreadResolutionCount = 0) {
   return {
     reports: [] as ControllerBugReportSummary[],
     hasMore: false,
     nextCursor: null,
     unreadCount,
-    unreadResolutionCount: unnotifiedResolutionCount,
-    unnotifiedResolutionCount,
+    unreadResolutionCount,
   };
 }
 
-function Harness({ userId, legacyResolutionToasts }: { userId: string | null; legacyResolutionToasts?: boolean }) {
+function Harness({ userId }: { userId: string | null }) {
   const support = useStudioBugReportController({
     currentUserId: userId,
     activeProjectId: null,
@@ -78,7 +78,6 @@ function Harness({ userId, legacyResolutionToasts }: { userId: string | null; le
     activeConversationLocalId: null,
     activeRuntimeId: null,
     controllerProjectMissing: false,
-    legacyResolutionToasts,
   });
   return (
     <>
@@ -86,7 +85,9 @@ function Harness({ userId, legacyResolutionToasts }: { userId: string | null; le
       <output data-testid="support-unread-reports">{JSON.stringify(support.supportUnreadReports)}</output>
       <output data-testid="support-loading">{String(support.supportNotificationsLoading)}</output>
       <output data-testid="support-error">{support.supportNotificationsError}</output>
-      <button onClick={() => void support.refreshSupportNotifications(false)}>Retry support</button>
+      <button onClick={() => void support.refreshSupportNotifications()}>Retry support</button>
+      <button onClick={() => support.onOpenBugReportInbox(REPORT_ID)}>Open report</button>
+      <button onClick={() => support.onOpenBugReportInbox()}>Open support</button>
       {support.dialogs}
     </>
   );
@@ -119,8 +120,6 @@ describe("useStudioBugReportController support notifications", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    mocks.claimResolutionAlerts.mockReset();
-    mocks.hideStatus.mockReset();
     mocks.listReports.mockReset();
     mocks.showStatus.mockReset();
   });
@@ -132,135 +131,94 @@ describe("useStudioBugReportController support notifications", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("polls while visible, claims once, and opens the resolved report from the toast", async () => {
-    mocks.listReports
-      .mockResolvedValueOnce(page(2, 1))
-      .mockResolvedValue(page(2, 0));
-    mocks.claimResolutionAlerts.mockResolvedValue({
-      claimedCount: 1,
-      latestReportId: REPORT_ID,
-      latestResolvedAt: "2026-09-05T12:00:00Z",
+  it("polls while visible and counts a resolution without a toast", async () => {
+    // One report has an unread reply, the other was resolved and not seen yet.
+    mocks.listReports.mockResolvedValue({
+      ...page(2, 1),
+      reports: [
+        unreadReport({ id: "22222222-2222-4222-8222-222222222222", status: "waiting_for_customer", resolvedAt: null, hasUnreadResolution: false }),
+        unreadReport(),
+      ],
     });
 
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
 
     expect(mocks.listReports).toHaveBeenCalledWith(100, null, "user-a");
-    expect(mocks.claimResolutionAlerts).toHaveBeenCalledWith("user-a");
     expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("2");
-    expect(mocks.showStatus).toHaveBeenCalledWith(
-      "Your Instafy support report was resolved.",
-      "success",
-      12_000,
-      expect.objectContaining({ actionLabel: "View report", behavior: { kind: "informational" }, nonPreemptive: true }),
-    );
-
-    const toastOptions = mocks.showStatus.mock.calls[0]?.[3] as { onAction: () => void };
-    await act(async () => toastOptions.onAction());
-    expect(
-      container.querySelector('[data-testid="mock-support-inbox"]')?.getAttribute("data-report-id"),
-    ).toBe(REPORT_ID);
+    const reports = JSON.parse(container.querySelector('[data-testid="support-unread-reports"]')!.textContent!);
+    expect(reports.find((report: { id: string }) => report.id === REPORT_ID)?.hasUnreadResolution).toBe(true);
 
     await act(async () => window.dispatchEvent(new Event(NOTIFICATION_FEED_CHANGED_EVENT)));
     await flushAsyncEffects();
     expect(mocks.listReports).toHaveBeenCalledTimes(2);
-    expect(mocks.claimResolutionAlerts).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not toast when another tab won the server claim", async () => {
-    mocks.listReports.mockResolvedValue(page(1, 1));
-    mocks.claimResolutionAlerts.mockResolvedValue({
-      claimedCount: 0,
-      latestReportId: null,
-      latestResolvedAt: null,
-    });
-
-    await act(async () => root.render(<Harness userId="user-a" />));
-    await flushAsyncEffects();
-
-    expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("1");
     expect(mocks.showStatus).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="mock-support-inbox"]')).toBeNull();
   });
 
-  it("pins a pending resolution claim to the account that observed it", async () => {
-    let resolveClaim!: (value: {
-      claimedCount: number;
-      latestReportId: string | null;
-      latestResolvedAt: string | null;
-    }) => void;
-    const pendingClaim = new Promise<{
-      claimedCount: number;
-      latestReportId: string | null;
-      latestResolvedAt: string | null;
-    }>((resolve) => {
-      resolveClaim = resolve;
+  it("opens the inbox at a requested report for the account that asked", async () => {
+    mocks.listReports.mockResolvedValue(page(0));
+    const inbox = () => container.querySelector('[data-testid="mock-support-inbox"]');
+    const press = (name: string) => act(async () => {
+      Array.from(container.querySelectorAll("button")).find((button) => button.textContent === name)!.click();
     });
-    mocks.listReports.mockResolvedValueOnce(page(1, 1)).mockResolvedValue(page(0, 0));
-    mocks.claimResolutionAlerts.mockReturnValue(pendingClaim);
-
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
-    expect(mocks.claimResolutionAlerts).toHaveBeenCalledWith("user-a");
 
+    // A notification, a support link and Home open a given report.
+    await press("Open report");
+    expect(inbox()?.getAttribute("data-report-id")).toBe(REPORT_ID);
+    const firstRequestKey = inbox()?.getAttribute("data-request-key");
+    // Asking for the same report again is a new request, so the inbox reloads it.
+    await press("Open report");
+    expect(inbox()?.getAttribute("data-request-key")).not.toBe(firstRequestKey);
+    // A plain open drops the earlier target.
+    await press("Open support");
+    expect(inbox()?.getAttribute("data-report-id")).toBe("");
+
+    // The open inbox belongs to one account: another account starts with it closed.
+    await press("Open report");
     await act(async () => root.render(<Harness userId="user-b" />));
-    await act(async () => {
-      resolveClaim({
-        claimedCount: 1,
-        latestReportId: REPORT_ID,
-        latestResolvedAt: "2026-09-05T12:00:00Z",
-      });
-      await pendingClaim;
-    });
-    await flushAsyncEffects();
-
-    expect(mocks.claimResolutionAlerts).toHaveBeenCalledTimes(1);
-    expect(mocks.showStatus).not.toHaveBeenCalled();
+    expect(inbox()).toBeNull();
+    await press("Open support");
+    expect(inbox()?.getAttribute("data-report-id")).toBe("");
   });
 
-  it("clears account-scoped UI immediately and disables an old toast action on identity change", async () => {
+  it("clears account-scoped UI immediately on identity change", async () => {
     let resolveUserB!: (value: ReturnType<typeof page>) => void;
     const userBPage = new Promise<ReturnType<typeof page>>((resolve) => {
       resolveUserB = resolve;
     });
     mocks.listReports
-      .mockResolvedValueOnce(page(4, 1))
+      .mockResolvedValueOnce(page(4))
       .mockReturnValueOnce(userBPage);
-    mocks.claimResolutionAlerts.mockResolvedValue({
-      claimedCount: 1,
-      latestReportId: REPORT_ID,
-      latestResolvedAt: "2026-09-05T12:00:00Z",
-    });
 
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
-    const toastOptions = mocks.showStatus.mock.calls[0]?.[3] as { id: string; onAction: () => void };
+    expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("4");
 
     await act(async () => root.render(<Harness userId="user-b" />));
     expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("0");
     expect(container.querySelector('[data-testid="mock-support-inbox"]')).toBeNull();
-    expect(mocks.hideStatus).toHaveBeenCalledWith(toastOptions.id);
-
-    await act(async () => toastOptions.onAction());
-    expect(container.querySelector('[data-testid="mock-support-inbox"]')).toBeNull();
 
     await act(async () => {
-      resolveUserB(page(1, 0));
+      resolveUserB(page(1));
       await userBPage;
     });
     await flushAsyncEffects();
+    expect(mocks.listReports).toHaveBeenLastCalledWith(100, null, "user-b");
     expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("1");
   });
 
-  it("publishes customer-safe unread summaries even when legacy resolution toasts are disabled", async () => {
-    mocks.listReports.mockResolvedValue({ ...page(1, 1), reports: [unreadReport(), unreadReport({ id: "22222222-2222-4222-8222-222222222222", hasUnreadSupportActivity: false })] });
-    await act(async () => root.render(<Harness userId="user-a" legacyResolutionToasts={false} />));
+  it("publishes customer-safe unread summaries", async () => {
+    mocks.listReports.mockResolvedValue({ ...page(1), reports: [unreadReport(), unreadReport({ id: "22222222-2222-4222-8222-222222222222", hasUnreadSupportActivity: false })] });
+    await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
     const reports = JSON.parse(container.querySelector('[data-testid="support-unread-reports"]')!.textContent!);
     expect(reports).toEqual([{
       id: REPORT_ID, title: "My tab cannot be dragged", projectId: null, activityAt: "2026-09-06T12:00:00Z",
       supportLastMessageAt: "2026-09-05T12:00:00Z", resolvedAt: "2026-09-06T12:00:00Z", hasUnreadResolution: true,
     }]);
-    expect(mocks.claimResolutionAlerts).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="support-loading"]')?.textContent).toBe("false");
   });
 
@@ -269,9 +227,9 @@ describe("useStudioBugReportController support notifications", () => {
     const secondId = "22222222-2222-4222-8222-222222222222";
     const secondCursor = { activityAt: "2026-09-02T12:00:00Z", id: secondId };
     mocks.listReports
-      .mockResolvedValueOnce({ ...page(2, 0), reports: [unreadReport({ hasUnreadSupportActivity: false })], hasMore: true, nextCursor: firstCursor })
-      .mockResolvedValueOnce({ ...page(2, 0), reports: [unreadReport()], hasMore: true, nextCursor: secondCursor })
-      .mockResolvedValueOnce({ ...page(2, 0), reports: [unreadReport({ id: secondId })], hasMore: true, nextCursor: { activityAt: "2026-09-01T12:00:00Z", id: secondId } });
+      .mockResolvedValueOnce({ ...page(2), reports: [unreadReport({ hasUnreadSupportActivity: false })], hasMore: true, nextCursor: firstCursor })
+      .mockResolvedValueOnce({ ...page(2), reports: [unreadReport()], hasMore: true, nextCursor: secondCursor })
+      .mockResolvedValueOnce({ ...page(2), reports: [unreadReport({ id: secondId })], hasMore: true, nextCursor: { activityAt: "2026-09-01T12:00:00Z", id: secondId } });
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
     expect(mocks.listReports).toHaveBeenNthCalledWith(2, 100, firstCursor, "user-a");
@@ -286,14 +244,14 @@ describe("useStudioBugReportController support notifications", () => {
     let resolveOldPage!: (value: ReturnType<typeof page>) => void;
     const pending = new Promise<ReturnType<typeof page>>(resolve => { resolveOldPage = resolve; });
     mocks.listReports
-      .mockResolvedValueOnce({ ...page(1, 0), hasMore: true, nextCursor: { activityAt: "2026-09-04T12:00:00Z", id: REPORT_ID } })
+      .mockResolvedValueOnce({ ...page(1), hasMore: true, nextCursor: { activityAt: "2026-09-04T12:00:00Z", id: REPORT_ID } })
       .mockReturnValueOnce(pending)
-      .mockResolvedValue(page(0, 0));
+      .mockResolvedValue(page(0));
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
     expect(container.querySelector('[data-testid="support-loading"]')?.textContent).toBe("true");
     await act(async () => root.render(<Harness userId="user-b" />));
-    await act(async () => resolveOldPage({ ...page(1, 0), reports: [unreadReport()] }));
+    await act(async () => resolveOldPage({ ...page(1), reports: [unreadReport()] }));
     await flushAsyncEffects();
     expect(container.querySelector('[data-testid="support-unread-reports"]')?.textContent).toBe("[]");
     expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("0");
@@ -302,7 +260,7 @@ describe("useStudioBugReportController support notifications", () => {
   });
 
   it("retains previous support rows on refresh failure and allows a quiet retry", async () => {
-    mocks.listReports.mockResolvedValueOnce({ ...page(1, 0), reports: [unreadReport()] }).mockRejectedValueOnce(new Error("offline")).mockResolvedValue(page(0, 0));
+    mocks.listReports.mockResolvedValueOnce({ ...page(1), reports: [unreadReport()] }).mockRejectedValueOnce(new Error("offline")).mockResolvedValue(page(0));
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
     await act(async () => window.dispatchEvent(new Event(NOTIFICATION_FEED_CHANGED_EVENT)));
@@ -318,7 +276,7 @@ describe("useStudioBugReportController support notifications", () => {
   });
 
   it("refreshes source support read state immediately after Home or the report acknowledges durable activity", async () => {
-    mocks.listReports.mockResolvedValueOnce({ ...page(1, 0), reports: [unreadReport()] }).mockResolvedValue(page(0, 1));
+    mocks.listReports.mockResolvedValueOnce({ ...page(1), reports: [unreadReport()] }).mockResolvedValue(page(0));
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
     expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("1");
@@ -326,11 +284,11 @@ describe("useStudioBugReportController support notifications", () => {
     await flushAsyncEffects();
     expect(container.querySelector('[data-testid="support-unread-count"]')?.textContent).toBe("0");
     expect(container.querySelector('[data-testid="support-unread-reports"]')?.textContent).toBe("[]");
-    expect(mocks.claimResolutionAlerts).not.toHaveBeenCalled();
+    expect(mocks.showStatus).not.toHaveBeenCalled();
   });
 
   it("stops a repeated paging cursor and exposes a retry instead of looping forever", async () => {
-    const repeating = { ...page(2, 0), reports: [], hasMore: true, nextCursor: { activityAt: "2026-09-04T12:00:00Z", id: REPORT_ID } };
+    const repeating = { ...page(2), reports: [], hasMore: true, nextCursor: { activityAt: "2026-09-04T12:00:00Z", id: REPORT_ID } };
     mocks.listReports.mockResolvedValue(repeating);
     await act(async () => root.render(<Harness userId="user-a" />));
     await flushAsyncEffects();
@@ -351,7 +309,7 @@ describe("useStudioBugReportController support notifications", () => {
     beforeEach(() => {
       setVisibility("visible");
       window.dispatchEvent(new Event("pointerdown"));
-      mocks.listReports.mockResolvedValue(page(0, 0));
+      mocks.listReports.mockResolvedValue(page(0));
     });
     afterEach(() => setVisibility("visible"));
 
