@@ -3212,14 +3212,20 @@ unless the policy is `"covered"`.
   address, and a turn whose answer holds no finding line gets the wrap-up pass
   below first, which also asks for its unread line, and the second pass then
   reads the pages that line names. A page its finding lines list already, read or
-  stopped at, is never one the second pass is told to read. A second pass that
-  stops for the person (a pause, a step's approval that ended it) ends the
-  turn with the words that say what they do next, which it posts, and its note
-  keeps every finding line in hand; no hand-back follows it. Its unread line
-  starts no third pass, and it ends with its own missing line too. The unread
-  line is the runtime's alone: no reply and no note keeps it. The missing
-  lines of a browser turn, both passes' for one with a second pass, go into
-  its note as one line after the finding lines, each name once, where the
+  stopped at, is never one the second pass is told to read. The second pass's
+  own unread line starts no third pass, and it ends with its own missing line
+  too, told to name each value still missing after both passes: when its
+  findings join the turn's, that line replaces the first pass's, which stays
+  only when the second wrote none. When both lines were kept, a comparison's
+  first pass named ten values missing, its second pass found most of them in
+  the reviews it read and named the three still missing, and the build, told
+  it didn't find twelve, printed values the second pass found as not found. A second
+  pass that stops for the person (a pause, a step's approval that ended it)
+  ends the turn with the words that say what they do next, which it posts, and
+  its note keeps every finding line in hand; no hand-back follows it. The
+  unread line is the runtime's alone: no reply and no note keeps it. The
+  missing lines of a browser turn go into its note as one line after the
+  finding lines, each name once, where the
   controller stamps them on the record as `missing` and lists them with the
   browser turns since a building thread's last turn, and a replay of the chat
   reads them; no reply keeps the line as written. Told only to read every page the request needs, a

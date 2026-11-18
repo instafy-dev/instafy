@@ -192,6 +192,10 @@ const LEGACY_AGENTS_DOC_SHA256: &[&str] = &[
     "9140c9a14e15cb6e83aa4428dda18cfd3bd9c39b85501718b362807c04b24bec", // v20
     // From before a public page was read with the AI's own web search too.
     "705f641d259b51f86b30a76edcd0c5ae69d074b22342cf3641a269a8671a230c", // v21
+    // From before a web search's text was no page read: a public page was read with the AI's own
+    // web search too, and a fact no page gave said only "not checked", never which web search found
+    // it.
+    "826cd906d7e028dcdb56708ab602478e3bda9c125e9bd71111a6eb92967bd47d", // v22
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -201,9 +205,10 @@ pub(super) fn is_bundled_agents_doc(text: &str) -> bool {
 
 /// The earlier copies of `AGENTS.md` whose "Reading the web" section is not the current one's
 /// ([`earlier_reading_the_web_sections`]). A change to that section adds the copy from before it
-/// here too.
+/// here too, and takes out a copy whose section the current one says again: v21's, since its rule
+/// came back.
 const EARLIER_AGENTS_DOCS_WITH_THEIR_OWN_READING_THE_WEB: &[&str] =
-    &[include_str!("legacy/agents-doc-v21.md")];
+    &[include_str!("legacy/agents-doc-v22.md")];
 
 /// The `## Reading the web` section ([`super::READING_THE_WEB_SECTION`]) of each earlier copy of
 /// `AGENTS.md` Instafy shipped whose section is not the current one's: how a copy a space edited
@@ -438,6 +443,9 @@ const LEGACY_BOUND_SITES_CHEATSHEET_SHA256: &[&str] = &[
     // From before a comparison named what each row is still missing once, in its footer, not
     // under its title.
     "7399e554e18fce2c87c6c012b262b459a12f3596ab5fa374952868b5245fb11d", // v6
+    // From before a fact only a web search gave kept `"viewer": "provider search"`, so its page
+    // drew it "from a web search", never as checked, and no limit or sort counted it.
+    "6ee191db7370c31d57111cf5f2b6496765f1344c97b9e877dad380363dfc35fa", // v7
 ];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
@@ -776,6 +784,11 @@ const LEGACY_WEB_RESEARCH_SHA256: &[&str] = &[
     // first, and only for what is fresh or a page no source names when each search costs the
     // person credits, and a site closed to Octo was guided in words with its link.
     "9bd5a0da14d8c85257d27bfc2c2108028fb2ed7b5d60880eb049a99988ab8788", // v19
+    // From before a search's own text was labelled as a web search's, never "checked" (it counted
+    // as a page read), a page kept a search's fact only once its page was read or refused, and a
+    // price no item page gave was searched for as "Finding sources" says, the AI's own web search
+    // first.
+    "3bd5d5159d5e678bfefa30f30dab0a0b5860d5e22e5217a53cb19d787fd6b266", // v20
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its
 /// values and the reviews asked for, and what a value nobody found says. A topic of the browser,
@@ -2687,9 +2700,10 @@ mod tests {
     /// (that build was a required change) is given that section with its lane, by its heading
     /// (`jobs::READING_THE_WEB_SECTION`), as it is given "Replies"; it was a line of
     /// "Responsiveness", which the runtime found by a copy of its words. A browser turn, which has
-    /// no shell, reads only "Replies". The line names the AI's own web search beside them, which a
-    /// run that has it uses to look things up; the rule as the copies from before said it is still
-    /// known, since a copy a space edited may say it word for word.
+    /// no shell, reads only "Replies". The line named the AI's own web search beside them (Nov 17),
+    /// and a turn took its text, what the search provider wrote, for a page read (a local test,
+    /// Nov 17): it names none now, as the copy from before it did. The rule as the copy that named
+    /// it said it is still known, since a copy a space edited may say it word for word.
     #[test]
     fn agents_doc_says_a_turn_reads_a_public_page_only_with_instafys_reader() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2701,8 +2715,8 @@ mod tests {
                 .map(str::to_string)
                 .expect("section")
         };
-        let rule = "- Read a public page only with `instafy web read <address>`, a reading command a skill names or the AI's own web search, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
-        let earlier_rule = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
+        let rule = "- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
+        let with_search = "- Read a public page only with `instafy web read <address>`, a reading command a skill names or the AI's own web search, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.";
         let heading = super::super::READING_THE_WEB_SECTION;
         assert!(
             AGENTS_DOC_TEMPLATE.contains(&format!("\n{heading}\n")),
@@ -2714,11 +2728,12 @@ mod tests {
             !section("## Responsiveness").contains("public page"),
             "{doc}"
         );
+        assert!(!doc.contains("the AI's own web search"), "{doc}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
         assert!(
             earlier_reading_the_web_sections()
-                .any(|earlier| earlier.lines().any(|line| line == earlier_rule)),
-            "{earlier_rule}"
+                .any(|earlier| earlier.lines().any(|line| line == with_search)),
+            "{with_search}"
         );
     }
 
@@ -2762,7 +2777,7 @@ mod tests {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
-            "A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.",
+            "A fact or tip you add to the reply or a page says \"not checked\" or which web search found it, or stays out, unless the person, a page you read this turn or Instafy's browser's findings gave it.",
             "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach.",
             "Never say a site or page lacks it or didn't load.",
             "Say only steps this turn did or started.",
@@ -2827,7 +2842,7 @@ mod tests {
     #[test]
     fn a_tip_no_page_gave_says_not_checked_on_the_page_as_in_the_reply() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let rule = "- A fact or tip you add to the reply or a page says \"not checked\", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.";
+        let rule = "- A fact or tip you add to the reply or a page says \"not checked\" or which web search found it, or stays out, unless the person, a page you read this turn or Instafy's browser's findings gave it.";
         let doc = flat(AGENTS_DOC_TEMPLATE);
         let replies = doc
             .split("## Replies")

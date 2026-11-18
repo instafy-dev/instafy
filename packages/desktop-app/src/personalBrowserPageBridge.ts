@@ -1186,20 +1186,6 @@ export async function pressPersonalBrowserTarget(
   );
 }
 
-export async function focusPersonalBrowserTarget(
-  webContents: WebContents,
-  target: PersonalBrowserTarget,
-): Promise<PersonalBrowserTargetDescriptor> {
-  return executeIsolated(
-    webContents,
-    buildPageScript(target, `
-      const element = findTarget();
-      if (element instanceof HTMLElement) element.focus();
-      return descriptor(element);
-    `),
-  );
-}
-
 export async function scrollPersonalBrowserPage(
   webContents: WebContents,
   amount: { x: number; y: number },

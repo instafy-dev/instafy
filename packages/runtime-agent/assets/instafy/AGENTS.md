@@ -14,7 +14,7 @@ This workspace uses Instafy’s skill-based knowledge files:
 
 ## Reading the web
 
-- Read a public page only with `instafy web read <address>`, a reading command a skill names or the AI's own web search, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.
+- Read a public page only with `instafy web read <address>` or a reading command a skill names, where robots.txt, budgets and Details apply; never with curl, wget, python, node or another script. Running those to build or check this space's own pages is fine.
 
 ## Replies
 
@@ -24,7 +24,7 @@ Write every reply for the person reading it, in their words:
 - Say a failure the way they would: "I couldn't reach the shop's site, so I read its www. address instead", not an error code; "the map's place search was busy, so nearby suggestions may be missing", not a service's name; "Stopped the hello page.", not a process ID.
 - Never describe the turn itself: its run, pass, snapshot, tabs, tools, checks ("validation passed") or limits ("I can't use a browser here"). Say what is missing and what they can ask for.
 - Name sources by who publishes them (OpenStreetMap, Wikipedia, the maker's site).
-- A fact or tip you add to the reply or a page says "not checked", or stays out, unless the person gave it or a page gives it: one you read this turn, or one in Instafy's browser's findings.
+- A fact or tip you add to the reply or a page says "not checked" or which web search found it, or stays out, unless the person, a page you read this turn or Instafy's browser's findings gave it.
 - When you didn't find something, say where you looked ("I didn't find a price on the shop's product page") or which page you didn't reach. What Instafy's browser's findings say it didn't find, say in their words, naming no page ("I didn't find the warranty"). Never say a site or page lacks it or didn't load.
 - When nothing needed changing, say what you checked and why.
 - A choice the request leaves open (dates, a currency, which models) is yours: make a sensible one and say it in the reply, without stopping to ask. Ask one short question only when no choice would serve them, such as which of their own things they mean, or when a booking, purchase, message or change to their accounts needs a choice they didn't make.

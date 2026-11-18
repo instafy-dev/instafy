@@ -25335,11 +25335,10 @@ mod tests {
         assert!(agents_doc[start..].contains(replies_rule));
         let no_change_rule = "- When nothing needed changing, say what you checked and why.\n";
         assert!(agents_doc[start..].contains(no_change_rule));
-        let reading_rule = "- Read a public page only with `instafy web read <address>`, a \
-                            reading command a skill names or the AI's own web search, where \
-                            robots.txt, budgets and Details apply; never with curl, wget, python, \
-                            node or another script. Running those to build or check this space's \
-                            own pages is fine.\n";
+        let reading_rule = "- Read a public page only with `instafy web read <address>` or a \
+                            reading command a skill names, where robots.txt, budgets and Details \
+                            apply; never with curl, wget, python, node or another script. Running \
+                            those to build or check this space's own pages is fine.\n";
         assert!(agents_doc[..start].contains(reading_rule));
         let reading_heading = format!("\n{READING_THE_WEB_SECTION}\n");
         assert!(agents_doc[..start].contains(&reading_heading));
@@ -25574,8 +25573,8 @@ mod tests {
                 .expect("prompt should build")
                 .0
         };
-        // The rule as copies from before the AI's own web search say it, which a copy the space
-        // edited may still say word for word.
+        // The rule as copies from before the AI's own web search say it, as the current copy does
+        // again, which a copy the space edited may still say word for word.
         let before_search = include_str!("legacy/agents-doc-v21.md");
         let earlier_section =
             markdown_section(before_search, READING_THE_WEB_SECTION).expect("section");
@@ -25583,7 +25582,21 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("- Read a public page only with"))
             .expect("rule");
-        assert_ne!(earlier_rule, rule);
+        assert_eq!(earlier_rule, rule);
+        // The copy between them named the AI's own web search as a reader of pages, a rule of its
+        // own, which a copy the space edited may still say word for word too.
+        let searched_as_a_read = include_str!("legacy/agents-doc-v22.md");
+        let search_section =
+            markdown_section(searched_as_a_read, READING_THE_WEB_SECTION).expect("section");
+        let search_rule = search_section
+            .lines()
+            .find(|line| line.starts_with("- Read a public page only with"))
+            .expect("rule");
+        assert_ne!(search_rule, rule);
+        assert!(
+            search_rule.contains("the AI's own web search"),
+            "{search_rule}"
+        );
         let before_its_section = include_str!("legacy/agents-doc-v20.md");
         assert!(!before_its_section.contains(READING_THE_WEB_SECTION));
         assert!(before_its_section.lines().any(|line| line == earlier_rule));
@@ -25592,7 +25605,19 @@ mod tests {
         let edited = format!("{before_its_section}\n## Our notes\n\n- Keep pages short.\n");
         let edited_section = format!("{before_search}\n## Our notes\n\n- Keep pages short.\n")
             .replace(READING_THE_WEB_SECTION, "## How we read");
+        let edited_search = format!("{searched_as_a_read}\n## Our notes\n\n- Keep pages short.\n")
+            .replace(READING_THE_WEB_SECTION, "## How we read");
         for (case, copy, gives) in [
+            (
+                "v22, naming the AI's own web search",
+                searched_as_a_read.to_string(),
+                true,
+            ),
+            (
+                "v22 edited, saying its rule word for word",
+                edited_search.clone(),
+                true,
+            ),
             (
                 "v21, from before the AI's own web search",
                 before_search.to_string(),

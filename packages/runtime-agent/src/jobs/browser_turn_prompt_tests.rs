@@ -358,7 +358,7 @@ fn a_turn_with_no_shell_leaves_out_the_sections_a_skill_names() {
         "never retry it another way (another reader, browser, user agent, cache, mirror or archive);",
         "- Never crawl, paginate results or sweep listings.",
         "## Citing",
-        "Show \"checked 26 Oct on <host>\" next to the fact",
+        "- From a page read: \"checked 26 Oct on <host>\", linked to it; from a search's text: \"a web search on 26 Oct found: … (<source> ↗, <article date>)\".",
     ] {
         assert!(read.contains(kept), "{kept}");
     }

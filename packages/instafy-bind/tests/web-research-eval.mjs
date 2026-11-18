@@ -116,7 +116,10 @@ const PRICE = /(?:€|\$|£)\s?\d+(?:[.,]\d+)?|\d+(?:[.,]\d+)?\s?(?:EUR|USD|GBP|
 
 /** A clock time, a duration or a numbered line: a fact a reply states that a page must back, or "not checked". */
 const STATED = [/\b\d{1,2}:\d{2}\b/, /\b\d+(?:[–-]\d+)?\s?(?:minutes?|mins?|hours?)\b/i, /\b(?:tram|bus|line|route|metro|train)\s+\d+[a-z]?\b/i];
-const CITED = /\b(?:checked|seen)\b|\bnot read\b/i;
+/** A fact a web search gave, said as one: "a web search on 26 Oct found: …" (no page was read for it). */
+const SEARCHED = /\bweb search on \d{1,2} [A-Z][a-z]{2}\b/i;
+const SEEN = /\bseen \d{1,2} [A-Z][a-z]{2}\b/;
+const CITED = new RegExp(`\\b(?:checked|seen)\\b|\\bnot read\\b|${SEARCHED.source}`, "i");
 
 /**
  * Grades one answer. `answer` = { findings: [{url,title,readAt,viewer,facts} | {url,stopped}], reply, items?,
@@ -173,9 +176,13 @@ export async function gradeAnswer(answer, { web, keyFacts = [], ask = "" }) {
     .filter((f) => !reply.includes(`checked ${dayMonth(f.readAt)} on ${hostOf(f.url)}`))
     .map((f) => `no "checked ${dayMonth(f.readAt)} on ${hostOf(f.url)}"`));
   const sentences = reply.split(/(?<=[.;!?])\s+|\n/);
+  // "seen" is said of a price a page read showed, naming that page; one a web search gave says so instead
+  const readHosts = [...new Set(read.map((f) => hostOf(f.url)))];
   check("prices_seen", [
-    ...sentences.filter((sentence) => sentence.match(PRICE) && !/\bseen \d{1,2} [A-Z][a-z]{2}\b/.test(sentence))
-      .map((sentence) => `price without "seen <date>": ${sentence}`),
+    ...sentences.filter((sentence) => sentence.match(PRICE) && !SEEN.test(sentence) && !SEARCHED.test(sentence))
+      .map((sentence) => `price without "seen <date>" or the web search that found it: ${sentence}`),
+    ...sentences.filter((sentence) => sentence.match(PRICE) && SEEN.test(sentence) && !readHosts.some((host) => sentence.includes(host)))
+      .map((sentence) => `a price "seen" on no page read: ${sentence}`),
     ...items.filter((item) => item.price && !/^\d{4}-\d{2}-\d{2}/.test(item.price.seen || "")).map((item) => `${item.name}: price without seen date`),
   ]);
   check("prices_link_out", items.filter((item) => item.price && web.siteOf(item.url || "")?.kind !== "official")

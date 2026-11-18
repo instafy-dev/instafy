@@ -612,6 +612,10 @@ export function numberIn(text) {
   return Number(m[1] + whole + (dec >= 0 ? `.${parts[dec].slice(1)}` : ""));
 }
 
+/** A fact only a web search gave ("viewer": "provider search", site.fromSearch): shown with that label, never counted
+ *  as within a limit nor named first under the title. */
+const fromSearch = (fact) => !!fact && typeof fact.viewer === "string" && fact.viewer.trim().toLowerCase() === "provider search";
+
 /** The number a page shows for a seed fact (site.known): a value with its source, or an estimate; else null. */
 export function knownNumber(fact) {
   if (!hasValue(fact) || !(fact.src || fact.est)) return null;
@@ -854,15 +858,19 @@ export function checkValues(dir) {
       // per item, as the page's filter reads it: its value for the key (none counts as unknown), or a check's
       const factOf = (item) => columns ? item.facts?.[filter.key]
         : filter.key === "price" ? item.price : (Array.isArray(item.details) ? item.details : []).find((d) => d?.key === filter.key)?.fact;
-      const unknown = data.items
+      const unread = data.items
         .filter((item) => item && typeof item === "object")
-        .filter((item) => knownNumber(factOf(item)) == null && liveValue(live.get(item.ref), filter.key) == null)
-        .map((item) => String(item.name ?? item.ref ?? "an item"));
-      if (unknown.length) {
-        const col = columns?.find((c) => c && c.key === filter.key);
-        const title = filter.unknown || `${col?.label ?? (filter.key === "price" ? "Price" : filter.key)} unknown`;
-        notes.push(`${unknown.length} item(s) have no ${String(col?.label ?? filter.key).toLowerCase()} the page can show: ${unknown.join(", ")}. The page lists them apart ("${title}"), never as "${label}"; say so in ${columns ? "the reply" : "the lede and the reply"}, with why for each.`);
-      }
+        .filter((item) => liveValue(live.get(item.ref), filter.key) == null);
+      const name = (item) => String(item.name ?? item.ref ?? "an item");
+      const unknown = unread.filter((item) => knownNumber(factOf(item)) == null).map(name);
+      // a value only a web search gave is shown with its label, and never counted as within the limit (site.within)
+      const searched = unread.filter((item) => knownNumber(factOf(item)) != null && fromSearch(factOf(item))).map(name);
+      const col = columns?.find((c) => c && c.key === filter.key);
+      const what = String(col?.label ?? filter.key).toLowerCase();
+      const title = filter.unknown || `${col?.label ?? (filter.key === "price" ? "Price" : filter.key)} unknown`;
+      const apart = `The page lists them apart ("${title}"), never as "${label}"; say so in ${columns ? "the reply" : "the lede and the reply"}`;
+      if (unknown.length) notes.push(`${unknown.length} item(s) have no ${what} the page can show: ${unknown.join(", ")}. ${apart}, with why for each.`);
+      if (searched.length) notes.push(`${searched.length} item(s) have a ${what} only a web search gave: ${searched.join(", ")}. ${apart}.`);
     }
   }
   // the line under a comparison's title comes from its sorts, where the compare starter's own app.js draws it
@@ -896,22 +904,25 @@ export function unsortedNumbers(data, records = new Map()) {
   // a row's number for a column, as a sort reads it: what a check read first, else its own value's
   const numberOf = (item, col) => read(item, col) ?? knownNumber(item.facts?.[col.key]);
   // the rows the line speaks of are those the page draws first: under a stated limit, the rows within it and those it
-  // cannot place (site.within, which counts an old price too)
+  // cannot place (site.within, which counts an old price too, and never a web search's)
   const filter = data.filter && typeof data.filter === "object" ? data.filter : null;
   const bound = (value) => (value == null || value === "" ? null : Number(value));
+  // a row whose own value only a web search gave, with no check's to draw instead
+  const searched = (item, col) => read(item, col) == null && fromSearch(item.facts?.[col.key]);
   const drawn = (item) => {
     if (!filter) return true;
-    const n = numberOf(item, columns.find((c) => c.key === filter.key) ?? { key: filter.key });
+    const col = columns.find((c) => c.key === filter.key) ?? { key: filter.key };
+    const n = searched(item, col) ? null : numberOf(item, col);
     const [max, min] = [bound(filter.max), bound(filter.min)];
     return n == null || ((max == null || n <= max) && (min == null || n >= min));
   };
   const rows = data.items.filter((item) => item && typeof item === "object" && drawn(item));
   if (rows.length < 2) return [];
   // the line names an option for a column only when every row shows a number for it, never a price that may have
-  // changed, and they are not all the same
+  // changed nor a value only a web search gave, and they are not all the same
   const fresh = (item, col) => {
     const asof = col.type === "price" && read(item, col) == null ? Date.parse(item.facts?.[col.key]?.asof ?? "") : NaN;
-    return Number.isFinite(asof) && Date.now() - asof > OLD_PRICE_MS ? null : numberOf(item, col);
+    return (Number.isFinite(asof) && Date.now() - asof > OLD_PRICE_MS) || searched(item, col) ? null : numberOf(item, col);
   };
   const decides = (col) => {
     const values = rows.map((item) => fresh(item, col));
