@@ -677,8 +677,12 @@ thread sends every page its turns read again: a comparison's fill-in on a thread
 request was about 114k tokens made 25 requests of 117k to 193k tokens, nearly all cached, and cost
 49 credits. So the browser part of a new message the routing step sent to the browser starts a new
 browser thread from the chat's replay once the thread's latest request sent more than 60k input
-tokens; a shorter thread is resumed, and so are the turns of one message (its second pass, a
-Continue under a Stop, a Let Octo continue). How a turn is charged is unchanged. Every other turn
+tokens; a shorter thread is resumed, and so are the turns of one message (its second pass, a Let
+Octo continue, and a Continue under a Stop whose thread ran a turn of the stopped message). A
+stopped or failed part saves no thread, so a Continue whose thread's latest request came before
+the person sent the message it carries on, and the Try again of a part that failed after leaving a
+long thread, start a new thread too.
+How a turn is charged is unchanged. Every other turn
 resumes the building thread, which never holds a page: what the browser read reaches it only as
 quoted page data. A building turn on a restored thread reads the browser turns since that thread's
 last turn (each one's request and reply, bounded and labelled as a hand-back's record is), a

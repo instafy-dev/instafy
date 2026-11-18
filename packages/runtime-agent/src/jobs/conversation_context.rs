@@ -157,30 +157,49 @@ fn continued_runs_of(entry: &JsonValue) -> impl Iterator<Item = &str> {
     .filter(|run| !run.is_empty())
 }
 
-/// Whether the card the routing step's job `card` posted answers a new message of the person's:
-/// one they wrote ([`is_person_message`]) that carries on no run a Stop ended. Studio's Continue
-/// under a Stop sends the stopped request again, naming the runs it carries on
-/// ([`continued_runs_of`]), so its message goes on with what those runs did. The card's entry
-/// names its job, and its run is the message's own. False when the history shows neither.
-pub(super) fn routed_card_answers_a_new_message(history: Option<&JsonValue>, card: &str) -> bool {
-    let Some(entries) = history.and_then(JsonValue::as_array) else {
-        return false;
-    };
-    let Some(run) = entries.iter().find_map(|entry| {
+/// The message of the person's that a card the routing step posted answers
+/// ([`routed_card_message`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RoutedCardMessage {
+    /// A new message: one they wrote ([`is_person_message`]) that carries on no run a Stop ended.
+    New,
+    /// Studio's Continue under a Stop, which sends the stopped request again, naming the runs it
+    /// carries on ([`continued_runs_of`]). `request_sent` is when the person sent that request:
+    /// the history's `createdAt` of its words ([`persons_request_at`]), when it says.
+    Continue {
+        request_sent: Option<chrono::DateTime<chrono::Utc>>,
+    },
+}
+
+/// What the card the routing step's job `card` posted answers: a new message of the person's, or
+/// a Continue under a Stop ([`RoutedCardMessage`]). The card's entry names its job, and its run is
+/// the message's own. None when the history shows neither.
+pub(super) fn routed_card_message(
+    history: Option<&JsonValue>,
+    card: &str,
+) -> Option<RoutedCardMessage> {
+    let entries = history.and_then(JsonValue::as_array)?;
+    let run = entries.iter().find_map(|entry| {
         let names_the_card = entry_text(entry, "role") == Some("assistant")
             && entry
                 .pointer("/metadata/jobId")
                 .and_then(JsonValue::as_str)
                 .is_some_and(|job| job.trim().eq_ignore_ascii_case(card.trim()));
         names_the_card.then(|| entry_text(entry, "runId")).flatten()
-    }) else {
-        return false;
-    };
-    entries.iter().any(|entry| {
-        entry_text(entry, "runId") == Some(run)
-            && is_person_message(entry)
-            && continued_runs_of(entry).next().is_none()
-    })
+    })?;
+    let mut messages = entries
+        .iter()
+        .filter(|entry| entry_text(entry, "runId") == Some(run) && is_person_message(entry))
+        .peekable();
+    messages.peek()?;
+    if messages.any(|entry| continued_runs_of(entry).next().is_none()) {
+        return Some(RoutedCardMessage::New);
+    }
+    let request_sent = persons_request_at(entries, run)
+        .and_then(|at| entry_text(&entries[at], "createdAt"))
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&chrono::Utc));
+    Some(RoutedCardMessage::Continue { request_sent })
 }
 
 /// The browser run a Let Octo continue goes on with: the paused turn of the same request, which
@@ -2584,22 +2603,32 @@ mod tests {
         }
         assert_eq!(context.metrics["mode"], "stateless_full");
 
-        // The card of the next message answers a new message; a Continue under a Stop carries a
-        // stopped request on, and a card the history doesn't show is no new message.
-        assert!(routed_card_answers_a_new_message(Some(&history), "card-2"));
-        assert!(routed_card_answers_a_new_message(Some(&history), "CARD-1"));
-        assert!(!routed_card_answers_a_new_message(
-            Some(&history),
-            "build-1"
-        ));
-        assert!(!routed_card_answers_a_new_message(Some(&history), "card-9"));
-        assert!(!routed_card_answers_a_new_message(None, "card-2"));
+        // The card of the next message answers a new message; a build's reply and a card the
+        // history doesn't show answer none of the person's.
+        let new = Some(RoutedCardMessage::New);
+        assert_eq!(routed_card_message(Some(&history), "card-2"), new);
+        assert_eq!(routed_card_message(Some(&history), "CARD-1"), new);
+        assert_eq!(routed_card_message(Some(&history), "build-1"), None);
+        assert_eq!(routed_card_message(Some(&history), "card-9"), None);
+        assert_eq!(routed_card_message(None, "card-2"), None);
+        // A Continue under a Stop carries a stopped request on: here the comparison, which its
+        // browser turn repeated, sent when the history says.
         let mut continued = history.clone();
         continued[6]["metadata"] = json!({"prompt_metadata": {"continuedStopMessageId": "stop-1", "continuedRunIds": ["run-2"]}});
-        assert!(!routed_card_answers_a_new_message(
-            Some(&continued),
-            "card-2"
-        ));
+        assert_eq!(
+            routed_card_message(Some(&continued), "card-2"),
+            Some(RoutedCardMessage::Continue { request_sent: None })
+        );
+        continued[0]["createdAt"] = json!("2026-11-17T14:31:05.250+00:00");
+        continued[6]["createdAt"] = json!("2026-11-17T14:52:40Z");
+        assert_eq!(
+            routed_card_message(Some(&continued), "card-2"),
+            Some(RoutedCardMessage::Continue {
+                request_sent: chrono::DateTime::parse_from_rfc3339("2026-11-17T14:31:05.250Z")
+                    .ok()
+                    .map(|at| at.with_timezone(&chrono::Utc)),
+            })
+        );
     }
 
     /// The routing step reads a browser turn's findings note as one line the runtime writes, how

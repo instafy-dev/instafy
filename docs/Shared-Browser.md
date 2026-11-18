@@ -1024,9 +1024,13 @@ of a new message the routing step sent to the browser starts again from the
 replay too once its thread's latest request sent more than 60k input tokens,
 as Codex recorded it in the thread's rollout: each request of a resumed thread
 sends every page it read again. A shorter thread is resumed, and so are the
-turns of one message: its second pass, a Continue under a Stop and a Let Octo
-continue. The browser's tabs and a page the person signs in on are no part of
-a thread. Codex withdraws the space's `AGENTS.md` from a
+turns of one message: its second pass, a Let Octo continue, and a Continue
+under a Stop whose thread ran a turn of the stopped message (its latest request
+came after the person sent it). A part the person stopped saves no thread, so
+when it had left a long one, or never began, its Continue leaves that earlier
+message's thread too; a part that fails after leaving one reports the state
+without it, so its Try again starts again from the replay. The browser's tabs
+and a page the person signs in on are no part of a thread. Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
 a fact no page read this turn states, where it looked for what it didn't find or
