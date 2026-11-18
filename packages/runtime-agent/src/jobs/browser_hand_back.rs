@@ -662,13 +662,6 @@ fn findings_reply(findings: &[String], missing: &[String]) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n\n"))
 }
 
-/// The reply a browser turn posted for its note when it answered in finding lines alone
-/// ([`findings_reply`]): a replay of the chat reads it once, from the note, which keeps its
-/// missing line after its finding lines ([`move_findings_into_details`]).
-pub(super) fn findings_reply_of(note: &str) -> Option<String> {
-    split_findings(note).and_then(|(_, lines)| findings_reply(&lines, &missing_names_in(note)))
-}
-
 /// A page's site as a person names it: its host, without `www.`.
 fn site_of(url: &str) -> Option<String> {
     let url = reqwest::Url::parse(url.trim()).ok()?;
@@ -3516,7 +3509,7 @@ mod tests {
         assert_eq!(turn.final_messages[0].content, lines);
 
         // What it didn't find comes last, from its missing line, in the runtime's words, and the
-        // note keeps the line; a replay reads the same reply from that note.
+        // note keeps the line.
         let chose = r#"{"url":"https://en.metrodoporto.pt/","title":"Metro do Porto","facts":["The journey planner allowed selecting São Bento as the start."]}"#;
         let stop = r#"{"url":"https://visitporto.travel/en-GB","stopped":"timed-out"}"#;
         let mut turn = execution(&format!(
@@ -3533,10 +3526,6 @@ mod tests {
         assert_eq!(
             note,
             format!("{chose}\n{stop}\n{{\"missing\":[\"a metro route\",\"opening hours.\"]}}")
-        );
-        assert_eq!(
-            findings_reply_of(&note).as_deref(),
-            Some(turn.summary.as_str())
         );
 
         // Lines that name pages and nothing they showed, with or without an empty missing line.

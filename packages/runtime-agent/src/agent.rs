@@ -1862,7 +1862,8 @@ impl RuntimeAgent {
                                     "failed to report telemetry for job error"
                                 );
                             }
-                            // A turn that left its building thread says so, failed or not.
+                            // A turn that left its building thread, or a long browser thread,
+                            // says so, failed or not.
                             let proxy_metadata = crate::jobs::failed_job_proxy_metadata(&error);
                             let failure_result = match failure_with_artifacts {
                                 Some(failure) => {
