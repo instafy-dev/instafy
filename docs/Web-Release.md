@@ -10,7 +10,10 @@
 `packages/frontend/hosted/hostedFrontendFeatureManifest.ts`, which composes:
 
 1. the public core feature module;
-2. the Studio performance bridge in `packages/frontend/hosted/performance/`,
+2. the local-engine lane's module (`packages/frontend/src/features/claudeCode/`),
+   which the public manifest lists too. It shows nothing until the controller's
+   switch covers the viewer ([Local-engine turns](Local-Engine-Turns.md));
+3. the Studio performance bridge in `packages/frontend/hosted/performance/`,
    whose transport is disabled in this lane.
 
 Integrations built outside this repository are not part of the hosted web app.

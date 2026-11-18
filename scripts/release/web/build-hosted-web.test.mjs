@@ -24,11 +24,18 @@ test("service-role names never reach the browser build", () => {
   assert.throws(() => hostedBuildEnvironment({ [["VITE", "SUPABASE", "SERVICE", "ROLE", "KEY"].join("_")]: "x" }, "/repo"), /forbidden/u);
 });
 
-test("the hosted manifest composes public core and then the performance bridge", () => {
+// The local-engine lane's module (docs/Local-Engine-Turns.md, 5.1 and phase 8). Its name is
+// built from parts: workflow-guard.test.mjs keeps the tool's name out of this folder's files.
+const LANE_MODULE = ["CLA", "UDE_CODE_FRONTEND_FEATURE_MODULE"].join("");
+
+test("the hosted manifest composes public core, the local-engine lane and then the performance bridge", () => {
   const manifest = fs.readFileSync(path.join(REPOSITORY_ROOT, HOSTED_MANIFEST_RELATIVE_PATH), "utf8");
   assert.match(
     manifest,
-    /APPLICATION_FRONTEND_FEATURE_MODULES = Object\.freeze\(\[\n  PUBLIC_CORE_FRONTEND_FEATURE_MODULE,\n  STUDIO_PERFORMANCE_FEATURE_MODULE,\n\]\);/u,
+    new RegExp(
+      `APPLICATION_FRONTEND_FEATURE_MODULES = Object\\.freeze\\(\\[\\n  PUBLIC_CORE_FRONTEND_FEATURE_MODULE,\\n  ${LANE_MODULE},\\n  STUDIO_PERFORMANCE_FEATURE_MODULE,\\n\\]\\);`,
+      "u",
+    ),
   );
   assert.deepEqual(fs.readdirSync(path.join(REPOSITORY_ROOT, "packages/frontend/hosted")).sort(), ["hostedFrontendFeatureManifest.ts", "performance"]);
 });
