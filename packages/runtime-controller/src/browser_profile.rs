@@ -24,7 +24,6 @@ use crate::agent::{
     ensure_agent_token_matches_runtime_lease, extract_agent_token, verify_agent_token_with_scopes,
 };
 use crate::auth::{authenticate_request, require_user_session};
-use crate::config::PgPool;
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, forbidden, internal_error,
     load_project_record, not_found, unauthorized, ApiError, AppState,
@@ -493,49 +492,6 @@ fn resolve_scope(query: &BrowserProfileQuery) -> Result<String, (StatusCode, Jso
         ));
     }
     Ok(scope)
-}
-
-pub(crate) async fn ensure_browser_profiles_table(pool: &PgPool) -> anyhow::Result<()> {
-    let mut connection = pool.get().await?;
-    let transaction = connection.transaction().await?;
-    // Multiple controller replicas (and parallel database-backed tests) may
-    // initialize this compatibility table at the same time. Serialize the
-    // multi-statement DDL as one transaction: CREATE INDEX / ALTER TABLE /
-    // REVOKE otherwise acquire different relation locks and can deadlock even
-    // though every individual statement is idempotent. A transaction-scoped
-    // advisory lock is released automatically on commit or rollback.
-    transaction
-        .query_one(
-            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&"runtime-controller:project-browser-profiles-schema-v1"],
-        )
-        .await?;
-    transaction
-        .batch_execute(
-            "
-            create table if not exists project_browser_profiles (
-              id uuid primary key,
-              project_id uuid not null references projects(id) on delete cascade,
-              scope text not null,
-              version bigint not null default 0,
-              nonce_b64 text not null,
-              ciphertext_b64 text not null,
-              bytes bigint not null default 0,
-              updated_by_runtime uuid,
-              created_at timestamptz not null default now(),
-              updated_at timestamptz not null default now()
-            );
-
-            create unique index if not exists project_browser_profiles_project_scope_uidx
-              on project_browser_profiles (project_id, scope);
-
-            alter table project_browser_profiles enable row level security;
-            revoke all privileges on table project_browser_profiles from anon, authenticated;
-            ",
-        )
-        .await?;
-    transaction.commit().await?;
-    Ok(())
 }
 
 /// Old runtimes used this path for unconditional writes. Preserve its auth and

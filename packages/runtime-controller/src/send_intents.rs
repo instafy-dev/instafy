@@ -967,10 +967,6 @@ pub(crate) async fn apply_steer_send_intent(
     crate::provider_requests::publish_canceled_provider_requests(state, &steered_requests);
 
     publish_conversation_message_event(&state.events, &persisted_message);
-    crate::notifications::enqueue_message_push_notifications(
-        state.clone(),
-        persisted_message.clone(),
-    );
     publish_job_input_event(
         state,
         conversation.project_id,

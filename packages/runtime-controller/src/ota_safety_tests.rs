@@ -321,15 +321,6 @@ async fn postgres_registries() -> anyhow::Result<Option<(OtaRegistry, OtaRegistr
     let pool = bb8::Pool::builder().max_size(5).build(manager).await?;
     let first = OtaRegistry::new_postgres(pool.clone());
     let second = OtaRegistry::new_postgres(pool.clone());
-    // Initialize independent controller registries before racing their mutations.
-    first
-        .list_releases()
-        .await
-        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-    second
-        .list_releases()
-        .await
-        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
     Ok(Some((first, second, pool)))
 }
 
@@ -598,6 +589,37 @@ async fn immutable_registration_postgres() -> anyhow::Result<()> {
         return Ok(());
     };
     assert_immutable_registration(registry).await
+}
+
+/// A bundle_version is unique per platform and channel
+/// (`ota_releases_platform_channel_bundle_version_idx`): registering it again
+/// under another release_id is a conflict, and stores nothing.
+#[tokio::test]
+async fn bundle_version_of_another_release_conflicts_postgres() -> anyhow::Result<()> {
+    let Some((registry, _, _)) = postgres_registries().await? else {
+        return Ok(());
+    };
+    let app = app_for(registry.clone()).await?;
+    let channel = format!("bundle-taken-{}", Uuid::new_v4());
+    let first = release_for(&channel, "first");
+    assert_eq!(
+        post(&app, "/ota/releases", json!(first)).await?.0,
+        StatusCode::CREATED
+    );
+    let mut other = release_for(&channel, "other");
+    other.bundle_version = first.bundle_version.clone();
+    let (status, body) = post(&app, "/ota/releases", json!(other)).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let stored = registry
+        .list_releases()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?
+        .into_iter()
+        .filter(|r| r.channel == channel)
+        .collect::<Vec<_>>();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].release_id, first.release_id);
+    Ok(())
 }
 
 #[test]

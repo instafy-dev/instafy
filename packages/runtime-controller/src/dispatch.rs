@@ -8,8 +8,6 @@ use axum::routing::post;
 use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use tokio_postgres::types::Json as PgJson;
@@ -62,9 +60,7 @@ const DISPATCHABLE_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS: i64 = 90;
 pub(crate) const CONVERSATION_VISIBILITY_KEY: &str = "conversationVisibility";
 
 pub(crate) fn router() -> Router<AppState> {
-    Router::new()
-        .route("/dispatch-prompt", post(dispatch_prompt))
-        .route("/progress-callback", post(progress_callback))
+    Router::new().route("/dispatch-prompt", post(dispatch_prompt))
 }
 
 pub(crate) async fn ensure_project_prompt_access(
@@ -1436,10 +1432,6 @@ pub(crate) async fn process_dispatch_prompt_timed(
         })?;
         if let Some(message) = user_message.as_ref() {
             conversations::publish_conversation_message_event(&state.events, message);
-            crate::notifications::enqueue_message_push_notifications(
-                state.clone(),
-                message.clone(),
-            );
         }
         return Ok(recorded_dispatch_response(conversation.id));
     }
@@ -1787,10 +1779,6 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 );
                 if let Some(message) = user_message.as_ref() {
                     conversations::publish_conversation_message_event(&state.events, message);
-                    crate::notifications::enqueue_message_push_notifications(
-                        state.clone(),
-                        message.clone(),
-                    );
                 }
                 if let Some(message) = silenced_existing_message.as_ref() {
                     // Clients already hold this row from the record path and
@@ -2028,7 +2016,6 @@ pub(crate) async fn process_dispatch_prompt_timed(
         insert_run_record(&transaction, &project, &run_request, run_id, &prompt_id).await?;
     }
 
-    let user_message_was_previously_recorded = existing_recorded_message.is_some();
     let user_message = if should_suppress_dispatch_user_message(&request.metadata) {
         None
     } else if let Some(existing) = existing_recorded_message.as_ref() {
@@ -2892,16 +2879,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     timings.transaction = Some(committed.duration_since(transaction_started));
 
     if let Some(user_message) = user_message.as_ref() {
+        // A reused record-then-dispatch row is published again so clients
+        // upsert the run linkage by message id.
         conversations::publish_conversation_message_event(&state.events, user_message);
-        // A reused record-then-dispatch row already sent push notifications
-        // when it was first recorded; republishing the event alone lets
-        // clients upsert the run linkage by message id.
-        if !user_message_was_previously_recorded {
-            crate::notifications::enqueue_message_push_notifications(
-                state.clone(),
-                user_message.clone(),
-            );
-        }
     }
 
     let mut primary_event_session = request.session_id;
@@ -3406,10 +3386,6 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 };
                 if let Some(message_row) = controller_message.as_ref() {
                     conversations::publish_conversation_message_event(&state.events, message_row);
-                    crate::notifications::enqueue_message_push_notifications(
-                        state.clone(),
-                        message_row.clone(),
-                    );
                 }
             }
         }
@@ -6012,160 +5988,6 @@ fn map_project_row(row: &tokio_postgres::Row) -> ProjectRecord {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct ProgressCallbackRequest {
-    run_id: String,
-    stage: Option<String>,
-    percent: Option<f64>,
-    message: Option<String>,
-    #[serde(rename = "preview_url", alias = "previewUrl")]
-    preview_url: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ProgressCallbackResponse {
-    ok: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProgressClaims {
-    run_id: Option<String>,
-    #[serde(rename = "exp")]
-    _exp: Option<i64>,
-}
-
-fn verify_progress_callback_token(
-    config: &AppConfig,
-    headers: &HeaderMap,
-    expected_run_id: &str,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let secret = config
-        .progress_callback_secret
-        .as_ref()
-        .ok_or_else(|| unauthorized("progress callback secret not configured"))?;
-
-    let auth_header = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| unauthorized("missing authorization header"))?;
-
-    if !auth_header.starts_with("Bearer ") {
-        return Err(unauthorized("authorization header must be Bearer token"));
-    }
-    let token = auth_header.trim_start_matches("Bearer ").trim();
-    if token.is_empty() {
-        return Err(unauthorized("authorization token is empty"));
-    }
-
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.validate_aud = false;
-    let token_data = decode::<ProgressClaims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|error| match error.kind() {
-        JwtErrorKind::ExpiredSignature => unauthorized("progress token expired"),
-        _ => unauthorized("invalid progress token"),
-    })?;
-
-    if let Some(run_id_claim) = token_data.claims.run_id {
-        if run_id_claim != expected_run_id {
-            return Err(unauthorized("progress token run_id mismatch"));
-        }
-    }
-
-    Ok(())
-}
-
-fn normalize_progress_percent(input: Option<f64>) -> Option<i32> {
-    input.and_then(|value| {
-        if !value.is_finite() {
-            return None;
-        }
-        let clamped = value.clamp(0.0, 100.0);
-        Some(clamped.round() as i32)
-    })
-}
-
-#[instrument(skip(state, headers, payload))]
-async fn progress_callback(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<ProgressCallbackRequest>,
-) -> Result<Json<ProgressCallbackResponse>, (StatusCode, Json<ApiError>)> {
-    let run_id_raw = payload.run_id.trim();
-    if run_id_raw.is_empty() {
-        return Err(bad_request("run_id is required"));
-    }
-
-    verify_progress_callback_token(&state.config, &headers, run_id_raw)?;
-
-    let run_id =
-        Uuid::from_str(run_id_raw).map_err(|_| bad_request("run_id must be a valid UUID"))?;
-
-    let percent = normalize_progress_percent(payload.percent);
-    let status_update = percent.and_then(|value| {
-        if value >= 100 {
-            Some("success")
-        } else if value > 0 {
-            Some("in_progress")
-        } else {
-            None
-        }
-    });
-
-    let (project_id, session_id, conversation_id, run_payload) = {
-        let client = &mut *state
-            .pool
-            .get()
-            .await
-            .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-        match runs::load_run_snapshot(client, &run_id).await {
-            Ok(Some(snapshot)) => {
-                // A callback can outlive its job's lease. Once Stop is
-                // committed, percent-derived progress must not revive it.
-                if snapshot.status == "canceled" {
-                    return Ok(Json(ProgressCallbackResponse { ok: true }));
-                }
-                (
-                    snapshot.project_id,
-                    snapshot.session_id,
-                    snapshot.conversation_id,
-                    runs::run_snapshot_to_json(&snapshot),
-                )
-            }
-            Ok(None) => (None, None, None, JsonValue::Null),
-            Err(error) => return Err(error),
-        }
-    };
-
-    if let Some(stage) = payload.stage.as_deref() {
-        publish_controller_event_with_conversation(
-            &state.events,
-            "run.progress",
-            project_id,
-            session_id,
-            conversation_id,
-            Some(run_id),
-            None,
-            json!({
-                "status": status_update,
-                "stage": stage,
-                "percent": percent,
-                "message": payload.message,
-                "previewUrl": payload.preview_url,
-                "run": run_payload,
-            }),
-        );
-    }
-
-    Ok(Json(ProgressCallbackResponse { ok: true }))
-}
-
 #[cfg(test)]
 #[path = "dispatch_security_tests.rs"]
 mod security_tests;
@@ -7836,15 +7658,6 @@ mod tests {
 
         let error = normalize_dispatch_request(request).unwrap_err();
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn normalize_progress_percent_clamps_and_rounds() {
-        assert_eq!(normalize_progress_percent(Some(-10.0)), Some(0));
-        assert_eq!(normalize_progress_percent(Some(12.4)), Some(12));
-        assert_eq!(normalize_progress_percent(Some(12.6)), Some(13));
-        assert_eq!(normalize_progress_percent(Some(150.0)), Some(100));
-        assert_eq!(normalize_progress_percent(Some(f64::NAN)), None);
     }
 
     #[test]

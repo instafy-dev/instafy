@@ -248,7 +248,6 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         browser_profile_persist_project_ids: vec![],
         browser_profile_snapshot_secs: 30,
         hosted_browser_host: Default::default(),
-        progress_callback_secret: None,
         git_remote_base_url: None,
         git_remote_public_base_url: None,
         git_shards: vec![],
@@ -453,43 +452,11 @@ fn decode_scoped_token_round_trip() {
 }
 
 #[tokio::test]
-async fn concurrent_browser_profile_table_initialization_is_deadlock_free() -> anyhow::Result<()> {
-    let Some(pool) = setup_origin_test_pool().await? else {
-        eprintln!("skipping browser profile schema concurrency test: TEST_DATABASE_URL not set");
-        return Ok(());
-    };
-
-    let initialize_all = async {
-        let mut initializers = tokio::task::JoinSet::new();
-        for _ in 0..10 {
-            let pool = pool.clone();
-            initializers.spawn(async move {
-                crate::browser_profile::ensure_browser_profiles_table(&pool).await
-            });
-        }
-        while let Some(result) = initializers.join_next().await {
-            result.map_err(|error| {
-                anyhow::anyhow!("browser profile initializer panicked: {error}")
-            })??;
-        }
-        Ok::<_, anyhow::Error>(())
-    };
-
-    timeout(std::time::Duration::from_secs(10), initialize_all)
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("parallel browser profile table initialization timed out")
-        })??;
-    Ok(())
-}
-
-#[tokio::test]
 async fn delete_project_purges_durable_browser_profile() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping browser profile deletion test: TEST_DATABASE_URL not set");
         return Ok(());
     };
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
 
     let project_id = Uuid::new_v4();
     let profile_id = Uuid::new_v4();
@@ -600,7 +567,6 @@ async fn project_builder_can_reset_browser_profile_after_policy_revocation() -> 
         eprintln!("skipping browser profile reset authorization test: TEST_DATABASE_URL not set");
         return Ok(());
     };
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
 
     let project_id = Uuid::new_v4();
     let builder_user_id = Uuid::new_v4();
@@ -746,7 +712,6 @@ async fn browser_profile_reset_retains_profile_when_provider_release_cannot_be_p
         eprintln!("skipping browser profile reset release test: TEST_DATABASE_URL not set");
         return Ok(());
     };
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
 
     let project_id = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();
@@ -918,7 +883,6 @@ async fn browser_profile_reset_retains_profile_when_provider_release_cannot_be_p
 async fn browser_profile_reset_accepts_removed_runtime_with_ordered_provider_release_ack(
 ) -> anyhow::Result<()> {
     let pool = require_origin_test_pool("acknowledged browser profile reset test").await?;
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
 
     let project_id = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();
@@ -1169,7 +1133,6 @@ async fn active_self_hosted_runtimes_cannot_access_browser_profiles() -> anyhow:
         eprintln!("skipping self-hosted browser-profile boundary test: TEST_DATABASE_URL not set");
         return Ok(());
     };
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
 
     let project_id = Uuid::new_v4();
     let self_hosted_runtime_id = Uuid::new_v4();
@@ -1325,7 +1288,6 @@ async fn active_managed_cloud_runtime_can_put_and_get_browser_profile() -> anyho
         eprintln!("skipping managed-cloud browser-profile test: TEST_DATABASE_URL not set");
         return Ok(());
     };
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
 
     let project_id = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();
@@ -1807,7 +1769,6 @@ async fn stopped_self_hosted_runtime_loses_browser_profile_capability() -> anyho
         eprintln!("skipping stopped browser-profile runtime test: TEST_DATABASE_URL not set");
         return Ok(());
     };
-    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
 
     let project_id = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();
@@ -10270,6 +10231,27 @@ async fn event_stream_hides_private_runtime_lifecycle_from_project_teammates() -
     Ok(())
 }
 
+/// Whom a message `sender` writes into `conversation_id` notifies: the
+/// recipient query the notification outbox's producer runs in the message's
+/// own transaction (`notification_conversation_recipients`).
+async fn notification_outbox_recipients(
+    pool: &PgPool,
+    conversation_id: &Uuid,
+    sender: &Uuid,
+) -> anyhow::Result<Vec<Uuid>> {
+    let mut recipients: Vec<Uuid> = pool
+        .get()
+        .await?
+        .query_one(
+            "select public.notification_conversation_recipients($1, $2)",
+            &[conversation_id, sender],
+        )
+        .await?
+        .get(0);
+    recipients.sort();
+    Ok(recipients)
+}
+
 #[tokio::test]
 async fn notification_inbox_and_push_recipients_require_current_project_access(
 ) -> anyhow::Result<()> {
@@ -10345,25 +10327,10 @@ async fn notification_inbox_and_push_recipients_require_current_project_access(
     let state = build_test_state(pool.clone(), config);
     let app = crate::notifications::router().with_state(state);
 
-    let recipients_before = {
-        let mut connection = pool.get().await?;
-        let transaction = connection.transaction().await?;
-        let conversation =
-            crate::conversations::load_conversation_record(&transaction, &conversation_id)
-                .await
-                .map_err(|error| {
-                    controller_error("load notification conversation before revocation", error)
-                })?;
-        let recipients = crate::notifications::load_notification_recipients(
-            &transaction,
-            &conversation,
-            Some(owner_user_id),
-        )
-        .await?;
-        transaction.commit().await?;
-        recipients
-    };
-    assert_eq!(recipients_before, vec![revoked_user_id]);
+    assert_eq!(
+        notification_outbox_recipients(&pool, &conversation_id, &owner_user_id).await?,
+        vec![revoked_user_id]
+    );
 
     let inbox_before = app
         .clone()
@@ -10400,25 +10367,12 @@ async fn notification_inbox_and_push_recipients_require_current_project_access(
             .await?;
     }
 
-    let recipients_after = {
-        let mut connection = pool.get().await?;
-        let transaction = connection.transaction().await?;
-        let conversation =
-            crate::conversations::load_conversation_record(&transaction, &conversation_id)
-                .await
-                .map_err(|error| {
-                    controller_error("load notification conversation after revocation", error)
-                })?;
-        let recipients = crate::notifications::load_notification_recipients(
-            &transaction,
-            &conversation,
-            Some(owner_user_id),
-        )
-        .await?;
-        transaction.commit().await?;
-        recipients
-    };
-    assert!(recipients_after.is_empty());
+    assert!(
+        notification_outbox_recipients(&pool, &conversation_id, &owner_user_id)
+            .await?
+            .is_empty(),
+        "a stale participant row must not make a revoked member a push recipient"
+    );
 
     let inbox_after = app
         .oneshot(
@@ -19633,6 +19587,29 @@ async fn post_agent_endpoint(
     Ok(response.status())
 }
 
+/// The notification outbox's rows about `conversation_id`, one per event and
+/// recipient: (producer key, event name, recipient). Producers write them in
+/// the transaction of the message or run they announce.
+async fn conversation_notification_rows(
+    pool: &PgPool,
+    conversation_id: &Uuid,
+) -> anyhow::Result<std::collections::BTreeSet<(String, String, Uuid)>> {
+    Ok(pool
+        .get()
+        .await?
+        .query(
+            "select e.producer_key, e.event_name, r.user_id
+               from notification_events e
+               join notification_recipients r on r.event_id = e.id
+              where e.conversation_id = $1",
+            &[conversation_id],
+        )
+        .await?
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect())
+}
+
 #[tokio::test]
 async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -> anyhow::Result<()>
 {
@@ -19857,9 +19834,10 @@ async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -
         // leased a job posts to it or ends it.
         let token = lease_job_to_space_runtime(&pool, &config, &project_id, &job_id).await?;
 
-        // Ignore any dispatch-time delivery attempts; the assertions below
-        // cover only the streamed/final result paths.
-        crate::notifications::take_test_push_enqueue_count(conversation_id);
+        // What the dispatch notified stays out of the completion assertion
+        // below, which covers only the final result.
+        let dispatched_notifications =
+            conversation_notification_rows(&pool, &conversation_id).await?;
 
         if case.stream_plain_text_decline {
             let status = post_agent_endpoint(
@@ -19886,12 +19864,47 @@ async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -
                 "streamed plain-text decline failed for {}",
                 case.name
             );
+            // The controller swallows the decline: it persists nothing and
+            // records the decline on the job and its run. (The outbox cannot
+            // show a leak here: notification_conversation_reply skips every
+            // /agent/message row, whose top-level kind is "update".)
+            let connection = pool.get().await?;
+            let persisted: i64 = connection
+                .query_one(
+                    "select count(*)::bigint from conversation_messages
+                      where conversation_id = $1
+                        and role = 'assistant'
+                        and coalesce(metadata ->> 'kind', '') <> 'runtime_alert'",
+                    &[&conversation_id],
+                )
+                .await?
+                .get(0);
             assert_eq!(
-                crate::notifications::take_test_push_enqueue_count(conversation_id),
-                0,
-                "streamed decline must not enqueue a push for {}",
+                persisted, 0,
+                "streamed decline must not be persisted for {}",
                 case.name
             );
+            let declined_job: PgJson<serde_json::Value> = connection
+                .query_one("select payload from agent_jobs where id = $1", &[&job_id])
+                .await?
+                .get("payload");
+            assert_eq!(
+                declined_job.0["metadata"]["groupParticipation"],
+                crate::group_participation::agent_declined_marker(),
+                "streamed decline must be recorded on the job for {}",
+                case.name
+            );
+            let declined_run: PgJson<serde_json::Value> = connection
+                .query_one("select metadata from runs where id = $1", &[&run_id])
+                .await?
+                .get("metadata");
+            assert_eq!(
+                declined_run.0["groupParticipation"],
+                crate::group_participation::agent_declined_marker(),
+                "streamed decline must be recorded on the run for {}",
+                case.name
+            );
+            drop(connection);
         }
 
         let mut completion = json!({
@@ -19911,10 +19924,26 @@ async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -
             "completion failed for {}",
             case.name
         );
+        // A visible result notifies the automation's owner once, with the
+        // automation's own event; a quiet one notifies nobody.
+        let completion_notifications: Vec<(String, Uuid)> =
+            conversation_notification_rows(&pool, &conversation_id)
+                .await?
+                .difference(&dispatched_notifications)
+                .map(|(_, event_name, user_id)| (event_name.clone(), *user_id))
+                .collect();
+        let expected_event = if case.outcome == "succeeded" {
+            "automation.completed"
+        } else {
+            "automation.failed"
+        };
         assert_eq!(
-            crate::notifications::take_test_push_enqueue_count(conversation_id),
-            usize::from(case.expected_content.is_some()),
-            "unexpected completion push enqueue count for {}",
+            completion_notifications,
+            case.expected_content
+                .map(|_| (expected_event.to_string(), owner_user_id))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "unexpected completion notifications for {}",
             case.name
         );
 

@@ -10,9 +10,6 @@ async fn test_state(name: &str) -> anyhow::Result<AppState> {
         crate::tests::test_origin_public_key(),
         name,
     );
-    ensure_bug_report_tables(&pool)
-        .await
-        .map_err(|error| anyhow::anyhow!(error.1 .0.message))?;
     Ok(crate::tests::build_test_state(pool, config))
 }
 
