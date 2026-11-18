@@ -364,7 +364,8 @@ test("card posts the card of a page that never had one, titled from the page, an
 // A page written by hand that loads another page's files ("../framework-laptops/site.js") can't be served from its own
 // folder, so the check holds its card back and names the command that gives it its own files. The card step without
 // the check holds it back too: its card would open a page whose files don't load, and the space's record would then
-// hold it as carded. Once the page loads its own files, the card step posts its card.
+// hold it as carded. Instafy's runtime reads this reason word for word, and says under the turn's reply that the page
+// isn't ready to open. Once the page loads its own files, the card step posts its card.
 test("card posts no card for a page that loads files from outside its folder, as the check posts none", () => {
   const s = space();
   try {

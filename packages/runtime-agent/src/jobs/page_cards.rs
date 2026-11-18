@@ -31,8 +31,17 @@
 //! served, so the runtime cannot read that skill's command there: a folder that a command of an
 //! installed skill named in the turn is left as it was, and that skill's own steps post its card.
 //!
-//! The reply waits for the cards at most [`CARD_TIMEOUT`] in all, and says nothing of a card
-//! either way: a card that could not be posted is logged, never shown.
+//! The reply waits for the cards at most [`CARD_TIMEOUT`] in all, and says nothing of a card that
+//! was posted or that could not be: that is logged, never shown. A page whose card the binder
+//! holds back for what the page itself does is another matter: nobody can open it, so a reply that
+//! says it was made must not stand alone. That is a page that loads files from outside its folder
+//! (another page's, say, or a library's elsewhere in the workspace), which are not there when its
+//! folder is served. In a local test (Nov 17) a build read another chat's comparison as a sample
+//! and wrote a page that loads that page's script and styles; its card was held back, and its
+//! reply said "Created a … comparison page" of a page with no card and no server. Under such a
+//! reply goes the runtime's own line, as under a reply whose change to another chat's page was put
+//! back ([`NOT_READY_TO_OPEN`]). It says "new", as the step is only for a page the turn made: the
+//! line beside it may name another chat's page, which opens as it did.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -68,11 +77,21 @@ const CARD_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_ANSWER_BYTES: u64 = 64 * 1024;
 /// The most of the command's own words about a card it could not post that go into the log.
 const MAX_ERROR_CHARS: usize = 300;
+/// The binder's reason for holding back the card of a page that loads files from outside its
+/// folder, as `instafy bind card --json` answers it (the binder's own test pins these words).
+const LOADS_FILES_FROM_OUTSIDE: &str = "it loads files from outside its folder";
+/// The line under the reply of a turn that left such a page, and of one that left several.
+const NOT_READY_TO_OPEN: &str =
+    "The new page isn't ready to open: it uses files from outside its own folder.";
+const NOT_READY_TO_OPEN_SEVERAL: &str =
+    "The new pages aren't ready to open: they use files from outside their own folders.";
 
 /// Posts the card of each page the turn left without one ([`pages_without_a_card`]), before the
 /// reply. `files` are the turn's files as its save lists them, `events` its Codex events, from
 /// each of its passes. One page at a time, at most [`MAX_CARDS`], for at most [`CARD_TIMEOUT`] in
-/// all; a Stop ends it.
+/// all; a Stop ends it. Returns the lines that go under the reply: [`NOT_READY_TO_OPEN`] when the
+/// binder held back the card of a page nobody can open, [`NOT_READY_TO_OPEN_SEVERAL`] when it held
+/// back more than one.
 pub(super) async fn post_missing_cards(
     workspace_dir: &Path,
     project_id: &Uuid,
@@ -80,7 +99,7 @@ pub(super) async fn post_missing_cards(
     files: &[CodexFileDescriptor],
     events: &[&[JsonValue]],
     cancel: Option<&JobCancelSignal>,
-) {
+) -> Vec<String> {
     post_missing_cards_within(
         workspace_dir,
         project_id,
@@ -90,7 +109,7 @@ pub(super) async fn post_missing_cards(
         cancel,
         CARD_TIMEOUT,
     )
-    .await;
+    .await
 }
 
 async fn post_missing_cards_within(
@@ -101,13 +120,13 @@ async fn post_missing_cards_within(
     events: &[&[JsonValue]],
     cancel: Option<&JobCancelSignal>,
     timeout: Duration,
-) {
+) -> Vec<String> {
     if read_only {
-        return;
+        return Vec::new();
     }
     let pages = pages_made(workspace_dir, files);
     if pages.is_empty() {
-        return;
+        return Vec::new();
     }
     let state = match std::env::var_os("HOME") {
         Some(home) => tokio::fs::read_to_string(Path::new(&home).join(PREVIEW_STATE_RELATIVE_PATH))
@@ -136,26 +155,34 @@ async fn post_missing_cards_within(
         .filter(|folder| !skills.contains(folder))
         .collect();
     if folders.is_empty() {
-        return;
+        return Vec::new();
     }
     // A Stop that reached the controller once the turn's change was saved: the turn is stopped.
     if let Some(cancel) = cancel
         && !cancel.lease_held().await
     {
         info!("the turn was stopped: no card for the page it left without one");
-        return;
+        return Vec::new();
     }
     let environment = card_environment();
     let deadline = Instant::now() + timeout;
+    let mut held_back = 0;
     for folder in folders.iter().take(MAX_CARDS) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             warn!(folder = %folder, "no time left to post the card of a page the turn left without one");
             break;
         }
-        if post_card(workspace_dir, folder, &environment, left, cancel).await == Posted::Stopped {
-            break;
+        match post_card(workspace_dir, folder, &environment, left, cancel).await {
+            Posted::Stopped => break,
+            Posted::HeldBack => held_back += 1,
+            Posted::Yes | Posted::No => {}
         }
+    }
+    match held_back {
+        0 => Vec::new(),
+        1 => vec![NOT_READY_TO_OPEN.to_string()],
+        _ => vec![NOT_READY_TO_OPEN_SEVERAL.to_string()],
     }
 }
 
@@ -343,6 +370,8 @@ fn card_environment() -> Vec<(OsString, OsString)> {
 enum Posted {
     Yes,
     No,
+    /// The binder held the card back for what the page does: nobody can open it.
+    HeldBack,
     Stopped,
 }
 
@@ -447,6 +476,11 @@ async fn post_card(
                 .collect::<String>();
             if status.code() == Some(2) {
                 info!(folder, said = %said, "no card to post for a page the turn left without one");
+                // Served from its own folder, it can't load files from outside it: nobody can open
+                // it. Any other answer says it has its card, or that none can be posted here.
+                if said == LOADS_FILES_FROM_OUTSIDE {
+                    return Posted::HeldBack;
+                }
             } else {
                 warn!(
                     folder,
@@ -659,8 +693,9 @@ mod tests {
 
     /// A stand-in `instafy`: it notes what ran it, where, and which of the settings and credentials
     /// it was given; `bind card` for `sites/fails` fails, for `sites/hangs` starts a helper in its
-    /// group and hangs, for `sites/none` answers that there is no card to post, and for any other
-    /// folder answers that it posted the card.
+    /// group and hangs, for `sites/none` answers that there is no card to post, for `sites/borrow…`
+    /// that it holds the card back, as the binder does for a page that loads files from outside its
+    /// folder, and for any other folder answers that it posted the card.
     #[cfg(unix)]
     fn stand_in(bin: &Path, seen: &Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -674,6 +709,7 @@ case "$3" in
   ./sites/fails) echo '{{"posted":false,"error":"the preview could not start"}}'; exit 1 ;;
   ./sites/hangs) sleep 300 & echo "helper=$!" >> "$seen"; sleep 300 ;;
   ./sites/none) echo '{{"posted":false,"reason":"a preview shows it"}}'; exit 2 ;;
+  ./sites/borrow*) echo '{{"posted":false,"reason":"it loads files from outside its folder"}}'; exit 2 ;;
 esac
 echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer":{{"status":"live"}}}}'
 "#,
@@ -688,7 +724,9 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
     // The card step runs the binder's card command from the workspace for each page the turn left
     // without a card, with the turn's credential and chat and nothing else secret, one page at a
     // time; a command that fails or runs out of time ends with nothing left of its group, and a
-    // Stop ends the step, before it starts or while a card is posted.
+    // Stop ends the step, before it starts or while a card is posted. Only a card held back for a
+    // page that loads files from outside its folder gives a line for the reply: one line, for one
+    // such page or for several.
     #[cfg(unix)]
     #[test]
     fn the_card_step_runs_the_binders_card_command_for_each_page_with_the_turns_credential() {
@@ -741,7 +779,9 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         let sandbox = std::path::PathBuf::from(std::env::var_os(CHILD_MARKER).unwrap());
         let seen_file = sandbox.join("seen");
         let workspace = sandbox.join("workspace");
-        for page in ["new", "fails", "none", "hangs", "later", "mine"] {
+        for page in [
+            "new", "fails", "none", "hangs", "later", "mine", "borrows", "borrowed",
+        ] {
             write(&workspace, &format!("sites/{page}/index.html"));
         }
         std::fs::create_dir_all(workspace.join(".instafy/pages")).unwrap();
@@ -788,12 +828,14 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         // A page the turn made, one whose card fails, one with none to post, and this chat's page:
         // the card command for each of the first three, one at a time, from the workspace, with
         // the turn's credential, chat and space, and none of the other credentials or secrets.
-        run(
+        // Nothing for the reply.
+        let said = run(
             made(&["new", "fails", "none", "mine"]),
             false,
             None,
             Duration::from_secs(30),
         );
+        assert_eq!(said, Vec::<String>::new());
         let lines = seen();
         let expected = |page: &str| {
             format!(
@@ -868,6 +910,46 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         assert!(
             gone(helper),
             "the stopped command's helper {helper} is gone"
+        );
+
+        // A page whose card is held back, as for a page that loads files from outside its
+        // folder, beside one with no card to post and one whose card is posted: the reply gets a
+        // line of its own for the new page, whatever those files are.
+        let said = run(
+            made(&["borrows", "none", "later"]),
+            false,
+            None,
+            Duration::from_secs(30),
+        );
+        assert_eq!(said, vec![NOT_READY_TO_OPEN.to_string()]);
+        assert_eq!(
+            NOT_READY_TO_OPEN,
+            "The new page isn't ready to open: it uses files from outside its own folder."
+        );
+        let lines = seen();
+        assert_eq!(
+            lines[7..],
+            [expected("borrows"), expected("later"), expected("none")],
+            "{lines:#?}"
+        );
+
+        // Two pages whose cards are held back, and one with no card to post: one line, for both.
+        let said = run(
+            made(&["borrowed", "borrows", "none"]),
+            false,
+            None,
+            Duration::from_secs(30),
+        );
+        assert_eq!(said, vec![NOT_READY_TO_OPEN_SEVERAL.to_string()]);
+        assert_eq!(
+            NOT_READY_TO_OPEN_SEVERAL,
+            "The new pages aren't ready to open: they use files from outside their own folders."
+        );
+        let lines = seen();
+        assert_eq!(
+            lines[10..],
+            [expected("borrowed"), expected("borrows"), expected("none")],
+            "{lines:#?}"
         );
     }
 }

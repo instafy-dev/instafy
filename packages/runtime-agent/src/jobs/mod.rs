@@ -4659,7 +4659,12 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 /// It speaks of a page made for the person (a map, a comparison, a page to share), and the list
 /// holds only those: the person's own app or site, from the workspace or a folder of it (an
 /// imported repository), is changed as asked from any chat ("Make the buttons rounder.").
-const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
+/// A new chat's build took another chat's comparison as its sample and wrote a page that loads
+/// that page's script and styles (`../<that page>/site.js`): served from its own folder, the new
+/// page can't load them, and nobody could open it (a local test, Nov 17). That build never opened
+/// the page skill, so this says it: a new page copies what it uses from another page. It rides in
+/// a restored thread's compact reminder too, which has little room: hence so few words.
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. Copy into it any file you use from another page. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
@@ -10872,7 +10877,7 @@ impl JobProcessor {
                 self.picture_sender(),
             );
             // A page the turn left without its card gets it now, before the reply.
-            page_cards::post_missing_cards(
+            let retry_unopened_pages = page_cards::post_missing_cards(
                 &workspace_dir,
                 &project_id,
                 read_only_workspace,
@@ -10976,8 +10981,10 @@ impl JobProcessor {
                 // An empty reply is no reply: the building turn answers.
                 retry_outcome.summary.clear();
             }
-            // The page another chat made that it didn't change, on a line of its own.
+            // The page another chat made that it didn't change, and a page it made that nobody
+            // can open, each on a line of its own.
             held_pages.reply(&mut retry_outcome.summary, &retry_outcome.files);
+            save_report::append_not_saved(&mut retry_outcome.summary, &retry_unopened_pages);
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
@@ -11227,7 +11234,7 @@ impl JobProcessor {
             self.picture_sender(),
         );
         // A page the turn left without its card gets it now, before the reply.
-        page_cards::post_missing_cards(
+        let unopened_pages = page_cards::post_missing_cards(
             &workspace_dir,
             &project_id,
             read_only_workspace,
@@ -11257,8 +11264,10 @@ impl JobProcessor {
             // An empty reply is no reply: the building turn answers.
             outcome.summary.clear();
         }
-        // The page another chat made that it didn't change, on a line of its own.
+        // The page another chat made that it didn't change, and a page it made that nobody can
+        // open, each on a line of its own.
         held_pages.reply(&mut outcome.summary, &outcome.files);
+        save_report::append_not_saved(&mut outcome.summary, &unopened_pages);
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
@@ -29833,13 +29842,15 @@ mod tests {
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
+        let compact = estimate_prompt_token_count(
+            &prompt_text
+                .strip_prefix(&preference_section)
+                .unwrap()
+                .replace(BROWSER_CHOICE_CONTRACT, ""),
+        );
         assert!(
-            estimate_prompt_token_count(
-                &prompt_text
-                    .strip_prefix(&preference_section)
-                    .unwrap()
-                    .replace(BROWSER_CHOICE_CONTRACT, "")
-            ) < 1_550
+            compact < 1_550,
+            "the compact restored prompt is {compact} estimated tokens without its preferences and the browser rule"
         );
         assert!(
             prompt_tokens < 1_625 + browser_choice,
