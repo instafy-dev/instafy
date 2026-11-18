@@ -23,7 +23,6 @@ import {
   runDesktopRuntimeExitFinalizer,
   shouldEnableProjectOrigin,
   stopDesktopRuntimeChildWithEscalation,
-  waitForProjectWorkspaceContent,
 } from "./index.js";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
@@ -82,31 +81,6 @@ describe("hasProjectWorkspaceContent", () => {
         gitRemoteUrl: null,
       }),
     ).toBe(false);
-  });
-
-  it("waits until hydration creates real project content", async () => {
-    fs.mkdirSync(path.join(tempDir, ".instafy"), { recursive: true });
-    const waitPromise = waitForProjectWorkspaceContent(tempDir, {
-      timeoutMs: 1_000,
-      intervalMs: 5,
-    });
-
-    setTimeout(() => {
-      fs.writeFileSync(path.join(tempDir, "README.md"), "# Hydrated\n");
-    }, 10);
-
-    await expect(waitPromise).resolves.toBe(true);
-  });
-
-  it("times out when only workspace markers exist", async () => {
-    fs.mkdirSync(path.join(tempDir, ".instafy"), { recursive: true });
-
-    await expect(
-      waitForProjectWorkspaceContent(tempDir, {
-        timeoutMs: 10,
-        intervalMs: 5,
-      }),
-    ).resolves.toBe(false);
   });
 });
 

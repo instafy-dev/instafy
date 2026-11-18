@@ -5,7 +5,6 @@ export const PROTOCOL_VERSION = 2;
 export const HOST_SOURCE = "instafy-host";
 export const INTENT_SOURCES = ["instafy-site"];
 export const HOST_TYPES = ["hello", "ack", "progress", "results", "done", "error", "command"];
-export const ACK_STATUSES = ["queued", "needs_confirm", "rejected", "running"];
 export const ERROR_CODES = ["not_found", "timeout", "policy", "upstream", "unavailable", "invalid", "cancelled", "dry_run", "internal"];
 export const COMMAND_NAMES = ["select", "highlight", "toast", "reload"];
 export const RESERVED_INTENTS = ["cancel"];
@@ -16,8 +15,6 @@ export const INTENT_NAME_RE = /^[a-z][a-z0-9_]{0,47}$/;
 export const ENVELOPE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,47}:[A-Za-z0-9_.:-]{1,120}$/;
 /** ui and attr hints from the page: short tokens only (they reach logs, prompts and other viewers). */
 export const ENVELOPE_TOKEN_RE = /^[A-Za-z0-9_.:-]{1,60}$/;
-/** Cancel keys returned to the submitting viewer only. */
-export const CANCEL_KEY_RE = /^[A-Za-z0-9_-]{16,64}$/;
 /** The whole POST body. */
 export const MAX_INTENT_BYTES = 8 * 1024;
 /** Serialised params. */

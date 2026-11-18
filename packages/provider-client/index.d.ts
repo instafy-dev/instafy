@@ -45,10 +45,6 @@ export type ProviderHostClientOptions = {
   fetch?: ProviderClientFetch;
 };
 
-export type ProviderHostJsonRequestOptions = {
-  fetch?: ProviderClientFetch;
-};
-
 export type ProviderHealthSnapshot = {
   ok: boolean;
   source: "resource" | "transport_probe" | "availability" | "error";
@@ -96,9 +92,3 @@ export function resolveProviderHealthSnapshot(
   client: ProviderHostClient,
   provider: ProviderSummary,
 ): Promise<ProviderHealthSnapshot>;
-export function providerHostJsonRequest<TResponse = unknown>(
-  baseUrl: string | undefined,
-  path: string,
-  init?: ProviderClientRequestInit,
-  options?: ProviderHostJsonRequestOptions,
-): Promise<TResponse>;

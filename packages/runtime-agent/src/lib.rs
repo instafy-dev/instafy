@@ -11,6 +11,7 @@ pub mod claude_code;
 pub mod cli_session;
 pub mod code_mode_host;
 pub mod codex;
+pub mod codex_claude_guard;
 mod codex_policy;
 pub mod config;
 pub mod controller;
