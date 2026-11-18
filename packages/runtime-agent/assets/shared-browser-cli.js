@@ -2420,29 +2420,91 @@ function typedLine(description, text, held, submitted, unsent = NOT_SENT, listed
   return [`${did}${holds}.`, "A page's reading never shows typed text.", listed, unsent].filter(Boolean).join(" ");
 }
 
-// A type step types as a person does: the text goes in, and its last
-// character as a key press, so a field that opens its list as keys are
-// pressed (a planner's stops, a search's suggestions) opens it. Setting the
-// value alone presses no key: a planner's stop lists never opened, and turns
-// pressed Tab or the wrong button, then said the planner gave no route (a
-// local test, Nov 17). A field whose value no key types (a date, a time, a
-// colour, a number), an empty text and a text whose last character is a key
-// of its own (a new line, a tab) are set as before, so typing never presses
-// Enter or moves the focus: what sends a form stays the person's or its own
-// step's.
+// A type step types as a person does: the text is set, and its last
+// character typed over itself as a key press, so a field that opens its list
+// as keys are pressed (a planner's stops, a search's suggestions) opens it.
+// Setting the value alone presses no key: a planner's stop lists never
+// opened, and turns pressed Tab or the wrong button, then said the planner
+// gave no route (a local test, Nov 17). A field whose value no key types (a
+// date, a time, a colour, a number), an empty text and a text whose last
+// character is a key of its own (a new line, a tab) or no key's (an accent
+// alone) are only set, so typing never presses Enter or moves the focus: what
+// sends a form stays the person's or its own step's. So is a field the page
+// moved on from as the text was set (lastKeyInPage): the key never goes to
+// what the page focused instead, which was never the step's control.
 const SET_VALUE_INPUT_TYPES = new Set(["color", "date", "datetime-local", "month", "number", "range", "time", "week"]);
-const KEY_TYPED_CHARACTER = /^[\p{L}\p{M}\p{N}\p{P}\p{S} ]$/u;
+const KEY_TYPED_CHARACTER = /^[\p{L}\p{N}\p{P}\p{S} ]$/u;
+// The characters Playwright's keyboard has a key for. It types any other with
+// no key press at all, so a field whose list a key opens never opened it for
+// a text ending on "ö" (pressLastKey).
+const KEYBOARD_CHARACTER = /^[\x20-\x7e]$/u;
 
-async function typeLikeAPerson(target, text) {
+async function typeLikeAPerson(page, target, text) {
+  await target.locator.fill(text);
   const characters = Array.from(text);
   const last = characters[characters.length - 1];
   const inputType = String(target.description.inputType || "").toLowerCase();
-  if (last === undefined || SET_VALUE_INPUT_TYPES.has(inputType) || !KEY_TYPED_CHARACTER.test(last)) {
-    await target.locator.fill(text);
+  if (last === undefined || SET_VALUE_INPUT_TYPES.has(inputType) || !KEY_TYPED_CHARACTER.test(last)) return;
+  const filled = await within(FIELD_READ_MS, target.locator.evaluate(lastKeyInPage, { kind: "last-key", last }).catch(() => null), null);
+  if (typeof filled !== "string") return;
+  await pressLastKey(page, target, last).catch(() => {});
+  // A key that did not land as it should never leaves the field changed or
+  // out of order: the text is set again, as setting it left the field.
+  if ((await heldText(target.locator)) !== filled) await target.locator.fill(text).catch(() => {});
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Whether the type step's text field, once its text is
+// set, takes that text's last character as a key: it is still in the page and
+// the focused element (as Playwright judges one, or its key would first move
+// the caret to the start), its caret is at the end, and what it holds ends
+// with that character. If so, that character is selected, for the key to type
+// it over itself, and the answer is what the field holds; null otherwise.
+// Neither changes what the field holds, however late the page runs it. A
+// page that moved the focus to a suggestion, opened a field of its own or
+// replaced the field as the text went in keeps the text as set.
+function lastKeyInPage(element, request) {
+  try {
+    const last = typeof request?.last === "string" ? request.last : "";
+    const doc = element.ownerDocument;
+    const view = doc?.defaultView;
+    if (!last || !view || !element.isConnected || element.readOnly || element.disabled) return null;
+    const textField = element instanceof view.HTMLTextAreaElement ||
+      (element instanceof view.HTMLInputElement && ["text", "search", "url", "tel"].includes(element.type));
+    if (!textField || element.getRootNode().activeElement !== element || !doc.hasFocus()) return null;
+    const value = String(element.value);
+    if (!value.endsWith(last) || element.selectionStart !== value.length || element.selectionEnd !== value.length) {
+      return null;
+    }
+    element.setSelectionRange(value.length - last.length, value.length);
+    return value;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Presses the key that types `last` over the field's selected last
+// character: Playwright's own for a character its keyboard has
+// (KEYBOARD_CHARACTER), which focuses the field first; for any other, the
+// browser's key event with that character, as a keyboard that has it sends
+// one, to the field lastKeyInPage just found focused.
+async function pressLastKey(page, target, last) {
+  if (KEYBOARD_CHARACTER.test(last)) {
+    await target.locator.type(last);
     return;
   }
-  await target.locator.fill(characters.slice(0, -1).join(""));
-  await target.locator.type(last);
+  const session = await page.context().newCDPSession(page);
+  try {
+    const still = await target.locator.evaluate((element, length) =>
+      element.getRootNode().activeElement === element && element.ownerDocument.hasFocus() &&
+      element.selectionEnd === element.value.length && element.selectionEnd - element.selectionStart === length, last.length)
+      .catch(() => false);
+    if (still !== true) return;
+    await session.send("Input.dispatchKeyEvent", { type: "keyDown", key: last, text: last, unmodifiedText: last });
+    await session.send("Input.dispatchKeyEvent", { type: "keyUp", key: last });
+  } finally {
+    await session.detach().catch(() => {});
+  }
 }
 
 // How long a type step looks for the list its field opens as a person types,
@@ -2463,19 +2525,23 @@ const FIELD_LIST_NAMED = 4;
 const MAX_FIELD_LIST_NAME_CHARS = 80;
 
 // Runs inside the page through Playwright, so it must not use anything from
-// this file's scope. Of `request.elements`, the options a person can see in
-// the list `field` opens as they type (a combobox's suggestions): those of a
-// list the field, or the combobox it sits in, names as its own
-// (aria-controls, aria-owns, the list its active option sits in) or holds,
-// and, when it names none, every option shown (`listed`); of those, the ones
-// that were not shown before the step typed (`fresh`; `request.before` holds
-// the words of those that were). The field counts with the one the page moved
-// the focus to as it was typed into (a planner that opens its search in a
-// field of its own). Answers too whether a field says it opens a list
-// (`named`), and the words of every option shown (`shown`) and of the first
-// fresh ones. Those words never leave the step: it only compares them.
+// this file's scope. Of `request.elements`, the options a person can see and
+// choose in the list `field` opens as they type (a combobox's suggestions).
+// When the field, or the combobox it sits in, names a list of its own
+// (aria-controls, aria-owns, the list its active option sits in) or holds
+// one (`own`), those of that list (`listed`); when it names none, the
+// options shown anywhere that were not before the step typed (`fresh`;
+// `request.before` holds the words of those that were). Another list on the
+// page is never the field's: a step named a field's options under another
+// field, and a page's "Sort by" under a search. An option turned off (a
+// list's "Searching…" or "No matches" row) is none. Once the step typed
+// (`request.typed`), the field counts with the one the page moved the focus
+// to (a planner that opens its search in a field of its own). Answers too
+// whether a field says it opens a list (`named`), the words of each set
+// (`ownWords`, `freshWords`) and of every option shown (`shown`). Those words
+// never leave the step: it only compares them.
 function fieldListInPage(field, request) {
-  const answer = { kind: "field-list", named: false, listed: [], fresh: [], words: [], shown: [] };
+  const answer = { kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [] };
   try {
     const elements = Array.isArray(request && request.elements) ? request.elements.slice(0, 400) : [];
     const before = new Set(Array.isArray(request && request.before) ? request.before.slice(0, 400) : []);
@@ -2493,7 +2559,7 @@ function fieldListInPage(field, request) {
       focused = focused.shadowRoot.activeElement;
     }
     const fields = [field];
-    if (focused && focused !== field && focused instanceof view.Element &&
+    if (request && request.typed === true && focused && focused !== field && focused instanceof view.Element &&
       focused.matches("input, textarea, [contenteditable], [role=combobox], [role=searchbox], [role=textbox]")) {
       fields.push(focused);
     }
@@ -2532,25 +2598,29 @@ function fieldListInPage(field, request) {
     };
     const options = elements.filter((element) =>
       element instanceof view.Element && element.matches("[role=option]") && shown(element));
-    const own = options.filter((option) => lists.some((list) => inside(option, list)));
-    const listed = own.length ? own : options;
-    const fresh = listed.filter((option) => !before.has(wordsOf(option)));
-    answer.listed = elements.map((element) => listed.includes(element));
+    const usable = options.filter((option) => !option.matches(":disabled") && !option.closest("[aria-disabled=true]"));
+    const own = lists.length ? usable.filter((option) => lists.some((list) => inside(option, list))) : [];
+    const fresh = lists.length ? [] : usable.filter((option) => !before.has(wordsOf(option)));
+    answer.own = lists.length > 0;
+    answer.listed = elements.map((element) => own.includes(element));
     answer.fresh = elements.map((element) => fresh.includes(element));
-    answer.words = fresh.slice(0, 16).map(wordsOf);
+    answer.ownWords = own.map(wordsOf);
+    answer.freshWords = fresh.map(wordsOf);
     answer.shown = options.map(wordsOf);
     return answer;
   } catch (_) {
-    return { kind: "field-list", named: false, listed: [], fresh: [], words: [], shown: [] };
+    return { kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [] };
   }
 }
 
-// What fieldListInPage answers for the type step's field of `elements`, or
-// null when the page cannot say in time.
-async function fieldListOf(target, elements, before) {
+// What fieldListInPage answers for the type step's field of `elements`, once
+// the step typed or before (`typed`), or null when the page cannot say in
+// time.
+async function fieldListOf(target, elements, before, typed) {
   return await within(FIELD_READ_MS, (async () => {
-    const answer = await target.locator.evaluate(fieldListInPage, { kind: "field-list", elements, before });
-    return answer && answer.kind === "field-list" && ["listed", "fresh", "words", "shown"].every((key) => Array.isArray(answer[key]))
+    const answer = await target.locator.evaluate(fieldListInPage, { kind: "field-list", elements, before, typed });
+    return answer && answer.kind === "field-list" &&
+      ["listed", "fresh", "ownWords", "freshWords", "shown"].every((key) => Array.isArray(answer[key]))
       ? answer
       : null;
   })().catch(() => null), null);
@@ -2561,32 +2631,37 @@ async function shownOptions(page) {
   return (await page.locator(FIELD_LIST_OPTIONS).elementHandles().catch(() => [])).slice(0, MAX_FIELD_LIST_OPTIONS);
 }
 
-// The words of the options the page shows before a type step types (`before`
-// for fieldListInPage), or none when it cannot say.
+// What the page shows before a type step types: the words of every option
+// (`shown`, the `before` of fieldListInPage) and of those of the field's own
+// list (`own`), or none when it cannot say.
 async function optionsShownBefore(page, target) {
-  const answer = await fieldListOf(target, await shownOptions(page), []);
-  return answer ? answer.shown : [];
+  const answer = await fieldListOf(target, await shownOptions(page), [], false);
+  return { shown: answer ? answer.shown : [], own: answer ? answer.ownWords : [] };
 }
 
 // Waits, after a type step, for the list its field opens as a person types:
-// until its fresh options (fieldListInPage) stop changing, for up to
-// FIELD_LIST_WAIT_MS when the field says it opens one or options came, and
-// FIELD_LIST_QUIET_MS otherwise. Answers which of fieldListInPage's sets the
-// step names ("fresh", or "listed" when a list shows only options shown before
-// the step: one it narrowed), or null when no list shows.
+// its own list's options once they differ from what it showed before the
+// step (one it narrowed is named whole), or else the options that came
+// (fieldListInPage), until they stop changing, for up to FIELD_LIST_WAIT_MS
+// when the field says it opens one or options came, and FIELD_LIST_QUIET_MS
+// otherwise. While only rows turned off show (a list's "Searching…"), it
+// keeps looking. Answers which of fieldListInPage's sets the step names
+// ("listed" or "fresh"), or null when no list came.
 async function fieldListAfterTyping(page, target, before) {
   const started = Date.now();
   let last = null;
   for (;;) {
-    const now = await fieldListOf(target, await shownOptions(page), before);
+    const now = await fieldListOf(target, await shownOptions(page), before.shown, true);
     if (!now) return null;
-    const words = now.words.join("\n");
-    if (now.words.length && last === words) return "fresh";
+    const set = now.own ? "listed" : "fresh";
+    const words = (now.own ? now.ownWords : now.freshWords).join("\n");
+    const came = words !== "" && words !== (now.own ? before.own.join("\n") : "");
+    if (came && last === words) return set;
     const waited = Date.now() - started;
-    if (waited >= (now.named || now.words.length ? FIELD_LIST_WAIT_MS : FIELD_LIST_QUIET_MS) || stepClock.isUp()) {
-      return now.words.length ? "fresh" : now.listed.includes(true) && now.named ? "listed" : null;
+    if (waited >= (now.named || came ? FIELD_LIST_WAIT_MS : FIELD_LIST_QUIET_MS) || stepClock.isUp()) {
+      return came ? set : null;
     }
-    last = words;
+    last = came ? words : null;
     await page.waitForTimeout(FIELD_LIST_EVERY_MS).catch(() => {});
   }
 }
@@ -2599,11 +2674,11 @@ async function fieldListAfterTyping(page, target, before) {
 // of them, or withholds the page.
 async function fieldListLine(target, reading, before, set) {
   const controls = readingControls;
-  if (!set || !controls || !reading || reading.secretScreen === true ||
+  if (!set || !before || !controls || !reading || reading.secretScreen === true ||
     !Array.isArray(reading.interactiveElements) || reading.interactiveElements.length !== controls.length) {
     return null;
   }
-  const answer = await fieldListOf(target, controls.map(({ locator }) => locator), before);
+  const answer = await fieldListOf(target, controls.map(({ locator }) => locator), before.shown, true);
   if (!answer) return null;
   const options = reading.interactiveElements.filter((_, index) => answer[set][index] === true);
   if (!options.length) return null;
@@ -7112,13 +7187,13 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // that opened as keys were pressed could take that Enter for one of its
     // options. Typing alone types as a person does, and looks for the list
     // the field opens (fieldListAfterTyping).
-    const optionsBefore = submitting ? [] : await optionsShownBefore(page, target);
+    const optionsBefore = submitting ? null : await optionsShownBefore(page, target);
     const typedOn = submitting ? null : { url: page.url(), documentId: await documentOf(page) };
     let listed = null;
     if (submitting) {
       await target.locator.fill(body.text);
     } else {
-      await typeLikeAPerson(target, body.text);
+      await typeLikeAPerson(page, target, body.text);
       listed = await fieldListAfterTyping(page, target, optionsBefore);
     }
     // A page that went on by itself while the step looked for its list (a

@@ -288,14 +288,17 @@ pub(crate) fn step_tried_addresses(
 }
 
 /// What only the browser can say stopped a step, by the word a browser turn's finding line gives
-/// it (`jobs::browser_hand_back`): the step, or the load it began, didn't answer in time
-/// (`timed-out`), or something on the page covered the control the step was for (`covered`).
-/// Read from the controller's own words for each (`assets/shared-browser-cli.js`), and from a
-/// step whose time ran out (`stepTimedOut`) or that paused on a cookie notice for the person,
-/// never from page text: a page's reading says neither. Two browser turns wrote `timed-out` and
-/// one `covered` of steps that answered with neither, and the person read that a planner didn't
-/// answer in time (a local test, Nov 17). None for any other step. Kept so that no finding of a
-/// browser turn says a page stopped it so where none of its steps was told so
+/// it (`jobs::browser_hand_back`): the step, or the load it began, didn't answer in time, or the
+/// page was still too busy to be read (`timed-out`), or something on the page covered the control
+/// the step was for (`covered`). Read from the controller's own words for each
+/// (`assets/shared-browser-cli.js`): a failed step's reason, a step's `message` and how a
+/// succeeded step's `done` starts, never the labels and options a `done` quotes from the page;
+/// and from a step whose time ran out (`stepTimedOut`) or that paused on a cookie notice for the
+/// person. A page's reading says neither. Two browser turns wrote `timed-out` and one `covered`
+/// of steps that answered with neither, and the person read that a planner didn't answer in time
+/// (a local test, Nov 17). None for any other step: a link the page did not take a click on,
+/// whose address then opened in the tab, stopped nothing. Kept so that no finding of a browser
+/// turn says a page stopped it so where none of its steps was told so
 /// (`jobs::browser_hand_back::leave_out_addresses_never_opened`), never projected into a
 /// message.
 pub(crate) fn step_stop(
@@ -303,21 +306,33 @@ pub(crate) fn step_stop(
     payload: Option<&JsonValue>,
     terminal_code: Option<&str>,
 ) -> Option<&'static str> {
-    // A step Playwright gave up waiting on, or a link the page did not take a click on in time;
-    // a site that did not answer, then or earlier in the chat; a page still loading when an
-    // earlier step's time ran out; a step whose time ran out; and a site the browser couldn't
-    // reach, which did not answer either.
-    const TIMED_OUT: [&str; 7] = [
+    // A step Playwright gave up waiting on; a site that did not answer, then or earlier in the
+    // chat; a page still loading when an earlier step's time ran out, still too busy to be read,
+    // or not read in time; a step whose time ran out; and a site the browser couldn't reach,
+    // which did not answer either.
+    const TIMED_OUT: [&str; 8] = [
         "did not take this step in time",
-        "did not take the click in time",
         "did not answer in time",
         "did not answer in Instafy's browser",
         "was still loading after",
+        "The page is still busy",
+        "could not be read in time",
         "time ran out",
         "it did not answer",
     ];
     // A cookie notice the browser could not decline, or anything else over the control.
     const COVERED: [&str; 2] = ["A cookie notice covers", "Something else on the page"];
+    // The stop the browser's words in `said` give, found in it by `known`.
+    fn stop_by(said: &str, known: impl Fn(&str, &str) -> bool) -> Option<&'static str> {
+        if TIMED_OUT.iter().any(|words| known(said, *words)) {
+            Some("timed-out")
+        } else {
+            COVERED
+                .iter()
+                .any(|words| known(said, *words))
+                .then_some("covered")
+        }
+    }
     if terminal_code == Some("cookie_notice_required") {
         return Some("covered");
     }
@@ -325,24 +340,23 @@ pub(crate) fn step_stop(
     if succeeded && payload.get("stepTimedOut").and_then(JsonValue::as_bool) == Some(true) {
         return Some("timed-out");
     }
-    let fields: &[&str] = if succeeded {
-        &["/done", "/message"]
-    } else {
-        &["/error/reason"]
-    };
-    let said: Vec<&str> = fields
-        .iter()
-        .filter_map(|field| payload.pointer(field).and_then(JsonValue::as_str))
-        .collect();
-    if said
-        .iter()
-        .any(|words| TIMED_OUT.iter().any(|known| words.contains(known)))
+    // A succeeded step's `done` names controls and options in the page's own words, after the
+    // browser's: only how it starts is the browser's.
+    if succeeded
+        && let Some(stop) = payload
+            .get("done")
+            .and_then(JsonValue::as_str)
+            .and_then(|done| stop_by(done, |said, words| said.starts_with(words)))
     {
-        return Some("timed-out");
+        return Some(stop);
     }
-    said.iter()
-        .any(|words| COVERED.iter().any(|known| words.contains(known)))
-        .then_some("covered")
+    let field = if succeeded {
+        "/message"
+    } else {
+        "/error/reason"
+    };
+    let said = payload.pointer(field).and_then(JsonValue::as_str)?;
+    stop_by(said, |said, words| said.contains(words))
 }
 
 /// Where a `navigate` or `open_tab` left its tab for the address it asked for: that address, as

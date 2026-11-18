@@ -1734,17 +1734,22 @@ covered (`covered`) is something only the browser says, in a step's answer;
 nothing on a page says it. runtime-agent keeps, for each run, the addresses
 at which a Shared Browser step was told one: by the controller's own words
 for a step Playwright gave up waiting on, a site that did not answer or was
-not reached, a page still loading when an earlier step's time ran out, a link
-the page did not take a click on in time, a step whose time ran out, and a
+not reached, a page still loading when an earlier step's time ran out, still
+too busy to be read or not read in time, a step whose time ran out, and a
 click a cookie notice or anything else covered, or a pause on a notice for the
 person; at the addresses the step tried, the link it pressed and the page its
-tab was on before it. A `timed-out` or `covered` line for a site where no step
-was told it is left out, of any pass of the turn, at an address a step opened
-too: a planner's route turn pressed Tab, was told the page read as before,
-wrote `timed-out` though no step had, and the reply said the planner gave no
-route; another wrote `covered` after a click the page took, and asked the
-person to dismiss a notice. Lines are compared by site, as the person reads
-them ("The page on planner.example didn't answer in time."). Every other stop, a
+tab was on before it. Those words are a failed step's reason, a step's
+`message` and how a step's `done` starts, never a label or an option a `done`
+quotes from the page; a link whose address opened in the tab when the page
+did not take its click was told no stop. A `timed-out` or `covered` line for a
+site where no step was told it is left out, of any pass of the turn, at an
+address a step opened too: a planner's route turn pressed Tab, was told the
+page read as before, wrote `timed-out` though no step had, and the reply said
+the planner gave no route; another wrote `covered` after a click the page
+took, and asked the person to dismiss a notice. A page that stayed too busy
+to be read keeps its line, so the person hears why it is missing. Lines are
+compared by site, as the person reads them ("The page on planner.example
+didn't answer in time."). Every other stop, a
 line whose address is no full address, and every line of a turn whose stops
 are not known stay: no Shared Browser step answered, a step of the browser on
 the person's device did (it says its stops in words of its own), the browser
@@ -2236,23 +2241,36 @@ yet."): a turn typed into a site's search, never sent it, and wrote that the
 page returned no results. Where Enter, as the box holds the text, is a site
 search that goes without a prompt (below), it reads "Nothing was searched
 yet: press Enter to search (no prompt needed).". A `type` step without
-`submit` types as a person does: the text goes in, then its last character as
-a key press, so a field that opens its list as keys are pressed (a planner's
-stops, a search's suggestions) opens it. Setting the value alone pressed no
-key: a planner's stop lists never opened, and turns pressed Tab or the wrong
-button, then said the planner gave no route. A field whose value no key types
-(a date, a time, a colour, a number), an empty text and a text whose last
-character is a key of its own (a new line, a tab) are set as before, so
+`submit` types as a person does: the text is set, then its last character is
+typed over itself as a key press, so a field that opens its list as keys are
+pressed (a planner's stops, a search's suggestions) opens it. Setting the
+value alone pressed no key: a planner's stop lists never opened, and turns
+pressed Tab or the wrong button, then said the planner gave no route. The key
+is the browser's own for a character a US keyboard has no key for ("ö", "é"),
+which Playwright would type with no key press. A field whose value no key
+types (a date, a time, a colour, a number), an empty text and a text whose
+last character is a key of its own (a new line, a tab) are only set, so
 typing never presses Enter or moves the focus; `submit` sets the text and
-presses Enter as before, and what sends a form keeps its own prompt. The step
-then looks for the list its field opens: the options (`role="option"`) of a
-list the field, or the combobox it sits in, names as its own
-(`aria-controls`, `aria-owns`, the list its active option is in) or holds,
-else options shown that were not before it typed, for up to 3 seconds when
-the field says it opens a list (a combobox, `aria-autocomplete`,
-`aria-haspopup`, `aria-expanded`) and 0.6 seconds otherwise, until they stop
-changing. Its `done` names how many there are and the first four, by the
-names and indices of the reading it answers with: "Typed 7 characters into
+presses Enter as before, and what sends a form keeps its own prompt. So is a
+field the page moved on from as the text was set: one no longer focused, with
+its caret off the end, or no longer in the page (a page that moves the focus
+to a suggestion, opens a search field of its own, or replaces the field). The
+key never goes to what the page focused instead, and a field the key left
+holding anything else is set again, so typing never leaves a field short or
+out of order. The step then looks for the list its field opens: the options
+(`role="option"`) of a list the field, or the combobox it sits in, names as
+its own (`aria-controls`, `aria-owns`, the list its active option is in) or
+holds, all of them once they differ from what that list showed before the
+step (a list the text narrowed is named whole); else, for a field that names
+no list, options shown that were not before it typed. Another list on the
+page is never the field's: a field's options were named under another field,
+and a page's "Sort by" under a search. An option turned off (a list's
+"Searching…" or "No matching stops" row) is none, and the step keeps looking
+past it. It looks for up to 3 seconds when the field says it opens a list (a
+combobox, `aria-autocomplete`, `aria-haspopup`, `aria-expanded`) and 0.6
+seconds otherwise, until the options stop changing. Its `done` names how many
+there are and the first four, by the names and indices of the reading it
+answers with: "Typed 7 characters into
 "From". A page's reading never shows typed text. 3 suggestions under "From":
 "Central Station" (index 3), "Central Square" (index 4), "Old Central Park"
 (index 5). Click one. Nothing was sent yet." On a page that may show a
