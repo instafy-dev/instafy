@@ -1749,7 +1749,6 @@ impl RuntimeAgent {
                             artifacts: vec![json!({
                                 "kind": "write-scope/coordination-required",
                             })],
-                            credit_snapshot: None,
                             provider_conversation_state: None,
                             messages: Vec::new(),
                             messages_streamed: false,

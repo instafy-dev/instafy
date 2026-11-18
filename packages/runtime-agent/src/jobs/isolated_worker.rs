@@ -280,7 +280,6 @@ impl JobProcessor {
                 suggested_replies: Vec::new(),
                 provider: "codex-embedded".into(),
                 artifacts: execution_artifacts,
-                credit_snapshot: None,
                 provider_conversation_state: None,
                 messages,
                 messages_streamed: progress

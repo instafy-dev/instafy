@@ -194,7 +194,6 @@ fn execution() -> JobExecution {
         suggested_replies: Vec::new(),
         provider: "terminal".to_string(),
         artifacts: Vec::new(),
-        credit_snapshot: None,
         provider_conversation_state: None,
         messages: Vec::new(),
         messages_streamed: false,

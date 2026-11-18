@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 use codex_protocol::openai_models::ReasoningEffort;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use runtime_contracts::{CreditSnapshotPayload, ProxyEnvelopePayload};
+use runtime_contracts::ProxyEnvelopePayload;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -3433,7 +3433,6 @@ pub struct JobExecution {
     pub suggested_replies: Vec<String>,
     pub provider: String,
     pub artifacts: Vec<JsonValue>,
-    pub credit_snapshot: Option<CreditSnapshotPayload>,
     pub provider_conversation_state: Option<JsonValue>,
     pub messages: Vec<JobMessage>,
     pub messages_streamed: bool,
@@ -3447,9 +3446,6 @@ impl JobExecution {
             "provider".to_string(),
             JsonValue::from(self.provider.clone()),
         );
-        if let Some(snapshot) = self.credit_snapshot.as_ref() {
-            map.insert("creditSnapshot".to_string(), snapshot.to_json());
-        }
         if let Some(state) = self.provider_conversation_state.as_ref() {
             map.insert("conversation".to_string(), state.clone());
         }
@@ -7611,7 +7607,6 @@ impl JobProcessor {
                         suggested_replies: Vec::new(),
                         provider: "terminal".to_string(),
                         artifacts,
-                        credit_snapshot: None,
                         provider_conversation_state: None,
                         messages: fallback_messages,
                         messages_streamed: streamed,
@@ -7741,7 +7736,6 @@ impl JobProcessor {
                         "scope": scope_key,
                         "workspaceDir": session.workspace_dir,
                     })],
-                    credit_snapshot: None,
                     provider_conversation_state: None,
                     messages: Vec::new(),
                     messages_streamed: false,
@@ -7763,7 +7757,6 @@ impl JobProcessor {
                             "scope": scope_key,
                             "active": false,
                         })],
-                        credit_snapshot: None,
                         provider_conversation_state: None,
                         messages: Vec::new(),
                         messages_streamed: false,
@@ -7801,7 +7794,6 @@ impl JobProcessor {
                         "workspaceDir": session.workspace_dir,
                         "outputChars": output.chars().count(),
                     })],
-                    credit_snapshot: None,
                     provider_conversation_state: None,
                     messages: Vec::new(),
                     messages_streamed: false,
@@ -7822,7 +7814,6 @@ impl JobProcessor {
                             "scope": scope_key,
                             "stopped": false,
                         })],
-                        credit_snapshot: None,
                         provider_conversation_state: None,
                         messages: Vec::new(),
                         messages_streamed: false,
@@ -7841,7 +7832,6 @@ impl JobProcessor {
                         "stopped": true,
                         "sessionId": session.session_id,
                     })],
-                    credit_snapshot: None,
                     provider_conversation_state: None,
                     messages: Vec::new(),
                     messages_streamed: false,
@@ -7921,7 +7911,6 @@ impl JobProcessor {
                         "bytes": payload.len(),
                         "outputChars": aggregated_output.chars().count(),
                     })],
-                    credit_snapshot: None,
                     provider_conversation_state: None,
                     messages,
                     messages_streamed: streamed,
@@ -8314,7 +8303,6 @@ impl JobProcessor {
                     suggested_replies: Vec::new(),
                     provider: "git-sync".to_string(),
                     artifacts: Vec::new(),
-                    credit_snapshot: None,
                     provider_conversation_state: None,
                     messages: Vec::new(),
                     messages_streamed: false,
@@ -11014,7 +11002,6 @@ impl JobProcessor {
                 suggested_replies: Vec::new(),
                 provider: "codex-embedded".to_string(),
                 artifacts: retry_artifacts,
-                credit_snapshot: None,
                 provider_conversation_state: retry_provider_conversation_state,
                 messages: retry_messages,
                 messages_streamed: streaming_active,
@@ -11297,7 +11284,6 @@ impl JobProcessor {
             suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts,
-            credit_snapshot: None,
             provider_conversation_state: output_provider_conversation_state,
             messages: interim_messages,
             messages_streamed: streaming_active,
@@ -18059,7 +18045,6 @@ async fn execute_preobserved_scoped_worker_direct(
         suggested_replies: Vec::new(),
         provider: "openai-proxy-chat-worker".to_string(),
         artifacts,
-        credit_snapshot: None,
         provider_conversation_state: None,
         messages: Vec::new(),
         messages_streamed: false,
@@ -18257,7 +18242,6 @@ async fn execute_write_scoped_worker_direct(
             suggested_replies: Vec::new(),
             provider: "openai-proxy-write-scoped-worker".to_string(),
             artifacts,
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: Vec::new(),
             messages_streamed: false,
@@ -18701,7 +18685,6 @@ fn routed_browser_execution(
         suggested_replies: Vec::new(),
         provider: "codex-embedded".to_string(),
         artifacts: vec![preflight_artifact],
-        credit_snapshot: None,
         provider_conversation_state: None,
         messages: Vec::new(),
         messages_streamed: false,
@@ -24684,7 +24667,6 @@ mod tests {
             suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts: vec![json!({"kind": "codex/run-log", "events": []})],
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: Vec::new(),
             messages_streamed: false,
@@ -24800,7 +24782,6 @@ mod tests {
             suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts: vec![json!({"kind": "codex/run-log", "events": []})],
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: Vec::new(),
             messages_streamed: false,
@@ -28584,7 +28565,6 @@ mod tests {
             suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts: Vec::new(),
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: Vec::new(),
             messages_streamed: false,
@@ -33370,7 +33350,6 @@ mod tests {
             suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts: Vec::new(),
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: vec![paused],
             messages_streamed: false,
@@ -33408,7 +33387,6 @@ mod tests {
             suggested_replies: Vec::new(),
             provider: "codex-embedded".to_string(),
             artifacts: Vec::new(),
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: Vec::new(),
             messages_streamed: false,

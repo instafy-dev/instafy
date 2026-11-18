@@ -79,7 +79,6 @@ pub async fn build_git_sync_execution(params: GitSyncExecutionParams<'_>) -> Res
         suggested_replies: Vec::new(),
         provider: "git-sync".to_string(),
         artifacts: Vec::new(),
-        credit_snapshot: None,
         provider_conversation_state: None,
         messages: Vec::new(),
         messages_streamed: false,

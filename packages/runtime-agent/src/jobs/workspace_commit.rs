@@ -3846,7 +3846,6 @@ mod tests {
             suggested_replies: Vec::new(),
             provider: "openai-proxy-write-scoped-worker".to_string(),
             artifacts: Vec::new(),
-            credit_snapshot: None,
             provider_conversation_state: None,
             messages: Vec::new(),
             messages_streamed: false,
