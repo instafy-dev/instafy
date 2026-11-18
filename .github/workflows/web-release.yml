@@ -134,8 +134,6 @@ jobs:
       VITE_DOWNLOADS_BASE_URL: https://downloads.instafy.dev
       VITE_DESKTOP_DOWNLOADS_PREFIX: desktop-app
       VITE_REQUIRE_AUTH: ${{ vars.VITE_REQUIRE_AUTH }}
-      VITE_USE_WEBCONTAINER: ${{ vars.VITE_USE_WEBCONTAINER }}
-      VITE_USE_WEBCONTAINERS: ${{ vars.VITE_USE_WEBCONTAINER }}
       VITE_INSTAFY_SHARED_BROWSER_CDP_SCREENCAST: "1"
       VITE_INSTAFY_SHARED_BROWSER_WEBRTC: "0"
       # Kill switch: set the repository variable to "0" to hide Continue with Google.

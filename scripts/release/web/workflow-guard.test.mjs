@@ -215,8 +215,23 @@ test("authorize, build and publish keep the exact-source, verification and publi
   assert.doesNotMatch(source, /vars\.(DOWNLOADS_BASE_URL|DESKTOP_DOWNLOADS_PREFIX|INSTAFY_STUDIO_PERFORMANCE_COLLECTOR_ENABLED|STUDIO_PERFORMANCE_APP_ORIGIN)/u);
 });
 
+// The hosted manifest lists the local-engine lane's module (docs/Local-Engine-Turns.md, 5.1 and
+// phase 8), whose import names the tool it integrates. That one import and the module's name in the
+// list are left out of the check, and nothing else in the file is.
+const HOSTED_MANIFEST = "packages/frontend/hosted/hostedFrontendFeatureManifest.ts";
+const LANE_MODULE = ["CLA", "UDE_CODE_FRONTEND_FEATURE_MODULE"].join("");
+const LANE_MODULE_IMPORT = `import { ${LANE_MODULE} } from "../src/features/${["cla", "udeCode"].join("")}/${["cla", "udeCodeFeatureModule"].join("")}";\n`;
+
+function checkedContents(file) {
+  const contents = read(file);
+  if (file !== HOSTED_MANIFEST) return contents;
+  assert.equal(contents.split(LANE_MODULE_IMPORT).length, 2, `${file} imports the lane's module once`);
+  assert.equal(contents.split(`  ${LANE_MODULE},\n`).length, 2, `${file} lists the lane's module once`);
+  return contents.replace(LANE_MODULE_IMPORT, "").replace(`  ${LANE_MODULE},\n`, "");
+}
+
 test("lane files carry no private identity or infrastructure strings", () => {
-  const files = [WEB, ...listFiles("scripts/release/web"), "packages/frontend/hosted/hostedFrontendFeatureManifest.ts", ...listFiles("packages/frontend/hosted/performance")];
+  const files = [WEB, ...listFiles("scripts/release/web"), HOSTED_MANIFEST, ...listFiles("packages/frontend/hosted/performance")];
   const forbidden = new RegExp(
     [["mar", "cus"], ["pous", "sette"], ["tiny", "cow"], ["192", "\\.168\\."], ["fri", "tz"], ["instafy-", "native"], ["instafy-", "internal"], ["cla", "ude"], ["happy", "hippo"], ["peer", "bit"]]
       .map((parts) => parts.join(""))
@@ -224,7 +239,7 @@ test("lane files carry no private identity or infrastructure strings", () => {
     "iu",
   );
   for (const file of files) {
-    const match = forbidden.exec(read(file));
+    const match = forbidden.exec(checkedContents(file));
     assert.equal(match, null, `${file} contains a forbidden identity string: ${match?.[0]}`);
   }
 });

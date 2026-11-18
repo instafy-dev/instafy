@@ -10,7 +10,10 @@
 `packages/frontend/hosted/hostedFrontendFeatureManifest.ts`, which composes:
 
 1. the public core feature module;
-2. the Studio performance bridge in `packages/frontend/hosted/performance/`,
+2. the local-engine lane's module (`packages/frontend/src/features/claudeCode/`),
+   which the public manifest lists too. It shows nothing until the controller's
+   switch covers the viewer ([Local-engine turns](Local-Engine-Turns.md));
+3. the Studio performance bridge in `packages/frontend/hosted/performance/`,
    whose transport is disabled in this lane.
 
 Integrations built outside this repository are not part of the hosted web app.
@@ -89,8 +92,8 @@ Do not enter any secret until steps 1 and 2 are done and read back.
 
 Browser configuration comes from repository variables `VITE_SUPABASE_URL`,
 `VITE_SUPABASE_ANON_KEY` (publishable key only), `VITE_CONTROLLER_URL`, and the
-optional `VITE_REQUIRE_AUTH`, `VITE_USE_WEBCONTAINER` and
-`VITE_INSTAFY_ENABLE_GOOGLE_AUTH` (kill switch, default `1`).
+optional `VITE_REQUIRE_AUTH` and `VITE_INSTAFY_ENABLE_GOOGLE_AUTH` (kill switch,
+default `1`).
 
 ## Stale, duplicate and failed publications
 

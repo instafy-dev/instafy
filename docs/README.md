@@ -1,6 +1,6 @@
 # Instafy Studio Docs
 
-These docs reflect the current product scope: a chat-first filesystem workspace with credits and billing. Preview/publish/custom domains are intentionally out of scope right now.
+These docs reflect the current product scope: a chat-first filesystem workspace with credits and billing, plus private site previews where an operator turns them on. Publishing and custom domains are intentionally out of scope right now.
 
 ## Maps
 - Product overview: `docs/Product.md`
