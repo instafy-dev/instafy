@@ -277,7 +277,7 @@ function createBlockedGoalProps(): Partial<ComponentProps<typeof ChatComposerSur
 function createRunStopController(overrides: Partial<ChatRunStopController> = {}): ChatRunStopController {
   const target = { jobId: "job-1", runId: "run-1", agentHandle: "octo", agentDisplayName: "Octo", initiatingUserId: "viewer" };
   return {
-    visible: true, phase: "idle", feedbackId: "stop-feedback", targets: [target],
+    visible: true, phase: "idle", feedbackId: "stop-feedback", escapeStops: true, targets: [target],
     groups: [{ handle: "octo", label: "Octo", targets: [target] }],
     error: null, confirmationTargets: null,
     requestStop: vi.fn(), confirmStop: vi.fn(), dismissConfirmation: vi.fn(), retry: vi.fn(),
@@ -382,6 +382,18 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
     expect(container.querySelector('[data-testid="chat-send-button"]')).not.toBeNull();
     expect(container.querySelectorAll('[data-testid="chat-run-stop-button"]')).toHaveLength(1);
+  });
+
+  // The chat's Browser view keeps Escape for the browser (useChatRunStop's `escapeStops`).
+  it("leaves Escape out of Stop's words where Escape stops nothing", async () => {
+    const status = () => container.querySelector('[data-testid="chat-primary-action-status"]')?.textContent;
+    const stop = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-run-stop-button"]')!;
+    await act(async () => root.render(<ChatComposerSurface {...createProps({ composerRunStopController: createRunStopController({ escapeStops: false }) })} />));
+    expect(status()).toBe("A reply is in progress. Stop is available.");
+    expect(stop().title).toBe("Stop");
+    await act(async () => root.render(<ChatComposerSurface {...createProps({ composerRunStopController: createRunStopController() })} />));
+    expect(status()).toBe("A reply is in progress. Stop is available, or press Escape.");
+    expect(stop().title).toBe("Stop (Esc)");
   });
 
   it("keeps Send beside Stop for an attachment-only draft even while Send is disabled", async () => {

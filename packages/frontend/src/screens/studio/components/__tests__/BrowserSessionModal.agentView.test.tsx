@@ -153,6 +153,8 @@ type HostProps = {
   compact?: boolean;
   /** The person's own turn paused on their fields (`request_human_input`). */
   pausedRunId?: string;
+  /** The chat's run that holds the browser while `agentHolds`, as its record names it. */
+  holdingRunId?: string;
   /** The chat's earlier browser turns on the same page, such as a card's. */
   earlierRunIds?: string[];
   teammates?: boolean;
@@ -167,7 +169,7 @@ type HostProps = {
 
 /** Studio's part: tabs are read only while the view is opening or live. */
 function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl = "https://www.visitlisboa.com/",
-  agentPageIds, hidden = false, compact = false, pausedRunId, earlierRunIds = [], teammates = false, onContinue,
+  agentPageIds, hidden = false, compact = false, pausedRunId, holdingRunId, earlierRunIds = [], teammates = false, onContinue,
   pageTitle, pageLoading, project = projectId }: HostProps) {
   const [kind, setKind] = useState<HostedBrowserViewKind | null>(null);
   const pagesActive = hostedBrowserPagesActive(kind);
@@ -189,7 +191,7 @@ function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl
   return <BrowserSessionModal isOpen onOpenChange={noop} projectId={project} currentUserId="user-1"
     browserSessionId="browser-session-1" preferRuntimeId={null} resumeRuntimeId={runtimeId}
     presentation="docked" fillContainer canControlBrowser canClearBrowserData transportActive={!hidden}
-    controlOwner={agentHolds ? { kind: "agent", displayName: "Octo" } : { kind: "human" }}
+    controlOwner={agentHolds ? { kind: "agent", displayName: "Octo", ...(holdingRunId ? { runId: holdingRunId } : {}) } : { kind: "human" }}
     onTakeOverAgent={async () => true} spaceBusy={agentHolds}
     onViewStateChange={setKind} conversationId={conversationId}
     {...(pausedRunId ? { humanInputIdentityKey: `user-1:${conversationId}`, humanInputRunIds: new Set([...earlierRunIds, pausedRunId]) } : {})}
@@ -814,5 +816,64 @@ describe("Shared Browser view while Octo drives", () => {
     await browserComesUp();
     expect(pauseRow()?.contains(continueButtons()[0]!)).toBe(true);
     expect(toolbarStatus()?.textContent).toBe("Ready");
+  });
+
+  // A sign-in pause in a local test: Octo outlined the fields, and the turn
+  // that paused went on writing its reply for 14 s, holding the browser. The
+  // row, and Let Octo continue, came only once that turn ended.
+  it("shows a pause's row from the pause while its turn ends, and Let Octo continue can be pressed once Octo lets go", async () => {
+    const onContinue = vi.fn(async () => true);
+    const props = { compact: true, pausedRunId: PAUSE_RUN, earlierRunIds: [CARD_RUN], onContinue, agentPageIds: ["PAGE1"] };
+    mocks.actions = pauseAfterCard().slice(0, 2);
+    // Octo's turn opens the sign-in page.
+    await octoTakesControl({ ...props, holdingRunId: PAUSE_RUN });
+    expect(pauseRow()).toBeNull();
+    // It pauses on the fields, and its turn still holds the browser.
+    mocks.actions = pauseAfterCard();
+    await act(async () => root.render(<Host agentHolds holdingRunId={PAUSE_RUN} {...props} />));
+    await advance(100);
+    expect(pauseRow()?.textContent).toContain("This space's browser keeps you signed in for its chats until you clear it.");
+    expect(continueButtons()).toHaveLength(1);
+    expect(pauseRow()?.contains(continueButtons()[0]!)).toBe(true);
+    expect(continueButtons()[0]!.textContent).toBe("Let Octo continue");
+    expect(continueButtons()[0]!.disabled).toBe(true);
+    expect(pauseRow()?.querySelector('[role="status"].sr-only')?.textContent)
+      .toBe("Fill the 2 highlighted fields on the page, then let Octo continue. Keep passwords and codes out of chat.");
+    expect(saysOctoIsStopping()).toBe(false);
+    await act(async () => continueButtons()[0]!.click());
+    await advance(50);
+    expect(onContinue).not.toHaveBeenCalled();
+    // The turn ends and Octo lets go: the press continues the task.
+    server.owner = { kind: "human", participantId: "self" };
+    await act(async () => {
+      for (const socket of server.sockets) socket.pushState();
+      root.render(<Host agentHolds={false} {...props} />);
+    });
+    await advance(200);
+    expect(continueButtons()).toHaveLength(1);
+    expect(continueButtons()[0]!.disabled).toBe(false);
+    await act(async () => continueButtons()[0]!.click());
+    await advance(50);
+    expect(onContinue).toHaveBeenCalledExactlyOnceWith(BROWSER_HUMAN_INPUT_CONTINUE_PROMPT);
+    expect(pauseRow()).toBeNull();
+  });
+
+  it("shows the row wide too while the turn that paused ends, and none while a newer turn of the chat drives", async () => {
+    const props = { pausedRunId: PAUSE_RUN, earlierRunIds: [CARD_RUN], onContinue: vi.fn(async () => true), agentPageIds: ["PAGE1"] };
+    mocks.actions = pauseAfterCard().slice(0, 2);
+    await octoTakesControl({ ...props, holdingRunId: PAUSE_RUN });
+    mocks.actions = pauseAfterCard();
+    await act(async () => root.render(<Host agentHolds holdingRunId={PAUSE_RUN} {...props} />));
+    await advance(100);
+    // One Let Octo continue, in the row, not yet to press; no other words for it in the toolbar.
+    expect(continueButtons()).toHaveLength(1);
+    expect(pauseRow()?.contains(continueButtons()[0]!)).toBe(true);
+    expect(continueButtons()[0]!.disabled).toBe(true);
+    expect(saysOctoIsStopping()).toBe(false);
+    // They wrote to Octo instead: its newer turn holds the browser, and is not paused.
+    await act(async () => root.render(<Host agentHolds holdingRunId="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" {...props} />));
+    await advance(100);
+    expect(pauseRow()).toBeNull();
+    expect(continueButtons()).toHaveLength(0);
   });
 });

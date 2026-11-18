@@ -118,7 +118,7 @@ function Reading() {
 
 function Stop() {
   const [phase, setPhase] = useState<"error" | "stopping">("error");
-  const controller: ChatRunStopController = { visible: true, phase, feedbackId: "review-stop-error", targets: [], groups: [], error: STOP_ERROR,
+  const controller: ChatRunStopController = { visible: true, phase, feedbackId: "review-stop-error", escapeStops: true, targets: [], groups: [], error: STOP_ERROR,
     confirmationTargets: null, requestStop: () => {}, confirmStop: () => {}, dismissConfirmation: () => {}, retry: () => setPhase("stopping") };
   return <div className="mt-auto p-3"><Surface radius="3xl" shadow="none" className="mx-auto max-w-3xl p-3">
     <Text as="p" variant="body" className="pb-3">Please compare these reports.</Text>

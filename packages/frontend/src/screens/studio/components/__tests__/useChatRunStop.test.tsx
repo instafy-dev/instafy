@@ -8,6 +8,9 @@ vi.mock("../../../../services/runtimeController/conversationStop", () => ({ stop
 import { applyReplyDraft, clearReplyDrafts, conversationReplyDrafts } from "../../../../conversations/replyDrafts";
 import { RuntimeStateProvider, useRuntimeState } from "../../../../runtime/RuntimeStateProvider";
 import type { RunRecord } from "../../../../types";
+import type { ChatMessage } from "../../types";
+import { ChatRunStopControl } from "../ChatRunStopControl";
+import { chatRunStopOnScreen, resolveChatRunStopTargets } from "../chatRunStopTargets";
 import {
   CHAT_RUN_STOP_HANDOVER_MS, CHAT_RUN_STOP_TIMEOUT_MS, useChatRunStop, type ChatRunStopController, type ChatRunStopOptions,
   type ChatRunStopTarget,
@@ -130,6 +133,60 @@ describe("useChatRunStop", () => {
     await act(async () => { document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await vi.runAllTicks(); });
     expect(cancel).toHaveBeenLastCalledWith("chat", ["replacement"]);
     expect(cancel).toHaveBeenCalledTimes(2);
+  });
+  // The chat's Browser view keeps Escape for the browser, and a sign-in pause
+  // brings that view forward by itself while Stop stays: there Stop's words
+  // don't offer Escape, which stops nothing, while Chat keeps both.
+  it("offers Escape in Stop's words only where Escape stops", async () => {
+    function WithControl() { controller = useChatRunStop(props); return <ChatRunStopControl controller={controller} />; }
+    const stopButton = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-run-stop-button"]')!;
+    const escape = () => act(async () => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await vi.runAllTicks();
+    });
+    props = { ...props, escapeStops: false };
+    await act(async () => { root.render(<WithControl />); });
+    expect(stopButton().title).toBe("Stop");
+    await escape();
+    expect(cancel).not.toHaveBeenCalled();
+    // A press still stops the turn there.
+    cancel.mockResolvedValueOnce(accepted("octo-1"));
+    await act(async () => stopButton().click());
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["octo-1"]);
+    // In Chat, for the next turn.
+    cancel.mockReset(); cancel.mockResolvedValueOnce(accepted("octo-2"));
+    props = { ...props, escapeStops: true, targets: [{ ...octo, jobId: "octo-2" }] };
+    await act(async () => { root.render(<WithControl />); });
+    expect(stopButton().title).toBe("Stop (Esc)");
+    await escape();
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["octo-2"]);
+  });
+
+  // A local test, Nov 17: a pause on the person's sign-in fields brought the
+  // chat's Browser view forward by itself, and Stop went with the Chat view,
+  // while the turn that paused went on writing its reply for 14 s.
+  it("stays in the chat's Browser view through a pause, until the turn that paused ends", async () => {
+    const JOB = "aaaaaaaa-0000-4000-8000-000000000001";
+    const pausing = (status: RunRecord["status"]): RunRecord => ({
+      id: "r1", status, projectId: "project", sessionId: null, conversationId: "chat", promptId: null, runType: "prompt",
+      progress: 0, progressStage: null, previewUrl: null, lastMessage: null, createdAt: null, updatedAt: null,
+      metadata: { jobId: JOB, initiatingUserId: "viewer", agent: { handle: "octo" }, browserTransport: "shared" },
+    });
+    const pause = { id: "m1", role: "assistant", content: "Tool call completed: instafy_shared_browser/request_human_input",
+      timestamp: 1, metadata: { runId: "r1", jobId: JOB, type: "mcp_tool_call",
+        details: { tool: "request_human_input", status: "completed" } } } as unknown as ChatMessage;
+    const active = chatRunStopOnScreen({ chatVisible: false, browserVisible: true, jobThread: false });
+    await render({ targets: resolveChatRunStopTargets([pausing("in_progress")], [pause]), active });
+    expect(controller!.visible).toBe(true);
+    // The turn ends by itself: Stop goes.
+    await render({ targets: resolveChatRunStopTargets([pausing("success")], [pause]), active });
+    await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS));
+    expect(controller!.visible).toBe(false);
+    // A press before then stops that turn.
+    cancel.mockResolvedValueOnce(accepted(JOB));
+    await render({ targets: resolveChatRunStopTargets([pausing("in_progress")], [pause]), active });
+    await act(async () => controller!.requestStop());
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", [JOB]);
   });
 
   // A local test, Nov 10: between a message's routing step and its browser

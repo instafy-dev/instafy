@@ -37,9 +37,9 @@ export function ChatRunStopControl({ controller, className, iconClassName = "h-[
     isPending: controller.phase === "stopping",
     isDisabled: controller.phase === "requested",
     "aria-label": label,
-    title: label === "Stop" ? "Stop (Esc)" : label,
+    title: label === "Stop" && controller.escapeStops ? "Stop (Esc)" : label,
     "aria-describedby": controller.error ? controller.feedbackId : undefined,
-    "aria-keyshortcuts": !busy && !retrying ? "Escape" : undefined,
+    "aria-keyshortcuts": controller.escapeStops && !busy && !retrying ? "Escape" : undefined,
     ref: triggerRef,
   };
   return (

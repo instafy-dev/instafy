@@ -3594,10 +3594,17 @@ export function BrowserSessionModal({
     </SharedBrowserCollaborationControls>
   );
 
+  // The turn that paused on this person's fields or step holds the browser
+  // until it ends, and it writes its reply meanwhile, for seconds. Not a
+  // newer turn of the chat (they wrote to Octo instead), nor another chat's.
+  const pauseRequest = browserHumanInputState.request ? browserHumanInputOptions.request : null;
+  const pauseTurnEnding = effectiveAgentControlOwner !== null && pauseRequest !== null && !anotherChatTurn &&
+    (controlOwner.kind !== "agent" || controlOwner.runId === pauseRequest.runId);
   // While a pause or take-over waits and Octo has let go, Let Octo continue
   // sits in a row under the toolbar, which a narrow view folds into a menu.
+  // A pause's row shows from the pause, while its turn ends.
   const humanInputRowShown = !shouldCollapseDocked && Boolean(humanInputIdentityKey) &&
-    browserHumanInputState.active && effectiveAgentControlOwner === null;
+    browserHumanInputState.active && (effectiveAgentControlOwner === null || pauseTurnEnding);
   const humanInputCanContinue = canLetOctoContinue({ ...browserHumanInputOptions, state: browserHumanInputState });
   // Through a pause this person can end, the toolbar says who it waits for,
   // in the reading row's words for a prompt, until they let Octo continue.
@@ -3733,7 +3740,7 @@ export function BrowserSessionModal({
               {signInNote}
             </Text>
           ) : null}
-          <BrowserHumanInputContinue {...browserHumanInputOptions} state={browserHumanInputState} />
+          <BrowserHumanInputContinue {...browserHumanInputOptions} state={browserHumanInputState} turnEnding={pauseTurnEnding} />
         </div>
       ) : null}
       <div

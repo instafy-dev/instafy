@@ -22,6 +22,12 @@ export type ChatRunStopOptions = {
   canStop: boolean;
   viewerUserId: string | null;
   active?: boolean;
+  /**
+   * Whether Escape stops from the view on screen (default true). The chat's
+   * Browser view keeps Escape for the browser: there the key stops nothing,
+   * and Stop's words don't offer it.
+   */
+  escapeStops?: boolean;
   escapeBlocked?: boolean;
   cancelJobs?: (conversationId: string, jobIds: readonly string[]) => Promise<ControllerConversationStopResult>;
   onStopped?: (result: ControllerConversationStopResult, targets: readonly ChatRunStopTarget[]) => void;
@@ -246,7 +252,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
       const current = latest.current;
       if (chatRunStopEscapeBlocked(event, {
         active: current.options.active !== false && current.options.canStop,
-        blocked: current.options.escapeBlocked || Boolean(current.state.confirmationTargets),
+        blocked: current.options.escapeBlocked || current.options.escapeStops === false || Boolean(current.state.confirmationTargets),
       })) blockedEvents.add(event);
     };
     const onEscape = (event: KeyboardEvent) => {
@@ -258,7 +264,8 @@ export function useChatRunStop(options: ChatRunStopOptions) {
         const current = latest.current;
         if (chatRunStopEscapeBlocked(event, {
           active: current.options.active !== false && current.options.canStop,
-          blocked: current.options.escapeBlocked || effectivePhase(current.state, current.options.targets) !== "idle" || Boolean(current.state.confirmationTargets),
+          blocked: current.options.escapeBlocked || current.options.escapeStops === false
+            || effectivePhase(current.state, current.options.targets) !== "idle" || Boolean(current.state.confirmationTargets),
         })) return;
         requestStop();
       });
@@ -276,7 +283,8 @@ export function useChatRunStop(options: ChatRunStopOptions) {
   const visible = active && canStop && Boolean(conversationId)
     && (availableTargets.length > 0 || phase === "stopping" || phase === "error" || phase === "requested" || between);
   return {
-    visible, phase, feedbackId, targets: availableTargets, groups: groupChatRunStopTargets(availableTargets),
+    visible, phase, feedbackId, escapeStops: options.escapeStops !== false,
+    targets: availableTargets, groups: groupChatRunStopTargets(availableTargets),
     error: state.error, confirmationTargets: state.confirmationTargets,
     requestStop, confirmStop, dismissConfirmation, retry,
   };
