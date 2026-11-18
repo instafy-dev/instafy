@@ -589,7 +589,7 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         .expect("the invariants");
     assert!(invariants.contains(&rule_and_pages), "{prompt}");
     assert!(
-        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject, and the page is served from that folder alone: copy any file you take from another page into it, never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat."),
+        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. Copy into it any file you take from another page; never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat."),
         "{PAGE_OF_ITS_OWN_CHAT_RULE}"
     );
     // The other chat, with no history at all: its page is its own.
@@ -947,8 +947,8 @@ fn a_comparison_gets_a_sort_for_each_amount_the_person_compares_by() {
 /// from its own folder, the page can't load them, so its card was held back and nobody could open
 /// it (a local test, Nov 17). That build never opened the page skill: its message ("… as a
 /// page.") loaded the research and comparing skills in its place. What it did read is the rule
-/// every turn that may write files reads, which says it now: a new page is served from its own
-/// folder, so what it takes from another page is copied there, never loaded from there.
+/// every turn that may write files reads, which says it now: a new page's folder gets a copy of any
+/// file it takes from another page, and never loads that page's files.
 #[test]
 fn a_new_page_copies_what_it_takes_from_another_page_and_never_loads_its_files() {
     let tmp = tempdir().expect("tmp");
@@ -973,7 +973,7 @@ fn a_new_page_copies_what_it_takes_from_another_page_and_never_loads_its_files()
         .map(|(_, rest)| rest)
         .expect("the invariants");
     assert!(
-        invariants.contains("- A request for a new page starts a new folder, even on the same subject, and the page is served from that folder alone: copy any file you take from another page into it, never load that page's files."),
+        invariants.contains("- A request for a new page starts a new folder, even on the same subject. Copy into it any file you take from another page; never load that page's files."),
         "{prompt}"
     );
 }

@@ -4663,7 +4663,7 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 /// that page's script and styles (`../<that page>/site.js`): served from its own folder, the new
 /// page can't load them, and nobody could open it (a local test, Nov 17). That build never opened
 /// the page skill, so this says it: a new page copies what it takes from another page.
-const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject, and the page is served from that folder alone: copy any file you take from another page into it, never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. Copy into it any file you take from another page; never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.
@@ -29510,13 +29510,15 @@ mod tests {
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
+        let compact = estimate_prompt_token_count(
+            &prompt_text
+                .strip_prefix(&preference_section)
+                .unwrap()
+                .replace(BROWSER_CHOICE_CONTRACT, ""),
+        );
         assert!(
-            estimate_prompt_token_count(
-                &prompt_text
-                    .strip_prefix(&preference_section)
-                    .unwrap()
-                    .replace(BROWSER_CHOICE_CONTRACT, "")
-            ) < 1_550
+            compact < 1_550,
+            "the compact restored prompt is {compact} estimated tokens without its preferences and the browser rule"
         );
         assert!(
             prompt_tokens < 1_625 + browser_choice,
