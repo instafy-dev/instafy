@@ -589,7 +589,7 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
         .expect("the invariants");
     assert!(invariants.contains(&rule_and_pages), "{prompt}");
     assert!(
-        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat."),
+        PAGE_OF_ITS_OWN_CHAT_RULE.contains("A request for a new page starts a new folder, even on the same subject, and the page is served from that folder alone: copy any file you take from another page into it, never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat."),
         "{PAGE_OF_ITS_OWN_CHAT_RULE}"
     );
     // The other chat, with no history at all: its page is its own.
@@ -945,22 +945,35 @@ fn a_comparison_gets_a_sort_for_each_amount_the_person_compares_by() {
 /// A build took another chat's comparison as its sample and wrote a page that loads that page's
 /// script and styles from its folder (`../<that page>/site.js`), with no starter of its own: served
 /// from its own folder, the page can't load them, so its card was held back and nobody could open
-/// it (a local test, Nov 17). A new page starts in a folder of its own from a starter, and a page
-/// taken as a sample is copied, never linked.
+/// it (a local test, Nov 17). That build never opened the page skill: its message ("… as a
+/// page.") loaded the research and comparing skills in its place. What it did read is the rule
+/// every turn that may write files reads, which says it now: a new page is served from its own
+/// folder, so what it takes from another page is copied there, never loaded from there.
 #[test]
-fn a_new_page_starts_in_its_own_folder_and_a_sample_is_copied_never_linked() {
-    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let hub =
-        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
-    for rule in [
-        "a new page starts in a folder of its own from the closest starter, `instafy bind init sites/<slug> --starter compare|ranked|timeline|checklist|blank`:",
-        "A page you take as a sample is copied, never linked: a page loads only files in its own folder.",
-    ] {
-        assert!(flat(hub).contains(rule), "{hub}");
-    }
+fn a_new_page_copies_what_it_takes_from_another_page_and_never_loads_its_files() {
+    let tmp = tempdir().expect("tmp");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    let (project, theirs, ours) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    fs::create_dir_all(tmp.path().join("sites/watch-comparison")).unwrap();
+    let prompt = prompt_in_chat(
+        tmp.path(),
+        &[recorded_page(
+            "sites/watch-comparison",
+            "Running watches: latest three",
+            Some(theirs),
+        )],
+        project,
+        ours,
+        json!({ "runtimeExpectations": { "workspaceFileChanges": true } }),
+        None,
+        "Compare three hotels in one city for two nights: location, what reviewers say, and the price, as a page.",
+    );
+    let invariants = prompt
+        .split_once("Direct workspace-change invariants:\n")
+        .map(|(_, rest)| rest)
+        .expect("the invariants");
     assert!(
-        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
-        "{} bytes",
-        hub.len()
+        invariants.contains("- A request for a new page starts a new folder, even on the same subject, and the page is served from that folder alone: copy any file you take from another page into it, never load that page's files."),
+        "{prompt}"
     );
 }

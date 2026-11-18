@@ -1033,9 +1033,8 @@ without it, so its Try again starts again from the replay. The browser's tabs
 and a page the person signs in on are no part of a thread. Codex withdraws the space's `AGENTS.md` from a
 turn without the workspace, so it is given that file's "Replies" too (how a reply
 reads: plain words, no error codes, file paths or inside words, "not checked" on
-a fact no page read this turn states, where it looked for what it didn't find or
-which page it didn't reach, never that a site or page lacks it, and only steps
-the turn started). The
+a fact no page read this turn states, where it looked for what it didn't find,
+never that a site or page lacks it, and only steps the turn started). The
 "Finding a page" section, which the
 `instafy-web-research` skill points to (a research turn without the browser
 skill prints just that section with one command), says how direct readers find a

@@ -728,7 +728,7 @@ async fn run_case() -> Result<()> {
         .context("the new chat's request")?;
     let prompt = last_user_text(asked);
     assert!(
-        prompt.contains("- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n- The space's pages:\n"),
+        prompt.contains("- A request for a new page starts a new folder, even on the same subject, and the page is served from that folder alone: copy any file you take from another page into it, never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n- The space's pages:\n"),
         "{prompt}"
     );
     assert!(

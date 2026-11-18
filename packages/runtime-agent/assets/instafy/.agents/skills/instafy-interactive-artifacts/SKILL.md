@@ -19,11 +19,10 @@ own kind of page.
   SKILL.md in full and build with its commands. Never hand-write what it generates.
 - **Values that change or must be checked per click** (prices, stock, opening hours): a bound site per
   `instafy-bound-sites`.
-- **Anything else:** a new page starts in a folder of its own from the closest starter,
-  `instafy bind init sites/<slug> --starter compare|ranked|timeline|checklist|blank`: compare = 2-8 options side by
-  side; ranked = "top N", "best X"; timeline = days or steps in time; checklist = packing, to-dos; blank = quiz,
-  calculator, the rest. Keep `theme.css` and `site.js`; write `data.json` and `app.js`. Restyle only when asked. A
-  page you take as a sample is copied, never linked: a page loads only files in its own folder.
+- **Anything else:** the closest starter, `instafy bind init sites/<slug> --starter compare|ranked|timeline|checklist|blank`:
+  compare = 2-8 options side by side; ranked = "top N", "best X"; timeline = days or steps in time; checklist =
+  packing, to-dos; blank = quiz, calculator, the rest. Keep `theme.css` and `site.js`; write `data.json` and
+  `app.js`. Restyle only when asked.
 - A request that needs many items researched first (several stops, products or options, each looked up live):
   `instafy-research-team` plans the research, then builds here.
 

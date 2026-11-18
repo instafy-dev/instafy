@@ -526,9 +526,6 @@ const LEGACY_INTERACTIVE_ARTIFACTS_SHA256: &[&str] = &[
     // From before `AGENTS.md`'s "Replies" said, for every turn, what to do with a choice the
     // request leaves open (it said "Never stop to ask before building").
     "d1343227c3c3db58e8d742098ffff1ef58d92ced1df21953cbf7bcaa2e1bdee2", // v21
-    // From before a new page started in a folder of its own, and a page taken as a sample was
-    // copied, never linked (it said "the closest starter").
-    "820a5231a8084be210d1719ece8a61dfce1e22459ab46227fb227c1c1f19f491", // v22
 ];
 const LEGACY_RESEARCH_TEAM_SHA256: &[&str] = &[
     "0855d10b442722d484f3c9fec42ba0f149fcf5102e55a6868170b0e0ab8d8fd2", // v1

@@ -4659,7 +4659,11 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 /// It speaks of a page made for the person (a map, a comparison, a page to share), and the list
 /// holds only those: the person's own app or site, from the workspace or a folder of it (an
 /// imported repository), is changed as asked from any chat ("Make the buttons rounder.").
-const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
+/// A new chat's build took another chat's comparison as its sample and wrote a page that loads
+/// that page's script and styles (`../<that page>/site.js`): served from its own folder, the new
+/// page can't load them, and nobody could open it (a local test, Nov 17). That build never opened
+/// the page skill, so this says it: a new page copies what it takes from another page.
+const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject, and the page is served from that folder alone: copy any file you take from another page into it, never load that page's files. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
 
 /// True when a person in this conversation opened a skill setup with
 /// `/skills import ... --start` or `/skills start <name>` and the setup began.

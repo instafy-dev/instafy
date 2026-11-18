@@ -26,8 +26,8 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    its pages holds (another chat's, or one whose card was opened before), one a preview shows, one that loads files
    from outside its folder (a check holds its card back too), a stopped turn, or a site an installed skill's command
    made, which that skill serves its own way (`jobs/page_cards.rs`). A page that loads files from outside its folder
-   can't be opened, so the reply gets a line of its own under the turn's words: "The page isn't ready to open: it uses
-   another page's files."
+   can't be opened, so the reply gets a line of its own under the turn's words, one for all such pages: "The new page
+   isn't ready to open: it uses files from outside its own folder."
 2. The CLI checks that something is listening, asks the controller for a preview, starts a rathole client for it and
    tells the controller it is ready. It never prints a URL. Its JSON output has ids, the port, the path, a status and
    `viewerHostSuffix` (for a dev server's allowed-hosts list).
