@@ -1491,14 +1491,15 @@ mod tests {
     /// reads) keeps both hashes. A change that means to move routes updates them, and its pull
     /// request carries the routing check's table. A message whose turn can search the web shares
     /// a start of its own: the same, with the one line that says so after the browser skill's
-    /// routing section.
+    /// routing section, and one on a runtime where research that ends in a page searches first
+    /// has the next line too. The space's pages, which differ from chat to chat, come after it.
     #[test]
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "80e0abc72beba6dd3ef20a921a873ef7e4020be39c3c600ad4aeed633f435ffd";
+            "01d39f65ffabdb8c60422e7957b7bcf5227c62a9fb33969b14d9939a45576a22";
         const CASE_PROMPTS_SHA256: &str =
-            "4a145f8e1f712eff1941931faa717401e009f0f6c4ed8d516e377faee549bd97";
+            "3fde2043135897ca1c9409c4cd610a83afb810a874a09626dc847957b72b7ae5";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1525,30 +1526,38 @@ mod tests {
             inputs.iter().all(|(_, input)| input.browser_routes_offered),
             "every case is offered the browser routes"
         );
-        assert_eq!(starts.len(), 2, "two starts: with and without search");
-        let searching: HashSet<&str> = shipped()
-            .iter()
-            .filter(|case| case.integrated_search)
-            .map(|case| case.id.as_str())
-            .map(|id| {
-                inputs
-                    .iter()
-                    .find(|(each, _)| each == id)
-                    .map(|(_, input)| input.shared_start.as_str())
-                    .expect("its input")
-            })
-            .collect();
         assert_eq!(
-            searching.len(),
-            1,
-            "every case that searches shares one start"
+            starts.len(),
+            3,
+            "three starts: without search, with it, and with research pages searching first"
         );
-        let search_start = searching.into_iter().next().expect("a start");
-        let start = starts
-            .into_iter()
-            .find(|start| *start != search_start)
-            .expect("the start without search");
-        // The one line is all that tells the two apart.
+        let cases = shipped();
+        let start_where = |searching: bool, pages_first: bool| {
+            let starts: HashSet<&str> = cases
+                .iter()
+                .filter(|case| {
+                    case.integrated_search == searching
+                        && case.research_pages_search_first == pages_first
+                })
+                .map(|case| {
+                    inputs
+                        .iter()
+                        .find(|(each, _)| *each == case.id)
+                        .map(|(_, input)| input.shared_start.as_str())
+                        .expect("its input")
+                })
+                .collect();
+            assert_eq!(
+                starts.len(),
+                1,
+                "every case with search {searching} and pages first {pages_first} shares one start"
+            );
+            starts.into_iter().next().expect("a start")
+        };
+        let start = start_where(false, false);
+        let search_start = start_where(true, false);
+        let pages_start = start_where(true, true);
+        // The one line is all that tells the first two apart, and the next one the last two.
         assert_eq!(
             search_start
                 .matches(super::super::ROUTING_SEARCH_FACT)
@@ -1559,13 +1568,26 @@ mod tests {
             search_start.replacen(super::super::ROUTING_SEARCH_FACT, "", 1),
             start
         );
+        assert_eq!(
+            pages_start
+                .matches(super::super::ROUTING_SEARCH_FIRST_FACT)
+                .count(),
+            1
+        );
+        assert_eq!(
+            pages_start.replacen(super::super::ROUTING_SEARCH_FIRST_FACT, "", 1),
+            search_start
+        );
         assert!(!start.contains(super::super::ROUTING_SEARCH_FACT));
+        assert!(!search_start.contains(super::super::ROUTING_SEARCH_FIRST_FACT));
         let mut prompts = String::new();
         let mut each = String::new();
         for (id, input) in &inputs {
             let prompt = without_counts(&input.prompt);
             assert!(
-                prompt.starts_with(start) || prompt.starts_with(search_start),
+                [start, search_start, pages_start]
+                    .iter()
+                    .any(|start| prompt.starts_with(start)),
                 "{id}: the prompt opens with a start"
             );
             let _ = writeln!(each, "{id}: {}", digest(&prompt));
