@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use reqwest::Url;
 use tokio::sync::{watch, Notify};
 use uuid::Uuid;
@@ -248,16 +248,6 @@ impl ServerConfig {
         }
     }
 
-    pub fn staging_root_for_workspace(&self, workspace_root: &Path) -> PathBuf {
-        if let Some(custom) = &self.staging_base {
-            return custom.clone();
-        }
-        workspace_root
-            .join(".instafy")
-            .join("origin-staging")
-            .join(self.origin_id.to_string())
-    }
-
     /// The checks a multi-tenant gateway must pass before it starts (a
     /// single-tenant origin passes trivially). Every space's repository is
     /// `<ORIGIN_GIT_REMOTE_BASE_URL>/<space id>.git`, so the base URL is
@@ -312,10 +302,6 @@ impl ServerConfig {
         Ok(())
     }
 
-    pub fn canonical_workspace_root(&self) -> Result<PathBuf> {
-        canonicalize(&self.workspace_root)
-    }
-
     pub fn git_remote_url_for_project(&self, project_id: Uuid) -> Option<String> {
         if let Some(url) = self.git_remote_url.as_deref() {
             let trimmed = url.trim();
@@ -357,10 +343,6 @@ impl ServerConfig {
             ]);
         Ok(url)
     }
-}
-
-fn canonicalize(path: &Path) -> Result<PathBuf> {
-    std::fs::canonicalize(path).with_context(|| format!("failed to canonicalize {:?}", path))
 }
 
 #[cfg(test)]
