@@ -230,16 +230,29 @@ export function decideDesktopRuntimeLifetimeRestart<T extends { controllerAccess
   ) {
     return { restart: false, reason: "restarted_recently" };
   }
-  const boundUserId = options.launchGrantUserId?.trim().toLowerCase() ?? "";
-  const accessToken = options.currentSession?.accessToken.trim() ?? "";
-  const userId = options.currentSession?.userId.trim().toLowerCase() ?? "";
-  if (!boundUserId || !accessToken || userId !== boundUserId) {
+  const accessToken = boundSessionAccessToken(options.launchGrantUserId, options.currentSession);
+  if (!accessToken) {
     return { restart: false, reason: "no_matching_session" };
   }
   return {
     restart: true,
     restartOptions: { ...options.restartOptions, controllerAccessToken: accessToken },
   };
+}
+
+/**
+ * The token of the session the Studio window shows now, when that session is
+ * the user a runtime start was bound to; null for any other session, an
+ * unbound start or no session.
+ */
+function boundSessionAccessToken(
+  launchGrantUserId: string | null,
+  currentSession: { accessToken: string; userId: string } | null,
+): string | null {
+  const boundUserId = launchGrantUserId?.trim().toLowerCase() ?? "";
+  const accessToken = currentSession?.accessToken.trim() ?? "";
+  const userId = currentSession?.userId.trim().toLowerCase() ?? "";
+  return boundUserId && accessToken && userId === boundUserId ? accessToken : null;
 }
 
 /**
@@ -269,10 +282,8 @@ export function buildConsentChangeRestartOptions<T extends { controllerAccessTok
     currentSession: { accessToken: string; userId: string } | null;
   },
 ): T {
-  const boundUserId = options.launchGrantUserId?.trim().toLowerCase() ?? "";
-  const accessToken = options.currentSession?.accessToken.trim() ?? "";
-  const userId = options.currentSession?.userId.trim().toLowerCase() ?? "";
-  if (!boundUserId || !accessToken || userId !== boundUserId) {
+  const accessToken = boundSessionAccessToken(options.launchGrantUserId, options.currentSession);
+  if (!accessToken) {
     return { ...options.restartOptions };
   }
   return { ...options.restartOptions, controllerAccessToken: accessToken };

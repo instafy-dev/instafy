@@ -201,6 +201,20 @@ describe("a session a runtime token is minted from", () => {
     vi.resetModules();
     try {
       const fetchModule = await import("../src/controller-fetch.js");
+      // Any token but the saved one is left alone, with the saved session right there.
+      for (const tokenSource of ["explicit", "env", "none"] as const) {
+        await expect(
+          fetchModule.freshenStoredAccessToken({
+            url: "http://127.0.0.1:8788",
+            accessToken: ending,
+            tokenSource,
+            cwd: home,
+            marginMs: 15 * 60 * 1000,
+            nowMs,
+          }),
+        ).resolves.toBe(ending);
+      }
+      expect(refreshBodies).toEqual([]);
       const freshened = await fetchModule.freshenStoredAccessToken({
         url: "http://127.0.0.1:8788",
         accessToken: ending,
