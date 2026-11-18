@@ -2517,11 +2517,16 @@ nothing). While it waits on the person's fields, a row of its own under the
 toolbar, at every width (a narrow toolbar folds its controls into a menu), says:
 "This space's browser keeps you signed in for its chats until you clear it.",
 or "…for its chats and members…" when other people can open the space (see
-Sign-ins on a browser host), beside **Let Octo continue**. The same row holds
-**Let Octo continue** after a take-over. When nobody holds the browser's
-control (after **Release control**, say), the press takes control first, as
-**Take control** does, and continues once the browser confirms it; without an
-answer within five seconds it says "The browser didn't answer. Try again." While
+Sign-ins on a browser host), beside **Let Octo continue**. The row shows from
+the pause on: the turn that paused writes its reply after it and holds the
+browser until it ends, so **Let Octo continue** can be pressed once Octo lets
+go, and the composer's Stop stays in the Browser view until then. A newer turn
+of the chat holding the browser (the person wrote to Octo instead) shows no
+such row. The same row holds **Let Octo continue** after a take-over. When
+nobody holds the browser's control (after **Release control**, say), the press
+takes control first, as **Take control** does, and continues once the browser
+confirms it; without an answer within five seconds it says "The browser didn't
+answer. Try again." While
 someone else holds the browser, the row shows the note alone (the toolbar says
 who holds it), and a press whose control went to someone else first ends
 without a notice. The

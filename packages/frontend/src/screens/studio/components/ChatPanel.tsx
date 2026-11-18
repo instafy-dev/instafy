@@ -141,7 +141,7 @@ import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import { useChatRunStop } from "./useChatRunStop";
-import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, resolveChatRunStopTargets } from "./chatRunStopTargets";
+import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, chatRunStopOnScreen, resolveChatRunStopTargets } from "./chatRunStopTargets";
 import { ChatRunStopNoticeProvider } from "./ChatRunStopNotice";
 import { useChatRunStopContinuation } from "./useChatRunStopContinuation";
 import {
@@ -6041,7 +6041,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     followOnTargets: stopFollowOnTargets,
     canStop: canStopRuns,
     viewerUserId: currentUserId,
-    active: chatVisible && !jobThread,
+    active: chatRunStopOnScreen({ chatVisible, browserVisible, jobThread: Boolean(jobThread) }),
     escapeBlocked: Boolean(messageMenu || imageLightbox || invitePrompt || connectSheetOpen
       || addMenuOpen || skillsImport.addSkillModalOpen || agentProfileModal || browserVisible),
   });

@@ -68,10 +68,11 @@ The caption stays compact on wide screens; long captions truncate within a reada
 and expose the full status on hover. The rail and captions contain no cancellation controls.
 
 A writable chat has one square Stop icon in the composer while jobs are live, including thinking
-before any command runs. With an empty draft it replaces the primary send/voice action; with text
-or attachments it sits beside Send. Active voice recording keeps its own controls. The icon has an
-accessible label and tooltip, with the same touch target as the other composer controls. With
-multiple agents it opens an agent choice and **Stop both** (or **Stop all**).
+before any command runs, in Chat and in the chat's Browser view. With an empty draft it replaces
+the primary send/voice action; with text or attachments it sits beside Send. Active voice
+recording keeps its own controls. The icon has an accessible label and tooltip, with the same
+touch target as the other composer controls. With multiple agents it opens an agent choice and
+**Stop both** (or **Stop all**).
 Escape stops the current set only when no dialog, menu, preview, or other interface owns the key.
 Stopping a turn owned by someone else, or whose owner is unknown, asks for confirmation. Read-only
 viewers and historical/lingering previews have no Stop action.

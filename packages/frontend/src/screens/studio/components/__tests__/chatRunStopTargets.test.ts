@@ -17,6 +17,7 @@ import {
   chatRunStopBetweenParts,
   chatRunStopFollowOnTargets,
   chatRunStopNeedsConfirmation,
+  chatRunStopOnScreen,
   groupChatRunStopTargets,
   resolveChatRunStopTargets,
   runsCanceledByStop,
@@ -243,5 +244,28 @@ describe("a message between two of its parts", () => {
     expect(call).toContain("routedWaitingKeys: routedBrowserWaiting,");
     expect(chatPanel).toContain("between: stopBetweenParts,");
     expect(chatPanel).not.toContain("routedBrowserWaiting.size");
+  });
+});
+
+// A sign-in pause in a local test: Studio brought the chat's Browser view
+// forward by itself, and Stop went with the Chat view, though the turn that
+// paused went on writing its reply for 14 s.
+describe("where the chat offers Stop", () => {
+  it("is in Chat and in the chat's Browser view, never in a job thread's tab", () => {
+    expect(chatRunStopOnScreen({ chatVisible: true, browserVisible: false, jobThread: false })).toBe(true);
+    expect(chatRunStopOnScreen({ chatVisible: false, browserVisible: true, jobThread: false })).toBe(true);
+    expect(chatRunStopOnScreen({ chatVisible: true, browserVisible: true, jobThread: false })).toBe(true);
+    // Another of the chat's views, a file or a preview, in front alone.
+    expect(chatRunStopOnScreen({ chatVisible: false, browserVisible: false, jobThread: false })).toBe(false);
+    expect(chatRunStopOnScreen({ chatVisible: true, browserVisible: false, jobThread: true })).toBe(false);
+  });
+
+  it("is what ChatPanel gives Stop", () => {
+    const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
+    const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
+    const start = chatPanel.indexOf("const runStop = useChatRunStop({");
+    expect(start).toBeGreaterThan(-1);
+    const call = chatPanel.slice(start, chatPanel.indexOf("});", start));
+    expect(call).toContain("active: chatRunStopOnScreen({ chatVisible, browserVisible, jobThread: Boolean(jobThread) }),");
   });
 });

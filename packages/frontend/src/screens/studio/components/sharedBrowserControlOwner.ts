@@ -3,9 +3,10 @@ import type { SharedBrowserCollaborationClientState } from "./sharedBrowserColla
 
 export type SharedBrowserControlOwner =
   | { kind: "human" }
-  | { kind: "agent"; displayName: string };
+  /** `runId`: the chat's run that holds the browser, when its record names one. */
+  | { kind: "agent"; displayName: string; runId?: string };
 
-type SharedBrowserControlRun = Pick<RunRecord, "metadata" | "status">;
+type SharedBrowserControlRun = Pick<RunRecord, "metadata" | "status"> & Partial<Pick<RunRecord, "id">>;
 
 export const HUMAN_SHARED_BROWSER_CONTROL_OWNER: SharedBrowserControlOwner = {
   kind: "human",
@@ -85,6 +86,7 @@ export function resolveSharedBrowserControlOwner(params: {
   return {
     kind: "agent",
     displayName: agentDisplayName(activeRun.metadata),
+    ...(activeRun.id ? { runId: activeRun.id } : {}),
   };
 }
 
