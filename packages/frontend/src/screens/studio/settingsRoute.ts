@@ -11,7 +11,7 @@ export type OrganizationSettingsCategory = "profile" | "members" | "ai" | "billi
 const categoriesByTab = {
   org: ["profile", "members", "ai", "billing", "danger"],
   project: ["overview", "access", "providers", "ai", "danger"],
-  profile: ["account", "appearance", "notifications", "location", "advanced"],
+  profile: ["account", "appearance", "notifications", "location", "machines", "advanced"],
 } as const;
 
 export function isSettingsCategory(tab: SettingsTab, category: string): boolean {

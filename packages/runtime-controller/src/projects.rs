@@ -413,6 +413,24 @@ pub(crate) async fn user_may_write_project(
         .is_some_and(|access| access.can_write()))
 }
 
+/// Whether `user_id` can read `project` now, as their own unscoped sign-in
+/// could. Like [`user_may_write_project`] it logs no denial. A deleted space
+/// is still refused as not found.
+pub(crate) async fn user_may_read_project(
+    client: &impl tokio_postgres::GenericClient,
+    project: &ProjectRecord,
+    user_id: Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let context = RequestContext {
+        user_id: Some(user_id),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    Ok(effective_project_access(client, project, &context, None)
+        .await?
+        .is_some())
+}
+
 /// The access `context` has to `project`, or `None` when it has none at all.
 /// A deleted space, a scoped token and a request with no user are refused.
 async fn effective_project_access(

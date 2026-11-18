@@ -13,7 +13,9 @@ Two user-facing concepts, deliberately no size matrix:
 - **Hosted machine** — a small cloud computer per project. Pauses when
   unused, keeps project files and caches, wakes when someone writes in the chat.
 - **Your machine** — the desktop runtime agent; free, unlimited, offered at
-  every ceiling (RAM, credits, capacity, repo size).
+  every ceiling (RAM, credits, capacity, repo size). Your settings → Machines
+  lists yours in every space and revokes them (see [Revoking your own
+  machines](Self-Hosted-Runtime-Security.md#revoking-your-own-machines)).
 
 ## Sizes
 

@@ -1,5 +1,6 @@
 import { listProductNotifications, updateProductNotificationState, readAllProductNotifications, getProductNotificationPreferences, saveProductNotificationPreferences } from "../../services/runtimeController/productNotifications";
 import { searchControllerMessages } from "../../services/runtimeController/messageSearch";
+import { listMyMachines, revokeMyMachines } from "../../services/runtimeController/myMachines";
 import { createControllerClient } from "@instafy/sdk/controller-client";
 import {
   acknowledgeMyNotificationInboxItem,
@@ -296,6 +297,8 @@ export const controllerClient = createControllerClient({
     stop: stopRuntime,
     stopIfIdle: stopRuntimeIfIdle,
     remove: removeRuntime,
+    listMine: listMyMachines,
+    revokeMine: revokeMyMachines,
     requestDesktop: requestDesktopRuntime,
     setPreference: setRuntimePreference,
     updateActivity: updateRuntimeActivity,

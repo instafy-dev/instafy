@@ -527,13 +527,13 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // proxy_retry_budget, provider_mcp and read-reference selectors, the code-mode host build, the
   // per-model proxy_retry_budget runs, the runtime provider core and service unit
   // tests, CLI git wrapper suite, local author pseudonym key test and inert native
-  // compaction, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the pages of their own chats, saved change reload, turn wrap-up, client time zone and proxy stream selectors, the hermetic local-engine turn targets and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings, local tunnel and runtime lifetime suites, and the tunnel
+  // compaction, granted turn, native subagent, browser hand-back, stopped turn, thread mode, evidence retry, reply draft stream, page card and Codex-never-starts-claude selectors, the pages of their own chats, saved change reload, turn wrap-up, client time zone and proxy stream selectors, the hermetic local-engine turn targets and run_instructions target, CLI preview check, bound-sites binder, web read (with its offline fixtures), preview picture, web search and link, MCP server, login profile and space id path, and account and team, chat and support, agent and diagnostics, preview server and page, bound site check, space setup, research settings, local tunnel, runtime lifetime and machine list and revocation suites, and the tunnel
   // broker test lane with its Rust tests aggregate entry, and the dead-code gate (RUSTFLAGS in every
   // lane but runtime-agent's, --all-targets in their check lanes, runtime-agent's clippy check with
   // its clippy component, and its comment): retains all functional commands, aggregate guards,
   // routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '49068a38fdb7fb5af11f3a369a444351595ff45231830e2898168ede003063c9');
+    '43a77ede3fd08069a3ede05f46dca244630f05fa0e380ab6e59ee3df2a9d5219');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

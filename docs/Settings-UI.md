@@ -503,13 +503,13 @@ loaded lists remain visible with a stale-data label; remote mutations pause whil
 and creation drafts remain editable. The state is scoped to the signed-in account, space
 and file route, and never carries an outage into another space or Home/personal settings.
 
-Your settings has Profile, Appearance, Notifications and Advanced categories.
+Your settings has Profile, Appearance, Notifications, Location, Machines and Advanced categories.
 Its header is account-wide on both desktop and mobile: **Your settings**, a return action,
 and global search, without the previous space's breadcrumb or organization tint. Back returns
 to the previous route, or Home when there is no in-app history. Team and space settings retain
 their scoped context and search.
 Appearance owns the device's System/Light/Dark theme. Theme changes apply immediately. Team and
-space colors remain in their scoped identity settings. On mobile the four categories use the
+space colors remain in their scoped identity settings. On mobile the categories use the
 shared anchored picker. There is no file-saving preference: every agent turn saves its files,
 so the former Preferences category is gone and an old link to it opens Profile.
 
@@ -517,6 +517,15 @@ Advanced keeps Developer tools collapsed until opened. Its diagnostics action an
 diagnostics action open the same Studio-owned dialog for logs, build information, runtime
 connections and layout overrides. No developer-mode preference is required. The account menu
 keeps Your settings, Support, install/update actions when relevant and Sign out.
+
+Machines lists the person's own machines in every space, one row per space a machine runs in,
+so a computer used in two spaces has two rows; it is not a space's Machines page. Each row that
+is not revoked has **Revoke**, whose accessible name and confirmation name the row's space;
+**Revoke all** shows while any row can still be revoked and is the one action that says "in
+every space". A revoked row stays listed and says when it was revoked, with its last sighting
+only when that came before the revocation. After a successful revoke, focus returns to the
+stable row. An offline first read shows an offline notice and a failed read hides the list, so
+neither looks like "No machines." nor leaves a stale list to revoke from.
 
 Utility pages such as Settings, Credits, AI and Machines share one temporary workspace tab.
 Browsing a different utility replaces that preview; settings categories reuse the same Settings

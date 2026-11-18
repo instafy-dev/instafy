@@ -28,6 +28,7 @@ use super::db::{
 };
 use super::lease::parse_lease_scope;
 use super::provider::authorize_provider_for_project;
+use super::revocation::OWNER_REVOCATION_CAPABILITY;
 use super::token::{
     default_runtime_token_scopes, effective_runtime_generation, ensure_runtime_generation_matches,
     set_runtime_generation_capability, CLAUDE_CODE_TURNS_SCOPE, PERSONAL_BROWSER_RUNTIME_SCOPE,
@@ -533,6 +534,10 @@ fn attest_runtime_capabilities(
     let reported_claude_code = capabilities.remove(CLAUDE_CODE_CAPABILITY);
     capabilities.remove(CLAUDE_CODE_CAPABILITY_SNAKE);
     capabilities.remove(RUNTIME_TOKEN_GENERATION_CAPABILITY);
+    // Only the owner's revocation records it: a lost machine that reported it
+    // naming its own generation would read as revoked, hidden from its
+    // owner's list and from their Revoke all.
+    capabilities.remove(OWNER_REVOCATION_CAPABILITY);
     capabilities.remove(super::managed::SHARED_BROWSER_AGENT_CONSENT_CAPABILITY);
     // The runtime reports `browserHost` as `{version, modes}`; the stored
     // value is the controller's, bound to the attested lease generation.
@@ -1721,6 +1726,7 @@ mod tests {
 
     #[test]
     fn personal_browser_capability_is_controller_attested() {
+        let generation = Uuid::new_v4().to_string();
         let spoofed = attest_runtime_capabilities(
             Some(json!({
                 "agent": true,
@@ -1728,7 +1734,11 @@ mod tests {
                     "enabled": true,
                     "ownerUserId": Uuid::new_v4().to_string(),
                 },
-                (RUNTIME_TOKEN_GENERATION_CAPABILITY): Uuid::new_v4().to_string(),
+                (RUNTIME_TOKEN_GENERATION_CAPABILITY): generation,
+                (OWNER_REVOCATION_CAPABILITY): {
+                    "generation": generation,
+                    "revokedAt": "2026-11-18T12:00:00Z",
+                },
             })),
             None,
             None,
@@ -1739,6 +1749,15 @@ mod tests {
         assert_eq!(spoofed["agent"], json!(true));
         assert!(spoofed.get("personalBrowser").is_none());
         assert!(spoofed.get(RUNTIME_TOKEN_GENERATION_CAPABILITY).is_none());
+        assert!(spoofed.get(OWNER_REVOCATION_CAPABILITY).is_none());
+        // Stored with the generation registration sets, a reported revocation
+        // could not make the runtime read as revoked either.
+        let mut stored = spoofed.clone();
+        set_runtime_generation_capability(
+            &mut stored,
+            Uuid::parse_str(&generation).expect("generation"),
+        );
+        assert!(crate::runtime::revocation::owner_revoked_at(&stored).is_none());
 
         let owner_user_id = Uuid::new_v4();
         let attested = attest_runtime_capabilities(

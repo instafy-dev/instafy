@@ -24,3 +24,14 @@ export function shownValue(value: string): string {
 export function shownPath(file: string): string {
   return file.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, escaped);
 }
+
+/**
+ * A value as `--json` prints it: `JSON.stringify` with two-space indentation, which escapes only
+ * the control characters up to U+001F. The others `shownPath` escapes, DEL, the C1 controls, the
+ * line and paragraph separators and the bidirectional marks, are written as `\uXXXX` escapes too.
+ * None of them can stand outside a string in JSON, and inside one the escape reads as the same
+ * character, so the output is still JSON and parses to the same values.
+ */
+export function shownJson(value: unknown): string {
+  return JSON.stringify(value, null, 2).replace(/[\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, escaped);
+}

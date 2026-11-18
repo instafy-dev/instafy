@@ -41,6 +41,7 @@ import { NotificationPreferencesSettings } from "../../../notifications/Notifica
 import { PersonalAppearanceSettings } from "./PersonalAppearanceSettings";
 import { PersonalAdvancedSettings } from "./PersonalAdvancedSettings";
 import { PersonalLocationSettings } from "./PersonalLocationSettings";
+import { MyMachinesSettings } from "./MyMachinesSettings";
 import { SettingsSection } from "./SettingsSection";
 import { describeProjectMemoryBootstrapResult } from "./projectMemoryBootstrapStatus";
 import { TeamProfileSettings } from "./TeamProfileSettings";
@@ -927,7 +928,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
                   ? "Appearance"
                   : profileCategory === "location"
                     ? "Location"
-                    : "Advanced";
+                    : profileCategory === "machines"
+                      ? "Machines"
+                      : "Advanced";
 
   const settingsScope =
     activeTab === "profile" ? null : activeTab === "org" ? (
@@ -1246,6 +1249,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       { id: "appearance", label: "Appearance", testId: "settings-category-profile-appearance" },
       { id: "notifications", label: "Notifications", testId: "settings-category-profile-notifications" },
       { id: "location", label: "Location", testId: "settings-category-profile-location" },
+      { id: "machines", label: "Machines", testId: "settings-category-profile-machines" },
       { id: "advanced", label: "Advanced", testId: "settings-category-profile-advanced" },
     ];
   }, [activeTab, projectAiItems]);
@@ -1561,6 +1565,8 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
             <PersonalAppearanceSettings />
           ) : profileCategory === "location" ? (
             <PersonalLocationSettings />
+          ) : profileCategory === "machines" ? (
+            <MyMachinesSettings />
           ) : (
             <PersonalAdvancedSettings />
           )}

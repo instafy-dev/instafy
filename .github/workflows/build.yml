@@ -667,6 +667,9 @@ jobs:
       - name: Test CLI runtime lifetime restarts
         run: pnpm --filter @instafy/cli exec vitest run test/runtime-lifetime.spec.ts test/runtime-lifetime-stop.e2e.spec.ts test/runtime-stale-pid.spec.ts
 
+      - name: Test CLI machine list and revocation
+        run: pnpm --filter @instafy/cli exec vitest run test/runtime-machines.spec.ts test/terminal-text.spec.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-

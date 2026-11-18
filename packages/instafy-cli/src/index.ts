@@ -30,6 +30,7 @@ import {
   credentialsTest,
 } from "./credentials.js";
 import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelLogs, runTunnelCommand } from "./tunnel.js";
+import { runtimeMachines, runtimeRevoke } from "./machines.js";
 import {
   PreviewCommandError,
   hasOpenPreviewFor,
@@ -1728,7 +1729,7 @@ configCommand
 
 const runtimeCommand = program
   .command("runtime")
-  .description("Start/stop the local Instafy runtime");
+  .description("Start/stop the local Instafy runtime, and list or revoke your machines");
 
 failWithGroupHelp(runtimeCommand);
 
@@ -1835,6 +1836,63 @@ runtimeTokenCommand
         controllerAccessToken: opts.accessToken,
         runtimeId: opts.runtimeId,
         scopes: opts.scope,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const runtimeMachinesCommand = runtimeCommand
+  .command("machines")
+  .description(
+    "List your own machines in every space, once per space, and tokens minted for machines that have not connected yet",
+  );
+
+addServerUrlOptions(runtimeMachinesCommand);
+addAccessTokenOptions(runtimeMachinesCommand, "Instafy access token");
+
+runtimeMachinesCommand
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      await runtimeMachines({
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const runtimeRevokeCommand = runtimeCommand
+  .command("revoke")
+  .description(
+    "End the runtime tokens of the machines you name, each in its own space, or of all of them with --all, and stop the ones running",
+  )
+  .argument("[ids-or-prefixes...]", "Machine UUIDs or unique id prefixes from `instafy runtime machines`")
+  .option("--all", "Revoke all your machines, in every space")
+  .option(
+    "--yes",
+    "Skip the confirmation prompt (required with --json, when CI=true, or when not running in a terminal)",
+  );
+
+addServerUrlOptions(runtimeRevokeCommand);
+addAccessTokenOptions(runtimeRevokeCommand, "Instafy access token");
+
+runtimeRevokeCommand
+  .option("--json", "Output JSON")
+  .action(async (idsOrPrefixes: string[], opts) => {
+    try {
+      await runtimeRevoke({
+        idsOrPrefixes,
+        all: Boolean(opts.all),
+        yes: Boolean(opts.yes),
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
