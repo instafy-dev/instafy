@@ -267,5 +267,7 @@ describe("where the chat offers Stop", () => {
     expect(start).toBeGreaterThan(-1);
     const call = chatPanel.slice(start, chatPanel.indexOf("});", start));
     expect(call).toContain("active: chatRunStopOnScreen({ chatVisible, browserVisible, jobThread: Boolean(jobThread) }),");
+    // The Browser view keeps Escape for the browser, and Stop's words say so.
+    expect(call).toContain("escapeStops: !browserVisible,");
   });
 });

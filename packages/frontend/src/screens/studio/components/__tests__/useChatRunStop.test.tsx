@@ -9,6 +9,7 @@ import { applyReplyDraft, clearReplyDrafts, conversationReplyDrafts } from "../.
 import { RuntimeStateProvider, useRuntimeState } from "../../../../runtime/RuntimeStateProvider";
 import type { RunRecord } from "../../../../types";
 import type { ChatMessage } from "../../types";
+import { ChatRunStopControl } from "../ChatRunStopControl";
 import { chatRunStopOnScreen, resolveChatRunStopTargets } from "../chatRunStopTargets";
 import {
   CHAT_RUN_STOP_HANDOVER_MS, CHAT_RUN_STOP_TIMEOUT_MS, useChatRunStop, type ChatRunStopController, type ChatRunStopOptions,
@@ -132,6 +133,35 @@ describe("useChatRunStop", () => {
     await act(async () => { document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await vi.runAllTicks(); });
     expect(cancel).toHaveBeenLastCalledWith("chat", ["replacement"]);
     expect(cancel).toHaveBeenCalledTimes(2);
+  });
+  // The chat's Browser view keeps Escape for the browser, and a sign-in pause
+  // brings that view forward by itself while Stop stays: there Stop's words
+  // don't offer Escape, which stops nothing, while Chat keeps both.
+  it("offers Escape in Stop's words only where Escape stops", async () => {
+    function WithControl() { controller = useChatRunStop(props); return <ChatRunStopControl controller={controller} />; }
+    const stopButton = () => container.querySelector<HTMLButtonElement>('[data-testid="chat-run-stop-button"]')!;
+    const escape = () => act(async () => {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await vi.runAllTicks();
+    });
+    props = { ...props, escapeStops: false };
+    await act(async () => { root.render(<WithControl />); });
+    expect(stopButton().title).toBe("Stop");
+    expect(stopButton().hasAttribute("aria-keyshortcuts")).toBe(false);
+    await escape();
+    expect(cancel).not.toHaveBeenCalled();
+    // A press still stops the turn there.
+    cancel.mockResolvedValueOnce(accepted("octo-1"));
+    await act(async () => stopButton().click());
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["octo-1"]);
+    // In Chat, for the next turn.
+    cancel.mockReset(); cancel.mockResolvedValueOnce(accepted("octo-2"));
+    props = { ...props, escapeStops: true, targets: [{ ...octo, jobId: "octo-2" }] };
+    await act(async () => { root.render(<WithControl />); });
+    expect(stopButton().title).toBe("Stop (Esc)");
+    expect(stopButton().getAttribute("aria-keyshortcuts")).toBe("Escape");
+    await escape();
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["octo-2"]);
   });
 
   // A local test, Nov 17: a pause on the person's sign-in fields brought the
