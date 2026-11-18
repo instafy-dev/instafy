@@ -16695,8 +16695,9 @@ const COOKIE_NOTICE_PAUSE_AGAIN_REPLY: &str = "Instafy's browser is still waitin
 /// What the person reads when a Shared Browser turn paused on a step only they take, a button or
 /// a link it highlighted, with any field beside it (`human_step_required`): a booking's or a
 /// payment's final button, or a part of the page Octo can't reach. The turn's own words say which
-/// step it is, where it is on the page and what it does, as the browser skill asks, and how to go
-/// on follows them ([`human_step_pause_reply`]). A turn that wrote none reads this.
+/// step it is, where it is on the page and what it does, as the pause's result asks
+/// (`shared_browser::terminal_consent_call_result`), and how to go on follows them
+/// ([`human_step_pause_reply`]). A turn that wrote none reads this.
 const HUMAN_STEP_PAUSE_REPLY: &str = "Your step is highlighted on the page in Instafy's browser: fill in any highlighted fields, press the highlighted button when you're ready, then choose Let Octo continue. I don't ask for those details in chat.";
 
 /// The same, when Octo's last reply in the chat was a pause already.
@@ -33376,7 +33377,7 @@ mod tests {
 
     /// A pause on a step only the person may do, a button among it (a booking's or a payment's
     /// final button), keeps what the turn said of it: which button, where it is on the page and
-    /// what pressing it does, as the browser skill asks. How to go on follows, and that nothing is
+    /// what pressing it does, as the pause's result asks. How to go on follows, and that nothing is
     /// asked in chat, once. Its missing and unread lines, and the lines for pages that stopped it,
     /// go as for any pause; the lines for pages it read stay after the words. A turn that wrote no
     /// words of its own, or whose answer the runtime stood in for, reads the fixed words, and

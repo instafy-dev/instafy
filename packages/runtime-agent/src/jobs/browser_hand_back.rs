@@ -132,8 +132,14 @@ a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a p
 Report only what the pages showed, never a secret; Instafy adds when and in which browser each page was read. \
 Octo's later turns read only these lines, never your reply's words: write each fact as \"Finding a page\" says.";
 
-/// What a browser turn says in words of a page that stopped it: the person reads it.
-const FIRST_LINE_STOP: &str = "If a page stopped you (a manual step, a refused or challenge page), say so in your first line.";
+/// What a browser turn says in words of a page that stopped it: the person reads it. For a
+/// challenge page, and for a step only the person can do that the turn didn't highlight, it says
+/// what they do there and the page's link too: told only to say so, two turns whose page was a bot
+/// check wrote only that it was, though their browser skill said to give its link, and the page's
+/// address stayed in their finding line, which the person never reads (a local test, Nov 17). A
+/// step the turn highlighted needs no link: the person does it where it is highlighted, in
+/// Instafy's browser, and the pause's reply says so.
+const FIRST_LINE_STOP: &str = "If a page stopped you (a manual step, a refused or challenge page), say so in your first line; for a challenge page or a manual step you didn't highlight, also what the person does there and the page's link.";
 
 /// The heading of the findings of a browser turn whose findings go back to the building turn
 /// ([`hands_back`]), and what it says in words, which the person reads only when a page stopped
@@ -2103,7 +2109,16 @@ mod tests {
                 section.contains(&format!(r#""stopped": "{reasons}""#)),
                 "{section}"
             );
-            assert!(section.contains("say so in your first line"));
+            // A page that stopped it is said in its first line, and for a challenge page or a step
+            // only the person can do that it didn't highlight, what they do there and the page's
+            // link: told only to say so, two turns whose page was a bot check wrote only that it
+            // was, and its address stayed in their finding lines (a local test, Nov 17).
+            assert!(
+                section.contains(
+                    "say so in your first line; for a challenge page or a manual step you didn't highlight, also what the person does there and the page's link."
+                ),
+                "{section}"
+            );
             // The browser turn says what it read, and never that it couldn't finish what the
             // next turn does.
             assert!(section.contains(
@@ -2113,7 +2128,7 @@ mod tests {
             // It ends with the turn's part of the request, which the request follows.
             assert!(
                 section.ends_with(
-                    "say so in your first line.\n\nYour part of this request is the reading: \
+                    "also what the person does there and the page's link.\n\nYour part of this request is the reading: \
                      read every page it needs before you end, as \"Finding a page\" says (this \
                      turn has no web search). What it asks Octo to make is the building turn's \
                      part, from your finding lines, so never stop because this turn can't make \
@@ -2156,6 +2171,14 @@ mod tests {
             assert!(
                 section.contains(
                     r#"After your finding lines, one line `{"missing": ["<a value this request needs that you looked for and didn't find>"]}`"#
+                ),
+                "{section}"
+            );
+            // Its reply is what the person reads: after a challenge page, or at a step only they
+            // can do that it didn't highlight, it says what they do there and the page's link.
+            assert!(
+                section.ends_with(
+                    "say so in your first line; for a challenge page or a manual step you didn't highlight, also what the person does there and the page's link."
                 ),
                 "{section}"
             );

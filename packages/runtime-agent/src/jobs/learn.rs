@@ -722,9 +722,11 @@ const LEGACY_BROWSER_AUTOMATION_SHA256: &[&str] = &[
     // searches first too. A change to another chat's page stayed `direct` with no change, and the
     // routing step's `summary` named a page a reply here linked by its address.
     "ee989f9ea7da84be0cd9c8b7b1beb2f4b064a36dcb6dfcf5bbb0bcc5dc47b24b", // v45
-    // From before a step only the person may do that can't be highlighted (one the snapshot doesn't
-    // list, such as one in a frame, and one after a CAPTCHA or bot check or on a link-only site) was
-    // said by what to do and where, with the page's link, never as not accessible.
+    // From before a step only the person may do was highlighted only where `request_human_input`
+    // can highlight it, and one it can't (one the snapshot doesn't list, such as one in a frame, a
+    // button in the Personal Browser, and one after a CAPTCHA or bot check or on a link-only site)
+    // was said by what to do, where it sits only as a page read shows it, and the page's link,
+    // never as not accessible.
     "e3f50c3e063c07481fb5a4b139287ef510fbb19eb0b3f8b894937b4ea1445e15", // v46
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
