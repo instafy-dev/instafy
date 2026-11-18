@@ -6042,8 +6042,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     canStop: canStopRuns,
     viewerUserId: currentUserId,
     active: chatRunStopOnScreen({ chatVisible, browserVisible, jobThread: Boolean(jobThread) }),
+    // The Browser view keeps Escape for the browser.
+    escapeStops: !browserVisible,
     escapeBlocked: Boolean(messageMenu || imageLightbox || invitePrompt || connectSheetOpen
-      || addMenuOpen || skillsImport.addSkillModalOpen || agentProfileModal || browserVisible),
+      || addMenuOpen || skillsImport.addSkillModalOpen || agentProfileModal),
   });
   const runStopNoticeContext = useChatRunStopContinuation({
     conversationId: stopConversationId,

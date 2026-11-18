@@ -488,7 +488,9 @@ export function ChatComposerSurface({
       ? "Stop requested."
       : composerRunStopController?.phase === "error"
         ? "Stop was not confirmed. Retry is available."
-        : "A reply is in progress. Stop is available, or press Escape.";
+        : composerRunStopController?.escapeStops
+          ? "A reply is in progress. Stop is available, or press Escape."
+          : "A reply is in progress. Stop is available.";
   const modifierPreviewBaseAvailable =
     !showVoicePrimaryAction &&
     !editingQueueMessage &&

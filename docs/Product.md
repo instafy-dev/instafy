@@ -74,8 +74,9 @@ recording keeps its own controls. The icon has an accessible label and tooltip, 
 touch target as the other composer controls. With multiple agents it opens an agent choice and
 **Stop both** (or **Stop all**).
 Escape stops the current set only when no dialog, menu, preview, or other interface owns the key.
-Stopping a turn owned by someone else, or whose owner is unknown, asks for confirmation. Read-only
-viewers and historical/lingering previews have no Stop action.
+The Browser view keeps Escape for the browser, so there Stop's tooltip and spoken status don't
+offer it. Stopping a turn owned by someone else, or whose owner is unknown, asks for
+confirmation. Read-only viewers and historical/lingering previews have no Stop action.
 
 Stop targets the captured job IDs, never the whole conversation as a fallback. Its request goes
 out before the chat redraws for it, which then shows a pending indicator, then a disabled Stop icon

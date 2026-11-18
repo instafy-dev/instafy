@@ -252,7 +252,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
       const current = latest.current;
       if (chatRunStopEscapeBlocked(event, {
         active: current.options.active !== false && current.options.canStop,
-        blocked: current.options.escapeBlocked || Boolean(current.state.confirmationTargets),
+        blocked: current.options.escapeBlocked || current.options.escapeStops === false || Boolean(current.state.confirmationTargets),
       })) blockedEvents.add(event);
     };
     const onEscape = (event: KeyboardEvent) => {
@@ -264,7 +264,8 @@ export function useChatRunStop(options: ChatRunStopOptions) {
         const current = latest.current;
         if (chatRunStopEscapeBlocked(event, {
           active: current.options.active !== false && current.options.canStop,
-          blocked: current.options.escapeBlocked || effectivePhase(current.state, current.options.targets) !== "idle" || Boolean(current.state.confirmationTargets),
+          blocked: current.options.escapeBlocked || current.options.escapeStops === false
+            || effectivePhase(current.state, current.options.targets) !== "idle" || Boolean(current.state.confirmationTargets),
         })) return;
         requestStop();
       });
