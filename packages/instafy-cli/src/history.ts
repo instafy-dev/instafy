@@ -5,7 +5,6 @@ import { resolveSpaceId } from "./space-id.js";
 type HistoryCommonOptions = {
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
   pretty?: boolean;
 };
 
@@ -78,7 +77,6 @@ export async function historyMessages(options: HistoryMessagesOptions): Promise<
     query,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     pretty: asPretty(options.pretty),
   });
 }
@@ -93,7 +91,6 @@ export async function historyRuns(options: HistoryRunsOptions): Promise<void> {
     query: [`limit=${limit}`],
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     pretty: asPretty(options.pretty),
   });
 }
@@ -108,7 +105,6 @@ export async function historyConversations(options: HistoryConversationsOptions)
     query: [`limit=${limit}`],
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     pretty: asPretty(options.pretty),
   });
 }

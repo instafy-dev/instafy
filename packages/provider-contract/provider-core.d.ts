@@ -75,55 +75,6 @@ export type ProviderEventEnvelope<TPayload = Record<string, unknown>> = {
   payload?: TPayload;
 };
 
-export type ProviderRecommendation<TPayload = Record<string, unknown>> = {
-  decision: string;
-  reason?: string;
-  confidence?: number;
-  actionToolName?: string;
-  summary?: string;
-  executionContext?: ProviderExecutionContext;
-  artifactRefs?: ProviderArtifactReference[];
-  payload?: TPayload;
-};
-
-export type ProviderComparisonSummary<TMetrics = Record<string, unknown>> = {
-  previousArtifactRef?: ProviderArtifactReference;
-  previousGeneratedAtIso8601?: string;
-  similarConditions?: boolean;
-  summary?: string;
-  metrics?: TMetrics;
-  sharedEvidenceCategories?: string[];
-  newEvidenceCategories?: string[];
-  clearedEvidenceCategories?: string[];
-};
-
-export type ProviderEvaluationReport<TMetrics = Record<string, unknown>> = {
-  kind: string;
-  providerId?: string;
-  providerType?: string;
-  generatedAtIso8601?: string;
-  sessionId?: string;
-  summary?: string;
-  executionContext?: ProviderExecutionContext;
-  artifactRefs?: ProviderArtifactReference[];
-  metrics?: TMetrics;
-  recommendation?: ProviderRecommendation;
-  comparison?: ProviderComparisonSummary;
-};
-
-export type ProviderAppliedUpdate<TPayload = Record<string, unknown>> = {
-  kind: string;
-  providerId?: string;
-  providerType?: string;
-  appliedAtIso8601?: string;
-  status?: string;
-  recommendationDecision?: string;
-  summary?: string;
-  executionContext?: ProviderExecutionContext;
-  artifactRefs?: ProviderArtifactReference[];
-  payload?: TPayload;
-};
-
 export type ProviderSummary = {
   id: string;
   title: string;
@@ -240,18 +191,6 @@ export function createProviderExecutionContext(
 export function createProviderEventEnvelope<TPayload = Record<string, unknown>>(
   input: Partial<ProviderEventEnvelope<TPayload>> | null | undefined,
 ): ProviderEventEnvelope<TPayload>;
-export function createProviderRecommendation<TPayload = Record<string, unknown>>(
-  input: Partial<ProviderRecommendation<TPayload>> | null | undefined,
-): ProviderRecommendation<TPayload>;
-export function createProviderComparisonSummary<TMetrics = Record<string, unknown>>(
-  input: Partial<ProviderComparisonSummary<TMetrics>> | null | undefined,
-): ProviderComparisonSummary<TMetrics>;
-export function createProviderEvaluationReport<TMetrics = Record<string, unknown>>(
-  input: Partial<ProviderEvaluationReport<TMetrics>> | null | undefined,
-): ProviderEvaluationReport<TMetrics>;
-export function createProviderAppliedUpdate<TPayload = Record<string, unknown>>(
-  input: Partial<ProviderAppliedUpdate<TPayload>> | null | undefined,
-): ProviderAppliedUpdate<TPayload>;
 export function createProviderSummary(input: Partial<ProviderSummary>): ProviderSummary;
 export function isProviderDiscoverable(
   provider: Pick<ProviderSummary, "discoverable"> | null | undefined,

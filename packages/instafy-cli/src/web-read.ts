@@ -113,7 +113,6 @@ export {
 
 /** What reads a page over the network: this command, over plain HTTP. A test build's fixture page says "fixture". */
 export const VIEWER = NETWORK_VIEWER;
-export const WEB_USER_AGENT = USER_AGENT;
 /** robots.txt groups checked for every URL: every crawler, this agent, and the AI agents. */
 export const ROBOTS_AGENTS: readonly string[] = ["*", "instafy-agent", ...AI_AGENTS];
 

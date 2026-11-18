@@ -179,10 +179,6 @@ export function getInstafyConfigPath(): string {
   return CONFIG_PATH;
 }
 
-export function getInstafyProfilesDirPath(): string {
-  return PROFILES_DIR;
-}
-
 export function getInstafyProfileConfigPath(profile: string): string {
   const normalized = normalizeProfileName(profile);
   if (!normalized) {

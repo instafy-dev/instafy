@@ -5,7 +5,6 @@ import { resolveSpaceId } from "./space-id.js";
 type ConversationCommonOptions = {
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
   pretty?: boolean;
 };
 
@@ -255,7 +254,6 @@ async function fetchProjectConversations(
     path: `/projects/${encodeURIComponent(options.project)}/conversations`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     query,
   });
   return Array.isArray(response) ? response : [];
@@ -272,7 +270,6 @@ async function fetchConversationMessages(
     path: `/conversations/${encodeURIComponent(options.conversationId)}/messages`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     query: [`limit=${options.limit}`],
   });
   return Array.isArray(response.messages) ? response.messages : [];
@@ -290,7 +287,6 @@ async function fetchConversationTranscript(
       path: `/conversations/${encodeURIComponent(options.conversationId)}/messages`,
       controllerUrl: options.controllerUrl,
       accessToken: options.accessToken,
-      serviceToken: options.serviceToken,
       query: [`limit=${MAX_LIMIT}`, ...(cursor ? [`cursor=${encodeURIComponent(cursor)}`] : [])],
     });
     // Missing pagination is not evidence that older messages do not exist.
@@ -421,7 +417,6 @@ async function buildSearchMatches(
           conversationId: match.conversation.id,
           controllerUrl: options.controllerUrl,
           accessToken: options.accessToken,
-          serviceToken: options.serviceToken,
           limit: DEFAULT_MESSAGE_LIMIT,
         }).catch(() => []),
       ),
@@ -530,7 +525,6 @@ export async function createConversation(options: ConversationCreateOptions): Pr
     path: `/projects/${encodeURIComponent(projectId)}/conversations/blank`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     jsonBody: {
       metadata: title ? { title } : {},
       parentConversationId,
@@ -577,7 +571,6 @@ export async function listConversations(options: ConversationListOptions): Promi
     rootsOnly: !options.includeThreads,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
 
   const items = conversations.map((conversation) => ({
@@ -614,7 +607,6 @@ export async function searchConversations(options: ConversationSearchOptions): P
     rootsOnly: !options.includeThreads,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
   const matches = await buildSearchMatches(conversations, options);
 
@@ -697,7 +689,6 @@ export async function showConversation(options: ConversationShowOptions): Promis
     rootsOnly: !options.includeThreads,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
 
   let selected: SearchMatch | null = null;
@@ -736,7 +727,6 @@ export async function showConversation(options: ConversationShowOptions): Promis
       includeThreads: options.includeThreads,
       controllerUrl: options.controllerUrl,
       accessToken: options.accessToken,
-      serviceToken: options.serviceToken,
       pretty: options.pretty,
       json: false,
     });
@@ -750,7 +740,6 @@ export async function showConversation(options: ConversationShowOptions): Promis
     conversationId: selected.id,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     limit,
   };
   const transcript = options.transcript
