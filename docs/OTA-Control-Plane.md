@@ -211,9 +211,10 @@ Create or register a release.
 
 A release ID has immutable artifact and native compatibility identity. Re-registering the same
 identity is an idempotent retry and returns the existing record unchanged, including its lifecycle
-and publication metadata. Changing that identity returns HTTP 409. Registration is no longer a
-way to edit an existing release's notes, status, or rollout; activation/rollback own lifecycle
-changes, and a different artifact or native guard requires a new release ID.
+and publication metadata. Changing that identity returns HTTP 409, and so does registering a
+bundle version that another release ID already uses on the same platform and channel. Registration
+is no longer a way to edit an existing release's notes, status, or rollout; activation/rollback own
+lifecycle changes, and a different artifact or native guard requires a new release ID.
 
 Payload:
 

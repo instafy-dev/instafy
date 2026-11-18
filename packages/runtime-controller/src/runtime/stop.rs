@@ -74,17 +74,6 @@ struct ProviderReleaseOutcome {
     succeeded: bool,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct RuntimeIdleReaperPayload {
-    pub(crate) limit: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct RuntimeIdleReaperResponse {
-    pub(crate) stopped: Vec<Uuid>,
-    pub(crate) candidates: usize,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct StopOptions {
     pub(crate) source: &'static str,
@@ -2396,132 +2385,6 @@ pub(crate) async fn runtime_remove(
     }))
 }
 
-pub(crate) async fn runtime_idle_reaper(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    headers: HeaderMap,
-    axum::Json(payload): axum::Json<RuntimeIdleReaperPayload>,
-) -> Result<Json<RuntimeIdleReaperResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate_request(&state.config, &headers).await?;
-    if !auth.is_service_role {
-        return Err(unauthorized("runtime idle reaper requires service role"));
-    }
-
-    let limit = payload.limit.unwrap_or(10).clamp(1, 50) as i64;
-
-    let connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-
-    let candidate_count_row = connection
-        .query_one(
-            r#"
-            select count(*)
-            from runtimes r
-            where r.status <> 'stopped'
-              and r.idle_ttl_seconds > 0
-              and r.last_seen_at is not null
-              and (r.last_seen_at + interval '1 second' * r.idle_ttl_seconds) < now()
-              and not exists (
-                select 1 from agent_jobs j
-                where j.leased_by_runtime_id = r.id
-                  and j.status = 'leased'
-              )
-            "#,
-            &[],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to count idle runtimes: {error}")))?;
-    let candidate_count: i64 = candidate_count_row.get(0);
-
-    let rows = connection
-        .query(
-            r#"
-            select r.id
-            from runtimes r
-            where r.status <> 'stopped'
-              and r.idle_ttl_seconds > 0
-              and r.last_seen_at is not null
-              and (r.last_seen_at + interval '1 second' * r.idle_ttl_seconds) < now()
-              and not exists (
-                select 1 from agent_jobs j
-                where j.leased_by_runtime_id = r.id
-                  and j.status = 'leased'
-              )
-            order by r.last_seen_at asc
-            limit $1
-            "#,
-            &[&limit],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to select idle runtimes: {error}")))?;
-    drop(connection);
-
-    let mut stopped_ids = Vec::new();
-
-    for row in rows {
-        let runtime_id: Uuid = row.get("id");
-
-        let stop_options = StopOptions {
-            source: "idle_reaper",
-            reason: Some("idle_timeout".to_string()),
-            skip_if_active_jobs: true,
-            require_idle_timeout: true,
-            allow_cleanup_pending_release: false,
-            expected_identity: None,
-        };
-        let stop_reason_label = stop_options
-            .reason
-            .clone()
-            .unwrap_or_else(|| stop_options.source.to_string());
-
-        let SafeRuntimeStop {
-            runtime, outcome, ..
-        } = match stop_runtime_safely(&state, &runtime_id, stop_options).await {
-            Ok(value) => value,
-            Err((status, _body)) if status == StatusCode::NOT_FOUND => {
-                info!(runtime_id = %runtime_id, "idle reaper candidate no longer exists");
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-
-        if outcome.status_changed {
-            if let Err((status, payload)) = revoke_tunnels_for_scope(
-                &state,
-                &runtime.project_id,
-                Some(&runtime.id),
-                outcome.released_runtime_lease_id.as_ref(),
-                &stop_reason_label,
-            )
-            .await
-            {
-                warn!(
-                    runtime_id = %runtime.id,
-                    project_id = %runtime.project_id,
-                    %status,
-                    error = payload.0.message,
-                    "failed to auto-revoke tunnels during idle reaper"
-                );
-            }
-
-            stopped_ids.push(runtime_id);
-        } else {
-            if let Some(reason) = outcome.skip_reason {
-                info!(runtime_id = %runtime_id, %reason, "idle reaper skipped runtime");
-            }
-        }
-    }
-
-    let response = RuntimeIdleReaperResponse {
-        stopped: stopped_ids,
-        candidates: candidate_count as usize,
-    };
-
-    Ok(Json(response))
-}
-
 /// What a stop publishes once its transaction commits: the inputs it
 /// rejected; each browser turn it failed, whose run's end and reserve
 /// give-back are written first, on connections of their own, then published
@@ -2614,7 +2477,6 @@ pub(super) async fn write_and_publish_failed_claude_code_turn(
     let wrote = message.is_some() || ended_run;
     if let Some(message) = message {
         crate::conversations::publish_conversation_message_event(&state.events, &message);
-        crate::notifications::enqueue_message_push_notifications(state.clone(), message);
     }
     if let (true, Some(run_id)) = (ended_run, turn.run_id) {
         super::sweeps::publish_failed_run(

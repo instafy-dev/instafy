@@ -255,7 +255,6 @@ impl Fixture {
         {
             let _schema = SCHEMA_SETUP.lock().await;
             crate::secrets::ensure_secret_tables(pool).await?;
-            crate::browser_profile::ensure_browser_profiles_table(pool).await?;
         }
         let old = CredentialKeyRing::from(old.clone());
         let new = CredentialKeyRing::from(new.clone());

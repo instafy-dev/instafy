@@ -1198,10 +1198,6 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
     );
     for message_row in &failed.conversation_messages {
         crate::conversations::publish_conversation_message_event(&state.events, message_row);
-        crate::notifications::enqueue_message_push_notifications(
-            state.clone(),
-            message_row.clone(),
-        );
     }
 
     let mut conversations = std::collections::BTreeSet::new();

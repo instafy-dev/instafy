@@ -349,7 +349,6 @@ async fn create_request(
         .await
         .map_err(|e| internal_error(format!("commit worker question: {e}")))?;
     publish_conversation_message_event(&state.events, &message);
-    crate::notifications::enqueue_message_push_notifications(state.clone(), message);
     drop(connection);
     publish_request_run_event(&state, request_id).await;
     Ok(Json(result))

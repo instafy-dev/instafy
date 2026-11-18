@@ -988,7 +988,6 @@ mod tests {
             browser_profile_persist_project_ids: vec![],
             browser_profile_snapshot_secs: 30,
             hosted_browser_host: Default::default(),
-            progress_callback_secret: None,
             git_remote_base_url: None,
             git_remote_public_base_url: None,
             git_shards: vec![],
