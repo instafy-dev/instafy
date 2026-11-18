@@ -52,6 +52,10 @@ use crate::upstream_error::UpstreamFailure;
 
 /// The most `search_query` entries one request runs, as codex's tool allows.
 const MAX_QUERIES: usize = 4;
+/// The searches a message whose person asked for deeper research may run
+/// (runtime-contracts `MANAGED_WEB_SEARCHES_FOR_DEEPER_RESEARCH`), which the
+/// line a model reads past a smaller limit says it could get.
+const SEARCHES_FOR_DEEPER_RESEARCH: u32 = 8;
 /// The most output tokens one search's answer may take, its reasoning
 /// included. Codex asks for at most its own tool-output budget.
 const MAX_ANSWER_TOKENS: u64 = 8_192;
@@ -505,6 +509,7 @@ impl SearchRequest {
             settings: self.settings.clone(),
             tool: self.tool.clone(),
             max_output_tokens: self.max_output_tokens,
+            withheld: None,
         }
     }
 }
@@ -544,6 +549,76 @@ enum Entry {
     NoSite { number: usize },
     /// The same search as an earlier entry, sent once.
     Same { number: usize, as_number: usize },
+    /// Not sent: the controller let fewer searches run ([`Withheld`]).
+    Withheld { number: usize },
+}
+
+/// Why searches a request planned were not run: the controller's check before
+/// a managed job's searches (runtime-controller `managed_web_search`), or this
+/// proxy's own switch. What the model reads in their place says why, and how
+/// to answer without them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Withheld {
+    /// Web search for Instafy AI is off: the controller's
+    /// `MANAGED_AI_NATIVE_WEB_SEARCH`, this proxy's
+    /// `PROXY_MANAGED_NATIVE_WEB_SEARCH`, or a job grant renewed without it.
+    Off,
+    /// The job's turn no longer holds its lease.
+    Ended,
+    /// A background check that may decline (an ambient evaluation), before it
+    /// answers.
+    Undecided,
+    /// The message has used its searches, of `limit`.
+    Used { limit: u32 },
+    /// The controller could not be asked.
+    Unchecked,
+}
+
+impl Withheld {
+    /// The controller's reason, as its claim names it.
+    pub(crate) fn from_refusal(refused: Option<&str>, limit: u32) -> Self {
+        match refused {
+            Some("off") => Self::Off,
+            Some("ended") => Self::Ended,
+            Some("undecided") => Self::Undecided,
+            Some("used") => Self::Used { limit },
+            _ => Self::Unchecked,
+        }
+    }
+
+    /// The reason's name in the proxy's log line.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Ended => "ended",
+            Self::Undecided => "undecided",
+            Self::Used { .. } => "used",
+            Self::Unchecked => "unchecked",
+        }
+    }
+
+    /// What the model reads in place of the searches.
+    fn tell(self) -> String {
+        const WITHOUT: &str = "Answer from what you have already found or read, read a page whose address you have with `instafy web read`, and say plainly what you could not check.";
+        match self {
+            Self::Off => format!("Not searched: web search is off for now. {WITHOUT}"),
+            Self::Ended => "Not searched: this turn can no longer search.".to_string(),
+            Self::Undecided => "Not searched: this message did not ask you, and a check that may not answer does not search. If you will not answer, decline as you were told. To answer it, say in one short sentence what you will look up, unless you already have, then search again.".to_string(),
+            Self::Used { limit } => {
+                let more = if limit < SEARCHES_FOR_DEEPER_RESEARCH {
+                    " A message gets more only when the person's own words in it ask for deeper research."
+                } else {
+                    ""
+                };
+                format!(
+                    "Not searched: this message has already used its {limit} web searches. {WITHOUT}{more}"
+                )
+            }
+            Self::Unchecked => {
+                format!("Not searched: web search could not be checked just now. {WITHOUT}")
+            }
+        }
+    }
 }
 
 /// The searches one request runs, and what to tell the model about the rest.
@@ -559,9 +634,41 @@ pub(crate) struct SearchPlan {
     settings: Option<Value>,
     tool: Map<String, Value>,
     max_output_tokens: u64,
+    /// Why some of the planned searches were not run, if any were not.
+    withheld: Option<Withheld>,
 }
 
 impl SearchPlan {
+    /// How many searches the plan runs.
+    pub(crate) fn searches(&self) -> usize {
+        self.searches.len()
+    }
+
+    /// Runs only the first `kept` of the plan's searches, and tells the model
+    /// `why` the others were not run. A later query that repeats one not run
+    /// is not run either.
+    pub(crate) fn withhold(&mut self, kept: usize, why: Withheld) {
+        if kept >= self.searches.len() {
+            return;
+        }
+        let withheld_numbers: Vec<usize> = self.searches[kept..]
+            .iter()
+            .map(|search| search.number)
+            .collect();
+        for entry in &mut self.entries {
+            let number = match *entry {
+                Entry::Searched(index) if index >= kept => self.searches[index].number,
+                Entry::Same { number, as_number } if withheld_numbers.contains(&as_number) => {
+                    number
+                }
+                _ => continue,
+            };
+            *entry = Entry::Withheld { number };
+        }
+        self.searches.truncate(kept);
+        self.withheld = Some(why);
+    }
+
     /// The request that runs `search` on `call`'s engine.
     fn request(&self, search: &Search, call: &SearchCall<'_>, today: &str) -> Value {
         match call.engine {
@@ -1260,6 +1367,9 @@ fn codex_response(
             Entry::Same { number, as_number } => {
                 let _ = writeln!(output, "Query {number} is the same as query {as_number}.");
             }
+            Entry::Withheld { number } => {
+                let _ = writeln!(output, "Query {number} was not searched.");
+            }
             Entry::Searched(index) => {
                 let search = &plan.searches[*index];
                 let (told, answer) = match &results[*index] {
@@ -1317,6 +1427,9 @@ fn codex_response(
                 }
             }
         }
+    }
+    if let Some(why) = plan.withheld {
+        let _ = writeln!(output, "\n{}", why.tell());
     }
     if plan.beyond_limit > 0 {
         let _ = writeln!(
@@ -1377,6 +1490,32 @@ fn codex_response(
         "encrypted_output": null,
         "results": listed,
     })
+}
+
+/// Codex's `SearchResponse` for a managed search none of whose queries may
+/// run, for `why`: no query searched, none charged, and the line the model
+/// reads in their place. Nothing goes upstream.
+pub(crate) fn not_searched(why: Withheld) -> Value {
+    json!({
+        "output": format!("Web search: nothing was searched.\n\n{}", why.tell()),
+        "encrypted_output": null,
+        "results": [
+            {"type": SEARCHED_QUERIES, "queries": []},
+            {"type": SEARCH_USAGE, "searches": 0, "input_tokens": 0,
+             "cached_input_tokens": 0, "output_tokens": 0},
+        ],
+    })
+}
+
+/// How many searches an answer of [`answer`] ran: its `search_usage` entry's.
+pub(crate) fn searches_in(response: &Value) -> usize {
+    response["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["type"] == SEARCH_USAGE)
+        .and_then(|entry| entry["searches"].as_u64())
+        .map_or(0, |searches| searches as usize)
 }
 
 /// Runs every search of `plan` at once, records each, and answers with
@@ -1616,6 +1755,105 @@ mod tests {
             ]
         );
         assert_eq!(plan.beyond_limit, 1);
+    }
+
+    /// The controller let fewer searches run than the plan holds: the first
+    /// ones run, the rest, and a repeat of one of them, are not searched, and
+    /// the model reads why once. None searched answers with nothing searched
+    /// and nothing charged.
+    #[test]
+    fn searches_the_controller_withheld_are_told_and_cost_nothing() {
+        let request = SearchRequest::read(&codex_request()).unwrap();
+        let mut first_only = request.plan(&[]);
+        first_only.withhold(1, Withheld::Used { limit: 2 });
+        assert_eq!(first_only.searches(), 1);
+        let mut none = request.plan(&[]);
+        none.withhold(0, Withheld::Used { limit: 2 });
+        assert_eq!(
+            none.entries,
+            vec![
+                Entry::Withheld { number: 1 },
+                Entry::Withheld { number: 2 },
+                Entry::Skipped {
+                    number: 3,
+                    refusal: QueryRefusal::LooksLikeSecret
+                },
+                // The same as query 1, which was not searched either.
+                Entry::Withheld { number: 4 },
+            ]
+        );
+        let answer = codex_response(&none, &[], Utc::now());
+        let output = answer["output"].as_str().unwrap();
+        assert!(
+            output.starts_with("Web search: nothing was searched."),
+            "{output}"
+        );
+        for told in [
+            "Query 1 was not searched.\n",
+            "Query 4 was not searched.\n",
+            "Not searched: this message has already used its 2 web searches.",
+            "A message gets more only when the person's own words in it ask for deeper research.",
+        ] {
+            assert!(output.contains(told), "{told}\n---\n{output}");
+        }
+        assert_eq!(output.matches("Not searched:").count(), 1);
+        assert_eq!(searches_in(&answer), 0);
+        assert_eq!(
+            answer["results"][0],
+            json!({"type": SEARCHED_QUERIES, "queries": []})
+        );
+
+        // With deeper research the line offers no more.
+        assert!(
+            !Withheld::Used { limit: 8 }
+                .tell()
+                .contains("deeper research")
+        );
+        // A plan the controller let run whole is left as it is.
+        let mut whole = request.plan(&[]);
+        whole.withhold(2, Withheld::Off);
+        assert_eq!(whole, request.plan(&[]));
+
+        // Nothing at all may run: nothing searched, nothing charged, and why.
+        for (why, line) in [
+            (Withheld::Off, "Not searched: web search is off for now."),
+            (
+                Withheld::Undecided,
+                "To answer it, say in one short sentence what you will look up, unless you already have, then search again.",
+            ),
+            (
+                Withheld::Unchecked,
+                "Not searched: web search could not be checked just now.",
+            ),
+        ] {
+            let answer = not_searched(why);
+            assert!(
+                answer["output"].as_str().unwrap().contains(line),
+                "{answer}"
+            );
+            assert_eq!(searches_in(&answer), 0);
+            assert_eq!(answer["encrypted_output"], Value::Null);
+        }
+        assert_eq!(
+            Withheld::from_refusal(Some("used"), 8),
+            Withheld::Used { limit: 8 }
+        );
+        assert_eq!(
+            Withheld::from_refusal(Some("undecided"), 2),
+            Withheld::Undecided
+        );
+        assert_eq!(Withheld::from_refusal(None, 2), Withheld::Unchecked);
+        for line in [
+            Withheld::Off,
+            Withheld::Used { limit: 2 },
+            Withheld::Undecided,
+        ]
+        .map(Withheld::tell)
+        {
+            for word in ["credit", "OpenAI", "proxy", "controller", "codex"] {
+                assert!(!line.contains(word), "{word} in {line}");
+            }
+        }
     }
 
     #[test]

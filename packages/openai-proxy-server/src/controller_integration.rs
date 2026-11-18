@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use axum::http::HeaderMap;
 
-use crate::controller_client::ControllerClient;
+use crate::controller_client::{ControllerClient, ManagedSearchClaim, ManagedSearchJob};
 use crate::controller_credential_source::ControllerCredentialSource;
 use crate::credential_lease::{CredentialLease, CredentialLeasePurpose, LeasedCredentials};
 use crate::proxy_auth::{ProxyClaims, ProxyTokenValidator};
@@ -92,6 +92,30 @@ impl ControllerIntegration {
     ) -> Result<()> {
         self.client
             .post_credential_usage(credential_id, snapshot)
+            .await
+    }
+
+    /// The controller's check `claim_id` before a managed job's searches run.
+    pub async fn claim_managed_web_searches(
+        &self,
+        job: &ManagedSearchJob,
+        claim_id: uuid::Uuid,
+        searches: u32,
+    ) -> Result<ManagedSearchClaim> {
+        self.client
+            .claim_managed_web_searches(job, claim_id, searches)
+            .await
+    }
+
+    /// Tells the controller how many of the check's searches ran.
+    pub async fn settle_managed_web_searches(
+        &self,
+        job: &ManagedSearchJob,
+        claim_id: uuid::Uuid,
+        ran: u32,
+    ) -> Result<()> {
+        self.client
+            .settle_managed_web_searches(job, claim_id, ran)
             .await
     }
 }

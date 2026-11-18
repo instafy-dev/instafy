@@ -2796,7 +2796,7 @@ async fn maybe_refresh_gemini_oauth_access_token(
     ))
 }
 
-fn require_proxy_credential_lease_token(
+pub(crate) fn require_proxy_credential_lease_token(
     config: &crate::AppConfig,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
@@ -2890,9 +2890,11 @@ pub(crate) async fn job_allows_native_web_search(
 /// written by), and only with `MANAGED_AI_NATIVE_WEB_SEARCH` on. The proxy
 /// serves its searches only with `PROXY_MANAGED_NATIVE_WEB_SEARCH` on too,
 /// and the runtime never turns search on in a routing step or a browser or
-/// granted turn, whatever the grant says. A job that started with search and
-/// is renewed after the switch went off loses its grant, and the runtime then
-/// stops it rather than going on with a different tool policy.
+/// granted turn, whatever the grant says. The switch is read again before
+/// every search (`managed_web_search`), so a job that started with search
+/// has its next search refused once the switch is off, and goes on. A job
+/// renewed after that loses the grant's search, and the runtime keeps it
+/// running.
 pub(crate) fn managed_job_allows_native_web_search(
     config: &crate::config::AppConfig,
     job: NativeSearchJob<'_>,

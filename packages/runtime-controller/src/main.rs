@@ -59,6 +59,7 @@ mod imports;
 mod integrations;
 mod job_trigger;
 mod jwks;
+mod managed_web_search;
 mod message_search;
 mod message_stashes;
 mod model_defaults;
@@ -560,6 +561,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(multi_agent_settings::router())
         .merge(research_settings::router())
         .merge(research_budget::router())
+        .merge(managed_web_search::router())
         .merge(browser_shares::router())
         .merge(imports::router())
         .merge(integrations::router())

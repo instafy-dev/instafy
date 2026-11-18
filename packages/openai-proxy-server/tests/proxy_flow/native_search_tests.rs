@@ -108,7 +108,6 @@ async fn native_search_refuses_untrusted_or_wrong_account_lanes_before_provider_
         let (addr, controller, upstream, _env, _guards) =
             spawn_stack(Some(MANAGED_STUB_KEY), None, false, proxy).await?;
         for token in [
-            grant(None, true, true),
             grant(Some(MANAGED_AI_CREDENTIAL_ID), true, true),
             grant(Some(BYO_CHATGPT_CREDENTIAL_ID), false, true),
             grant(Some(BYO_CHATGPT_CREDENTIAL_ID), true, false),
@@ -117,6 +116,20 @@ async fn native_search_refuses_untrusted_or_wrong_account_lanes_before_provider_
                 post_through_proxy(addr, &token, "/v1/alpha/search", request()).await?;
             assert_eq!(status, StatusCode::FORBIDDEN);
         }
+        // A managed job's search, with the proxy's switch off, runs nothing and
+        // says so, so its turn goes on.
+        let (status, body) = post_through_proxy(
+            addr,
+            &grant(None, true, true),
+            "/v1/alpha/search",
+            request(),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("Not searched: web search is off for now."),
+            "{body}"
+        );
         let allowed = grant(Some(BYO_CHATGPT_CREDENTIAL_ID), true, true);
         for field in ["id", "model"] {
             for invalid in [Value::Null, json!(" "), json!(42)] {

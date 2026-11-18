@@ -205,6 +205,129 @@ struct ControllerStub {
     /// predates the field.
     pinned_model: Option<String>,
     upstream_base: String,
+    /// The controller's check before a managed job's searches
+    /// (runtime-controller `managed_web_search`): one message for every job.
+    web_searches: Arc<Mutex<WebSearchStub>>,
+}
+
+/// What the stub controller's web search check keeps.
+#[derive(Debug)]
+struct WebSearchStub {
+    /// `MANAGED_AI_NATIVE_WEB_SEARCH`: off refuses every search.
+    switch_on: bool,
+    /// The message's limit.
+    limit: u64,
+    /// What each check took, by its id, less the searches that did not run.
+    taken: Vec<(String, u64)>,
+    /// (job id, searches asked) of each check, its id, and (job id, ran) of
+    /// each settle.
+    claims: Vec<(String, u64)>,
+    claim_ids: Vec<String>,
+    settled: Vec<(String, u64)>,
+    /// How many checks are answered `undecided` first, as for a background
+    /// check whose answer has not reached the controller yet.
+    undecided: usize,
+    /// How many checks take their searches and then answer with an error, as
+    /// a controller whose answer is lost.
+    lost_answers: usize,
+}
+
+impl WebSearchStub {
+    /// The searches the message has used.
+    fn used(&self) -> u64 {
+        self.taken.iter().map(|(_, searches)| searches).sum()
+    }
+}
+
+impl Default for WebSearchStub {
+    fn default() -> Self {
+        Self {
+            switch_on: true,
+            limit: 2,
+            taken: Vec::new(),
+            claims: Vec::new(),
+            claim_ids: Vec::new(),
+            settled: Vec::new(),
+            undecided: 0,
+            lost_answers: 0,
+        }
+    }
+}
+
+async fn controller_web_search_claim_stub(
+    State(stub): State<ControllerStub>,
+    headers: HeaderMap,
+    AxumJson(body): AxumJson<Value>,
+) -> impl IntoResponse {
+    let expected = format!("Bearer {LEASE_BEARER}");
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return (StatusCode::UNAUTHORIZED, AxumJson(json!({})));
+    }
+    let asked = body["searches"].as_u64().unwrap_or(0);
+    let claim_id = body["claimId"].as_str().unwrap_or_default().to_string();
+    let mut searches = stub.web_searches.lock().expect("web search log");
+    searches.claims.push((
+        body["jobId"].as_str().unwrap_or_default().to_string(),
+        asked,
+    ));
+    searches.claim_ids.push(claim_id.clone());
+    if !searches.switch_on {
+        return (
+            StatusCode::OK,
+            AxumJson(json!({"granted": 0, "limit": searches.limit, "refused": "off"})),
+        );
+    }
+    if searches.undecided > 0 {
+        searches.undecided -= 1;
+        return (
+            StatusCode::OK,
+            AxumJson(json!({"granted": 0, "limit": searches.limit, "refused": "undecided"})),
+        );
+    }
+    // The same check again takes nothing more.
+    let taken = searches
+        .taken
+        .iter()
+        .find(|(id, _)| *id == claim_id)
+        .map(|(_, taken)| *taken);
+    let granted = match taken {
+        Some(taken) => taken.min(asked),
+        None => {
+            let granted = asked.min(searches.limit.saturating_sub(searches.used()));
+            searches.taken.push((claim_id, granted));
+            granted
+        }
+    };
+    if searches.lost_answers > 0 {
+        searches.lost_answers -= 1;
+        return (StatusCode::BAD_GATEWAY, AxumJson(json!({})));
+    }
+    let mut answer = json!({"granted": granted, "limit": searches.limit});
+    if granted < asked {
+        answer["refused"] = json!("used");
+    }
+    (StatusCode::OK, AxumJson(answer))
+}
+
+async fn controller_web_search_settle_stub(
+    State(stub): State<ControllerStub>,
+    AxumJson(body): AxumJson<Value>,
+) -> impl IntoResponse {
+    let ran = body["ran"].as_u64().unwrap_or(0);
+    let claim_id = body["claimId"].as_str().unwrap_or_default().to_string();
+    let mut stored = stub.web_searches.lock().expect("web search log");
+    match stored.taken.iter().position(|(id, _)| *id == claim_id) {
+        Some(index) => stored.taken[index].1 = stored.taken[index].1.min(ran),
+        None => stored.taken.push((claim_id, 0)),
+    }
+    stored
+        .settled
+        .push((body["jobId"].as_str().unwrap_or_default().to_string(), ran));
+    StatusCode::NO_CONTENT
 }
 
 #[derive(Clone, Default)]
@@ -644,6 +767,7 @@ async fn spawn_stack_with_settings(
         managed_key: managed_key.map(str::to_string),
         pinned_model: pinned_model.map(str::to_string),
         upstream_base: format!("http://{upstream_addr}"),
+        web_searches: Arc::new(Mutex::new(WebSearchStub::default())),
     };
     let (controller_addr, controller_guard) = spawn_router(
         Router::new()
@@ -652,6 +776,14 @@ async fn spawn_stack_with_settings(
                 get(controller_lease_stub),
             )
             .route("/healthz", get(controller_health_stub))
+            .route(
+                "/internal/managed-web-search/claim",
+                post(controller_web_search_claim_stub),
+            )
+            .route(
+                "/internal/managed-web-search/settle",
+                post(controller_web_search_settle_stub),
+            )
             .with_state(controller.clone()),
     )
     .await?;
