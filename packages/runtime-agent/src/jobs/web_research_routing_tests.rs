@@ -3259,7 +3259,7 @@ fn a_routed_browser_part_is_told_what_to_find_and_an_unconfirmed_page_browses_fi
     );
     assert!(
         section.contains(
-            "and for a page or change made only from what this chat found and confirmed.\n- Stay `direct`, even when"
+            "and for a page or change made only from what this chat found and confirmed; (`none`) for a change to another chat's page.\n- Stay `direct`, even when"
         ),
         "{section}"
     );
@@ -3323,7 +3323,7 @@ fn a_change_that_needs_a_web_page_browses_first_and_a_map_is_a_change_of_files()
     };
     let reply = line("- Research whose answer is a reply");
     assert!(
-        reply.ends_with(
+        reply.contains(
             "the building turn reads first, opening the browser itself if a page needs it."
         ),
         "{reply}"
@@ -3347,8 +3347,7 @@ fn a_change_that_needs_a_web_page_browses_first_and_a_map_is_a_change_of_files()
         "{section}"
     );
     assert!(
-        section
-            .contains("with your `summary`: name in it the items, place or site this chat names"),
+        section.contains("and your `summary`: name the items, place or site this chat names"),
         "{section}"
     );
     for gone in [
@@ -3414,25 +3413,25 @@ fn a_change_in_the_persons_own_words_stays_direct() {
         .filter(|line| line.starts_with("- "))
         .collect();
     assert!(
-        rules[1].starts_with("- `browser_then_build`:")
-            && rules[1].ends_with("So is a change that needs what a web page says."),
+        rules[2].starts_with("- `browser_then_build`:")
+            && rules[2].ends_with("So is a change that needs what a web page says."),
         "{}",
-        rules[1]
+        rules[2]
     );
     for moved in ["on a map", "own words", "found and confirmed"] {
-        assert!(!rules[1].contains(moved), "{moved}: {}", rules[1]);
+        assert!(!rules[2].contains(moved), "{moved}: {}", rules[2]);
     }
     assert_eq!(
-        rules[2],
+        rules[3],
         "- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color), and for a page or change made only from what this chat found and confirmed; (`none`) for a change to another chat's page."
     );
     assert!(
-        rules[3].starts_with("- Stay `direct`, even when"),
+        rules[4].starts_with("- Stay `direct`, even when"),
         "{}",
-        rules[3]
+        rules[4]
     );
     assert!(section.contains(
-        "A routed browser turn sees only the person's words and this chat's browser turns, with your `summary`:"
+        "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`:"
     ));
     assert!(
         section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS,
