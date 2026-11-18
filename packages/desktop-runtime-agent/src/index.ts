@@ -506,7 +506,6 @@ const NON_PROJECT_WORKSPACE_ENTRIES = new Set([
   "Thumbs.db",
 ]);
 
-const DEFAULT_PROJECT_WORKSPACE_CONTENT_WAIT_MS = 120_000;
 const DEFAULT_PROJECT_WORKSPACE_CONTENT_POLL_MS = 1_000;
 const DESKTOP_RUNTIME_SIGINT_GRACE_MS = 5_000;
 const DESKTOP_RUNTIME_SIGTERM_GRACE_MS = 2_000;
@@ -797,24 +796,6 @@ export function shouldEnableProjectOrigin(options: {
   gitRemoteUrl: string | null;
 }): boolean {
   return options.projectWorkspaceHasContent || Boolean(options.gitRemoteUrl);
-}
-
-export async function waitForProjectWorkspaceContent(
-  dir: string,
-  options: { timeoutMs?: number; intervalMs?: number } = {},
-): Promise<boolean> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_PROJECT_WORKSPACE_CONTENT_WAIT_MS;
-  const intervalMs = options.intervalMs ?? DEFAULT_PROJECT_WORKSPACE_CONTENT_POLL_MS;
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() <= deadline) {
-    if (hasProjectWorkspaceContent(dir)) {
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-
-  return hasProjectWorkspaceContent(dir);
 }
 
 export async function startDesktopRuntime(

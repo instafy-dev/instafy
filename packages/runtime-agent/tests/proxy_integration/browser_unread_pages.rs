@@ -59,10 +59,11 @@ const PASS_ASKS_FOR_MISSING: &str = "After your finding lines, one line `{\"miss
 /// The missing line a question's wrap-up pass writes: kept after its lines, for later turns.
 const QUESTION_MISSING: &str = r#"{"missing": ["the warranty"]}"#;
 /// The missing line the turn ends its answer with, and its second pass's: the values each looked
-/// for and didn't find. The turn's note keeps their names once, in one line.
-const MISSING_FIRST: &str = r#"{"missing": ["warranty"]}"#;
+/// for and didn't find. The second pass found the Laptop 12's weight (`READ_12`), and its line
+/// names what is still missing after both, so the turn's note keeps its names alone.
+const MISSING_FIRST: &str = r#"{"missing": ["Laptop 12 weight", "warranty"]}"#;
 const MISSING_SECOND: &str = r#"{"missing": ["price", "warranty"]}"#;
-const NOTE_MISSING: &str = r#"{"missing":["warranty","price"]}"#;
+const NOTE_MISSING: &str = r#"{"missing":["price","warranty"]}"#;
 /// What the second pass is told of its missing line (runtime-agent `unread_pages_prompt`).
 const SECOND_PASS_MISSING: &str = "the missing line for each value you still didn't find";
 /// A turn's answer that says in words which pages it didn't read, with no finding line and no
@@ -787,11 +788,11 @@ async fn two_passes(
     );
     // The turn ends with every page both passes read, after the words of both, and with no
     // unread line: the second pass's starts no third, and with its lines the end of the turn
-    // asks for nothing more.
+    // asks for nothing more. Its missing line replaces the first's.
     let lines = [READ_HOME, READ_13, READ_12, READ_16, READ_12_REVIEW].join("\n");
     assert_eq!(
         summary,
-        format!("{FIRST_WORDS}\n{MISSING_FIRST}\n\n{SECOND_WORDS}\n{MISSING_SECOND}\n\n{lines}")
+        format!("{FIRST_WORDS}\n\n{SECOND_WORDS}\n{MISSING_SECOND}\n\n{lines}")
     );
     assert!(!summary.contains(STILL_UNREAD), "{summary}");
     assert_eq!(state.requests.lock().unwrap().len(), 2, "no third pass");
@@ -818,8 +819,8 @@ async fn two_passes(
     move_findings_into_details(&job, &mut ended);
     assert_eq!(ended.summary, "", "no reply bubble");
     assert_eq!(ended.final_messages.len(), 1);
-    // The names both passes' missing lines gave, once each, after the lines: the controller
-    // reads them there for the hand-back, and no person reads them.
+    // The names the second pass's missing line gave, after the lines, and none the second pass
+    // found: the controller reads them there for the hand-back, and no person reads them.
     assert_eq!(
         ended.final_messages[0].content,
         format!("{FIRST_WORDS}\n\n{SECOND_WORDS}\n\n{lines}\n{NOTE_MISSING}")

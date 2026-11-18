@@ -1,13 +1,20 @@
-//! Codex may not start the person's own `claude` (docs/Local-Engine-Turns.md, D22), through a
-//! real turn with an inert, localhost provider: the model asks for `claude` by its bare name and
-//! by an absolute path, and Codex refuses both before anything runs, with the harness's reason.
-//! The same program under another name runs, so the refusal is the rule's and not the shell's.
+//! Codex may not start the person's own `claude` (docs/Local-Engine-Turns.md, D22 and phase 8),
+//! through a real turn with an inert, localhost provider: the model asks for `claude` by its bare
+//! name, by an absolute path and in the forms the exec-policy rule cannot see (a redirection, a
+//! substitution, a here-document, a variable before the name, a quoted name, a glob, a path built
+//! with a variable, a nested `bash -c`, a wrapper), and asks for a bare shell it could type into
+//! later. Codex refuses each before anything runs, with the harness's reason: the guard's
+//! `PreToolUse` hook, which Codex runs from the harness's managed requirements as runtime-agent's
+//! own executable, answers first. The same program under another name runs, in the same forms, so
+//! the refusals are the harness's and not the shell's.
 //!
-//! Were the rule lost, the bare name would run whatever `claude` Codex's shell finds, so the model
-//! asks for it only after Codex's shell showed that `claude` is the test's stand-in: commands run
-//! in a shell that is no login shell (`login: false`), which keeps the test's PATH. A login shell
-//! would put the system's folders (/usr/local/bin, /opt/homebrew/bin) first. If the name resolves
-//! elsewhere, the turn ends there and the test fails, with nothing named `claude` started.
+//! Were the rule and the hook lost, the bare name would run whatever `claude` Codex's shell finds,
+//! so the model asks for it only after Codex's shell showed that `claude` is the test's stand-in:
+//! commands run in a shell that is no login shell (`login: false`), which keeps the test's PATH. A
+//! login shell would put the system's folders (/usr/local/bin, /opt/homebrew/bin) first. If the
+//! name resolves elsewhere, the turn ends there and the test fails, with nothing named `claude`
+//! started. Every other form names the stand-in alone, never a `claude` the person installed
+//! (`~/.local/bin/claude`), so a hook that let one through would only start the stand-in.
 
 use super::*;
 use std::collections::HashMap;
@@ -17,8 +24,17 @@ const CHILD: &str = "INSTAFY_CODEX_NEVER_STARTS_CLAUDE_TEST_CHILD";
 const TEST_NAME: &str =
     "codex_never_starts_claude::a_codex_turn_is_refused_claude_by_name_and_by_path_via_proxy";
 const PROVIDER_KEY: &str = "inert-codex-never-starts-claude-provider-key";
-/// What Codex says of a refused command: "`<command>` rejected: <the harness's reason>".
-const REFUSED: &str = "rejected: This runtime does not let an agent start Claude Code.";
+/// What Codex says of a command the harness refuses: "`<command>` rejected: <reason>." for the
+/// exec-policy rule, "Command blocked by PreToolUse hook: <reason>. Command: <command>" for the
+/// guard's hook, which answers first.
+const REFUSED: &str = "This runtime does not let an agent start Claude Code";
+/// The guard's hook refused it.
+const BLOCKED_BY_THE_HOOK: &str =
+    "Command blocked by PreToolUse hook: This runtime does not let an agent start Claude Code";
+/// The guard's hook refused a shell that would read the session's input.
+const SHELL_BLOCKED: &str = "Command blocked by PreToolUse hook: This runtime does not let an agent type commands into a shell";
+/// Where the stand-in lives, for the command that builds its path with a variable.
+const STAND_IN_DIR: &str = "INSTAFY_TEST_CLAUDE_STAND_IN_DIR";
 
 #[test]
 fn a_codex_turn_is_refused_claude_by_name_and_by_path_via_proxy() -> Result<()> {
@@ -139,6 +155,11 @@ async fn provider_request(
 
 async fn run_case() -> Result<()> {
     let _env = env_guard().await;
+    // This process is the test's own binary, which does not know the hook's flag: Codex's hook
+    // starts runtime-agent's executable, as it does in a runtime.
+    runtime_agent::codex::use_claude_guard_program(PathBuf::from(env!(
+        "CARGO_BIN_EXE_runtime-agent"
+    )));
     let workspace_root = TempDir::new()?;
     let runtime_home = TempDir::new()?;
     let programs = TempDir::new()?;
@@ -187,7 +208,7 @@ async fn run_case() -> Result<()> {
         ("CODEX_SANDBOX_MODE", "danger-full-access"),
         ("CODEX_ENABLE_WEB_SEARCH", "false"),
         ("CODEX_RUNTIME_REASONING_EFFORT", "low"),
-        ("CODEX_RUN_TIMEOUT_SECONDS", "45"),
+        ("CODEX_RUN_TIMEOUT_SECONDS", "150"),
     ] {
         settings.push(EnvGuard::set(key, value));
     }
@@ -210,12 +231,29 @@ async fn run_case() -> Result<()> {
         ),
     ));
 
+    settings.push(EnvGuard::set(STAND_IN_DIR, bin.to_string_lossy()));
+
     let state = Arc::new(Provider {
         commands: vec![
             "command -v claude".to_string(),
             "claude -p 'Tidy the README'".to_string(),
             format!("{} --version", claude.display()),
             format!("{} --version", not_claude.display()),
+            // The direct forms the rule cannot see (D22), each refused by the guard's hook.
+            "claude -p 'Review the changes' 2>&1 | tail -n 80".to_string(),
+            "claude -p \"$(echo Tidy the README)\"".to_string(),
+            "claude -p <<'EOF'\nTidy the README\nEOF".to_string(),
+            "FOO=1 claude -p hi".to_string(),
+            "\"claude\" -p hi".to_string(),
+            "claude -p fix *.md".to_string(),
+            format!("\"${STAND_IN_DIR}\"/claude -p hi"),
+            "cd . && bash -c 'claude -p hi'".to_string(),
+            "timeout 60 claude -p hi".to_string(),
+            // A shell the turn could write commands into later.
+            "bash".to_string(),
+            // The same forms run under another name.
+            "not-claude -p 'Review the changes' 2>&1 | tail -n 80".to_string(),
+            "cd . && bash -c 'not-claude -p hi'".to_string(),
         ],
         stand_in: claude.display().to_string(),
         requests: StdMutex::new(Vec::new()),
@@ -317,7 +355,7 @@ async fn run_case() -> Result<()> {
     };
     let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
     tokio::time::timeout(
-        Duration::from_secs(90),
+        Duration::from_secs(180),
         processor.run_apply_job(
             &registration_for_live(Uuid::new_v4()),
             &job,
@@ -344,7 +382,7 @@ async fn run_case() -> Result<()> {
         .collect();
     assert_eq!(
         outputs.len(),
-        4,
+        state.commands.len(),
         "an output for each command; `claude` must resolve to the stand-in ({}) first: {outputs:?}",
         state.stand_in
     );
@@ -353,17 +391,29 @@ async fn run_case() -> Result<()> {
         let output = &outputs[call];
         assert!(output.contains(REFUSED), "{call}: {output}");
     }
+    for call in 4..=12 {
+        let call = format!("call_{call}");
+        let output = &outputs[&call];
+        assert!(
+            output.contains(BLOCKED_BY_THE_HOOK),
+            "{call} ({:?}): {output}",
+            state.commands[call["call_".len()..].parse::<usize>()?]
+        );
+    }
     assert!(
-        !ran.join("claude").exists(),
-        "claude ran: {:?}",
-        outputs["call_1"]
-    );
-    // The same program under another name runs.
-    assert!(
-        outputs["call_3"].contains("not-claude ran"),
+        outputs["call_13"].contains(SHELL_BLOCKED),
         "{}",
-        outputs["call_3"]
+        outputs["call_13"]
     );
+    assert!(!ran.join("claude").exists(), "claude ran: {outputs:?}");
+    // The same program under another name runs, in the same forms.
+    for call in ["call_3", "call_14", "call_15"] {
+        assert!(
+            outputs[call].contains("not-claude ran"),
+            "{call}: {}",
+            outputs[call]
+        );
+    }
     assert!(ran.join("not-claude").exists());
 
     drop(settings);

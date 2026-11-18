@@ -11,7 +11,6 @@ type SpaceInviteOptions = {
   path?: string;
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
   json?: boolean;
 };
 
@@ -23,7 +22,6 @@ type SpaceRoleOptions = {
   path?: string;
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
   json?: boolean;
 };
 
@@ -133,7 +131,7 @@ function findExactEmailInvitation(
 async function listOrgMembers(
   options: Pick<
     SpaceInviteOptions,
-    "orgId" | "controllerUrl" | "accessToken" | "serviceToken"
+    "orgId" | "controllerUrl" | "accessToken"
   >,
   query?: string,
 ): Promise<OrgMemberPayload[]> {
@@ -147,7 +145,6 @@ async function listOrgMembers(
     path: `/orgs/${encodeURIComponent(options.orgId ?? "")}/members`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     query: queryParts,
   });
   return Array.isArray(response.members) ? response.members : [];
@@ -156,7 +153,7 @@ async function listOrgMembers(
 async function listOrgInvitations(
   options: Pick<
     SpaceInviteOptions,
-    "orgId" | "controllerUrl" | "accessToken" | "serviceToken"
+    "orgId" | "controllerUrl" | "accessToken"
   >,
 ): Promise<OrgInvitationPayload[]> {
   const response = await requestControllerApiJson<OrgInvitationsResponse>({
@@ -164,7 +161,6 @@ async function listOrgInvitations(
     path: `/orgs/${encodeURIComponent(options.orgId ?? "")}/invitations`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
   return Array.isArray(response.invitations) ? response.invitations : [];
 }
@@ -175,14 +171,12 @@ async function updateOrgMemberRole(options: {
   role: string;
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
 }): Promise<OrgMemberPayload> {
   const response = await requestControllerApiJson<UpdateOrgMemberResponse>({
     method: "PATCH",
     path: `/orgs/${encodeURIComponent(options.orgId)}/members/${encodeURIComponent(options.userId)}`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     jsonBody: {
       role: options.role,
     },
@@ -231,7 +225,6 @@ async function resolveOrgContext(options: SpaceInviteOptions): Promise<{
     path: `/projects/${encodeURIComponent(projectId)}`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
   const resolvedOrgId = trimOrNull(project.org_id) ?? trimOrNull(project.orgId);
   if (!resolvedOrgId) {
@@ -262,7 +255,6 @@ export async function inviteSpaceMember(options: SpaceInviteOptions) {
     projectId,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
   });
 
   if (options.json) {
@@ -293,7 +285,6 @@ export async function setSpaceMemberRole(options: SpaceRoleOptions) {
         orgId,
         controllerUrl: options.controllerUrl,
         accessToken: options.accessToken,
-        serviceToken: options.serviceToken,
       },
       email,
     ),
@@ -301,7 +292,6 @@ export async function setSpaceMemberRole(options: SpaceRoleOptions) {
       orgId,
       controllerUrl: options.controllerUrl,
       accessToken: options.accessToken,
-      serviceToken: options.serviceToken,
     }),
   ]);
 
@@ -325,7 +315,6 @@ export async function setSpaceMemberRole(options: SpaceRoleOptions) {
         role,
         controllerUrl: options.controllerUrl,
         accessToken: options.accessToken,
-        serviceToken: options.serviceToken,
       });
     }
     if (options.json) {
@@ -367,7 +356,6 @@ export async function setSpaceMemberRole(options: SpaceRoleOptions) {
         projectId,
         controllerUrl: options.controllerUrl,
         accessToken: options.accessToken,
-        serviceToken: options.serviceToken,
       });
     }
     if (options.json) {
@@ -400,7 +388,6 @@ async function sendSpaceInvitation(options: {
   projectId: string | null;
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
 }) {
   const payload: Record<string, unknown> = { email: options.email };
   if (options.role) {
@@ -415,7 +402,6 @@ async function sendSpaceInvitation(options: {
     path: `/orgs/${encodeURIComponent(options.orgId)}/invitations`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     jsonBody: payload,
   });
 

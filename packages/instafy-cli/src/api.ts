@@ -17,7 +17,6 @@ export type ControllerApiRequestOptions = {
   path: string;
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
   query?: string[];
   headers?: string[];
   json?: string;
@@ -31,7 +30,6 @@ export type ControllerApiJsonRequestOptions = {
   path: string;
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
   query?: string[];
   headers?: string[];
   jsonBody?: unknown;
@@ -281,7 +279,6 @@ export async function requestControllerApiJson<T = unknown>(
       path: options.path,
       controllerUrl: options.controllerUrl,
       accessToken: options.accessToken,
-      serviceToken: options.serviceToken,
       query: options.query,
       headers: options.headers,
       allowCrossOrigin: options.allowCrossOrigin,

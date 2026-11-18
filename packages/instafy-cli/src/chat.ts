@@ -4,7 +4,6 @@ import { resolveSpaceId } from "./space-id.js";
 type ChatCommonOptions = {
   controllerUrl?: string;
   accessToken?: string;
-  serviceToken?: string;
   timeoutMs?: number;
   pollMs?: number;
 };
@@ -232,7 +231,6 @@ async function dispatchPrompt(options: ChatPromptOptions): Promise<{
       path: `/conversations/${encodeURIComponent(conversationId)}/messages`,
       controllerUrl: options.controllerUrl,
       accessToken: options.accessToken,
-      serviceToken: options.serviceToken,
       jsonBody: payload,
     });
     return {
@@ -249,7 +247,6 @@ async function dispatchPrompt(options: ChatPromptOptions): Promise<{
     path: `/projects/${encodeURIComponent(projectId)}/conversations`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     jsonBody: payload,
   });
   const conversationId = response.conversationId?.trim();
@@ -274,7 +271,6 @@ async function pollRunStatus(
     path: `/conversations/${encodeURIComponent(conversationId)}/runs`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     query: ["limit=100"],
   });
   return Array.isArray(runs)
@@ -291,7 +287,6 @@ async function fetchConversationMessages(
     path: `/conversations/${encodeURIComponent(conversationId)}/messages`,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
-    serviceToken: options.serviceToken,
     query: ["limit=200"],
   });
   return Array.isArray(page?.messages) ? page.messages : [];
