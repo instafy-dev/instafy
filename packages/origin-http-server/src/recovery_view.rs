@@ -1353,7 +1353,6 @@ pub(crate) enum ItemKind {
     Conflict,
     Unpublished,
     Unsaved,
-    Stale,
     Undone,
     Unknown,
 }
@@ -1364,7 +1363,6 @@ impl From<RecoveryKind> for ItemKind {
             RecoveryKind::Conflict => Self::Conflict,
             RecoveryKind::Unpublished => Self::Unpublished,
             RecoveryKind::Unsaved => Self::Unsaved,
-            RecoveryKind::Stale => Self::Stale,
             RecoveryKind::Undone => Self::Undone,
         }
     }
@@ -2016,7 +2014,6 @@ fn recovery_kind(value: &str) -> Option<RecoveryKind> {
         RecoveryKind::Conflict,
         RecoveryKind::Unpublished,
         RecoveryKind::Unsaved,
-        RecoveryKind::Stale,
         RecoveryKind::Undone,
     ]
     .into_iter()

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::controller::LeaseJob;
 
-use super::{JobExecution, workspace_memory_io};
+use super::{JobExecution, runtime_pack_files::sha256_hex, workspace_memory_io};
 use origin_http_server::workspace_fs::WorkspaceDir;
 
 pub const INSTAFY_FILENAME: &str = "INSTAFY.md";
@@ -91,129 +91,156 @@ const USAGE_DEDUP_WINDOW_SECS: u64 = 6 * 60 * 60;
 const COLD_BLOCK_UNUSED_TTL_SECS: u64 = 14 * 24 * 60 * 60;
 const COLD_BLOCK_LOW_USE_TTL_SECS: u64 = 45 * 24 * 60 * 60;
 
+// Each `LEGACY_*_SHA256` list holds the SHA-256, in lowercase hex, of the exact bytes of every
+// earlier copy of one bundled file, oldest first: a scaffold replaces a workspace file only while
+// it is one of them, unedited (`upgrade_bundled_skill`). A change to a bundled file adds the digest
+// of the file as `main` has it, the next `vN`, under a line on what the change did. From the
+// repository root this prints that entry (`<path>` under `packages/runtime-agent/assets/instafy/`):
+//
+//   printf '    "%s", // vN\n' "$(git cat-file blob origin/main:packages/runtime-agent/assets/instafy/<path> | shasum -a 256 | cut -c1-64)"
+//
+// An old file longer than `LONGEST_EARLIER_COPY_BYTES` raises that bound to its length: an upgrade
+// reads at most `EARLIER_COPY_READ_CAP` bytes, and the build fails if the cap falls below it.
+//
+// The earlier copies of `AGENTS.md`, `CLAUDE.md` and `INSTAFY.md` are also kept whole, one file for
+// each digest, as `legacy/agents-doc-vN.md`, `legacy/claude-doc-vN.md` and
+// `legacy/instafy-doc-vN.md`, since the local-engine preflight test checks every one
+// (`claude_code::preflight`; `kept_earlier_copies_hash_to_their_listed_digests` checks the
+// pairs). A change to `AGENTS.md`'s "Reading the web" section also adds the copy from before it
+// to `EARLIER_AGENTS_DOCS_WITH_THEIR_OWN_READING_THE_WEB`
+// (`every_earlier_reading_the_web_section_is_known`).
 const INSTAFY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/INSTAFY.md"
 ));
-/// Earlier bundled copies of `INSTAFY.md` a scaffold may replace. A space's own memory (its
-/// snapshot, constants, workflows or preferences filled in) is an edited copy, and is kept.
-const LEGACY_INSTAFY_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier bundled copy of `INSTAFY.md`, which a scaffold may replace. A
+/// space's own memory (its snapshot, constants, workflows or preferences filled in) is an edited
+/// copy, and is kept.
+const LEGACY_INSTAFY_SHA256: &[&str] = &[
     // The first bundled copy.
-    include_str!("legacy/instafy-doc-v1.md"),
+    "e0179f7f097f606a79d6395fc54685b6b97e487fcd069cff5fbd18f8c9992073", // v1
     // From before it stopped telling every turn to load the memory its prompt already holds (a
     // "Start-of-task ritual" that preferred `python AGENTS.py`, and "first discover what
     // skills/tools are available"). It was written only into a space that had none, so a space
     // whose files this runtime keeps (a Desktop folder) kept it in every turn's snapshot.
-    include_str!("legacy/instafy-doc-v2.md"),
+    "75d388085c43f624ae7f7878071d902aae735556d870ab43d1cd38384ef5f492", // v2
 ];
 /// Whether `text` is a copy of `INSTAFY.md` Instafy ships, the current one or an earlier one: its
 /// snapshot, constants and workflows still hold placeholders, so it says nothing of the space. A
 /// copy a space filled in or edited is not.
 pub(super) fn is_bundled_instafy_doc(text: &str) -> bool {
-    text == INSTAFY_TEMPLATE || LEGACY_INSTAFY_TEMPLATES.contains(&text)
+    text == INSTAFY_TEMPLATE || is_earlier_copy(text.as_bytes(), LEGACY_INSTAFY_SHA256)
 }
 /// The `AGENTS.md` Instafy ships now.
 pub(super) const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.md"
 ));
-/// Earlier bundled copies of `AGENTS.md` a scaffold may replace. A team's own `AGENTS.md`, or an edited
-/// copy, is kept.
-const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier bundled copy of `AGENTS.md`, which a scaffold may replace. A team's
+/// own `AGENTS.md`, or an edited copy, is kept.
+const LEGACY_AGENTS_DOC_SHA256: &[&str] = &[
     // From before it said how replies speak (no ports, process ids, paths, tool names or error codes).
-    include_str!("legacy/agents-doc-v1.md"),
+    "48cdab987022c56c47b229ec45cdee17eb5a0013bb63f34842b88cf92b43b7bf", // v1
     // From before it said to tell what was done, not what the tools saw ("The browser was blank, so…").
-    include_str!("legacy/agents-doc-v2.md"),
+    "96f8a78caa8c0e19fc8911bda853ba1dbb0ed1ebcdb6f8f77e4ee94d7d6cf801", // v2
     // From before it named inside words a reply leaves out ("the shared browser", "placeholder rows").
-    include_str!("legacy/agents-doc-v3.md"),
+    "b86255edbf11a1cfec5cc915a8e7f298a34d5c42623ed254d9a6b69403608f06", // v3
     // From before a fact no page stated said "not checked", a reply named only steps its turn
     // started, and "I can't search the whole web here" replaced "search key" and the like.
-    include_str!("legacy/agents-doc-v4.md"),
+    "4102bb4676db3c44f259b1086bdcc7da9ee756eaebec4f19f7786f4e70e88415", // v4
     // From before a command still running (a `session_id` and no `exit_code`) was waited for
     // before the reply.
-    include_str!("legacy/agents-doc-v5.md"),
+    "5198f071dfdae612c21ab8e5da8faca57882f0e6e71ec78219df130263b7d255", // v5
     // From before a reply said what was made, not what a page check found or passed.
-    include_str!("legacy/agents-doc-v6.md"),
+    "a484416359d6b053a996cf72290309ca8c51063a378e71e39635d54ac84c9b33", // v6
     // From before `exec` printed a command's whole result (`text(r)`), not `r.output` alone.
-    include_str!("legacy/agents-doc-v7.md"),
+    "86e9ca24aef061c98a8d0019d75ebb5e6dc6c4c4c6f16dcd2062eb3ca3c281cb", // v7
     // From before one rule (never describe the turn itself) replaced the examples of what tools saw
     // and inside words, and a reply said which page it didn't reach.
-    include_str!("legacy/agents-doc-v8.md"),
+    "86d2ddff9d79a71e9b5b6b887a9afe369f8fe74c0adaccfbb24f2ab6ffae7b0f", // v8
     // From before a bare "keep going" carried on what the chat left open, never a change the
     // person stopped or undid, and said which.
-    include_str!("legacy/agents-doc-v10.md"),
+    "e8cd3518f8293ca4074028b72928fda98030115b9b02b4636d0c982e852d122e", // v10
     // From before a reply said a site or page lacks something (a station, a route) only when a
     // page it read said so.
-    include_str!("legacy/agents-doc-v11.md"),
+    "940cb0a2e7d62a3a4f2055d339bacd1c372c6dcd158fdae70b44ee7464fbdef4", // v11
     // From before it stopped telling every turn to load the memory its prompt already holds
     // (`python AGENTS.py`, a "fast context load" and a `/learn` section).
-    include_str!("legacy/agents-doc-v12.md"),
+    "47d543d9f23a77c762e4fa7a6ecc74a4d483a98ddbc8512d2a4e3ddac76a1459", // v12
     // From before a reply that didn't find something said where it looked or which page it didn't
     // reach, in place of a rule that only forbade saying a site or page lacks it.
-    include_str!("legacy/agents-doc-v13.md"),
+    "d16dc7adf429ef000eb76eff50410fbebddfb18f15023ff1e676c6ef006ccb6f", // v13
     // From before a reply named none of its turn's tabs, checks ("validation passed") or limits ("I
     // can't use a browser here"), and said what is missing and what the person can ask for instead.
-    include_str!("legacy/agents-doc-v14.md"),
+    "5cfa9f07530adbc93e70f8aef51c31cc163027d842e7bb4abdc5cdbebe1d5a53", // v14
     // From before a tip no page gave said "not checked" too, on the page as in the reply.
-    include_str!("legacy/agents-doc-v15.md"),
+    "88b9e6567e9260bc5417126ddcd25bc252145425a177c248846f693dbd8ced81", // v15
     // From before a reply never asked the person to accept cookies or tracking.
-    include_str!("legacy/agents-doc-v16.md"),
+    "57bb6972f54503c7f8a288a2303342a28ca2ea545bfd367162c416f283feca53", // v16
     // From before a turn read a public page only with `instafy web read` or a reading command a
     // skill names, never with curl, wget, python, node or another script.
-    include_str!("legacy/agents-doc-v17.md"),
+    "5b7a70848ef7ff1dc9890c079dd01ffb1a7788d6ea5283db88266ce564001373", // v17
     // From before a reply that changed nothing said what it checked and why, under a rule of its
     // own.
-    include_str!("legacy/agents-doc-v18.md"),
+    "a42cce1cf03c923c98bc91ca801958839d2395bfb8fccfb2185463829060abca", // v18
     // From before a reply never said a site or page lacks what it didn't find there, even of a page
     // it read.
-    include_str!("legacy/agents-doc-v19.md"),
+    "8ca1b04a70639d33acb6eec3d1533a8abeb806421979df00a07bb5003f24ca86", // v19
     // From before what a reply didn't find, and a choice its request left open, had a rule each
     // in "Replies", and the rule for reading a public page was a section of its own ("Reading the
     // web") rather than a line of "Responsiveness".
-    include_str!("legacy/agents-doc-v20.md"),
+    "9140c9a14e15cb6e83aa4428dda18cfd3bd9c39b85501718b362807c04b24bec", // v20
     // From before a public page was read with the AI's own web search too.
-    include_str!("legacy/agents-doc-v21.md"),
+    "705f641d259b51f86b30a76edcd0c5ae69d074b22342cf3641a269a8671a230c", // v21
     // From before a web search's text was no page read: a public page was read with the AI's own
     // web search too, and a fact no page gave said only "not checked", never which web search found
     // it.
-    include_str!("legacy/agents-doc-v22.md"),
+    "826cd906d7e028dcdb56708ab602478e3bda9c125e9bd71111a6eb92967bd47d", // v22
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
 pub(super) fn is_bundled_agents_doc(text: &str) -> bool {
-    text == AGENTS_DOC_TEMPLATE || LEGACY_AGENTS_DOC_TEMPLATES.contains(&text)
+    text == AGENTS_DOC_TEMPLATE || is_earlier_copy(text.as_bytes(), LEGACY_AGENTS_DOC_SHA256)
 }
 
-/// The section under `heading` of each earlier copy of `AGENTS.md` Instafy shipped that has one:
-/// how a copy a space edited may still say that section's rules word for word.
-pub(super) fn earlier_agents_doc_sections(heading: &str) -> impl Iterator<Item = String> + '_ {
-    LEGACY_AGENTS_DOC_TEMPLATES
+/// The earlier copies of `AGENTS.md` whose "Reading the web" section is not the current one's
+/// ([`earlier_reading_the_web_sections`]). A change to that section adds the copy from before it
+/// here too, and takes out a copy whose section the current one says again: v21's, since its rule
+/// came back.
+const EARLIER_AGENTS_DOCS_WITH_THEIR_OWN_READING_THE_WEB: &[&str] =
+    &[include_str!("legacy/agents-doc-v22.md")];
+
+/// The `## Reading the web` section ([`super::READING_THE_WEB_SECTION`]) of each earlier copy of
+/// `AGENTS.md` Instafy shipped whose section is not the current one's: how a copy a space edited
+/// may still say an earlier version of that section's rules word for word.
+pub(super) fn earlier_reading_the_web_sections() -> impl Iterator<Item = String> {
+    EARLIER_AGENTS_DOCS_WITH_THEIR_OWN_READING_THE_WEB
         .iter()
-        .filter_map(move |text| super::markdown_section(text, heading))
+        .filter_map(|text| super::markdown_section(text, super::READING_THE_WEB_SECTION))
 }
 const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/CLAUDE.md"
 ));
-/// Earlier bundled copies of `CLAUDE.md` a scaffold may replace. A team's own `CLAUDE.md`, or an
-/// edited copy, is kept. The one-line `@AGENTS.md` file bundled before these is left out: a
-/// repository can keep exactly that as its own `CLAUDE.md`, and the upgrade matches bytes only, so
-/// it cannot tell Instafy's old seed from a team's file.
-const LEGACY_CLAUDE_DOC_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier bundled copy of `CLAUDE.md`, which a scaffold may replace. A team's
+/// own `CLAUDE.md`, or an edited copy, is kept. The one-line `@AGENTS.md` file bundled before these
+/// is left out: a repository can keep exactly that as its own `CLAUDE.md`, and the upgrade matches
+/// bytes only, so it cannot tell Instafy's old seed from a team's file.
+const LEGACY_CLAUDE_DOC_SHA256: &[&str] = &[
     // From before its notes on `instafy preview open` and `instafy web search` covered a Claude
     // Code session Instafy starts from its chat: they said this session was not an Instafy job.
-    include_str!("legacy/claude-doc-v1.md"),
+    "14dac3f5b67b7fd7c192bbd7bf20429964bb3637f21b9135b85591de7857cff8", // v1
 ];
 const AGENTS_SCRIPT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.py"
 ));
-/// Earlier bundled copies of the learning policy a scaffold may replace.
-const LEGACY_LEARNING_POLICY_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier bundled copy of the learning policy, which a scaffold may replace.
+const LEGACY_LEARNING_POLICY_SHA256: &[&str] = &[
     // From before it dropped its "Start-of-task ritual" (load the snapshot again, "Prefer
     // `python AGENTS.py`"), which a turn whose words route the policy read beside the snapshot
     // its prompt already holds. `/learn`'s own prompt still runs the script.
-    include_str!("legacy/learning-policy-v1.md"),
+    "9afe10c05a1bb2e805c93ce100ab12d55a756c064873e59f3d944d297c9792e6", // v1
 ];
 const LEARNING_POLICY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -260,28 +287,28 @@ const FRONTEND_PREVIEWS_TEMPLATE: &str = include_str!(concat!(
 // what its page shows. A
 // workspace still holding an unedited earlier bundled copy of this skill,
 // browser automation or skill import compat is upgraded; an edited one is kept.
-const LEGACY_FRONTEND_PREVIEWS_TEMPLATES: &[&str] = &[
-    include_str!("legacy/frontend-previews-v1.md"),
-    include_str!("legacy/frontend-previews-v2.md"),
-    include_str!("legacy/frontend-previews-v3.md"),
-    include_str!("legacy/frontend-previews-v4.md"),
-    include_str!("legacy/frontend-previews-v5.md"),
-    include_str!("legacy/frontend-previews-v6.md"),
-    include_str!("legacy/frontend-previews-v7.md"),
-    include_str!("legacy/frontend-previews-v8.md"),
-    include_str!("legacy/frontend-previews-v9.md"),
-    include_str!("legacy/frontend-previews-v10.md"),
-    include_str!("legacy/frontend-previews-v11.md"),
-    include_str!("legacy/frontend-previews-v12.md"),
-    include_str!("legacy/frontend-previews-v13.md"),
-    include_str!("legacy/frontend-previews-v14.md"),
-    include_str!("legacy/frontend-previews-v15.md"),
+const LEGACY_FRONTEND_PREVIEWS_SHA256: &[&str] = &[
+    "e88535cb56f9bc04deae0dd0806be7c28975f2d26bafb8eb64d99a8de4b4f877", // v1
+    "1256057a8289039f9335407e11aea126885e089ed47fd174a5e5b8582f59191f", // v2
+    "164892f262d65c8d71fbff62408c0d0f93e24bb4126ca5b2283afc24255f9c55", // v3
+    "f0598180ea5ccf9015b0538bc8dfaec847a8f38a5d8020db0dadf8f57856f7c3", // v4
+    "c9a7d2f4b0f17a98af2651cc5480a9d47ddc614ca399b68516c77b7c091e9332", // v5
+    "1884ea785cb316fa1a358b1b2e4652a5a98809051bce5d46a684e8f36d618789", // v6
+    "7060a7d6cae978846d582796c47d2518ae757f0c3199890cf9d2be03d33c0d64", // v7
+    "43dac04c652b69d9d386c2ce1b861862d088f924a8bbdbd06cbbf0cbe862458a", // v8
+    "aaab5b62602c1d15fc090cdde3895f9cddccefa8d82c99f922235f182450d23a", // v9
+    "746e10b5610cd46c65a14a4c81c65500ff9596991c27ab1114824ed23f32f646", // v10
+    "603d2e40ea58c4a75d4117aff26544f4f68fc23f58e8c8bc5b74efb93ea1864a", // v11
+    "3d92387b96821ee90f1c3c4dea5001e1c10d3ab260d7bd0d5bd900422b4a3d44", // v12
+    "7453c96753b39a785cc60e1cf851a898a7c3f126eccbb91b27ca402ad03753bc", // v13
+    "015fe67358cfb840fedc8eab454e8cd93ec55f20b2ffc30bb3b8ba62f9855d3d", // v14
+    "87ef6f07aedda2b1856c2263b3aed5bfb71803abfaa3d12011e1dace778cae4f", // v15
     // From before a page made for the person (a map, a comparison, a page to share) was built per the
     // interactive artifacts skill, and a static file server served only other sites.
-    include_str!("legacy/frontend-previews-v16.md"),
+    "9529cfb84370dd54d2779cefc37de93fea5336b0e37b70db4b98d7b7a3fab55d", // v16
     // From before `instafy preview open --start` served a page's folder with no toolchain by itself:
     // it spelled out `python3 -m http.server` as the serve command, twice.
-    include_str!("legacy/frontend-previews-v17.md"),
+    "5aa8451a4fe47648ea4cf229c5028fe94964791119dde016706dc9518eeae4d5", // v17
 ];
 /// What a previewed site asks Studio for (the person's location, Present and
 /// Follow), read only when a site needs it.
@@ -294,7 +321,6 @@ const FRONTEND_PREVIEWS_TUNNELS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-frontend-previews/references/tunnels.md"
 ));
-const LEGACY_FRONTEND_PREVIEWS_REFERENCE_TEMPLATES: &[&str] = &[];
 const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
@@ -302,15 +328,15 @@ const INTEGRATION_ONBOARDING_TEMPLATE: &str = include_str!(concat!(
 // The setup flow routes this skill into every kickoff, so a workspace still holding a
 // bundled version that predates the browser offer, or the routing keywords for repo
 // imports and auth failures (v4), is upgraded; an edited one is kept.
-const LEGACY_INTEGRATION_ONBOARDING_TEMPLATES: &[&str] = &[
-    include_str!("legacy/integration-onboarding-v1.md"),
-    include_str!("legacy/integration-onboarding-v2.md"),
-    include_str!("legacy/integration-onboarding-v3.md"),
-    include_str!("legacy/integration-onboarding-v4.md"),
+const LEGACY_INTEGRATION_ONBOARDING_SHA256: &[&str] = &[
+    "2c3a8b61e2c08b628d8758bdd0764ae89d07dfe3f732d22614052197bcb3382d", // v1
+    "6152f1bd2cf8d37cffd287e470439398964e24949cb96566062556d0ba93dd3c", // v2
+    "15530c6f4d1f8af1b900df9c72618ba3198ab312b658640bd9f4ff139de0c511", // v3
+    "0e4fcd538304f18eea1a729cbb5c5ab437bf7d6ddeef4b78190be0ecf180bb61", // v4
     // From before the button that continues after a sign-in was "Let Octo continue".
-    include_str!("legacy/integration-onboarding-v5.md"),
+    "bb266b7871d4effbe92e7deddd5ef34c801635bb9143c8325a3862c7ae74c88c", // v5
     // From before replies stopped carrying suggestion chips.
-    include_str!("legacy/integration-onboarding-v6.md"),
+    "6152a8b553c990148d3dac4c7b14869fb9e8d582efa35105a865d091d2f08fff", // v6
 ];
 const BYOC_AI_CREDENTIALS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -346,13 +372,14 @@ const SPACE_REVIEW_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-space-review/SKILL.md"
 ));
-// Frozen previous built-in content is an exact migration baseline, never projected as a skill.
-// Preserve user edits rather than treating a familiar name or partial match as managed content.
-const LEGACY_SPACE_REVIEW_TEMPLATES: &[&str] = &[
-    include_str!("legacy/space-review-v1.md"),
-    include_str!("legacy/space-review-v2.md"),
-    include_str!("legacy/space-review-v3.md"),
-    include_str!("legacy/space-review-v4.md"),
+// The digests of frozen previous built-in content: an exact migration baseline, never projected as
+// a skill. Preserve user edits rather than treating a familiar name or partial match as managed
+// content.
+const LEGACY_SPACE_REVIEW_SHA256: &[&str] = &[
+    "e980c51dcfc4de5042ca4d148e2eed80ebd26906ab29979cf9df0389fe9409d6", // v1
+    "c3ffbff7d4ce7f67f43664f2c6cae359540ae5d80554163398dec0dacb00c4d5", // v2
+    "415bba2222ae161bea6bca1fd7347220205a8f703e082b5bf018d243de6ac297", // v3
+    "429d120eb04d8496a4a4f8895250feb31e2cde4176582eb0583b17614c1288ee", // v4
 ];
 const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -366,10 +393,10 @@ const AUTOMATIONS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-automations/SKILL.md"
 ));
-const LEGACY_AUTOMATIONS_TEMPLATES: &[&str] = &[
-    include_str!("legacy/automations-v1.md"),
-    include_str!("legacy/automations-v2.md"),
-    include_str!("legacy/automations-v3.md"),
+const LEGACY_AUTOMATIONS_SHA256: &[&str] = &[
+    "641567ce895132d95f6692eac9ae17e0981d9c9f308a5cfe06497b2148ba59f9", // v1
+    "fb512bdc31d281fba67c1ed78031b706de67013b0afb0a07477458aba460b54b", // v2
+    "25d0f32caaf2bcbe5ae64f0398745f52eac955507468322e7ba603955629b881", // v3
 ];
 const PERSISTENT_CONTEXTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -385,40 +412,40 @@ const BOUND_SITES_CHEATSHEET_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
 ));
-/// Earlier bundled copies of the bound-sites skill and cheat sheet that a scaffold may replace.
-/// A copy someone edited is kept.
-const LEGACY_BOUND_SITES_TEMPLATES: &[&str] = &[
-    include_str!("legacy/bound-sites-v1.md"),
+/// The SHA-256 of each earlier bundled copy of the bound-sites skill and of its cheat sheet, which
+/// a scaffold may replace. A copy someone edited is kept.
+const LEGACY_BOUND_SITES_SHA256: &[&str] = &[
+    "a763bde102c405b9682f920a3221369bbdb468246078d721d2393dbd82f196a8", // v1
     // From before each value cited its page and day, and a filter listed unknown values apart.
-    include_str!("legacy/bound-sites-v2.md"),
+    "c7597d35040c3e64c7a2094c45b61187164cba7e33403a0fb98485394c650600", // v2
     // From before one `instafy preview open --start` picked the port, served the site and showed it.
-    include_str!("legacy/bound-sites-v3.md"),
+    "d01addd6a4d4b252e8c8eee850f18b1c9081a3f898d2285ed81b3f92b45f938a", // v3
     // From before the card's command went into the site's folder (it said "from the site's folder").
-    include_str!("legacy/bound-sites-v4.md"),
+    "b1b553540498a1988cdd1698bb92656057dd8ae4694cef5cffc5e1627fe18456", // v4
     // From before every saved change reloaded the open views of the sites it changed, so a turn
     // ran no `instafy bind command <dir> reload '{}'` of its own.
-    include_str!("legacy/bound-sites-v5.md"),
+    "4078509aac054fe9d996c577ec6572bc8fa9b825d7cbb4bbb5b2df81a13c5b97", // v5
 ];
-const LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES: &[&str] = &[
+const LEGACY_BOUND_SITES_CHEATSHEET_SHA256: &[&str] = &[
     // From before each value cited its page and day, and a value never was a dash.
-    include_str!("legacy/bound-sites-cheatsheet-v1.md"),
+    "fa5257fec72c0cd7ca773650bdd4e2d99ee2e04c10b1e40a6ca20d8a81c9494d", // v1
     // From before one `instafy preview open --start` picked the port, served the site and showed it.
-    include_str!("legacy/bound-sites-cheatsheet-v2.md"),
+    "ef63cbc25f2d0e14f37c7dfc6d7c36fba47087eecf014baa3ee895e504ba8226", // v2
     // From before a value not found on a page read said where it was looked for ("price not found
     // on maker.com's page", "Not found · checked …"), not that the page lacks it.
-    include_str!("legacy/bound-sites-cheatsheet-v3.md"),
+    "28627b17f79248af8a06f81330d7e86265d3f456239f2742d95c357a12052b4f", // v3
     // From before every saved change reloaded the open views of the sites it changed, so a turn
     // ran no `instafy bind command <dir> reload '{}'` of its own.
-    include_str!("legacy/bound-sites-cheatsheet-v4.md"),
+    "3cf3198c46ab196a2727ad3bdd25f40330e4355f5adc3420e56c0fe488e7fb82", // v4
     // From before a comparison's line under its title came from its own sorts and cells (it asked
     // for a lede with "the biggest unknown").
-    include_str!("legacy/bound-sites-cheatsheet-v5.md"),
+    "44aa39123adc79dbab9c253b1d04491cfdeada35e957043304497907e2883540", // v5
     // From before a comparison named what each row is still missing once, in its footer, not
     // under its title.
-    include_str!("legacy/bound-sites-cheatsheet-v6.md"),
+    "7399e554e18fce2c87c6c012b262b459a12f3596ab5fa374952868b5245fb11d", // v6
     // From before a fact only a web search gave kept `"viewer": "provider search"`, so its page
     // drew it "from a web search", never as checked, and no limit or sort counted it.
-    include_str!("legacy/bound-sites-cheatsheet-v7.md"),
+    "6ee191db7370c31d57111cf5f2b6496765f1344c97b9e877dad380363dfc35fa", // v7
 ];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
@@ -436,86 +463,87 @@ const RESEARCH_TEAM_RESEARCHER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
 ));
-/// Earlier bundled copies of these skills that a scaffold may replace. A copy someone edited is kept.
-const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier bundled copy of these skills, which a scaffold may replace. A copy
+/// someone edited is kept.
+const LEGACY_INTERACTIVE_ARTIFACTS_SHA256: &[&str] = &[
     // From before a page of options cited each value and listed unknown values apart from a filter.
-    include_str!("legacy/interactive-artifacts-v1.md"),
+    "79e8b29fc2bf6f8532daf1b193638c5ac134f8a923f3cc29d23752eace2faf4d", // v1
     // From before a candidate nothing could be read for stayed a row, so a page of options was never empty.
-    include_str!("legacy/interactive-artifacts-v2.md"),
+    "d06bab7545b8c8b3304979c0ad148970d60c9a1da8da5b7544f7400281edf8a8", // v2
     // From before one `instafy preview open --start` picked the port, served the site and showed it.
-    include_str!("legacy/interactive-artifacts-v3.md"),
+    "76c8611ec09f83b406ccbe4763946fc2df33df9c45bfb88832940f0f0d0e9d57", // v3
     // From before a page written by hand followed light and dark mode.
-    include_str!("legacy/interactive-artifacts-v4.md"),
+    "98573dbe99853a5ce95d4cc7749aaba7c88ab4ac1ea2618ab0a0fe1acf806765", // v4
     // From before a value cited only a page that gives it, a lede said only what a page read
     // says, and no sort was by a value no row has.
-    include_str!("legacy/interactive-artifacts-v5.md"),
+    "d8465c360ee7fec70ba44fde87acb2e8bb5b9ef91fdace7e18fdf354f764e947", // v5
     // From before a request for a small page, or for something as a page or on a page, matched this skill.
-    include_str!("legacy/interactive-artifacts-v6.md"),
+    "1c1a766b2af97c82f81c9bcadba04f3ed933f73a74db98d391b55078c6221310", // v6
     // From before the card's command went into the site's folder (it said "from the site's folder").
-    include_str!("legacy/interactive-artifacts-v7.md"),
+    "d55993395c3f07f9a2fab298ec6a4759b0614a1d3f9ab0d8734a17eed0260a8b", // v7
     // From before the card came before the check, so a failing check never held it back (it said "Check before
     // the card").
-    include_str!("legacy/interactive-artifacts-v8.md"),
+    "4bbca0c8063e7cac4d3726e3e274b7708df695f480bb71f46628202a1d953f75", // v8
     // From before a page said what phone-first means: never wider than the screen, one column when narrow.
-    include_str!("legacy/interactive-artifacts-v9.md"),
+    "3fedf02a9b255df4a08f9f64ef0af37772aca905a6bfd4d325d06bb1c196f8ad", // v9
     // From before a reply about a page to share said who can open it and how to get a link, not as
     // an assumption, and replies to send nobody sees went.
-    include_str!("legacy/interactive-artifacts-v10.md"),
+    "142aa8770e478ef474e5d13328fbdb3c67032d95317aa23c919053b40266ea37", // v10
     // From before a value nobody found said where it was looked for ("price not found on
     // maker.com's page"), not that the page lacks it.
-    include_str!("legacy/interactive-artifacts-v11.md"),
+    "043f1637b3a280e450c9a6a58b9be0eb74d726eec2801d3e99e2fc2010d0ce9f", // v11
     // From before "comparison" routed here, a follow-up changed only the site its own chat made, a
     // page asked for from what Octo knows said so ("from": "memory"), and an item whose own page
     // wasn't opened, the lede's missing items and a tip from no page each said what they are.
-    include_str!("legacy/interactive-artifacts-v12.md"),
+    "ca585be1c8a0a3dd9e3b4e1246b50942a2b6a54a18700fd67818a7ebd6b8fd62", // v12
     // From before whose page a turn changes was said only in every writing turn's instructions,
     // with the space's pages and the chat that made each, a reply's `Assumed:` line was only for a
     // default the person didn't give, and a note on a page said where Octo looked, never its tools.
-    include_str!("legacy/interactive-artifacts-v13.md"),
+    "8d54d0d731688651f853ec4ea67ebcbb7abc61994d74008847d67a8aad7a10ab", // v13
     // From before every saved change reloaded the open views of the sites it changed, so a turn
     // ran no `instafy bind command <dir> reload '{}'` of its own.
-    include_str!("legacy/interactive-artifacts-v14.md"),
+    "dd0ce7dbc5ec3be029ef3fcd82c60582f1a46a527c55b929eb8eea756e17fbf4", // v14
     // From before a check that passes posted a bound page's card (it said "Post the card first"
     // for every page), and before the page, not the lede, named what's missing.
-    include_str!("legacy/interactive-artifacts-v15.md"),
+    "63a4115c45ff9c129387a4a02fb340c91ca76a8aa656eed84c9021de283ebcde", // v15
     // From before a comparison's line under its title came from its own sorts and cells (it said
     // "The lede: the verdict, saying only what a page you read says").
-    include_str!("legacy/interactive-artifacts-v16.md"),
+    "44aa31e6f089e2f06ce8906f9895bbde4339a7d3324cddcb202e3c73520a2f96", // v16
     // From before the card command of a page with no builder skill took no `--serve-cmd` (it said
     // "The serve command is the builder skill's.").
-    include_str!("legacy/interactive-artifacts-v17.md"),
+    "078c79ea4bc777e8ad725bbbb14d516fba7cc60df2bd21a34cdd73d8ad36762d", // v17
     // From before a value nobody found was said as `instafy-comparing` says (it said where Octo
     // looked, also of a value only Octo's browser looked for), and prices and reviews per item
     // were the research skill's "Comparing items".
-    include_str!("legacy/interactive-artifacts-v18.md"),
+    "d4b1670d5227367f66e66ba851435063e9e61be330eb8450319eb682b4710114", // v18
     // From before a comparison got a `sort` entry for each amount the person compares by, so the
     // line under its title names the option each puts first (its sort counted as one nobody asked
     // for).
-    include_str!("legacy/interactive-artifacts-v20.md"),
+    "7366b1698a311026f5cbd71dd0b31e1874a14b4ef085a0777d83738c869c61e6", // v20
     // From before `AGENTS.md`'s "Replies" said, for every turn, what to do with a choice the
     // request leaves open (it said "Never stop to ask before building").
-    include_str!("legacy/interactive-artifacts-v21.md"),
+    "d1343227c3c3db58e8d742098ffff1ef58d92ced1df21953cbf7bcaa2e1bdee2", // v21
 ];
-const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
-    include_str!("legacy/research-team-v1.md"),
-    include_str!("legacy/research-team-v2.md"),
+const LEGACY_RESEARCH_TEAM_SHA256: &[&str] = &[
+    "0855d10b442722d484f3c9fec42ba0f149fcf5102e55a6868170b0e0ab8d8fd2", // v1
+    "2a92a3f468db351c5a8bb11a2c118bceb704240dd94bbd6d95130e9b8f7d6d23", // v2
     // From before the card came before the reconcile with `Expect:` ("Reconcile with `Expect:` before the card").
-    include_str!("legacy/research-team-v3.md"),
+    "25130fa341ed4155754cce116ea227f3e9fc5f88ffe7d9f55c4bef578fe8ff46", // v3
     // From before a reply offered to add an item the page leaves out, not "among the 2-3
     // suggested replies", which the hub no longer asks for and Studio never shows.
-    include_str!("legacy/research-team-v4.md"),
+    "3f02a00c089557a6a8d8fafdc19edbfd68e43ba64ba0064795396cffa4a948ba", // v4
 ];
-const LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES: &[&str] = &[
+const LEGACY_RESEARCH_TEAM_RESEARCHER_SHA256: &[&str] = &[
     // From before a lane read with the research skill and compared a product by its "Comparing items".
-    include_str!("legacy/research-team-researcher-v1.md"),
-    include_str!("legacy/research-team-researcher-v2.md"),
+    "5d3c8566d41eab6c385b655c08571e81b6c7388a9cfbf278944397834adce929", // v1
+    "0aae1ebc778a8cdbe0bc5c5d69246c515f5a1a84ab3e604df22cb5b4b8982bb1", // v2
     // From before a page robots.txt refuses left the site's other pages open, as its `tell` says.
-    include_str!("legacy/research-team-researcher-v3.md"),
+    "0a2e42a92a7c1930649def05609d453690f6848b5a8052693d0294038412fc7e", // v3
     // Before removing Instafy-owned domain restrictions.
-    include_str!("legacy/research-team-researcher-v4.md"),
+    "87ee59eaea826efe4cdc69c9ac701a5a71007dc3fd89380d084cc0f9fcfe033a", // v4
     // From before a product followed `instafy-comparing`, not the research skill's "Comparing
     // items".
-    include_str!("legacy/research-team-researcher-v5.md"),
+    "1984eef149a5e0c937a6a58bcf90eb47723561851f31a63e79e9992a4d38ab93", // v5
 ];
 const SKILL_ROUTER_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -529,103 +557,103 @@ const BROWSER_AUTOMATION_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md"
 ));
-const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
-    include_str!("legacy/browser-automation-v1.md"),
-    include_str!("legacy/browser-automation-v2.md"),
-    include_str!("legacy/browser-automation-v3.md"),
+const LEGACY_BROWSER_AUTOMATION_SHA256: &[&str] = &[
+    "e60144bbfca772377fb6eda900eea65fc96e1aae8a93e168bf6a61f694cfe7c9", // v1
+    "f275adb176e94199711cdd20033b9487824c6d1e373d76e075dedcca43a9650c", // v2
+    "b6a1040b0b7d75fab30148cf1becb77c4caba441c7b26bb007d297a1b6d5d3ea", // v3
     // From before it said what Instafy's browser can reach.
-    include_str!("legacy/browser-automation-v4.md"),
+    "a4cf7d51be8919abbf3017e0e331785d74d4a99f50366ce977bb4ad4af74ba1d", // v4
     // From before one card could carry several reads and return labelled findings.
-    include_str!("legacy/browser-automation-v5.md"),
+    "2ed81c98edaeeb99df53659de7a64efb58297c69183fab8f1828b56c209aad4a", // v5
     // From before it pointed pages without JavaScript to `instafy web read`.
-    include_str!("legacy/browser-automation-v6.md"),
+    "9af2bd8442246b6bc0a6c538bca20f3d6c0a25fce22b91e53c2cd4687a328261", // v6
     // From before the Personal Browser opened agent tabs.
-    include_str!("legacy/browser-automation-v7.md"),
+    "23e115265618fb174be442950f72a6accf36b688be3f866ed8573933b3476a7c", // v7
     // From before the Shared Browser read a card's pages in Octo's own tabs.
-    include_str!("legacy/browser-automation-v8.md"),
+    "063395dfb34b34d5feeac0c1a61a106399a260de7cb0630e2375654d16d9f60f", // v8
     // From before it said to take another route after a declined site.
-    include_str!("legacy/browser-automation-v9.md"),
+    "05363eff56f8aabdfd4dc735d324c4522aefa625505d10cf7363f3be05563fc1", // v9
     // From before it said to give a failed step's plain reason, never a raw error code, and that
     // a Shared page another chat left is not this task's work.
-    include_str!("legacy/browser-automation-v10.md"),
+    "ba185dd6cd387bf64127a5919ba802d00befa6752d2f890190d61082edd8754c", // v10
     // From before "Finding a page": a missing page's site search, another source after two
     // failures, own pages, "not checked", the names a comparison lists and a cookie banner's refusal.
-    include_str!("legacy/browser-automation-v11.md"),
+    "48a0c11593659a2d34f02cfc0db02f6c5cc200b302e37b4c165978f1e8a8c5a2", // v11
     // From before a stopped page ended only that page, not the task, and another source a search
     // found was read.
-    include_str!("legacy/browser-automation-v12.md"),
+    "6b98dadf2babd465c093c9d140021d86bd92f35a8b6b0d797bf78c64956affdf", // v12
     // From before a card's reads went one by one on the chat's own page, and the button that
     // continues after a sign-in was "Let AI continue".
-    include_str!("legacy/browser-automation-v13.md"),
+    "b8ec06afc6c4a95f744d6b3a8b11ca66665dda5d7532abd4bdb96d3fbc069655", // v13
     // From before a sign-in the person asked for was opened and paused on, and the reply said
     // where the browser goes.
-    include_str!("legacy/browser-automation-v14.md"),
+    "8949d1483c6f9baf2f4e4b86d6957315369388345f508e0aa7cb623358bedb51", // v14
     // From before a page that reads as busy got one more snapshot, then the place's own site.
-    include_str!("legacy/browser-automation-v15.md"),
+    "412b7f796a679c8d9408b4db4db61e010ba30a4847ec99d1dac5e911e36279a8", // v15
     // From before a cookie banner with no reject button was left up and read under, and a
     // learning example clicked "I agree".
-    include_str!("legacy/browser-automation-v16.md"),
+    "d9387b5dcf3af0bff0e6d470e0ac0edf0c345deb14f88b08c7b4b709c7a0ed26", // v16
     // From before a page that fails (busy, blank or an error page) sent the turn to the place's
     // own site in the same turn, in place of one more snapshot and two failed pages a site.
-    include_str!("legacy/browser-automation-v17.md"),
+    "9cd23b2a0f428340077228e103b55a4be0f7be2e6363b550fd578be797edb630", // v17
     // From before a list (a select) was set with `choose`, never by clicking it.
-    include_str!("legacy/browser-automation-v18.md"),
+    "2a7ac2e04b2b2ffc6273f878f9144190bd6a08f77685a2381000d148b152c857", // v18
     // From before a message that names the browser, or acts on a site, went straight to it.
-    include_str!("legacy/browser-automation-v19.md"),
+    "a9cb1edab4674791a6f25cd31b5a3236afbf4102ee41ed93fa1e945a1d18a3d8", // v19
     // From before a message that carries on the chat's browser work went to the browser even when
     // public pages answer it.
-    include_str!("legacy/browser-automation-v20.md"),
+    "633904d9e9497ee32a335e4dc9a25bb7641984ec36043f1dad4d6c4f2acac7bd", // v20
     // From before a route came from the operator's journey planner, its stations chosen.
-    include_str!("legacy/browser-automation-v21.md"),
+    "d8a00bb382c86da5907862ef1a7dcd0c0b323aa3c7eacae9ec714b03e8d25c43", // v21
     // From before a comparison listed the models a page's menu names too, then opened each
     // one's own page.
-    include_str!("legacy/browser-automation-v22.md"),
+    "5c57cc4430c18ad93fdd061cf435868d395e761210af9dcf9d606e5ea42e4979", // v22
     // From before a request to make a page, a map or a table with no site to use first stayed
     // out of the browser, research that ends in a page went to it from the first message, and
     // browser work that did not find its answer still carried on there.
-    include_str!("legacy/browser-automation-v23.md"),
+    "78eb88428980573703fcfbbc2038c4e3b7dc28b5792165a5cc1ef07c1f83fd43", // v23
     // From before how to write a learned block, the owner-local tool, the Personal Browser's
     // own notes and what a browser script keeps in mind moved to
     // `references/learning-and-local-browsers.md`, so a browser turn carries the whole skill.
-    include_str!("legacy/browser-automation-v24.md"),
+    "a67772385ad0888c63d93b63e1eb31f170c81a9fc764e75e58dfea7c72fbb5b2", // v24
     // From before a failed tool call was never repeated the same way (it was retried once, and a
     // failed first step was reported or repaired once), a list was set by the field `choose`
     // takes, a route was planned for the day and time the person travels, a page's links were
     // printed with its text, and a message that carries on the chat's browser work went to the
     // browser also when it needs what a page here says, if all it needs is what that work found.
-    include_str!("legacy/browser-automation-v25.md"),
+    "fffe811dc8d8ea347088d7db8614e4c4c1e21099ec2b9a28502259505c43d7e1", // v25
     // From before a page never added a read only to the card's list, anything not read on a page
     // this turn (how far, how to get there, what is best) said "not checked" or stayed out, and a
     // bare "keep going" carried on what the chat left open, never a change the person stopped or
     // undid.
-    include_str!("legacy/browser-automation-v26.md"),
+    "ee23cbb1691a8189a8dbbf8b24e0bd1d00c9555ca660123f0dbd283334f0e9d5", // v26
     // From before a route from a journey planner set its day and hour and pressed its button, a
     // form's own button left its prompt to the person, a page whose reading lists a cookie
     // banner's reject button pressed it before its next step, a bare "keep going" never carried
     // on a change the person stopped or undid on any route, carried-on work went to a build when
     // the chat asked for a page not made yet, and a page made from what the chat already found
     // stayed `direct`.
-    include_str!("legacy/browser-automation-v27.md"),
+    "a150fcc2eeb5e0846bf6fa36da3ee280ee9229663762f26be8a844facc4077e2", // v27
     // From before a request to make something "on a map" was `direct` in a sentence of its own,
     // with the reason (a map's skill finds and cites its places itself), and a bare "keep going"
     // carried on what the chat's replies or page mark not confirmed, such as a route.
-    include_str!("legacy/browser-automation-v28.md"),
+    "a0149b814e9d3d6b104c3164b7aae952cd58ba6e61286d448dab01dd066ab59c", // v28
     // From before a browser turn read one set of rules: its run instructions say how its browser
     // works, which steps are the person's and what asks first, and the skill keeps what they do
     // not say; lines for scripts and one-call checks ("stop there"), session kinds no turn can
     // make, a second findings format, a third copy of how a list is set and a building turn's
     // card (`no_shell_omits`) left what a browser turn reads.
-    include_str!("legacy/browser-automation-v29.md"),
+    "af53e4382df8a96e2c45fbda5a1b336b2d793f4f87e2d66f9decc77d1c12af1f", // v29
     // From before a bare "keep going" never carrying on a change the person stopped or undid was
     // part of the `browser` route's line, not a rule of its own ahead of the routes.
-    include_str!("legacy/browser-automation-v30.md"),
+    "4994ac37a71f7ab3a09c2baa8bb25d5b4a0a0ea0617523d007861cb965ae5f2d", // v30
     // From before a browser turn that carries on the person's own message left out what a
     // card's listed reads ask (`routed_omits`), and what page text may start and which pages end
     // a read moved from that section into "Core rules", which every browser turn reads.
-    include_str!("legacy/browser-automation-v31.md"),
+    "f1aa09491c2cd2f91a978db36952d364d5274748e9842a4ef6bf729d698f285d", // v31
     // From before Instafy's browser declined a page's cookie banner itself, so a turn no longer
     // pressed a banner's reject button, or left one with none up, by a line of its own.
-    include_str!("legacy/browser-automation-v32.md"),
+    "5ec022e5a4e1420c132dbc0e52a56bd6b40b0628bf0c668644b90416dcee8274", // v32
     // From before research that ends in a page went to the browser first unless it was a map or
     // a page made only from what the chat already found, a bare "keep going" with a page here
     // that marks something open was `browser_then_build`'s, a reply that was not the browser's
@@ -633,64 +661,64 @@ const LEGACY_BROWSER_AUTOMATION_TEMPLATES: &[&str] = &[
     // what only this space holds said a change here is built after it, a card was asked for only
     // in a reply-only turn, and the routing step's `summary` went with the person's words in a
     // chat with no browser turn yet.
-    include_str!("legacy/browser-automation-v33.md"),
+    "48733c1a635bcdabf41d0a86fb4a716fe4d86eeb2b8175862a2a85a5cf91200e", // v33
     // From before the routing step's `summary` named, by name and not by address, the items,
     // place or site the chat names and what to find, a bare "keep going" said nothing of a
     // change the person stopped or undid, a page stayed `direct` only when made from what the
     // chat found and confirmed, and a page with no address given was the official site of what
     // the task names.
-    include_str!("legacy/browser-automation-v34.md"),
+    "53d7dafb71a7627d245bb92d0d40c3e676bd86ad0f39a9683120cbbc792a0ad3", // v34
     // Before native retrieval and removing Instafy-owned website restrictions.
-    include_str!("legacy/browser-automation-v35.md"),
+    "ee9454d32596c9f4821230c652b428f92fe6fa35b82b8346b4aab41122cd208b", // v35
     // From before a change that needs what a web page says was `browser_then_build`, and one made
     // only from what this chat found and confirmed stayed `direct` as such a page does, with the
     // building turn's own reads and cards left to an answer in words, a map was a change of files,
     // and the routing step's `summary` went with the person's words in every chat, not only in
     // one with no browser turn yet.
-    include_str!("legacy/browser-automation-v36.md"),
+    "7600de86a508f0fb2e9b0ff6b43c44cfe2916a0d524980ea4dc59c98e94000b6", // v36
     // From before a route from an operator's journey planner went to the stop the place's own
     // page names, read first, and said which stop it used.
-    include_str!("legacy/browser-automation-v37.md"),
+    "d55840806966df0f16a33dc6b794a89dea45678b438b15442cf2b99534531f95", // v37
     // From before a map, a change in the person's own words to a page or map here and a page or
     // change made only from what this chat found and confirmed stayed `direct` in a line of their
     // own, not at the end of `browser_then_build`'s, and the routing step read that a routed
     // browser turn sees the person's words, not only their message.
-    include_str!("legacy/browser-automation-v38.md"),
+    "fae6b5c91ab90b2037da55dfef569bd2906264f04342af7cd7681106bf9d8b65", // v38
     // From before a page was found at the official site of what the task names first and a
     // search engine only when the person named one or no official site was known, and a route's
     // finding named its end stop and whose pick it was, what it left out and when its legs ran.
-    include_str!("legacy/browser-automation-v39.md"),
+    "e5eb327f0316fd913e79d94b6bc185ec6be7f8e7ea754722b08d69531fa35353", // v39
     // From before a cookie notice stopped being one of the person's steps to pause on: consent
     // left the line that lists them.
-    include_str!("legacy/browser-automation-v40.md"),
+    "489ccdb69b800def1aeb5de7877b7f2a8b172ffa3ef857258f5c1a824cd0e07f", // v40
     // From before a route's line said what to choose in a planner with no page to read first,
     // and a core rule said that a form isn't sent until its button is pressed.
-    include_str!("legacy/browser-automation-v41.md"),
+    "2e3a45c9892b7467044b4bce41f23e027d9cc94a3b23755b2088b7a1310d7823", // v41
     // From before routes and comparing moved into `instafy-getting-around` and
     // `instafy-comparing`, "Finding a page" gave one list of where to go when a page ends and
     // said how to write a finding's fact, a search engine was opened only when the person named
     // one, and the skill was for a page that needs the browser, not every page that would help.
-    include_str!("legacy/browser-automation-v42.md"),
+    "1db5745ada853ed9ee18d5471053247c9c15bb65b9ff3b608c9e12a98a972c27", // v42
     // From before a page, or a change to one, asked for with values this chat's replies said
     // weren't found or confirmed was `browser_then_build`, checking the person's own account was
     // work on a website, and the routing section left out what the routing step's own
     // instructions already say (that the step can route to the browser, that a message with
     // attachments is never offered it, and that a card hands back to a build).
-    include_str!("legacy/browser-automation-v43.md"),
+    "806b51ad3941d4f38a1113ccbdba2b3929db37a9f305625848744742843e2786", // v43
     // From before the skill was for using websites (forms, planners, bookings and availability,
     // sign-ins and accounts) and looking things up was the research skill's, a step only the
     // person may do (a payment or the button that books or buys, a cookie choice, a CAPTCHA, a
     // part of a page Octo can't reach) was said and highlighted for them, research that ends in a
     // page stayed `direct` when Octo can search the web and no site needs using first, and the
     // card's section and the browsers' names were shorter.
-    include_str!("legacy/browser-automation-v44.md"),
+    "a33825a82341a5ecf662614546a29b02e26f996f725826f2a39a0eff0d858568", // v44
     // From before the routing section's first rule kept research with Octo unless a site must be
     // used first (an order's own status or items among them): research answered in a reply, a
     // rule or policy beside an order number or email among it, and, when Octo can search the web,
     // availability for dates at places nobody named; research that ends in a page when it
     // searches first too. A change to another chat's page stayed `direct` with no change, and the
     // routing step's `summary` named a page a reply here linked by its address.
-    include_str!("legacy/browser-automation-v45.md"),
+    "ee989f9ea7da84be0cd9c8b7b1beb2f4b064a36dcb6dfcf5bbb0bcc5dc47b24b", // v45
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -699,10 +727,10 @@ const BROWSER_AUTOMATION_REFERENCE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-browser-automation/references/learning-and-local-browsers.md"
 ));
-const LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES: &[&str] = &[
-    include_str!("legacy/skill-import-compat-v1.md"),
-    include_str!("legacy/skill-import-compat-v2.md"),
-    include_str!("legacy/skill-import-compat-v3.md"),
+const LEGACY_SKILL_IMPORT_COMPAT_SHA256: &[&str] = &[
+    "a2606c5575668dbb21ed62a3cb4d3621a034a78d34f28edc966ea3982f9865e2", // v1
+    "c9853bb34986a3c9b43fd11b45beab4c26f63b602f6e9aade87e3d0bfe9e31fa", // v2
+    "25308d80d43ebaaf64b81615cd39177599c748243db8eadf98d360725c0a601f", // v3
 ];
 /// Which sources Octo reads for a fact, how many, how it cross-checks and cites them, and the sites
 /// it only links to (skill-owned data, so the list is judgement a reader enforces, not code).
@@ -710,63 +738,64 @@ const WEB_RESEARCH_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-web-research/SKILL.md"
 ));
-/// Earlier bundled copies of the web-research skill a scaffold may replace. A copy someone edited is kept.
-const LEGACY_WEB_RESEARCH_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier bundled copy of the web-research skill, which a scaffold may
+/// replace. A copy someone edited is kept.
+const LEGACY_WEB_RESEARCH_SHA256: &[&str] = &[
     // From before `instafy web read` was one of its readers.
-    include_str!("legacy/web-research-v1.md"),
+    "000dafbd8f9f4fb23eed19e333ddcfec37bbbaabe979b51319858ca5a99d255d", // v1
     // From before link-only sites had kinds (no-agents, no-reuse) and a guided mode.
-    include_str!("legacy/web-research-v2.md"),
+    "f5a7c3b058ab9d351fd71366bdd523594d3fd6a0d23b9e69f767d900432ea807", // v2
     // From before `instafy web search` was its way to search.
-    include_str!("legacy/web-research-v3.md"),
+    "beaea7c6076a05f4af459f13502278ee6449cbc322725d9f41bb4d4398eaae77", // v3
     // From before reference search (Wikipedia, Wikivoyage, Wikidata) was one of its open sources.
-    include_str!("legacy/web-research-v4.md"),
+    "e4f348d8cfce0f96e5021fced15db6b5ca5cbb07820b499884c33b3eba3d0c09", // v4
     // From before it said how to compare items: a price per item or why not, and the reviews asked for.
-    include_str!("legacy/web-research-v5.md"),
+    "11bdbecbf013f4e8a285b7df842eb15b89572eca2897517bbe8b923a8b2738b0", // v5
     // From before a missing search key or a site that did not load never ended the task (pages read without a
     // search, "www." added or removed once, the page built with what was read).
-    include_str!("legacy/web-research-v6.md"),
+    "dd6486ab57f2dca2481068c125c8f41ab5396d9f16d627a022cd89447c4a7a23", // v6
     // From before an item without a price was listed as "price unknown" (it read as never listed), two failures on
     // the official site sent the turn to an independent source, and a page of options had a row per candidate.
-    include_str!("legacy/web-research-v7.md"),
+    "7038b3d4054a4093fc36a5294b6c7e0def1a6ddd622ebe1a720074c2d3ac855f", // v7
     // Before the controller shared configurable page allowances across helpers.
-    include_str!("legacy/web-research-v8.md"),
+    "6131a52ee88683ff516ab80319d0ab3d3b76251c27e99d18c8ca5cd5dfb9143b", // v8
     // From before it pointed to the browser skill's "Finding a page" instead of keeping its own copy
     // of "not checked", the independent source after two failures and the rows a comparison lists.
-    include_str!("legacy/web-research-v9.md"),
+    "39bacc4f0c4fd582892ada5780d1a3f6b6472e087e8d21b0788dadc0db8ad028", // v9
     // From before reviews came from a reviewer's home page and its links, never a guessed address.
-    include_str!("legacy/web-research-v10.md"),
+    "1f4d88ce27e79e331e3f757afbde0103d787609b1b4c62fb3c232eea80639f7c", // v10
     // From before a stop was listed by the page that stopped, not its site, and the turn went on
     // as its `tell` says instead of to "a different source".
-    include_str!("legacy/web-research-v11.md"),
+    "2a940da25186ed223e73a415f2fc9288d7eecaf102ccbef1a9fcae00914ac656", // v11
     // From before a count of the reviews found cited only those reviews.
-    include_str!("legacy/web-research-v12.md"),
+    "61ce5c916cd969d14921282a91a0fd69984b302c6ff066e18d0b2fa322ad383e", // v12
     // From before it said that a browser turn's readers are its browser tools and the `instafy`
     // commands are for building turns.
-    include_str!("legacy/web-research-v13.md"),
+    "3819f4c6babfe450699192e5ea4365d81f6456d1ab41b8fc8d871006af551f2e", // v13
     // From before a browser turn left out the readers, searches and page-building rules only a
     // building turn can use (`no_shell_omits`), and reading stopped "when material facts are
     // supported".
-    include_str!("legacy/web-research-v14.md"),
+    "f79530826321c2a4fd40ab1ea08f1bdf9787da25abd0b9a0aee3f87ba9ba432b", // v14
     // From before what `instafy web read` marks, reports and returns, and a review search, moved
     // into the sections a browser turn leaves out (it read of a reader and a search it does not
     // have), and a price not read said where it was not found ("no price on <page>").
-    include_str!("legacy/web-research-v15.md"),
+    "43789e1847701abf081e457d9abe3e232bac3940fad9fe5af021bce4745c5fed", // v15
     // From before a `request_browser` card was a reader only in a reply-only turn: a turn that
     // must change files has none.
-    include_str!("legacy/web-research-v16.md"),
+    "6f1cb801c575b07a5e33c66941e18fb41c9b3bb69dce45e68b539e4889cad615", // v16
     // Before native retrieval on verified onboarded ChatGPT connections.
-    include_str!("legacy/web-research-v17.md"),
+    "124d1d03f829cfd3c3644bf27d2eadc42710de4f9391bea371629aee49bdba62", // v17
     // From before comparing items moved into `instafy-comparing`.
-    include_str!("legacy/web-research-v18.md"),
+    "536ac581e5242d364b7d7623571963a3504ea64c002cea729c2cfcd2f961a2ae", // v18
     // From before it was the one skill for looking things up, the AI's own web search came
     // first, and only for what is fresh or a page no source names when each search costs the
     // person credits, and a site closed to Octo was guided in words with its link.
-    include_str!("legacy/web-research-v19.md"),
+    "9bd5a0da14d8c85257d27bfc2c2108028fb2ed7b5d60880eb049a99988ab8788", // v19
     // From before a search's own text was labelled as a web search's, never "checked" (it counted
     // as a page read), a page kept a search's fact only once its page was read or refused, and a
     // price no item page gave was searched for as "Finding sources" says, the AI's own web search
     // first.
-    include_str!("legacy/web-research-v20.md"),
+    "3bd5d5159d5e678bfefa30f30dab0a0b5860d5e22e5217a53cb19d787fd6b266", // v20
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its
 /// values and the reviews asked for, and what a value nobody found says. A topic of the browser,
@@ -775,12 +804,12 @@ const COMPARING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-comparing/SKILL.md"
 ));
-/// Earlier bundled copies of the comparing skill a scaffold may replace. A copy someone edited is
-/// kept.
-const LEGACY_COMPARING_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier bundled copy of the comparing skill, which a scaffold may replace. A
+/// copy someone edited is kept.
+const LEGACY_COMPARING_SHA256: &[&str] = &[
     // From before a comparison searched first with the AI's own web search, reviews included,
     // and used the browser only for what search can't reach.
-    include_str!("legacy/comparing-v1.md"),
+    "2215129e58e85d635731d72fa527346f37e921f43b083ae0f519143f7cd62a6a", // v1
 ];
 /// How Octo finds and gives a route between places, for every reader and browser. A topic of the
 /// browser, research and page skills, under them in the skills tree.
@@ -792,26 +821,29 @@ const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
 ));
-/// Earlier generated site policies a scaffold may replace. Edited workspace policies are kept.
-const LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier generated site policy, which a scaffold may replace. Edited workspace
+/// policies are kept. These three are kept whole too, as `legacy/web-research-link-only-vN.json`:
+/// the controller's, the CLI's and the Shared Browser's tests read them.
+const LEGACY_WEB_RESEARCH_LINK_ONLY_SHA256: &[&str] = &[
     // From before it listed the translators, caches and archives that serve copies of other sites.
-    include_str!("legacy/web-research-link-only-v1.json"),
+    "3933791dc167fac9df1e8dbea4c4d5731e701efaeeb1d28c8606291e48fc7479", // v1
     // From before each site had a kind, the terms it rests on, and guided-mode links.
-    include_str!("legacy/web-research-link-only-v2.json"),
+    "df6b966a5172f3ea30cbf400b37e5b3a245f12d22a79060c73b9d74513b5bb80", // v2
     // Retire the last curated domain list without changing workspace-owned policies.
-    include_str!("legacy/web-research-link-only-v3.json"),
+    "ab7bb9dc142b8422b9dedc3fa309e70cbc77d34b1a6db0d9b910b5dd49164b14", // v3
 ];
 const SKILL_READING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-skill-reading/SKILL.md"
 ));
-/// Earlier bundled copies of the skill-reading rules a scaffold may replace.
-const LEGACY_SKILL_READING_TEMPLATES: &[&str] = &[
+/// The SHA-256 of each earlier bundled copy of the skill-reading rules, which a scaffold may
+/// replace.
+const LEGACY_SKILL_READING_SHA256: &[&str] = &[
     // From before a turn read the skills it picks, and what they say to read, without caps:
     // "stop early", "at most 2 links", "more than ~8k characters … stop reading". Map turns that
     // carried them read the map skill's trip reference cut at 1,400 or 4,000 tokens, or never,
     // and built no plan (local tests, Nov 1 and Nov 4); one without them read it whole.
-    include_str!("legacy/skill-reading-v1.md"),
+    "d701a2dd4f1c24b2ca5f9e597b079d89ec6a135b1004f9d19e1e385ce3013489", // v1
 ];
 const LEARNED_INDEX_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -955,7 +987,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &instafy_path,
-        LEGACY_INSTAFY_TEMPLATES,
+        LEGACY_INSTAFY_SHA256,
         INSTAFY_TEMPLATE,
     ) {
         wrote_any = true;
@@ -964,7 +996,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &agents_doc_path,
-        LEGACY_AGENTS_DOC_TEMPLATES,
+        LEGACY_AGENTS_DOC_SHA256,
         AGENTS_DOC_TEMPLATE,
     ) {
         wrote_any = true;
@@ -973,7 +1005,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &claude_doc_path,
-        LEGACY_CLAUDE_DOC_TEMPLATES,
+        LEGACY_CLAUDE_DOC_SHA256,
         CLAUDE_DOC_TEMPLATE,
     ) {
         wrote_any = true;
@@ -986,7 +1018,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &policy_path,
-        LEGACY_LEARNING_POLICY_TEMPLATES,
+        LEGACY_LEARNING_POLICY_SHA256,
         LEARNING_POLICY_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1019,7 +1051,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &frontend_previews_path,
-        LEGACY_FRONTEND_PREVIEWS_TEMPLATES,
+        LEGACY_FRONTEND_PREVIEWS_SHA256,
         FRONTEND_PREVIEWS_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1034,12 +1066,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
             FRONTEND_PREVIEWS_TUNNELS_TEMPLATE,
         ),
     ] {
-        if upgrade_bundled_skill(
-            workspace_dir,
-            path,
-            LEGACY_FRONTEND_PREVIEWS_REFERENCE_TEMPLATES,
-            template,
-        ) {
+        if upgrade_bundled_skill(workspace_dir, path, &[], template) {
             wrote_any = true;
         }
     }
@@ -1047,7 +1074,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &integration_onboarding_path,
-        LEGACY_INTEGRATION_ONBOARDING_TEMPLATES,
+        LEGACY_INTEGRATION_ONBOARDING_SHA256,
         INTEGRATION_ONBOARDING_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1094,7 +1121,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &space_review_path,
-        LEGACY_SPACE_REVIEW_TEMPLATES,
+        LEGACY_SPACE_REVIEW_SHA256,
         SPACE_REVIEW_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1123,7 +1150,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &automations_path,
-        LEGACY_AUTOMATIONS_TEMPLATES,
+        LEGACY_AUTOMATIONS_SHA256,
         AUTOMATIONS_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1144,7 +1171,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &skill_import_compat_path,
-        LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES,
+        LEGACY_SKILL_IMPORT_COMPAT_SHA256,
         SKILL_IMPORT_COMPAT_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1153,7 +1180,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &browser_automation_path,
-        LEGACY_BROWSER_AUTOMATION_TEMPLATES,
+        LEGACY_BROWSER_AUTOMATION_SHA256,
         BROWSER_AUTOMATION_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1170,7 +1197,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &bound_sites_path,
-        LEGACY_BOUND_SITES_TEMPLATES,
+        LEGACY_BOUND_SITES_SHA256,
         BOUND_SITES_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1178,7 +1205,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &bound_sites_cheatsheet_path,
-        LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES,
+        LEGACY_BOUND_SITES_CHEATSHEET_SHA256,
         BOUND_SITES_CHEATSHEET_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1186,34 +1213,30 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     for (path, legacy, current) in [
         (
             &interactive_artifacts_path,
-            LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES,
+            LEGACY_INTERACTIVE_ARTIFACTS_SHA256,
             INTERACTIVE_ARTIFACTS_TEMPLATE,
         ),
         (
             &research_team_path,
-            LEGACY_RESEARCH_TEAM_TEMPLATES,
+            LEGACY_RESEARCH_TEAM_SHA256,
             RESEARCH_TEAM_TEMPLATE,
         ),
         (
             &research_team_researcher_path,
-            LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES,
+            LEGACY_RESEARCH_TEAM_RESEARCHER_SHA256,
             RESEARCH_TEAM_RESEARCHER_TEMPLATE,
         ),
         (
             &web_research_path,
-            LEGACY_WEB_RESEARCH_TEMPLATES,
+            LEGACY_WEB_RESEARCH_SHA256,
             WEB_RESEARCH_TEMPLATE,
         ),
         (
             &web_research_link_only_path,
-            LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES,
+            LEGACY_WEB_RESEARCH_LINK_ONLY_SHA256,
             WEB_RESEARCH_LINK_ONLY_TEMPLATE,
         ),
-        (
-            &comparing_path,
-            LEGACY_COMPARING_TEMPLATES,
-            COMPARING_TEMPLATE,
-        ),
+        (&comparing_path, LEGACY_COMPARING_SHA256, COMPARING_TEMPLATE),
         // New in every space, and an edited copy is kept: there is no earlier copy yet.
         (
             &getting_around_path,
@@ -1229,7 +1252,7 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     if upgrade_bundled_skill(
         workspace_dir,
         &skill_reading_path,
-        LEGACY_SKILL_READING_TEMPLATES,
+        LEGACY_SKILL_READING_SHA256,
         SKILL_READING_TEMPLATE,
     ) {
         wrote_any = true;
@@ -1251,24 +1274,41 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
     maybe_commit_project_memory_scaffold(workspace_dir, wrote_any);
 }
 
+/// The length of the longest earlier copy any `LEGACY_*_SHA256` list holds: the browser skill's
+/// v24. A digest of a longer file raises it to that file's length.
+const LONGEST_EARLIER_COPY_BYTES: usize = 28_390;
+
+/// How much of a workspace file an upgrade reads to tell whether it is an earlier bundled copy: no
+/// less than [`LONGEST_EARLIER_COPY_BYTES`] or any bundled file now, which becomes an earlier copy
+/// when it changes (`each_bundled_files_earlier_copies_are_different_versions`). A longer file is
+/// an edited one.
+const EARLIER_COPY_READ_CAP: usize = 64 * 1024;
+const _: () = assert!(EARLIER_COPY_READ_CAP >= LONGEST_EARLIER_COPY_BYTES);
+
+/// Whether `bytes` are exactly one of the earlier bundled copies whose SHA-256 (lowercase hex, as
+/// `sha256_hex` gives it) `earlier` lists: the digest is of the bytes as they are, so a copy that
+/// differs by a space or a line ending is not one.
+fn is_earlier_copy(bytes: &[u8], earlier: &[&str]) -> bool {
+    earlier.contains(&sha256_hex(bytes).as_str())
+}
+
 /// Writes the bundled `current` text at `path` when the file is absent or holds
-/// exactly one of the `legacy` bundled versions, and reports whether it wrote.
-/// A workspace's own edit is kept, and nothing is written through a symlink at
+/// exactly one of the earlier bundled copies whose SHA-256 `earlier` lists, and
+/// reports whether it wrote. A workspace's own edit is kept, and so is a file
+/// longer than [`EARLIER_COPY_READ_CAP`]; nothing is written through a symlink at
 /// or below the workspace root.
 fn upgrade_bundled_skill(
     workspace_dir: &Path,
     path: &Path,
-    legacy: &[&str],
+    earlier: &[&str],
     current: &str,
 ) -> bool {
-    let budget = legacy.iter().map(|text| text.len()).max().unwrap_or(0);
-    let replaceable = match workspace_memory_io::read_prefix(workspace_dir, path, budget) {
-        Ok((bytes, false)) => {
-            std::str::from_utf8(&bytes).is_ok_and(|content| legacy.contains(&content))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-        _ => false,
-    };
+    let replaceable =
+        match workspace_memory_io::read_prefix(workspace_dir, path, EARLIER_COPY_READ_CAP) {
+            Ok((bytes, false)) => is_earlier_copy(&bytes, earlier),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            _ => false,
+        };
     replaceable && write_file_if_changed(workspace_dir, path, current)
 }
 
@@ -2477,22 +2517,15 @@ mod tests {
         fs::write(&skill, customized).unwrap();
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
-        // An unedited earlier copy is brought up to date (it did not say how to answer a site's ask).
-        let previous = include_str!("legacy/bound-sites-v1.md");
-        assert!(!previous.contains("## When someone asks from a site"));
-        fs::write(&skill, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), BOUND_SITES_TEMPLATE);
         assert!(BOUND_SITES_TEMPLATE.contains("## When someone asks from a site"));
     }
 
     /// Replies speak the person's words (28 Oct drive: "Overpass place search was
     /// unavailable", "net::ERR_TUNNEL_CONNECTION_FAILED", "recorded PID (1368)",
     /// "index.html"): `AGENTS.md`, which every turn loads, says what a reply leaves
-    /// out and how a failure is said. An unedited earlier copy is upgraded; a
-    /// team's own `AGENTS.md` is kept.
+    /// out and how a failure is said. A team's own `AGENTS.md` is kept.
     #[test]
-    fn agents_doc_says_how_replies_speak_and_reaches_existing_spaces() {
+    fn agents_doc_says_how_replies_speak_and_a_teams_own_is_kept() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
@@ -2508,14 +2541,9 @@ mod tests {
         }
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
 
-        let previous = include_str!("legacy/agents-doc-v1.md");
-        assert!(!previous.contains("## Replies"));
         let workspace = tempdir().expect("workspace");
         ensure_project_memory_scaffold(workspace.path());
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
         let theirs = "# How we work\n\nReply in Swedish.\n";
         fs::write(&path, theirs).unwrap();
@@ -2530,7 +2558,6 @@ mod tests {
     /// was stale". `AGENTS.md` gives one rule in place of those examples. What could not be looked
     /// at still stays in the reply, in plain words (the builder skill's "what is unverified", and
     /// the page skill's "nobody has looked at the page yet").
-    /// The copies from before, with the examples or from before them, are upgraded.
     #[test]
     fn agents_doc_says_never_to_describe_the_turn_itself() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2559,27 +2586,12 @@ mod tests {
         }
         assert!(!doc.contains("Leave out what you could not look at"));
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/agents-doc-v8.md");
-        assert!(previous.contains("passed the desktop and phone checks"));
-        assert!(!previous.contains("Never describe the turn itself"));
-        for previous in [
-            include_str!("legacy/agents-doc-v2.md"),
-            include_str!("legacy/agents-doc-v3.md"),
-            include_str!("legacy/agents-doc-v6.md"),
-            previous,
-        ] {
-            let workspace = tempdir().expect("workspace");
-            let path = workspace.path().join(AGENTS_DOC_FILENAME);
-            fs::write(&path, previous).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
-        }
     }
 
     /// A browser turn whose press of a cookie notice's accept was refused replied "Please choose
     /// “aceitar e continuar” on the page": it asked the person to accept cookies, which Octo never
     /// does and never asks anyone to do. "Replies", which every web and browser turn carries, says
-    /// so in one line. The copy from before is upgraded.
+    /// so in one line.
     #[test]
     fn a_reply_never_asks_the_person_to_accept_cookies() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2592,21 +2604,13 @@ mod tests {
         let rule = "- Never ask the person to accept cookies or tracking.";
         assert!(replies.contains(rule), "{replies}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-
-        let previous = include_str!("legacy/agents-doc-v16.md");
-        assert!(!flat(previous).contains(rule));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// "Add a weight column to the laptop comparison." found the column already there, and the
     /// reply said so, but the turn held other rules for such a reply: that it doesn't satisfy a
     /// required change, and a line of the runtime's to end it with. Without the line, the
     /// correct answer failed (a local test, Nov 9). "Replies", which every file-changing turn
-    /// reads, holds the one rule. The copy from before is upgraded.
+    /// reads, holds the one rule.
     #[test]
     fn a_reply_that_changed_nothing_says_what_it_checked_and_why() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2620,14 +2624,6 @@ mod tests {
         assert!(replies.contains(rule), "{replies}");
         assert_eq!(doc.matches("nothing needed changing").count(), 1, "{doc}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-
-        let previous = include_str!("legacy/agents-doc-v18.md");
-        assert!(!flat(previous).contains(rule));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// Three things a reply says had more than one rule, which pulled different ways: what it
@@ -2637,10 +2633,9 @@ mod tests {
     /// clarification if you lack enough information to act.", and a page's build "Never stop to
     /// ask before building"). Each is one rule now, a line of its own in "Replies", which every
     /// turn that replies to the person reads, and neither the runtime's words nor the page skill
-    /// says it again. The copies from before are upgraded.
+    /// says it again.
     #[test]
     fn the_replies_guide_says_each_of_its_three_rules_once() {
-        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let replies = AGENTS_DOC_TEMPLATE
             .split("\n## Replies\n")
             .nth(1)
@@ -2700,26 +2695,6 @@ mod tests {
             !INTERACTIVE_ARTIFACTS_TEMPLATE.contains("stop to ask"),
             "{INTERACTIVE_ARTIFACTS_TEMPLATE}"
         );
-
-        let previous = include_str!("legacy/agents-doc-v20.md");
-        assert!(flat(previous).contains("in Instafy's browser's findings. When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach, never that a site or page lacks it or didn't load."));
-        assert!(!previous.contains("short question"));
-        let previous_hub = include_str!("legacy/interactive-artifacts-v21.md");
-        assert!(previous_hub.contains(
-            "Never stop to ask before building: a vague ask gets sensible defaults, stated in the reply."
-        ));
-        let workspace = tempdir().expect("workspace");
-        let agents = workspace.path().join(AGENTS_DOC_FILENAME);
-        let hub = workspace.path().join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
-        ensure_project_memory_scaffold(workspace.path());
-        fs::write(&agents, previous).unwrap();
-        fs::write(&hub, previous_hub).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&agents).unwrap(), AGENTS_DOC_TEMPLATE);
-        assert_eq!(
-            fs::read_to_string(&hub).unwrap(),
-            INTERACTIVE_ARTIFACTS_TEMPLATE
-        );
     }
 
     /// A building turn listed its tools, then read a shop's site twice with python's `urllib`:
@@ -2734,8 +2709,8 @@ mod tests {
     /// "Responsiveness", which the runtime found by a copy of its words. A browser turn, which has
     /// no shell, reads only "Replies". The line named the AI's own web search beside them (Nov 17),
     /// and a turn took its text, what the search provider wrote, for a page read (a local test,
-    /// Nov 17): it names none now, as the copy from before it did. The copies from before are
-    /// upgraded.
+    /// Nov 17): it names none now, as the copy from before it did. The rule as the copy that named
+    /// it said it is still known, since a copy a space edited may say it word for word.
     #[test]
     fn agents_doc_says_a_turn_reads_a_public_page_only_with_instafys_reader() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2762,37 +2737,18 @@ mod tests {
         );
         assert!(!doc.contains("the AI's own web search"), "{doc}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-
-        let before_the_rule = include_str!("legacy/agents-doc-v17.md");
-        assert!(!flat(before_the_rule).contains("instafy web read"));
-        let before_its_section = include_str!("legacy/agents-doc-v20.md");
-        assert!(!before_its_section.contains(heading));
-        assert!(flat(before_its_section).contains(rule));
-        let before_search = include_str!("legacy/agents-doc-v21.md");
-        assert!(flat(before_search).contains(rule));
-        assert!(!before_search.contains("the AI's own web search"));
-        let searched_as_a_read = include_str!("legacy/agents-doc-v22.md");
-        assert!(flat(searched_as_a_read).contains(with_search));
-        for previous in [
-            before_the_rule,
-            before_its_section,
-            before_search,
-            searched_as_a_read,
-        ] {
-            let workspace = tempdir().expect("workspace");
-            let path = workspace.path().join(AGENTS_DOC_FILENAME);
-            fs::write(&path, previous).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
-        }
+        assert!(
+            earlier_reading_the_web_sections()
+                .any(|earlier| earlier.lines().any(|line| line == with_search)),
+            "{with_search}"
+        );
     }
 
     /// A reply named its turn's check ("JSON validation passed."), its browser's own tab ("I couldn't
     /// run the planner from my reading tab") and what its turn can't do ("I can't access a browser for
     /// another lookup here", from a build after the browser part, which by design opens no browser):
     /// none says anything the person can use. The rule on the turn itself names its tabs, checks and
-    /// limits, and a reply says what is missing and what the person can ask for instead. The copy
-    /// from before is upgraded.
+    /// limits, and a reply says what is missing and what the person can ask for instead.
     #[test]
     fn a_reply_names_no_tab_check_or_limit_of_its_turn_and_says_what_to_ask_for() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2805,14 +2761,6 @@ mod tests {
         let rule = "- Never describe the turn itself: its run, pass, snapshot, tabs, tools, checks (\"validation passed\") or limits (\"I can't use a browser here\"). Say what is missing and what they can ask for.";
         assert!(replies.contains(rule), "{replies}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-
-        let previous = include_str!("legacy/agents-doc-v14.md");
-        assert!(!flat(previous).contains(rule));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A reply states only what a page read in its turn says, else "not checked"; it never says a site or
@@ -2820,7 +2768,7 @@ mod tests {
     /// and says which page it didn't reach ("the planner itself didn't load in the page", of a planner whose
     /// own page the turn never opened); and it names only steps its turn started ("I'm sending Instafy's
     /// browser…" with no browser card is a promise nobody keeps). `AGENTS.md` is what web turns carry, and a
-    /// browser turn is given its "Replies" too. The copies from before are upgraded.
+    /// browser turn is given its "Replies" too.
     ///
     /// The rule named what doesn't exist ("a place, stop, route, time or page"), and a turn that read a
     /// journey planner's station list, which showed only the station it held, replied that the planner
@@ -2862,21 +2810,6 @@ mod tests {
         assert_eq!(replies.matches("didn't load").count(), 1, "{replies}");
         assert!(!replies.contains("doesn't exist"), "{replies}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let before_not_checked = include_str!("legacy/agents-doc-v4.md");
-        assert!(!before_not_checked.contains("not checked\", or stays out"));
-        let before_lacks = include_str!("legacy/agents-doc-v11.md");
-        assert!(
-            before_lacks.contains("Never say a place, stop, route, time or page doesn't exist")
-        );
-        let before_where_you_looked = include_str!("legacy/agents-doc-v13.md");
-        assert!(before_where_you_looked.contains("Never say a site or page lacks something"));
-        for previous in [before_not_checked, before_lacks, before_where_you_looked] {
-            let workspace = tempdir().expect("workspace");
-            let path = workspace.path().join(AGENTS_DOC_FILENAME);
-            fs::write(&path, previous).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
-        }
     }
 
     /// A value Octo looked for and didn't find is said where Octo looked, never as something a
@@ -2886,7 +2819,7 @@ mod tests {
     /// Nov 10). Read beside "unless a page you read says so", a page that doesn't show a value
     /// reads as one that says it lacks it, and a finding quoted as page data reads as a page. A
     /// page that does say so gives a fact, which the rule's first sentence already allows. A
-    /// browser turn reads "Replies" too. The copy from before is upgraded.
+    /// browser turn reads "Replies" too.
     #[test]
     fn a_reply_never_says_a_page_lacks_what_octo_didnt_find_on_it() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2904,16 +2837,6 @@ mod tests {
         }
         assert!(!doc.contains("unless a page you read says so"), "{doc}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-
-        let previous = include_str!("legacy/agents-doc-v19.md");
-        assert!(
-            flat(previous).contains("lacks it or didn't load, unless a page you read says so.")
-        );
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A tip no page gave ("Arrive near opening time for a quieter visit.") went on a page as plain
@@ -2922,8 +2845,7 @@ mod tests {
     /// rule for the reply alone. It names a tip as well, and the page as well as the reply, in the
     /// one place every turn reads. It is about what the turn adds, so a page's values from earlier
     /// turns keep their pages, and it leaves out what the person gave (a note in their own words)
-    /// and what Instafy's browser's findings give, which a building turn cites by their pages. The
-    /// copy from before is upgraded.
+    /// and what Instafy's browser's findings give, which a building turn cites by their pages.
     #[test]
     fn a_tip_no_page_gave_says_not_checked_on_the_page_as_in_the_reply() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2937,123 +2859,431 @@ mod tests {
         assert!(replies.contains(rule), "{replies}");
         assert_eq!(doc.matches("\"not checked\"").count(), 1, "{doc}");
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-
-        let previous = include_str!("legacy/agents-doc-v15.md");
-        assert!(flat(previous).contains(
-            "- A fact no page you read this turn states says \"not checked\", or stays out."
-        ));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
+
+    /// Every bundled file a scaffold upgrades, with its `LEGACY_*_SHA256` list and the file it
+    /// ships now.
+    const UPGRADED_FILES: &[(&str, &[&str], &str)] = &[
+        ("INSTAFY.md", LEGACY_INSTAFY_SHA256, INSTAFY_TEMPLATE),
+        ("AGENTS.md", LEGACY_AGENTS_DOC_SHA256, AGENTS_DOC_TEMPLATE),
+        ("CLAUDE.md", LEGACY_CLAUDE_DOC_SHA256, CLAUDE_DOC_TEMPLATE),
+        (
+            "learning policy",
+            LEGACY_LEARNING_POLICY_SHA256,
+            LEARNING_POLICY_TEMPLATE,
+        ),
+        (
+            "frontend previews",
+            LEGACY_FRONTEND_PREVIEWS_SHA256,
+            FRONTEND_PREVIEWS_TEMPLATE,
+        ),
+        (
+            "frontend previews host messages",
+            &[],
+            FRONTEND_PREVIEWS_HOST_MESSAGES_TEMPLATE,
+        ),
+        (
+            "frontend previews tunnels",
+            &[],
+            FRONTEND_PREVIEWS_TUNNELS_TEMPLATE,
+        ),
+        (
+            "integration onboarding",
+            LEGACY_INTEGRATION_ONBOARDING_SHA256,
+            INTEGRATION_ONBOARDING_TEMPLATE,
+        ),
+        (
+            "space review",
+            LEGACY_SPACE_REVIEW_SHA256,
+            SPACE_REVIEW_TEMPLATE,
+        ),
+        (
+            "automations",
+            LEGACY_AUTOMATIONS_SHA256,
+            AUTOMATIONS_TEMPLATE,
+        ),
+        (
+            "skill import",
+            LEGACY_SKILL_IMPORT_COMPAT_SHA256,
+            SKILL_IMPORT_COMPAT_TEMPLATE,
+        ),
+        (
+            "browser automation",
+            LEGACY_BROWSER_AUTOMATION_SHA256,
+            BROWSER_AUTOMATION_TEMPLATE,
+        ),
+        (
+            "browser automation reference",
+            &[],
+            BROWSER_AUTOMATION_REFERENCE_TEMPLATE,
+        ),
+        (
+            "bound sites",
+            LEGACY_BOUND_SITES_SHA256,
+            BOUND_SITES_TEMPLATE,
+        ),
+        (
+            "bound sites cheat sheet",
+            LEGACY_BOUND_SITES_CHEATSHEET_SHA256,
+            BOUND_SITES_CHEATSHEET_TEMPLATE,
+        ),
+        (
+            "interactive artifacts",
+            LEGACY_INTERACTIVE_ARTIFACTS_SHA256,
+            INTERACTIVE_ARTIFACTS_TEMPLATE,
+        ),
+        (
+            "research team",
+            LEGACY_RESEARCH_TEAM_SHA256,
+            RESEARCH_TEAM_TEMPLATE,
+        ),
+        (
+            "researcher",
+            LEGACY_RESEARCH_TEAM_RESEARCHER_SHA256,
+            RESEARCH_TEAM_RESEARCHER_TEMPLATE,
+        ),
+        (
+            "web research",
+            LEGACY_WEB_RESEARCH_SHA256,
+            WEB_RESEARCH_TEMPLATE,
+        ),
+        (
+            "link-only sites",
+            LEGACY_WEB_RESEARCH_LINK_ONLY_SHA256,
+            WEB_RESEARCH_LINK_ONLY_TEMPLATE,
+        ),
+        ("comparing", LEGACY_COMPARING_SHA256, COMPARING_TEMPLATE),
+        ("getting around", &[], GETTING_AROUND_TEMPLATE),
+        (
+            "skill reading",
+            LEGACY_SKILL_READING_SHA256,
+            SKILL_READING_TEMPLATE,
+        ),
+    ];
 
     /// A space's unedited copy of a bundled file is brought up to date only when it is one of the
     /// file's earlier copies, so each earlier copy is a different version and none is the current
-    /// file. Two changes to one file that land one after the other each keep the copy from before
-    /// their own change: the second keeps the file the first one shipped. One more copy of the
-    /// file both started from repeats a copy already kept, and a space that got the first one's
-    /// file would keep it as if the person had edited it.
+    /// file. Two changes to one file that land one after the other each list the copy from before
+    /// their own change: the second lists the file the first one shipped. One more digest of the
+    /// file both started from repeats one already listed, and a space that got the first one's
+    /// file would keep it as if the person had edited it. An entry is a digest, never a copy, and
+    /// each file now fits what an upgrade reads, so its digest still matches once it is an earlier
+    /// copy.
     #[test]
     fn each_bundled_files_earlier_copies_are_different_versions() {
-        for (name, earlier, current) in [
-            (
-                "AGENTS.md",
-                LEGACY_AGENTS_DOC_TEMPLATES,
-                AGENTS_DOC_TEMPLATE,
-            ),
-            (
-                "frontend previews",
-                LEGACY_FRONTEND_PREVIEWS_TEMPLATES,
-                FRONTEND_PREVIEWS_TEMPLATE,
-            ),
-            (
-                "integration onboarding",
-                LEGACY_INTEGRATION_ONBOARDING_TEMPLATES,
-                INTEGRATION_ONBOARDING_TEMPLATE,
-            ),
-            (
-                "space review",
-                LEGACY_SPACE_REVIEW_TEMPLATES,
-                SPACE_REVIEW_TEMPLATE,
-            ),
-            (
-                "automations",
-                LEGACY_AUTOMATIONS_TEMPLATES,
-                AUTOMATIONS_TEMPLATE,
-            ),
-            (
-                "skill import",
-                LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES,
-                SKILL_IMPORT_COMPAT_TEMPLATE,
-            ),
-            (
-                "browser automation",
-                LEGACY_BROWSER_AUTOMATION_TEMPLATES,
-                BROWSER_AUTOMATION_TEMPLATE,
-            ),
-            (
-                "bound sites",
-                LEGACY_BOUND_SITES_TEMPLATES,
-                BOUND_SITES_TEMPLATE,
-            ),
-            (
-                "bound sites cheat sheet",
-                LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES,
-                BOUND_SITES_CHEATSHEET_TEMPLATE,
-            ),
-            (
-                "interactive artifacts",
-                LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES,
-                INTERACTIVE_ARTIFACTS_TEMPLATE,
-            ),
-            (
-                "research team",
-                LEGACY_RESEARCH_TEAM_TEMPLATES,
-                RESEARCH_TEAM_TEMPLATE,
-            ),
-            (
-                "researcher",
-                LEGACY_RESEARCH_TEAM_RESEARCHER_TEMPLATES,
-                RESEARCH_TEAM_RESEARCHER_TEMPLATE,
-            ),
-            (
-                "web research",
-                LEGACY_WEB_RESEARCH_TEMPLATES,
-                WEB_RESEARCH_TEMPLATE,
-            ),
-            (
-                "link-only sites",
-                LEGACY_WEB_RESEARCH_LINK_ONLY_TEMPLATES,
-                WEB_RESEARCH_LINK_ONLY_TEMPLATE,
-            ),
-            (
-                "skill reading",
-                LEGACY_SKILL_READING_TEMPLATES,
-                SKILL_READING_TEMPLATE,
-            ),
-            ("INSTAFY.md", LEGACY_INSTAFY_TEMPLATES, INSTAFY_TEMPLATE),
-            (
-                "learning policy",
-                LEGACY_LEARNING_POLICY_TEMPLATES,
-                LEARNING_POLICY_TEMPLATE,
-            ),
-        ] {
-            for (index, copy) in earlier.iter().enumerate() {
+        let is_digest = |entry: &str| {
+            entry.len() == 64
+                && entry
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        for (name, earlier, current) in UPGRADED_FILES {
+            assert!(
+                current.len() <= EARLIER_COPY_READ_CAP,
+                "{name}: {} bytes, more than an upgrade reads (EARLIER_COPY_READ_CAP)",
+                current.len()
+            );
+            let current = sha256_hex(current.as_bytes());
+            for (index, digest) in earlier.iter().enumerate() {
+                assert!(
+                    is_digest(digest),
+                    "{name}: earlier copy {} is not a SHA-256 in lowercase hex; list the old file's digest (see LEGACY_INSTAFY_SHA256)",
+                    index + 1
+                );
                 assert_ne!(
-                    *copy,
+                    *digest,
                     current,
                     "{name}: earlier copy {} is the current file",
                     index + 1
                 );
                 assert!(
-                    !earlier[..index].contains(copy),
-                    "{name}: earlier copy {} repeats one before it; keep the file the change before this one shipped instead",
+                    !earlier[..index].contains(digest),
+                    "{name}: earlier copy {} repeats one before it; list the digest of the file the change before this one shipped instead",
                     index + 1
                 );
             }
         }
+    }
+
+    /// An upgrade replaces a file only when its bytes are exactly an earlier copy whose digest its
+    /// list holds. An edit is kept, and so is the same text with a space or a line ending more or
+    /// less, an empty file and bytes that are not UTF-8; the current file is left as it is, and a
+    /// missing one is written.
+    #[test]
+    fn an_upgrade_replaces_only_an_unedited_earlier_copy() {
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(".agents/skills/demo/SKILL.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let earlier = "---\nname: demo\n---\n\n# Demo\n\nThe copy Instafy shipped before.\n";
+        let current = "---\nname: demo\n---\n\n# Demo\n\nThe copy Instafy ships now.\n";
+        let digest = sha256_hex(earlier.as_bytes());
+        let listed = [digest.as_str()];
+        let upgrade = || upgrade_bundled_skill(workspace.path(), &path, &listed, current);
+
+        assert!(upgrade());
+        assert_eq!(fs::read_to_string(&path).unwrap(), current);
+        assert!(!upgrade());
+        assert_eq!(fs::read_to_string(&path).unwrap(), current);
+
+        fs::write(&path, earlier).unwrap();
+        assert!(upgrade());
+        assert_eq!(fs::read_to_string(&path).unwrap(), current);
+
+        for kept in [
+            format!("{earlier}Our own rule.\n").into_bytes(),
+            earlier.trim_end().as_bytes().to_vec(),
+            format!("{earlier}\n").into_bytes(),
+            format!(" {earlier}").into_bytes(),
+            earlier.replace('\n', "\r\n").into_bytes(),
+            Vec::new(),
+            [earlier.as_bytes(), b"\xff"].concat(),
+        ] {
+            fs::write(&path, &kept).unwrap();
+            assert!(!upgrade(), "{:?}", String::from_utf8_lossy(&kept));
+            assert_eq!(fs::read(&path).unwrap(), kept);
+        }
+    }
+
+    /// An upgrade reads at most `EARLIER_COPY_READ_CAP` bytes of a file: a longer file is an edited
+    /// one, kept even were its digest listed, and a file of exactly that length is still compared.
+    #[test]
+    fn a_file_longer_than_an_upgrade_reads_is_kept() {
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(INSTAFY_FILENAME);
+        let at_cap = "a".repeat(EARLIER_COPY_READ_CAP);
+        let longer = format!("{at_cap}a");
+        let digests = [sha256_hex(at_cap.as_bytes()), sha256_hex(longer.as_bytes())];
+        let listed = [digests[0].as_str(), digests[1].as_str()];
+
+        fs::write(&path, &longer).unwrap();
+        assert!(!upgrade_bundled_skill(
+            workspace.path(),
+            &path,
+            &listed,
+            INSTAFY_TEMPLATE
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), longer);
+
+        fs::write(&path, &at_cap).unwrap();
+        assert!(upgrade_bundled_skill(
+            workspace.path(),
+            &path,
+            &listed,
+            INSTAFY_TEMPLATE
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), INSTAFY_TEMPLATE);
+    }
+
+    /// A file with no earlier copy yet is written when it is missing and kept otherwise, an empty
+    /// file included, and an empty file is no list's earlier copy.
+    #[test]
+    fn with_no_earlier_copy_only_a_missing_file_is_written() {
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        assert!(upgrade_bundled_skill(
+            workspace.path(),
+            &path,
+            &[],
+            AGENTS_DOC_TEMPLATE
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+        let digest = sha256_hex(b"an earlier copy\n");
+        let cases: [(&str, &[&str]); 3] = [
+            ("", &[]),
+            ("# How we work\n", &[]),
+            ("", &[digest.as_str()]),
+        ];
+        for (kept, earlier) in cases {
+            fs::write(&path, kept).unwrap();
+            assert!(!upgrade_bundled_skill(
+                workspace.path(),
+                &path,
+                earlier,
+                AGENTS_DOC_TEMPLATE
+            ));
+            assert_eq!(fs::read_to_string(&path).unwrap(), kept);
+        }
+    }
+
+    /// An earlier copy behind a link is never replaced, and the link's target is left as it is: a
+    /// link to a file outside the space, a skill folder that links outside it, and a link to
+    /// nothing, whose target is never created.
+    #[cfg(unix)]
+    #[test]
+    fn an_earlier_copy_behind_a_link_is_never_replaced() {
+        use std::os::unix::fs::symlink;
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside workspace");
+        let earlier = "# Demo\n\nThe copy Instafy shipped before.\n";
+        let digest = sha256_hex(earlier.as_bytes());
+        let listed = [digest.as_str()];
+        let skill = workspace.path().join(".agents/skills/demo/SKILL.md");
+        let folder = skill.parent().unwrap();
+        let external = outside.path().join("SKILL.md");
+        fs::write(&external, earlier).unwrap();
+        let upgrade = || upgrade_bundled_skill(workspace.path(), &skill, &listed, "# Demo\n");
+
+        fs::create_dir_all(folder).unwrap();
+        symlink(&external, &skill).unwrap();
+        assert!(!upgrade());
+        assert_eq!(fs::read_to_string(&external).unwrap(), earlier);
+
+        fs::remove_file(&skill).unwrap();
+        fs::remove_dir(folder).unwrap();
+        symlink(outside.path(), folder).unwrap();
+        assert!(!upgrade());
+        assert_eq!(fs::read_to_string(&external).unwrap(), earlier);
+
+        fs::remove_file(folder).unwrap();
+        fs::create_dir_all(folder).unwrap();
+        let dangling = outside.path().join("created-outside.md");
+        symlink(&dangling, &skill).unwrap();
+        assert!(!upgrade());
+        assert!(!dangling.exists());
+    }
+
+    /// The earlier copies kept whole under `src/jobs/legacy/`: every one of `AGENTS.md`,
+    /// `CLAUDE.md` and `INSTAFY.md`, which the local-engine preflight test checks
+    /// (`claude_code::preflight`), and the link-only list's, which the controller's, the CLI's and
+    /// the Shared Browser's tests read. Each prefix, the list of its file and where the file goes.
+    const KEPT_EARLIER_COPIES: &[(&str, &[&str], &str, &str)] = &[
+        (
+            "agents-doc-",
+            LEGACY_AGENTS_DOC_SHA256,
+            AGENTS_DOC_FILENAME,
+            AGENTS_DOC_TEMPLATE,
+        ),
+        (
+            "claude-doc-",
+            LEGACY_CLAUDE_DOC_SHA256,
+            CLAUDE_DOC_FILENAME,
+            CLAUDE_DOC_TEMPLATE,
+        ),
+        (
+            "instafy-doc-",
+            LEGACY_INSTAFY_SHA256,
+            INSTAFY_FILENAME,
+            INSTAFY_TEMPLATE,
+        ),
+        (
+            "web-research-link-only-",
+            LEGACY_WEB_RESEARCH_LINK_ONLY_SHA256,
+            WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH,
+            WEB_RESEARCH_LINK_ONLY_TEMPLATE,
+        ),
+    ];
+
+    /// The name and text of each earlier copy kept whole whose name starts with `prefix`.
+    fn kept_earlier_copies(prefix: &str) -> Vec<(String, String)> {
+        let legacy = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/jobs/legacy");
+        let mut copies: Vec<(String, String)> = fs::read_dir(legacy)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter_map(|path| {
+                let name = path.file_name()?.to_str()?.to_string();
+                name.starts_with(prefix)
+                    .then(|| (name, fs::read_to_string(&path).unwrap()))
+            })
+            .collect();
+        copies.sort();
+        copies
+    }
+
+    /// Each earlier copy kept whole is one its list holds, no longer than
+    /// `LONGEST_EARLIER_COPY_BYTES`, and no other bundled file keeps a copy: their lists hold
+    /// digests alone. Every earlier `AGENTS.md`, `CLAUDE.md` and `INSTAFY.md` stays a file, one for
+    /// each digest, since the preflight test checks every version. A dotfile (Finder's
+    /// `.DS_Store`) is no copy.
+    #[test]
+    fn kept_earlier_copies_hash_to_their_listed_digests() {
+        let legacy = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/jobs/legacy");
+        for entry in fs::read_dir(legacy).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            assert!(
+                KEPT_EARLIER_COPIES
+                    .iter()
+                    .any(|(prefix, ..)| name.starts_with(prefix)),
+                "legacy/{name}: only the earlier copies of AGENTS.md, CLAUDE.md, INSTAFY.md and the link-only list are kept whole; list the old file's digest instead"
+            );
+        }
+        for (prefix, listed, ..) in KEPT_EARLIER_COPIES {
+            let copies = kept_earlier_copies(prefix);
+            assert!(!copies.is_empty(), "{prefix}");
+            let digests: Vec<String> = copies
+                .iter()
+                .map(|(name, text)| {
+                    assert!(
+                        text.len() <= LONGEST_EARLIER_COPY_BYTES,
+                        "legacy/{name}: {} bytes; raise LONGEST_EARLIER_COPY_BYTES",
+                        text.len()
+                    );
+                    let digest = sha256_hex(text.as_bytes());
+                    assert!(
+                        listed.contains(&digest.as_str()),
+                        "legacy/{name}: its SHA-256 {digest} is not listed"
+                    );
+                    digest
+                })
+                .collect();
+            if *prefix != "web-research-link-only-" {
+                assert_eq!(
+                    copies.len(),
+                    listed.len(),
+                    "{prefix}: one legacy/{prefix}vN.md for each listed digest, since the local-engine preflight test reads every earlier version"
+                );
+                for digest in *listed {
+                    assert!(
+                        digests.iter().any(|kept| kept == digest),
+                        "{prefix}: {digest} is listed but no legacy/{prefix}vN.md holds it; the local-engine preflight test reads every earlier version"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The scaffold replaces each earlier copy kept whole, unedited, with the current file, and
+    /// keeps an edited one.
+    #[test]
+    fn the_scaffold_replaces_each_kept_earlier_copy_and_keeps_an_edited_one() {
+        for (prefix, _, relative, current) in KEPT_EARLIER_COPIES {
+            let workspace = tempdir().expect("workspace");
+            let path = workspace.path().join(relative);
+            ensure_project_memory_scaffold(workspace.path());
+            for (name, earlier) in kept_earlier_copies(prefix) {
+                fs::write(&path, &earlier).unwrap();
+                ensure_project_memory_scaffold(workspace.path());
+                assert_eq!(fs::read_to_string(&path).unwrap(), *current, "{name}");
+                let edited = format!("{earlier}\nOur own line.\n");
+                fs::write(&path, &edited).unwrap();
+                ensure_project_memory_scaffold(workspace.path());
+                assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{name}");
+            }
+        }
+    }
+
+    /// Each earlier version of `AGENTS.md`'s "Reading the web" that a kept copy holds is one that
+    /// a turn without the file still knows (`earlier_reading_the_web_sections`), but the current
+    /// one's: a copy a space edited that says its rules word for word gives the current section
+    /// (`jobs::tests::a_turn_without_agents_md_reads_the_web_as_instafy_ships_it_from_an_earlier_copy`).
+    #[test]
+    fn every_earlier_reading_the_web_section_is_known() {
+        let heading = super::super::READING_THE_WEB_SECTION;
+        let current =
+            super::super::markdown_section(AGENTS_DOC_TEMPLATE, heading).expect("section");
+        let mut earlier: Vec<String> = kept_earlier_copies("agents-doc-")
+            .iter()
+            .filter_map(|(_, text)| super::super::markdown_section(text, heading))
+            .filter(|section| *section != current)
+            .collect();
+        earlier.sort();
+        earlier.dedup();
+        assert!(!earlier.is_empty());
+        let mut known: Vec<String> = earlier_reading_the_web_sections().collect();
+        known.sort();
+        assert_eq!(known, earlier);
     }
 
     /// A command that outlives its wait is still running: a map turn left two such lookups behind
@@ -3061,7 +3291,7 @@ mod tests {
     /// commands from code, where a command still running comes back with a `session_id` and no
     /// `exit_code`. `AGENTS.md` says so, says how to wait (`write_stdin` with that `session_id` and
     /// no input) before replying or using what the command makes, and says a server never exits,
-    /// so a turn never waits on one. The copy from before is upgraded.
+    /// so a turn never waits on one.
     #[test]
     fn agents_doc_says_to_wait_for_a_command_still_running() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3081,13 +3311,6 @@ mod tests {
             );
         }
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/agents-doc-v5.md");
-        assert!(!previous.contains("A command still running hasn't finished"));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// In code, a command's result keeps a still-running command's `session_id` apart from its
@@ -3095,7 +3318,7 @@ mod tests {
     /// runs on: a map turn did that with all of its commands, planned its days while its place
     /// lookups ran, and replied. `AGENTS.md` says to print the whole result (`text(r)` prints it as
     /// JSON); the plain-output form it named instead ("Process running with session ID …") is not
-    /// what such a turn sees. The copy from before is upgraded.
+    /// what such a turn sees.
     #[test]
     fn agents_doc_says_to_print_a_commands_whole_result() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3113,14 +3336,6 @@ mod tests {
         );
         assert!(!doc.contains("Process running with session ID"));
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/agents-doc-v7.md");
-        assert!(previous.contains("(shown as \"Process running with session ID …\")"));
-        assert!(!previous.contains("text(r)"));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A bare "keep going" carries on what the chat left open and the reply says which. A local
@@ -3129,7 +3344,7 @@ mod tests {
     /// with…?". The routing step reads its own rule; the turn that carries on reads `AGENTS.md`'s
     /// "Replies", as a building turn and a browser turn are given it, and that turn never reads
     /// the routing step's rule, so the line names what it never carries on too: a change the
-    /// person stopped or undid. The copy from before is upgraded.
+    /// person stopped or undid.
     #[test]
     fn agents_doc_says_a_bare_keep_going_carries_on_what_the_chat_left_open() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3146,19 +3361,12 @@ mod tests {
             "{replies}"
         );
         assert!(AGENTS_DOC_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/agents-doc-v10.md");
-        assert!(!previous.contains("keep going"));
-        let workspace = tempdir().expect("workspace");
-        let path = workspace.path().join(AGENTS_DOC_FILENAME);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
     }
 
     /// A page of options cites each value's page and day, and a stated limit lists a row whose value is unknown
-    /// apart: the bound-sites skill and its cheat sheet say so, and unedited earlier copies are brought up to date.
+    /// apart: the bound-sites skill and its cheat sheet say so.
     #[test]
-    fn scaffold_upgrades_the_bound_sites_skill_and_cheat_sheet_to_cited_values() {
+    fn the_bound_sites_skill_and_cheat_sheet_say_to_cite_each_value() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             flat(BOUND_SITES_TEMPLATE)
@@ -3169,28 +3377,6 @@ mod tests {
         assert!(
             sheet_text.contains("each value cites them (\"checked 17 Oct on fleetfeet.com ↗\"")
         );
-        let workspace = tempdir().expect("workspace");
-        ensure_project_memory_scaffold(workspace.path());
-        for (relative, previous, current) in [
-            (
-                BOUND_SITES_RELATIVE_PATH,
-                include_str!("legacy/bound-sites-v2.md"),
-                BOUND_SITES_TEMPLATE,
-            ),
-            (
-                BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
-                include_str!("legacy/bound-sites-cheatsheet-v1.md"),
-                BOUND_SITES_CHEATSHEET_TEMPLATE,
-            ),
-        ] {
-            assert!(
-                !previous.contains("site.byFilter") && !previous.contains("No value is a dash")
-            );
-            let path = workspace.path().join(relative);
-            fs::write(&path, previous).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
-        }
     }
 
     #[test]
@@ -3358,7 +3544,6 @@ mod tests {
     /// to run it "from the site's folder", a turn ran it from the space's folder with the site's
     /// path in the serve command, so the card's site was the whole space and another chat's build
     /// took a new picture of it. The command goes into the site's folder itself, and serves `.`.
-    /// An unedited earlier copy is upgraded; an edited one is kept.
     #[test]
     fn bound_sites_starts_its_card_inside_the_sites_own_folder() {
         assert!(
@@ -3369,28 +3554,15 @@ mod tests {
         );
         assert!(!BOUND_SITES_TEMPLATE.contains("from the site's folder"));
         assert!(BOUND_SITES_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/bound-sites-v4.md");
-        assert!(previous.contains("in one command**, from the site's folder:\n"));
-        assert!(LEGACY_BOUND_SITES_TEMPLATES.contains(&previous));
-        let workspace = tempdir().expect("workspace tempdir");
-        ensure_project_memory_scaffold(workspace.path());
-        let path = workspace.path().join(BOUND_SITES_RELATIVE_PATH);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), BOUND_SITES_TEMPLATE);
-        let edited = format!("{previous}\nOur sites live in pages/.\n");
-        fs::write(&path, &edited).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
     }
 
     /// A local test, Nov 7: a map's note, made in a turn that read no map skill, never ran the
     /// skill's own reload, and neither open view of the map showed the note, or its Undo, until it
     /// was reloaded by hand. The runtime now sends every open view of a site its reload once a
     /// change to the site is saved, so the skills that made each page tell a turn to send none of
-    /// its own. Unedited earlier copies are upgraded.
+    /// its own.
     #[test]
-    fn a_turn_sends_no_reload_of_its_own_and_earlier_skills_are_upgraded() {
+    fn a_turn_sends_no_reload_of_its_own() {
         for (name, template) in [
             ("hub", INTERACTIVE_ARTIFACTS_TEMPLATE),
             ("bound sites", BOUND_SITES_TEMPLATE),
@@ -3410,35 +3582,6 @@ mod tests {
             flat(BOUND_SITES_CHEATSHEET_TEMPLATE)
                 .contains("every open viewer shows the new list once your change is saved")
         );
-        let workspace = tempdir().expect("workspace tempdir");
-        ensure_project_memory_scaffold(workspace.path());
-        for (relative, previous, list, template) in [
-            (
-                INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-                include_str!("legacy/interactive-artifacts-v14.md"),
-                LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES,
-                INTERACTIVE_ARTIFACTS_TEMPLATE,
-            ),
-            (
-                BOUND_SITES_RELATIVE_PATH,
-                include_str!("legacy/bound-sites-v5.md"),
-                LEGACY_BOUND_SITES_TEMPLATES,
-                BOUND_SITES_TEMPLATE,
-            ),
-            (
-                BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
-                include_str!("legacy/bound-sites-cheatsheet-v4.md"),
-                LEGACY_BOUND_SITES_CHEATSHEET_TEMPLATES,
-                BOUND_SITES_CHEATSHEET_TEMPLATE,
-            ),
-        ] {
-            assert!(previous.contains("reload '{}'"), "{relative}");
-            assert!(list.contains(&previous), "{relative}");
-            let path = workspace.path().join(relative);
-            fs::write(&path, previous).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(fs::read_to_string(&path).unwrap(), template, "{relative}");
-        }
     }
 
     #[test]
@@ -3517,21 +3660,6 @@ mod tests {
         assert!(snapshot.text.contains(
             "instafy conversation show <conversation-id> --limit 20 --transcript --json"
         ));
-        for previous in LEGACY_SPACE_REVIEW_TEMPLATES {
-            fs::write(&skill, previous).expect("previous bundled skill");
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(
-                fs::read_to_string(&skill).expect("upgraded built-in skill"),
-                SPACE_REVIEW_TEMPLATE
-            );
-            let customized_legacy = format!("{previous}\nProject-specific rule.\n");
-            fs::write(&skill, &customized_legacy).expect("customized previous skill");
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(
-                fs::read_to_string(&skill).expect("preserved previous customization"),
-                customized_legacy
-            );
-        }
         fs::write(&skill, "project-specific review guidance").expect("customized review skill");
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(
@@ -3541,24 +3669,19 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_upgrades_bundled_automations_and_preserves_customized_reminders() {
+    fn scaffold_adds_automations_and_preserves_customized_reminders() {
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
         let skill = workspace.path().join(AUTOMATIONS_RELATIVE_PATH);
         assert_eq!(fs::read_to_string(&skill).unwrap(), AUTOMATIONS_TEMPLATE);
-        for previous in LEGACY_AUTOMATIONS_TEMPLATES {
-            fs::write(&skill, previous).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(fs::read_to_string(&skill).unwrap(), AUTOMATIONS_TEMPLATE);
-            let customized = format!("{previous}\nUse my preferred reminder time.\n");
-            fs::write(&skill, &customized).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
-        }
+        let customized = format!("{AUTOMATIONS_TEMPLATE}\nUse my preferred reminder time.\n");
+        fs::write(&skill, &customized).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
     }
 
     #[test]
-    fn scaffold_upgrades_bundled_integration_onboarding_and_preserves_edits() {
+    fn scaffold_adds_integration_onboarding_and_preserves_edits() {
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
         let skill = workspace.path().join(INTEGRATION_ONBOARDING_RELATIVE_PATH);
@@ -3568,47 +3691,25 @@ mod tests {
         );
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("`request_browser`"));
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("open Instafy's browser without asking"));
-        // Every earlier copy predates the browser offer, except the last three:
-        // the first of them predates the repo-import and auth-failure routing
-        // keywords, the next names the button that goes on after a sign-in
-        // "Let AI continue", where Studio now says "Let Octo continue", and the
-        // last still offers suggestion chips, which no reply carries now.
-        let (chips, earlier) = LEGACY_INTEGRATION_ONBOARDING_TEMPLATES
-            .split_last()
-            .expect("legacy copies");
-        assert!(chips.contains("suggestion chips"));
-        assert!(!INTEGRATION_ONBOARDING_TEMPLATE.contains("suggestion chips"));
-        let (last, earlier) = earlier.split_last().expect("legacy copies");
-        let (keywords, earlier) = earlier.split_last().expect("legacy copies");
-        for previous in earlier {
-            assert!(!previous.contains("open Instafy's browser without asking"));
-        }
+        // It routes repo imports and auth failures, names the button that goes on after a sign-in
+        // as Studio does, and offers no suggestion chips, which no reply carries now.
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("permission denied, 401, 403"));
-        assert!(!keywords.contains("permission denied, 401, 403"));
-        assert!(last.contains("Let AI continue"));
         assert!(INTEGRATION_ONBOARDING_TEMPLATE.contains("Let Octo continue"));
         assert!(!INTEGRATION_ONBOARDING_TEMPLATE.contains("Let AI continue"));
-        for previous in LEGACY_INTEGRATION_ONBOARDING_TEMPLATES {
-            fs::write(&skill, previous).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(
-                fs::read_to_string(&skill).unwrap(),
-                INTEGRATION_ONBOARDING_TEMPLATE
-            );
-            let customized = format!("{previous}\nAlways use the staging portal.\n");
-            fs::write(&skill, &customized).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
-        }
+        assert!(!INTEGRATION_ONBOARDING_TEMPLATE.contains("suggestion chips"));
+        let customized =
+            format!("{INTEGRATION_ONBOARDING_TEMPLATE}\nAlways use the staging portal.\n");
+        fs::write(&skill, &customized).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
     }
 
     /// A turn reads the skills it picks, and what they say to read, with no cap: the skill-reading
     /// rules said to stop early, follow at most 2 links and stop reading past ~8k characters, and
     /// map turns that carried them read the map skill's trip reference cut at 1,400 or 4,000
-    /// tokens, or never, and built no plan (local tests, Nov 1 and Nov 4). The rules were written
-    /// only into a space that had none; an unedited earlier copy is upgraded now, and an edited
-    /// one is kept. Nor does the persistent-contexts root say to stop once a turn can act, or name
-    /// browser sessions no turn can make.
+    /// tokens, or never, and built no plan (local tests, Nov 1 and Nov 4). Nor does the
+    /// persistent-contexts root say to stop once a turn can act, or name browser sessions no turn
+    /// can make.
     #[test]
     fn a_turn_reads_the_skills_it_picks_with_no_cap() {
         for cap in [
@@ -3635,19 +3736,10 @@ mod tests {
             assert!(!PERSISTENT_CONTEXTS_TEMPLATE.contains(gone), "{gone}");
         }
 
-        let previous = include_str!("legacy/skill-reading-v1.md");
-        assert!(previous.contains("If you’ve read more than ~8k characters of skills/docs in one turn, stop reading and act."));
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
         let path = workspace.path().join(SKILL_READING_RELATIVE_PATH);
         assert_eq!(fs::read_to_string(&path).unwrap(), SKILL_READING_TEMPLATE);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), SKILL_READING_TEMPLATE);
-        let edited = format!("{previous}\n- Our own rule.\n");
-        fs::write(&path, &edited).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
     }
 
     /// A page the person wants to share: its reply says in one line who can open it and how to get
@@ -3656,8 +3748,7 @@ mod tests {
     /// local test, Nov 4); others said "Built and opened…" (nothing was opened), "the provided
     /// read" and "updated for viewers". A vague ask's defaults keep their `Assumed:` line. The
     /// replies to send as-is, which Studio never shows, go, from the research team's final reply
-    /// too, which follows the hub's step 4 and offers to add an item the page leaves out. Unedited
-    /// earlier copies are upgraded.
+    /// too, which follows the hub's step 4 and offers to add an item the page leaves out.
     #[test]
     fn a_shared_pages_reply_says_who_can_open_it_and_how_to_get_a_link() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3677,53 +3768,33 @@ mod tests {
         for gone in ["suggested replies", "reload open viewers"] {
             assert!(!page.contains(gone), "{gone}");
         }
-        let previous = include_str!("legacy/interactive-artifacts-v10.md");
-        assert!(previous.contains("ONE `Assumed:` line"));
-        let workspace = tempdir().expect("workspace tempdir");
-        let path = workspace.path().join(INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            INTERACTIVE_ARTIFACTS_TEMPLATE
-        );
 
         let team = flat(RESEARCH_TEAM_TEMPLATE);
         assert!(team.contains("Reply per the hub's step 4. An item the page leaves out is said plainly, never a shorter list presented as the answer, and offer to add it."));
         assert!(!team.contains("suggested replies"));
-        let previous = include_str!("legacy/research-team-v4.md");
-        assert!(previous.contains("among the 2-3 suggested replies"));
-        let path = workspace.path().join(RESEARCH_TEAM_RELATIVE_PATH);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), RESEARCH_TEAM_TEMPLATE);
     }
 
     /// Until Oct 19 the bundled browser guidance asked before opening a
     /// browser, and these three skills were only written when absent, so an
-    /// existing workspace kept that guidance for good. Each unedited earlier
-    /// bundled copy is upgraded now; an edited one is kept.
+    /// existing workspace kept that guidance for good. None of them asks first
+    /// now, and an edited one is kept.
     #[test]
-    fn scaffold_upgrades_bundled_browser_guidance_and_preserves_edits() {
+    fn the_bundled_browser_guidance_never_asks_first_and_edits_are_kept() {
         let workspace = tempdir().expect("workspace tempdir");
         ensure_project_memory_scaffold(workspace.path());
-        for (relative, legacy, current, ask_first) in [
+        for (relative, current, ask_first) in [
             (
                 BROWSER_AUTOMATION_RELATIVE_PATH,
-                LEGACY_BROWSER_AUTOMATION_TEMPLATES,
                 BROWSER_AUTOMATION_TEMPLATE,
                 "use disposable, non-sensitive accounts only",
             ),
             (
                 FRONTEND_PREVIEWS_RELATIVE_PATH,
-                LEGACY_FRONTEND_PREVIEWS_TEMPLATES,
                 FRONTEND_PREVIEWS_TEMPLATE,
                 "Never auto-open a live browser session",
             ),
             (
                 SKILL_IMPORT_COMPAT_RELATIVE_PATH,
-                LEGACY_SKILL_IMPORT_COMPAT_TEMPLATES,
                 SKILL_IMPORT_COMPAT_TEMPLATE,
                 "use Playwright CLI (Node + Playwright)",
             ),
@@ -3731,24 +3802,14 @@ mod tests {
             let skill = workspace.path().join(relative);
             assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
             assert!(!current.contains(ask_first), "{relative}");
-            assert!(!legacy.contains(&current), "{relative}");
-            assert!(
-                legacy.iter().any(|previous| previous.contains(ask_first)),
+            let customized = format!("{current}\nAlways use the staging portal.\n");
+            fs::write(&skill, &customized).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(
+                fs::read_to_string(&skill).unwrap(),
+                customized,
                 "{relative}"
             );
-            for previous in legacy {
-                fs::write(&skill, previous).unwrap();
-                ensure_project_memory_scaffold(workspace.path());
-                assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
-                let customized = format!("{previous}\nAlways use the staging portal.\n");
-                fs::write(&skill, &customized).unwrap();
-                ensure_project_memory_scaffold(workspace.path());
-                assert_eq!(
-                    fs::read_to_string(&skill).unwrap(),
-                    customized,
-                    "{relative}"
-                );
-            }
         }
     }
 
@@ -3760,10 +3821,9 @@ mod tests {
     /// credentials, and says Instafy's browser cannot open the space's own
     /// addresses. What a site asks Studio for (the person's location, Present
     /// and Follow) and the tunnel details live in `references/`, which the
-    /// scaffold writes too. An unedited v3 to v10 copy is upgraded; an edited
-    /// one is kept.
+    /// scaffold writes too; an edited copy is kept.
     #[test]
-    fn scaffold_upgrades_frontend_previews_to_studio_preview_cards() {
+    fn scaffold_writes_frontend_previews_with_studio_preview_cards() {
         for needle in [
             "instafy preview open --title \"<short name>\" --serve-cmd \"<command>\" --start --json",
             "Write `{port}` where the command takes its port",
@@ -3851,44 +3911,8 @@ mod tests {
         assert!(FRONTEND_PREVIEWS_TEMPLATE.contains(
             "It stops the site `--start` started, and its card reads Stopped. Never stop a site with `kill`, `pkill` or `pgrep` and a name pattern"
         ));
-        let v3 = include_str!("legacy/frontend-previews-v3.md");
-        let v4 = include_str!("legacy/frontend-previews-v4.md");
-        let v5 = include_str!("legacy/frontend-previews-v5.md");
-        let v6 = include_str!("legacy/frontend-previews-v6.md");
-        let v7 = include_str!("legacy/frontend-previews-v7.md");
-        let v8 = include_str!("legacy/frontend-previews-v8.md");
-        let v9 = include_str!("legacy/frontend-previews-v9.md");
-        let v10 = include_str!("legacy/frontend-previews-v10.md");
-        let v11 = include_str!("legacy/frontend-previews-v11.md");
-        let v12 = include_str!("legacy/frontend-previews-v12.md");
-        let previous = include_str!("legacy/frontend-previews-v13.md");
-        assert!(!v3.contains("instafy preview open"));
-        assert!(v4.contains("instafy preview open"));
-        assert!(!v4.contains("Allow the preview host before the person opens the card."));
-        assert!(v5.contains("Allow the preview host before the person opens the card."));
-        assert!(!v5.contains("location-request"));
-        assert!(v6.contains("location-request"));
-        assert!(!v6.contains("layout-ack"));
-        assert!(v7.contains("layout-ack"));
-        assert!(!v7.contains("--serve-cmd"));
-        assert!(v8.contains("--serve-cmd"));
-        assert!(v8.contains(".rt.instafy.dev"));
-        assert!(v9.contains("--serve-cmd"));
-        assert!(!v9.contains("--start"));
-        assert!(!v9.contains(".rt.instafy.dev"));
-        assert!(v10.contains("--start"));
-        assert!(v10.contains("refreshes the card"));
-        assert!(!v11.contains("refreshes the card"));
-        assert!(!v11.contains("--summary"));
-        assert!(v12.contains("--summary"));
-        // v12 had the reply report exit codes and a stopped site's process:
-        // the person is told in plain words which site stopped.
-        assert!(v12.contains("Report what each command returned (exit code, `status`)"));
-        // v13 had Octo pick the port, send the person to the card and stop a
-        // site with `kill`.
-        assert!(previous.contains("instafy preview open --port <port> --title"));
-        assert!(previous.contains("Tell the person to open it from the card"));
-        assert!(previous.contains("kill -- -<startedPid>"));
+        // The person is told in plain words which site stopped, never a command's exit code or a
+        // stopped site's process.
         for needle in [
             "tell the person in plain words (\"the page is up\", \"the page didn't start\"), without the port, exit code or log file",
             "Then say which site stopped (\"Stopped the hello page.\"), never its process ID or port.",
@@ -3927,16 +3951,11 @@ mod tests {
             ensure_project_memory_scaffold(workspace.path());
             assert_eq!(fs::read_to_string(&reference).unwrap(), edited);
         }
-        for old in [v3, v4, v5, v6, v7, v8, v9, v10, v11, previous] {
-            fs::write(&skill, old).unwrap();
-            ensure_project_memory_scaffold(workspace.path());
-            assert_eq!(
-                fs::read_to_string(&skill).unwrap(),
-                FRONTEND_PREVIEWS_TEMPLATE
-            );
-        }
-
-        let customized = format!("{previous}\nAlways tunnel port 3000.\n");
+        assert_eq!(
+            fs::read_to_string(&skill).unwrap(),
+            FRONTEND_PREVIEWS_TEMPLATE
+        );
+        let customized = format!("{FRONTEND_PREVIEWS_TEMPLATE}\nAlways tunnel port 3000.\n");
         fs::write(&skill, &customized).unwrap();
         ensure_project_memory_scaffold(workspace.path());
         assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
@@ -3945,7 +3964,7 @@ mod tests {
     /// A page check that loaded nothing (exit 4, no browser here, or 70, the check itself failed)
     /// stays in the reply as what it means for the page. The skill said "nothing was checked; say
     /// so", while `AGENTS.md` says a reply never describes the turn's own checks: the reply says
-    /// nobody has looked at the page yet. The copy from before is upgraded.
+    /// nobody has looked at the page yet.
     #[test]
     fn frontend_previews_says_a_check_that_loaded_nothing_in_the_pages_words() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3958,18 +3977,6 @@ mod tests {
         );
         assert!(!skill.contains("say so"), "{skill}");
         assert!(FRONTEND_PREVIEWS_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/frontend-previews-v14.md");
-        assert!(previous.contains("means nothing was checked; say so."));
-        assert!(LEGACY_FRONTEND_PREVIEWS_TEMPLATES.contains(&previous));
-        let workspace = tempdir().expect("workspace tempdir");
-        ensure_project_memory_scaffold(workspace.path());
-        let path = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            FRONTEND_PREVIEWS_TEMPLATE
-        );
     }
 
     /// With no `--summary`, a card's line under its title is the page's own
@@ -3978,7 +3985,7 @@ mod tests {
     /// route, while its page said the hours were not checked and no route was confirmed. The
     /// description is written after the page, from what the page shows. Each new picture of the
     /// card takes its line from the page's description again, so a later change that alters what
-    /// the page shows writes it again. The copy from before is upgraded.
+    /// the page shows writes it again.
     #[test]
     fn frontend_previews_has_a_cards_line_say_only_what_its_page_shows() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3990,30 +3997,12 @@ mod tests {
             "{skill}"
         );
         assert!(FRONTEND_PREVIEWS_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
-        let previous = include_str!("legacy/frontend-previews-v15.md");
-        assert!(
-            previous.contains(
-                "Without it the card shows the page's own `<meta name=\"description\">`.\n"
-            )
-        );
-        assert!(!previous.contains("from what the page shows"));
-        assert!(LEGACY_FRONTEND_PREVIEWS_TEMPLATES.contains(&previous));
-        let workspace = tempdir().expect("workspace tempdir");
-        ensure_project_memory_scaffold(workspace.path());
-        let path = workspace.path().join(FRONTEND_PREVIEWS_RELATIVE_PATH);
-        fs::write(&path, previous).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            FRONTEND_PREVIEWS_TEMPLATE
-        );
     }
 
     /// The Personal Browser's tab tools are named where a Personal Browser turn reads them, its
     /// run text (`codex::tests::the_run_text_says_what_the_skills_notes_on_the_local_browsers_say`):
     /// the bundled browser skill keeps the tab every browser turn may open for a second page, and
-    /// no longer says that the broker controls one visible page. v7 is the copy from before, and
-    /// an unedited v7 is upgraded.
+    /// no longer says that the broker controls one visible page.
     #[test]
     fn browser_automation_names_the_personal_browser_tab_tools() {
         assert!(BROWSER_AUTOMATION_TEMPLATE.contains("open your own tab (`open_tab`, 3 at most)"));
@@ -4021,25 +4010,11 @@ mod tests {
             assert!(!BROWSER_AUTOMATION_TEMPLATE.contains(moved), "{moved}");
         }
         assert!(!BROWSER_AUTOMATION_TEMPLATE.contains("The broker controls one visible page."));
-        let v7 = include_str!("legacy/browser-automation-v7.md");
-        assert!(LEGACY_BROWSER_AUTOMATION_TEMPLATES.contains(&v7));
-        assert!(v7.contains("The broker controls one visible page."));
-
-        let workspace = tempdir().expect("workspace tempdir");
-        ensure_project_memory_scaffold(workspace.path());
-        let skill = workspace.path().join(BROWSER_AUTOMATION_RELATIVE_PATH);
-        fs::write(&skill, v7).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&skill).unwrap(),
-            BROWSER_AUTOMATION_TEMPLATE
-        );
     }
 
     /// The bundled browser skill says, near its top, that Instafy's browser
     /// cannot open the space's own addresses and that such a site is shown
-    /// with a preview card; v4 is the copy from before. An unedited v4 is
-    /// upgraded (see `scaffold_upgrades_bundled_browser_guidance_and_preserves_edits`).
+    /// with a preview card.
     #[test]
     fn browser_automation_says_what_instafys_browser_can_reach() {
         let section = "## What Instafy's browser can reach";
@@ -4058,42 +4033,40 @@ mod tests {
             BROWSER_AUTOMATION_TEMPLATE
                 .contains("Not for sites running in this space (shown with a Studio preview).")
         );
-        let v4 = include_str!("legacy/browser-automation-v4.md");
-        assert!(LEGACY_BROWSER_AUTOMATION_TEMPLATES.contains(&v4));
-        assert!(!v4.contains(section));
-
-        let workspace = tempdir().expect("workspace tempdir");
-        ensure_project_memory_scaffold(workspace.path());
-        let skill = workspace.path().join(BROWSER_AUTOMATION_RELATIVE_PATH);
-        fs::write(&skill, v4).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(
-            fs::read_to_string(&skill).unwrap(),
-            BROWSER_AUTOMATION_TEMPLATE
-        );
     }
 
+    /// The scaffold writes no skill through a link: not to the target of a skill's link to
+    /// nothing, which the old "write when absent" check followed, and not into a folder outside the
+    /// space that a skill's folder links to. An earlier copy a link reaches is left as it is too
+    /// (`an_earlier_copy_behind_a_link_is_never_replaced`).
     #[cfg(unix)]
     #[test]
-    fn scaffold_does_not_write_the_onboarding_skill_through_a_symlink() {
+    fn scaffold_writes_no_skill_through_a_link() {
         use std::os::unix::fs::symlink;
-        let workspace = tempdir().expect("workspace");
-        let outside = tempdir().expect("outside workspace");
-        ensure_project_memory_scaffold(workspace.path());
-        let skill = workspace.path().join(INTEGRATION_ONBOARDING_RELATIVE_PATH);
-        let external_skill = outside.path().join("SKILL.md");
-        let previous = LEGACY_INTEGRATION_ONBOARDING_TEMPLATES.last().unwrap();
-        fs::write(&external_skill, previous).unwrap();
-        fs::remove_file(&skill).unwrap();
-        symlink(&external_skill, &skill).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
-        // A dangling link was followed by the old "write when absent" check.
-        fs::remove_file(&skill).unwrap();
-        let dangling = outside.path().join("created-outside.md");
-        symlink(&dangling, &skill).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert!(!dangling.exists());
+        for relative in [
+            INTEGRATION_ONBOARDING_RELATIVE_PATH,
+            AUTOMATIONS_RELATIVE_PATH,
+            SPACE_REVIEW_RELATIVE_PATH,
+        ] {
+            let workspace = tempdir().expect("workspace");
+            let outside = tempdir().expect("outside workspace");
+            ensure_project_memory_scaffold(workspace.path());
+            let skill = workspace.path().join(relative);
+            fs::remove_file(&skill).unwrap();
+            let dangling = outside.path().join("created-outside.md");
+            symlink(&dangling, &skill).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert!(!dangling.exists(), "{relative}");
+            fs::remove_file(&skill).unwrap();
+            fs::remove_dir(skill.parent().unwrap()).unwrap();
+            symlink(outside.path(), skill.parent().unwrap()).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(
+                fs::read_dir(outside.path()).unwrap().count(),
+                0,
+                "{relative}"
+            );
+        }
     }
 
     #[test]
@@ -4154,50 +4127,6 @@ mod tests {
         )
         .expect("explicit review memory snapshot");
         assert!(review.text.contains(SPACE_REVIEW_TEMPLATE.trim()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn scaffold_does_not_upgrade_an_automation_skill_through_a_symlink() {
-        use std::os::unix::fs::symlink;
-        let workspace = tempdir().expect("workspace");
-        let outside = tempdir().expect("outside workspace");
-        ensure_project_memory_scaffold(workspace.path());
-        let skill = workspace.path().join(AUTOMATIONS_RELATIVE_PATH);
-        let external_skill = outside.path().join("SKILL.md");
-        let previous = LEGACY_AUTOMATIONS_TEMPLATES.last().unwrap();
-        fs::write(&external_skill, previous).unwrap();
-        fs::remove_file(&skill).unwrap();
-        symlink(&external_skill, &skill).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
-        fs::remove_file(&skill).unwrap();
-        fs::remove_dir(skill.parent().unwrap()).unwrap();
-        symlink(outside.path(), skill.parent().unwrap()).unwrap();
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn scaffold_does_not_upgrade_a_review_skill_through_a_symlink() {
-        use std::os::unix::fs::symlink;
-        let workspace = tempdir().expect("workspace");
-        let outside = tempdir().expect("outside workspace");
-        ensure_project_memory_scaffold(workspace.path());
-        let skill = workspace.path().join(SPACE_REVIEW_RELATIVE_PATH);
-        let external_skill = outside.path().join("SKILL.md");
-        let previous = LEGACY_SPACE_REVIEW_TEMPLATES.last().unwrap();
-        fs::write(&external_skill, previous).expect("external skill");
-        fs::remove_file(&skill).expect("remove default");
-        symlink(&external_skill, &skill).expect("skill symlink");
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
-        fs::remove_file(&skill).expect("remove symlink");
-        fs::remove_dir(skill.parent().unwrap()).expect("remove skill directory");
-        symlink(outside.path(), skill.parent().unwrap()).expect("directory symlink");
-        ensure_project_memory_scaffold(workspace.path());
-        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
     }
 
     #[test]

@@ -12,7 +12,7 @@ import { getControllerUrl } from "./harness.js";
  * a git.write token and the trailers the recovery list reads.
  */
 
-export type RecoveryKind = "conflict" | "unpublished" | "unsaved" | "stale";
+export type RecoveryKind = "conflict" | "unpublished" | "unsaved";
 
 export interface PlantedRecoveryRef {
   ref: string;

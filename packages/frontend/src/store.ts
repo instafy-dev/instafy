@@ -3,12 +3,9 @@ import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import { DEFAULT_PROJECT_AI_MODEL } from "./ai/modelDefaults";
 import type {
-  CollaborationSettings,
-  ProjectContent,
   ProjectMetadata,
   ProjectOrgInfo,
-  SiteBuilderState,
-  VersionControlSettings
+  SiteBuilderState
 } from "./types";
 import { createDefaultCodeWorkspace } from "./code/defaults";
 import { createDefaultBillingState } from "./credits/defaults";
@@ -16,8 +13,6 @@ import { writePendingProjectSwitch } from "./screens/pendingProjectSwitch";
 import { forgetWorkspaceTabsForProjects, rememberWorkspaceTabsForProject } from "./workspace/workspaceTabPersistence";
 import { isUUID } from "./utils/uuid";
 import { studioPerformance } from "./telemetry/studioPerformance";
-
-type HistoryEntry = SiteBuilderState;
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -143,17 +138,10 @@ export type RemoveProjectsByOrgIdOptions = Pick<RemoveProjectOptions, "forgetSav
 
 export interface SessionStore {
   state: SiteBuilderState;
-  history: HistoryEntry[];
-  future: HistoryEntry[];
   projects: Record<string, SiteBuilderState>;
   activeProjectId: string;
   workspaceScope: string;
   setWorkspaceScope: (scope: string) => void;
-  updateMetadata: (updater: (metadata: SiteBuilderState["metadata"]) => SiteBuilderState["metadata"]) => void;
-  updateContent: (updater: (content: SiteBuilderState["content"]) => SiteBuilderState["content"]) => void;
-  updateDeployment: (
-    updater: (deployment: SiteBuilderState["deployment"]) => SiteBuilderState["deployment"]
-  ) => void;
   updateCode: (updater: (code: SiteBuilderState["code"]) => SiteBuilderState["code"]) => void;
   /**
    * Update the code of a space that is not the open one (a save that finished
@@ -164,12 +152,6 @@ export interface SessionStore {
     projectId: string,
     updater: (code: SiteBuilderState["code"]) => SiteBuilderState["code"],
   ) => void;
-  updateVersionControl: (
-    updater: (versionControl: SiteBuilderState["versionControl"]) => SiteBuilderState["versionControl"]
-  ) => void;
-  updateCollaboration: (
-    updater: (collaboration: SiteBuilderState["collaboration"]) => SiteBuilderState["collaboration"]
-  ) => void;
   updateBilling: (updater: (billing: SiteBuilderState["billing"]) => SiteBuilderState["billing"]) => void;
   createProject: (options?: CreateProjectOptions) => string;
   switchProject: (projectId: string) => void;
@@ -178,8 +160,6 @@ export interface SessionStore {
   setProjectIdentity: (projectId: string, identity: ProjectIdentity) => void;
   removeProject: (projectId: string, options?: RemoveProjectOptions) => void;
   removeProjectsByOrgId: (orgId: string, options?: RemoveProjectsByOrgIdOptions) => void;
-  undo: () => void;
-  redo: () => void;
   reset: () => void;
 }
 
@@ -196,41 +176,12 @@ const baseMetadata: ProjectMetadata = {
   tags: []
 };
 
-const baseContent: ProjectContent = {};
-
-const baseVersionControl: VersionControlSettings = {
-  enabled: false,
-  provider: "github",
-  mode: "managed",
-  organization: "",
-  repository: "",
-  branch: "main",
-  status: "idle",
-  lastSyncedAt: null,
-  automationEnabled: true,
-  error: null,
-  repoUrl: null
-};
-
-const baseCollaboration: CollaborationSettings = {
-  enabled: false,
-  inviteToken: null,
-  allowGuestEditors: false,
-  pendingInvites: []
-};
-
-function createEmptyContent(): ProjectContent {
-  return clone(baseContent);
-}
-
 function createProjectState(options?: {
   projectName?: string;
   tags?: string[];
   orgId?: string | null;
   orgName?: string | null;
 }): SiteBuilderState {
-  const content = createEmptyContent();
-
   const metadata: ProjectMetadata = {
     ...baseMetadata,
     projectName: options?.projectName ?? baseMetadata.projectName,
@@ -239,14 +190,7 @@ function createProjectState(options?: {
 
   return {
     metadata,
-    content,
-    deployment: {
-      subdomain: "",
-      hostingPlan: "instafy",
-    },
     code: createDefaultCodeWorkspace(),
-    versionControl: clone(baseVersionControl),
-    collaboration: clone(baseCollaboration),
     billing: createDefaultBillingState(),
     org: {
       id: options?.orgId ?? null,
@@ -274,8 +218,6 @@ const initialProjectState =
 export const useWorkspaceStore = create<SessionStore>()(
   subscribeWithSelector<SessionStore>((set, get) => ({
   state: initialProjectState,
-  history: [],
-  future: [],
   projects: initialProjects,
   activeProjectId: initialActiveProjectId,
   workspaceScope: initialWorkspaceScope,
@@ -305,79 +247,13 @@ export const useWorkspaceStore = create<SessionStore>()(
     set({
       workspaceScope: scope,
       state: nextState,
-      history: [],
-      future: [],
       projects: nextProjects,
       activeProjectId: nextActiveProjectId,
-    });
-  },
-  updateMetadata: (updater) => {
-    const store = get();
-    const previous = clone(store.state);
-    const nextMetadata = updater(clone(previous.metadata));
-    if (JSON.stringify(previous.metadata) === JSON.stringify(nextMetadata)) {
-      return;
-    }
-    const nextState: SiteBuilderState = {
-      ...previous,
-      metadata: nextMetadata
-    };
-    set({
-      state: nextState,
-      history: [...store.history, previous],
-      future: [],
-      projects: {
-        ...store.projects,
-        [store.activeProjectId]: clone(nextState)
-      }
-    });
-  },
-  updateContent: (updater) => {
-    const store = get();
-    const previous = clone(store.state);
-    const nextContent = updater(clone(previous.content));
-    if (JSON.stringify(previous.content) === JSON.stringify(nextContent)) {
-      return;
-    }
-    const nextState: SiteBuilderState = {
-      ...previous,
-      content: nextContent
-    };
-    set({
-      state: nextState,
-      history: [...store.history, previous],
-      future: [],
-      projects: {
-        ...store.projects,
-        [store.activeProjectId]: clone(nextState)
-      }
-    });
-  },
-  updateDeployment: (updater) => {
-    const store = get();
-    const previous = clone(store.state);
-    const nextDeployment = updater(clone(previous.deployment));
-    if (JSON.stringify(previous.deployment) === JSON.stringify(nextDeployment)) {
-      return;
-    }
-    const nextState: SiteBuilderState = {
-      ...previous,
-      deployment: nextDeployment
-    };
-    set({
-      state: nextState,
-      history: [...store.history, previous],
-      future: [],
-      projects: {
-        ...store.projects,
-        [store.activeProjectId]: clone(nextState)
-      }
     });
   },
   updateCode: (updater) => {
     const store = get();
     const previousState = store.state;
-    const previousSnapshot = clone(previousState);
     const nextCode = updater(clone(previousState.code));
     if (JSON.stringify(previousState.code) === JSON.stringify(nextCode)) {
       return;
@@ -388,8 +264,6 @@ export const useWorkspaceStore = create<SessionStore>()(
     };
     set({
       state: nextState,
-      history: [...store.history, previousSnapshot],
-      future: [],
       projects: {
         ...store.projects,
         [store.activeProjectId]: clone(nextState)
@@ -413,52 +287,9 @@ export const useWorkspaceStore = create<SessionStore>()(
       }
     });
   },
-  updateVersionControl: (updater) => {
-    const store = get();
-    const previous = clone(store.state);
-    const nextVersionControl = updater(clone(previous.versionControl));
-    if (JSON.stringify(previous.versionControl) === JSON.stringify(nextVersionControl)) {
-      return;
-    }
-    const nextState: SiteBuilderState = {
-      ...previous,
-      versionControl: nextVersionControl
-    };
-    set({
-      state: nextState,
-      history: [...store.history, previous],
-      future: [],
-      projects: {
-        ...store.projects,
-        [store.activeProjectId]: clone(nextState)
-      }
-    });
-  },
-  updateCollaboration: (updater) => {
-    const store = get();
-    const previous = clone(store.state);
-    const nextCollaboration = updater(clone(previous.collaboration));
-    if (JSON.stringify(previous.collaboration) === JSON.stringify(nextCollaboration)) {
-      return;
-    }
-    const nextState: SiteBuilderState = {
-      ...previous,
-      collaboration: nextCollaboration
-    };
-    set({
-      state: nextState,
-      history: [...store.history, previous],
-      future: [],
-      projects: {
-        ...store.projects,
-        [store.activeProjectId]: clone(nextState)
-      }
-    });
-  },
   updateBilling: (updater) => {
     const store = get();
     const previousState = store.state;
-    const previousSnapshot = clone(previousState);
     const nextBilling = updater(clone(previousState.billing));
     if (JSON.stringify(previousState.billing) === JSON.stringify(nextBilling)) {
       return;
@@ -469,8 +300,6 @@ export const useWorkspaceStore = create<SessionStore>()(
     };
     set({
       state: nextState,
-      history: [...store.history, previousSnapshot],
-      future: [],
       projects: {
         ...store.projects,
         [store.activeProjectId]: clone(nextState)
@@ -502,8 +331,6 @@ export const useWorkspaceStore = create<SessionStore>()(
       };
       return {
         state: newState,
-        history: [],
-        future: [],
         projects: nextProjects,
         activeProjectId: projectId
       };
@@ -522,9 +349,7 @@ export const useWorkspaceStore = create<SessionStore>()(
     writePendingProjectSwitch(projectId);
     set({
       state: clone(project),
-      activeProjectId: projectId,
-      history: [],
-      future: []
+      activeProjectId: projectId
     });
   },
   setProjectOrg: (projectId, org) => {
@@ -628,16 +453,12 @@ export const useWorkspaceStore = create<SessionStore>()(
           projects: nextProjects,
           activeProjectId: "",
           state: createProjectState(),
-          history: [],
-          future: [],
         };
       }
       return {
         projects: nextProjects,
         activeProjectId: fallbackId,
         state: clone(nextProjects[fallbackId]),
-        history: [],
-        future: [],
       };
     });
     if (options?.forgetSavedTabs) {
@@ -668,61 +489,23 @@ export const useWorkspaceStore = create<SessionStore>()(
           projects: nextProjects,
           activeProjectId: "",
           state: createProjectState(),
-          history: [],
-          future: [],
         };
       }
       return {
         projects: nextProjects,
         activeProjectId: fallbackId,
         state: clone(nextProjects[fallbackId]),
-        history: [],
-        future: [],
       };
     });
     if (options?.forgetSavedTabs) {
       forgetWorkspaceTabsForProjects(removedIds);
     }
   },
-  undo: () => {
-    const { history, state, future, projects, activeProjectId } = get();
-    if (history.length === 0) {
-      return;
-    }
-    const previous = history[history.length - 1];
-    set({
-      state: previous,
-      history: history.slice(0, history.length - 1),
-      future: [clone(state), ...future],
-      projects: {
-        ...projects,
-        [activeProjectId]: clone(previous)
-      }
-    });
-  },
-  redo: () => {
-    const { future, history, state, projects, activeProjectId } = get();
-    if (future.length === 0) {
-      return;
-    }
-    const next = future[0];
-    set({
-      state: next,
-      history: [...history, clone(state)],
-      future: future.slice(1),
-      projects: {
-        ...projects,
-        [activeProjectId]: clone(next)
-      }
-    });
-  },
   reset: () => {
     const resetState = createProjectState();
     const { projects, activeProjectId } = get();
     set({
       state: resetState,
-      history: [],
-      future: [],
       projects: {
         ...projects,
         [activeProjectId]: clone(resetState)

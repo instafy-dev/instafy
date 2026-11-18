@@ -1259,7 +1259,7 @@ capture, native keyboards, browser transport or controller persistence.
 ## Support workflow simulation
 
 The support component browser suite exercises the production profile menu, report composer,
-inbox, follow-up form, notification hook, and status toast in desktop and narrow phone viewports.
+inbox, follow-up form and support notification hook in desktop and narrow phone viewports.
 It uses synthetic authentication and controller responses with the real frontend HTTP client;
 it needs no account, database, model, or provider credentials. From `packages/frontend`, run:
 

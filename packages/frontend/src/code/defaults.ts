@@ -17,7 +17,6 @@ export function createDefaultCodeWorkspace(seedFiles: CodeFile[] = defaultFiles)
     lastGeneratedAt: null,
     summary: "",
     status: "idle",
-    provider: null,
     error: null,
     installedDependencies: [],
     lastAppliedAt: null

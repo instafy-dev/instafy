@@ -97,19 +97,12 @@ export interface ControllerBugReportListPage {
   nextCursor: ControllerBugReportListCursor | null;
   unreadCount: number;
   unreadResolutionCount: number;
-  unnotifiedResolutionCount: number;
 }
 
 export interface AcknowledgeControllerBugReportActivityResult {
   acknowledgedThrough: string;
   hasUnreadSupportActivity: boolean;
   hasUnreadResolution: boolean;
-}
-
-export interface ClaimControllerSupportResolutionAlertsResult {
-  claimedCount: number;
-  latestReportId: string | null;
-  latestResolvedAt: string | null;
 }
 
 export interface ControllerBugReportMessageListCursor {
@@ -324,7 +317,6 @@ export async function listControllerBugReportPage(
         nextCursor?: unknown;
         unreadCount?: number;
         unreadResolutionCount?: number;
-        unnotifiedResolutionCount?: number;
       }
     | null;
 
@@ -341,10 +333,6 @@ export async function listControllerBugReportPage(
     unreadCount: typeof body?.unreadCount === "number" ? body.unreadCount : 0,
     unreadResolutionCount:
       typeof body?.unreadResolutionCount === "number" ? body.unreadResolutionCount : 0,
-    unnotifiedResolutionCount:
-      typeof body?.unnotifiedResolutionCount === "number"
-        ? body.unnotifiedResolutionCount
-        : 0,
   };
 }
 
@@ -432,49 +420,6 @@ export async function acknowledgeControllerBugReportActivity(
     acknowledgedThrough: body.acknowledgedThrough,
     hasUnreadSupportActivity: body.hasUnreadSupportActivity === true,
     hasUnreadResolution: body.hasUnreadResolution === true,
-  };
-}
-
-export async function claimControllerSupportResolutionAlerts(
-  expectedUserId: string,
-): Promise<ClaimControllerSupportResolutionAlertsResult> {
-  const normalizedExpectedUserId = expectedUserId.trim();
-  if (!normalizedExpectedUserId) {
-    throw new Error("Login required to check support resolution alerts.");
-  }
-  const { requestContext, accessToken } = await resolveSupportRequestContext(
-    "Login required to check support resolution alerts.",
-  );
-  const response = await fetch(`${requestContext.baseUrl}/support/resolution-alerts/claim`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ expectedUserId: normalizedExpectedUserId }),
-  });
-  if (!response.ok) {
-    const message = await readControllerError(
-      response,
-      "support resolution alert claim failed",
-      requestContext,
-    );
-    throw new Error(message);
-  }
-  const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-  return {
-    claimedCount:
-      typeof body?.claimedCount === "number" && Number.isFinite(body.claimedCount)
-        ? Math.max(0, Math.floor(body.claimedCount))
-        : 0,
-    latestReportId:
-      typeof body?.latestReportId === "string" && body.latestReportId.trim()
-        ? body.latestReportId
-        : null,
-    latestResolvedAt:
-      typeof body?.latestResolvedAt === "string" && body.latestResolvedAt.trim()
-        ? body.latestResolvedAt
-        : null,
   };
 }
 

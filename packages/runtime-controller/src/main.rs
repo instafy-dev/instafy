@@ -222,11 +222,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("{warning}");
     }
     let pool = config.build_pool().await?;
-    browser_profile::ensure_browser_profiles_table(&pool)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("failed to initialize browser profile storage: {error}")
-        })?;
 
     // Hosted workspaces are git-canonical working copies on an ephemeral node
     // disk; the git remote is the ONLY durable copy. Without it, a controller

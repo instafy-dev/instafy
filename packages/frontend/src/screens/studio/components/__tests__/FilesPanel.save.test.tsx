@@ -514,6 +514,38 @@ describe("FilesPanel one Save", () => {
     expect(container.querySelector('[data-testid="files-save-status"]')?.textContent).toBe("Saved");
   });
 
+  it("reports a legacy Save version conflict to the chat card without opening the source-control drawer", async () => {
+    mocks.versioning.mode = "legacy";
+    mocks.runtime.runtimeReady = true;
+    mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyPaths: [{ path: "README.md" }] });
+    mocks.syncToRemote.mockResolvedValueOnce({ ok: false, conflict: true, error: "README.md changed upstream" });
+    const syncResults: unknown[] = [];
+    const onSyncResult = (event: Event) => syncResults.push((event as CustomEvent).detail);
+    const openSourceControl = vi.fn();
+    window.addEventListener("instafy:workspace-git-sync-result", onSyncResult);
+    window.addEventListener("instafy:open-source-control", openSourceControl);
+    try {
+      await render([buffer({ modified: "saved", baseRev: undefined, blobOid: undefined, originId: undefined })]);
+      await settle();
+      const save = query("code-save-button")!;
+      save.focus();
+      await act(async () => save.click());
+      await settle();
+      expect(mocks.syncToRemote).toHaveBeenCalledTimes(1);
+      // The toast names the conflict and offers no action: the drawer it opened is History, empty in a legacy space.
+      expect(openSourceControl).not.toHaveBeenCalled();
+      expect(mocks.showStatus.mock.calls).toEqual([["Conflicts detected. README.md changed upstream", "error", 8000]]);
+      // The chat's merge-conflict card is raised from this event.
+      expect(syncResults).toEqual([
+        { projectId: "space-a", ok: false, conflict: true, error: "README.md changed upstream" },
+      ]);
+      expect(document.activeElement).toBe(save);
+    } finally {
+      window.removeEventListener("instafy:workspace-git-sync-result", onSyncResult);
+      window.removeEventListener("instafy:open-source-control", openSourceControl);
+    }
+  });
+
   it("saves once on Cmd/Ctrl+S with the buffer's baseRev and blob, then marks it saved", async () => {
     await render([buffer()]);
     const event = await pressSave({ metaKey: true });

@@ -114,7 +114,6 @@ pub(crate) fn router() -> Router<AppState> {
             post(token::mint_runtime_access_token),
         )
         .route("/runtime/remove", post(stop::runtime_remove))
-        .route("/runtime/idle-reaper", post(stop::runtime_idle_reaper))
         .route(
             "/projects/:project_id/runtime/activity",
             post(status::runtime_activity),

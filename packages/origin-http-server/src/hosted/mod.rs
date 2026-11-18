@@ -13,7 +13,6 @@ mod cas;
 mod change;
 pub mod config;
 mod disk;
-mod legacy;
 mod read;
 mod recovery;
 #[cfg(test)]
@@ -30,5 +29,4 @@ mod write_tests;
 
 pub(crate) use cache::MirrorCache;
 pub use config::HostedGatewayConfig;
-pub(crate) use legacy::park_legacy_checkouts;
 pub(crate) use routes::{router, HostedState};

@@ -5,7 +5,6 @@ interface ImportMetaEnv {
   // Dev-only: true when the vite dev server exposes the local Codex-seed
   // endpoint (INSTAFY_DEV_CODEX_SEED=1). Statically replaced at build time.
   readonly INSTAFY_DEV_CODEX_SEED_ENABLED?: boolean;
-  readonly VITE_USE_WEBCONTAINERS?: string;
   readonly VITE_CONTROLLER_URL?: string;
   readonly VITE_DOWNLOADS_BASE_URL?: string;
   readonly VITE_DESKTOP_DOWNLOADS_PREFIX?: string;

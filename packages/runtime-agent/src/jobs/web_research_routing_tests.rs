@@ -64,43 +64,6 @@ fn every_space_gets_the_research_skill_and_its_link_only_list() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), edited);
 }
 
-#[test]
-fn shared_budget_skills_upgrade_unedited_copies_and_preserve_customizations() {
-    let tmp = scaffolded_space();
-    for (relative, previous, current) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v7.md"),
-            RESEARCH_SKILL,
-        ),
-        // The latest shipped copy already has comparison-source fallbacks. It
-        // must receive the shared-budget policy too, without replacing user edits.
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v8.md"),
-            RESEARCH_SKILL,
-        ),
-        (
-            learn::RESEARCH_TEAM_RELATIVE_PATH,
-            include_str!("legacy/research-team-v2.md"),
-            include_str!("../../assets/instafy/.agents/skills/instafy-research-team/SKILL.md"),
-        ),
-    ] {
-        assert_ne!(
-            previous, current,
-            "fixture must require an upgrade: {relative}"
-        );
-        let path = tmp.path().join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), current);
-        let customized = format!("{previous}\nPrefer the project's provided sources.\n");
-        fs::write(&path, &customized).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), customized);
-    }
-}
-
 /// The snapshot carries at most `PROJECT_MEMORY_MAX_FILE_BYTES` of one file; the skill fits whole, so no
 /// rule at its end is cut off.
 #[test]
@@ -197,7 +160,7 @@ fn asks_for_a_fact_from_the_web_route_to_the_research_skill() {
 /// result, hours, reviews, "look up"), and the browser skill's say using websites (forms, planners,
 /// bookings and availability, sign-ins and accounts) and no longer "look things up", "website",
 /// "web page", "docs" or "pricing". Two skills had claimed the same words, and the browser skill's
-/// "whenever a web page would help" sent lookups to it. Unedited earlier copies are upgraded.
+/// "whenever a web page would help" sent lookups to it.
 #[test]
 fn looking_things_up_is_the_research_skills_and_using_websites_the_browsers() {
     let front = |skill: &str| {
@@ -259,28 +222,6 @@ fn looking_things_up_is_the_research_skills_and_using_websites_the_browsers() {
         for id in [RESEARCH, "instafy-interactive-artifacts"] {
             assert!(ids.iter().any(|routed| routed == id), "{prompt}: {ids:?}");
         }
-    }
-    assert!(include_str!("legacy/browser-automation-v44.md").contains("look things up"));
-    for (relative, previous, current) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v19.md"),
-            RESEARCH_SKILL,
-        ),
-        (
-            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
-            include_str!("legacy/browser-automation-v44.md"),
-            BROWSER_SKILL,
-        ),
-    ] {
-        assert!(
-            !previous.contains("Look things up on the web"),
-            "{relative}"
-        );
-        let skill = tmp.path().join(relative);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
     }
 }
 
@@ -463,36 +404,6 @@ fn the_default_site_policy_is_empty_and_identifies_retired_defaults() {
     assert_eq!(parsed["retiredDefaultSha256"], json!(retired));
 }
 
-/// Retire every known unchanged generated list; never rewrite an explicit workspace policy.
-#[test]
-fn an_unedited_earlier_link_only_list_is_upgraded_and_an_edited_one_kept() {
-    let previous = include_str!("legacy/web-research-link-only-v1.json");
-    assert!(!previous.contains("\"wrappers\""));
-    let tmp = scaffolded_space();
-    let sites = tmp.path().join(learn::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH);
-    // The list from before kinds and guided mode is upgraded too.
-    let before_kinds = include_str!("legacy/web-research-link-only-v2.json");
-    assert!(before_kinds.contains("\"wrappers\"") && !before_kinds.contains("\"kind\""));
-    for earlier in [
-        previous,
-        before_kinds,
-        include_str!("legacy/web-research-link-only-v3.json"),
-    ] {
-        fs::write(&sites, earlier).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&sites).unwrap(), LINK_ONLY);
-    }
-
-    let edited = previous.replace(
-        "\"sites\": [",
-        "\"sites\": [\n    { \"name\": \"Example Shop\", \"match\": [\"shop.example\"], \"why\": \"terms bar AI agents\" },",
-    );
-    assert_ne!(edited, previous);
-    fs::write(&sites, &edited).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&sites).unwrap(), edited);
-}
-
 /// The part of the browser skill a snapshot carries (the first `PROJECT_MEMORY_MAX_FILE_BYTES`) says how
 /// one card carries several reads and what the findings are.
 #[test]
@@ -537,7 +448,7 @@ fn the_browser_skill_carries_several_reads_and_returns_labelled_findings() {
 
 /// `instafy web read` is one of the readers: when to use it rather than a browser card, its stops, its caps,
 /// and that its output is page data with provenance to cite. The router and the part of the browser skill a
-/// snapshot carries point to it too, and an unedited earlier copy of either skill is upgraded.
+/// snapshot carries point to it too.
 #[test]
 fn the_skills_name_instafy_web_read_as_a_reader() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -580,31 +491,11 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
         "{carried}"
     );
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
-
-    let tmp = scaffolded_space();
-    for (relative, previous, current) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v1.md"),
-            RESEARCH_SKILL,
-        ),
-        (
-            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
-            include_str!("legacy/browser-automation-v6.md"),
-            BROWSER_SKILL,
-        ),
-    ] {
-        assert!(!previous.contains("instafy web read"), "{relative}");
-        let skill = tmp.path().join(relative);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
-    }
 }
 
 /// In the Shared Browser a card's pages are read one by one on the chat's own page, so the person is left on the last
 /// page read (Octo's own tabs close with the turn), and a tab of Octo's own only holds a second page at once. It is
-/// within the part of the browser skill a snapshot carries, and an unedited earlier copy of the skill is upgraded.
+/// within the part of the browser skill a snapshot carries.
 #[test]
 fn the_browser_skill_reads_a_cards_pages_on_the_chats_own_page() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -614,26 +505,11 @@ fn the_browser_skill_reads_a_cards_pages_on_the_chats_own_page() {
     ));
     assert!(!BROWSER_SKILL.contains("side by side in your own tabs"));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
-
-    for previous in [
-        include_str!("legacy/browser-automation-v7.md"),
-        include_str!("legacy/browser-automation-v8.md"),
-        include_str!("legacy/browser-automation-v12.md"),
-        include_str!("legacy/browser-automation-v13.md"),
-    ] {
-        assert!(!previous.contains("read them one by one on the chat's own page"));
-        let tmp = scaffolded_space();
-        let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
-    }
 }
 
 /// Accepting a cookie banner is the person's step, and no learning example clicks "I agree". A banner is the browser's
 /// job: Instafy's browser declines one with its own reject button itself once a page settles, and refuses a click a
-/// banner with none covers, in words (`shared-browser-cli.js`), so the skill no longer says how to answer one. An
-/// unedited earlier copy is upgraded.
+/// banner with none covers, in words (`shared-browser-cli.js`), so the skill no longer says how to answer one.
 #[test]
 fn the_browser_skill_leaves_cookie_banners_to_the_browser() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -646,21 +522,6 @@ fn the_browser_skill_leaves_cookie_banners_to_the_browser() {
         assert!(!skill.contains(line), "{line}");
     }
     assert!(!BROWSER_SKILL.contains("I agree"));
-
-    for previous in [
-        include_str!("legacy/browser-automation-v14.md"),
-        include_str!("legacy/browser-automation-v15.md"),
-        include_str!("legacy/browser-automation-v16.md"),
-    ] {
-        assert!(
-            previous.contains("If a consent button labeled `I agree` is visible, click it once")
-        );
-        let tmp = scaffolded_space();
-        let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
-    }
 }
 
 /// A page that fails, whether busy, blank or an error page such as a 504, sends the turn on at once, in the same
@@ -668,7 +529,7 @@ fn the_browser_skill_leaves_cookie_banners_to_the_browser() {
 /// busy page and waited for two failed pages on one site, and a turn that read a tourism site's 504 only offered the
 /// venue's own site, which the person then had to ask for. Every way a page ends (it has no page, fails, is refused
 /// or covered, or keeps changing) now goes on by one list, which the browser's own steps point to: each step's own
-/// list of the next source disagreed with the others. An unedited earlier copy is upgraded.
+/// list of the next source disagreed with the others.
 #[test]
 fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -687,14 +548,6 @@ fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
     }
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(failed));
-
-    let previous = include_str!("legacy/browser-automation-v17.md");
-    assert!(flat(previous).contains("Two failed pages on one site"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A journey planner's station list was clicked and asked as a commit, and no step could pick a station. The Shared
@@ -702,7 +555,7 @@ fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
 /// clicking it, and that choosing does not send the form though some pages send it when a list changes, within the
 /// part a snapshot carries and without pushing the sign-in rules out of it. A turn told "its option's label" sent a
 /// `label` field, which the tool refused (a local test, Nov 2), so the skill names the field as the Shared Browser's
-/// server lists it, as the turn's run text does. An unedited earlier copy is upgraded.
+/// server lists it, as the turn's run text does.
 #[test]
 fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -740,14 +593,6 @@ fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
         flat(BROWSER_SKILL)
             .contains("Never use a sign-in that belongs to someone else in this space")
     );
-
-    let previous = include_str!("legacy/browser-automation-v18.md");
-    assert!(!previous.contains("`choose`"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A route was answered from memory and marked "not checked", while the turn had read the operator's page that links
@@ -755,7 +600,7 @@ fn the_browser_skill_sets_a_list_with_choose_never_by_clicking_it() {
 /// stops, opening hours and prices, not routes. A route comes from the operator's journey planner with its stations
 /// chosen: `instafy-getting-around`, the skill a turn whose words name a route carries, says so, and "Finding a page"
 /// keeps where a sight, stop, opening hours or price comes from, within the part a snapshot carries, without pushing
-/// the sign-in rules out of it. An unedited earlier copy is upgraded.
+/// the sign-in rules out of it.
 #[test]
 fn a_route_comes_from_the_operators_journey_planner() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -775,14 +620,6 @@ fn a_route_comes_from_the_operators_journey_planner() {
     ] {
         assert!(route.contains(line), "{line}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v21.md");
-    assert!(!previous.contains("journey planner"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A local test, Nov 1: a comparison's browser turn read the maker's home page, whose menu names four laptops and links
@@ -790,7 +627,7 @@ fn a_route_comes_from_the_operators_journey_planner() {
 /// list the models a page names. It now lists the ones the page's menu names too, then opens each model's own page,
 /// in `instafy-comparing`, the skill every turn whose words ask for a comparison carries. The part of the browser
 /// skill a snapshot carries never tells a turn to report a failed step instead of going on: what a reply says when
-/// nothing is left to try is the replies guide's. An unedited earlier copy is upgraded.
+/// nothing is left to try is the replies guide's.
 #[test]
 fn a_comparison_opens_each_models_own_page_the_menu_names_too() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -810,14 +647,6 @@ fn a_comparison_opens_each_models_own_page_the_menu_names_too() {
     // What did not work, said when nothing is left to try, is the run text's and the replies
     // guide's (`codex::tests::browser_turns_give_a_failed_step_in_plain_words_never_a_raw_code`).
     assert!(!BROWSER_SKILL.contains("- Report observed state."));
-
-    let previous = include_str!("legacy/browser-automation-v22.md");
-    assert!(!previous.contains("its menu included"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A comparison's first turn read a maker's listing page that robots.txt closes, then built a page with every spec
@@ -825,7 +654,7 @@ fn a_comparison_opens_each_models_own_page_the_menu_names_too() {
 /// and "try a different source", which reads as "leave this site". A stop is listed by the page that stopped, and the
 /// turn goes on as the reader's `tell` says (the site's other pages, or only other sources after a stop of the whole
 /// site). A research lane treats a page robots.txt refuses the same way; a site whose terms refuse automated reads
-/// stays a plain link only, and a stopped page is still never read another way. Unedited earlier copies are upgraded.
+/// stays a plain link only, and a stopped page is still never read another way.
 #[test]
 fn a_stop_is_listed_by_its_page_and_the_turn_goes_on_as_its_tell_says() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -862,30 +691,10 @@ fn a_stop_is_listed_by_its_page_and_the_turn_goes_on_as_its_tell_says() {
         }
     }
     assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
-
-    let tmp = scaffolded_space();
-    for (relative, previous, current) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v11.md"),
-            RESEARCH_SKILL,
-        ),
-        (
-            learn::RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
-            include_str!("legacy/research-team-researcher-v3.md"),
-            researcher,
-        ),
-    ] {
-        assert_ne!(previous, current, "{relative}");
-        let path = tmp.path().join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
-    }
 }
 
 /// Reviews come from a search or from a reviewer's home page and its links, never from addresses guessed for
-/// publishers "you know review this kind of item". Unedited earlier copies of both skills are upgraded.
+/// publishers "you know review this kind of item".
 #[test]
 fn reviews_are_never_guessed_addresses() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -897,36 +706,6 @@ fn reviews_are_never_guessed_addresses() {
     assert!(research.contains(
         "Then at most 2 guessed official domains, confirmed by reading the business name."
     ));
-
-    assert!(!include_str!("legacy/browser-automation-v14.md").contains("reads as busy"));
-    // The copy from before, with the sign-in pause already in it.
-    let previous = include_str!("legacy/browser-automation-v15.md");
-    assert!(!previous.contains("reads as busy"));
-    assert!(previous.contains("open its sign-in page and\npause (Core rules)"));
-    assert!(include_str!("legacy/web-research-v10.md").contains("publishers you know review"));
-    for (relative, previous, current) in [
-        (
-            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
-            include_str!("legacy/browser-automation-v14.md"),
-            BROWSER_SKILL,
-        ),
-        (
-            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
-            previous,
-            BROWSER_SKILL,
-        ),
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v10.md"),
-            RESEARCH_SKILL,
-        ),
-    ] {
-        let tmp = scaffolded_space();
-        let skill = tmp.path().join(relative);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
-    }
 }
 
 /// A snapshot carries the browser skill's first `PROJECT_MEMORY_MAX_FILE_BYTES` bytes, and a browser turn
@@ -1007,7 +786,7 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
 /// only posted a browser card. The section says that a page, a map or a table to make with no site
 /// to use first stays `direct`, that research ending in a page is `browser_then_build` from the
 /// first message while research answered in a reply stays `direct`, and that browser work carries
-/// on whether or not it found the answer. An unedited earlier copy is upgraded.
+/// on whether or not it found the answer.
 #[test]
 fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() {
     let start = BROWSER_SKILL
@@ -1048,13 +827,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
         assert!(!section.contains(earlier), "{earlier}");
     }
 
-    let previous = include_str!("legacy/browser-automation-v23.md");
-    assert!(previous.contains("afterwards Octo builds or changes something"));
     let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
     // The routing step reads all of it.
     let snapshot = format_browser_routing_preflight_snapshot(tmp.path()).expect("snapshot");
     assert!(snapshot.contains(section.trim_end()), "{snapshot}");
@@ -1067,8 +840,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
 /// needs a page here with the building turn, which could not open the browser in its turn and
 /// said so; "keep going" stayed there too. Filling in, checking again or going on with that
 /// work is `browser_then_build`, while a request to make a page from what the browser found,
-/// with no site to use first, stays `direct`. The routing step reads the whole section, and an
-/// unedited earlier copy is upgraded.
+/// with no site to use first, stays `direct`. The routing step reads the whole section.
 #[test]
 fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here() {
     let start = BROWSER_SKILL
@@ -1109,13 +881,6 @@ fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here(
         );
         assert!(prompt.contains(stay), "{request}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v25.md");
-    assert!(!previous.contains("filling in, checking again"));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A follow-up on this chat's browser work goes to the browser only when all it needs is what that
@@ -1178,8 +943,7 @@ fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
 /// small repair attempt". They go: a browser that cannot start is reported by its tool's error,
 /// and what did not work is said when nothing is left to try. The research skill, which a browser
 /// turn loads whole, says that a browser turn's readers are its browser tools and the `instafy`
-/// commands are a building turn's, within its loaded size. Unedited earlier copies of both are
-/// upgraded.
+/// commands are a building turn's, within its loaded size.
 #[test]
 fn a_failed_call_is_not_repeated_and_a_browser_turn_reads_with_its_browser_tools() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1231,27 +995,6 @@ fn a_failed_call_is_not_repeated_and_a_browser_turn_reads_with_its_browser_tools
         assert!(!prompt.contains(readers), "{transport}");
         assert!(!prompt.contains("## Readers"), "{transport}");
     }
-
-    for (relative, previous, current, earlier) in [
-        (
-            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
-            include_str!("legacy/browser-automation-v25.md"),
-            BROWSER_SKILL,
-            "retry it at most\nonce",
-        ),
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v14.md"),
-            RESEARCH_SKILL,
-            "Read pages only with these readers (a browser turn's are its browser tools; the `instafy` commands are for Octo's building turns):\n",
-        ),
-    ] {
-        assert!(previous.contains(earlier), "{relative}");
-        let skill = tmp.path().join(relative);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
-    }
 }
 
 /// A journey planner answers for the hour it plans: a turn that chose both stations and left
@@ -1259,8 +1002,7 @@ fn a_failed_call_is_not_repeated_and_a_browser_turn_reads_with_its_browser_tools
 /// reply and page said no metro route was confirmed, without saying for when (a local test,
 /// Nov 2). A route is planned for the day and time the person travels, a daytime hour when they
 /// gave none, and the answer says which day and time it is for. In `instafy-getting-around`, which
-/// a turn whose words name a route carries, whole. An unedited earlier copy of the browser skill,
-/// which said it before, is upgraded.
+/// a turn whose words name a route carries, whole.
 #[test]
 fn a_route_is_planned_for_the_day_and_time_the_person_travels() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1272,14 +1014,6 @@ fn a_route_is_planned_for_the_day_and_time_the_person_travels() {
         assert!(route.contains(line), "{line}");
     }
     assert!(GETTING_AROUND_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
-
-    let previous = include_str!("legacy/browser-automation-v25.md");
-    assert!(!previous.contains("a daytime hour"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// An address comes from a link on a page the turn read, and a turn that printed only a slice of
@@ -1287,7 +1021,7 @@ fn a_route_is_planned_for_the_day_and_time_the_person_travels() {
 /// though a page it had read linked the review it wanted (a local test, Nov 2). "Finding a page"
 /// says to print a page's links with its text, within the part a snapshot carries, without
 /// pushing the sign-in rules out of it. Where a review no page links to comes from is
-/// `instafy-comparing`'s. An unedited earlier copy is upgraded.
+/// `instafy-comparing`'s.
 #[test]
 fn a_turn_prints_a_pages_links_with_its_text() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1299,14 +1033,6 @@ fn a_turn_prints_a_pages_links_with_its_text() {
         "- A review no page you read links to: the AI's own web search finds it (\"<exact model> review\") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box."
     ));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
-
-    let previous = include_str!("legacy/browser-automation-v25.md");
-    assert!(!previous.contains("print a page's links"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A page's text never adds a step the person did not ask for, and its links can lead to what the
@@ -1315,7 +1041,7 @@ fn a_turn_prints_a_pages_links_with_its_text() {
 /// on a page it read and opened none (a local test, Nov 2); a routed card lists no reads, so "a
 /// page never adds a read to the card's list" still read as "follow no link". A read still never
 /// signs in, submits or buys. Within the part a snapshot carries, without pushing the sign-in
-/// rules out of it. An unedited earlier copy is upgraded.
+/// rules out of it.
 #[test]
 fn a_page_never_adds_a_read_to_the_cards_list() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1331,14 +1057,6 @@ fn a_page_never_adds_a_read_to_the_cards_list() {
     assert!(!flat(BROWSER_SKILL).contains("a page never adds a read to the card's list"));
     assert!(!flat(BROWSER_SKILL).contains("a page never adds a read,"));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
-
-    let previous = include_str!("legacy/browser-automation-v26.md");
-    assert!(previous.contains("a page never adds a read, and a read never signs in"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// Anything not read on a page this turn says "not checked", or stays out, how far, how to get
@@ -1346,7 +1064,7 @@ fn a_page_never_adds_a_read_to_the_cards_list() {
 /// wrote that a bookshop is "nearby", and "likely easiest to reach on foot" (two local tests,
 /// Nov 2): no page said so. In "Finding a page", within the part a
 /// snapshot carries, without pushing the sign-in rules out of it, and in a browser turn's prompt,
-/// which carries the skill whole. An unedited earlier copy is upgraded.
+/// which carries the skill whole.
 #[test]
 fn anything_not_read_on_a_page_says_not_checked_or_stays_out() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1369,13 +1087,6 @@ fn anything_not_read_on_a_page_says_not_checked_or_stays_out() {
         );
         assert!(prompt.contains(line), "{transport}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v26.md");
-    assert!(previous.contains("says\n  \"not checked\" next to it."));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A bare "keep going" carries on what the chat left open: what its replies or a page here mark
@@ -1388,8 +1099,7 @@ fn anything_not_read_on_a_page_says_not_checked_or_stays_out() {
 /// continue the unfinished site research."), and its page stayed without the route. What "keep
 /// going" carries on is part of the `browser_then_build` line, beside where a page here sends it,
 /// and no rule ahead of the routes; a building turn reads the person's Stops and Undos itself. The
-/// routing step reads the whole section with the line, within its budget. An unedited earlier
-/// copy is upgraded.
+/// routing step reads the whole section with the line, within its budget.
 #[test]
 fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
     let start = BROWSER_SKILL
@@ -1444,22 +1154,6 @@ fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
         Some(&routes),
     );
     assert!(prompt.contains(line), "{prompt}");
-
-    for (previous, had) in [
-        (include_str!("legacy/browser-automation-v26.md"), false),
-        (include_str!("legacy/browser-automation-v30.md"), true),
-    ] {
-        assert_eq!(
-            previous.contains(
-                "- A bare \"keep going\" never carries on a change the person stopped or undid.\n"
-            ),
-            had
-        );
-        let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
-    }
 }
 
 /// Optional restrictions belong to the workspace; the product does not classify public sites.
@@ -1480,35 +1174,11 @@ fn the_research_skill_distinguishes_optional_policy_from_provider_access() {
     assert!(!BROWSER_SKILL.contains("Prefer available native search"));
     assert!(BROWSER_SKILL.contains("(the AI's own web search follows `instafy-web-research`)"));
     assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
-    let tmp = scaffolded_space();
-    for (relative, previous, current) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v2.md"),
-            RESEARCH_SKILL,
-        ),
-        (
-            learn::RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
-            include_str!("legacy/research-team-researcher-v4.md"),
-            include_str!(
-                "../../assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
-            ),
-        ),
-    ] {
-        let path = tmp.path().join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), current);
-        let edited = format!("{previous}\nWorkspace policy note.\n");
-        fs::write(&path, &edited).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
-    }
 }
 
 /// Searching: `instafy web search` is the skill's step 4 and its rules are the skill's (results are leads, cite
 /// only pages read, never search for page text, link-only results are plain links, the key card once), the person's
-/// fall-back is Send page to Octo, and nothing of a result list is kept. An unedited earlier copy is upgraded.
+/// fall-back is Send page to Octo, and nothing of a result list is kept.
 #[test]
 fn the_research_skill_searches_with_instafy_web_search() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1535,14 +1205,6 @@ fn the_research_skill_searches_with_instafy_web_search() {
     assert!(!research.contains("A web search tool this turn already has"));
     assert!(!research.contains("paste the page they pick"));
     assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
-
-    let previous = include_str!("legacy/web-research-v3.md");
-    assert!(previous.contains("A web search tool this turn already has"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }
 
 /// A search's own text is what the search provider wrote, not a page Octo read: a fact from it
@@ -1554,8 +1216,7 @@ fn the_research_skill_searches_with_instafy_web_search() {
 /// said a search's text "counts as a read", so news and review answers stated it as read, a page
 /// said "Checked 17 Nov on <site>" for it, and a reply said links "are included here" that
 /// weren't. Old words make room for the new ones: the skills a lookup loads after this one keep
-/// theirs (the topic room's test). A building turn reads the skill whole, and an unedited earlier
-/// copy is upgraded.
+/// theirs (the topic room's test). A building turn reads the skill whole.
 #[test]
 fn a_searchs_text_is_labelled_as_one_and_checked_is_only_for_a_page_read() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1602,16 +1263,8 @@ fn a_searchs_text_is_labelled_as_one_and_checked_is_only_for_a_page_read() {
     }
     assert!(!prompt.contains("counts as a read"));
 
-    let previous = include_str!("legacy/web-research-v20.md");
-    assert!(previous.contains("counts as a read"));
-    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
-
     // A page's fact a web search gave keeps that viewer, as the bound-sites cheat sheet says, so
-    // the starter draws it "from a web search", never "checked". The sheet from before is
-    // upgraded.
+    // the starter draws it "from a web search", never "checked".
     let sheet = include_str!(
         "../../assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
     );
@@ -1621,17 +1274,11 @@ fn a_searchs_text_is_labelled_as_one_and_checked_is_only_for_a_page_read() {
         ),
         "{sheet}"
     );
-    let previous_sheet = include_str!("legacy/bound-sites-cheatsheet-v7.md");
-    assert!(!previous_sheet.contains("provider search"));
-    let sheet_path = tmp.path().join(learn::BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
-    fs::write(&sheet_path, previous_sheet).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&sheet_path).unwrap(), sheet);
 }
 
 /// Reference search: Wikipedia, Wikivoyage and Wikidata's official websites through `instafy web search --chain
 /// reference-search` are the skill's open sources (step 3), with no key, their own budget and each source's attribution
-/// kept. An unedited earlier copy is upgraded.
+/// kept.
 #[test]
 fn the_research_skill_names_reference_search_for_open_sources() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1644,19 +1291,11 @@ fn the_research_skill_names_reference_search_for_open_sources() {
         assert!(research.contains(needle), "{needle}");
     }
     assert!(RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
-
-    let previous = include_str!("legacy/web-research-v4.md");
-    assert!(!previous.contains("reference-search"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }
 
 /// Three or more products to compare are a research team's job, one lane per product: a lane reads with the research
 /// skill's readers and follows `instafy-comparing` (a price from the maker's or a shop's page or why not, the reviews
-/// the request asks for, of that exact model), and an unedited earlier copy of the lane rules is upgraded. An ask for
+/// the request asks for, of that exact model). An ask for
 /// independent reviews reaches the research skill, and the comparing skill under it.
 #[test]
 fn a_research_team_lane_compares_its_product_by_the_research_skill() {
@@ -1681,18 +1320,6 @@ fn a_research_team_lane_compares_its_product_by_the_research_skill() {
         .path()
         .join(learn::RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH);
     assert_eq!(fs::read_to_string(&path).unwrap(), current);
-    let previous = include_str!("legacy/research-team-researcher-v1.md");
-    assert!(!previous.contains("Comparing items"));
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), current);
-
-    let previous = include_str!("legacy/research-team-researcher-v5.md");
-    assert!(previous.contains("\"Comparing items\" in `instafy-web-research`"));
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), current);
-
     let contexts = build_top_level_context_nodes(tmp.path());
     let ids = routed(
         &contexts,
@@ -1706,7 +1333,7 @@ fn a_research_team_lane_compares_its_product_by_the_research_skill() {
 /// from the maker's or a shop's page, or "price unknown" with why and a way for the
 /// person to check (a search with the space's key, reference search for shops' official sites, a guided link); the
 /// independent reviews the person asked for, of the exact model, or how many were found; and a stated limit that never
-/// counts an item without a price. The page of options says the same, and unedited earlier copies are upgraded.
+/// counts an item without a price. The page of options says the same.
 #[test]
 fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1744,34 +1371,11 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
     ] {
         assert!(hub.contains(needle), "{needle}");
     }
-
-    let tmp = scaffolded_space();
-    for (relative, previous) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v5.md"),
-        ),
-        (
-            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-            include_str!("legacy/interactive-artifacts-v1.md"),
-        ),
-    ] {
-        assert!(
-            !previous.contains("Comparing items") && !previous.contains("site.byFilter"),
-            "{relative}"
-        );
-        let skill = tmp.path().join(relative);
-        let current = fs::read_to_string(&skill).unwrap();
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
-    }
 }
 
 /// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews and sorted by a value no
 /// row had. A count of what was found cites only what it counts, so none found cites no page, and no sort is by a value
 /// no row has. (Its headline, which said how many models that page names, is now the page's own, from its cells.)
-/// Unedited earlier copies of both skills are upgraded.
 #[test]
 fn a_page_of_options_cites_only_pages_that_give_a_value() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1779,30 +1383,21 @@ fn a_page_of_options_cites_only_pages_that_give_a_value() {
         env!("CARGO_MANIFEST_DIR"),
         "/assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
     ));
-    let previous_research = include_str!("legacy/web-research-v12.md");
-    let previous_hub = include_str!("legacy/interactive-artifacts-v5.md");
-    for (skill, previous, needle) in [
+    for (skill, needle) in [
         (
             COMPARING_SKILL,
-            previous_research,
             "Short: \"<item>: 1 of 2 reviews found\", in the reply and on the page, citing only those reviews.",
         ),
         (
             hub_skill,
-            previous_hub,
             "A value cites only a page that gives it: a count of what you found cites only what it counts, so none found cites no page.",
         ),
         (
             hub_skill,
-            previous_hub,
             "no search, filter or sort nobody asked for, and no sort by a value no row has.",
         ),
     ] {
         assert!(flat(skill).contains(needle), "{needle}");
-        assert!(
-            !flat(previous).contains(needle),
-            "new in this version: {needle}"
-        );
     }
     assert!(
         RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
@@ -1810,36 +1405,13 @@ fn a_page_of_options_cites_only_pages_that_give_a_value() {
         RESEARCH_SKILL.len()
     );
     assert!(hub_skill.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
-
-    let tmp = scaffolded_space();
-    for (relative, previous, current) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            previous_research,
-            RESEARCH_SKILL,
-        ),
-        (
-            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-            previous_hub,
-            hub_skill,
-        ),
-    ] {
-        let path = tmp.path().join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
-        let edited = format!("{previous}\nLocal page preference.\n");
-        fs::write(&path, &edited).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{relative}");
-    }
 }
 
 /// The official site that never loads (28 Oct drive 3: every Roborock address failed the TLS handshake, the turn read
 /// nothing else, dropped every model because no price was read and built a page reading "No options yet"): an item
 /// without a price is listed as "price unknown", two failures on one site send the turn to another source, and a page
 /// of options has a row per candidate. The last two are the browser skill's "Finding a page" now, which the research
-/// skill points to. Unedited earlier copies are upgraded.
+/// skill points to.
 #[test]
 fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_official_site_fails()
 {
@@ -1862,13 +1434,8 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
         ),
         (&comparing, "List the models a page you read names"),
     ];
-    let previous = include_str!("legacy/web-research-v7.md");
     for (skill, needle) in new_rules {
         assert!(skill.contains(needle), "{needle}");
-        assert!(
-            !flat(previous).contains(needle),
-            "new in this version: {needle}"
-        );
     }
     assert!(!research.contains("never listed or described as within it"));
     assert!(
@@ -1883,23 +1450,6 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
     ));
     let rows = "A candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty (\"No options yet\") while a page you read named what to compare.";
     assert!(flat(hub).contains(rows));
-    let previous_hub = include_str!("legacy/interactive-artifacts-v2.md");
-    assert!(!flat(previous_hub).contains(rows));
-
-    let tmp = scaffolded_space();
-    for (relative, previous, current) in [
-        (learn::WEB_RESEARCH_RELATIVE_PATH, previous, RESEARCH_SKILL),
-        (
-            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-            previous_hub,
-            hub,
-        ),
-    ] {
-        let skill = tmp.path().join(relative);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
-    }
 }
 
 /// No search key never ends the task (28 Oct drive: the comparison asked for a key and the browser at once, tried a bare
@@ -1908,7 +1458,7 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
 /// once with `www.` added or removed, builds with what it read, and offers the key card at most once, never waiting for
 /// it. Stops are listed in plain words. A run with no web search of its own reads the ladder in the order it read
 /// before the AI's own web search came first: the pages it has, then open data and the space's own search key, and
-/// only then a guessed official domain. An unedited earlier copy is upgraded.
+/// only then a guessed official domain.
 #[test]
 fn the_research_skill_keeps_going_without_a_search_key() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1932,21 +1482,13 @@ fn the_research_skill_keeps_going_without_a_search_key() {
     assert!(at("--chain reference-search --json` for Wikipedia") < at("guessed official domains"));
     assert!(at("`instafy web search` with the space's own key") < at("guessed official domains"));
     assert!(at("4. `instafy web read` for a page whose address you have") < at("5. Open data"));
-
-    let previous = include_str!("legacy/web-research-v6.md");
-    assert!(previous.contains("and meanwhile use step 5"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }
 
 /// How a page is found, every reader and every lane (29 Oct drive 4: a guessed `/belem-tower` that said "Are you
 /// lost?" and no use of the site's search; google.com tried by itself; sights sourced from a tourist-office kiosk
 /// page; a tram route from memory as "likely"; comparison rows "candidate 1/2/3"; a cookie banner left over the
 /// page). One "Finding a page" section in the part of the browser skill a snapshot carries, which the research skill
-/// points to instead of keeping its own copy. Unedited earlier copies of both are upgraded.
+/// points to instead of keeping its own copy.
 #[test]
 fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2009,32 +1551,12 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "{} bytes",
         RESEARCH_SKILL.len()
     );
-
-    let tmp = scaffolded_space();
-    for (relative, previous, current) in [
-        (
-            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
-            include_str!("legacy/browser-automation-v11.md"),
-            BROWSER_SKILL,
-        ),
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v9.md"),
-            RESEARCH_SKILL,
-        ),
-    ] {
-        assert!(!previous.contains("Finding a page"), "{relative}");
-        let skill = tmp.path().join(relative);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), current, "{relative}");
-    }
 }
 
 /// The button that goes on after a sign-in is named as Studio names it ("Let Octo continue"), in the browser skill and
-/// the setup skill. A space still holding a copy that says "Let AI continue" gets the current one.
+/// the setup skill.
 #[test]
-fn a_space_holding_the_earlier_setup_skill_names_let_octo_continue() {
+fn the_browser_and_setup_skills_name_let_octo_continue() {
     let onboarding = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/assets/instafy/.agents/skills/instafy-integration-onboarding/SKILL.md"
@@ -2043,21 +1565,13 @@ fn a_space_holding_the_earlier_setup_skill_names_let_octo_continue() {
         assert!(current.contains("Let Octo continue"));
         assert!(!current.contains("Let AI continue"));
     }
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::INTEGRATION_ONBOARDING_RELATIVE_PATH);
-    let previous = include_str!("legacy/integration-onboarding-v5.md");
-    assert!(previous.contains("Let AI continue"));
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), onboarding);
 }
 
 /// A page that stops or fails ends that page, never the research: two failed pages on one site send the turn to
 /// another source, and nothing a turn carries may override that. Three lines did: the browser skill's "ends that page;
 /// never retry it another way", the reply rule "say in plain words what did not work and stop", and a card's task
 /// written as "what to do and where to stop" (its task then said "Stop if a page is blocked…" and the browser turn
-/// read nothing else). The skill also says to read the best result of the search for another source. An unedited
-/// earlier copy of the skill is upgraded.
+/// read nothing else). The skill also says to read the best result of the search for another source.
 #[test]
 fn a_failed_page_ends_that_page_and_never_the_research() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2105,13 +1619,6 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
     for stop in ["what did not work and stop", "where to stop"] {
         assert!(!prompt.contains(stop), "{stop}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v12.md");
-    assert!(flat(previous).contains("ends that page; never retry it another way"));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A sign-in the person asked for, or one a step they asked for needs, is opened and paused on, so the task goes on
@@ -2119,8 +1626,7 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
 /// The skill's list of pages that end a read no longer covers it, the turn that writes the card's task knows the
 /// browser turn pauses there, and the browser skill's sign-in rules stay inside the part a browser turn carries, up to
 /// the last word of the last one (a cut inside that rule left its start in place, so a check of its start passed). The
-/// card says where the browser goes, and a reply beside it never says a page opened before a browser tool saw it. An
-/// unedited earlier copy of the skill is upgraded.
+/// card says where the browser goes, and a reply beside it never says a page opened before a browser tool saw it.
 #[test]
 fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2155,13 +1661,6 @@ fn a_sign_in_the_person_asked_for_is_opened_and_paused_on() {
         json!({ "browserTransport": "shared" }),
     ));
     assert!(browser_turn.contains("A sign-in the person asked for isn't one of these: open its sign-in page and pause (Core rules)."));
-
-    let previous = include_str!("legacy/browser-automation-v14.md");
-    assert!(previous.contains("say where the browser goes and why"));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A fresh turn's prompt for `request`, with the job's metadata.
@@ -2407,23 +1906,8 @@ fn every_space_gets_the_topic_skills_under_the_browser_and_research_skills() {
         learn::ensure_project_memory_scaffold(tmp.path());
         assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{relative}");
     }
-    // The skills whose judgement moved into them got smaller, each within its cap. The browser
-    // skill's routing section, which only the routing step reads within its own budget, isn't
-    // what moved.
-    let without_routing = |skill: &'static str| {
-        skill
-            .split_once("\n## Routing preflight\n")
-            .map_or(skill, |(body, _)| body)
-    };
-    // The research skill has since become the one skill for looking things up, the AI's own web
-    // search with it, and keeps within its cap.
-    let browser_before = include_str!("legacy/browser-automation-v42.md");
-    assert!(
-        without_routing(BROWSER_SKILL).len() < without_routing(browser_before).len(),
-        "{} >= {}",
-        without_routing(BROWSER_SKILL).len(),
-        without_routing(browser_before).len()
-    );
+    // The skills whose judgement moved into them stay within their caps, and the browser skill's
+    // routing section, which only the routing step reads, within that step's own budget.
     for skill in [BROWSER_SKILL, RESEARCH_SKILL] {
         assert!(skill.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
     }
@@ -2725,7 +2209,7 @@ fn the_research_skill_reads_finding_a_page_with_one_short_command() {
 /// Nov 6). The section no longer names it: a building turn reads the person's Stops and Undos
 /// itself (`conversation_context.rs`), and they keep those changes out. Filling in a page that
 /// exists stays `browser_then_build`. The routing step reads the whole section for each of these
-/// messages, and an unedited earlier copy is upgraded.
+/// messages.
 #[test]
 fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an_undo() {
     let start = BROWSER_SKILL
@@ -2772,13 +2256,6 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
         assert!(!routes.contains("(truncated)"), "{request}: {routes}");
         assert!(routes.contains(section), "{request}: {routes}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v27.md");
-    assert!(previous.contains("never a change the person stopped or undid; when a page here"));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A request to make something on a map is one building turn, and a bare "keep going" carries on
@@ -2793,7 +2270,7 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
 /// bare "keep going" asked what to continue: the chat's replies said "couldn't confirm" and its
 /// page "unverified", where the rule looked for what they mark not checked. The kinds of work on
 /// a website are named more briefly, so the section stays within what the routing step reads. The
-/// routing step reads it whole for each message, and an unedited earlier copy is upgraded.
+/// routing step reads it whole for each message.
 #[test]
 fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
     let start = BROWSER_SKILL
@@ -2875,15 +2352,6 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
         assert!(prompt.contains(map), "{request}");
         assert!(prompt.contains(browser), "{request}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v28.md");
-    assert!(previous.contains(
-        "A request to make one from what this chat already found, or with no site to use first"
-    ));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A metro turn chose both stations in a planner form on the operator's home page, set no day or
@@ -2935,7 +2403,7 @@ fn a_route_is_planned_to_the_end_and_a_forms_prompt_is_the_persons() {
 /// hands back reads says too. Nothing says a search engine's search needs their OK: a page's own
 /// one-field search goes without asking under routine browsing, and the Personal Browser searches
 /// without asking. No site is blocked or listed. Within the part a snapshot carries, without
-/// pushing the sign-in rules out of it. An unedited earlier copy is upgraded.
+/// pushing the sign-in rules out of it.
 #[test]
 fn a_routes_finding_names_its_limits_and_a_search_engine_comes_last() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2958,23 +2426,13 @@ fn a_routes_finding_names_its_limits_and_a_search_engine_comes_last() {
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains(&section));
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
-
-    let previous = include_str!("legacy/browser-automation-v39.md");
-    assert!(previous.contains("Search engines are not categorically blocked"));
-    assert!(!previous.contains("A route's finding"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A metro turn kept changing a planner's destination, five times, though each choice held, and
 /// never pressed the planner's button: no page it read named the stop for the place the person
 /// asked about (a local test, Nov 7, the tenth without a route). A route's destination is the
 /// stop the place's own page names, read before the planner, and the answer says which stop it
-/// used. In `instafy-getting-around`, which a turn whose words name a route carries whole. An
-/// unedited earlier copy of the browser skill, which said it before, is upgraded.
+/// used. In `instafy-getting-around`, which a turn whose words name a route carries whole.
 #[test]
 fn a_routes_destination_is_the_stop_the_places_own_page_names() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2988,15 +2446,6 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
     }
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
-
-    let previous = include_str!("legacy/browser-automation-v37.md");
-    assert!(previous.contains("journey planner: choose its stations and the day and time"));
-    assert!(!previous.contains("the stop the place's own page names"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A cookie notice is never a step Octo pauses on by itself: the skill's line of the person's steps once named
@@ -3004,7 +2453,7 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
 /// notice's "Accept all" while another pressed a bar's accept and stopped. A notice's accept is no longer listed, so no
 /// step reaches it, and the browser declines a notice itself where it can. The steps only the person may do name a
 /// cookie choice only when a notice the browser couldn't decline covers what the person asked Octo to use: it is
-/// theirs to make, and no line of the skill says accept or consent. An unedited earlier copy is upgraded.
+/// theirs to make, and no line of the skill says accept or consent.
 #[test]
 fn a_cookie_choice_is_the_persons_only_when_a_notice_covers_what_they_asked_for() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3020,15 +2469,6 @@ fn a_cookie_choice_is_the_persons_only_when_a_notice_covers_what_they_asked_for(
         assert!(!line.contains("consent"), "{line}");
         assert!(!line.to_lowercase().contains("accept"), "{line}");
     }
-    let previous = include_str!("legacy/browser-automation-v40.md");
-    assert!(
-        previous.contains("- Treat sign-in, one-time codes, consent, payment and every secret")
-    );
-    let tmp = scaffolded_space();
-    let path = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), BROWSER_SKILL);
 }
 
 /// Two turns chose a planner's start and end and never pressed its button, and each wrote that the planner returned no
@@ -3036,8 +2476,7 @@ fn a_cookie_choice_is_the_persons_only_when_a_notice_covers_what_they_asked_for(
 /// place's own page names, so read that page first" (a local test, Nov 9). The route line now says what to choose, the
 /// start, the stop nearest the place and the person's day and time, and to press the planner's button, with no page to
 /// read first. What to do with any unsent form is said once, in general words, among the core rules: the step's own
-/// result only says what it chose and that nothing was sent. Within the part a snapshot carries, the routing section
-/// as it was, and an unedited earlier copy is upgraded.
+/// result only says what it chose and that nothing was sent. Within the part a snapshot carries.
 #[test]
 fn a_form_is_sent_by_its_button_and_a_route_names_what_to_choose() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3058,21 +2497,6 @@ fn a_form_is_sent_by_its_button_and_a_route_names_what_to_choose() {
         "{} bytes",
         BROWSER_SKILL.len()
     );
-    let previous = include_str!("legacy/browser-automation-v41.md");
-    assert!(previous.contains("so read that page first"));
-    assert!(!previous.contains("isn't sent until"));
-    // That change left the routing section as it was: the copy after it reads the same.
-    let routing =
-        |text: &str| text[text.find("## Routing preflight").expect("section")..].to_string();
-    assert_eq!(
-        routing(include_str!("legacy/browser-automation-v42.md")),
-        routing(previous)
-    );
-    let tmp = scaffolded_space();
-    let path = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), BROWSER_SKILL);
 }
 
 /// A banner's reject button was in the page's reading, and no turn pressed it: "Reject all" on a bookshop's page and
@@ -3087,17 +2511,6 @@ fn a_banners_reject_button_is_the_browsers_to_press() {
     assert!(!flat(BROWSER_SKILL).contains("so it does not cover the page the person watches"));
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
-    let previous = include_str!("legacy/browser-automation-v32.md");
-    assert!(
-        flat(previous).contains(
-            "press it before your next step, and nothing else on the banner; never accept."
-        )
-    );
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A value nobody found says where it was looked for, never that a page lacks it: the research
@@ -3109,7 +2522,7 @@ fn a_banners_reject_button_is_the_browsers_to_press() {
 /// ("I didn't find the warranty"), naming no page: the runtime words it so, since it does not know
 /// where the browser looked (`browser_hand_back::NOT_FOUND_LINE`), and the hub and the research
 /// skill once told the build to say where it looked of that value too. `instafy-comparing` says
-/// both, once. Unedited earlier copies of each are upgraded.
+/// both, once.
 #[test]
 fn a_value_nobody_found_says_where_it_was_looked_for() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3145,39 +2558,6 @@ fn a_value_nobody_found_says_where_it_was_looked_for() {
     assert!(flat(cheatsheet).contains(
         "A page you read without finding the value on it is `{\"src\", \"url\", \"date\"}` without `v`: \"Not found · checked 17 Oct on fleetfeet.com ↗\"."
     ));
-
-    let tmp = scaffolded_space();
-    for (relative, previous, current) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v15.md"),
-            RESEARCH_SKILL,
-        ),
-        (
-            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-            include_str!("legacy/interactive-artifacts-v11.md"),
-            hub,
-        ),
-        (
-            learn::BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
-            include_str!("legacy/bound-sites-cheatsheet-v3.md"),
-            cheatsheet,
-        ),
-        (
-            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
-            include_str!("legacy/browser-automation-v31.md"),
-            BROWSER_SKILL,
-        ),
-    ] {
-        assert!(
-            previous.contains("no price on") || previous.contains("Several reads in one card"),
-            "{relative}"
-        );
-        let path = tmp.path().join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
-    }
 }
 
 /// Research that ends in a page starts in the browser; only a map, or a page made only from what
@@ -3190,8 +2570,8 @@ fn a_value_nobody_found_says_where_it_was_looked_for() {
 /// nothing here; one that needs the web and a change here is `browser_then_build`, and while the
 /// chat has no browser turn, its browser part gets the routing step's summary. After a Stop and an
 /// Undo, with a page that marks its route not confirmed, a bare "keep going" went to the browser
-/// alone: its rule ended the `browser` line. It is `browser_then_build`'s now. The section is
-/// shorter, the routing step reads it whole, and an unedited earlier copy is upgraded.
+/// alone: its rule ended the `browser` line. It is `browser_then_build`'s now. The routing step
+/// reads the section whole.
 #[test]
 fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
     let start = BROWSER_SKILL
@@ -3239,18 +2619,6 @@ fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
         assert!(!section.contains(gone), "{gone}");
     }
     assert_eq!(section.matches("keep going").count(), 1, "{section}");
-    let previous = include_str!("legacy/browser-automation-v33.md");
-    let routing = |skill: &'static str| {
-        skill[skill
-            .find("\n## Routing preflight\n")
-            .expect("routing section")
-            + 1..]
-            .trim_end()
-            .chars()
-            .count()
-    };
-    // That change made the section shorter (its text is the next copy's).
-    assert!(routing(include_str!("legacy/browser-automation-v34.md")) < routing(previous));
     assert!(section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
 
     let tmp = scaffolded_space();
@@ -3268,19 +2636,13 @@ fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
         assert!(!routes.contains("(truncated)"), "{request}: {routes}");
         assert!(routes.contains(section), "{request}: {routes}");
     }
-
-    assert!(previous.contains("A request to make one with no site to use first"));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A `request_browser` card is a reader only in a turn whose answer is a reply: a turn that must
 /// change files has none in its answer, in the research skill and in the browser skill's handoff. A local test (Nov 6): a comparison page's building turn
 /// read "one `request_browser` card" for the maker's pages, which its answer could not carry,
 /// and asked the person to send the pages. The research skill stays within what a turn loads of
-/// it, and an unedited earlier copy is upgraded.
+/// it.
 #[test]
 fn a_card_is_a_reader_only_in_a_reply_only_turn() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3300,13 +2662,6 @@ fn a_card_is_a_reader_only_in_a_reply_only_turn() {
     }
     assert!(!browser.contains("When a page would help and neither"));
     assert!(!browser.contains("When a page would help in a reply-only turn"));
-    let previous = include_str!("legacy/web-research-v16.md");
-    assert!(flat(previous).contains("or when none of these is there: one `request_browser` card"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::WEB_RESEARCH_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), RESEARCH_SKILL);
 }
 
 /// A routed browser part knows what to look up, and a page stays `direct` only when this chat
@@ -3320,7 +2675,7 @@ fn a_card_is_a_reader_only_in_a_reply_only_turn() {
 /// those changes out. "Put the hours and the metro route on a small page I can share." went
 /// `direct` with the route unconfirmed, as "a page made only from what this chat already found":
 /// that page needs what the chat found and confirmed. The routing step reads the whole section,
-/// within its budget, for each of these messages, and an unedited earlier copy is upgraded.
+/// within its budget, for each of these messages.
 #[test]
 fn a_routed_browser_part_is_told_what_to_find_and_an_unconfirmed_page_browses_first() {
     let start = BROWSER_SKILL
@@ -3370,14 +2725,6 @@ fn a_routed_browser_part_is_told_what_to_find_and_an_unconfirmed_page_browses_fi
         assert!(!routes.contains("(truncated)"), "{request}: {routes}");
         assert!(routes.contains(section), "{request}: {routes}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v34.md");
-    assert!(previous.contains("it carries that on, never a change the person stopped or undid."));
-    assert!(previous.contains("So is a page made only from what this chat already found.\n"));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A change that needs what a web page says starts in the browser, and the building turn's own
@@ -3392,7 +2739,7 @@ fn a_routed_browser_part_is_told_what_to_find_and_an_unconfirmed_page_browses_fi
 /// so its turn ran in another mode. And the routing step's `summary` goes with the person's words
 /// in every chat with earlier turns, so "those" from a reply the browser never read no longer
 /// keeps a message with the building turn. The routing step reads the whole section, within its
-/// budget, and an unedited earlier copy is upgraded.
+/// budget.
 #[test]
 fn a_change_that_needs_a_web_page_browses_first_and_a_map_is_a_change_of_files() {
     let start = BROWSER_SKILL
@@ -3465,14 +2812,6 @@ fn a_change_that_needs_a_web_page_browses_first_and_a_map_is_a_change_of_files()
         assert!(!routes.contains("(truncated)"), "{request}: {routes}");
         assert!(routes.contains(section), "{request}: {routes}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v36.md");
-    assert!(previous.contains("with your `summary` while this chat has no browser turn:"));
-    assert!(previous.contains("A map (\"on a map\") is `direct`: its skill"));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// A change in the person's own words stays `direct`. In a local test (Nov 8), "Add a note to day
@@ -3485,7 +2824,7 @@ fn a_change_that_needs_a_web_page_browses_first_and_a_map_is_a_change_of_files()
 /// chat found and confirmed now stay `direct` in a line of their own, right after
 /// `browser_then_build`'s, which ends with its own rules. A routed browser turn reads the person's
 /// own messages of the chat too (`conversation_context.rs`), and the section says so. The routing
-/// step reads the whole section, within its budget, and an unedited earlier copy is upgraded.
+/// step reads the whole section, within its budget.
 #[test]
 fn a_change_in_the_persons_own_words_stays_direct() {
     let start = BROWSER_SKILL
@@ -3539,15 +2878,6 @@ fn a_change_in_the_persons_own_words_stays_direct() {
         assert!(!routes.contains("(truncated)"), "{request}: {routes}");
         assert!(routes.contains(section), "{request}: {routes}");
     }
-
-    let previous = include_str!("legacy/browser-automation-v38.md");
-    assert!(previous.contains(
-        "So is a change that needs what a web page says. A map (\"on a map\") is `direct` and a change of files (`required`)"
-    ));
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// The native evidence route must reach ordinary and no-shell skill snapshots without turning
@@ -3579,27 +2909,6 @@ fn provider_retrieval_keeps_direct_reader_restrictions_and_survives_skill_filter
                 .contains("Explicit workspace policies and direct-reader/browser access controls still govern URLs you open yourself")
         );
         assert!(prompt.contains("never send a forbidden URL to another reader, search included"));
-    }
-    for (relative, previous, current) in [
-        (
-            learn::WEB_RESEARCH_RELATIVE_PATH,
-            include_str!("legacy/web-research-v17.md"),
-            RESEARCH_SKILL,
-        ),
-        (
-            learn::BROWSER_AUTOMATION_RELATIVE_PATH,
-            include_str!("legacy/browser-automation-v35.md"),
-            BROWSER_SKILL,
-        ),
-    ] {
-        let skill = tmp.path().join(relative);
-        fs::write(&skill, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), current);
-        let edited = format!("{previous}\nSpace-specific note.\n");
-        fs::write(&skill, &edited).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&skill).unwrap(), edited);
     }
 }
 
@@ -4000,8 +3309,7 @@ fn assert_the_routing_step_reads(section: &str, request: &str) {
 /// map's: a map's skill looks up its own places, and a map's reply often names a place it didn't
 /// find. In a local test (Nov 10), "Add a note to day 1: book the <castle> tickets ahead." came
 /// right after a map reply that said the castle's listing wasn't found; a note in the person's
-/// own words, and a place added to a map, stay `direct` (`required`). An unedited earlier copy is
-/// upgraded.
+/// own words, and a place added to a map, stay `direct` (`required`).
 #[test]
 fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
     let section = routing_section(BROWSER_SKILL);
@@ -4033,14 +3341,6 @@ fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
     ] {
         assert_the_routing_step_reads(section, request);
     }
-
-    let previous = include_str!("legacy/browser-automation-v43.md");
-    assert!(!previous.contains("weren't found or confirmed"));
-    let tmp = scaffolded_space();
-    let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&skill, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&skill).unwrap(), BROWSER_SKILL);
 }
 
 /// News put on a page is research that ends in a page, and goes to the browser first as a
@@ -4141,21 +3441,6 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
             );
         }
     }
-    let previous = include_str!("legacy/browser-automation-v43.md");
-    assert!(!previous.contains("check their account"));
-    let previous = include_str!("legacy/browser-automation-v44.md");
-    assert!(!previous.contains("unless Octo can search the web"));
-    let tmp = scaffolded_space();
-    let path = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), BROWSER_SKILL);
-    // The copy whose exception sat in the `browser_then_build` line is upgraded too.
-    let previous = include_str!("legacy/browser-automation-v45.md");
-    assert!(previous.contains("from the first message, unless Octo can search the web"));
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), BROWSER_SKILL);
 }
 
 /// Research that ends in a page searches before the browser only on a runtime whose setting says
@@ -4202,10 +3487,6 @@ fn the_routing_section_leaves_out_what_the_routing_instructions_say() {
         "and a change here is built after it",
     ] {
         assert!(!section.contains(gone), "{gone}");
-        assert!(
-            include_str!("legacy/browser-automation-v43.md").contains(gone),
-            "{gone}"
-        );
     }
     let tmp = scaffolded_space();
     let request = "Open www.belvedere.at in your browser and find tomorrow's opening hours.";

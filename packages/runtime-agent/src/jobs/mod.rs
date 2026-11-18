@@ -773,6 +773,85 @@ fn leave_thread_holding_a_stopped_request(
     (Some(JsonValue::Object(map)), left)
 }
 
+/// A message's routed browser part starts a new browser thread once the chat's browser thread's
+/// latest request sent more than this many input tokens
+/// ([`leave_a_long_browser_thread_of_earlier_messages`]).
+const LONG_BROWSER_THREAD_INPUT_TOKENS: u64 = 60_000;
+
+/// A chat's browser thread holds every page its browser turns read, and each request of a turn
+/// that resumes it sends them all again. A comparison's fill-in resumed a thread whose latest
+/// request was about 114k tokens, made 25 requests of 117k to 193k tokens, nearly all cached, and
+/// cost 49 credits; the seven browser parts of that local test that resumed their chat's thread
+/// cost 122 of its 252 credits (Nov 17). So the browser part of a new message the routing step
+/// sent to the browser (`browser_hand_back::carries_on_a_routed_card`) leaves a thread whose
+/// latest request sent more than [`LONG_BROWSER_THREAD_INPUT_TOKENS`]
+/// (`codex::thread_last_request`): the lane's keys go, as after a Stop
+/// ([`leave_thread_holding_a_stopped_request`]), and the turn starts a new thread from the chat's
+/// replay, which gives it the chat's browser turns, what each was asked and, quoted as builds
+/// read them, its findings and what it didn't find (`conversation_context::parse_lane_history`).
+/// A shorter thread is cheap and holds what the chat's last browser turn just saw, so it is
+/// resumed.
+///
+/// The turns of one message keep their thread: a second pass and the wrap-up run on their turn's
+/// own thread and never come here, and Let Octo continue and a building turn's card carry on a
+/// request of their own. A Continue under a Stop sends the stopped request again, as a message
+/// whose card the routing step posts (`conversation_context::RoutedCardMessage::Continue`), and
+/// its browser part goes on with what that request's turn did on the thread, when the thread
+/// holds it: when the thread's latest request came after the person sent the request. A turn the
+/// person stopped saves no thread, so when the stopped part had left a long thread, or never
+/// began (a Stop during the routing step), the state still names an earlier message's thread,
+/// whose latest request came before: the Continue's part leaves it as a new message's would. A
+/// Continue whose history says nothing of when the request was sent, or whose thread's rollout
+/// says nothing of when its latest request was, keeps the thread. A turn that fails saves no
+/// thread either: the job reports the state this rule left ([`LeftThread`]), so its Try again,
+/// which carries no routed stamp, does not resume the long thread. The browser itself (its tabs,
+/// a page the person signs in on) is no part of a thread, and the building thread is untouched.
+/// Returns the state and, when the thread was left, how many input tokens its latest request
+/// sent.
+fn leave_a_long_browser_thread_of_earlier_messages(
+    state: Option<JsonValue>,
+    job: &LeaseJob,
+    lane: ThreadLane,
+    last_request: impl FnOnce(Option<&JsonValue>) -> Option<crate::codex::ThreadLastRequest>,
+) -> (Option<JsonValue>, Option<u64>) {
+    if lane != ThreadLane::SharedBrowser {
+        return (state, None);
+    }
+    let Some(card) = job
+        .payload
+        .get("metadata")
+        .filter(|metadata| browser_hand_back::carries_on_a_routed_card(metadata))
+        .and_then(|metadata| metadata.pointer("/browserCardTurn/cardJobId"))
+        .and_then(JsonValue::as_str)
+    else {
+        return (state, None);
+    };
+    let Some(message) =
+        conversation_context::routed_card_message(job.payload.get("conversation_history"), card)
+    else {
+        return (state, None);
+    };
+    let Some(latest) = last_request(state.as_ref())
+        .filter(|latest| latest.input_tokens > LONG_BROWSER_THREAD_INPUT_TOKENS)
+    else {
+        return (state, None);
+    };
+    if let conversation_context::RoutedCardMessage::Continue { request_sent } = message {
+        let holds_no_turn_of_the_request = latest
+            .at
+            .zip(request_sent)
+            .is_some_and(|(at, sent)| at < sent);
+        if !holds_no_turn_of_the_request {
+            return (state, None);
+        }
+    }
+    let Some(JsonValue::Object(mut map)) = state else {
+        return (state, None);
+    };
+    let left = leave_lane_thread(&mut map, lane).then_some(latest.input_tokens);
+    (Some(JsonValue::Object(map)), left)
+}
+
 /// Takes the lane's thread out of a state, so a run of the lane starts a new one: every key of
 /// the thread goes, at the top and in a nested `codex` state. Says whether the state named one.
 fn leave_lane_thread(map: &mut JsonMap<String, JsonValue>, lane: ThreadLane) -> bool {
@@ -898,11 +977,14 @@ fn left_building_thread_for_mode(state: Option<&JsonValue>) -> bool {
 }
 
 /// The state a job reports when its turn fails after it left the building thread for another
-/// mode. A failed turn saves no thread, so the controller would hand the next turn the state that
-/// names the thread left, which never saw the failed turn: a turn of that thread's mode would
-/// resume it, and read neither the failed request nor an Undo or a Stop before it. The job reports
-/// the state the turn ran on instead, which names no building thread, so the next turn starts
-/// one from the chat's replay. A turn that lost its lease (a Stop) reports no failure.
+/// mode, or a long browser thread of earlier messages
+/// ([`leave_a_long_browser_thread_of_earlier_messages`]). A failed turn saves no thread, so the
+/// controller would hand the next turn the state that names the thread left, which never saw the
+/// failed turn: a turn of that thread's mode would resume it, and read neither the failed request
+/// nor an Undo or a Stop before it, and a Try again of the browser part would resume the long
+/// thread. The job reports the state the turn ran on instead, which names no such thread, so the
+/// next turn starts one from the chat's replay. A turn that lost its lease (a Stop) reports no
+/// failure.
 #[derive(Default)]
 struct LeftThread(parking_lot::Mutex<Option<JsonValue>>);
 
@@ -947,7 +1029,8 @@ impl std::error::Error for FailedTurnState {}
 
 /// What a failed job reports for the next turn of its chat, as a finished job does
 /// (`JobExecution::proxy_metadata`): the state its turn ran on, when it left its building thread
-/// ([`LeftThread`]); otherwise nothing, and the next turn gets the state saved before.
+/// or a long browser thread ([`LeftThread`]); otherwise nothing, and the next turn gets the state
+/// saved before.
 pub fn failed_job_proxy_metadata(error: &anyhow::Error) -> Option<JsonValue> {
     error
         .downcast_ref::<FailedTurnState>()
@@ -2746,7 +2829,7 @@ fn pinned_reading_the_web_section(workspace_dir: &Path) -> Option<String> {
     } else if let Some(own) = markdown_section(&text, READING_THE_WEB_SECTION) {
         own
     } else if says_each_rule_of(&text, &current)
-        || learn::earlier_agents_doc_sections(READING_THE_WEB_SECTION)
+        || learn::earlier_reading_the_web_sections()
             .any(|earlier| says_each_rule_of(&text, &earlier))
     {
         current
@@ -4818,6 +4901,31 @@ fn participation_decline_sentinel(content: &str) -> bool {
         return false;
     }
     trimmed.trim_matches('`').trim() == "NO_RESPONSE"
+}
+
+/// Whether the controller lets this turn end on the bare decline word: a turn it dispatched for
+/// Octo to decide whether to answer at all (an ambient group turn, an automation with nothing to
+/// report), or one it already marked declined. The controller swallows the word on exactly these
+/// (`job_payload_marks_agent_evaluation` or `job_payload_marks_agent_declined`).
+fn controller_lets_the_turn_decline(job: &LeaseJob) -> bool {
+    let participation = &job.payload["metadata"]["groupParticipation"];
+    let decision = participation["decision"].as_str();
+    participation["enforcedBy"].as_str() == Some("runtime-controller")
+        && (decision == Some("agent_evaluation")
+            || (decision == Some("silent")
+                && participation["reason"].as_str() == Some("agent_declined")))
+}
+
+/// An answer that is only the decline word, on a turn the controller does not let decline. Such a
+/// turn addresses Octo, and the controller posts the word as its reply (a direct answer is never
+/// silently eaten), so the turn runs once more and is told to answer. Nov 18: "hello" in a
+/// one-on-one chat got "NO_RESPONSE".
+fn declined_a_turn_that_needs_an_answer(
+    job: &LeaseJob,
+    summary: &str,
+) -> Option<CodexFallbackSummaryKind> {
+    (participation_decline_sentinel(summary) && !controller_lets_the_turn_decline(job))
+        .then_some(CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer)
 }
 
 fn clean_decline_final_json(value: &JsonValue) -> bool {
@@ -8389,6 +8497,22 @@ impl JobProcessor {
                 "the lane's thread holds a request or message the person stopped or undid; this turn starts a new thread from the chat's replay"
             );
         }
+        let (stored_provider_conversation_state, left_long_browser_thread) =
+            leave_a_long_browser_thread_of_earlier_messages(
+                stored_provider_conversation_state,
+                job,
+                thread_lane,
+                |state| crate::codex::thread_last_request(state, thread_lane),
+            );
+        if let Some(last_request_input_tokens) = left_long_browser_thread {
+            left_thread.record(stored_provider_conversation_state.as_ref());
+            tracing::info!(
+                job_id = %job.id,
+                lane = thread_lane.name(),
+                last_request_input_tokens,
+                "the chat's browser thread is long and holds no turn of this message; its browser part starts a new thread from the chat's replay"
+            );
+        }
         let final_output_mode = final_output_mode_for_runtime_job(
             job,
             read_only_scoped_worker_preobserved,
@@ -9116,7 +9240,8 @@ impl JobProcessor {
             );
         }
         let mut codex_fallback_summary_kind =
-            classify_internal_codex_fallback_summary(&outcome.summary);
+            classify_internal_codex_fallback_summary(&outcome.summary)
+                .or_else(|| declined_a_turn_that_needs_an_answer(job, &outcome.summary));
         if first_shared_browser_terminal_consent_failure.is_some() {
             // The lines it keeps name no address the browser refused it and no step opened,
             // and none its steps never tried.
@@ -9570,7 +9695,8 @@ impl JobProcessor {
                             )
                         }
                     }
-                    CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => {
+                    CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
+                    | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
                         codex_fallback_retry_prompt(&prompt, kind)
                     }
                 }
@@ -9818,7 +9944,8 @@ impl JobProcessor {
             log_browser_requests_dropped_as_read(job, &retry_output.final_json);
             suppress_browser_requests_where_unsupported(job, &mut retry_outcome);
             let mut retry_codex_fallback_summary_kind =
-                classify_internal_codex_fallback_summary(&retry_outcome.summary);
+                classify_internal_codex_fallback_summary(&retry_outcome.summary)
+                    .or_else(|| declined_a_turn_that_needs_an_answer(job, &retry_outcome.summary));
             augment_summary_for_onboarding_actions(
                 &mut retry_outcome.summary,
                 &retry_outcome.actions,
@@ -15409,6 +15536,9 @@ fn codex_fallback_retry_reason(kind: CodexFallbackSummaryKind) -> &'static str {
         CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => {
             "invalid_final_assistant_message_json"
         }
+        CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+            "declined_a_turn_that_needs_an_answer"
+        }
     }
 }
 
@@ -15419,6 +15549,10 @@ fn codex_fallback_retry_message(kind: CodexFallbackSummaryKind) -> &'static str 
         }
         CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => {
             "Retrying: Codex completed without returning a valid final assistant JSON message."
+        }
+        // A row of the turn: the decline word is not in it.
+        CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+            "Retrying: Codex declined a turn that needs an answer."
         }
     }
 }
@@ -15431,12 +15565,16 @@ fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> 
         CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => {
             "Your previous response completed, but the final assistant message was not valid JSON."
         }
+        CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+            "Your previous answer was only `NO_RESPONSE`. That word declines an ambient group turn that Instafy marks for a participation decision, and this turn is not one: the person is talking to you, so answer them. Do not answer `NO_RESPONSE`."
+        }
     };
     let observation_requirement = match kind {
         CodexFallbackSummaryKind::MissingFinalAssistantMessage => {
             "\n        - If the latest request depends on workspace, project, repository, or runtime facts and the user did not forbid tool use, make at least one concrete observation with an available tool/command before the final response."
         }
-        CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson => "",
+        CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
+        | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => "",
     };
     format!(
         "{prompt}\n\nIMPORTANT RETRY REQUIREMENT:\n\
@@ -15985,6 +16123,11 @@ fn codex_fallback_failure_message(kind: CodexFallbackSummaryKind, summary: &str)
             format!(
                 "Codex returned assistant text instead of the required final JSON after retry. Last assistant output: \"{preview}\""
             )
+        }
+        // Never the word itself as the turn's reply: on this turn the controller would post it.
+        CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+            "Codex declined to answer (NO_RESPONSE) again after retry, on a turn that needs an answer."
+                .to_string()
         }
     }
 }
@@ -27402,6 +27545,267 @@ mod tests {
         );
     }
 
+    /// The browser part of a new message the routing step sent to the browser leaves a browser
+    /// thread whose latest request sent more than 60k input tokens: only the browser lane's keys
+    /// go, so the run starts a new browser thread from the chat's replay with the building thread
+    /// riding along. A shorter thread is resumed, and so is the thread of a turn that carries on
+    /// a request of its own: a Let Octo continue, a building turn's card, and a Continue under a
+    /// Stop whose thread ran a turn of the request it sends again. A Continue whose thread's
+    /// latest request came before the person sent that request leaves a long one as a new
+    /// message's part would: the stopped part saved no thread, so that thread is an earlier
+    /// message's. A local test (Nov 17): a comparison's fill-in resumed a thread whose latest
+    /// request was about 114k tokens, and its browser part cost 49 credits.
+    #[test]
+    fn a_messages_browser_part_leaves_a_long_browser_thread_of_earlier_messages() {
+        use crate::codex::ThreadLastRequest;
+        let tmp = tempdir().expect("temp dir");
+        let rollout = tmp.path().join("browser.jsonl");
+        fs::write(&rollout, "").expect("write rollout");
+        let building = Uuid::new_v4().to_string();
+        let browser = Uuid::new_v4().to_string();
+        let state = json!({
+            "provider": "codex-embedded",
+            "defaultThreadId": building,
+            "threadId": building,
+            "defaultThreadMode": "strict_structured",
+            "sharedBrowserThreadId": browser,
+            "sharedBrowserRolloutPath": rollout.display().to_string(),
+            "sharedBrowserThreadRestoreFailed": false,
+            "sharedBrowserHistoryReplayRequired": false,
+            "historyReplayRequired": false,
+        });
+        let card_turn = |card: &str| {
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": format!("job:{card}"),
+                "browserHandsBack": true,
+                "browserCardTurn": {"version": 1, "cardJobId": card, "routed": true},
+            })
+        };
+        let mut history = vec![
+            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-1", "createdAt": "2026-11-17T14:30:00Z"}),
+            json!({"role": "assistant", "content": "", "runId": "run-1", "createdAt": "2026-11-17T14:30:04Z", "metadata": {"jobId": "card-1", "messageType": "action_request", "details": {"browserRequest": {"task": "Compare the three latest laptops, as a comparison page.", "routed": true}}}}),
+            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-2", "lane": "browser", "createdAt": "2026-11-17T14:30:06Z", "metadata": {"prompt_metadata": card_turn("card-1")}}),
+            json!({"role": "assistant", "content": "{\"url\":\"https://maker.example/\",\"title\":\"Laptops\",\"facts\":[\"Lists three laptops.\"]}", "runId": "run-2", "lane": "browser", "createdAt": "2026-11-17T14:41:02Z", "metadata": {"details": {"browserFindings": {"pages": 1, "pagesRead": 1}}}}),
+            json!({"role": "user", "content": "Continue building with what the browser turn found.", "runId": "run-3", "createdAt": "2026-11-17T14:41:03Z"}),
+            json!({"role": "assistant", "content": "Built the comparison page.", "runId": "run-3", "createdAt": "2026-11-17T14:43:30Z", "metadata": {"jobId": "build-1"}}),
+            json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-4", "createdAt": "2026-11-17T14:50:00Z"}),
+            json!({"role": "assistant", "content": "", "runId": "run-4", "createdAt": "2026-11-17T14:50:04Z", "metadata": {"jobId": "card-2", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}}),
+        ];
+        let job_with = |history: &[JsonValue], metadata: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({"conversation_history": history, "metadata": metadata}),
+            )
+        };
+        let request = |input_tokens: u64, at: &str| {
+            let at = chrono::DateTime::parse_from_rfc3339(at)
+                .ok()
+                .map(|at| at.with_timezone(&chrono::Utc));
+            assert!(at.is_some(), "a time");
+            move |_: Option<&JsonValue>| Some(ThreadLastRequest { input_tokens, at })
+        };
+        // The comparison's browser part's second pass, before the fill-in was sent.
+        let long = request(113_864, "2026-11-17T14:40:51.441Z");
+        let fill_in = job_with(&history, card_turn("card-2"));
+
+        let (left_state, left) = leave_a_long_browser_thread_of_earlier_messages(
+            Some(state.clone()),
+            &fill_in,
+            ThreadLane::SharedBrowser,
+            long,
+        );
+        assert_eq!(left, Some(113_864));
+        let left_state = left_state.expect("state");
+        for key in ThreadLane::SharedBrowser.thread_state_keys() {
+            assert!(left_state.get(*key).is_none(), "{key}: {left_state}");
+        }
+        for key in ["defaultThreadId", "threadId", "defaultThreadMode"] {
+            assert_eq!(left_state[key], state[key], "{key}");
+        }
+        let (for_run, _) = provider_conversation_state_for_this_runtime(
+            Some(left_state.clone()),
+            ThreadLane::SharedBrowser,
+        );
+        assert!(!provider_state_claims_restored_thread(
+            for_run.as_ref(),
+            ThreadLane::SharedBrowser
+        ));
+        // A new message leaves a long thread whenever its latest request was.
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                Some(state.clone()),
+                &fill_in,
+                ThreadLane::SharedBrowser,
+                request(113_864, "2026-11-17T14:51:30Z")
+            ),
+            (Some(left_state.clone()), Some(113_864))
+        );
+
+        // The thread the rollout says it reads: its latest request, as Codex recorded it.
+        let unchanged = (Some(state.clone()), None);
+        let reads_the_rollout = |state: Option<&JsonValue>| {
+            crate::codex::thread_last_request(state, ThreadLane::SharedBrowser)
+        };
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                Some(state.clone()),
+                &fill_in,
+                ThreadLane::SharedBrowser,
+                reads_the_rollout
+            ),
+            unchanged.clone(),
+            "an empty rollout records no request"
+        );
+        // A short thread is resumed: what the chat's last browser turn saw is still in it.
+        for tokens in [20_000, LONG_BROWSER_THREAD_INPUT_TOKENS] {
+            assert_eq!(
+                leave_a_long_browser_thread_of_earlier_messages(
+                    Some(state.clone()),
+                    &fill_in,
+                    ThreadLane::SharedBrowser,
+                    request(tokens, "2026-11-17T14:40:51.441Z")
+                ),
+                unchanged.clone(),
+                "{tokens}"
+            );
+        }
+        // No browser thread yet: nothing to leave.
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                None,
+                &fill_in,
+                ThreadLane::SharedBrowser,
+                long
+            ),
+            (None, None)
+        );
+
+        // Turns that carry on a request of their own keep the thread, and never read its rollout.
+        let never = |_: Option<&JsonValue>| -> Option<ThreadLastRequest> {
+            panic!("read the thread's rollout")
+        };
+        let building_turn = job_with(&history, json!({}));
+        let let_octo_continue = job_with(
+            &history,
+            json!({"browserTransport": "shared", "browserContinuesRunId": Uuid::new_v4().to_string()}),
+        );
+        let building_turns_card = job_with(
+            &history,
+            json!({"browserTransport": "shared", "browserRequestOf": "job:build-1", "browserHandsBack": true}),
+        );
+        // A Try again of a failed browser part: the controller stamps a card's first turn only.
+        let try_again = job_with(
+            &history,
+            json!({"browserTransport": "shared", "browserRequestOf": "job:card-2", "browserHandsBack": true}),
+        );
+        for (job, lane) in [
+            (&building_turn, ThreadLane::Building),
+            (&fill_in, ThreadLane::Building),
+            (&let_octo_continue, ThreadLane::SharedBrowser),
+            (&building_turns_card, ThreadLane::SharedBrowser),
+            (&try_again, ThreadLane::SharedBrowser),
+        ] {
+            assert_eq!(
+                leave_a_long_browser_thread_of_earlier_messages(
+                    Some(state.clone()),
+                    job,
+                    lane,
+                    never
+                ),
+                unchanged.clone()
+            );
+        }
+        // A card the history doesn't show is no message to start again for.
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                Some(state.clone()),
+                &job_with(&history, card_turn("card-9")),
+                ThreadLane::SharedBrowser,
+                never
+            ),
+            unchanged.clone()
+        );
+
+        // A Continue under a Stop sends the stopped request again, as a message of its own whose
+        // card the routing step posts. The person stopped the fill-in while its card was being
+        // posted, so no browser turn of it ran: the stored thread is the comparison's, whose
+        // latest request came before the fill-in was sent, and the Continue's part leaves it.
+        history.push(json!({"role": "assistant", "content": "Stopped this run.", "runId": "run-4", "createdAt": "2026-11-17T14:50:05Z", "metadata": {
+            "source": "controller", "kind": "run_cancellation", "details": {
+                "reason": "Stopped", "runIds": ["run-4"], "stopRequested": true, "actorUserId": "person-1",
+            },
+        }}));
+        history.push(json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-5", "createdAt": "2026-11-17T14:52:30Z", "metadata": {"prompt_metadata": {"continuedStopMessageId": "stop-1", "continuedRunIds": ["run-4"]}}}));
+        history.push(json!({"role": "assistant", "content": "", "runId": "run-5", "createdAt": "2026-11-17T14:52:34Z", "metadata": {"jobId": "card-3", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}}));
+        let continued = job_with(&history, card_turn("card-3"));
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                Some(state.clone()),
+                &continued,
+                ThreadLane::SharedBrowser,
+                long
+            ),
+            (Some(left_state.clone()), Some(113_864))
+        );
+        // A Continue whose stopped part ran on the thread goes on there: its latest request came
+        // after the fill-in was sent. So does one that can't tell when either was.
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                Some(state.clone()),
+                &continued,
+                ThreadLane::SharedBrowser,
+                request(75_000, "2026-11-17T14:50:31.008Z")
+            ),
+            unchanged.clone()
+        );
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                Some(state.clone()),
+                &continued,
+                ThreadLane::SharedBrowser,
+                |_| Some(ThreadLastRequest {
+                    input_tokens: 113_864,
+                    at: None,
+                })
+            ),
+            unchanged.clone()
+        );
+        let mut undated = history.clone();
+        for entry in &mut undated {
+            entry.as_object_mut().expect("entry").remove("createdAt");
+        }
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                Some(state.clone()),
+                &job_with(&undated, card_turn("card-3")),
+                ThreadLane::SharedBrowser,
+                long
+            ),
+            unchanged.clone()
+        );
+        // The person stopped the fill-in's browser part, which had left the comparison's thread:
+        // its Continue, which names that part's run, leaves it too.
+        let mut stopped_part = history[..8].to_vec();
+        stopped_part.push(json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-6", "lane": "browser", "createdAt": "2026-11-17T14:50:06Z", "metadata": {"prompt_metadata": card_turn("card-2")}}));
+        stopped_part.push(json!({"role": "assistant", "content": "Stopped this run.", "runId": "run-6", "createdAt": "2026-11-17T14:51:40Z", "metadata": {
+            "source": "controller", "kind": "run_cancellation", "details": {
+                "reason": "Stopped", "runIds": ["run-6"], "stopRequested": true, "actorUserId": "person-1",
+            },
+        }}));
+        stopped_part.push(json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-7", "createdAt": "2026-11-17T14:52:30Z", "metadata": {"prompt_metadata": {"continuedStopMessageId": "stop-2", "continuedRunIds": ["run-6"]}}}));
+        stopped_part.push(json!({"role": "assistant", "content": "", "runId": "run-7", "createdAt": "2026-11-17T14:52:34Z", "metadata": {"jobId": "card-4", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}}));
+        assert_eq!(
+            leave_a_long_browser_thread_of_earlier_messages(
+                Some(state.clone()),
+                &job_with(&stopped_part, card_turn("card-4")),
+                ThreadLane::SharedBrowser,
+                long
+            ),
+            (Some(left_state), Some(113_864))
+        );
+    }
+
     /// Two modes share a building thread exactly when their requests begin alike: with the same
     /// base instructions and the same reply format.
     #[test]
@@ -28567,6 +28971,96 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    /// Nov 18: "hello" in a one-on-one chat got the reply "NO_RESPONSE". Only a turn the controller
+    /// lets decline may end on the word; on any other, the answer is no answer, the turn runs once
+    /// more told to answer, and a second decline fails it instead of becoming the reply.
+    #[test]
+    fn only_a_turn_the_controller_lets_decline_may_answer_with_the_decline_word() {
+        let participation = |marker: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({"metadata": {"groupParticipation": marker}}),
+            )
+        };
+        let one_on_one = participation(json!({
+            "decision":"respond", "reason":"single_human_conversation", "domain":"direct",
+            "participantCount":1, "confidence":100, "enforcedBy":"runtime-controller"
+        }));
+        // A marker the controller did not stamp lets no turn decline, as the controller reads it.
+        let unstamped = participation(json!({
+            "decision":"agent_evaluation", "reason":"skill_mode_ambient"
+        }));
+        let automation = participation(json!({
+            "decision":"agent_evaluation", "reason":"automation_nothing_to_report",
+            "enforcedBy":"runtime-controller"
+        }));
+        let declined = participation(json!({
+            "decision":"silent", "reason":"agent_declined", "enforcedBy":"runtime-controller"
+        }));
+        let needs_an_answer = [
+            one_on_one.clone(),
+            unstamped,
+            test_lease_job(Some("feature"), json!({})),
+        ];
+        let may_decline = [ambient_participation_test_job(), automation, declined];
+        for word in [
+            "NO_RESPONSE",
+            " `NO_RESPONSE` ",
+            "```text\nNO_RESPONSE\n```",
+        ] {
+            for job in &needs_an_answer {
+                assert_eq!(
+                    declined_a_turn_that_needs_an_answer(job, word),
+                    Some(CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer),
+                    "{word:?} {}",
+                    job.payload
+                );
+            }
+            for job in &may_decline {
+                assert_eq!(
+                    declined_a_turn_that_needs_an_answer(job, word),
+                    None,
+                    "{word:?} {}",
+                    job.payload
+                );
+            }
+        }
+        // Words around the token, or another casing, are an answer, as the controller reads them.
+        for answer in [
+            "Hi! What can I help you with?",
+            "I will not answer: NO_RESPONSE",
+            "no_response",
+        ] {
+            assert_eq!(
+                declined_a_turn_that_needs_an_answer(&one_on_one, answer),
+                None
+            );
+        }
+
+        let kind = CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer;
+        assert_eq!(
+            codex_fallback_retry_reason(kind),
+            "declined_a_turn_that_needs_an_answer"
+        );
+        assert!(!codex_fallback_retry_message(kind).contains("NO_RESPONSE"));
+        let retry = codex_fallback_retry_prompt("hello", kind);
+        assert!(
+            retry.starts_with("hello\n\nIMPORTANT RETRY REQUIREMENT:\n"),
+            "{retry}"
+        );
+        assert!(retry.contains("Do not answer `NO_RESPONSE`."), "{retry}");
+        let failure = codex_retry_blocking_failure_message(
+            Some(kind),
+            "NO_RESPONSE",
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("a second decline fails the turn");
+        assert!(failure.contains("again after retry"), "{failure}");
     }
 
     #[test]

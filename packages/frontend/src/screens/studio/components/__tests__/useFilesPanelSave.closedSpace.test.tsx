@@ -85,7 +85,7 @@ describe("a save that outlives its space or Studio", () => {
   function openSpaces(spaces: Record<string, CodeWorkspace>, active: string) {
     const base = useWorkspaceStore.getState().state;
     const projects = Object.fromEntries(Object.entries(spaces).map(([id, workspace]) => [id, { ...base, code: workspace }]));
-    useWorkspaceStore.setState({ projects, activeProjectId: active, state: projects[active], history: [], future: [] });
+    useWorkspaceStore.setState({ projects, activeProjectId: active, state: projects[active] });
   }
   async function renderStudio(panelKey: string | null = null) {
     await act(async () =>

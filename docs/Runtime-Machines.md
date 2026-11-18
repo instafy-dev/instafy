@@ -883,8 +883,8 @@ loses only work that never reached the remote:
   be pushed at all goes to one as well. See
   [the origin server](../packages/origin-http-server/README.md#publishing-workspace-runtimes-and-desktop).
 - **A stop never publishes dirty files.** Before the controller stops a
-  provider-managed runtime (idle reaper, credit stop, a user's Stop or
-  removal, ensure replacement, the sweeps), and before it fences the runtime,
+  provider-managed runtime (credit stop, a user's Stop or removal, ensure
+  replacement, the sweeps), and before it fences the runtime,
   it calls the hosted origin's `POST /git/flush` and waits at most 25 seconds.
   The flush first stores everything on local recovery refs, with no network
   call: finished local commits that are not on `main` as `unpublished`, and
@@ -962,7 +962,7 @@ loses only work that never reached the remote:
   event adds top-level `durable`, `persistedAt` and, when the save did not
   land, `workingStateError`: whether canonical holds everything the folder
   held, and since when.
-- An idle stop (the idle sweep, the idle reaper, an idle-slot reclaim) can
+- An idle stop (the idle sweep or an idle-slot reclaim) can
   wait up to 25 seconds on its flush. When someone comes back meanwhile (a
   new workspace lease this runtime serves, or a user's activity ping), the
   stop gives way (`workspace_reopened`) and the origin takes saves again. A
@@ -1141,11 +1141,8 @@ chat uploads, build output): such files stay on the runtime's disk only.
 **Checkout lifetime.** The hosted checkout is a bind mount of the node's disk,
 `DOCKER_REPO_HOST/<project>`. It survives container stops and re-provisioning
 on that node and is lost when the node is replaced; correctness does not
-depend on it, because the next start clones `main` again. `DOCKER_REPO_HOST`
-is never the origin gateway's `ORIGIN_WORKSPACE_ROOT`: the gateway moves every
-`<project>` folder of its root aside when it starts, and refuses to start on a
-folder that holds runtime checkouts. The provider service evicts stopped
-checkouts:
+depend on it, because the next start clones `main` again. The provider service
+evicts stopped checkouts:
 
 - after `RUNTIME_CHECKOUT_TTL_DAYS` without a start or stop (default 7, 0
   turns idle eviction off), and, oldest first, while the node's checkouts

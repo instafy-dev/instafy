@@ -3113,16 +3113,12 @@ export async function prepareStudio(
           setState?: (input: Partial<{
             activeProjectId: string;
             projects: Record<string, unknown>;
-            history: unknown[];
-            future: unknown[];
           }>) => void;
         };
       };
       runtimeWindow.__INSTAFY_STORE__?.setState?.({
         activeProjectId: "",
         projects: {},
-        history: [],
-        future: [],
       });
       runtimeWindow.__INSTAFY_ACTIVE_PROJECT_ID__ = null;
       runtimeWindow.__INSTAFY_PROJECT_INITIALIZED__ = false;

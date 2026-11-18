@@ -76,8 +76,7 @@ fn pages_to_tap_through_route_to_the_hub() {
 /// that builds it runs without the workspace memory snapshot, so it learns which skills apply from the hints alone:
 /// they named the browser skill (whose `page` is a page in the browser) and no page builder, and the turn built the
 /// page inside a map site, served without Studio's theme. The hub is hinted now, and picks a starter. A page in the
-/// browser, or a request with no page in it, is not the hub's. An unedited copy of the hub from before is upgraded;
-/// an edited one is kept.
+/// browser, or a request with no page in it, is not the hub's.
 #[test]
 fn a_page_asked_for_in_plain_words_points_the_building_turn_at_the_hub() {
     let tmp = tempdir().expect("tmp");
@@ -111,19 +110,6 @@ fn a_page_asked_for_in_plain_words_points_the_building_turn_at_the_hub() {
             routed(&contexts, prompt)
         );
     }
-
-    let hub =
-        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
-    let previous = include_str!("legacy/interactive-artifacts-v6.md");
-    assert!(!previous.contains("small page"));
-    let path = tmp.path().join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
-    let edited = format!("{previous}\nLocal page preference.\n");
-    fs::write(&path, &edited).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
 
 #[test]
@@ -192,74 +178,25 @@ fn hub_and_an_installed_pack_skill_load_whole_within_the_budget() {
     );
 }
 
-#[test]
-fn research_execution_policy_upgrades_unedited_skills_but_keeps_local_edits() {
-    let tmp = tempdir().unwrap();
-    let root = tmp.path();
-    learn::ensure_project_memory_scaffold(root);
-    let current =
-        include_str!("../../assets/instafy/.agents/skills/instafy-research-team/SKILL.md");
-    let researcher = include_str!(
-        "../../assets/instafy/.agents/skills/instafy-research-team/references/researcher.md"
-    );
-    for (relative, previous, expected) in [
-        (
-            learn::RESEARCH_TEAM_RELATIVE_PATH,
-            include_str!("legacy/research-team-v1.md"),
-            current,
-        ),
-        (
-            learn::RESEARCH_TEAM_RESEARCHER_RELATIVE_PATH,
-            include_str!("legacy/research-team-researcher-v2.md"),
-            researcher,
-        ),
-    ] {
-        let path = root.join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(root);
-        assert_eq!(fs::read_to_string(&path).unwrap(), expected);
-        let customized = format!("{previous}\nLocal research preference.\n");
-        fs::write(&path, &customized).unwrap();
-        learn::ensure_project_memory_scaffold(root);
-        assert_eq!(fs::read_to_string(path).unwrap(), customized);
-    }
-    assert!(current.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
-}
-
 /// A page written by hand follows light and dark as the starters' `theme.css` does (a visit page written by hand set
 /// `color-scheme: light` and stayed light in a dark Studio, and so did its card's picture): the device's mode, and
 /// Studio's theme, which the bind client puts on `<html data-theme>` and which wins over the device's (a framed
-/// page's `prefers-color-scheme` can follow the device instead of Studio). An unedited earlier copy of the hub is
-/// upgraded; an edited one is kept.
+/// page's `prefers-color-scheme` can follow the device instead of Studio).
 #[test]
 fn a_page_written_by_hand_follows_light_and_dark() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
-    let previous = include_str!("legacy/interactive-artifacts-v4.md");
     let rule = r#"a page you write sets its dark colours, with `color-scheme: dark`, under
         `:root:not([data-theme="light"])` inside `@media (prefers-color-scheme: dark)` and under
         `:root[data-theme="dark"]` (Studio's theme, which `instafy bind serve` puts on `<html>`). Never
         `color-scheme: light` alone;"#;
     assert!(flat(hub).contains(&flat(rule)), "{hub}");
-    assert!(!previous.contains("prefers-color-scheme"));
     assert!(
         hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
         "{} bytes",
         hub.len()
     );
-
-    let tmp = tempdir().unwrap();
-    let root = tmp.path();
-    learn::ensure_project_memory_scaffold(root);
-    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
-    let edited = format!("{previous}\nLocal page preference.\n");
-    fs::write(&path, &edited).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
 
 /// `instafy preview open` takes the folder it runs in for the card's site: where opening the card
@@ -271,14 +208,12 @@ fn a_page_written_by_hand_follows_light_and_dark() {
 /// gets that command from the check, which runs it when it passes (named in the hub as well, the
 /// card was asked for twice). A page with no builder skill names no serve command there: the
 /// command serves its folder by itself
-/// (`no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill`). An unedited earlier
-/// copy of the hub is upgraded; an edited one is kept.
+/// (`no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill`).
 #[test]
 fn a_pages_card_starts_inside_the_sites_own_folder() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
-    let previous = include_str!("legacy/interactive-artifacts-v7.md");
     let step = r#"1. A page `instafy bind check` checks gets its card from that check (above), whose answer
         gives its port. Any other site: one command, run inside the site's folder, starts it so it
         outlives your turn and posts its card: `(cd sites/<slug> && instafy preview open --title
@@ -287,24 +222,11 @@ fn a_pages_card_starts_inside_the_sites_own_folder() {
     assert!(flat(hub).contains(&flat(step)), "{hub}");
     assert!(!hub.contains("a bound or plain site's is"), "{hub}");
     assert!(!hub.contains("from the site's folder"), "{hub}");
-    assert!(flat(previous).contains("1. One command, from the site's folder, starts it"));
     assert!(
         hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
         "{} bytes",
         hub.len()
     );
-
-    let tmp = tempdir().unwrap();
-    let root = tmp.path();
-    learn::ensure_project_memory_scaffold(root);
-    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
-    let edited = format!("{previous}\nLocal page preference.\n");
-    fs::write(&path, &edited).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
 
 /// A blank page's turn chained `instafy bind check … && instafy preview open …`, as the hub said
@@ -314,7 +236,7 @@ fn a_pages_card_starts_inside_the_sites_own_folder() {
 /// that passes posts the card itself, so a bound page's turn no longer posts it first: two turns
 /// that did, then opened it again under another title, were refused and told the person the page
 /// "wasn't opened separately". Only a site with no binder (a map a builder skill hosts) posts its
-/// card first. Unedited earlier copies of both are upgraded; edited ones are kept.
+/// card first.
 #[test]
 fn a_pages_card_comes_from_its_check_and_never_waits_for_one_that_fails() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -357,72 +279,23 @@ fn a_pages_card_comes_from_its_check_and_never_waits_for_one_that_fails() {
             skill.len()
         );
     }
-
-    let tmp = tempdir().unwrap();
-    let root = tmp.path();
-    learn::ensure_project_memory_scaffold(root);
-    for (relative, previous, current) in [
-        (
-            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-            include_str!("legacy/interactive-artifacts-v8.md"),
-            hub,
-        ),
-        (
-            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-            include_str!("legacy/interactive-artifacts-v15.md"),
-            hub,
-        ),
-        (
-            learn::RESEARCH_TEAM_RELATIVE_PATH,
-            include_str!("legacy/research-team-v3.md"),
-            team,
-        ),
-    ] {
-        assert!(
-            previous.contains("before the card") || previous.contains("Post the card first"),
-            "{relative}"
-        );
-        let path = root.join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(root);
-        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
-        let edited = format!("{previous}\nLocal page preference.\n");
-        fs::write(&path, &edited).unwrap();
-        learn::ensure_project_memory_scaffold(root);
-        assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{relative}");
-    }
 }
 
 /// A comparison looked right on a laptop and cramped on a phone, and the hub said only
 /// "Phone-first". It says what that means for a page Octo writes itself (the starters already do
-/// it): never wider than the screen, one column when narrow. An unedited earlier copy of the hub is
-/// upgraded; an edited one is kept.
+/// it): never wider than the screen, one column when narrow.
 #[test]
 fn a_page_is_never_wider_than_a_phone_and_one_column_when_narrow() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
-    let previous = include_str!("legacy/interactive-artifacts-v9.md");
     let line = "Phone-first (never wider than the screen, one column when narrow)";
     assert!(flat(hub).contains(line), "{hub}");
-    assert!(!flat(previous).contains("never wider than the screen"));
     assert!(
         hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
         "{} bytes",
         hub.len()
     );
-
-    let tmp = tempdir().unwrap();
-    let root = tmp.path();
-    learn::ensure_project_memory_scaffold(root);
-    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
-    let edited = format!("{previous}\nLocal page preference.\n");
-    fs::write(&path, &edited).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
 
 /// A hand-back's own words are always the controller's one line, which names no page. Research
@@ -557,8 +430,7 @@ fn direct_write_prompt(workspace: &Path, request: &str) -> String {
 /// own there, and that chat's page and card showed the new one. The turn, which loads no workspace
 /// memory, was hinted only the browser skill: "comparison" was no keyword of the hub (it folds apart
 /// from "compare"). The hub is hinted now. Whose page a request changes is said once, in every
-/// direct workspace-change turn's instructions, and the hub no longer repeats it. An unedited hub
-/// from before is upgraded.
+/// direct workspace-change turn's instructions, and the hub no longer repeats it.
 #[test]
 fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as_it_is() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -596,21 +468,6 @@ fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as
         )
         .contains(PAGE_OF_ITS_OWN_CHAT_RULE)
     );
-
-    // The hub from before: no keyword of this request, and "follow-ups change the same site".
-    let path = tmp.path().join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
-    let previous = include_str!("legacy/interactive-artifacts-v12.md");
-    assert!(previous.contains("follow-ups change the same site"));
-    fs::write(&path, previous).unwrap();
-    assert!(!hinted().iter().any(|id| id == HUB), "{:?}", hinted());
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
-    // and the one that said whose page a request changes itself
-    let previous = include_str!("legacy/interactive-artifacts-v13.md");
-    assert!(previous.contains("a site another chat made changes only when the person names it"));
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
 }
 
 /// The prompt a turn of `conversation` with this job metadata gets for `request` in the space
@@ -804,28 +661,24 @@ fn a_writing_turn_is_told_which_chat_made_each_of_the_spaces_pages() {
 /// person didn't give (dates, a currency, which models) now. And "the review search had no provider"
 /// reached a comparison's cell: a note on a page never names Octo's tools. What a value nobody
 /// found says (where Octo looked itself, or the browser's own words for one it didn't find) is
-/// `instafy-comparing`'s. An unedited hub from before is upgraded
-/// (`a_comparison_asked_in_a_new_chat_is_the_hubs_…`).
+/// `instafy-comparing`'s.
 #[test]
 fn a_reply_assumes_only_what_the_person_left_open_and_a_page_names_no_tool() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub = flat(include_str!(
         "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
     ));
-    let previous = flat(include_str!("legacy/interactive-artifacts-v13.md"));
     for needle in [
         "An `Assumed:` line only for a default you chose that the person didn't give (dates, a currency, which models), and none when there is none.",
         "A note on the page never names the tools, searches or services you used.",
     ] {
         assert!(hub.contains(needle), "{needle}");
-        assert!(!previous.contains(needle), "new in this version: {needle}");
     }
     assert!(
         hub.contains("one nobody found reads `Unknown` and why, as `instafy-comparing` says"),
         "{hub}"
     );
     assert!(!hub.contains("ONE `Assumed:` line"), "{hub}");
-    assert!(previous.contains("ONE `Assumed:` line for the defaults you chose"));
 }
 
 /// Whose page a turn changes reached only the turns that answer in plain text, then every turn
@@ -884,7 +737,7 @@ fn every_turn_that_may_write_reads_whose_page_it_changes_and_never_whose_app() {
 /// sends a page made for the person to the hub, and names no static file server for any site
 /// (`no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill`).
 /// That its prompt names the hub, and no static file server, held before too ("small page" is a
-/// keyword of the hub): it is kept as a guard. An unedited previews skill from before is upgraded.
+/// keyword of the hub): it is kept as a guard.
 #[test]
 fn a_page_to_share_is_built_the_hubs_way_not_served_by_hand() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -921,13 +774,6 @@ fn a_page_to_share_is_built_the_hubs_way_not_served_by_hand() {
         "{} bytes",
         previews.len()
     );
-
-    let path = tmp.path().join(learn::FRONTEND_PREVIEWS_RELATIVE_PATH);
-    let previous = include_str!("legacy/frontend-previews-v16.md");
-    assert!(previous.contains("With no toolchain, prefer one `index.html`"));
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(tmp.path());
-    assert_eq!(fs::read_to_string(&path).unwrap(), previews);
 }
 
 /// A page with no builder skill ("Put the hours and the metro route on a small page I can share.")
@@ -940,7 +786,6 @@ fn a_page_to_share_is_built_the_hubs_way_not_served_by_hand() {
 /// now starts Instafy's page server in such a folder itself (the CLI's `pageServeCommand`), so no
 /// skill a turn reads spells out a serve command for it: the previews skill's two python examples
 /// are gone, and the hub's card command for a page with no builder skill takes no `--serve-cmd`.
-/// The copies from before are kept, and an unedited one is upgraded.
 #[test]
 fn no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill() {
     fn markdown_under(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -1001,33 +846,6 @@ fn no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill() {
             text.len()
         );
     }
-
-    let previous_previews = include_str!("legacy/frontend-previews-v17.md");
-    let previous_hub = include_str!("legacy/interactive-artifacts-v17.md");
-    assert_eq!(
-        previous_previews.matches("python3 -m http.server").count(),
-        2
-    );
-    assert!(previous_hub.contains("The serve command is the builder skill's."));
-    let tmp = tempdir().expect("tmp");
-    learn::ensure_project_memory_scaffold(tmp.path());
-    for (relative, previous, current) in [
-        (
-            learn::FRONTEND_PREVIEWS_RELATIVE_PATH,
-            previous_previews,
-            previews,
-        ),
-        (
-            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-            previous_hub,
-            hub,
-        ),
-    ] {
-        let path = tmp.path().join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(tmp.path());
-        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
-    }
 }
 
 /// A comparison asked for "from what you already know, without browsing" claimed "checked 1 Mar 2025
@@ -1035,14 +853,13 @@ fn no_skill_spells_out_a_serve_command_for_a_page_with_no_builder_skill() {
 /// asks for exactly that. Such a page says so (`"from": "memory"`), and its values cite no page. On
 /// pages of options, an item whose own page nobody opened read "Not found yet", and a tip from no
 /// page sat in the style of the hours' source line: such an item says it wasn't checked, and a tip
-/// is plain text. An unedited hub from before is upgraded.
+/// is plain text.
 #[test]
 fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub = flat(include_str!(
         "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
     ));
-    let previous = flat(include_str!("legacy/interactive-artifacts-v12.md"));
     for needle in [
         "Options asked for from what you already know, with nothing looked up: the compare starter with `\"from\": \"memory\"`, each value only its `\"v\"`, from your own knowledge, never from the space's other pages.",
         "the starter reads each value \"<value>, not checked\" and says \"From what Octo knows; nothing checked.\" under the title.",
@@ -1051,7 +868,6 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
         "A tip no page gave is plain text, never styled like a source line.",
     ] {
         assert!(hub.contains(needle), "{needle}");
-        assert!(!previous.contains(needle), "new in this version: {needle}");
     }
 }
 
@@ -1059,43 +875,26 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
 /// "Still to confirm", where the build's own `unchecked` said it again (a local test, Nov 10). The
 /// compare starter names each row's missing values once, first in its footer, and the bound-sites
 /// cheat sheet says so: nothing names them under the title any more, and `unchecked` never says
-/// again that they are missing, while an entry may still say what the reader can do about one. The
-/// unedited copy from before is upgraded; an edited one is kept.
+/// again that they are missing, while an entry may still say what the reader can do about one.
 #[test]
 fn a_comparisons_missing_values_are_named_once_in_its_footer() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let sheet = include_str!(
         "../../assets/instafy/.agents/skills/instafy-bound-sites/references/cheatsheet.md"
     );
-    let previous = include_str!("legacy/bound-sites-cheatsheet-v6.md");
     let rule = "A comparison's footer first names what each row is still missing, from its cells, with each value's `note`: its `unchecked` never says again that they are missing.";
     assert!(flat(sheet).contains(rule), "{sheet}");
     assert!(
         !flat(sheet).contains("and what each row is still missing"),
         "{sheet}"
     );
-    assert!(flat(previous).contains("and what each row is still missing"));
-    assert!(!flat(previous).contains(rule));
-
-    let tmp = tempdir().unwrap();
-    let root = tmp.path();
-    learn::ensure_project_memory_scaffold(root);
-    let path = root.join(learn::BOUND_SITES_CHEATSHEET_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), sheet);
-    let edited = format!("{previous}\nLocal page preference.\n");
-    fs::write(&path, &edited).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
 
 /// A comparison's headline was free text the hub asked for ("The lede gives the verdict"). Asked
 /// for it three times, a build wrote what a page lists and named the missing reviews right above
 /// the line that names them; the build before it claimed reviews the page didn't have. The compare
 /// starter now writes that line itself, from its own sorts and cells, so neither the hub nor the
-/// bound-sites cheat sheet asks a comparison for a headline, or for its biggest unknown. Unedited
-/// copies from before are upgraded; an edited one is kept.
+/// bound-sites cheat sheet asks a comparison for a headline, or for its biggest unknown.
 #[test]
 fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1115,36 +914,6 @@ fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
     assert!(flat(sheet).contains(
         "Lede: the verdict. A comparison has none of its own: under its title the compare starter names the row each `sort` entry puts first, when every row shows that value."
     ));
-
-    let tmp = tempdir().unwrap();
-    let root = tmp.path();
-    learn::ensure_project_memory_scaffold(root);
-    for (relative, previous, current) in [
-        (
-            learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH,
-            include_str!("legacy/interactive-artifacts-v16.md"),
-            hub,
-        ),
-        (
-            learn::BOUND_SITES_CHEATSHEET_RELATIVE_PATH,
-            include_str!("legacy/bound-sites-cheatsheet-v5.md"),
-            sheet,
-        ),
-    ] {
-        assert!(
-            flat(previous).contains("The lede gives the verdict")
-                || flat(previous).contains("plus the biggest unknown"),
-            "{relative}"
-        );
-        let path = root.join(relative);
-        fs::write(&path, previous).unwrap();
-        learn::ensure_project_memory_scaffold(root);
-        assert_eq!(fs::read_to_string(&path).unwrap(), current, "{relative}");
-        let edited = format!("{previous}\nLocal page preference.\n");
-        fs::write(&path, &edited).unwrap();
-        learn::ensure_project_memory_scaffold(root);
-        assert_eq!(fs::read_to_string(&path).unwrap(), edited, "{relative}");
-    }
 }
 
 /// The line under a comparison's title names the option each `sort` entry puts first, and two
@@ -1154,37 +923,21 @@ fn a_comparisons_headline_comes_from_its_cells_and_no_skill_asks_for_one() {
 /// 155H" is 7155), so an entry by it would name the "highest CPU" for no reason. `instafy bind
 /// check` asks in the same words. Under 5 options no row moves, and a phone shows the first
 /// entry's value on each row, so the hub never says the entry "only writes the line". The rule
-/// for every other sort stays. An unedited hub from before is upgraded, and an edited one is kept.
+/// for every other sort stays.
 #[test]
 fn a_comparison_gets_a_sort_for_each_amount_the_person_compares_by() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
-    let previous = include_str!("legacy/interactive-artifacts-v20.md");
     let rule = "A comparison still gets a `sort` entry, with `dir`, for each amount the person compares by (a price, a weight, a size), the main one first, never for a number in a name (a chip, a model, a version): under 5 options no row moves, the page names the option each puts first under its title (\"Lowest price: Option B\"), and a phone shows the first one's value on each row.";
     assert!(flat(hub).contains(rule), "{hub}");
-    assert!(!flat(previous).contains(rule), "new in this version");
     assert!(!flat(hub).contains("only writes the line"), "{hub}");
-    for kept in [hub, previous] {
-        assert!(flat(kept).contains(
-            "no search, filter or sort nobody asked for, and no sort by a value no row has."
-        ));
-    }
+    assert!(flat(hub).contains(
+        "no search, filter or sort nobody asked for, and no sort by a value no row has."
+    ));
     assert!(
         hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
         "{} bytes",
         hub.len()
     );
-
-    let tmp = tempdir().unwrap();
-    let root = tmp.path();
-    learn::ensure_project_memory_scaffold(root);
-    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
-    fs::write(&path, previous).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
-    let edited = format!("{previous}\nLocal page preference.\n");
-    fs::write(&path, &edited).unwrap();
-    learn::ensure_project_memory_scaffold(root);
-    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }

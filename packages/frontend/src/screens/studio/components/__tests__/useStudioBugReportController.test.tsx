@@ -102,7 +102,7 @@ describe("shake issue report opening", () => {
     mocks.appLogs = [];
     mocks.logListeners.clear();
     mocks.capture.mockReset();
-    mocks.listPage.mockResolvedValue({ reports: [], unreadCount: 0, unnotifiedResolutionCount: 0, hasMore: false, nextCursor: null });
+    mocks.listPage.mockResolvedValue({ reports: [], unreadCount: 0, hasMore: false, nextCursor: null });
     window.localStorage.clear();
     window.localStorage.setItem("instafy.shakeReportEnabled", "1");
     mocks.capture.mockResolvedValue(screenshot);

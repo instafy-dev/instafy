@@ -15,7 +15,7 @@ This broker + PDNS path is meant to stay isolated from the controller/frontend c
     "labels": { "source": "controller" }
   }
   ```
-  Response: `{ tunnel: { tunnel_id, hostname, ingress_host, ingress_port, token, token_expires_at, url?, client: { server, token, hostname, protocol } }, credit?: null }`
+  Response: `{ tunnel: { tunnel_id, hostname, ingress_host, ingress_port, token, token_expires_at, url?, client: { server, token, hostname, protocol } } }`
 - `GET /tunnels/:id` — fetch descriptor.
 - `GET /capabilities` — optional features this broker is configured for: `{ privatePreviews: true, previewDomain }` when private previews are set up (below), otherwise `{ privatePreviews: false }`. Callers check it before asking for a private tunnel.
 - `GET /tunnels/:id/probe?path=/` — is the site behind the tunnel answering HTTP? Returns `{ listening, status }`; `listening` is true only when an HTTP status line comes back, because rathole accepts the TCP connection even when nothing is behind it. Ports are allocated per ingress, so where the answer comes from depends on the tunnel's ingress:
@@ -102,7 +102,6 @@ Run `pnpm test:pdns:api` to verify PowerDNS API can write an ACME-style `_acme-c
 - Add refresh endpoint for token rotation.
 - Add metrics/health endpoints for DNS/ingress nodes.
 - Optional: expose PDNS stats or AXFR to a secondary if you deploy multiple DNS nodes.
-- Expose credit snapshot in responses when burns occur (matching controller metadata), and align burn amount with controller config.
 
 ## Multi-ingress (production)
 - Every ingress node runs:

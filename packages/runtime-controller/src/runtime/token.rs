@@ -214,13 +214,10 @@ fn normalize_runtime_token_scopes(
     Ok(scopes)
 }
 
-/// Clamp a requested runtime-token TTL to the hard bounds and to any remaining
-/// lifetime delegated by a scoped parent token. A runtime token must never
-/// outlive the credential that authorized it.
-fn resolve_runtime_token_ttl(
-    requested: Option<i64>,
-    delegated_limit: Option<i64>,
-) -> Result<i64, (StatusCode, Json<ApiError>)> {
+/// A runtime token's TTL: the requested one within the hard bounds, or the
+/// default. No parent token's lifetime limits it, because a scoped access
+/// token never mints one (`mint_runtime_access_token`).
+fn resolve_runtime_token_ttl(requested: Option<i64>) -> Result<i64, (StatusCode, Json<ApiError>)> {
     if let Some(value) = requested {
         if !(MIN_RUNTIME_TOKEN_TTL_SECONDS..=MAX_RUNTIME_TOKEN_TTL_SECONDS).contains(&value) {
             return Err(bad_request(format!(
@@ -228,21 +225,7 @@ fn resolve_runtime_token_ttl(
             )));
         }
     }
-    let limit = delegated_limit
-        .unwrap_or(MAX_RUNTIME_TOKEN_TTL_SECONDS)
-        .min(MAX_RUNTIME_TOKEN_TTL_SECONDS);
-    if limit < MIN_RUNTIME_TOKEN_TTL_SECONDS {
-        return Err(forbidden(
-            "Parent access token expires too soon to mint a runtime token",
-        ));
-    }
-    let ttl = requested.unwrap_or(DEFAULT_RUNTIME_TOKEN_TTL_SECONDS.min(limit));
-    if ttl > limit {
-        return Err(forbidden(
-            "Runtime token cannot outlive the scoped access token",
-        ));
-    }
-    Ok(ttl)
+    Ok(requested.unwrap_or(DEFAULT_RUNTIME_TOKEN_TTL_SECONDS))
 }
 
 pub(crate) fn runtime_generation_from_capabilities(
@@ -496,7 +479,7 @@ pub(super) async fn mint_runtime_access_token(
         .as_ref()
         .map(|id| id.to_string())
         .unwrap_or_else(|| project_id.to_string());
-    let ttl_seconds = resolve_runtime_token_ttl(body.ttl_seconds, None)?;
+    let ttl_seconds = resolve_runtime_token_ttl(body.ttl_seconds)?;
     let successor_generation = (lease_id.is_none() && mints_runtime_machine).then(Uuid::new_v4);
 
     let mut connection = state
@@ -917,12 +900,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_token_ttl_is_strictly_bounded_and_cannot_outlive_parent() {
-        assert!(resolve_runtime_token_ttl(Some(59), None).is_err());
-        assert!(resolve_runtime_token_ttl(Some(3_601), None).is_err());
-        assert!(resolve_runtime_token_ttl(Some(301), Some(300)).is_err());
-        assert_eq!(resolve_runtime_token_ttl(None, Some(300)).unwrap(), 300);
-        assert_eq!(resolve_runtime_token_ttl(Some(600), None).unwrap(), 600);
+    fn runtime_token_ttl_is_strictly_bounded() {
+        assert!(resolve_runtime_token_ttl(Some(59)).is_err());
+        assert!(resolve_runtime_token_ttl(Some(3_601)).is_err());
+        assert_eq!(resolve_runtime_token_ttl(Some(60)).unwrap(), 60);
+        assert_eq!(resolve_runtime_token_ttl(Some(600)).unwrap(), 600);
+        assert_eq!(resolve_runtime_token_ttl(Some(3_600)).unwrap(), 3_600);
+        assert_eq!(resolve_runtime_token_ttl(None).unwrap(), 3_600);
     }
 
     #[test]

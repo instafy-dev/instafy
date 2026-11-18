@@ -212,7 +212,7 @@ describe("StudioSidebar organization navigation", () => {
   });
 
   it("removes a deleted team from the rail and picker despite a persisted local space", async () => {
-    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs, fixture.orgs.length);
+    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs);
     fixture.orgs = fixture.orgs.filter(org => org.id !== "org-c");
     fixture.discoveredProjects = [{ projectId: "space-a", orgId: "org-a", projectName: "Core" }];
     await render({ workspaceSwitcherOpen: true });
@@ -269,7 +269,7 @@ describe("StudioSidebar organization navigation", () => {
   });
 
   it("accepts empty controller directories without resurrecting a cached team", async () => {
-    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs, fixture.orgs.length);
+    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs);
     fixture.orgs = [];
     fixture.discoveredProjects = [];
     await render({ workspaceSwitcherOpen: true });
@@ -281,7 +281,7 @@ describe("StudioSidebar organization navigation", () => {
   });
 
   it.each(["organizations", "projects"])("retains cached teams when cold %s discovery fails", async failure => {
-    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs, fixture.orgs.length);
+    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs);
     fixture.orgs = fixture.orgs.filter(org => org.id !== "org-c");
     fixture.organizationsError = failure === "organizations";
     fixture.discoveryResolved = failure !== "projects";

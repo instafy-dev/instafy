@@ -1,7 +1,7 @@
-//! Filesystem steps the gateway takes on its own directories (the cache and
-//! `.legacy/`). Nothing here follows a symbolic link: entries are inspected
-//! with `symlink_metadata`, links are moved or removed as links, and trees
-//! are removed with `remove_dir_all`, which never descends through a link.
+//! Filesystem steps the gateway takes on its own directories (the mirror
+//! cache). Nothing here follows a symbolic link: entries are inspected with
+//! `symlink_metadata`, links are moved or removed as links, and trees are
+//! removed with `remove_dir_all`, which never descends through a link.
 
 use std::io;
 use std::path::Path;

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
+#[cfg(test)]
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, State};
@@ -10,7 +11,6 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use tokio::sync::OnceCell;
 #[cfg(test)]
 use tokio::sync::RwLock;
 use tokio_postgres::types::{Json as PgJson, ToSql};
@@ -69,7 +69,6 @@ enum DesktopUpdateRegistryBackend {
 #[derive(Clone)]
 struct PostgresDesktopUpdateRegistry {
     pool: crate::config::PgPool,
-    tables_ready: Arc<OnceCell<()>>,
 }
 
 #[cfg(test)]
@@ -124,10 +123,7 @@ impl DesktopUpdateRegistry {
 
     pub(crate) fn new_postgres(pool: crate::config::PgPool) -> Self {
         Self {
-            backend: DesktopUpdateRegistryBackend::Postgres(PostgresDesktopUpdateRegistry {
-                pool,
-                tables_ready: Arc::new(OnceCell::new()),
-            }),
+            backend: DesktopUpdateRegistryBackend::Postgres(PostgresDesktopUpdateRegistry { pool }),
         }
     }
 
@@ -251,23 +247,10 @@ impl DesktopUpdateRegistry {
 }
 
 impl PostgresDesktopUpdateRegistry {
-    async fn ensure_tables(&self) -> Result<(), DesktopUpdateRegistryError> {
-        self.tables_ready
-            .get_or_try_init(|| async {
-                ensure_desktop_update_tables(&self.pool)
-                    .await
-                    .map_err(desktop_internal)?;
-                Ok(())
-            })
-            .await
-            .map(|_| ())
-    }
-
     async fn list_device_states(
         &self,
         params: ResolvedDesktopDeviceStateListParams,
     ) -> Result<Vec<DesktopUpdateDeviceState>, DesktopUpdateRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(desktop_internal)?;
         let mut bindings: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
         // Leave any historical rows from retired channels untouched while
@@ -321,7 +304,6 @@ impl PostgresDesktopUpdateRegistry {
         &self,
         params: ResolvedDesktopEventListParams,
     ) -> Result<Vec<DesktopUpdateEvent>, DesktopUpdateRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(desktop_internal)?;
         let mut bindings: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
         // Leave any historical rows from retired channels untouched while
@@ -375,7 +357,6 @@ impl PostgresDesktopUpdateRegistry {
         &self,
         params: ResolvedDesktopPromotionListParams,
     ) -> Result<Vec<DesktopPromotionRecord>, DesktopUpdateRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(desktop_internal)?;
         let mut bindings: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
         // Promotions from retired routes remain in storage for audit, but are
@@ -428,7 +409,6 @@ impl PostgresDesktopUpdateRegistry {
         &self,
         params: ResolvedDesktopDownloadInsightsParams,
     ) -> Result<DesktopDownloadInsights, DesktopUpdateRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(desktop_internal)?;
         let (start_day, end_day, start_at, end_exclusive) = resolve_download_window(params.days)?;
 
@@ -604,7 +584,6 @@ impl PostgresDesktopUpdateRegistry {
         &self,
         request_id: &str,
     ) -> Result<Option<DesktopPromotionRecord>, DesktopUpdateRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(desktop_internal)?;
         let row = connection
             .query_opt(
@@ -625,7 +604,6 @@ impl PostgresDesktopUpdateRegistry {
         &self,
         event: DesktopUpdateEvent,
     ) -> Result<DesktopUpdateEvent, DesktopUpdateRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(desktop_internal)?;
         connection
             .execute(
@@ -759,7 +737,6 @@ impl PostgresDesktopUpdateRegistry {
         &self,
         promotion: DesktopPromotionRecord,
     ) -> Result<DesktopPromotionRecord, DesktopUpdateRegistryError> {
-        self.ensure_tables().await?;
         let connection = self.pool.get().await.map_err(desktop_internal)?;
         let row = connection
             .query_one(
@@ -2094,82 +2071,6 @@ fn map_desktop_promotion_row(
         status: DesktopPromotionStatus::from_str(row.get::<_, String>("status").as_str())?,
         notes: row.get("notes"),
     })
-}
-
-async fn ensure_desktop_update_tables(pool: &crate::config::PgPool) -> Result<(), anyhow::Error> {
-    let connection = pool.get().await?;
-    connection
-        .batch_execute(
-            "create table if not exists desktop_update_device_states (
-                device_id text primary key,
-                channel text not null check (channel in ('internal', 'stable')),
-                current_version text not null,
-                available_version text,
-                phase text not null check (phase in ('idle', 'checking', 'update_available', 'downloading', 'downloaded', 'up_to_date', 'error')),
-                feed_url text not null,
-                platform text,
-                arch text,
-                last_seen_at timestamptz not null,
-                last_event_type text,
-                last_event_at timestamptz,
-                last_checked_at timestamptz,
-                last_downloaded_at timestamptz,
-                last_error text,
-                created_at timestamptz not null default now(),
-                updated_at timestamptz not null default now()
-            );
-
-            create table if not exists desktop_update_events (
-                event_id text primary key,
-                event_type text not null check (event_type in ('update_available', 'update_not_available', 'download_started', 'download_completed', 'update_ready', 'install_applied', 'update_error')),
-                occurred_at timestamptz not null,
-                device_id text not null,
-                channel text not null check (channel in ('internal', 'stable')),
-                current_version text not null,
-                available_version text,
-                phase text not null check (phase in ('idle', 'checking', 'update_available', 'downloading', 'downloaded', 'up_to_date', 'error')),
-                feed_url text not null,
-                platform text,
-                arch text,
-                country_code text,
-                properties jsonb not null default '{}'::jsonb,
-                created_at timestamptz not null default now()
-            );
-
-            alter table desktop_update_events
-                add column if not exists country_code text;
-
-            create table if not exists desktop_update_promotions (
-                request_id text primary key,
-                source_channel text not null check (source_channel in ('internal', 'stable')),
-                target_channel text not null check (target_channel in ('internal', 'stable')),
-                workflow_ref text not null,
-                requested_at timestamptz not null,
-                requested_by text not null,
-                status text not null check (status in ('dispatched')),
-                notes text,
-                created_at timestamptz not null default now()
-            );
-
-            create index if not exists desktop_update_device_states_last_seen_idx
-                on desktop_update_device_states (last_seen_at desc);
-            create index if not exists desktop_update_events_occurred_at_idx
-                on desktop_update_events (occurred_at desc);
-            create index if not exists desktop_update_events_channel_idx
-                on desktop_update_events (channel, occurred_at desc);
-            create index if not exists desktop_update_promotions_requested_at_idx
-                on desktop_update_promotions (requested_at desc);
-
-            alter table desktop_update_device_states enable row level security;
-            alter table desktop_update_events enable row level security;
-            alter table desktop_update_promotions enable row level security;
-
-            revoke all privileges on table desktop_update_device_states from anon, authenticated;
-            revoke all privileges on table desktop_update_events from anon, authenticated;
-            revoke all privileges on table desktop_update_promotions from anon, authenticated;",
-        )
-        .await?;
-    Ok(())
 }
 
 fn desktop_internal(error: impl Into<anyhow::Error>) -> DesktopUpdateRegistryError {

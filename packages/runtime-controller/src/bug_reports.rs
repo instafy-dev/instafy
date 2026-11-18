@@ -632,7 +632,6 @@ async fn acknowledge_support_report_activity(
         .map(|value| value.with_timezone(&Utc))
         .map_err(|_| bad_request("seenThrough must be a valid RFC3339 timestamp"))?;
 
-    ensure_bug_report_tables(&state.pool).await?;
     let mut connection = state.pool.get().await.map_err(|error| {
         internal_error(format!("failed to acquire database connection: {error}"))
     })?;
@@ -780,7 +779,6 @@ async fn claim_support_resolution_alerts(
             )),
         ));
     }
-    ensure_bug_report_tables(&state.pool).await?;
     let connection = state.pool.get().await.map_err(|error| {
         internal_error(format!("failed to acquire database connection: {error}"))
     })?;
@@ -1576,10 +1574,6 @@ pub(crate) async fn record_system_bug_report(
     state: &AppState,
     input: SystemBugReportInput,
 ) -> anyhow::Result<Uuid> {
-    ensure_bug_report_tables(&state.pool)
-        .await
-        .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
-
     let message = input.message.trim().to_string();
     anyhow::ensure!(!message.is_empty(), "system bug report message is required");
 
@@ -1735,8 +1729,6 @@ async fn post_bug_report_with_context(
         }
         validate_customer_bug_report_request(&body)?;
     }
-
-    ensure_bug_report_tables(&state.pool).await?;
 
     let message = body.message.trim().to_string();
     if message.is_empty() {
@@ -2153,7 +2145,6 @@ async fn list_bug_reports(
         }
     }
 
-    ensure_bug_report_tables(&state.pool).await?;
     let limit = query
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -2508,7 +2499,6 @@ async fn get_bug_report(
     let mine_only = query.mine.unwrap_or(false);
     require_bug_report_request_access(&context, mine_only)?;
 
-    ensure_bug_report_tables(&state.pool).await?;
     let bug_report_id = Uuid::parse_str(bug_report_id_raw.trim())
         .map_err(|_| bad_request("bug_report_id must be a valid UUID"))?;
 
@@ -2793,7 +2783,6 @@ async fn update_bug_report(
     require_expected_version: bool,
 ) -> Result<Json<BugReportSummary>, (StatusCode, Json<ApiError>)> {
     let operator_context = require_bug_report_operator_access(&state, &headers).await?;
-    ensure_bug_report_tables(&state.pool).await?;
 
     let bug_report_id = Uuid::parse_str(bug_report_id_raw.trim())
         .map_err(|_| bad_request("bug_report_id must be a valid UUID"))?;
@@ -4227,74 +4216,6 @@ fn normalize_labels(value: JsonValue) -> Result<JsonValue, (StatusCode, Json<Api
         }
     }
     Ok(JsonValue::Array(labels))
-}
-
-async fn ensure_bug_report_tables(pool: &PgPool) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let connection = pool.get().await.map_err(|error| {
-        internal_error(format!("failed to acquire database connection: {error}"))
-    })?;
-    connection
-        .batch_execute(
-            "
-            create table if not exists bug_reports (
-                id uuid primary key,
-                user_id uuid,
-                reporter_email text,
-                message text not null,
-                details text,
-                project_id uuid,
-                runtime_id uuid,
-                run_id uuid,
-                conversation_id uuid,
-                status text not null default 'open',
-                priority text not null default 'normal',
-                assignee text,
-                labels jsonb not null default '[]'::jsonb,
-                duplicate_of uuid references bug_reports(id) on delete set null,
-                github_issue_url text,
-                resolved_at timestamptz,
-                metadata jsonb not null default '{}'::jsonb,
-                logs jsonb not null default '[]'::jsonb,
-                created_at timestamptz not null default now(),
-                updated_at timestamptz not null default now()
-            );
-
-            create table if not exists bug_report_attachments (
-                id uuid primary key,
-                bug_report_id uuid not null references bug_reports(id) on delete cascade,
-                file_name text not null,
-                media_type text not null,
-                byte_size bigint not null,
-                content bytea not null,
-                created_at timestamptz not null default now()
-            );
-
-            alter table bug_reports add column if not exists priority text not null default 'normal';
-            alter table bug_reports add column if not exists assignee text;
-            alter table bug_reports add column if not exists labels jsonb not null default '[]'::jsonb;
-            alter table bug_reports add column if not exists duplicate_of uuid references bug_reports(id) on delete set null;
-            alter table bug_reports add column if not exists github_issue_url text;
-            alter table bug_reports add column if not exists resolved_at timestamptz;
-            alter table bug_reports add column if not exists updated_at timestamptz not null default now();
-
-            create index if not exists bug_reports_created_at_idx on bug_reports (created_at desc);
-            create index if not exists bug_reports_user_id_idx on bug_reports (user_id, created_at desc);
-            create index if not exists bug_reports_project_id_idx on bug_reports (project_id, created_at desc);
-            create index if not exists bug_reports_status_created_at_idx on bug_reports (status, created_at desc);
-            create index if not exists bug_reports_priority_created_at_idx on bug_reports (priority, created_at desc);
-            create index if not exists bug_reports_assignee_created_at_idx on bug_reports (assignee, created_at desc);
-            create index if not exists bug_reports_duplicate_of_idx on bug_reports (duplicate_of);
-            create index if not exists bug_report_attachments_bug_report_id_idx on bug_report_attachments (bug_report_id, created_at asc);
-
-            alter table bug_reports enable row level security;
-            alter table bug_report_attachments enable row level security;
-            revoke all privileges on table bug_reports from anon, authenticated;
-            revoke all privileges on table bug_report_attachments from anon, authenticated;
-            ",
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to ensure bug report tables: {error}")))?;
-    Ok(())
 }
 
 async fn load_reporter_email_snapshot(

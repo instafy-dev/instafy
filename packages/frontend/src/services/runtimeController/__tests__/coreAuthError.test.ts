@@ -99,11 +99,11 @@ describe("emitControllerAuthError with an injected override token", () => {
       core.readControllerError(
         new Response(
           JSON.stringify({
-            message: "support alert session changed; refresh support and try again",
+            message: "support list session changed; refresh support and try again",
           }),
           { status: 409 },
         ),
-        "support resolution alert claim failed",
+        "support report list failed",
         {
           baseUrl: "https://controller.example.test",
           accessToken: "new-account-token",
@@ -111,7 +111,7 @@ describe("emitControllerAuthError with an injected override token", () => {
           generation: 2,
         },
       ),
-    ).resolves.toBe("support alert session changed; refresh support and try again");
+    ).resolves.toBe("support list session changed; refresh support and try again");
 
     expect(received).toEqual([]);
     expect(core.isControllerDocumentReloadPending()).toBe(false);

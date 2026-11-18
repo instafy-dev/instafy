@@ -58,7 +58,6 @@ async function openTouchSidebar(page: Page) {
   await page.getByTestId("mobile-header-picker").last().click();
   await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
   await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
-  await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
 }
 
 async function openNavigationDestination(page: Page, destination: "All chats" | "Files") {
@@ -273,10 +272,8 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
     await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
     await expect(page.getByTestId("sidebar-project-switcher-back")).toHaveCount(0);
-    await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
     await openTeamDirectory(page);
     await expect(page.getByTestId("sidebar-project-switcher-back")).toBeVisible();
-    await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
     await page.getByTestId("sidebar-project-switcher-back").click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
     await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
