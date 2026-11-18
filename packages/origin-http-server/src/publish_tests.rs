@@ -1422,65 +1422,6 @@ fn restoring_a_recovery_commit_keeps_a_legacy_chat_upload() {
     );
 }
 
-/// The old sync's `reset --mixed` left stale copies; a stop and a Desktop
-/// "Save as version" never publish them as reverts.
-#[test]
-fn stale_copies_from_the_old_align_are_never_published_as_reverts() {
-    for desktop in [false, true] {
-        let sc = Scenario::new(Options {
-            desktop,
-            ..Options::default()
-        });
-        // Remote moves: README edited, a file imported, logo deleted.
-        sc.push_other(
-            &[
-                (
-                    "README.md",
-                    Some(b"one\ntwo\nthree\nfour\nfive\nv2 from studio\n"),
-                ),
-                ("imported/lib.rs", Some(b"fn imported() {}\n")),
-                ("logo.bin", None),
-            ],
-            "Studio work",
-        );
-        // The old align: fetch, then reset --mixed onto the remote tip.
-        ig(&sc.ws, &["fetch", "-q", "origin"]);
-        ig(&sc.ws, &["reset", "-q", "--mixed", "origin/main"]);
-        // And a genuine edit after it.
-        sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\ngenuine\n");
-
-        if desktop {
-            let report = sc.publish(Selection::AllDirty);
-            assert_ne!(
-                report.git_sync_status,
-                SyncStatus::Unpublished,
-                "{report:?}"
-            );
-            assert!(sc.remote_file("doc.md").unwrap().contains("genuine"));
-        } else {
-            flush(&sc.ctx(true), false).unwrap();
-            refresh(&sc.ctx(true)).unwrap();
-        }
-        assert!(
-            sc.remote_file("README.md")
-                .unwrap()
-                .contains("v2 from studio"),
-            "desktop={desktop}: README reverted"
-        );
-        assert_eq!(
-            sc.remote_file("imported/lib.rs").as_deref(),
-            Some("fn imported() {}\n"),
-            "desktop={desktop}: import deleted"
-        );
-        assert!(
-            sc.remote_file("logo.bin").is_none(),
-            "desktop={desktop}: deletion undone"
-        );
-        assert!(sc.disk("README.md").unwrap().contains("v2 from studio"));
-        assert!(sc.ws.join("imported/lib.rs").exists());
-    }
-}
-
 /// A Desktop save that conflicts keeps the user's bytes in their folder.
 #[test]
 fn desktop_conflict_leaves_the_users_file_unchanged() {
@@ -1928,7 +1869,6 @@ const PUBLISH_MODULES: &[(&str, &str)] = &[
     ("push.rs", include_str!("push.rs")),
     ("recovery.rs", include_str!("recovery.rs")),
     ("recovery_view.rs", include_str!("recovery_view.rs")),
-    ("stale_align.rs", include_str!("stale_align.rs")),
     ("tree_merge.rs", include_str!("tree_merge.rs")),
     ("working_state.rs", include_str!("working_state.rs")),
     ("publish_policy.rs", include_str!("publish_policy.rs")),
@@ -2280,9 +2220,7 @@ const WORKING_COPY_NAMES: &[&str] = &[
     "list_dirty_files",
     "lookup_apply_idempotency",
     "push_existing_head",
-    "repair_stale_checkout",
     "revert_paths",
-    "stale_align",
     "try_acquire_workspace_apply_lock",
     "workspace_fs",
     "workspace_lock",
@@ -5585,110 +5523,45 @@ fn a_parked_copy_on_top_of_a_secret_is_rebuilt_before_it_is_pushed() {
     );
 }
 
-/// The old sync's reset left a local commit's files as if they were unsaved
-/// edits: the one-time repair keeps them (and a stop or a Desktop save keeps
-/// or publishes them), whether or not the remote had moved.
+/// An edit to a secret `main` tracks stays on disk only, even after `main`
+/// changed that secret: a stop with write access stores no copy holding
+/// it, and the copy of the other unsaved work it pushes keeps the secret as
+/// the checkout saved it.
 #[test]
-fn the_repair_never_drops_a_local_commit_the_old_reset_abandoned() {
-    for (desktop, remote_moved) in [(false, false), (false, true), (true, false), (true, true)] {
-        let sc = Scenario::new(Options {
-            desktop,
-            ..Options::default()
-        });
-        sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nlocal edit\n");
-        sc.write("feature.md", b"new feature\n");
-        sc.agent_commit(&["doc.md", "feature.md"], "local work");
-        if remote_moved {
-            sc.push_other(&[("README.md", Some(b"remote readme\n"))], "remote");
-        }
-        // The old sync: fetch, then reset --mixed onto the remote tip.
-        ig(&sc.ws, &["fetch", "-q", "origin"]);
-        ig(&sc.ws, &["reset", "-q", "--mixed", "origin/main"]);
-        let case = format!("desktop={desktop} remote_moved={remote_moved}");
-
-        if desktop {
-            let report = sc.publish(Selection::AllDirty);
-            assert_ne!(
-                report.git_sync_status,
-                SyncStatus::Unpublished,
-                "{case}: {report:?}"
-            );
-            assert!(
-                sc.remote_file("doc.md").unwrap().contains("local edit"),
-                "{case}"
-            );
-            assert_eq!(
-                sc.remote_file("feature.md").as_deref(),
-                Some("new feature\n"),
-                "{case}"
-            );
-        } else {
-            let report = flush(&sc.ctx(true), false).unwrap();
-            let unsaved: Vec<_> = report
-                .recovery_refs
-                .iter()
-                .filter(|entry| entry.name.contains("-unsaved-"))
-                .collect();
-            assert_eq!(unsaved.len(), 1, "{case}: {report:?}");
-            assert_eq!(
-                sc.recovery_file(&unsaved[0].reference, "feature.md")
-                    .as_deref(),
-                Some("new feature\n"),
-                "{case}"
-            );
-            assert!(
-                sc.recovery_file(&unsaved[0].reference, "doc.md")
-                    .unwrap()
-                    .contains("local edit"),
-                "{case}"
-            );
-        }
-        assert!(sc.disk("doc.md").unwrap().contains("local edit"), "{case}");
-        assert_eq!(
-            sc.disk("feature.md").as_deref(),
-            Some("new feature\n"),
-            "{case}"
-        );
-        if remote_moved {
-            assert_eq!(
-                sc.disk("README.md").as_deref(),
-                Some("remote readme\n"),
-                "{case}: the leftover README was not repaired"
-            );
-            assert_eq!(
-                sc.remote_file("README.md").as_deref(),
-                Some("remote readme\n"),
-                "{case}"
-            );
-            assert_eq!(
-                sc.local_refs(crate::stale_align::BACKUP_REF).len(),
-                1,
-                "{case}: the replaced copy is kept locally"
-            );
-        }
-        assert!(
-            sc.remote_refs(crate::stale_align::BACKUP_REF).is_empty(),
-            "{case}"
-        );
-    }
-}
-
-/// A tracked secret the repair would park stays on disk only.
-#[test]
-fn the_repair_never_parks_a_secret() {
+fn a_stop_never_pushes_an_edit_to_a_secret_main_tracks() {
     let sc = Scenario::new(Options {
         seed: vec![(".env", b"A=1\nB=2\nC=3\n".to_vec())],
         ..Options::default()
     });
     sc.push_other(&[(".env", Some(b"A=1\nB=main\nC=3\n"))], "main changes B");
-    ig(&sc.ws, &["fetch", "-q", "origin"]);
-    ig(&sc.ws, &["reset", "-q", "--mixed", "origin/main"]);
     sc.write(".env", b"A=1\nB=SECRET-XYZ\nC=3\n");
-    flush(&sc.ctx(true), false).unwrap();
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nunsaved\n");
+    let report = flush(&sc.ctx(true), false).unwrap();
     assert!(
         !sc.anywhere_on_remote("SECRET-XYZ"),
         "a secret reached canonical"
     );
+    // A copy holding it would be rebuilt without it only at push time.
+    assert!(
+        sc.local_refs(crate::recovery::LOCAL_RECOVERY_REJECTED_ROOT)
+            .is_empty(),
+        "the stop stored a copy holding the secret"
+    );
+    let pushed: Vec<_> = report
+        .recovery_refs
+        .iter()
+        .filter(|entry| entry.pushed && entry.name.contains("-unsaved-"))
+        .collect();
+    assert_eq!(pushed.len(), 1, "{report:?}");
+    assert_eq!(
+        sc.recovery_file(&pushed[0].reference, ".env").as_deref(),
+        Some("A=1\nB=2\nC=3\n"),
+        "the copy keeps the secret as the checkout saved it"
+    );
+    assert!(sc
+        .recovery_file(&pushed[0].reference, "doc.md")
+        .unwrap()
+        .contains("unsaved"));
     assert_eq!(sc.disk(".env").as_deref(), Some("A=1\nB=SECRET-XYZ\nC=3\n"));
 }
 

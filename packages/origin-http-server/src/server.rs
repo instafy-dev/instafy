@@ -20,7 +20,7 @@ use crate::config::CONTROLLER_TOKEN_REFRESH_TIMEOUT;
 use crate::config::MAX_APPLY_MANIFEST_BYTES;
 use crate::git;
 use crate::git_tokens;
-use crate::hosted::{park_legacy_checkouts, HostedGatewayConfig, HostedState, MirrorCache};
+use crate::hosted::{HostedGatewayConfig, HostedState, MirrorCache};
 use crate::route_auth::RouteAuth;
 use crate::routes::{self, AppState};
 use serde_json::Value as JsonValue;
@@ -489,28 +489,13 @@ impl OriginHttpServer {
         })
     }
 
-    /// The gateway's routes. Before anything is served, every working copy
-    /// the stateful gateway left in the root is moved to `.legacy/`, so an
-    /// older image started on this volume later clones fresh instead of
-    /// saving old drafts; a failure stops the start.
+    /// The gateway's routes, served from the mirror cache under `root`.
     async fn hosted_router(
         &mut self,
         hosted: Arc<HostedGatewayConfig>,
         token_validator: TokenValidator,
         root: &std::path::Path,
     ) -> Result<axum::Router> {
-        let parked_root = root.to_path_buf();
-        let parked = tokio::task::spawn_blocking(move || park_legacy_checkouts(&parked_root))
-            .await
-            .context("moving old gateway working copies failed")?
-            .context("could not move old gateway working copies to .legacy; refusing to start")?;
-        if !parked.moved.is_empty() || parked.removed_empty > 0 {
-            info!(
-                moved = parked.moved.len(),
-                removed_empty = parked.removed_empty,
-                "moved old gateway working copies out of the workspace root"
-            );
-        }
         let cache_root = root.to_path_buf();
         let config = self.config.clone();
         let http = self.http_client.clone();
@@ -1387,8 +1372,10 @@ mod hosted_start_tests {
         assert!(OriginHttpServer::new_hosted(config, HostedGatewayConfig::default()).is_err());
     }
 
+    /// The gateway keeps only its mirror cache in its root: a folder named
+    /// like a space stays where it is.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_gateway_moves_old_working_copies_before_it_listens() {
+    async fn a_gateway_leaves_space_folders_alone_and_serves_no_browser_routes() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let space = uuid::Uuid::new_v4().to_string();
@@ -1401,9 +1388,8 @@ mod hosted_start_tests {
         server.set_browser_host(std::sync::Arc::new(NoBrowserHost));
         let start = server.start().await.unwrap();
 
-        assert!(!root.join(&space).exists());
         assert_eq!(
-            std::fs::read_to_string(root.join(".legacy").join(&space).join("draft.md")).unwrap(),
+            std::fs::read_to_string(root.join(&space).join("draft.md")).unwrap(),
             "draft\n"
         );
         let health = reqwest::get(format!("http://{}/healthz", start.address))
@@ -1443,25 +1429,6 @@ mod hosted_start_tests {
         fn note_seen(&self, _: &str) {
             unreachable!("the gateway has no browser host")
         }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_gateway_that_cannot_move_old_working_copies_does_not_listen() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let space = uuid::Uuid::new_v4().to_string();
-        std::fs::create_dir_all(root.join(&space)).unwrap();
-        std::fs::write(root.join(&space).join("draft.md"), "draft\n").unwrap();
-        // `.legacy` is a file: nothing can be moved into it.
-        std::fs::write(root.join(".legacy"), "not a folder").unwrap();
-
-        let mut server = OriginHttpServer::new(gateway_config(&root)).unwrap();
-        let error = server.start().await.err().expect("the start fails");
-
-        assert!(format!("{error:#}").contains(".legacy"), "{error:#}");
-        assert!(server.address.is_none(), "nothing was bound");
-        assert!(root.join(&space).join("draft.md").is_file());
     }
 
     /// A stop waits for a request in progress only up to the drain limit,

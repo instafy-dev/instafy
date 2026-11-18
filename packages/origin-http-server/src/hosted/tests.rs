@@ -1931,28 +1931,6 @@ fn ref_fetches_tell_this_servers_disk_from_canonical() {
     assert_eq!(code(super::routes::ref_error(&mirror, error(away))), 502);
 }
 
-/// The sweeper never touches `.legacy/` (working copies of the old
-/// gateway); when the disk is short of space it reports its size.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_sweeper_reports_and_never_removes_legacy_working_copies() {
-    let sc = HostedScenario::new();
-    let legacy = sc.root.join(".legacy").join(Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&legacy).unwrap();
-    std::fs::write(legacy.join("draft.md"), vec![b'd'; 4096]).unwrap();
-    let cache = Arc::new(sc.open_cache().with_free_space(1 << 30, |_| Some(1)));
-    let report = {
-        let cache = cache.clone();
-        tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now()))
-            .await
-            .unwrap()
-    };
-    assert!(legacy.join("draft.md").is_file());
-    assert!(
-        report.legacy_bytes.is_some_and(|bytes| bytes >= 4096),
-        "{report:?}"
-    );
-}
-
 /// A sweep asked for while another runs (a write that found the disk full)
 /// is not lost: the running sweep goes over the cache again when done.
 #[test]

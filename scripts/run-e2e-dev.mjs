@@ -255,19 +255,17 @@ function ensureGitCanonicalBindRoots() {
 
 /**
  * Before the provider starts with git-canonical on: an earlier local stack
- * kept runtime checkouts in the gateway's folder, which the gateway now
- * moves out of the way (or refuses to start on). Move them to the
+ * kept runtime checkouts in the gateway's folder. Move them to the
  * provider's own folder once, except for a space whose runtime container
- * still exists; while such a checkout stays, the gateway refuses to start
- * (see relocateRuntimeCheckouts).
+ * still exists (see relocateRuntimeCheckouts).
  *
  * With `providerRunning` (a provider this run reuses, which may be one that
  * keeps its checkouts in the gateway's folder), nothing moves: every
- * checkout there stays and keeps the gateway from starting on it, with a
- * warning to stop the provider so the next start moves them. Unless
- * `providerRoot` (the folder this script recorded when it launched that
- * provider) is another folder, the gateway's folder is kept from the
- * gateway even before the provider makes a checkout there.
+ * checkout there stays, with a warning to stop the provider so the next
+ * start moves them. Unless `providerRoot` (the folder this script recorded
+ * when it launched that provider) is another folder, the stamp folder is
+ * made in the gateway's folder even before the provider makes a checkout
+ * there.
  */
 function separateRuntimeCheckoutsFromGateway(
   checkoutRoot,
@@ -284,8 +282,7 @@ function separateRuntimeCheckoutsFromGateway(
   if (path.resolve(gatewayRoot) === checkouts) {
     console.warn(
       `[runtime-dev] DOCKER_REPO_HOST is the origin gateway's folder (${gatewayRoot}); ` +
-        "the gateway refuses to start on a folder that holds runtime checkouts. Unset DOCKER_REPO_HOST " +
-        "or point it elsewhere."
+        "runtime checkouts belong in a folder of their own. Unset DOCKER_REPO_HOST or point it elsewhere."
     );
     stampGatewayFolder(gatewayRoot, { why: "because DOCKER_REPO_HOST keeps runtime checkouts there" });
     return;
@@ -2767,10 +2764,7 @@ async function waitForProvider(port) {
 /**
  * Keep the provider that is already running. It may have been started
  * before runtime checkouts had a folder of their own, so the checkouts it
- * keeps in the gateway's folder stay there, and the gateway refuses to
- * start on that folder instead of moving them into its .legacy/ folder.
- * Unless this script launched it with a folder of its own, that holds
- * before it makes its first checkout there too.
+ * keeps in the gateway's folder stay there.
  */
 function reuseRunningProvider(pid) {
   console.log(`[runtime-dev] Provider already running (pid=${pid}).`);
