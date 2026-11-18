@@ -214,12 +214,15 @@ async fn get_my_session(
     Ok((response_headers, Json(session)))
 }
 
+/// Name the person behind an interactive sign-in. Desktop's Personal Browser
+/// picks its persistent profile by this answer, so only a Supabase sign-in or
+/// a controller session gets one. A scoped token's subject is often a user id
+/// too, but the token was issued for a runtime, origin, Git remote or job,
+/// not to the person, and a service credential speaks for no one.
 fn my_session_response(
     context: RequestContext,
 ) -> Result<MySessionResponse, (StatusCode, Json<ApiError>)> {
-    let user_id = context
-        .user_id
-        .ok_or_else(|| unauthorized("user session required"))?;
+    let user_id = require_user_session(&context)?;
     Ok(MySessionResponse {
         user_id: user_id.to_string(),
     })
@@ -4435,9 +4438,139 @@ mod requirement_tests {
 
 #[cfg(test)]
 mod session_identity_tests {
-    use super::my_session_response;
-    use crate::auth::RequestContext;
+    use super::{my_session_response, router};
+    use crate::auth::{issue_controller_token, RequestContext};
+    use crate::tests::{
+        build_app_config, build_test_state, call_router, test_origin_private_key,
+        test_origin_public_key,
+    };
+    use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
+    use axum::http::StatusCode;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use serde::Serialize;
+    use serde_json::json;
     use uuid::Uuid;
+
+    /// `build_app_config` verifies Supabase access tokens with this HS256
+    /// secret.
+    const SUPABASE_SECRET: &str = "secret";
+
+    /// An access token shaped like one Supabase Auth issues, for `role`.
+    fn supabase_access_token(user_id: Uuid, role: &'static str) -> String {
+        #[derive(Serialize)]
+        struct Claims {
+            aud: &'static str,
+            role: &'static str,
+            sub: String,
+            session_id: String,
+            iat: i64,
+            exp: i64,
+        }
+        let now = Utc::now();
+        encode(
+            &Header::new(Algorithm::HS256),
+            &Claims {
+                aud: "authenticated",
+                role,
+                sub: user_id.to_string(),
+                session_id: Uuid::new_v4().to_string(),
+                iat: now.timestamp(),
+                exp: (now + ChronoDuration::hours(1)).timestamp(),
+            },
+            &EncodingKey::from_secret(SUPABASE_SECRET.as_bytes()),
+        )
+        .expect("sign Supabase test token")
+    }
+
+    /// A runtime token for `user_id`, like the ones runtimes, origins, Git
+    /// remotes and jobs carry: its subject is the user it acts for.
+    fn scoped_token_for(config: &crate::config::AppConfig, user_id: Uuid) -> String {
+        let runtime_id = Uuid::new_v4();
+        mint_scoped_token(
+            config,
+            ScopedTokenRequest {
+                audience: runtime_id.to_string(),
+                subject: user_id.to_string(),
+                project_id: Uuid::new_v4().to_string(),
+                origin_id: None,
+                runtime_id: Some(runtime_id.to_string()),
+                protocol: None,
+                scopes: vec!["git.read".to_string()],
+                lease_id: None,
+                run_id: None,
+                prefer_runtime: None,
+                ttl_seconds: Some(600),
+            },
+        )
+        .expect("mint scoped token")
+        .token
+    }
+
+    /// Nothing listens on port 1: a request that reached the database would
+    /// fail with a 5xx instead of the answer each case expects.
+    fn unconnectable_pool() -> crate::config::PgPool {
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )
+        .expect("connection manager");
+        bb8::Pool::builder().max_size(1).build_unchecked(manager)
+    }
+
+    /// Desktop's Personal Browser opens the profile named by this answer, so
+    /// it names only a signed-in person. Every credential below carries
+    /// `user_id`.
+    #[tokio::test]
+    async fn me_session_answers_only_for_an_interactive_sign_in() {
+        let config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "test-origin-key",
+        );
+        let user_id = Uuid::new_v4();
+        let controller_session = issue_controller_token(&config, &user_id)
+            .expect("controller session token")
+            .token;
+        let scoped = scoped_token_for(&config, user_id);
+        let app = router().with_state(build_test_state(unconnectable_pool(), config));
+
+        let cases = [
+            (
+                "Supabase sign-in",
+                supabase_access_token(user_id, "authenticated"),
+                StatusCode::OK,
+            ),
+            ("controller session", controller_session, StatusCode::OK),
+            ("runtime token", scoped, StatusCode::UNAUTHORIZED),
+            (
+                "Supabase service token",
+                supabase_access_token(user_id, "service_role"),
+                StatusCode::UNAUTHORIZED,
+            ),
+        ];
+        for (label, token, expected) in cases {
+            let (status, body) = call_router(
+                &app,
+                Some(&format!("Bearer {token}")),
+                "GET",
+                "/me/session".to_string(),
+                None,
+            )
+            .await
+            .expect("GET /me/session");
+            assert_eq!(status, expected, "{label}: {body}");
+            if expected == StatusCode::OK {
+                assert_eq!(body, json!({ "userId": user_id.to_string() }), "{label}");
+            } else {
+                assert_eq!(
+                    body["message"],
+                    json!("interactive user session required"),
+                    "{label}: {body}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn session_response_contains_only_authenticated_user_id() {
@@ -4453,13 +4586,15 @@ mod session_identity_tests {
 
     #[test]
     fn session_response_rejects_non_user_credentials() {
+        // A service credential can carry a user id; it still speaks for no one.
         let error = my_session_response(RequestContext {
-            user_id: None,
+            user_id: Some(Uuid::new_v4()),
             is_service_role: true,
             scoped_claims: None,
         })
         .expect_err("service credentials must not select a Personal Browser profile");
         assert_eq!(error.0, axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(error.1 .0.message, "interactive user session required");
     }
 }
 
