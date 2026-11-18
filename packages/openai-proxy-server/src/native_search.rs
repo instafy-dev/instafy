@@ -13,7 +13,7 @@
 
 use super::*;
 use crate::client::{parse_codex_rate_limit_headers, read_model_error_body};
-use crate::controller_client::ManagedSearchJob;
+use crate::controller_client::{ManagedSearchClaim, ManagedSearchJob};
 use crate::model_transport::ResponseBodyLimit;
 use crate::search_bridge::{self, Engine, RecordScope, SearchCall, SearchRequest, Withheld};
 
@@ -77,6 +77,67 @@ fn managed_search_job(claims: Option<&ProxyClaims>) -> Option<ManagedSearchJob> 
         lease_attempt: i32::try_from(claims.lease_attempt?).ok()?,
         run_id: id(run_id_from_claims(Some(claims))?)?,
     })
+}
+
+/// How long a background check's search waits for the check's answer to reach
+/// the controller before it is not run. Such a check (an ambient evaluation)
+/// may search once it has answered, and it answers with a short sentence that
+/// its runtime posts while the search it says it will make goes out.
+const UNDECIDED_WAIT: Duration = Duration::from_secs(3);
+/// How often a waiting search asks the controller again.
+const UNDECIDED_POLL: Duration = Duration::from_millis(250);
+
+/// The controller's answer to the check `claim_id`, asked again while the
+/// check is a background check that has not answered yet, for up to
+/// [`UNDECIDED_WAIT`]. None when no answer could be read: the check is then
+/// settled with none, so searches the controller took for it (its answer, not
+/// the check, was lost) go back to the message.
+async fn claim_managed_searches(
+    controller: &ControllerIntegration,
+    job: &ManagedSearchJob,
+    claim_id: Uuid,
+    asked: u32,
+) -> Option<ManagedSearchClaim> {
+    let waits_until = tokio::time::Instant::now() + UNDECIDED_WAIT;
+    loop {
+        match controller
+            .claim_managed_web_searches(job, claim_id, asked)
+            .await
+        {
+            Ok(claim)
+                if claim.refused.as_deref() == Some("undecided")
+                    && tokio::time::Instant::now() + UNDECIDED_POLL <= waits_until =>
+            {
+                tokio::time::sleep(UNDECIDED_POLL).await;
+            }
+            Ok(claim) => return Some(claim),
+            Err(error) => {
+                eprintln!("[proxy] managed web search check failed: {error}");
+                settle_managed_searches(controller, job, claim_id, 0).await;
+                return None;
+            }
+        }
+    }
+}
+
+/// Tells the controller that `ran` of the check's searches ran, so the rest go
+/// back to the message, asking once more if that fails: settling a check
+/// again changes nothing more.
+async fn settle_managed_searches(
+    controller: &ControllerIntegration,
+    job: &ManagedSearchJob,
+    claim_id: Uuid,
+    ran: u32,
+) {
+    for _ in 0..2 {
+        match controller
+            .settle_managed_web_searches(job, claim_id, ran)
+            .await
+        {
+            Ok(()) => return,
+            Err(error) => eprintln!("[proxy] managed web search settle failed: {error}"),
+        }
+    }
 }
 
 /// One log line for searches a managed run's request planned and did not run,
@@ -270,9 +331,10 @@ pub(super) async fn search(
 /// Its searches run only with this proxy's `PROXY_MANAGED_NATIVE_WEB_SEARCH`
 /// on and the grant's search, and only as many as the controller lets run
 /// (runtime-controller `managed_web_search`): it counts a message's searches
-/// across its jobs and refuses them while its own switch is off. Searches it
-/// let run that did not search go back to it. A search that may not run is
-/// answered with why, searches nothing and costs nothing, so the turn goes on.
+/// across its jobs and refuses them while its own switch is off. Each check is
+/// settled with how many of its searches ran, so those that did not go back to
+/// it. A search that may not run is answered with why, searches nothing and
+/// costs nothing, so the turn goes on.
 async fn managed_search(
     state: &ProxyState,
     claims: Option<&ProxyClaims>,
@@ -314,19 +376,24 @@ async fn managed_search(
         _ => return Err(unavailable()),
     };
     let mut plan = request.plan(&[leased.credentials.bearer()]);
+    let transport = ModelTransportConfig::from_env().map_err(AppError::internal)?;
+    // No alternate host or redirect may acquire the platform's credentials.
+    let http = transport
+        .http_client_builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(AppError::upstream)?;
+    // Nothing after the controller's check returns before the check is settled.
     let asked = plan.searches();
     let job = managed_search_job(claims);
+    let claim_id = Uuid::new_v4();
     let granted = if asked == 0 {
         0
     } else {
         let claimed = match (state.controller.as_ref(), job.as_ref()) {
-            (Some(controller), Some(job)) => controller
-                .claim_managed_web_searches(job, asked as u32)
-                .await
-                .map_err(|error| {
-                    eprintln!("[proxy] managed web search check failed: {error}");
-                })
-                .ok(),
+            (Some(controller), Some(job)) => {
+                claim_managed_searches(controller, job, claim_id, asked as u32).await
+            }
             _ => None,
         };
         let (granted, why) = match claimed {
@@ -342,13 +409,6 @@ async fn managed_search(
         }
         granted
     };
-    let transport = ModelTransportConfig::from_env().map_err(AppError::internal)?;
-    // No alternate host or redirect may acquire the platform's credentials.
-    let http = transport
-        .http_client_builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(AppError::upstream)?;
     let call = SearchCall::new(
         &http,
         &leased.credentials,
@@ -363,11 +423,8 @@ async fn managed_search(
     let ran = answer.as_ref().map_or(0, search_bridge::searches_in);
     if let (Some(controller), Some(job)) = (state.controller.as_ref(), job.as_ref())
         && granted > ran
-        && let Err(error) = controller
-            .give_back_managed_web_searches(job, (granted - ran) as u32)
-            .await
     {
-        eprintln!("[proxy] managed web search give-back failed: {error}");
+        settle_managed_searches(controller, job, claim_id, ran as u32).await;
     }
     Ok(Json(answer.map_err(AppError::upstream)?).into_response())
 }

@@ -603,7 +603,7 @@ impl Withheld {
         match self {
             Self::Off => format!("Not searched: web search is off for now. {WITHOUT}"),
             Self::Ended => "Not searched: this turn can no longer search.".to_string(),
-            Self::Undecided => "Not searched: this message did not ask you, and a check that may not answer does not search. If you will not answer, decline as you were told. To answer it, first say in one short sentence what you will look up, then search again.".to_string(),
+            Self::Undecided => "Not searched: this message did not ask you, and a check that may not answer does not search. If you will not answer, decline as you were told. To answer it, say in one short sentence what you will look up, unless you already have, then search again.".to_string(),
             Self::Used { limit } => {
                 let more = if limit < SEARCHES_FOR_DEEPER_RESEARCH {
                     " A message gets more only when the person's own words in it ask for deeper research."
@@ -1819,7 +1819,7 @@ mod tests {
             (Withheld::Off, "Not searched: web search is off for now."),
             (
                 Withheld::Undecided,
-                "To answer it, first say in one short sentence what you will look up, then search again.",
+                "To answer it, say in one short sentence what you will look up, unless you already have, then search again.",
             ),
             (
                 Withheld::Unchecked,

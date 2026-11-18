@@ -400,7 +400,10 @@ charges for it, passed through:
   turn that costs nothing (one Instafy started that ended without a reply and left nothing, a
   failed turn that left nothing) is not charged its searches either; a search step is a step that
   worked, so a turn that searched leaves something. A turn the person stopped sends no
-  completion, so its searches are not charged. Only a job charged as Instafy AI
+  completion, so its searches are not charged, and neither are those of a turn put back in the
+  queue (its machine stopped, its lease lapsed, or a short rate limit): its attempt sends no
+  completion, or one the requeue sets aside, and the attempt that runs again is charged for what
+  it searches itself. Only a job charged as Instafy AI
   (`managedAiUsed`) is charged its searches. A background check that may decline (an ambient
   evaluation, whose charge waits for it to speak: `managedAiBillingDeferred`) gets no search
   until it answers (below), and one that declines is charged nothing, its searches included. A
@@ -426,19 +429,28 @@ controller keeps the message's count, and the proxy asks it before each search
   read a page whose address it has, and to say what it could not check; and that a message gets
   more only when the person's own words ask for deeper research. Nothing is searched or charged
   for it, and the chat shows no search;
-- a search the controller let run that failed goes back to the message
-  (`POST /internal/managed-web-search/give-back`);
+- the proxy settles each check with how many of its searches ran, and the rest (a search that
+  failed) go back to the message (`POST /internal/managed-web-search/settle`). Each check has
+  the proxy's own id, so the same check asked or settled again changes nothing more, and one
+  whose answer the proxy never read (the controller was slow, or the answer was lost) is settled
+  with none: nothing is searched or charged for it, the model reads that web search could not be
+  checked just now, and the message keeps its searches, even if the check lands only afterwards;
 - a native helper, and a recovery retry of the turn, search from the turn's searches. A retry
   that starts afresh, on a new thread, reads what the earlier attempt's searches answered and the
   pages it read, and does not search: the message's searches are charged once;
+- a turn put back in the queue runs again as the job's next lease attempt. No completion charged
+  the attempt before it, so that attempt's searches go back to the message when the new attempt
+  first asks, and the new attempt may search again, on whichever machine runs it. It does not
+  read what the earlier attempt found, which only that attempt's machine had;
 - a background check that may decline (an ambient evaluation) is not let search until it answers:
-  the model reads that, to answer, it first says in a short sentence what it will look up, and
-  then searches like any turn.
+  the model reads that, to answer, it says in a short sentence what it will look up, unless it
+  already has, and then searches like any turn. That sentence reaches the controller as the
+  search goes out, so a search the check makes waits up to 3 seconds for it before it is refused.
 
 The runtime keeps to the limit as well, for the turns it runs itself: a hand-back goes on with
-the allowance of the turn whose card it carries on, and a job's later attempt with its earlier
-attempt's, while the runtime that ran them is up. Searches a call held and did not run go back to
-the message. The limits are `MANAGED_WEB_SEARCHES_PER_MESSAGE` and
+the allowance of the turn whose card it carries on, and a recovery retry with its first try's,
+while the runtime that ran them is up; a later lease attempt starts over, as on another machine.
+Searches a call held and did not run go back to the message. The limits are `MANAGED_WEB_SEARCHES_PER_MESSAGE` and
 `MANAGED_WEB_SEARCHES_FOR_DEEPER_RESEARCH` in `runtime-contracts` (`research.rs`).
 
 **Turning it on.** OpenAI bills the platform key for each search, and each costs the person

@@ -168,15 +168,17 @@ impl ControllerClient {
     }
 
     /// Asks the controller whether `searches` of a managed job's searches may
-    /// run: it counts a message's searches across its jobs, and refuses them
-    /// while its `MANAGED_AI_NATIVE_WEB_SEARCH` is off.
+    /// run, as the check `claim_id`: it counts a message's searches across its
+    /// jobs, and refuses them while its `MANAGED_AI_NATIVE_WEB_SEARCH` is off.
+    /// The same check asked again takes nothing more.
     pub async fn claim_managed_web_searches(
         &self,
         job: &ManagedSearchJob,
+        claim_id: Uuid,
         searches: u32,
     ) -> Result<ManagedSearchClaim> {
         let response = self
-            .managed_web_search_request("claim", job, searches)
+            .managed_web_search_request("claim", job, claim_id, ("searches", searches))
             .await?;
         if !response.status().is_success() {
             bail!("controller web search check returned {}", response.status());
@@ -184,19 +186,22 @@ impl ControllerClient {
         Ok(response.json::<ManagedSearchClaim>().await?)
     }
 
-    /// Gives back to the message `searches` the controller let run and that
-    /// did not search.
-    pub async fn give_back_managed_web_searches(
+    /// Tells the controller that `ran` of the check's searches ran: the rest
+    /// go back to the message. A check whose answer was never read is settled
+    /// with none, so it takes nothing even if it lands afterwards. Settling
+    /// again changes nothing more.
+    pub async fn settle_managed_web_searches(
         &self,
         job: &ManagedSearchJob,
-        searches: u32,
+        claim_id: Uuid,
+        ran: u32,
     ) -> Result<()> {
         let response = self
-            .managed_web_search_request("give-back", job, searches)
+            .managed_web_search_request("settle", job, claim_id, ("ran", ran))
             .await?;
         if !response.status().is_success() {
             bail!(
-                "controller web search give-back returned {}",
+                "controller web search settle returned {}",
                 response.status()
             );
         }
@@ -207,14 +212,16 @@ impl ControllerClient {
         &self,
         operation: &str,
         job: &ManagedSearchJob,
-        searches: u32,
+        claim_id: Uuid,
+        (field, count): (&str, u32),
     ) -> Result<reqwest::Response> {
         let url = format!(
             "{}/internal/managed-web-search/{operation}",
             self.base_url.trim_end_matches('/')
         );
         let mut body = serde_json::to_value(job)?;
-        body["searches"] = serde_json::json!(searches);
+        body["claimId"] = serde_json::json!(claim_id);
+        body[field] = serde_json::json!(count);
         Ok(self
             .http
             .post(url)

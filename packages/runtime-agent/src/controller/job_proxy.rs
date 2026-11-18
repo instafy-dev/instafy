@@ -200,6 +200,70 @@ pub(crate) mod tests {
         server.abort();
     }
 
+    /// The runtime tells the controller about a job's deeper research at the job's own path,
+    /// fenced to its lease attempt, with the machine bearer; a refusal is an error, so the
+    /// message keeps to the smaller limit.
+    #[tokio::test]
+    async fn deeper_research_is_reported_for_the_jobs_lease_attempt() {
+        use axum::{
+            extract::{Path, State},
+            http::HeaderMap,
+            routing::post,
+        };
+        use std::sync::Arc;
+        type Seen = Arc<Mutex<Vec<(String, String, JsonValue)>>>;
+        let seen: Seen = Arc::default();
+        let app = axum::Router::new()
+            .route(
+                "/agent/jobs/:id/deeper-research",
+                post(
+                    |State(seen): State<Seen>,
+                     Path(id): Path<String>,
+                     headers: HeaderMap,
+                     axum::Json(body): axum::Json<JsonValue>| async move {
+                        let refused = body["lease_attempt"] == json!(3);
+                        seen.lock().push((
+                            id,
+                            headers["authorization"].to_str().unwrap().to_owned(),
+                            body,
+                        ));
+                        if refused {
+                            axum::http::StatusCode::CONFLICT
+                        } else {
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (client, registration) = proxy_test_client(base);
+        *client.current_agent_token.lock() = Some("test-current-agent".into());
+        let job_id = Uuid::new_v4();
+        client
+            .report_deeper_research(&registration, job_id, 2)
+            .await
+            .expect("reported");
+        assert_eq!(
+            *seen.lock(),
+            [(
+                job_id.to_string(),
+                "Bearer test-current-agent".to_string(),
+                json!({"lease_attempt": 2})
+            )]
+        );
+        // A lease that has moved on is refused.
+        assert!(
+            client
+                .report_deeper_research(&registration, job_id, 3)
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn job_proxy_token_never_follows_redirects_or_logs_response_bodies() {
         let app = axum::Router::new().route(

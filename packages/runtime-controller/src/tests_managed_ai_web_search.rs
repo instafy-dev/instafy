@@ -319,24 +319,65 @@ async fn a_declined_evaluations_web_searches_are_not_charged() -> anyhow::Result
     .await
 }
 
-/// What the proxy sends before a managed job's searches, and what it reads back.
+/// One of the proxy's checks before a managed job's searches: the job `(space, job, run)` as its
+/// token names it, its lease attempt, and the check's own id.
+#[derive(Debug, Clone, Copy)]
+struct Check {
+    job: (uuid::Uuid, uuid::Uuid, uuid::Uuid),
+    lease_attempt: i32,
+    id: uuid::Uuid,
+}
+
+impl Check {
+    /// A new check of the job's first lease attempt.
+    fn of(job: (uuid::Uuid, uuid::Uuid, uuid::Uuid)) -> Self {
+        Self::of_attempt(job, 1)
+    }
+
+    fn of_attempt(job: (uuid::Uuid, uuid::Uuid, uuid::Uuid), lease_attempt: i32) -> Self {
+        Self {
+            job,
+            lease_attempt,
+            id: uuid::Uuid::new_v4(),
+        }
+    }
+
+    fn body(&self, field: &str, value: u32) -> serde_json::Value {
+        let (project_id, job_id, run_id) = self.job;
+        let mut body = json!({"projectId": project_id, "jobId": job_id,
+                              "leaseAttempt": self.lease_attempt, "runId": run_id,
+                              "claimId": self.id});
+        body[field] = json!(value);
+        body
+    }
+}
+
+/// The proxy asks to run `searches` of the job's searches, and reads the answer.
 async fn claim(
     state: &crate::AppState,
-    path: &str,
-    fixture_job: (uuid::Uuid, uuid::Uuid, uuid::Uuid),
+    check: Check,
     searches: u32,
 ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
-    let (project_id, job_id, run_id) = fixture_job;
+    send(state, CLAIM, check.body("searches", searches)).await
+}
+
+/// The proxy says how many of the check's searches ran.
+async fn settle(state: &crate::AppState, check: Check, ran: u32) -> anyhow::Result<StatusCode> {
+    Ok(send(state, SETTLE, check.body("ran", ran)).await?.0)
+}
+
+/// What the proxy sends the controller, and what it reads back.
+async fn send(
+    state: &crate::AppState,
+    path: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<(StatusCode, serde_json::Value)> {
     let request = axum::http::Request::builder()
         .method("POST")
         .uri(path)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .header(axum::http::header::AUTHORIZATION, "Bearer credential-lease")
-        .body(axum::body::Body::from(
-            json!({"projectId": project_id, "jobId": job_id, "leaseAttempt": 1,
-                   "runId": run_id, "searches": searches})
-            .to_string(),
-        ))?;
+        .body(axum::body::Body::from(body.to_string()))?;
     let response = crate::managed_web_search::router()
         .with_state(state.clone())
         .oneshot(request)
@@ -409,7 +450,7 @@ async fn seed_worker(fixture: &ReservedManagedAiPrompt) -> anyhow::Result<uuid::
 }
 
 const CLAIM: &str = "/internal/managed-web-search/claim";
-const GIVE_BACK: &str = "/internal/managed-web-search/give-back";
+const SETTLE: &str = "/internal/managed-web-search/settle";
 
 /// A message runs at most 2 web searches in all, whichever of its jobs asks: the lead's turn
 /// runs one, its team plan's worker one, and a third, from either, is refused, so it never runs
@@ -431,11 +472,12 @@ async fn a_third_search_in_one_message_is_refused_across_its_jobs() -> anyhow::R
         let before = credit_balance(&fixture.pool, &fixture.org_id).await?;
 
         assert_eq!(
-            claim(&state, CLAIM, lead, 1).await?,
+            claim(&state, Check::of(lead), 1).await?,
             (StatusCode::OK, json!({"granted": 1, "limit": 2}))
         );
+        let workers = Check::of(worker);
         assert_eq!(
-            claim(&state, CLAIM, worker, 2).await?,
+            claim(&state, workers, 2).await?,
             (
                 StatusCode::OK,
                 json!({"granted": 1, "limit": 2, "refused": "used"})
@@ -443,7 +485,7 @@ async fn a_third_search_in_one_message_is_refused_across_its_jobs() -> anyhow::R
         );
         for job in [lead, worker] {
             assert_eq!(
-                claim(&state, CLAIM, job, 1).await?,
+                claim(&state, Check::of(job), 1).await?,
                 (
                     StatusCode::OK,
                     json!({"granted": 0, "limit": 2, "refused": "used"})
@@ -452,11 +494,21 @@ async fn a_third_search_in_one_message_is_refused_across_its_jobs() -> anyhow::R
             );
         }
         // The worker's search failed: it goes back, and the message may run one more.
+        assert_eq!(settle(&state, workers, 0).await?, StatusCode::NO_CONTENT);
+        let leads = Check::of(lead);
+        assert_eq!(claim(&state, leads, 1).await?.1["granted"], 1);
+        // The proxy never read that answer (it timed out), so it settles the check with none:
+        // its search goes back, and the same check landing again takes nothing more.
+        assert_eq!(settle(&state, leads, 0).await?, StatusCode::NO_CONTENT);
+        assert_eq!(claim(&state, leads, 1).await?.1["granted"], 0);
+        // One it gave up on before it landed takes nothing when it lands.
+        let landed_late = Check::of(worker);
         assert_eq!(
-            claim(&state, GIVE_BACK, worker, 1).await?.0,
+            settle(&state, landed_late, 0).await?,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(claim(&state, CLAIM, lead, 1).await?.1["granted"], 1);
+        assert_eq!(claim(&state, landed_late, 1).await?.1["granted"], 0);
+        assert_eq!(claim(&state, Check::of(worker), 1).await?.1["granted"], 1);
         // A claim writes no credits: the searches that ran are charged with the turn.
         assert_eq!(
             credit_balance(&fixture.pool, &fixture.org_id).await?,
@@ -468,7 +520,7 @@ async fn a_third_search_in_one_message_is_refused_across_its_jobs() -> anyhow::R
         // The switch, read on every search: off refuses the next one at once.
         state.config.managed_ai_native_web_search = false;
         assert_eq!(
-            claim(&state, CLAIM, lead, 1).await?,
+            claim(&state, Check::of(lead), 1).await?,
             (
                 StatusCode::OK,
                 json!({"granted": 0, "limit": 2, "refused": "off"})
@@ -478,7 +530,7 @@ async fn a_third_search_in_one_message_is_refused_across_its_jobs() -> anyhow::R
         let mut wrong = state.clone();
         wrong.config.proxy_credential_lease_token = Some("another".into());
         assert_eq!(
-            claim(&wrong, CLAIM, lead, 1).await?.0,
+            claim(&wrong, Check::of(lead), 1).await?.0,
             StatusCode::UNAUTHORIZED
         );
         anyhow::Ok(())
@@ -522,7 +574,7 @@ async fn an_ambient_check_searches_only_once_it_answers_and_deeper_research_runs
         };
         set_metadata(json!({"managedAiUsed": false, "managedAiBillingDeferred": true})).await?;
         assert_eq!(
-            claim(&state, CLAIM, job, 1).await?,
+            claim(&state, Check::of(job), 1).await?,
             (
                 StatusCode::OK,
                 json!({"granted": 0, "limit": 2, "refused": "undecided"})
@@ -530,7 +582,7 @@ async fn an_ambient_check_searches_only_once_it_answers_and_deeper_research_runs
         );
         // It answered: its first reply marked it used, as its deferred charge does.
         set_metadata(json!({"managedAiUsed": true})).await?;
-        assert_eq!(claim(&state, CLAIM, job, 1).await?.1["granted"], 1);
+        assert_eq!(claim(&state, Check::of(job), 1).await?.1["granted"], 1);
 
         // Deeper research, from the runtime that holds the lease.
         let request = axum::http::Request::builder()
@@ -550,11 +602,11 @@ async fn an_ambient_check_searches_only_once_it_answers_and_deeper_research_runs
             .await?;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            claim(&state, CLAIM, job, 4).await?,
+            claim(&state, Check::of(job), 4).await?,
             (StatusCode::OK, json!({"granted": 4, "limit": 8}))
         );
         assert_eq!(
-            claim(&state, CLAIM, job, 4).await?,
+            claim(&state, Check::of(job), 4).await?,
             (
                 StatusCode::OK,
                 json!({"granted": 3, "limit": 8, "refused": "used"})
@@ -572,12 +624,68 @@ async fn an_ambient_check_searches_only_once_it_answers_and_deeper_research_runs
             )
             .await?;
         assert_eq!(
-            claim(&state, CLAIM, job, 1).await?,
+            claim(&state, Check::of(job), 1).await?,
             (
                 StatusCode::OK,
                 json!({"granted": 0, "limit": 2, "refused": "ended"})
             )
         );
+        anyhow::Ok(())
+    }
+    .await;
+    with_cleanup(fixture, async move { outcome }).await
+}
+
+/// A turn put back in the queue (its machine stopped, its lease lapsed, or a short rate limit)
+/// runs again as the job's next lease attempt, and no completion charged the attempt before it:
+/// when the new attempt first asks, the earlier attempt's searches go back to the message, so it
+/// may search again, within the message's limit. The earlier attempt can no longer search.
+#[tokio::test]
+async fn a_turn_put_back_in_the_queue_may_search_again_when_it_runs_again() -> anyhow::Result<()> {
+    let Some(fixture) = seed_reserved_managed_ai_prompt("web-search-requeue").await? else {
+        eprintln!("skipping requeued web search test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let outcome = async {
+        lease_for_search(&fixture).await?;
+        let mut state = fixture.state.clone();
+        state.config.managed_ai_native_web_search = true;
+        let job = (fixture.project_id, fixture.job_id, fixture.run_id);
+        assert_eq!(claim(&state, Check::of(job), 2).await?.1["granted"], 2);
+        assert_eq!(claim(&state, Check::of(job), 1).await?.1["granted"], 0);
+
+        // Its machine stopped: the job went back to the queue and was leased again.
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "update agent_jobs set lease_attempts = 2, lease_expires_at = now() + interval '10 minutes'
+                  where id = $1",
+                &[&fixture.job_id],
+            )
+            .await?;
+        assert_eq!(
+            claim(&state, Check::of(job), 1).await?,
+            (
+                StatusCode::OK,
+                json!({"granted": 0, "limit": 2, "refused": "ended"})
+            ),
+            "the earlier attempt"
+        );
+        assert_eq!(
+            claim(&state, Check::of_attempt(job, 2), 1).await?,
+            (StatusCode::OK, json!({"granted": 1, "limit": 2}))
+        );
+        assert_eq!(
+            claim(&state, Check::of_attempt(job, 2), 2).await?,
+            (
+                StatusCode::OK,
+                json!({"granted": 1, "limit": 2, "refused": "used"})
+            )
+        );
+        let rows = web_search_rows(&fixture.pool, &fixture.project_id).await?;
+        assert!(rows.is_empty(), "{rows:?}");
         anyhow::Ok(())
     }
     .await;

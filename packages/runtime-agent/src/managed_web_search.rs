@@ -11,7 +11,10 @@
 //!   the browser), and the proxy asks it before each search, so the message as a whole keeps to
 //!   them whichever machines its jobs run on. This runtime keeps to them too, for its own jobs: a
 //!   build Instafy starts after the browser (a hand-back) goes on with the allowance of the turn
-//!   whose card it carries on, and a job's later attempt with its earlier attempt's.
+//!   whose card it carries on, and a recovery retry with its first try's. A job put back in the
+//!   queue runs again as a new lease attempt, which starts over with an allowance of its own, as
+//!   it would on another machine: no completion charged the attempt before it, so the controller
+//!   gives that attempt's searches back to the message.
 //! - The AI's search tool is wrapped ([`install`]): a call runs only as many of its queries as
 //!   are left, and says so, and a call with none left does not run: the model reads
 //!   [`limit_line`] in its place. What the searches answered is kept ([`ManagedWebSearch::found`]),
@@ -56,8 +59,8 @@ const MAX_FOUND_CHARS: usize = 12_000;
 /// The most `search_query` entries one call of the search tool runs: the search bridge's own
 /// limit (openai-proxy-server `search_bridge::MAX_QUERIES`), as codex's tool allows.
 const QUERIES_PER_CALL: usize = 4;
-/// How many recent jobs' allowances this runtime remembers, for the hand-backs and later attempts
-/// that go on with them.
+/// How many recent jobs' allowances this runtime remembers, for the hand-backs and retries that go
+/// on with them.
 const REMEMBERED_JOBS: usize = 64;
 /// The search tool this wraps: codex's `web.run`.
 const SEARCH_TOOL_NAMESPACE: &str = "web";
@@ -239,36 +242,41 @@ pub(crate) fn keep_found_for_test(allowance: &ManagedWebSearch, text: &str) {
     allowance.keep_found(text.to_string());
 }
 
-/// The allowances of recent jobs, newest last.
-static REMEMBERED: LazyLock<Mutex<VecDeque<(Uuid, Arc<ManagedWebSearch>)>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::new()));
+/// The allowances of recent jobs, by job and lease attempt, newest last.
+type Remembered = VecDeque<(Uuid, i32, Arc<ManagedWebSearch>)>;
+static REMEMBERED: LazyLock<Mutex<Remembered>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
 
-/// The allowance of `job_id`'s turn: the one an earlier attempt of the job held, else the one of
-/// the turn whose card it carries on (`goes_on_from`, a hand-back's), else a new one of `limit`
-/// searches. A runtime that started since, or another runtime, has none of them: the turn gets a
-/// new one.
+/// The allowance of `job_id`'s turn in its lease attempt `lease_attempt`: the one the attempt
+/// already holds (a recovery retry's), else the one of the turn whose card it carries on
+/// (`goes_on_from`, a hand-back's), else a new one of `limit` searches. A later lease attempt of
+/// the job (it went back to the queue: its machine stopped, its lease lapsed, or a short rate
+/// limit) starts over with a new one, as a runtime that started since, or another runtime, does.
 pub(crate) fn allowance_for_job(
     job_id: Uuid,
+    lease_attempt: i32,
     goes_on_from: Option<Uuid>,
     limit: u32,
 ) -> Arc<ManagedWebSearch> {
     let mut remembered = REMEMBERED.lock();
-    let find = |remembered: &VecDeque<(Uuid, Arc<ManagedWebSearch>)>, id: Uuid| {
-        remembered
-            .iter()
-            .find(|(job, _)| *job == id)
-            .map(|(_, allowance)| allowance.clone())
+    let allowance = match remembered.iter().position(|(job, _, _)| *job == job_id) {
+        Some(index) if remembered[index].1 == lease_attempt => return remembered[index].2.clone(),
+        Some(earlier_attempt) => {
+            remembered.remove(earlier_attempt);
+            Arc::new(ManagedWebSearch::new(limit))
+        }
+        None => goes_on_from
+            .and_then(|card_job| {
+                remembered
+                    .iter()
+                    .find(|(job, _, _)| *job == card_job)
+                    .map(|(_, _, allowance)| allowance.clone())
+            })
+            .unwrap_or_else(|| Arc::new(ManagedWebSearch::new(limit))),
     };
-    if let Some(allowance) = find(&remembered, job_id) {
-        return allowance;
-    }
-    let allowance = goes_on_from
-        .and_then(|card_job| find(&remembered, card_job))
-        .unwrap_or_else(|| Arc::new(ManagedWebSearch::new(limit)));
     if remembered.len() >= REMEMBERED_JOBS {
         remembered.pop_front();
     }
-    remembered.push_back((job_id, allowance.clone()));
+    remembered.push_back((job_id, lease_attempt, allowance.clone()));
     allowance
 }
 
@@ -280,8 +288,8 @@ pub(crate) fn usage_artifact_of_job(job_id: Uuid) -> Option<JsonValue> {
     let allowance = REMEMBERED
         .lock()
         .iter()
-        .find(|(job, _)| *job == job_id)
-        .map(|(_, allowance)| allowance.clone())?;
+        .find(|(job, _, _)| *job == job_id)
+        .map(|(_, _, allowance)| allowance.clone())?;
     allowance.take_unreported().map(SearchCost::to_artifact)
 }
 
@@ -691,6 +699,105 @@ mod tests {
         assert_eq!(allowance.found().len(), 2, "no room left");
     }
 
+    /// A stand-in for the search extension's tool: it says, as the search bridge's answer does,
+    /// which queries it searched, and answers `text`.
+    struct AnswersSearch {
+        searched: &'static [&'static str],
+        text: &'static str,
+    }
+
+    impl<'call> ToolExecutor<ToolCall<'call>> for AnswersSearch {
+        fn tool_name(&self) -> ToolName {
+            ToolName::namespaced(SEARCH_TOOL_NAMESPACE, SEARCH_TOOL_NAME)
+        }
+
+        fn spec(&self) -> ToolSpec {
+            unreachable!("a call reads no spec")
+        }
+
+        fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
+        where
+            ToolCall<'call>: 'a,
+        {
+            Box::pin(async move {
+                let end = EventMsg::WebSearchEnd(codex_protocol::protocol::WebSearchEndEvent {
+                    call_id: call.call_id.clone(),
+                    query: String::new(),
+                    action: codex_protocol::models::WebSearchAction::Search {
+                        query: None,
+                        queries: None,
+                    },
+                    results: Some(bridge_results(self.searched, 8_000)),
+                });
+                call.turn_item_emitter
+                    .emit_completed(ExtensionTurnItem {
+                        item: serde_json::from_value(
+                            json!({"kind": "clock.sleep", "id": "search", "durationMs": 0}),
+                        )
+                        .unwrap(),
+                        legacy_events: vec![end],
+                    })
+                    .await;
+                Ok(Box::new(codex_extension_api::JsonToolOutput::new(
+                    json!({ "output": self.text }),
+                )) as Box<dyn ToolOutput>)
+            })
+        }
+    }
+
+    /// The model's call of the search tool with `queries`.
+    fn search_call(queries: &[&str]) -> ToolCall<'static> {
+        let queries: Vec<JsonValue> = queries.iter().map(|query| json!({ "q": query })).collect();
+        ToolCall {
+            turn_id: "turn".into(),
+            call_id: "call".into(),
+            tool_name: ToolName::namespaced(SEARCH_TOOL_NAMESPACE, SEARCH_TOOL_NAME),
+            model: "model".into(),
+            codex_turn_metadata: None,
+            truncation_policy: codex_protocol::protocol::TruncationPolicy::Bytes(10_000),
+            source: codex_extension_api::ToolCallSource::Direct,
+            conversation_history: codex_extension_api::ConversationHistory::default(),
+            turn_item_emitter: Arc::new(codex_extension_api::NoopTurnItemEmitter),
+            attachment_store: codex_core::passthrough_image_store(),
+            ephemeral: false,
+            environments: Vec::new(),
+            payload: ToolPayload::Function {
+                arguments: json!({ "search_query": queries }).to_string(),
+            },
+        }
+    }
+
+    /// The search tool kept to an allowance keeps what a call that searched answered, as the
+    /// model read it, for a run of the same turn that starts afresh. A call that searched nothing
+    /// (the controller refused it) keeps nothing, and its search goes back.
+    #[tokio::test]
+    async fn the_search_tool_keeps_what_a_call_that_searched_answered() {
+        let allowance = Arc::new(ManagedWebSearch::new(SEARCHES_PER_MESSAGE));
+        let kept = |searched: &'static [&'static str], text: &'static str| KeptSearch {
+            inner: Arc::new(AnswersSearch { searched, text }),
+            allowance: allowance.clone(),
+        };
+        kept(&["museum hours"], "Open 10:00 to 18:00.")
+            .handle(search_call(&["museum hours"]))
+            .await
+            .expect("it searched");
+        let found = allowance.found();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("Open 10:00 to 18:00."), "{found:?}");
+
+        kept(&[], "Not searched: web search is off for now.")
+            .handle(search_call(&["museum tickets"]))
+            .await
+            .expect("it answered");
+        assert_eq!(
+            allowance.found(),
+            found,
+            "a call that searched nothing keeps nothing"
+        );
+        assert_eq!(allowance.hold(2), 1, "its search went back");
+        assert_eq!(allowance.take_unreported(), Some(cost(1, 8_000, 100)));
+    }
+
     /// A search answered by no bridge (no entry of its own) keeps what it held, and reports
     /// nothing to charge; one answered by a bridge from before `search_usage` counts the queries
     /// it names, with no tokens.
@@ -761,25 +868,44 @@ mod tests {
         );
     }
 
-    /// A hand-back goes on with the allowance of the turn whose card it carries on, and a job's
-    /// later attempt with its own: the message keeps to one allowance. Any other turn gets a new
-    /// one.
+    /// A hand-back goes on with the allowance of the turn whose card it carries on, and a retry
+    /// in the same lease attempt with its first try's: the message keeps to one allowance. A
+    /// later lease attempt of the job starts over, as it would on another machine, and any other
+    /// turn gets a new one.
     #[test]
-    fn a_hand_back_and_a_later_attempt_go_on_with_the_messages_allowance() {
+    fn a_hand_back_goes_on_with_the_messages_allowance_and_a_later_attempt_starts_over() {
         let message = Uuid::new_v4();
-        let first = allowance_for_job(message, None, SEARCHES_FOR_DEEPER_RESEARCH);
+        let first = allowance_for_job(message, 1, None, SEARCHES_FOR_DEEPER_RESEARCH);
         assert_eq!(first.hold(5), 5);
         first.settle(5, Some(Some(cost(5, 0, 0))));
-        let again = allowance_for_job(message, None, SEARCHES_PER_MESSAGE);
-        assert!(Arc::ptr_eq(&first, &again));
-        let hand_back = allowance_for_job(Uuid::new_v4(), Some(message), SEARCHES_PER_MESSAGE);
+        let retry = allowance_for_job(message, 1, None, SEARCHES_PER_MESSAGE);
+        assert!(Arc::ptr_eq(&first, &retry));
+        let hand_back = allowance_for_job(Uuid::new_v4(), 1, Some(message), SEARCHES_PER_MESSAGE);
         assert!(Arc::ptr_eq(&first, &hand_back));
         assert_eq!(hand_back.limit(), SEARCHES_FOR_DEEPER_RESEARCH);
         assert_eq!(hand_back.hold(8), 3);
 
-        let unknown_card = allowance_for_job(Uuid::new_v4(), Some(Uuid::new_v4()), 2);
+        let unknown_card = allowance_for_job(Uuid::new_v4(), 1, Some(Uuid::new_v4()), 2);
         assert!(!Arc::ptr_eq(&first, &unknown_card));
         assert_eq!(unknown_card.hold(4), 2);
+
+        // The job went back to the queue and runs again here: its new attempt starts over, and
+        // what it searches is its own to report.
+        let job = Uuid::new_v4();
+        let earlier = allowance_for_job(job, 1, None, SEARCHES_PER_MESSAGE);
+        record_searches_for_test(&earlier, 2, 100, 10);
+        let later = allowance_for_job(job, 2, None, SEARCHES_PER_MESSAGE);
+        assert!(!Arc::ptr_eq(&earlier, &later));
+        assert_eq!(later.hold(2), 2);
+        assert!(Arc::ptr_eq(
+            &later,
+            &allowance_for_job(job, 2, None, SEARCHES_PER_MESSAGE)
+        ));
+        assert_eq!(
+            usage_artifact_of_job(job),
+            None,
+            "the later attempt searched nothing yet"
+        );
     }
 
     /// A job's completion takes what its searches cost since the last report, once, as the
@@ -788,7 +914,7 @@ mod tests {
     #[test]
     fn a_jobs_report_takes_what_its_searches_cost_once() {
         let job = Uuid::new_v4();
-        let allowance = allowance_for_job(job, None, SEARCHES_PER_MESSAGE);
+        let allowance = allowance_for_job(job, 1, None, SEARCHES_PER_MESSAGE);
         assert_eq!(usage_artifact_of_job(job), None, "nothing searched yet");
         record_searches_for_test(&allowance, 2, 16_824, 782);
         assert_eq!(

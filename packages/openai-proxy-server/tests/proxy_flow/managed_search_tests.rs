@@ -205,7 +205,7 @@ async fn a_third_search_in_one_message_is_refused_uncharged_across_two_jobs() ->
             (LEAD.to_string(), 1)
         ]
     );
-    assert!(searches.given_back.is_empty());
+    assert!(searches.settled.is_empty());
     Ok(())
 }
 
@@ -231,12 +231,13 @@ async fn the_controllers_switch_off_refuses_the_next_search_and_the_turn_goes_on
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{body}");
-    // One of the two failed: it goes back to the message.
+    // One of the two failed: the check is settled with the one that ran, and
+    // the other goes back to the message.
     assert_eq!(
-        controller.web_searches.lock().unwrap().given_back,
+        controller.web_searches.lock().unwrap().settled,
         [("77777777-7777-4777-8777-777777777777".to_string(), 1)]
     );
-    assert_eq!(controller.web_searches.lock().unwrap().used, 1);
+    assert_eq!(controller.web_searches.lock().unwrap().used(), 1);
 
     controller.web_searches.lock().unwrap().switch_on = false;
     let (status, body) = post_through_proxy(
@@ -283,6 +284,128 @@ async fn the_controllers_switch_off_refuses_the_next_search_and_the_turn_goes_on
         nothing_searched()
     );
     assert_eq!(controller.web_searches.lock().unwrap().claims.len(), asked);
+    assert_eq!(responses_requests(&upstream).len(), 2);
+    Ok(())
+}
+
+/// A background check that may decline (an ambient evaluation) searches only
+/// once it has answered, and it answers with a short sentence its runtime
+/// posts while the search goes out. The search waits for that answer to
+/// reach the controller, asking again with the same check, and then runs; a
+/// check that never answers runs nothing and reads why.
+#[tokio::test]
+#[serial]
+async fn an_ambient_checks_search_waits_for_its_answer_to_reach_the_controller() -> Result<()> {
+    let (addr, controller, upstream, _env, _guards) =
+        spawn_search_stack(StackProxy::Dynamic, Some("1")).await?;
+    upstream.respond_next.lock().unwrap().extend([
+        (StatusCode::OK, web_search_answer()),
+        (StatusCode::OK, web_search_answer()),
+    ]);
+    // Its sentence reaches the controller while the search waits.
+    controller.web_searches.lock().unwrap().undecided = 2;
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(true, true),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body)?;
+    assert_eq!(answer["results"][1]["searches"], 2, "{answer}");
+    {
+        let searches = controller.web_searches.lock().unwrap();
+        assert_eq!(searches.claims.len(), 3);
+        assert!(
+            searches
+                .claim_ids
+                .iter()
+                .all(|id| *id == searches.claim_ids[0]),
+            "one check, asked again: {:?}",
+            searches.claim_ids
+        );
+        assert_eq!(searches.used(), 2);
+    }
+
+    // One that never answers searches nothing, and reads why.
+    controller.web_searches.lock().unwrap().undecided = usize::MAX;
+    let started = std::time::Instant::now();
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(true, true),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body)?;
+    let output = answer["output"].as_str().unwrap();
+    assert!(
+        output.contains("To answer it, say in one short sentence what you will look up, unless you already have, then search again."),
+        "{output}"
+    );
+    assert_eq!(answer["results"], nothing_searched());
+    assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+    assert_eq!(
+        responses_requests(&upstream).len(),
+        2,
+        "nothing more upstream"
+    );
+    Ok(())
+}
+
+/// A check whose answer the proxy never read (the controller took the
+/// searches, and its answer was lost) is settled with none: nothing is
+/// searched or charged for it, its searches go back to the message, and the
+/// next search runs.
+#[tokio::test]
+#[serial]
+async fn a_check_whose_answer_was_lost_gives_its_searches_back() -> Result<()> {
+    let (addr, controller, upstream, _env, _guards) =
+        spawn_search_stack(StackProxy::Dynamic, Some("1")).await?;
+    upstream.respond_next.lock().unwrap().extend([
+        (StatusCode::OK, web_search_answer()),
+        (StatusCode::OK, web_search_answer()),
+    ]);
+    controller.web_searches.lock().unwrap().lost_answers = 1;
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(true, true),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body)?;
+    assert!(
+        answer["output"]
+            .as_str()
+            .unwrap()
+            .contains("Not searched: web search could not be checked just now."),
+        "{answer}"
+    );
+    assert_eq!(answer["results"], nothing_searched());
+    assert!(responses_requests(&upstream).is_empty());
+    {
+        let searches = controller.web_searches.lock().unwrap();
+        assert_eq!(
+            searches.settled,
+            [("77777777-7777-4777-8777-777777777777".to_string(), 0)]
+        );
+        assert_eq!(searches.used(), 0, "its searches went back");
+    }
+
+    let (status, body) = post_through_proxy(
+        addr,
+        &managed_grant(true, true),
+        "/v1/alpha/search",
+        luna_search(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body)?;
+    assert_eq!(answer["results"][1]["searches"], 2, "{answer}");
     assert_eq!(responses_requests(&upstream).len(), 2);
     Ok(())
 }

@@ -95,23 +95,27 @@ impl ControllerIntegration {
             .await
     }
 
-    /// The controller's check before a managed job's searches run.
+    /// The controller's check `claim_id` before a managed job's searches run.
     pub async fn claim_managed_web_searches(
         &self,
         job: &ManagedSearchJob,
+        claim_id: uuid::Uuid,
         searches: u32,
     ) -> Result<ManagedSearchClaim> {
-        self.client.claim_managed_web_searches(job, searches).await
+        self.client
+            .claim_managed_web_searches(job, claim_id, searches)
+            .await
     }
 
-    /// Gives back searches the controller let run and that did not search.
-    pub async fn give_back_managed_web_searches(
+    /// Tells the controller how many of the check's searches ran.
+    pub async fn settle_managed_web_searches(
         &self,
         job: &ManagedSearchJob,
-        searches: u32,
+        claim_id: uuid::Uuid,
+        ran: u32,
     ) -> Result<()> {
         self.client
-            .give_back_managed_web_searches(job, searches)
+            .settle_managed_web_searches(job, claim_id, ran)
             .await
     }
 }

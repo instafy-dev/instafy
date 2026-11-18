@@ -3528,8 +3528,10 @@ fn attach_task_usage(result: Result<JobExecution>, task_usage: &TaskUsage) -> Re
 /// What an Instafy AI job's web searches cost (`managed_web_search`), on its completion whether
 /// it succeeded or failed: a turn that searched and then ended in an error or its time limit has
 /// no `turn.completed`, and its searches still ran and cost what they cost. The searches of every
-/// run of the job are in it, a recovery retry's too. A job that lost its lease sends no
-/// completion: what it searched is kept for the job's next attempt on this runtime.
+/// run of the job's lease attempt are in it, a recovery retry's too. A job that lost its lease
+/// sends no completion, so what that attempt searched is not charged: the job's next attempt
+/// starts over (`managed_web_search::allowance_for_job`), and the controller gives those searches
+/// back to the message when it first asks.
 fn attach_web_search_usage(result: Result<JobExecution>, job_id: Uuid) -> Result<JobExecution> {
     if result
         .as_ref()
@@ -5218,9 +5220,12 @@ fn should_run_agent_routing_preflight_for_execution(job: &LeaseJob, prompt_text:
 /// None where the job's grant lets no managed run search: a person's own ChatGPT login searches
 /// on their own plan. It holds more searches when the turn's routing step read the person's own
 /// words as asking for deeper research (`deeper_research`). A hand-back goes on with the allowance
-/// of the turn whose card it carries on, and a job's later attempt with its earlier attempt's, so
-/// the message keeps to one allowance. Each job of a team plan has one of its own: a team's jobs
-/// skip the routing step, so they get [`crate::managed_web_search::SEARCHES_PER_MESSAGE`].
+/// of the turn whose card it carries on, and a recovery retry with its first try's, so the message
+/// keeps to one allowance here; a later lease attempt of the job starts over with its own. The
+/// controller counts the message's searches across all its jobs, and the proxy asks it before
+/// each one: a team's jobs skip the routing step, so each holds
+/// [`crate::managed_web_search::SEARCHES_PER_MESSAGE`] here, and the controller keeps the team to
+/// the message's.
 fn managed_web_search_allowance(
     job: &LeaseJob,
     deeper_research: bool,
@@ -5233,6 +5238,7 @@ fn managed_web_search_allowance(
     };
     Some(crate::managed_web_search::allowance_for_job(
         job.id,
+        job.lease_attempts,
         browser_hand_back::card_job_of(job),
         limit,
     ))
@@ -9940,26 +9946,17 @@ impl JobProcessor {
                 retry_prompt_context["evidenceRecoveryContract"] =
                     json!(routing_recovery::CONTRACT);
             }
-            let mut retry_codex_run_options = recovery_retry_codex_run_options(
+            let (mut retry_codex_run_options, retry_prompt) = recovery_retry(
                 &codex_run_options,
                 retry_codex_run_options,
                 evidence_recovery_plan.filter(|_| use_evidence_recovery),
+                retry_prompt,
+                &output.events,
             );
             if use_evidence_recovery {
                 retry_codex_run_options.usage_observer =
                     Some(task_usage.call(UsagePhase::Recovery));
             }
-            // A retry on a new thread has none of the first attempt's search results: with
-            // Instafy AI it reads them, and the pages that attempt read, instead of searching
-            // again, so the message's searches run, and are charged, once.
-            let retry_prompt = match findings_for_a_fresh_retry(
-                &codex_run_options,
-                &mut retry_codex_run_options,
-                &output.events,
-            ) {
-                Some(findings) => format!("{retry_prompt}{findings}"),
-                None => retry_prompt,
-            };
 
             // Brief jittered backoff before the recovery retry: re-hitting the
             // same degraded upstream milliseconds after a failed turn mostly
@@ -17313,6 +17310,27 @@ fn recovery_retry_codex_run_options(
         .for_another_attempt()
 }
 
+/// The recovery retry's options ([`recovery_retry_codex_run_options`]) and its prompt. A retry on
+/// a new thread has none of the first attempt's search results: with Instafy AI it reads them,
+/// and the pages that attempt read, instead of searching again ([`findings_for_a_fresh_retry`]),
+/// so the message's searches run, and are charged, once.
+fn recovery_retry(
+    first_attempt: &CodexRunOptions,
+    lane_retry: CodexRunOptions,
+    evidence_recovery: Option<routing_recovery::Plan>,
+    prompt: String,
+    first_attempt_events: &[JsonValue],
+) -> (CodexRunOptions, String) {
+    let mut options =
+        recovery_retry_codex_run_options(first_attempt, lane_retry, evidence_recovery);
+    let prompt = match findings_for_a_fresh_retry(first_attempt, &mut options, first_attempt_events)
+    {
+        Some(findings) => format!("{prompt}{findings}"),
+        None => prompt,
+    };
+    (options, prompt)
+}
+
 /// The options of the finalization pass after a missing-final retry: an ephemeral,
 /// low-effort run without the shell or contextual instructions. It only formats the retry's
 /// answer, so it sends no images.
@@ -24201,14 +24219,20 @@ mod tests {
                 "command": "instafy web read https://museum.example/failed", "exit_code": 1,
                 "status": "failed", "aggregated_output": "refused"}}),
         ];
-        let mut fresh = CodexRunOptions {
+        // A missing-final retry, which the lane runs on a new thread, as the recovery path
+        // builds it.
+        let lane_retry = CodexRunOptions {
             persist_conversation_thread: false,
             provider_conversation_state: None,
             ..first.clone()
         };
-        let findings = findings_for_a_fresh_retry(&first, &mut fresh, &events)
-            .expect("a fresh retry reads what the first attempt found");
+        let (fresh, prompt) =
+            recovery_retry(&first, lane_retry, None, "The request.".into(), &events);
         assert!(fresh.disable_native_web_search, "no new search");
+        let findings = prompt
+            .strip_prefix("The request.")
+            .expect("the retry's own prompt comes first")
+            .to_string();
         for told in [
             "What an earlier attempt at this request found:",
             "this attempt does not search again",
@@ -24236,7 +24260,7 @@ mod tests {
         let rollouts = tempdir().expect("rollout dir");
         let rollout = rollouts.path().join("rollout.jsonl");
         fs::write(&rollout, "").expect("rollout");
-        let mut resumed = CodexRunOptions {
+        let resuming = CodexRunOptions {
             persist_conversation_thread: true,
             provider_conversation_state: Some(json!({
                 "defaultThreadId": "019a0000-0000-7000-8000-000000000001",
@@ -24244,7 +24268,9 @@ mod tests {
             })),
             ..first.clone()
         };
-        assert!(findings_for_a_fresh_retry(&first, &mut resumed, &events).is_none());
+        let (resumed, prompt) =
+            recovery_retry(&first, resuming, None, "The request.".into(), &events);
+        assert_eq!(prompt, "The request.");
         assert!(!resumed.disable_native_web_search);
 
         // A first attempt that searched nothing, or a person's own login, leaves the retry as
@@ -24254,8 +24280,14 @@ mod tests {
             ..Default::default()
         };
         for first in [unsearched, CodexRunOptions::default()] {
-            let mut retry = CodexRunOptions::default();
-            assert!(findings_for_a_fresh_retry(&first, &mut retry, &events).is_none());
+            let (retry, prompt) = recovery_retry(
+                &first,
+                CodexRunOptions::default(),
+                None,
+                "The request.".into(),
+                &events,
+            );
+            assert_eq!(prompt, "The request.");
             assert!(!retry.disable_native_web_search);
         }
     }
@@ -24579,8 +24611,8 @@ mod tests {
     /// An Instafy AI job's completion says what its web searches cost, whether the job succeeded
     /// or failed: a turn that searched and then ended in an error or its time limit has no
     /// `turn.completed`, and a recovery retry's searches are its job's too. Each search is
-    /// reported once. A job that lost its lease sends no completion, so what it searched waits
-    /// for its next attempt.
+    /// reported once. A job that lost its lease sends no completion, and its next attempt starts
+    /// over, reporting only what it searched itself.
     #[test]
     fn a_jobs_completion_says_what_its_web_searches_cost_whether_it_succeeded_or_failed() {
         use crate::managed_web_search::{
@@ -24602,7 +24634,7 @@ mod tests {
 
         // A turn that searched once, and its recovery retry that searched once more.
         let succeeded = Uuid::new_v4();
-        let allowance = allowance_for_job(succeeded, None, SEARCHES_PER_MESSAGE);
+        let allowance = allowance_for_job(succeeded, 1, None, SEARCHES_PER_MESSAGE);
         record_searches_for_test(&allowance, 1, 8_412, 391);
         record_searches_for_test(&allowance, 1, 8_412, 391);
         // Beside the receipt of the job's model calls, as every completion carries it.
@@ -24628,7 +24660,7 @@ mod tests {
         // A turn that searched twice and then lost its stream.
         let failed = Uuid::new_v4();
         record_searches_for_test(
-            &allowance_for_job(failed, None, SEARCHES_PER_MESSAGE),
+            &allowance_for_job(failed, 1, None, SEARCHES_PER_MESSAGE),
             2,
             16_824,
             782,
@@ -24648,10 +24680,11 @@ mod tests {
             Some("stream disconnected before completion")
         );
 
-        // A job that lost its lease: nothing now, all of it with its next attempt's completion.
+        // A job that lost its lease sends nothing. Its next attempt starts over: its completion
+        // carries only what that attempt searched.
         let lost = Uuid::new_v4();
         record_searches_for_test(
-            &allowance_for_job(lost, None, SEARCHES_PER_MESSAGE),
+            &allowance_for_job(lost, 1, None, SEARCHES_PER_MESSAGE),
             2,
             16_824,
             782,
@@ -24663,13 +24696,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(extract_job_failure_artifacts(&error).is_none());
-        let next_attempt =
+        let next_attempt = allowance_for_job(lost, 2, None, SEARCHES_PER_MESSAGE);
+        let next_attempt_ran =
             attach_job_receipts(Ok(execution()), &TaskUsage::default(), lost).unwrap();
-        assert_eq!(next_attempt.artifacts.last(), Some(&two_searches));
+        assert_eq!(next_attempt_ran.artifacts.len(), 1, "nothing searched yet");
+        record_searches_for_test(&next_attempt, 2, 16_824, 782);
+        let next_attempt_ran =
+            attach_job_receipts(Ok(execution()), &TaskUsage::default(), lost).unwrap();
+        assert_eq!(next_attempt_ran.artifacts.last(), Some(&two_searches));
 
         // A job with no allowance (a person's own login), or that searched nothing, says nothing.
         let unsearched = Uuid::new_v4();
-        allowance_for_job(unsearched, None, SEARCHES_PER_MESSAGE);
+        allowance_for_job(unsearched, 1, None, SEARCHES_PER_MESSAGE);
         for job in [unsearched, Uuid::new_v4()] {
             let result = attach_job_receipts(Ok(execution()), &TaskUsage::default(), job).unwrap();
             assert_eq!(result.artifacts.len(), 1);

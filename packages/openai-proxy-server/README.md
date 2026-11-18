@@ -221,11 +221,16 @@ model request stays off on the platform lane either way.
 
 Before a managed run's searches go upstream, the proxy asks the controller how many may run
 (`POST /internal/managed-web-search/claim` with the credential-lease bearer, the job named by its
-verified token), and runs only those. The controller counts a message's searches across its jobs
-(2 a message, or 8 when the person asked for deeper research) and refuses every one while its
-`MANAGED_AI_NATIVE_WEB_SEARCH` is off, so that switch turns search off for the next search on
-every machine. Searches it let run that did not search (a search that failed) go back to it
-(`POST /internal/managed-web-search/give-back`). A managed job's search that may not run (this
+verified token, and a new `claimId` for the request), and runs only those. The controller counts a
+message's searches across its jobs (2 a message, or 8 when the person asked for deeper research)
+and refuses every one while its `MANAGED_AI_NATIVE_WEB_SEARCH` is off, so that switch turns search
+off for the next search on every machine. The proxy then settles the check with how many of its
+searches ran (`POST /internal/managed-web-search/settle`, `ran`), asking once more if that fails,
+and the rest (a search that failed) go back to the message. A check whose answer it could not read
+(an error, or no answer within 5 seconds) is settled with none, so what the controller took for it
+goes back, and the same check landing afterwards takes nothing. A background check that has not
+answered yet (`undecided`) is asked again every 250 ms for up to 3 seconds, for its answer to reach
+the controller, before its search is refused. A managed job's search that may not run (this
 proxy's setting off, a grant renewed without `native_web_search`, the controller's refusal, or a
 controller that could not be asked) is answered, not refused: `200` with nothing searched,
 `search_usage.searches` 0, and an `output` that says why and how to answer without it, so the

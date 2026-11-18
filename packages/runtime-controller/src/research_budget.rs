@@ -216,19 +216,38 @@ struct BudgetState {
 }
 
 /// A message's Instafy AI web searches, kept with its task budget.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct WebSearches {
-    /// The searches the proxy was let run, less those it gave back.
-    pub(crate) used: u32,
     /// Whether the message's routing step read the person's own words as asking
     /// for deeper research.
     pub(crate) deeper_research: bool,
+    /// The proxy's checks that took searches, or that it gave up on, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) claims: Vec<ClaimedSearches>,
+}
+
+/// One of the proxy's checks before a managed job's searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClaimedSearches {
+    /// The id the proxy gave the check.
+    pub(crate) id: Uuid,
+    /// The job, and its lease attempt, the check was for.
+    pub(crate) job_id: Uuid,
+    pub(crate) lease_attempt: i32,
+    /// The searches it took, less those that did not run.
+    pub(crate) searches: u32,
 }
 
 impl WebSearches {
     fn is_unused(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// The searches the message has used.
+    pub(crate) fn used(&self) -> u32 {
+        self.claims.iter().map(|claim| claim.searches).sum()
     }
 }
 
@@ -252,7 +271,7 @@ pub(crate) async fn change_web_searches<T>(
         .map_err(|e| internal_error(format!("lock research budget: {e}")))?;
     let mut saved: BudgetState = serde_json::from_value(row.get("state"))
         .map_err(|e| internal_error(format!("invalid research budget state: {e}")))?;
-    let before = saved.web_searches;
+    let before = saved.web_searches.clone();
     let result = change(&mut saved.web_searches);
     if saved.web_searches != before {
         tx.execute_typed(

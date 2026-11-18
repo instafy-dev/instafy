@@ -13,11 +13,18 @@
 //!   granted while `MANAGED_AI_NATIVE_WEB_SEARCH` is off, so turning it off refuses the next
 //!   search on every machine while the jobs running there go on; nor for a job that no longer
 //!   holds its lease; nor for a background check that may decline (an ambient evaluation) before
-//!   it answers; nor past the message's limit.
-//! - `POST /internal/managed-web-search/give-back`: searches the proxy was let run and that did
-//!   not search go back to the message.
+//!   it answers; nor past the message's limit. Each check has the proxy's id, so the same check
+//!   asked again takes nothing more.
+//! - `POST /internal/managed-web-search/settle`: the proxy says how many of a check's searches
+//!   ran, and the rest go back to the message. A check whose answer the proxy never read (it
+//!   timed out) is settled with none, so it takes nothing even if it lands afterwards.
 //! - `POST /agent/jobs/:job_id/deeper-research`: the runtime that holds a job's lease says its
 //!   routing step read the person's own words as asking for deeper research.
+//!
+//! A job put back in the queue (its machine stopped, its lease lapsed, or a short rate limit)
+//! runs again as a new lease attempt. No completion charged the attempt before it, so its
+//! searches go back to the message when the new attempt first asks: that attempt starts over,
+//! searching as it needs to, and is charged for what it runs.
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -31,7 +38,7 @@ use serde_json::Value as JsonValue;
 use tokio_postgres::Transaction;
 use uuid::Uuid;
 
-use crate::research_budget::{change_web_searches, WebSearches};
+use crate::research_budget::{change_web_searches, ClaimedSearches, WebSearches};
 use crate::typed_sql::typed;
 use crate::{bad_request, internal_error, unauthorized, ApiError, AppState};
 
@@ -40,23 +47,41 @@ type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 /// The most searches one claim asks for: the search bridge's limit per request
 /// (openai-proxy-server `search_bridge::MAX_QUERIES`).
 const MAX_SEARCHES_PER_CLAIM: u32 = 4;
+/// The most checks a message keeps. Its searches are at most
+/// [`MANAGED_WEB_SEARCHES_FOR_DEEPER_RESEARCH`], so only checks that hold none are ever dropped,
+/// oldest first.
+const MAX_KEPT_CLAIMS: usize = 32;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/internal/managed-web-search/claim", post(claim))
-        .route("/internal/managed-web-search/give-back", post(give_back))
+        .route("/internal/managed-web-search/settle", post(settle))
         .route("/agent/jobs/:job_id/deeper-research", post(deeper_research))
 }
 
-/// A managed job's searches, as the proxy read them from the job's verified token.
+/// The proxy's check before a managed job's searches: the job, as the proxy read it from the
+/// job's verified token, the check's id, and how many searches it asks to run.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Searches {
+struct Claim {
     project_id: Uuid,
     job_id: Uuid,
     lease_attempt: i32,
     run_id: Uuid,
+    claim_id: Uuid,
     searches: u32,
+}
+
+/// How many of a check's searches ran, from the proxy.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Settle {
+    project_id: Uuid,
+    job_id: Uuid,
+    lease_attempt: i32,
+    run_id: Uuid,
+    claim_id: Uuid,
+    ran: u32,
 }
 
 /// Why fewer searches may run than the proxy asked for.
@@ -103,11 +128,32 @@ fn limit(count: &WebSearches) -> u32 {
     }
 }
 
-/// Takes up to `asked` of the message's searches.
-fn take(count: &mut WebSearches, asked: u32) -> Claimed {
+/// Takes up to `asked` of the message's searches for the check `claim` (its id, its job and
+/// lease attempt). The same check again takes nothing more. An earlier lease attempt of the same
+/// job gives its searches back first: it ended without a completion that charged them (a
+/// completion that charges ends the job, and a requeue charges nothing).
+fn take(count: &mut WebSearches, claim: ClaimedSearches, asked: u32) -> Claimed {
     let limit = limit(count);
-    let granted = asked.min(limit.saturating_sub(count.used));
-    count.used += granted;
+    if let Some(kept) = count.claims.iter().find(|kept| kept.id == claim.id) {
+        return Claimed {
+            granted: kept.searches.min(asked),
+            limit,
+            refused: (kept.searches < asked).then_some(Refusal::Used),
+        };
+    }
+    count
+        .claims
+        .retain(|kept| kept.job_id != claim.job_id || kept.lease_attempt >= claim.lease_attempt);
+    let granted = asked.min(limit.saturating_sub(count.used()));
+    if granted > 0 {
+        keep(
+            count,
+            ClaimedSearches {
+                searches: granted,
+                ..claim
+            },
+        );
+    }
     Claimed {
         granted,
         limit,
@@ -115,9 +161,34 @@ fn take(count: &mut WebSearches, asked: u32) -> Claimed {
     }
 }
 
-/// Gives back `searches` the proxy was let run and that did not search.
-fn give(count: &mut WebSearches, searches: u32) {
-    count.used = count.used.saturating_sub(searches);
+/// Settles the check `claim`: `ran` of its searches ran, and the rest go back. Settling it again
+/// changes nothing more. A check with no record (the proxy gave up on its answer, which may still
+/// land) is kept as one that took nothing, so it takes nothing if it lands afterwards.
+fn settle_claim(count: &mut WebSearches, claim: ClaimedSearches, ran: u32) {
+    match count.claims.iter().position(|kept| kept.id == claim.id) {
+        Some(index) => {
+            let kept = &mut count.claims[index];
+            kept.searches = kept.searches.min(ran);
+        }
+        None => keep(
+            count,
+            ClaimedSearches {
+                searches: 0,
+                ..claim
+            },
+        ),
+    }
+}
+
+/// Keeps `claim`, dropping the oldest checks that hold no search past [`MAX_KEPT_CLAIMS`].
+fn keep(count: &mut WebSearches, claim: ClaimedSearches) {
+    count.claims.push(claim);
+    while count.claims.len() > MAX_KEPT_CLAIMS {
+        let Some(oldest) = count.claims.iter().position(|kept| kept.searches == 0) else {
+            break;
+        };
+        count.claims.remove(oldest);
+    }
 }
 
 fn metadata_flag(payload: &JsonValue, key: &str) -> bool {
@@ -202,7 +273,7 @@ async fn counting_job(
 async fn claim(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<Searches>,
+    Json(request): Json<Claim>,
 ) -> ApiResult<Json<Claimed>> {
     crate::credentials::require_proxy_credential_lease_token(&state.config, &headers)?;
     if !(1..=MAX_SEARCHES_PER_CLAIM).contains(&request.searches) {
@@ -237,8 +308,14 @@ async fn claim(
         return Ok(Json(Claimed::refused(Refusal::Undecided)));
     }
     let counted_with = counting_job(&tx, &request.project_id, &request.job_id, &payload).await?;
+    let check = ClaimedSearches {
+        id: request.claim_id,
+        job_id: request.job_id,
+        lease_attempt: request.lease_attempt,
+        searches: 0,
+    };
     let claimed = change_web_searches(&tx, request.project_id, counted_with, |count| {
-        take(count, request.searches)
+        take(count, check, request.searches)
     })
     .await?;
     tx.commit()
@@ -254,14 +331,14 @@ async fn claim(
     Ok(Json(claimed))
 }
 
-async fn give_back(
+async fn settle(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<Searches>,
+    Json(request): Json<Settle>,
 ) -> ApiResult<StatusCode> {
     crate::credentials::require_proxy_credential_lease_token(&state.config, &headers)?;
-    if !(1..=MAX_SEARCHES_PER_CLAIM).contains(&request.searches) {
-        return Err(bad_request("searches must be between 1 and 4"));
+    if request.ran > MAX_SEARCHES_PER_CLAIM {
+        return Err(bad_request("ran must be between 0 and 4"));
     }
     let mut connection = state
         .pool
@@ -272,7 +349,8 @@ async fn give_back(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-    // A job that has ended since keeps nothing to give back to.
+    // A job whose lease has ended since keeps nothing to settle: its next attempt, if any, gives
+    // back what this one took.
     let Some(payload) = leased_managed_job(
         &tx,
         &request.project_id,
@@ -286,8 +364,14 @@ async fn give_back(
         return Ok(StatusCode::NO_CONTENT);
     };
     let counted_with = counting_job(&tx, &request.project_id, &request.job_id, &payload).await?;
+    let check = ClaimedSearches {
+        id: request.claim_id,
+        job_id: request.job_id,
+        lease_attempt: request.lease_attempt,
+        searches: 0,
+    };
     change_web_searches(&tx, request.project_id, counted_with, |count| {
-        give(count, request.searches)
+        settle_claim(count, check, request.ran)
     })
     .await?;
     tx.commit()
@@ -354,49 +438,138 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A check of `job_id`'s lease attempt `lease_attempt`.
+    fn check(job_id: Uuid, lease_attempt: i32) -> ClaimedSearches {
+        ClaimedSearches {
+            id: Uuid::new_v4(),
+            job_id,
+            lease_attempt,
+            searches: 0,
+        }
+    }
+
     /// A message's searches are counted once for all its jobs: two jobs that share its budget
-    /// get two in all, the third is refused, and what a search did not use goes back. Deeper
+    /// get two in all, the third is refused, and what a search did not run goes back. Deeper
     /// research raises the message's limit to eight.
     #[test]
     fn a_message_runs_its_searches_once_whichever_job_asks() {
+        let (lead, worker) = (Uuid::new_v4(), Uuid::new_v4());
         let mut message = WebSearches::default();
         // The lead's turn asks for one, a worker for two: one is left for the worker.
         assert_eq!(
-            take(&mut message, 1),
+            take(&mut message, check(lead, 1), 1),
             Claimed {
                 granted: 1,
                 limit: 2,
                 refused: None
             }
         );
+        let workers = check(worker, 1);
         assert_eq!(
-            take(&mut message, 2),
+            take(&mut message, workers, 2),
             Claimed {
                 granted: 1,
                 limit: 2,
                 refused: Some(Refusal::Used)
             }
         );
-        assert_eq!(take(&mut message, 1).granted, 0, "a third search");
+        assert_eq!(
+            take(&mut message, check(lead, 1), 1).granted,
+            0,
+            "a third search"
+        );
         // The worker's search failed: it goes back, and the next one may run.
-        give(&mut message, 1);
-        assert_eq!(take(&mut message, 1).granted, 1);
-        give(&mut message, 9);
-        assert_eq!(message.used, 0, "never below none");
+        settle_claim(&mut message, workers, 0);
+        assert_eq!(message.used(), 1);
+        assert_eq!(take(&mut message, check(lead, 1), 1).granted, 1);
+        // A check that ran what it took keeps it.
+        settle_claim(&mut message, workers, 4);
+        assert_eq!(message.used(), 2);
 
         let mut deeper = WebSearches {
-            used: 2,
             deeper_research: true,
+            ..message
         };
         assert_eq!(
-            take(&mut deeper, 4),
+            take(&mut deeper, check(lead, 1), 4),
             Claimed {
                 granted: 4,
                 limit: 8,
                 refused: None
             }
         );
-        assert_eq!(take(&mut deeper, 4).granted, 2);
+        assert_eq!(take(&mut deeper, check(worker, 1), 4).granted, 2);
+    }
+
+    /// A job put back in the queue runs again as a new lease attempt, and no completion charged
+    /// the one before: when the new attempt first asks, the earlier attempt's searches go back,
+    /// so it may search again. Another job's searches, and the new attempt's own, still count.
+    #[test]
+    fn a_later_lease_attempt_gets_back_what_its_earlier_attempt_took() {
+        let (lead, worker) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut message = WebSearches::default();
+        assert_eq!(take(&mut message, check(lead, 1), 2).granted, 2);
+        assert_eq!(take(&mut message, check(worker, 1), 1).granted, 0);
+        // The lead's machine stopped, and its turn runs again.
+        assert_eq!(
+            take(&mut message, check(lead, 2), 1),
+            Claimed {
+                granted: 1,
+                limit: 2,
+                refused: None
+            }
+        );
+        assert_eq!(take(&mut message, check(worker, 1), 2).granted, 1);
+        assert_eq!(
+            take(&mut message, check(lead, 2), 1).granted,
+            0,
+            "the message's two"
+        );
+        assert_eq!(message.used(), 2);
+        // An earlier attempt's late check takes nothing back from the attempt after it.
+        let mut later = message.clone();
+        assert_eq!(take(&mut later, check(lead, 1), 1).granted, 0);
+        assert_eq!(later.used(), 2);
+    }
+
+    /// A check whose answer the proxy never read (it timed out, or the answer was lost) is
+    /// settled with none: what it took goes back, and if it lands only afterwards it takes
+    /// nothing. The same check asked or settled again changes nothing more.
+    #[test]
+    fn a_check_the_proxy_gave_up_on_takes_nothing() {
+        let job = Uuid::new_v4();
+        let mut message = WebSearches::default();
+        // Its answer came too late: the proxy settles it with none.
+        let late = check(job, 1);
+        assert_eq!(take(&mut message, late, 2).granted, 2);
+        settle_claim(&mut message, late, 0);
+        assert_eq!(message.used(), 0);
+        settle_claim(&mut message, late, 0);
+        assert_eq!(
+            take(&mut message, late, 2).granted,
+            0,
+            "the same check again"
+        );
+        assert_eq!(message.used(), 0);
+        // It landed only after the proxy settled it.
+        let landed_after = check(job, 1);
+        settle_claim(&mut message, landed_after, 0);
+        assert_eq!(
+            take(&mut message, landed_after, 2),
+            Claimed {
+                granted: 0,
+                limit: 2,
+                refused: Some(Refusal::Used)
+            }
+        );
+        // The message keeps its two for the next check.
+        assert_eq!(take(&mut message, check(job, 1), 2).granted, 2);
+        // A check that took searches is never dropped to make room.
+        for _ in 0..(2 * MAX_KEPT_CLAIMS) {
+            settle_claim(&mut message, check(job, 1), 0);
+        }
+        assert_eq!(message.claims.len(), MAX_KEPT_CLAIMS);
+        assert_eq!(message.used(), 2);
     }
 
     /// A refused claim names why, in the words the proxy reads.
@@ -466,13 +639,26 @@ mod tests {
     /// searched stores nothing new.
     #[test]
     fn the_count_round_trips_with_the_task_budget() {
+        let (id, job_id) = (Uuid::new_v4(), Uuid::new_v4());
         let count = WebSearches {
-            used: 1,
             deeper_research: true,
+            claims: vec![ClaimedSearches {
+                id,
+                job_id,
+                lease_attempt: 1,
+                searches: 1,
+            }],
         };
+        let stored = json!({"deeperResearch": true, "claims": [
+            {"id": id, "jobId": job_id, "leaseAttempt": 1, "searches": 1}]});
+        assert_eq!(serde_json::to_value(&count).unwrap(), stored);
         assert_eq!(
-            serde_json::to_value(count).unwrap(),
-            json!({"used": 1, "deeperResearch": true})
+            serde_json::from_value::<WebSearches>(stored).unwrap(),
+            count
+        );
+        assert_eq!(
+            serde_json::to_value(WebSearches::default()).unwrap(),
+            json!({"deeperResearch": false})
         );
         assert_eq!(
             serde_json::from_value::<WebSearches>(json!({})).unwrap(),
