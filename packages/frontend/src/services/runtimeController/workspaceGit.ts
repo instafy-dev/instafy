@@ -1469,7 +1469,7 @@ export async function revertWorkspaceGitCommitFromController(params: {
 // Unsaved work (recovery refs)
 // ---------------------------------------------------------------------------
 
-export type WorkspaceRecoveryKind = "conflict" | "unpublished" | "unsaved" | "stale" | "undone";
+export type WorkspaceRecoveryKind = "conflict" | "unpublished" | "unsaved" | "undone";
 
 export interface WorkspaceRecoveryEntry {
   ref: string;

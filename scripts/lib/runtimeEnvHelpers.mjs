@@ -337,11 +337,10 @@ const PROVIDER_FOLDERS = [STAMP_FOLDER, ".instafy-evicted"];
 const SPACE_FOLDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * Make the stamp folder in the gateway's folder `folder` (and `folder`
- * itself when there is none yet), so the origin gateway refuses to start on
- * it instead of moving the runtime checkouts there into its `.legacy/`
- * folder. `why` says why it is kept, after "Keeping <stamps> ". Whether the
- * stamp folder exists now.
+ * Make the provider's stamp folder in the gateway's folder `folder` (and
+ * `folder` itself when there is none yet). The origin gateway does not read
+ * it: it touches only its `.git-cache/`. `why` says why it is kept, after
+ * "Keeping <stamps> ". Whether the stamp folder exists now.
  */
 export function stampGatewayFolder(folder, { log = console, why }) {
   const stamps = path.join(folder, STAMP_FOLDER);
@@ -351,16 +350,10 @@ export function stampGatewayFolder(folder, { log = console, why }) {
     } catch {
       fs.mkdirSync(stamps, { recursive: true });
     }
-    log.warn(
-      `[runtime-dev] Keeping ${stamps} ${why}. The origin gateway refuses to start on that folder ` +
-        "until it is gone, instead of moving runtime checkouts there into its .legacy/ folder."
-    );
+    log.warn(`[runtime-dev] Keeping ${stamps} ${why}.`);
     return true;
   } catch (error) {
-    log.warn(
-      `[runtime-dev] Unable to create ${stamps} (${error.message}); the origin gateway may move ` +
-        `runtime checkouts in ${folder} into its .legacy/ folder when it starts.`
-    );
+    log.warn(`[runtime-dev] Unable to create ${stamps} (${error.message}).`);
     return false;
   }
 }
@@ -405,8 +398,7 @@ export function recordedProviderCheckoutRoot(file, pid) {
  * The folder the local runtime provider keeps its runtimes' checkouts in
  * (`DOCKER_REPO_HOST`, one `<space id>` folder each). With git-canonical on,
  * that is a folder of its own, never the gateway's (`tmp/origin-gateway-
- * workspaces`): the gateway moves every space folder of its root out of the
- * way when it starts, and refuses to start on a provider's folder.
+ * workspaces`), which holds the gateway's mirror cache.
  */
 export function resolveRuntimeCheckoutRoot({ env = process.env, repoRoot, sandboxDir }) {
   const explicit = String(env.DOCKER_REPO_HOST ?? "").trim();
@@ -437,14 +429,12 @@ export function resolveRuntimeCheckoutRoot({ env = process.env, repoRoot, sandbo
  * the folder that provider keeps its checkouts in, when this script
  * launched it and recorded it (`recordedProviderCheckoutRoot`); unless it
  * is known to be another folder than `from`, the provider may clone a space
- * into `from` at any moment before the gateway starts, so the stamp folder
- * is made there even while `from` holds no checkout yet.
+ * into `from` at any moment, so the stamp folder is made there even while
+ * `from` holds no checkout yet.
  *
  * While a checkout stays in `from`, its stamp stays too, and the provider's
  * folders are never removed from `from` (the stamp folder is made when
- * there is none): the gateway refuses to start on a folder that holds them,
- * where it would otherwise move that checkout into its `.legacy/`
- * (`park_legacy_checkouts` in origin-http-server).
+ * there is none).
  */
 export function relocateRuntimeCheckouts({
   from,
@@ -524,7 +514,7 @@ export function relocateRuntimeCheckouts({
       providerFolders.push(name);
     }
   }
-  // The checkouts the gateway would still find here.
+  // The runtime checkouts that stay here.
   const stayed = report.kept.map((item) => item.name).filter((name) => SPACE_FOLDER.test(name));
   if (providerRunning && stayed.length > 0) {
     log.warn(
@@ -557,7 +547,7 @@ export function relocateRuntimeCheckouts({
       try {
         fs.rmdirSync(source);
       } catch {
-        // Something stayed behind; the gateway names it if it refuses.
+        // Something stayed behind.
       }
     }
   }

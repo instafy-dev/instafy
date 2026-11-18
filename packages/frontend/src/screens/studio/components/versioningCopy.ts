@@ -414,7 +414,6 @@ const UNSAVED_WORK_TITLES: Record<string, string> = {
   conflict: "Agent work that conflicted with newer changes",
   unpublished: "Agent work that couldn't be saved",
   unsaved: "Unsaved edits from a stopped workspace",
-  stale: "Older copies found in a workspace",
   undone: "Edits undone from the chat",
 };
 

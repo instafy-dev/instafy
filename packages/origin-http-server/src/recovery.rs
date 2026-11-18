@@ -81,8 +81,6 @@ pub enum RecoveryKind {
     Unpublished,
     /// Changes nobody saved before the workspace stopped.
     Unsaved,
-    /// Copies an older sync left behind that differ from the saved files.
-    Stale,
     /// Changes a person undid from the chat before anything saved them (a
     /// turn's edits a Stop left unsaved), kept so they can be restored.
     Undone,
@@ -94,7 +92,6 @@ impl RecoveryKind {
             Self::Conflict => "conflict",
             Self::Unpublished => "unpublished",
             Self::Unsaved => "unsaved",
-            Self::Stale => "stale",
             Self::Undone => "undone",
         }
     }
@@ -104,18 +101,16 @@ impl RecoveryKind {
             Self::Conflict => "Keep changes that conflicted with the saved version",
             Self::Unpublished => "Keep changes that could not be saved",
             Self::Unsaved => "Keep unsaved changes from a stopped workspace",
-            Self::Stale => "Keep old copies left by an earlier sync",
             Self::Undone => "Keep changes undone from the chat",
         }
     }
 }
 
 /// Every kind, in the order names are matched.
-const KINDS: [RecoveryKind; 5] = [
+const KINDS: [RecoveryKind; 4] = [
     RecoveryKind::Conflict,
     RecoveryKind::Unpublished,
     RecoveryKind::Unsaved,
-    RecoveryKind::Stale,
     RecoveryKind::Undone,
 ];
 
@@ -556,10 +551,6 @@ fn message(spec: &RecoverySpec) -> String {
         RecoveryKind::Unsaved => {
             body.push_str("The workspace stopped before these changes were saved.\n")
         }
-        RecoveryKind::Stale => body.push_str(
-            "An older version of the sync left these copies behind. They differ from\n\
-             the saved files, so they were set aside instead of being saved.\n",
-        ),
         RecoveryKind::Undone => body.push_str(
             "These changes were undone from the chat before anything saved them. This\n\
              commit keeps them so they can be restored.\n",
@@ -1262,7 +1253,7 @@ pub(crate) fn kind_of_name(name: &str) -> Option<RecoveryKind> {
 /// `main` (or were replayed without dismissed work onto commits that are):
 /// their content is canonical. `also_published` names local commits
 /// whose sanitised rewrite (the same work without unpublishable paths) is on
-/// `main`. Conflict, unsaved and stale refs are never touched. A pushed copy
+/// `main`. Conflict, unsaved and undone refs are never touched. A pushed copy
 /// is deleted on the remote first (with a lease on the exact commit) and its
 /// marker only after that succeeds.
 pub(crate) fn retire_superseded(
