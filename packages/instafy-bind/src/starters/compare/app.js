@@ -11,15 +11,16 @@
  *   sort: [{key, label, dir: "asc"|"desc"}]   the first entry is the person's main criterion: phones show its value
  *                          on the right of each row. An entry whose column no row has a value for (nor, for a price, a
  *                          store that can be checked) is left out. Under the title, each entry whose column every row
- *                          shows a value for names the row it puts first ("Lowest price: Option B"). With 5 or more
- *                          options and more than one entry, rows are sorted by the first entry left (fresh values
- *                          first, then ones that may have changed, then missing ones), and a "Sort by" select offers
- *                          the entries left when there are two or more. Otherwise rows keep the order of "items",
- *                          before and after a price check.
+ *                          shows a value for, read on a page, names the row it puts first ("Lowest price: Option B").
+ *                          With 5 or more options and more than one entry, rows are sorted by the first entry left
+ *                          (fresh values first, then ones that may have changed or only a web search gave, then
+ *                          missing ones), and a "Sort by" select offers the entries left when there are two or more.
+ *                          Otherwise rows keep the order of "items", before and after a price check.
  *   columns: [{key, label, type: "price"|"number"|"text"}]   at most 5; a "price" column can be checked live
  *   filter (only for a constraint the person stated): {key, max, label: "Under $160", rest: "over $160",
- *                          unknown?: "Price unknown"}. Only a value the page shows counts: a row whose value is
- *                          unknown is never listed as under $160; it is listed apart, under "Price unknown".
+ *                          unknown?: "Price unknown"}. Only a value the page shows counts, and not one only a web
+ *                          search gave: a row whose value is unknown is never listed as under $160; it is listed
+ *                          apart, under "Price unknown".
  *   items: [{ref: "option:a", name, why (one short line), badge?: "Previous model", note?, facts: {key: fact},
  *            store: {name, url, readable}, more?: [{label, fact}], sources?: [{url}], found?: "example.com"}]
  *                          every candidate a page you read named, also one nothing could be read for: its cells say
@@ -38,7 +39,8 @@
  *                          without a source does; the line under the title says "From what Octo knows; nothing
  *                          checked." Nothing on the page cites a page or offers a check.
  *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
- *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"), and no cell is blank: a source you read
+ *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"; one only a web search gave, with "viewer":
+ *   "provider search", "from a web search, 17 Oct · maker.com ↗"), and no cell is blank: a source you read
  *   without finding the value on it is the fact without "v" ({"src", "url", "date"}): "Weight (not found · checked
  *   17 Oct on maker.com ↗)"; any other missing value says why with {"note": "the store blocks price checks"}. A value
  *   of an item whose own page wasn't opened is {"note": "its own page wasn't opened"}. "Still to confirm" names each
@@ -91,10 +93,11 @@
     if (live && site.blocked(item.ref)) return seed; // a blocked check keeps the seed value
     return live || seed;
   }
-  /** A fact's page and day: two values share a citation only when one page on one day gives both. */
+  /** A fact's page and day: two values share a citation only when one page on one day gives both, read there (by any
+   * reader) or both from a web search. */
   function citeKey(f) {
     var page = site.safeUrl(f.url);
-    return [page ? page.split("#")[0] : "src:" + f.src, f.date || "", f.asof || ""].join("|");
+    return [page ? page.split("#")[0] : "src:" + f.src, f.date || "", f.asof || "", site.fromSearch(f) ? "search" : ""].join("|");
   }
   /** Per column: the page most of its cells share ({src, date, asof, url}), when two or more cells and over half do. */
   function sharedSources(data, items) {
@@ -200,13 +203,13 @@
   function sorted(data) { return sortList(data).length > 1 && (data.items || []).length >= 5 && !!sorts(data).length; }
   /** The "Sort by" select shows only when rows are sorted and more than one entry is left to choose from. */
   function sortShown(data) { return sorted(data) && sorts(data).length > 1; }
-  /** Sorted by the chosen key: fresh values first, then values that may have changed (an old price never leads), then
-   * rows without one. */
+  /** Sorted by the chosen key: fresh values first, then values that may have changed (an old price never leads) or
+   * only a web search gave, then rows without one. */
   function sortItems(data, items, st) {
     var def = sortDef(data, st);
     if (!def) return items;
     var col = colOf(data, def.key) || { key: def.key };
-    var tier = function (i) { var v = valueOf(i, col); return site.known(v) == null ? 2 : site.old(v, isPrice(col)) ? 1 : 0; };
+    var tier = function (i) { var v = valueOf(i, col); return site.known(v) == null ? 2 : site.old(v, isPrice(col)) || site.fromSearch(v) ? 1 : 0; };
     return items.slice().sort(function (a, b) {
       var ta = tier(a), tb = tier(b);
       if (ta !== tb) return ta - tb;
@@ -232,9 +235,9 @@
   function and(list) { return list.length > 1 ? list.slice(0, -1).join(", ") + " and " + list[list.length - 1] : list[0]; }
   /** The line under the title: what the page's own sorts decide among the rows drawn ("Lowest price: Option B ·
    * Lowest weight and highest rating: Option A"). A sort decides only when every row drawn shows a value for its
-   * column, none of them one that may have changed, and they are not all the same: it names the rows it puts first,
-   * and criteria the same rows lead are said together. "" when no sort decides anything. A page from what Octo knows
-   * checked nothing, so it says that instead. */
+   * column, none of them one that may have changed or only a web search gave, and they are not all the same: it names
+   * the rows it puts first, and criteria the same rows lead are said together. "" when no sort decides anything. A
+   * page from what Octo knows checked nothing, so it says that instead. */
   function verdict(data, rows) {
     if (memory) return MEMORY_LINE;
     var groups = [];
@@ -242,7 +245,7 @@
     sorts(data).forEach(function (s) {
       var col = colOf(data, s.key);
       if (!col) return;
-      var values = rows.map(function (i) { var v = valueOf(i, col); return site.old(v, isPrice(col)) ? null : site.known(v); });
+      var values = rows.map(function (i) { var v = valueOf(i, col); return site.old(v, isPrice(col)) || site.fromSearch(v) ? null : site.known(v); });
       if (values.some(function (n) { return n == null; })) return;
       var best = s.dir === "desc" ? Math.max.apply(null, values) : Math.min.apply(null, values);
       var names = rows.filter(function (i, k) { return values[k] === best; }).map(function (i) { return String(i.name || i.ref || ""); });
