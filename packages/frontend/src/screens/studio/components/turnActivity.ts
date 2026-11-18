@@ -415,6 +415,33 @@ function stepKey(message: ChatMessage, kind: StepKind): string {
   return itemId ? `${kind}:${itemId}` : `message:${message.id}`;
 }
 
+/**
+ * The web searches that ended having searched nothing, by their step's key.
+ * The runtime posts a search's step as it starts, so the line reads
+ * "Searching the web…" while it runs, and ends it `declined`, with no words,
+ * when the call searched nothing: it only opened or looked in a page, or
+ * every query it asked for was refused. That is no step, as before it
+ * started: Details has no row for it, and the line neither counts it nor
+ * says it was tried. A step is as its newest message has it.
+ */
+function searchesThatSearchedNothing(messages: readonly ChatMessage[]): Set<string> {
+  const nothing = new Set<string>();
+  for (const message of messages) {
+    if (stepKindOf(message) !== "search") {
+      continue;
+    }
+    const key = stepKey(message, "search");
+    const details = extractMessageDetails(isRecord(message.metadata) ? message.metadata : null);
+    const status = typeof details?.status === "string" ? details.status.trim().toLowerCase() : "";
+    if (status === "declined") {
+      nothing.add(key);
+    } else {
+      nothing.delete(key);
+    }
+  }
+  return nothing;
+}
+
 function stepPaths(message: ChatMessage): string[] {
   const details = extractMessageDetails(isRecord(message.metadata) ? message.metadata : null);
   const paths = details?.paths;
@@ -1405,6 +1432,7 @@ export function summarizeTurnActivity(
   // the turn moved past: a step still running from before it never names the
   // line again. A retry is not: the turn goes on after it.
   let newestSaveIndex = -1;
+  const searchedNothing = searchesThatSearchedNothing(threadMessages);
 
   threadMessages.forEach((message, index) => {
     const type = (getMessageType(message) ?? "").trim().toLowerCase();
@@ -1417,6 +1445,9 @@ export function summarizeTurnActivity(
     if (kind) {
       newestOtherIndex = index;
       const key = stepKey(message, kind);
+      if (searchedNothing.has(key)) {
+        return;
+      }
       const step = turnStepFromMessage(message, stepJobIds) as TurnStep;
       const existing = stepIndexByKey.get(key);
       if (existing !== undefined) {

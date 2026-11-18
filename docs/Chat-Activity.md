@@ -617,11 +617,13 @@ in it counts.
 
 A search the AI runs with its own web search (OpenAI's, which Codex calls with its search tool: a
 person's own ChatGPT login, or Instafy AI where the proxy searches for it) is one search step,
-which shows once the search ends: "searched the web" on the turn's line, or "searched the web 3
+which shows as the search starts, so the line reads "Searching the web…" while it runs, never
+"Thinking…". Once it ends it says "searched the web" on the turn's line, or "searched the web 3
 times" for a step that searched three queries at once. It shares its label with `instafy web
 search`, so a turn that used both says so once, counted. Codex names a search's words only when it
-ends, so no step shows while a search runs, and the line reads "Thinking…". runtime-agent makes the
-step from Codex's search event (`codex.rs`, `web_search_step`): a `web_search` item with the words
+ends: the step's start names only its call, and its end fills in the words and the pages.
+runtime-agent makes the step from Codex's search events (`codex.rs`, `web_search_step`, and
+`extract_codex_messages`): at the end, a `web_search` item with the words
 searched for (`query`, the queries joined with ` · `, and each of them in `queries`), and `pages`,
 the pages the search returned, each an http(s) address of a public site and its title on one line.
 An address with a user name, a port of its own, an IP address or a machine on a local network is
@@ -629,11 +631,19 @@ left out, and so is everything else of the search: what it wrote, snippets, and 
 tool. Details shows the words on the step's row and the pages behind its chevron, linked to each
 page.
 
-Only a search is a step. Opening a page or finding text in one with the search tool, and its
-other commands, end with no words and no pages, so no step shows for them: the proxy runs only
-searches for Instafy AI, so such a call may have run nothing. A search's start names only its
-call, for the run log's timings, and a search the provider refused never ends, so no step shows
-for it either.
+Only a search is a step. A call's start does not say what it does, so every call of the search
+tool reads "Searching the web…" while it runs. Opening a page or finding text in one with the
+search tool, and its other commands, end with no words and no pages: the proxy runs only searches
+for Instafy AI, so such a call may have run nothing. The runtime ends the step of a call that
+searched nothing `declined`, with no words and no label, and Studio shows no step for it: no row in
+Details, nothing on the line, never "tried". A search the provider refused never ends, and Codex's
+turn ends with an error instead: the runtime then ends its step as one that was tried ("Tried
+searching the web"), so it never reads "Searching the web…" on through a retry's run.
+
+`instafy web search` exits 0 only when it found results. With no search key in the space
+(`no_provider`), no results or no search available, it exits 2: that step was tried, so the line
+never says "searched the web" for it, and a search after it that found results is the one the line
+counts.
 
 Whose words the step shows depends on who searched. A person's own ChatGPT login searches the words
 the AI wrote, as they are, so those are the step's. For Instafy AI the proxy's search bridge says
