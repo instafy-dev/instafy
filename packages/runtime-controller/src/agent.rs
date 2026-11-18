@@ -3173,6 +3173,7 @@ async fn refund_managed_ai_reserve_on_failed_completion(
             &org_id,
             leased_runtime_id,
             &prompt_uuid,
+            job_id,
             refund_reason,
         )
         .await
@@ -4450,6 +4451,7 @@ async fn reconcile_completion_usage(
                         &org_id,
                         leased_runtime_id,
                         &prompt_uuid,
+                        job_id,
                         provider,
                         managed_ai_label.as_deref(),
                         ManagedAiTokenUsage {
@@ -4464,7 +4466,8 @@ async fn reconcile_completion_usage(
             };
             match token_charge {
                 None => {}
-                Some(Ok(charge)) => {
+                Some(Ok(settlement)) => {
+                    let charge = settlement.charge;
                     // A zero adjustment only merges metadata into the
                     // reserve row, and a replayed one writes nothing.
                     // An unpaid remainder changes what the person is told
@@ -4474,7 +4477,7 @@ async fn reconcile_completion_usage(
                     }
                     if let Some(run_uuid) = run_id {
                         let reserve_key = format!("managed-ai-prompt:{prompt_uuid}");
-                        let adjustment_key = format!("managed-ai-adjustment:{prompt_uuid}");
+                        let adjustment_key = settlement.adjustment_key;
                         let reserve =
                             crate::credits::load_credit_ledger_reference_by_idempotency_key(
                                 transaction,
