@@ -2323,8 +2323,15 @@ site it shows, and a canvas, such as a map or a chart, as "[picture with no
 text]" (with its label when it has one). A frame's page is never read, so a
 booking engine, a payment form or a video in one never reads as missing, and
 a field in it never reaches the reading; one too small to see (a tracking
-frame) is nothing. A frame's site is an address, never page text: it is put
-in after the text is masked and judged, so a random-looking ad server's name
+frame) is nothing. No control in a frame, one of the page's own site too, is
+listed or counted, so no step or pause reaches it: for a step there that only
+the person may do, as for any `request_human_input` can't highlight and one
+after a bot check, the browser skill has the turn say what to do, where it
+sits only as a page it read shows it (the frame's place, the words around
+it), and the page's link, never that it isn't accessible; a browser turn's
+first line asks for that step and link too. A frame's site is an address,
+never page text: it is put in after the text is masked and judged, so a
+random-looking ad server's name
 makes no secret screen. A canvas's label is page text and is masked as the
 rest is. A page with more text than the reading holds is read from
 where it is scrolled to: the text starts at the first line in view after the
