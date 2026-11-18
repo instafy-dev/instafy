@@ -22381,7 +22381,8 @@ const WEB_SEARCH_SEARCHED_NOTHING: &str = "declined";
 
 /// The message of a web search's step that names no words: its start, which shows "Searching the
 /// web" while it runs, or an end that searched nothing ([`WEB_SEARCH_SEARCHED_NOTHING`], no label)
-/// or never answered (`failed`, "Tried searching the web").
+/// or of a search whose request failed or that never answered (`failed`, "Tried searching the
+/// web").
 fn web_search_step_without_words(item_id: &str, status: &str) -> (String, JsonValue) {
     let (content, event_type) = match status {
         "in_progress" => ("Web search started", "item.started"),
@@ -22400,6 +22401,23 @@ fn web_search_step_without_words(item_id: &str, status: &str) -> (String, JsonVa
         metadata["activity"] = activity;
     }
     (content.to_string(), metadata)
+}
+
+/// Ends the steps of the web searches in `open` as ones that were tried: each started, and its
+/// turn ended before it answered.
+fn end_unanswered_searches(
+    open: &mut Vec<String>,
+    push_message: &mut impl FnMut(String, String, Option<&str>, JsonValue),
+) {
+    for item_id in std::mem::take(open) {
+        let (content, metadata) = web_search_step_without_words(&item_id, "failed");
+        push_message(
+            format!("web_search_failed::{item_id}"),
+            content,
+            Some("web_search"),
+            metadata,
+        );
+    }
 }
 
 fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
@@ -22776,26 +22794,28 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             .and_then(JsonValue::as_str)
                             .map(str::trim)
                             .filter(|query| !query.is_empty());
+                        let failed =
+                            item.get("status").and_then(JsonValue::as_str) == Some("failed");
                         // A call that searched nothing (it only opened or looked in a page, or
                         // every query it asked for was refused) is no step: the step its start
-                        // posted ends as one.
+                        // posted ends as one. A search whose request failed ends with no words
+                        // too (`managed_web_search::EndedSearch`), as one that was tried.
                         let Some(query) = query else {
                             if started {
-                                let (content, metadata) = web_search_step_without_words(
-                                    item_id,
-                                    WEB_SEARCH_SEARCHED_NOTHING,
-                                );
-                                push_message(
-                                    format!("web_search_searched_nothing::{item_id}"),
-                                    content,
-                                    Some("web_search"),
-                                    metadata,
-                                );
+                                let (key, status) = if failed {
+                                    (format!("web_search_failed::{item_id}"), "failed")
+                                } else {
+                                    (
+                                        format!("web_search_searched_nothing::{item_id}"),
+                                        WEB_SEARCH_SEARCHED_NOTHING,
+                                    )
+                                };
+                                let (content, metadata) =
+                                    web_search_step_without_words(item_id, status);
+                                push_message(key, content, Some("web_search"), metadata);
                             }
                             continue;
                         };
-                        let failed =
-                            item.get("status").and_then(JsonValue::as_str) == Some("failed");
                         // A step that searched several queries at once counts each of
                         // them ("searched the web 3 times"); its row names them all.
                         let searches = item
@@ -22951,6 +22971,8 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                 }
             }
             "turn.completed" => {
+                // The turn ended: a search it started that never answered was tried.
+                end_unanswered_searches(&mut open_searches, &mut push_message);
                 let usage = map.get("usage").cloned().unwrap_or(JsonValue::Null);
                 if let Some(usage_map) = usage.as_object() {
                     let input = usage_map
@@ -23001,18 +23023,10 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                     if message.starts_with("Reconnecting...") {
                         continue;
                     }
-                    // The run ended here: a search it started and never answered (its request
-                    // failed, or the turn was aborted) was tried, and never runs on through the
-                    // rest of the message, as through the run of a retry.
-                    for item_id in std::mem::take(&mut open_searches) {
-                        let (content, metadata) = web_search_step_without_words(&item_id, "failed");
-                        push_message(
-                            format!("web_search_failed::{item_id}"),
-                            content,
-                            Some("web_search"),
-                            metadata,
-                        );
-                    }
+                    // The run ended here: a search it started and never answered (the turn was
+                    // aborted or failed) was tried, and never runs on through the rest of the
+                    // message, as through the run of a retry.
+                    end_unanswered_searches(&mut open_searches, &mut push_message);
                     let key = format!("stream_error::{message}");
                     push_message(
                         key,
@@ -23026,15 +23040,7 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                 }
             }
             "turn.failed" => {
-                for item_id in std::mem::take(&mut open_searches) {
-                    let (content, metadata) = web_search_step_without_words(&item_id, "failed");
-                    push_message(
-                        format!("web_search_failed::{item_id}"),
-                        content,
-                        Some("web_search"),
-                        metadata,
-                    );
-                }
+                end_unanswered_searches(&mut open_searches, &mut push_message);
                 if let Some(message) = map
                     .get("error")
                     .and_then(JsonValue::as_object)

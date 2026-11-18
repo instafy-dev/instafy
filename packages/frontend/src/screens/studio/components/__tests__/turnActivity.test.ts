@@ -1059,12 +1059,15 @@ describe("a web search", () => {
     expect(stored.details).toHaveLength(1);
   });
 
-  // Its request failed, and the run ended before it answered.
+  // Its request failed, which the runtime ends at once while the turn goes
+  // on, or its turn ended before it answered.
   it("that never answered was tried", () => {
     const start = started("ws_1");
     const failed = step("web_search", WEB_SEARCH, { kind: "codex_web_search", itemId: "ws_1", status: "failed" });
     expect(summarize([start, failed], "running").live).toBe("Thinking…");
+    expect(summarize([start, failed, command(WEB_READ)], "running").live).toBe("Thinking…");
     expect(summarize([start, failed]).summary).toBe("Tried searching the web");
+    expect(summarize([start, failed, command(WEB_READ)]).summary).toBe("Read 6 pages");
   });
 
   // `instafy web search` exits 2 when the space has no search key

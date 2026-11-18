@@ -636,9 +636,18 @@ tool reads "Searching the web…" while it runs. Opening a page or finding text 
 search tool, and its other commands, end with no words and no pages: the proxy runs only searches
 for Instafy AI, so such a call may have run nothing. The runtime ends the step of a call that
 searched nothing `declined`, with no words and no label, and Studio shows no step for it: no row in
-Details, nothing on the line, never "tried". A search the provider refused never ends, and Codex's
-turn ends with an error instead: the runtime then ends its step as one that was tried ("Tried
-searching the web"), so it never reads "Searching the web…" on through a retry's run.
+Details, nothing on the line, never "tried".
+
+A search whose request failed (the provider or the proxy answered with an error, or the request
+never reached them) gets no end from Codex: its tool returns the error, which a release build of
+Codex only logs, answering the call "aborted" for the model, and the turn goes on (a debug build
+stops the turn instead). So the runtime's wrapper of the search tool (`managed_web_search.rs`,
+`EndedSearch`, on every run, a person's own login too) ends the step that call's start posted, with
+no words, before it returns the error: as a search that was tried ("Tried searching the web") when
+the call asked to search, else as a call that searched nothing. A search still open when its turn
+ends (an error, an abort, or the turn's end) ends as one that was tried too, so it never reads
+"Searching the web…" on through a retry's run, nor "Didn't finish searching the web" after a turn
+that ended.
 
 `instafy web search` exits 0 only when it found results. With no search key in the space
 (`no_provider`), no results or no search available, it exits 2: that step was tried, so the line
