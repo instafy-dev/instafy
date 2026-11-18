@@ -36,7 +36,7 @@ use super::utils::normalize_display_name_owned;
 #[cfg(test)]
 use crate::runtime::RUNTIME_TOKEN_DEFAULT_SCOPES;
 
-const RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS: i64 = 3600;
+pub(super) const RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS: i64 = 3600;
 
 /// The capability that says whether a runtime's own Claude Code can run
 /// local-engine turns (docs/Local-Engine-Turns.md 2.10, 3.2). Only
@@ -561,6 +561,27 @@ fn renewed_runtime_token_subject(
         .unwrap_or_else(|| "runtime.service".to_string())
 }
 
+/// The scopes registration renews a runtime token with: the defaults, plus
+/// the Personal Browser and local-engine scopes it attested, but never a
+/// scope the presented token did not hold. Renewal keeps a runtime running;
+/// it must not widen what a person minted (`instafy runtime token --scope`).
+/// A service or dev-mode registration, which presents no runtime token, gets
+/// the defaults.
+fn renewed_runtime_token_scopes(
+    presented: Option<&AccessTokenClaims>,
+    personal_browser: bool,
+    claude_code: bool,
+) -> Vec<String> {
+    default_runtime_token_scopes()
+        .into_iter()
+        .chain(personal_browser.then(|| PERSONAL_BROWSER_RUNTIME_SCOPE.to_string()))
+        .chain(claude_code.then(|| CLAUDE_CODE_TURNS_SCOPE.to_string()))
+        .filter(|scope| {
+            presented.is_none_or(|claims| claims.scopes.iter().any(|held| held == scope))
+        })
+        .collect()
+}
+
 fn attested_self_hosted_owner(
     provider_is_self_hosted: bool,
     claims: Option<&AccessTokenClaims>,
@@ -856,6 +877,13 @@ pub(crate) async fn runtime_register(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    // Before any row lock: a membership change's fence for this person either
+    // waits for this registration and rotates the runtime it commits, or this
+    // registration waits for the fence and its owner check below sees the
+    // change (see `super::revocation`).
+    if let Some(owner) = super::revocation::self_hosted_person_owner(&state, self_hosted_owner) {
+        super::revocation::share_runtime_owner_lock(&transaction, owner).await?;
+    }
 
     let project = match load_project_record(&transaction, &project_id).await {
         Ok(project) => project,
@@ -943,6 +971,21 @@ pub(crate) async fn runtime_register(
     } else {
         None
     };
+    // Renewal must end when the person the runtime acts for can no longer
+    // write the space: removed from it and its team, or made a viewer. Checked
+    // after the deleted-space refusal and the generation, so a deleted space
+    // still answers space_deleted and a rotated token its generation.
+    if super::access::runtime_is_private_self_hosted(
+        &state,
+        &runtime.provider,
+        &runtime.capabilities,
+    ) {
+        if let Some(owner) = super::revocation::self_hosted_person_owner(&state, self_hosted_owner)
+        {
+            super::revocation::ensure_self_hosted_owner_may_write(&transaction, &project, owner)
+                .await?;
+        }
+    }
 
     if let Some(expected) = runtime.active_lease_id {
         let provided = lease_details.as_ref().map(|lease| lease.id).or(lease_id);
@@ -1174,11 +1217,11 @@ pub(crate) async fn runtime_register(
             origin_id: None,
             runtime_id: Some(updated_runtime.id.to_string()),
             protocol: None,
-            scopes: default_runtime_token_scopes()
-                .into_iter()
-                .chain(personal_browser_owner.map(|_| PERSONAL_BROWSER_RUNTIME_SCOPE.to_string()))
-                .chain(claude_code_owner.map(|_| CLAUDE_CODE_TURNS_SCOPE.to_string()))
-                .collect(),
+            scopes: renewed_runtime_token_scopes(
+                scoped_claims.as_ref(),
+                personal_browser_owner.is_some(),
+                claude_code_owner.is_some(),
+            ),
             lease_id: lease_details.as_ref().map(|lease| lease.id.to_string()),
             run_id: None,
             prefer_runtime: None,

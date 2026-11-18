@@ -85,15 +85,18 @@ const RUNTIME_TOKEN_ALLOWED_SCOPES: &[&str] = &[
 ];
 
 const DEFAULT_RUNTIME_TOKEN_TTL_SECONDS: i64 = 3600;
-const MAX_RUNTIME_TOKEN_TTL_SECONDS: i64 = 3600;
+pub(super) const MAX_RUNTIME_TOKEN_TTL_SECONDS: i64 = 3600;
 const MIN_RUNTIME_TOKEN_TTL_SECONDS: i64 = 60;
 
-/// Scopes issued to new and renewed runtime tokens.
+/// Scopes issued to new runtime tokens, and the most a renewal re-issues:
+/// registration renews a token with only those of them it holds, so a
+/// narrowed mint stays narrow.
 ///
 /// `RUNTIME_TOKEN_REQUIRED_SCOPES` remains the compatibility baseline used to
-/// authenticate tokens minted before telemetry writes were introduced. Keeping
-/// issuance additive avoids disconnecting already-running production agents.
-/// The Git checkout/sync scopes are part of the minted defaults
+/// authenticate tokens minted before telemetry writes were introduced: such a
+/// token still registers and renews with the scopes it holds, and gains the
+/// later ones only from a new mint. The Git checkout/sync scopes are part of
+/// the minted defaults
 /// (`RUNTIME_TOKEN_DEFAULT_SCOPES`); the telemetry, Git-mint and
 /// workspace-lease-read capabilities are chained on top.
 pub(crate) fn default_runtime_token_scopes() -> Vec<String> {
@@ -508,6 +511,13 @@ pub(super) async fn mint_runtime_access_token(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start project lookup: {error}")))?;
+    // A person's machine mint admits a machine for them: serialize it with a
+    // membership change's fence for that person (see `super::revocation`).
+    if human_runtime_machine_mint {
+        if let Some(person) = context.user_id {
+            super::revocation::share_runtime_owner_lock(&transaction, person).await?;
+        }
+    }
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, None).await?;
     let mut successor_capabilities = None;

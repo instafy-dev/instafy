@@ -12371,8 +12371,9 @@ async fn post_commit_receipt_emits_workspace_commit_event() -> anyhow::Result<()
         let connection = pool.get().await?;
         connection
             .execute(
-                "INSERT INTO projects (id, project_type, status) VALUES ($1, 'customer', 'active')",
-                &[&project_id],
+                "INSERT INTO projects (id, project_type, status, owner_user_id)
+                 VALUES ($1, 'customer', 'active', $2)",
+                &[&project_id, &user_id],
             )
             .await?;
         connection
@@ -12523,6 +12524,7 @@ async fn post_commit_receipt_emits_workspace_commit_event() -> anyhow::Result<()
     assert_eq!(rev, "rev-123");
 
     cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_test_user(&pool, &user_id).await?;
 
     Ok(())
 }
@@ -15632,6 +15634,7 @@ async fn post_origin_register_upserts_origin() -> anyhow::Result<()> {
     // signed runtime identity; callers may not select a separate origin UUID.
     let origin_id = runtime_id;
     let owner_user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
     let capabilities = json!({
         "_instafySelfHostedAccess": {
             "mode": "private",
@@ -15643,8 +15646,9 @@ async fn post_origin_register_upserts_origin() -> anyhow::Result<()> {
         let connection = pool.get().await?;
         connection
             .execute(
-                "INSERT INTO projects (id, project_type, status) VALUES ($1, 'customer', 'active')",
-                &[&project_id],
+                "INSERT INTO projects (id, project_type, status, owner_user_id)
+                 VALUES ($1, 'customer', 'active', $2)",
+                &[&project_id, &owner_user_id],
             )
             .await?;
         connection
@@ -15841,6 +15845,7 @@ async fn post_origin_register_upserts_origin() -> anyhow::Result<()> {
     assert_eq!(binding.get::<_, String>("status"), "online");
 
     cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
 
     Ok(())
 }
@@ -16158,6 +16163,7 @@ async fn origin_registration_rejects_reserved_missing_and_hijacked_bindings() ->
     let project_id = Uuid::new_v4();
     let foreign_project_id = Uuid::new_v4();
     let owner_user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
     let private_runtime_id = Uuid::new_v4();
     let managed_runtime_id = Uuid::new_v4();
     let managed_lease_id = Uuid::new_v4();
@@ -16187,9 +16193,10 @@ async fn origin_registration_rejects_reserved_missing_and_hijacked_bindings() ->
         let connection = pool.get().await?;
         connection
             .execute(
-                "insert into projects (id, project_type, status)
-                 values ($1, 'customer', 'active'), ($2, 'customer', 'active')",
-                &[&project_id, &foreign_project_id],
+                "insert into projects (id, project_type, status, owner_user_id)
+                 values ($1, 'customer', 'active', $3::uuid),
+                        ($2, 'customer', 'active', null)",
+                &[&project_id, &foreign_project_id, &owner_user_id],
             )
             .await?;
         connection
@@ -16486,6 +16493,7 @@ async fn origin_registration_rejects_reserved_missing_and_hijacked_bindings() ->
 
     cleanup_origin_project(&pool, &project_id).await?;
     cleanup_origin_project(&pool, &foreign_project_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
     Ok(())
 }
 
@@ -16516,13 +16524,24 @@ async fn concurrent_private_origin_preclaim_attempts_are_rejected() -> anyhow::R
             "ownerUserId": second_owner_id.to_string(),
         }
     }));
+    // Both owners can write the space, so a runtime's owner re-check passes
+    // and the preclaim reaches the binding check this test is about.
+    ensure_test_user(&pool, &first_owner_id).await?;
+    ensure_test_user(&pool, &second_owner_id).await?;
     {
         let connection = pool.get().await?;
         connection
             .execute(
-                "insert into projects (id, project_type, status)
-                 values ($1, 'customer', 'active')",
-                &[&project_id],
+                "insert into projects (id, project_type, status, owner_user_id)
+                 values ($1, 'customer', 'active', $2)",
+                &[&project_id, &first_owner_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_memberships (project_id, user_id, role)
+                 values ($1, $2, 'builder')",
+                &[&project_id, &second_owner_id],
             )
             .await?;
         connection
@@ -16597,18 +16616,14 @@ async fn concurrent_private_origin_preclaim_attempts_are_rejected() -> anyhow::R
         AxumJson(request),
     );
     let (first, second) = tokio::join!(first, second);
-    assert_eq!(
-        first
-            .expect_err("first arbitrary private origin preclaim must fail")
-            .0,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        second
-            .expect_err("second arbitrary private origin preclaim must fail")
-            .0,
-        StatusCode::FORBIDDEN
-    );
+    for (label, result) in [("first", first), ("second", second)] {
+        let error = result.expect_err("an arbitrary private origin preclaim must fail");
+        assert_eq!(error.0, StatusCode::FORBIDDEN, "{label}");
+        assert_eq!(
+            error.1 .0.message, "origin id does not match the controller-bound runtime identity",
+            "{label}"
+        );
+    }
 
     {
         let connection = pool.get().await?;
@@ -16632,6 +16647,8 @@ async fn concurrent_private_origin_preclaim_attempts_are_rejected() -> anyhow::R
     }
 
     cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_test_user(&pool, &first_owner_id).await?;
+    cleanup_test_user(&pool, &second_owner_id).await?;
     Ok(())
 }
 
@@ -34475,12 +34492,17 @@ mod billing_service_tests {
         };
 
         let project_id = Uuid::new_v4();
+        // Registration renews a self-hosted runtime's token only while the
+        // person it acts for can write the space, so that person owns it.
+        let runtime_owner_id = Uuid::new_v4();
+        ensure_test_user(&pool, &runtime_owner_id).await?;
         {
             let connection = pool.get().await?;
             connection
                 .execute(
-                    "INSERT INTO projects (id, project_type, status) VALUES ($1, 'customer', 'active')",
-                    &[&project_id],
+                    "INSERT INTO projects (id, project_type, status, owner_user_id)
+                     VALUES ($1, 'customer', 'active', $2)",
+                    &[&project_id, &runtime_owner_id],
                 )
                 .await?;
         }
@@ -34565,7 +34587,6 @@ mod billing_service_tests {
             "origin.presence",
             "origin.apply",
         ];
-        let runtime_owner_id = Uuid::new_v4();
         let minted = mint_scoped_token(
             &config,
             ScopedTokenRequest {
@@ -34604,6 +34625,8 @@ mod billing_service_tests {
         assert_eq!(parsed.agent_token.is_empty(), false);
         assert_eq!(parsed.lease_url.contains(&config.lease_path), true);
 
+        cleanup_origin_project(&pool, &project_id).await?;
+        cleanup_test_user(&pool, &runtime_owner_id).await?;
         Ok(())
     }
 

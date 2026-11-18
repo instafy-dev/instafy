@@ -1175,6 +1175,31 @@ fn is_a_persons_stop(options: &StopOptions) -> bool {
             .contains(&options.reason.as_deref().unwrap_or(options.source))
 }
 
+/// Whether a `/runtime/stop` rotates the runtime's token generation
+/// ([`super::revocation`]), so its agent cannot simply register it ready
+/// again: a person stopped their own private self-hosted runtime with their
+/// own sign-in, and it is stopped now or already was. The owner starts it
+/// again with a fresh mint. Not the agent's own stop, which a restart on the
+/// same token follows, not the service role's cleanup, and not a skipped
+/// stop. The reason is not consulted: any caller can send any reason.
+fn a_persons_stop_ends_its_tokens(
+    state: &AppState,
+    auth: &StopAuth,
+    runtime: &RuntimeDetails,
+    outcome: &StopOutcome,
+) -> bool {
+    matches!(auth, StopAuth::User(context) if crate::auth::require_user_session(context).is_ok())
+        && super::access::runtime_is_private_self_hosted(
+            state,
+            &runtime.provider,
+            &runtime.capabilities,
+        )
+        && matches!(
+            outcome.skip_reason.as_deref(),
+            None | Some("already_stopped")
+        )
+}
+
 /// What `/runtime/stop` and `/runtime/remove` tell open tabs once their stop
 /// has committed, before any provider release, which can take a minute. A
 /// person's stop ([`is_a_persons_stop`]) that stopped the runtime publishes
@@ -1638,6 +1663,10 @@ pub(crate) async fn runtime_stop(
         } else {
             let outcome =
                 perform_runtime_stop(&transaction, &runtime, stop_options.clone()).await?;
+            if a_persons_stop_ends_its_tokens(&state, &auth_context, &runtime, &outcome) {
+                super::revocation::rotate_runtime_token_generation(&transaction, &runtime.id)
+                    .await?;
+            }
             transaction.commit().await.map_err(|error| {
                 internal_error(format!("failed to commit runtime stop: {error}"))
             })?;
@@ -2340,6 +2369,15 @@ pub(crate) async fn runtime_remove(
             )
             .await
             .map_err(|error| internal_error(format!("failed to mark runtime removed: {error}")))?;
+        // A removed private runtime keeps no working token, whoever removed
+        // it: its agent cannot register it again, only a fresh mint can.
+        if super::access::runtime_is_private_self_hosted(
+            &state,
+            &runtime.provider,
+            &runtime.capabilities,
+        ) {
+            super::revocation::rotate_runtime_token_generation(&transaction, &runtime.id).await?;
+        }
 
         // Clear preference if it points to this runtime.
         state

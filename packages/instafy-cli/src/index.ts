@@ -1815,7 +1815,10 @@ addAccessTokenOptions(runtimeTokenCommand, "Instafy access token (required)");
 
 runtimeTokenCommand
   .option("--runtime-id <uuid>", "Runtime ID to bind token to")
-  .option("--scope <scope...>", "Override scopes (default agent.* + origin.*)")
+  .option(
+    "--scope <scope...>",
+    "Mint only these scopes, which renewal keeps (default agent.*, origin.*, git.*, telemetry.write, workspace.lease.read)",
+  )
   .option("--json", "Output token as JSON")
   .action(async (opts) => {
     try {

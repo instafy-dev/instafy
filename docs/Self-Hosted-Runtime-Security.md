@@ -7,7 +7,7 @@ Sharing an Instafy project does not share a contributor's computer. The current 
 | Runtime or browser surface | Who may discover/use it | Can teammates view/control it? |
 | --- | --- | --- |
 | Managed `instafy-cloud` runtime | Project members according to their project role | Yes, through Shared Browser's separate view/control grants |
-| Ordinary self-hosted runtime | Its controller-attested immutable owner, plus narrowly scoped controller service operations | No |
+| Ordinary self-hosted runtime | Its controller-attested immutable owner while they can write the space, plus narrowly scoped controller service operations | No |
 | Personal Browser runtime | The signed-in owner on the attested Electron device | No runtime access; explicit local tab sharing is a separate surface grant |
 | Team runtime | Not implemented | No |
 
@@ -44,7 +44,13 @@ The owner check is repeated at every authority boundary, rather than treated as 
 - tunnel mint, list, connection, and revocation;
 - runtime, active-job, origin, Git, and browser-profile credentials.
 
-Private preferences and local-workspace registrations are keyed by user as well as project. A project teammate cannot make the owner's machine the project's shared preference. Controller-mediated operations revalidate scoped credentials against the current runtime owner and generation, so a stopped or rotated runtime fails those requests immediately. Direct origin credentials remain stateless until their short expiry (normally about five minutes), and an already-upgraded origin WebSocket is not continuously introspected; it ends on expiry or explicit connection closure. That limitation is one reason Team runtime is not enabled.
+The owner must also still be able to write the space. Registration, which renews the runtime token, and every runtime machine capability (origin registration and presence, applies and commit receipts, workspace lease reads, and Git token mints) check it again and refuse with 403 and code `runtime_owner_access_revoked` when they cannot. The controller's own service runtime identity is no member of any space and is not checked.
+
+Private preferences and local-workspace registrations are keyed by user as well as project. A project teammate cannot make the owner's machine the project's shared preference. Controller-mediated operations revalidate scoped credentials against the current runtime owner and generation. Registration renews a runtime token for the same owner and generation, never with a scope the presented token lacked, so renewal alone never ends it; a new generation does. The controller writes one when the runtime is removed, when its owner stops it with their own sign-in (not the agent's own stop), and when a member or team change made through the controller leaves its owner unable to write the space. Every route that checks the generation (registration, the agent's lease, heartbeat and job routes, tunnels, and the machine capabilities above) then refuses the old generation's runtime, agent and job tokens with 401 `runtime token generation is no longer current`, which is what a person removed from a space and its team, or made a viewer, meets on their machines there. Telemetry writes do not check the generation and end when their token expires. Only a fresh mint by a person who can write the space names the new generation, so a removed or stopped runtime cannot register itself ready again.
+
+An admission and a removal never miss each other. The runtime token mint, `/agent/login` and registration hold a per-person lock, shared, while they admit that person's machine, and a member or team change holds it exclusively while it rotates that person's runtimes, so a machine admitted while its owner loses access is either rotated by the change or refused by the owner check: the 403 above is what a first registration that raced a removal gets. The change also rotates a runtime of theirs that terminal cleanup marked `removed` while a token issued for it may still be alive, because registration takes such a runtime back. A runtime token minted for a new machine names no runtime the controller has stored until its first registration, so a removal has nothing of it to rotate: the owner check refuses it while the person cannot write the space, but if they can write it again before the token expires, at most an hour after the mint, it registers. Idle, heartbeat and terminal-cleanup sweeps never rotate: a machine that slept comes back on the tokens it holds, and a status of `removed` proves no removal, since terminal cleanup sets it too.
+
+A membership edited in the database outside the controller rotates nothing. The owner check then refuses the next registration and machine capability call with the 403, but the agent's lease, heartbeat and job routes and tunnels check only the generation, so they keep working until the tokens already issued expire: an agent token after `AGENT_TOKEN_TTL_SECONDS`, a renewed runtime token after at most the longer of that and an hour. The runtime agent does not yet treat any of these refusals as final and keeps retrying registration until it is stopped. Direct origin credentials, and Git tokens already minted from a runtime token, remain stateless until their short expiry (normally about five minutes for origin credentials), and an already-upgraded origin WebSocket is not continuously introspected; it ends on expiry or explicit connection closure. That limitation is one reason Team runtime is not enabled.
 
 `POST /agent/lease` always requires a signed runtime ID and validates the registered runtime
 and its current generation, even with `STRICT_MODE=false`. A project-scoped `agent.lease`
@@ -161,6 +167,7 @@ Published runtime images are scanned before they are pushed, separately for each
 cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-controller self_hosted
 cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-controller \
   private_self_hosted_origin_tokens_are_owner_bound_and_revoked_on_rotation
+cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-controller runtime::revocation
 cargo test --manifest-path packages/origin-http-server/Cargo.toml
 pnpm --filter @instafy/frontend test:e2e:desktop:shared-browser-collaboration
 ```
