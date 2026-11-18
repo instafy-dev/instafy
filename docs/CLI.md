@@ -672,7 +672,11 @@ chat made goes back as it was when the turn began, and the reply says which page
 the chat that made it. A step reaches a page when an edit names a file in it, or a command refers to a path in it, to
 its folder or to a folder that holds it, or runs in it; a word a command only says (a search for the page's name) is no
 path, so what the page's own server saves meanwhile stays. A change that could not go back is said in the reply as
-well ("I changed … and couldn't put it back as it was"), and such a reply never ends "Nothing was changed." A page reads with no chat, and is held from nobody, when its chat is gone for the person the
+well ("I changed … and couldn't put it back as it was"), and such a reply never ends "Nothing was changed." An edit step
+whose every file went back counts for nothing on the turn's line, as a declined step: the line names only changes the
+turn kept, never "Edited a file" for a page that is as it was, and its row in Details reads "Tried editing files". The
+routing step before the turn reads the same pages, so a change asked for to another chat's page is one building turn
+that changes nothing. A page reads with no chat, and is held from nobody, when its chat is gone for the person the
 turn runs for: the chat no longer exists, they moved it to Trash, or it is a thread nobody asks in (an automation's, a
 bound site's). A scheduled run has no chat to ask in, so nothing holds a page for it. A runtime started with
 `INSTAFY_HOLD_PAGES=0` holds no page at all: its turns are told the same, and nothing is put back.

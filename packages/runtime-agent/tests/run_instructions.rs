@@ -1771,19 +1771,23 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "browser work goes on whether or not it found its answer",
             ),
             (
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or an earlier message here asked for one that isn't made yet: it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map,",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map,",
                 "a bare \"keep going\" carries on what a page here left open, and a change that needs a web page browses first",
             ),
             (
-                "So is research whose answer ends in a page (a comparison, prices, a route), from the first message, unless Octo can search the web and no site needs using first (a booking or availability for dates, a sign-in or their account, a form or planner): it then stays `direct`.",
-                "research ending in a page goes to the browser from the first message unless Octo can search the web",
+                "So is research that ends in a page (a comparison, prices, a route), from the first message.",
+                "research ending in a page goes to the browser from the first message",
             ),
             (
-                "So is a page, or a change to one, asked for with values this chat's replies said weren't found or confirmed: the browser looks again first.",
+                "and research that ends in a page when it searches first, unless a site must be used first",
+                "research ending in a page stays with Octo only where it searches first",
+            ),
+            (
+                "So is a page or change with values this chat's replies said weren't found or confirmed: the browser looks again first.",
                 "a page, or a change to one, asked for with values the chat's replies didn't confirm goes to the browser first",
             ),
             (
-                "- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color), and for a page or change made only from what this chat found and confirmed.",
+                "- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color), and for a page or change made only from what this chat found and confirmed; (`none`) for a change to another chat's page.",
                 "a map, a change in the person's own words and a page or change made only from what the chat found and confirmed stay direct",
             ),
         ] {
@@ -1795,7 +1799,9 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
         // These jobs' grants let no turn search the web, so the routing call reads nothing of
         // it: research that ends in a page goes to the browser first, as it did.
         ensure!(
-            !routing.contains("Octo can search the web for this message."),
+            !routing.contains("Octo can search the web for this message.")
+                && !routing
+                    .contains("Research that ends in a page searches first for this message."),
             "{label}'s routing call read that Octo can search the web, though its job can't"
         );
     }
@@ -1968,7 +1974,7 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
     ensure!(r1.routed, "L1 was not sent straight to the browser");
     ensure!(
         input_text(first_sampling_request(r1)).contains(
-            "with your `summary`: name in it the items, place or site this chat names (by name, not an address), and what to find."
+            "and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find."
         ),
         "L1's routing call was never told what its summary names"
     );

@@ -1432,15 +1432,27 @@ browser has no web search, but it opens the company's own site, while a
 building turn that must make a page can't ask for the browser and, on an AI
 with no web search of its own, reads only pages whose addresses it already
 knows. When Octo can search the web for the message (the job's grant lets its
-turn use the AI's own web search) on a runtime with
-`INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on, the routing step reads one line that
-says so, after the section, and such research stays with Octo, which searches
-first, unless a site needs using first (a booking or availability for dates, a
-sign-in or the person's account, a form or a planner). Without that line, on
-every AI with no web search of its own and on every runtime while the setting
-is off, which it is unless set, the routing input is as it was: a building
-turn that makes a page still can't ask for the browser for what search didn't
-reach. A change that needs
+turn use the AI's own web search), the routing step reads one line that says
+so, after the section: research answered in a reply, and availability for
+dates where nobody named the places (search finds them, then at most one card
+checks their pages), stay with Octo, which searches first. On a runtime with
+`INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on, a second line says research that ends
+in a page searches first too, and such research stays with Octo as well. Each
+holds unless a site must be used first (availability at a place named, a
+sign-in or the person's account, a form or a planner). Without the first line,
+on every AI with no web search of its own, the routing input is as it was, and
+without the second, which is every runtime while the setting is off, research
+that ends in a page goes to the browser first: a building turn that makes a
+page still can't ask for the browser for what search didn't reach. These are
+the section's first rule, ahead of the routes: as an exception in the middle of
+the `browser_then_build` line, a comparison page went to the browser though its
+routing input said Octo could search (a local test, Nov 17). A question about a
+rule or policy stays with Octo beside an order number or an email too: only an
+order's own status or items need the person's account. A change asked in one
+chat to a page another chat made stays with Octo with no change: the routing
+step reads the space's pages as a turn that may write files does, each made in
+this chat or in another and read-only here, after the part of its input every
+chat shares. A change that needs
 what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,
