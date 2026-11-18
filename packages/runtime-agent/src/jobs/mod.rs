@@ -210,6 +210,8 @@ const COLLABORATION_RESULT_POLICY_MAX_CHARS: usize = 1_200;
 const COLLABORATION_SKILL_PATH: &str = ".agents/skills/instafy-agent-collaboration/SKILL.md";
 /// The collaboration skill's folder under `.agents/skills`.
 const COLLABORATION_SKILL_ID: &str = "instafy-agent-collaboration";
+/// The group-participation policy's folder under `.agents/skills` ([`one_on_one_turn`]).
+const GROUP_PARTICIPATION_SKILL_ID: &str = "instafy-group-participation";
 const ROUTING_PRE_OBSERVATION_OUTPUT_MAX_CHARS: usize = 4_000;
 const ROUTING_PRE_OBSERVATION_TIMEOUT_SECS: u64 = 10;
 const WORKSPACE_LEASE_WRITE_SCOPE: &str = "workspace.lease.write";
@@ -2535,6 +2537,7 @@ fn format_project_memory_snapshot(
         None,
         false,
         &[],
+        &[],
     )
 }
 
@@ -2924,7 +2927,8 @@ fn sections_left_out(metadata: &SkillMetadata, no_shell: bool, routed: bool) -> 
 
 /// `routed`: the turn is a browser turn that carries on the person's own message
 /// ([`browser_hand_back::carries_on_a_routed_card`]). `left_out` names skills this turn's
-/// snapshot does not carry, whatever its words.
+/// snapshot does not carry, whatever its words. `untold` names skills the turn is not told of
+/// at all: no line in the index, no copy, no routing place.
 fn format_project_memory_snapshot_with_preferences(
     workspace_dir: &Path,
     prompt_text: &str,
@@ -2932,6 +2936,7 @@ fn format_project_memory_snapshot_with_preferences(
     pinned: Option<&PinnedSkill>,
     routed: bool,
     left_out: &[&str],
+    untold: &[&str],
 ) -> Option<ProjectMemorySnapshot> {
     let pinned_skill = pinned.map(|pinned| pinned.id);
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
@@ -3081,7 +3086,10 @@ fn format_project_memory_snapshot_with_preferences(
     let is_learn = normalized_prompt.starts_with("/learn");
 
     if remaining > 0 && skills_dir.is_dir() {
-        let contexts = build_top_level_context_nodes(workspace_dir);
+        let contexts: Vec<ContextNode> = build_top_level_context_nodes(workspace_dir)
+            .into_iter()
+            .filter(|context| !untold.contains(&context.id.as_str()))
+            .collect();
         let mut topic_room = TOPIC_SKILLS_MAX_BYTES;
         // A turn with a pinned skill has no shell: it is told only of the skills it can use.
         let told_of = |context: &ContextNode| match pinned {
@@ -4919,6 +4927,20 @@ fn controller_lets_the_turn_decline(job: &LeaseJob) -> bool {
         && (decision == Some("agent_evaluation")
             || (decision == Some("silent")
                 && participation["reason"].as_str() == Some("agent_declined")))
+}
+
+/// A turn of a conversation with one person in it, as the controller decided it (it answers, and
+/// counted at most one participant): nobody else is there to leave the turn to. Its prompt
+/// carries no group-participation policy, whose decline word Octo otherwise reached for: on Nov 18
+/// two of three first turns after a restart in a one-on-one chat answered "NO_RESPONSE" before the
+/// retry below ([`declined_a_turn_that_needs_an_answer`]). A group chat's turns keep the policy.
+fn one_on_one_turn(job: &LeaseJob) -> bool {
+    let participation = &job.payload["metadata"]["groupParticipation"];
+    participation["enforcedBy"].as_str() == Some("runtime-controller")
+        && participation["decision"].as_str() == Some("respond")
+        && participation["participantCount"]
+            .as_u64()
+            .is_some_and(|count| count <= 1)
 }
 
 /// An answer that is only the decline word, on a turn the controller does not let decline. Such a
@@ -11791,6 +11813,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             } else {
                 &[]
             };
+            let untold: &[&str] = if one_on_one_turn(job) {
+                &[GROUP_PARTICIPATION_SKILL_ID]
+            } else {
+                &[]
+            };
             if let Some(snapshot) = format_project_memory_snapshot_with_preferences(
                 workspace_dir,
                 request_for_skills,
@@ -11800,6 +11827,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     .get("metadata")
                     .is_some_and(browser_hand_back::carries_on_a_routed_card),
                 left_out,
+                untold,
             ) {
                 append_prompt_section(
                     &mut prompt,
@@ -29572,6 +29600,85 @@ mod tests {
                 ),
                 "{role}"
             );
+        }
+    }
+
+    /// Nov 18: in a one-on-one chat, two of three first turns after a restart answered
+    /// "NO_RESPONSE". The always-included group-participation policy told every turn how to
+    /// decline. A turn with one person in it is told nothing of it, also when it names Octo; a
+    /// group chat's turns, and turns the controller did not mark, keep it.
+    #[test]
+    fn a_one_on_one_turn_is_told_nothing_of_group_participation() {
+        let tmp = tempdir().expect("temp dir");
+        learn::ensure_project_memory_scaffold(tmp.path());
+        assert!(
+            tmp.path()
+                .join(".agents/skills")
+                .join(GROUP_PARTICIPATION_SKILL_ID)
+                .join("SKILL.md")
+                .is_file(),
+            "the scaffold carries the policy, so the checks below are not vacuous"
+        );
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let prompt_for = |marker: JsonValue| {
+            let job = test_lease_job(
+                Some("feature"),
+                json!({"metadata": {"groupParticipation": marker}}),
+            );
+            processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "hello",
+                    true,
+                    None,
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("actual main prompt builder")
+                .0
+        };
+        let decided = |reason: &str, participants: u64, by: &str| {
+            json!({
+                "decision":"respond", "reason":reason, "domain":"direct",
+                "participantCount":participants, "confidence":100, "enforcedBy":by
+            })
+        };
+        for (label, marker) in [
+            (
+                "one person",
+                decided("single_human_conversation", 1, "runtime-controller"),
+            ),
+            (
+                "one person naming Octo",
+                decided("explicit_octo", 1, "runtime-controller"),
+            ),
+        ] {
+            let prompt = prompt_for(marker);
+            assert!(
+                prompt.contains("Persistent contexts index"),
+                "{label}: the workspace memory is there"
+            );
+            assert!(!prompt.contains("NO_RESPONSE"), "{label}");
+            assert!(!prompt.contains(GROUP_PARTICIPATION_SKILL_ID), "{label}");
+        }
+        for (label, marker) in [
+            (
+                "a group chat naming Octo",
+                decided("explicit_octo", 2, "runtime-controller"),
+            ),
+            (
+                "a marker the controller did not stamp",
+                decided("single_human_conversation", 1, "client"),
+            ),
+            ("no marker", JsonValue::Null),
+        ] {
+            let prompt = prompt_for(marker);
+            assert!(prompt.contains(GROUP_PARTICIPATION_SKILL_ID), "{label}");
+            assert!(prompt.contains("NO_RESPONSE"), "{label}");
         }
     }
 

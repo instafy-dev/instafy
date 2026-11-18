@@ -1373,11 +1373,12 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         let retry = requests[2]["input"].to_string();
         assert!(retry.contains("hello"), "{retry}");
         assert!(retry.contains("Do not answer `NO_RESPONSE`."), "{retry}");
-        assert!(
-            !requests[1]["input"]
-                .to_string()
-                .contains("Do not answer `NO_RESPONSE`.")
-        );
+        // The first main request is a one-on-one turn's: its workspace memory names no
+        // group-participation policy and no decline word.
+        let main = requests[1]["input"].to_string();
+        assert!(main.contains("Persistent contexts index"), "{main}");
+        assert!(!main.contains("NO_RESPONSE"), "{main}");
+        assert!(!main.contains("instafy-group-participation"), "{main}");
     }
     if scenario == "ambient_decline" {
         assert!(
