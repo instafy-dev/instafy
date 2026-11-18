@@ -177,6 +177,9 @@ const LEGACY_AGENTS_DOC_TEMPLATES: &[&str] = &[
     // web search too, and a fact no page gave said only "not checked", never which web search found
     // it.
     include_str!("legacy/agents-doc-v22.md"),
+    // From before a reply that didn't find something said only what it didn't find and where it
+    // looked, never which page it didn't reach.
+    include_str!("legacy/agents-doc-v23.md"),
 ];
 /// Whether `text` is a copy of `AGENTS.md` Instafy ships, the current one or an earlier one. A
 /// copy a space edited, or a team's own, is not: its rules are the space's.
@@ -495,6 +498,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_TEMPLATES: &[&str] = &[
     // From before `AGENTS.md`'s "Replies" said, for every turn, what to do with a choice the
     // request leaves open (it said "Never stop to ask before building").
     include_str!("legacy/interactive-artifacts-v21.md"),
+    // From before a new page started in a folder of its own, and a page taken as a sample was
+    // copied, never linked (it said "the closest starter").
+    include_str!("legacy/interactive-artifacts-v22.md"),
 ];
 const LEGACY_RESEARCH_TEAM_TEMPLATES: &[&str] = &[
     include_str!("legacy/research-team-v1.md"),
@@ -2809,11 +2815,11 @@ mod tests {
     }
 
     /// A reply states only what a page read in its turn says, else "not checked"; it never says a site or
-    /// page lacks something (a place, stop, route or time), or that a page didn't load,
-    /// and says which page it didn't reach ("the planner itself didn't load in the page", of a planner whose
-    /// own page the turn never opened); and it names only steps its turn started ("I'm sending Instafy's
-    /// browser…" with no browser card is a promise nobody keeps). `AGENTS.md` is what web turns carry, and a
-    /// browser turn is given its "Replies" too. The copies from before are upgraded.
+    /// page lacks something (a place, stop, route or time), or that a page didn't load ("the planner
+    /// itself didn't load in the page", of a planner whose own page the turn never opened), and says
+    /// what it didn't find and where it looked; and it names only steps its turn started ("I'm sending
+    /// Instafy's browser…" with no browser card is a promise nobody keeps). `AGENTS.md` is what web turns
+    /// carry, and a browser turn is given its "Replies" too. The copies from before are upgraded.
     ///
     /// The rule named what doesn't exist ("a place, stop, route, time or page"), and a turn that read a
     /// journey planner's station list, which showed only the station it held, replied that the planner
@@ -2821,16 +2827,16 @@ mod tests {
     /// made from that reply said both again. It named what a site or page lacks then, and only
     /// forbade saying so: three replies still said a page lacks something, in the forbidden form
     /// ("lists its address and coordinates, but not nearby metro directions", of a home page whose
-    /// seven closed sections no step opened; a local test, Nov 5). It gives the words now: say
-    /// where you looked, or which page you didn't reach. It still forbids both forms, a site's and
-    /// a page's: every one of those replies said it of a page.
+    /// seven closed sections no step opened; a local test, Nov 5). It gives the words now: say what
+    /// you didn't find and where you looked. It still forbids both forms, a site's and a page's:
+    /// every one of those replies said it of a page.
     #[test]
     fn agents_doc_says_unread_facts_are_not_checked_and_names_only_steps_the_turn_started() {
         let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
         let doc = flat(AGENTS_DOC_TEMPLATE);
         for needle in [
             "A fact or tip you add to the reply or a page says \"not checked\" or which web search found it, or stays out, unless the person, a page you read this turn or Instafy's browser's findings gave it.",
-            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach.",
+            "When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\").",
             "Never say a site or page lacks it or didn't load.",
             "Say only steps this turn did or started.",
             "offer it as a next step instead",
@@ -2839,8 +2845,8 @@ mod tests {
         }
         assert!(!doc.contains("lacks something"));
         // Its example of a failure said "the shop's site didn't load", of a site no page said
-        // was down: the example says which page wasn't reached, as the rule does, and nothing
-        // else in "Replies" says a page didn't load.
+        // was down: the example says which site wasn't reached and what was read instead, and
+        // nothing else in "Replies" says a page didn't load.
         let replies = doc
             .split("## Replies")
             .nth(1)
@@ -2890,7 +2896,7 @@ mod tests {
             .and_then(|rest| rest.split("## ").next())
             .expect("Replies section");
         for rule in [
-            "- When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\") or which page you didn't reach.",
+            "- When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\").",
             "Never say a site or page lacks it or didn't load.",
         ] {
             assert!(replies.contains(rule), "{replies}");
@@ -2902,6 +2908,32 @@ mod tests {
         assert!(
             flat(previous).contains("lacks it or didn't load, unless a page you read says so.")
         );
+        let workspace = tempdir().expect("workspace");
+        let path = workspace.path().join(AGENTS_DOC_FILENAME);
+        fs::write(&path, previous).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&path).unwrap(), AGENTS_DOC_TEMPLATE);
+    }
+
+    /// What a reply didn't find has one form: what it didn't find, and where it looked ("I didn't
+    /// find a price on the shop's product page"). The rule let a reply say which page it didn't
+    /// reach as well, and replies kept blaming a page in that form: "The hotel's page wasn't at the
+    /// address tried", of an address the turn guessed (a local test, Nov 17). The copy from before
+    /// is upgraded.
+    #[test]
+    fn a_reply_says_what_it_didnt_find_never_which_page_it_didnt_reach() {
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = flat(AGENTS_DOC_TEMPLATE);
+        assert!(
+            doc.contains("- When you didn't find something, say where you looked (\"I didn't find a price on the shop's product page\"). What Instafy's browser's findings say it didn't find"),
+            "{doc}"
+        );
+        assert!(!doc.contains("didn't reach"), "{doc}");
+
+        let previous = include_str!("legacy/agents-doc-v23.md");
+        assert!(flat(previous).contains(
+            "(\"I didn't find a price on the shop's product page\") or which page you didn't reach."
+        ));
         let workspace = tempdir().expect("workspace");
         let path = workspace.path().join(AGENTS_DOC_FILENAME);
         fs::write(&path, previous).unwrap();

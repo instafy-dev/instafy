@@ -10695,7 +10695,7 @@ impl JobProcessor {
                 self.picture_sender(),
             );
             // A page the turn left without its card gets it now, before the reply.
-            page_cards::post_missing_cards(
+            let retry_unopened_pages = page_cards::post_missing_cards(
                 &workspace_dir,
                 &project_id,
                 read_only_workspace,
@@ -10799,8 +10799,10 @@ impl JobProcessor {
                 // An empty reply is no reply: the building turn answers.
                 retry_outcome.summary.clear();
             }
-            // The page another chat made that it didn't change, on a line of its own.
+            // The page another chat made that it didn't change, and a page it made that nobody
+            // can open, each on a line of its own.
             held_pages.reply(&mut retry_outcome.summary, &retry_outcome.files);
+            save_report::append_not_saved(&mut retry_outcome.summary, &retry_unopened_pages);
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
@@ -11050,7 +11052,7 @@ impl JobProcessor {
             self.picture_sender(),
         );
         // A page the turn left without its card gets it now, before the reply.
-        page_cards::post_missing_cards(
+        let unopened_pages = page_cards::post_missing_cards(
             &workspace_dir,
             &project_id,
             read_only_workspace,
@@ -11080,8 +11082,10 @@ impl JobProcessor {
             // An empty reply is no reply: the building turn answers.
             outcome.summary.clear();
         }
-        // The page another chat made that it didn't change, on a line of its own.
+        // The page another chat made that it didn't change, and a page it made that nobody can
+        // open, each on a line of its own.
         held_pages.reply(&mut outcome.summary, &outcome.files);
+        save_report::append_not_saved(&mut outcome.summary, &unopened_pages);
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {

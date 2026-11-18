@@ -1188,3 +1188,41 @@ fn a_comparison_gets_a_sort_for_each_amount_the_person_compares_by() {
     learn::ensure_project_memory_scaffold(root);
     assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 }
+
+/// A build took another chat's comparison as its sample and wrote a page that loads that page's
+/// script and styles from its folder (`../<that page>/site.js`), with no starter of its own: served
+/// from its own folder, the page can't load them, so its card was held back and nobody could open
+/// it (a local test, Nov 17). A new page starts in a folder of its own from a starter, and a page
+/// taken as a sample is copied, never linked. An unedited hub from before is upgraded, and an
+/// edited one is kept.
+#[test]
+fn a_new_page_starts_in_its_own_folder_and_a_sample_is_copied_never_linked() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let previous = include_str!("legacy/interactive-artifacts-v22.md");
+    for rule in [
+        "a new page starts in a folder of its own from the closest starter, `instafy bind init sites/<slug> --starter compare|ranked|timeline|checklist|blank`:",
+        "A page you take as a sample is copied, never linked: a page loads only files in its own folder.",
+    ] {
+        assert!(flat(hub).contains(rule), "{hub}");
+        assert!(!flat(previous).contains(rule), "new in this version");
+    }
+    assert!(
+        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        hub.len()
+    );
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    learn::ensure_project_memory_scaffold(root);
+    let path = root.join(learn::INTERACTIVE_ARTIFACTS_RELATIVE_PATH);
+    fs::write(&path, previous).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), hub);
+    let edited = format!("{previous}\nLocal page preference.\n");
+    fs::write(&path, &edited).unwrap();
+    learn::ensure_project_memory_scaffold(root);
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+}
