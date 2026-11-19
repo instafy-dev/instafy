@@ -649,21 +649,17 @@ async function ensureControllerProviders(serviceRoleKey: string) {
     "dev-provider-token";
 
   // Bench runs must exercise the local runtime-agent changes (ex: /learn optimizer) rather than
-  // whatever runtime-agent image is currently published. We do that by forcing the provider
-  // metadata to request the local webdev build target and the stable local image tag that
-  // `pnpm stack:refresh` / manual local rebuilds produce.
+  // whatever runtime-agent image is currently published. No provider builds an image at launch:
+  // the dev stack builds its runtime images when they are missing (scripts/run-e2e-dev.mjs
+  // ensureRuntimeImage), so run `pnpm stack:refresh` after changing runtime-agent. The stack's
+  // own provider runs as exact instafy-cloud and starts those images whatever a request names;
+  // the stable local tag below is for a provider that honors a request's image.
   //
   // This is intentionally gated behind PLAYWRIGHT_RUN_BENCH so the normal e2e suite stays fast.
   const benchEnabled = (process.env.PLAYWRIGHT_RUN_BENCH ?? "").trim() === "1";
   const benchRuntimeMetadata = (() => {
     if (!benchEnabled) return {};
-    return {
-      runtimeAgentImage: "runtime-agent:webdev",
-      env: {
-        // Triggers docker allocator to run `docker compose build runtime` before `up`.
-        RUNTIME_AGENT_BUILD_TARGET: "runtime-webdev",
-      },
-    };
+    return { runtimeAgentImage: "runtime-agent:webdev" };
   })();
 
   const baseUrl = CONTROLLER_URL.replace(/\/+$/, "");
