@@ -105,15 +105,39 @@ pub fn mint_runtime_machine_token(
     runtime_generation: Option<Uuid>,
     machine_expires_at: DateTime<Utc>,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token_inner(
+    mint_runtime_token_expires_no_later_than(
         config,
         request,
         runtime_generation,
         Some(machine_expires_at),
         None,
+    )
+}
+
+/// Mint a runtime token bound to its generation whose signed expiry passes
+/// neither `machine_expires_at` nor `latest_expires_at`, measured as it is
+/// signed. With `machine_expires_at` it is a person's machine token and
+/// carries that expiry ([`mint_runtime_machine_token`]), unchanged when
+/// `latest_expires_at` comes first.
+pub fn mint_runtime_token_expires_no_later_than(
+    config: &AppConfig,
+    request: ScopedTokenRequest,
+    runtime_generation: Option<Uuid>,
+    machine_expires_at: Option<DateTime<Utc>>,
+    latest_expires_at: Option<DateTime<Utc>>,
+) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
+    mint_scoped_token_inner(
+        config,
+        request,
+        runtime_generation,
+        machine_expires_at
+            .into_iter()
+            .chain(latest_expires_at)
+            .min(),
         None,
         None,
-        Some(machine_expires_at.timestamp()),
+        None,
+        machine_expires_at.map(|expires_at| expires_at.timestamp()),
     )
 }
 

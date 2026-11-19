@@ -6,8 +6,8 @@
 //!   until they expire;
 //! - a token minted before lifetimes starts one at its next renewal, and a
 //!   service-owned runtime never has one;
-//! - a person's mint never outlives the session that makes it, and a session
-//!   about to expire is refused as expired;
+//! - a person's mint never outlives the session that makes it, even one that
+//!   waits on a lock, and a session about to expire is refused as expired;
 //! - a mint for a new machine waits as a pending mint that its first
 //!   registration takes, and a retried first registration still works;
 //! - a removal ends the pending mints where the person lost write access, so
@@ -16,14 +16,18 @@
 //!
 //! Requires `TEST_DATABASE_URL` like the tests in `tests.rs`.
 
+use std::future::Future;
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::{json, Value as JsonValue};
 use uuid::Uuid;
 
+use crate::auth::{issue_controller_token, ControllerToken};
 use crate::config::DEFAULT_SELF_HOSTED_MACHINE_LIFETIME_SECONDS;
 use crate::runtime::token::default_runtime_token_scopes;
-use crate::tests::{assert_controller_only, sql, sql_one};
+use crate::tests::{assert_controller_only, eventually, sql, sql_one};
 use crate::tokens::{
     decode_scoped_token_in_full, mint_runtime_machine_token,
     mint_scoped_token_with_runtime_generation, ScopedTokenRequest,
@@ -32,7 +36,10 @@ use crate::tokens::{
 use super::tests::{
     assert_refused, with_configured_space, with_space, People, Space, SERVICE_ROLE,
 };
-use super::{prune_expired_pending_machine_mints, RUNTIME_MACHINE_LIFETIME_ENDED_CODE};
+use super::{
+    hold_runtime_owner_lock, prune_expired_pending_machine_mints,
+    RUNTIME_MACHINE_LIFETIME_ENDED_CODE,
+};
 
 /// The machine expiry `token` carries, if any.
 fn machine_expiry(space: &Space, token: &str) -> anyhow::Result<Option<i64>> {
@@ -127,6 +134,43 @@ async fn mint_with(
             Some(body),
         )
         .await
+}
+
+/// A session of `person`, with its expiry.
+fn session_of(space: &Space, person: Uuid) -> anyhow::Result<ControllerToken> {
+    issue_controller_token(&space.config, &person)
+        .map_err(|error| anyhow::anyhow!("failed to issue a session token: {error:?}"))
+}
+
+/// The answer to `mint`, which waits on a lock `holder` holds: `holder` lets
+/// go two seconds after it sees the mint wait, and a mint that never waits
+/// fails the test.
+async fn mint_after_a_wait(
+    space: &Space,
+    holder: tokio_postgres::Transaction<'_>,
+    mint: impl Future<Output = anyhow::Result<(StatusCode, JsonValue)>>,
+) -> anyhow::Result<(StatusCode, JsonValue)> {
+    let holder_pid: i32 = holder
+        .query_one("select pg_backend_pid()", &[])
+        .await?
+        .get(0);
+    let release = async move {
+        eventually("the mint to wait on the lock", || async {
+            let waiting: i64 = sql_one(
+                &space.pool,
+                "select count(*) from pg_stat_activity where $1 = any(pg_blocking_pids(pid))",
+                &[&holder_pid],
+            )
+            .await?;
+            Ok((waiting > 0).then_some(()))
+        })
+        .await?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        holder.commit().await?;
+        anyhow::Ok(())
+    };
+    let (answer, ()) = tokio::try_join!(mint, release)?;
+    Ok(answer)
 }
 
 fn assert_lifetime_ended(status: StatusCode, body: &JsonValue, label: &str) {
@@ -311,18 +355,22 @@ async fn a_mint_never_outlives_the_session_that_makes_it() -> anyhow::Result<()>
             let teammate = space.people.teammate;
             // The test config's sessions last 900 s, under the hour a mint
             // would otherwise get.
-            let session = space.person_token(teammate)?;
-            let (status, body) = mint_with(&space, &session, space.project_id, json!({})).await?;
+            let session = session_of(&space, teammate)?;
+            let (status, body) =
+                mint_with(&space, &session.token, space.project_id, json!({})).await?;
             assert_eq!(status, StatusCode::OK, "the mint: {body}");
             let expires_in = body["expiresIn"].as_i64().unwrap_or_default();
             assert!((840..=900).contains(&expires_in), "{body}");
             let token = body["token"].as_str().unwrap_or_default();
-            assert!(token_expiry(&space, token)? <= Utc::now().timestamp() + 900);
+            assert!(
+                token_expiry(&space, token)? <= session.expires_at,
+                "ends by the session's own expiry: {body}"
+            );
 
             // Asking for longer than the session has left is refused.
             let (status, body) = mint_with(
                 &space,
-                &session,
+                &session.token,
                 space.project_id,
                 json!({ "ttlSeconds": 1800 }),
             )
@@ -363,6 +411,76 @@ async fn a_mint_never_outlives_the_session_that_makes_it() -> anyhow::Result<()>
             )
             .await?;
             assert_eq!(runtimes, 0, "a refused mint records nothing");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// The session's time left is measured before a mint waits on the pool, the
+/// owner lock and the runtime row, so the cap must hold where it signs.
+#[tokio::test]
+async fn a_mint_that_waits_still_ends_by_its_session() -> anyhow::Result<()> {
+    with_space(
+        "a_mint_that_waits_still_ends_by_its_session",
+        |space| async move {
+            let teammate = space.people.teammate;
+            let machine = space.start_machine(teammate, space.project_id).await?;
+            let session = session_of(&space, teammate)?;
+            let mut connection = space.pool.get().await?;
+
+            // A machine mint waits on its person's owner lock while a
+            // membership fence holds it.
+            let fence = connection.transaction().await?;
+            hold_runtime_owner_lock(&fence, teammate)
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to hold the owner lock: {error:?}"))?;
+            let (status, body) = mint_after_a_wait(
+                &space,
+                fence,
+                mint_with(&space, &session.token, space.project_id, json!({})),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "the machine mint: {body}");
+            let token = body["token"].as_str().unwrap_or_default();
+            assert!(
+                token_expiry(&space, token)? <= session.expires_at,
+                "the machine mint ends by its session: {body}"
+            );
+            // The machine expiry it carries is the mint's own, not the cap.
+            let answered = DateTime::parse_from_rfc3339(
+                body["machineExpiresAt"].as_str().unwrap_or_default(),
+            )?;
+            assert_eq!(machine_expiry(&space, token)?, Some(answered.timestamp()));
+            assert!(answered.timestamp() > session.expires_at, "{body}");
+
+            // Any other mint by a person: one for its runtime's row, which
+            // another transaction holds.
+            let holder = connection.transaction().await?;
+            holder
+                .execute(
+                    "select 1 from runtimes where id = $1 for update",
+                    &[&machine.runtime_id],
+                )
+                .await?;
+            let (status, body) = mint_after_a_wait(
+                &space,
+                holder,
+                mint_with(
+                    &space,
+                    &session.token,
+                    space.project_id,
+                    json!({ "runtimeId": machine.runtime_id, "scopes": ["origin.presence"] }),
+                ),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "a narrower mint: {body}");
+            let token = body["token"].as_str().unwrap_or_default();
+            assert_eq!(machine_expiry(&space, token)?, None, "{body}");
+            assert!(
+                token_expiry(&space, token)? <= session.expires_at,
+                "a narrower mint ends by its session: {body}"
+            );
             Ok(())
         },
     )

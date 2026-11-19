@@ -9,9 +9,12 @@
 //!   signed machine expiry, `SELF_HOSTED_MACHINE_LIFETIME_SECONDS` after the
 //!   mint, and every renewal carries it unchanged; registration stops
 //!   renewing once a renewed token would outlive it, with 401
-//!   [`RUNTIME_MACHINE_LIFETIME_ENDED_CODE`], so no token of the machine
-//!   outlives it. Desktop and the CLI then mint again with the person's
-//!   sign-in, which checks their access again, and start the machine anew.
+//!   [`RUNTIME_MACHINE_LIFETIME_ENDED_CODE`], so no runtime or agent token
+//!   of the machine outlives it. A job leased shortly before the end keeps
+//!   the tokens minted for it at its lease, such as its workspace token,
+//!   for max(`AGENT_TOKEN_TTL_SECONDS`, an hour) after that lease. Desktop
+//!   and the CLI then mint again with the person's sign-in, which checks
+//!   their access again, and start the machine anew.
 //! - The runtime's token generation is rotated when it is removed, when its
 //!   owner stops it with their own sign-in, and when a member or team change
 //!   made through the controller leaves its owner unable to write the space.

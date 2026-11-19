@@ -417,6 +417,12 @@ Notes:
   fallback is explicit: set `INSTAFY_RUNTIME_AGENT_IMAGE` to a locally built tag or an
   immutable published OCI digest. It does not silently pull a mutable `latest` channel.
 - `runtime start` runs in the foreground by default; use `--detach` to background it.
+- When a private runtime's machine lifetime ends, the agent exits with status 4 and a foreground
+  `runtime start` mints a new token for the same runtime from your sign-in and starts it again, at
+  most once in ten minutes (see
+  [Machine lifetime](Self-Hosted-Runtime-Security.md#machine-lifetime)). While it mints, the state
+  file names the `runtime start` process itself: `runtime status` shows it running, another
+  `runtime start` refuses, and `runtime stop`, Ctrl-C or closing the terminal stop it for good.
 
 ### `instafy runtime status`
 

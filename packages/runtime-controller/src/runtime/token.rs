@@ -1,7 +1,7 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runtime_contracts::AccessTokenClaims;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -9,12 +9,11 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::auth::{authenticate_request_with_expiry, require_user_session, RequestContext};
-use crate::config::ClaudeCodeLaneUsers;
+use crate::config::{AppConfig, ClaudeCodeLaneUsers};
 #[cfg(test)]
 use crate::projects::ensure_scoped_claims_allow_requested_scopes;
 use crate::tokens::{
-    mint_runtime_machine_token, mint_scoped_token_with_runtime_generation, MintedAccessToken,
-    ScopedTokenRequest,
+    mint_runtime_token_expires_no_later_than, MintedAccessToken, ScopedTokenRequest,
 };
 use crate::{
     bad_request, ensure_project_write_access, forbidden, internal_error, load_project_record,
@@ -89,6 +88,11 @@ const RUNTIME_TOKEN_ALLOWED_SCOPES: &[&str] = &[
 const DEFAULT_RUNTIME_TOKEN_TTL_SECONDS: i64 = 3600;
 pub(super) const MAX_RUNTIME_TOKEN_TTL_SECONDS: i64 = 3600;
 const MIN_RUNTIME_TOKEN_TTL_SECONDS: i64 = 60;
+/// The 401 a person's mint gets when their session has less than
+/// [`MIN_RUNTIME_TOKEN_TTL_SECONDS`] left, as the mint starts or as it signs
+/// after its waits. The CLI refreshes the session on it and mints again.
+const SESSION_NEARLY_EXPIRED: &str =
+    "The session has nearly expired; refresh it to mint a runtime token";
 
 /// Scopes issued to new runtime tokens, and the most a renewal re-issues:
 /// registration renews a token with only those of them it holds, so a
@@ -239,9 +243,7 @@ fn resolve_runtime_token_ttl(
         .unwrap_or(MAX_RUNTIME_TOKEN_TTL_SECONDS)
         .min(MAX_RUNTIME_TOKEN_TTL_SECONDS);
     if limit < MIN_RUNTIME_TOKEN_TTL_SECONDS {
-        return Err(unauthorized(
-            "The session has nearly expired; refresh it to mint a runtime token",
-        ));
+        return Err(unauthorized(SESSION_NEARLY_EXPIRED));
     }
     let ttl = requested.unwrap_or(DEFAULT_RUNTIME_TOKEN_TTL_SECONDS.min(limit));
     if ttl > limit {
@@ -250,6 +252,46 @@ fn resolve_runtime_token_ttl(
         ));
     }
     Ok(ttl)
+}
+
+/// Sign a minted runtime token. A person's is capped at `session_expires_at`
+/// here, after the mint's waits (the pool, the owner lock, the runtime row),
+/// so it never ends after the session; `None` for service automation. A
+/// session with less than [`MIN_RUNTIME_TOKEN_TTL_SECONDS`] left by then is
+/// refused as nearly expired, as it is before the waits
+/// ([`resolve_runtime_token_ttl`]), so whichever wait ran it down, it never
+/// cuts a person's token below that.
+fn sign_runtime_token(
+    config: &AppConfig,
+    request: ScopedTokenRequest,
+    runtime_generation: Option<Uuid>,
+    machine_expires_at: Option<DateTime<Utc>>,
+    session_expires_at: Option<DateTime<Utc>>,
+) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
+    let minted = mint_runtime_token_expires_no_later_than(
+        config,
+        request,
+        runtime_generation,
+        machine_expires_at,
+        session_expires_at,
+    )
+    .map_err(|error| {
+        let session_ended = session_expires_at.is_some_and(|expires_at| expires_at <= Utc::now());
+        if error.0 == StatusCode::UNAUTHORIZED && session_ended {
+            unauthorized(SESSION_NEARLY_EXPIRED)
+        } else {
+            error
+        }
+    })?;
+    // Counted from the token's own `iat`, in the whole seconds its lifetime
+    // is capped in, so no turn of the clock between a check and the signing
+    // lets a shorter token through.
+    let session_left =
+        session_expires_at.map(|expires_at| expires_at.timestamp() - minted.issued_at.timestamp());
+    if session_left.is_some_and(|left| left < MIN_RUNTIME_TOKEN_TTL_SECONDS) {
+        return Err(unauthorized(SESSION_NEARLY_EXPIRED));
+    }
+    Ok(minted)
 }
 
 pub(crate) fn runtime_generation_from_capabilities(
@@ -508,11 +550,21 @@ pub(super) async fn mint_runtime_access_token(
         .as_ref()
         .map(|id| id.to_string())
         .unwrap_or_else(|| project_id.to_string());
-    // A person's mint never outlives the session that made it. Service
-    // automation's secrets do not expire.
-    let session_ttl_limit = credential_expires_at
+    // A person's mint never outlives the session that made it: checked here,
+    // and checked and capped again where the token is signed, after the
+    // waits below. Service automation's secrets do not expire.
+    let session_expires_at = credential_expires_at
         .filter(|_| !context.is_service_role)
-        .map(|expires_at| expires_at.saturating_sub(Utc::now().timestamp()));
+        .map(|expires_at| {
+            DateTime::<Utc>::from_timestamp(expires_at, 0)
+                .ok_or_else(|| unauthorized("session expiry is invalid"))
+        })
+        .transpose()?;
+    let session_ttl_limit = session_expires_at.map(|expires_at| {
+        expires_at
+            .timestamp()
+            .saturating_sub(Utc::now().timestamp())
+    });
     let ttl_seconds = resolve_runtime_token_ttl(body.ttl_seconds, session_ttl_limit)?;
     let successor_generation = (lease_id.is_none() && mints_runtime_machine).then(Uuid::new_v4);
     // The person an unleased machine mint admits a machine for: its subject,
@@ -627,17 +679,13 @@ pub(super) async fn mint_runtime_access_token(
         prefer_runtime: None,
         ttl_seconds: Some(ttl_seconds),
     };
-    let minted = match machine_expires_at {
-        Some(machine_expires_at) => mint_runtime_machine_token(
-            &state.config,
-            request,
-            successor_generation,
-            machine_expires_at,
-        )?,
-        None => {
-            mint_scoped_token_with_runtime_generation(&state.config, request, successor_generation)?
-        }
-    };
+    let minted = sign_runtime_token(
+        &state.config,
+        request,
+        successor_generation,
+        machine_expires_at,
+        session_expires_at,
+    )?;
     // A new machine of a person has no runtime row to rotate until it
     // registers: record it, so a membership change can still end it.
     if let (Some(person), Some(runtime_id), Some(generation)) =
@@ -987,6 +1035,143 @@ mod tests {
         assert_eq!(resolve_runtime_token_ttl(Some(600), None).unwrap(), 600);
         assert_eq!(resolve_runtime_token_ttl(Some(3_600), None).unwrap(), 3_600);
         assert_eq!(resolve_runtime_token_ttl(None, None).unwrap(), 3_600);
+    }
+
+    fn runtime_token_request() -> ScopedTokenRequest {
+        let runtime_id = Uuid::new_v4().to_string();
+        ScopedTokenRequest {
+            audience: runtime_id.clone(),
+            subject: Uuid::new_v4().to_string(),
+            project_id: Uuid::new_v4().to_string(),
+            origin_id: None,
+            runtime_id: Some(runtime_id),
+            protocol: None,
+            scopes: default_runtime_token_scopes(),
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(DEFAULT_RUNTIME_TOKEN_TTL_SECONDS),
+        }
+    }
+
+    /// A person's runtime token ends by their session's expiry as it is
+    /// signed, a machine's still carrying its machine expiry. One whose
+    /// session has less than the floor left by then, or has ended, gets the
+    /// nearly-expired 401, and one with exactly the floor left is signed for
+    /// it. Service automation's is not capped.
+    #[test]
+    fn a_signed_runtime_token_ends_by_its_session() {
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "runtime-token-session-cap",
+        );
+        let session_expires_at = Utc::now() + ChronoDuration::seconds(600);
+        let machine_expires_at = Utc::now() + ChronoDuration::days(7);
+        for machine in [None, Some(machine_expires_at)] {
+            let minted = sign_runtime_token(
+                &config,
+                runtime_token_request(),
+                Some(Uuid::new_v4()),
+                machine,
+                Some(session_expires_at),
+            )
+            .expect("sign a person's runtime token");
+            let decoded =
+                crate::tokens::decode_scoped_token_in_full(&config, &minted.token, "runtime token")
+                    .expect("decode a person's runtime token");
+            assert_eq!(
+                decoded.claims.exp,
+                session_expires_at.timestamp(),
+                "{machine:?}"
+            );
+            assert_eq!(minted.ttl, decoded.claims.exp - decoded.claims.iat);
+            assert_eq!(
+                decoded.machine_expires_at,
+                machine.map(|expires_at| expires_at.timestamp())
+            );
+
+            let ended = Utc::now() - ChronoDuration::seconds(1);
+            let (status, error) =
+                sign_runtime_token(&config, runtime_token_request(), None, machine, Some(ended))
+                    .unwrap_err();
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{machine:?}");
+            assert_eq!(error.0.message, SESSION_NEARLY_EXPIRED);
+
+            // A session that ends 30 s, or a second short of the floor,
+            // after the signing, as one can once a mint has waited. A
+            // session ends on a whole second, as these do.
+            for left in [30, MIN_RUNTIME_TOKEN_TTL_SECONDS - 1] {
+                let expires_at = DateTime::<Utc>::from_timestamp(Utc::now().timestamp() + left, 0)
+                    .expect("a session expiry");
+                match sign_runtime_token(
+                    &config,
+                    runtime_token_request(),
+                    None,
+                    machine,
+                    Some(expires_at),
+                ) {
+                    Err((status, error)) => {
+                        assert_eq!(status, StatusCode::UNAUTHORIZED, "{machine:?} {left}");
+                        assert_eq!(
+                            error.0.message, SESSION_NEARLY_EXPIRED,
+                            "{machine:?} {left}"
+                        );
+                    }
+                    Ok(minted) => panic!(
+                        "{machine:?}: a session {left} s from its end signed a {} s token",
+                        minted.ttl
+                    ),
+                }
+            }
+
+            // One that ends exactly the floor after the signing is signed for
+            // it. Should the clock's second turn before the signing, the
+            // session has a second less and is refused: read the clock again.
+            let (floor_expires_at, at_the_floor) = loop {
+                let now = Utc::now().timestamp();
+                let expires_at =
+                    DateTime::<Utc>::from_timestamp(now + MIN_RUNTIME_TOKEN_TTL_SECONDS, 0)
+                        .expect("a session expiry");
+                let signed = sign_runtime_token(
+                    &config,
+                    runtime_token_request(),
+                    None,
+                    machine,
+                    Some(expires_at),
+                );
+                if signed.is_ok() || Utc::now().timestamp() == now {
+                    break (expires_at, signed.expect("sign a token at the floor"));
+                }
+            };
+            let decoded = crate::tokens::decode_scoped_token_in_full(
+                &config,
+                &at_the_floor.token,
+                "runtime token",
+            )
+            .expect("decode a token at the floor");
+            assert_eq!(
+                at_the_floor.ttl, MIN_RUNTIME_TOKEN_TTL_SECONDS,
+                "{machine:?}"
+            );
+            assert_eq!(
+                decoded.claims.exp,
+                floor_expires_at.timestamp(),
+                "{machine:?}"
+            );
+            assert_eq!(
+                decoded.claims.exp - decoded.claims.iat,
+                MIN_RUNTIME_TOKEN_TTL_SECONDS
+            );
+            assert_eq!(
+                decoded.machine_expires_at,
+                machine.map(|expires_at| expires_at.timestamp())
+            );
+        }
+
+        let service = sign_runtime_token(&config, runtime_token_request(), None, None, None)
+            .expect("sign a service runtime token");
+        assert_eq!(service.ttl, DEFAULT_RUNTIME_TOKEN_TTL_SECONDS);
     }
 
     #[test]
