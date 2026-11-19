@@ -28,7 +28,7 @@ function input(overrides: Partial<Parameters<typeof resolveChatTranscriptIdentit
     chatClientSessionId: "local-session",
     humanPeerContext: { resolved: true, hasHumanPeer: false },
     rosterAgents: [railOcto],
-    historyComplete: true,
+    historyLoaded: true,
     messages: [prompt, message()],
     runAgentIdentityByRunId: new Map(),
     runMetadata: [],
@@ -64,6 +64,54 @@ describe("resolveChatTranscriptIdentityLayout", () => {
     }))).toBe("solo");
   });
 
+  it("stays solo on the newest page of a long chat while older pages are still on the server", () => {
+    // Shaped like the chat that showed the problem. Its newest 104 rows held 9
+    // prompts and 10 replies; the rest were hidden progress rows (64 reasoning,
+    // 20 token usage, 1 status), each stamped with the viewer's Octo, so a page
+    // of 50 rows held a few turns and older pages stayed on the server.
+    const progress = (n: number, messageType: string, i: number) => message({
+      id: `${messageType}-${n}-${i}`,
+      messageType,
+      metadata: { kind: "update", messageType, runId: `run-${n}`, agent: ownOctoStamp },
+    });
+    const turn = (n: number, reasoningRows: number) => [
+      message({ id: `prompt-${n}`, role: "user", authorId: "self", metadata: { runId: `run-${n}` } }),
+      ...Array.from({ length: reasoningRows }, (_, i) => progress(n, "reasoning", i)),
+      progress(n, "token_usage", 0),
+      progress(n, "token_usage", 1),
+      message({ id: `reply-${n}`, metadata: { runId: `run-${n}`, agent: ownOctoStamp } }),
+    ];
+    const loaded = [
+      // The newest pages start inside an older turn: its prompt is on a page not loaded.
+      message({ id: "reply-0", metadata: { runId: "run-0", agent: ownOctoStamp } }),
+      progress(0, "status", 0),
+      progress(0, "token_usage", 0),
+      progress(0, "token_usage", 1),
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap(n => turn(n, n === 2 ? 56 : 1)),
+    ];
+    expect(loaded).toHaveLength(104);
+    expect(resolveChatTranscriptIdentityLayout(input({
+      messages: loaded,
+      runAgentIdentityByRunId: new Map(
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => [`run-${n}`, { id: OWN_OCTO_ID, handle: "octo", avatarSeed: "octo" }]),
+      ),
+    }))).toBe("solo");
+  });
+
+  it("switches to participants once an older page loads with another author", () => {
+    const newestPage = [prompt, message({ id: "reply", metadata: { agent: ownOctoStamp } })];
+    expect(resolveChatTranscriptIdentityLayout(input({ messages: newestPage }))).toBe("solo");
+    // An older page comes before the newest one in the transcript.
+    for (const older of [
+      message({ id: "their-octo", metadata: { agent: { ...ownOctoStamp, id: OTHER_OCTO_ID } } }),
+      message({ id: "former-peer", role: "user", authorId: "former-peer", metadata: null }),
+      message({ id: "old-plan", messageType: "multi_agent_plan" }),
+      message({ id: "unresolved-run", metadata: { runId: "unloaded-old-run" } }),
+    ]) {
+      expect(resolveChatTranscriptIdentityLayout(input({ messages: [older, ...newestPage] }))).toBe("participants");
+    }
+  });
+
   it("goes by the rail's current face for the viewer's own Octo, as the chat draws its rows", () => {
     // Removing Octo's picture resets its seed to its id, which is Octo's tile
     // again. Replies stamped while it wore the picture are drawn from the
@@ -83,12 +131,12 @@ describe("resolveChatTranscriptIdentityLayout", () => {
     { humanPeerContext: null },
     { humanPeerContext: { resolved: false, hasHumanPeer: false } },
     { humanPeerContext: { resolved: true, hasHumanPeer: true } },
-    { historyComplete: false },
+    { historyLoaded: false },
     { rosterAgents: [] },
     { rosterAgents: [{ handle: "reviewer", agentId: "reviewer-agent", avatarSeed: "hatchling:2" }] },
     { rosterAgents: [railOcto, { handle: "reviewer", agentId: "reviewer-agent", avatarSeed: "hatchling:2" }] },
     { rosterAgents: [railOcto, { ...railOcto, agentId: OTHER_OCTO_ID }] },
-  ])("keeps identities while membership or complete history cannot establish solo: %j", overrides => {
+  ])("keeps identities while membership or loaded history cannot establish solo: %j", overrides => {
     expect(resolveChatTranscriptIdentityLayout(input(overrides))).toBe("participants");
   });
 

@@ -20,8 +20,12 @@ type IdentityLayoutInput = {
   humanPeerContext: ConversationHumanPeerPresence | null | undefined;
   /** The chat's AIs as its participant rail lists them (resolveConversationRosterAgents). */
   rosterAgents: readonly Pick<ConversationRosterAgent, "handle" | "agentId" | "avatarSeed">[];
-  /** Complete conversation history, not a targeted message window or a recent page. */
-  historyComplete: boolean;
+  /**
+   * The conversation's newest history is in: its first page loaded without an
+   * error, and it is not a targeted message window or a job thread. Older pages
+   * may still be on the server.
+   */
+  historyLoaded: boolean;
   messages: readonly ChatMessage[];
   runAgentIdentityByRunId: ReadonlyMap<string, AssistantAgentIdentity>;
   /** Only runs belonging to this conversation, including active workers. */
@@ -92,21 +96,26 @@ function hasOtherOrUnknownAgent(
 
 /**
  * Reclaim the permanent avatar column only for a known conversation between
- * one person and their Octo. Online presence and the currently rendered rows
- * cannot establish that. Missing/partial history keeps participant identity;
- * compact pane layout still moves its avatars above the message body.
+ * one person and their Octo. Online presence and the rendered rows cannot
+ * establish that; the members do: no other human can see the conversation, and
+ * its rail lists only the viewer's Octo. Every loaded row and run must agree.
+ * Older pages still on the server need not: they fill with hidden progress rows
+ * (reasoning, token usage), so waiting for all of them kept any chat of more
+ * than a few turns in the participants layout. When an older page loads with
+ * another author, this returns participants from then on. Compact pane layout
+ * still moves its avatars above the message body.
  */
 export function resolveChatTranscriptIdentityLayout({
   currentUserId,
   chatClientSessionId,
   humanPeerContext,
   rosterAgents,
-  historyComplete,
+  historyLoaded,
   messages,
   runAgentIdentityByRunId,
   runMetadata,
 }: IdentityLayoutInput): ChatTranscriptIdentityLayout {
-  if (!currentUserId?.trim() || !humanPeerContext?.resolved || humanPeerContext.hasHumanPeer || !historyComplete) {
+  if (!currentUserId?.trim() || !humanPeerContext?.resolved || humanPeerContext.hasHumanPeer || !historyLoaded) {
     return "participants";
   }
   const defaultHandle = getDefaultAssistantHandle();
