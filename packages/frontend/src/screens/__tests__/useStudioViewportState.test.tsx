@@ -253,8 +253,12 @@ describe("Studio viewport and software-keyboard state", () => {
     capacitor.platform = "ios";
     await render(); await focus();
     // The plugin shrinks the web view only after the keyboard's animation and
-    // another 0.2 s; the Studio takes the announced room at once.
-    await keyboardWillShow(336);
+    // another 0.2 s; the Studio takes the announced room at once, inside the
+    // event, without waiting for an animation frame WebKit may hold back.
+    await act(async () => {
+      window.dispatchEvent(Object.assign(new Event("keyboardWillShow"), { keyboardHeight: 336 }));
+    });
+    expect(frames.size).toBe(0);
     expect(state).toEqual({ viewportHeightPx: 464, keyboardOpen: true });
     await resize(464, 464); // the web view catches up: nothing moves again
     expect(state).toEqual({ viewportHeightPx: 464, keyboardOpen: true });

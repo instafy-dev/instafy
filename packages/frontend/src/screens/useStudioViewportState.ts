@@ -126,7 +126,12 @@ export function useStudioViewportState({ trackKeyboard }: { trackKeyboard: boole
           schedule();
         }, NATIVE_KEYBOARD_LEAD_MS);
       }
-      schedule();
+      // Apply inside the event, not on the next animation frame: WebKit holds
+      // frames back while the keyboard animates, which cost about a quarter of
+      // a second on an iPhone 17 Pro simulator. Inside the event, the composer
+      // is in its new place on the first frame the keyboard draws.
+      if (frameId !== null && typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(frameId);
+      applyViewport();
     };
     const onKeyboardWillHide = () => {
       announcedKeyboard = null;
