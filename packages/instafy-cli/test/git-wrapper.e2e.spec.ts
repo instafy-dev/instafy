@@ -4,7 +4,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 async function readAll(stream: NodeJS.ReadableStream) {
@@ -700,4 +700,97 @@ describe("instafy git", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+});
+
+// Set for the run of this file that the test below starts, so that run does not start another.
+const NESTED_RUN = "INSTAFY_CLI_GIT_WRAPPER_NESTED_RUN";
+
+// A repository with a linked worktree, built with no inherited or user git settings. Its linked worktree's GIT_DIR
+// does not end in /.git, which is what makes a stray `git init` set core.bare=true in the shared config.
+function namedRepository() {
+  const named = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-named-repository-")));
+  const main = path.join(named, "main");
+  const linked = path.join(named, "linked");
+  const env = { PATH: process.env.PATH, HOME: named, LANG: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=Named", "-c", "user.email=named@example.invalid", ...args], {
+      cwd,
+      env,
+      encoding: "utf8",
+    }).trim();
+  fs.mkdirSync(main);
+  git(main, "init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(main, "README.md"), "not a fixture\n");
+  git(main, "add", "README.md");
+  git(main, "commit", "-q", "-m", "named");
+  git(main, "worktree", "add", "-q", "-b", "linked", linked);
+  return {
+    root: named,
+    gitDir: git(linked, "rev-parse", "--absolute-git-dir"),
+    config: () => fs.readFileSync(path.join(main, ".git", "config"), "utf8"),
+    state: () => ({
+      index: git(linked, "ls-files", "--stage"),
+      refs: git(linked, "for-each-ref", "--format=%(refname) %(objectname)"),
+      head: git(linked, "rev-parse", "HEAD"),
+      status: git(linked, "status", "--porcelain", "--untracked-files=all"),
+    }),
+  };
+}
+
+type VitestReport = {
+  numFailedTests: number;
+  testResults: Array<{ assertionResults: Array<{ title: string; status: string }> }>;
+};
+
+describe.skipIf(process.env[NESTED_RUN] === "1")("instafy git's tests, run by git", () => {
+  it(
+    "leave the repository GIT_DIR and GIT_INDEX_FILE name alone",
+    () => {
+      const named = namedRepository();
+      try {
+        const configBefore = named.config();
+        const before = named.state();
+        const packageRoot = new URL("../", import.meta.url).pathname;
+        const report = path.join(named.root, "report.json");
+        // What a commit hook in a linked worktree gets; `git rebase --exec` sets GIT_DIR alone.
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          GIT_DIR: named.gitDir,
+          GIT_INDEX_FILE: path.join(named.gitDir, "index"),
+          [NESTED_RUN]: "1",
+        };
+        for (const name of Object.keys(env)) {
+          if (name.startsWith("VITEST")) delete env[name];
+        }
+
+        const run = spawnSync(
+          process.execPath,
+          [
+            path.join(packageRoot, "node_modules", "vitest", "vitest.mjs"),
+            "run",
+            "test/git-wrapper.e2e.spec.ts",
+            "--reporter=json",
+            `--outputFile=${report}`,
+          ],
+          { cwd: packageRoot, env, encoding: "utf8", timeout: 150_000 },
+        );
+        const output = `${run.stdout}\n${run.stderr}`;
+
+        expect(named.config(), "a test changed the config of the repository GIT_DIR names").toBe(configBefore);
+        expect(named.state()).toEqual(before);
+        expect(run.status, output).toBe(0);
+        const results = JSON.parse(fs.readFileSync(report, "utf8")) as VitestReport;
+        const passed = results.testResults
+          .flatMap((file) => file.assertionResults)
+          .filter((test) => test.status === "passed")
+          .map((test) => test.title);
+        expect(results.numFailedTests, output).toBe(0);
+        // The test that inits a repository of its own and stages through `instafy git`.
+        expect(passed).toContain("stages files inside embedded git repos (git-inside-git)");
+      } finally {
+        fs.rmSync(named.root, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
 });

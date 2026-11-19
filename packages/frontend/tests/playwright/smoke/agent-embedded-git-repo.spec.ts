@@ -20,6 +20,7 @@ import {
   waitForHostedRuntimeReady,
   writeWorkspaceFile,
 } from "../utils/harness.js";
+import { testGitEnv } from "../utils/gitEnv.js";
 
 // This suite may onboard the machine's real Codex credential. Never retain a
 // Playwright trace containing credential or session material.
@@ -52,7 +53,7 @@ function initEmbeddedGitRepo(projectId: string, repoDir: string): void {
   for (const root of new Set(workspaceRootsForTests())) {
     const target = path.join(root, projectId, ...repoDir.split("/"));
     fs.mkdirSync(target, { recursive: true });
-    const init = spawnSync("git", ["init"], { cwd: target, encoding: "utf8" });
+    const init = spawnSync("git", ["init"], { cwd: target, encoding: "utf8", env: testGitEnv() });
     if ((init.status ?? 1) !== 0) {
       throw new Error(
         `Failed to initialize embedded git repo at ${target}: ${(init.stderr || init.stdout || "").trim()}`

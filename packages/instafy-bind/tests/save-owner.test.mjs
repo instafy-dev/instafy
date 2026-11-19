@@ -9,7 +9,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { findSpaceCheckout, noteSiteWrite, ownSiteWrites, releaseSiteWrites, SaveOwner } from "../src/save-owner.mjs";
 import { writeRecords } from "../src/apply.mjs";
-import { cleanup, eventsUrl, intentMessage, openSse, postIntent, simpleParams, sleep, startBinder, claim } from "./helpers.mjs";
+import { cleanup, eventsUrl, fixtureGitEnv, intentMessage, openSse, postIntent, simpleParams, sleep, startBinder, claim } from "./helpers.mjs";
 
 const HANDLER = `
 const kit = await import(process.env.BIND_KIT);
@@ -21,8 +21,7 @@ kit.done("ok");
 const FAST = { delayMs: 30, maxDelayMs: 200 };
 
 function gitIn(space, args, { allowFail = false } = {}) {
-  const env = { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "t@example.com" };
-  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]) delete env[key];
+  const env = fixtureGitEnv(space, { GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "t@example.com" });
   const result = spawnSync("git", ["--git-dir", path.join(space, ".instafy", ".git"), "--work-tree", space, ...args], { cwd: space, env, encoding: "utf8" });
   if (!allowFail && result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   return result.stdout;
@@ -42,7 +41,7 @@ function makeSpace({ site = "hello", extra = {} } = {}) {
     fs.mkdirSync(path.dirname(path.join(space, rel)), { recursive: true });
     fs.writeFileSync(path.join(space, rel), content);
   }
-  spawnSync("git", ["init", "-q", "--bare", path.join(space, ".instafy", ".git")]);
+  spawnSync("git", ["init", "-q", "--bare", path.join(space, ".instafy", ".git")], { env: fixtureGitEnv(space) });
   gitIn(space, ["config", "core.bare", "false"]);
   gitIn(space, ["config", "user.name", "Instafy Studio"]);
   gitIn(space, ["config", "user.email", "studio@instafy.dev"]);
@@ -183,7 +182,7 @@ test("outside a space nothing is committed: a plain folder, or a person's own re
   try {
     assert.equal(findSpaceCheckout(plain), null);
     assert.equal(ownSiteWrites(plain), null);
-    spawnSync("git", ["init", "-q", own]);
+    spawnSync("git", ["init", "-q", own], { env: fixtureGitEnv(own) });
     assert.equal(findSpaceCheckout(own), null, "a .git of the person's own is not a space checkout");
     assert.equal(ownSiteWrites(own), null);
     noteSiteWrite(path.join(own, "data", "version.json"), "{}"); // no owner: nothing happens

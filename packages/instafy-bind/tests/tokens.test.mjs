@@ -5,17 +5,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { adminToken, viewerToken } from "../src/tokens.mjs";
+import { fixtureGitEnv } from "./helpers.mjs";
 
 test("tokens and the binder's files are never committed with the site", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-tokens-"));
+  const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: fixtureGitEnv(dir) });
   try {
-    execFileSync("git", ["init", "-q"], { cwd: dir });
+    git("init", "-q");
     fs.writeFileSync(path.join(dir, "index.html"), "<p>hi</p>");
     adminToken(dir);
     viewerToken(dir);
     fs.writeFileSync(path.join(dir, ".bind", "binder.log"), "{}\n");
-    execFileSync("git", ["add", "-A"], { cwd: dir });
-    const staged = execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: dir, encoding: "utf8" }).trim().split("\n");
+    git("add", "-A");
+    const staged = git("diff", "--cached", "--name-only").trim().split("\n");
     assert.deepEqual(staged, ["index.html"]);
     // An existing ignore file is left alone.
     fs.writeFileSync(path.join(dir, ".bind", ".gitignore"), "custom\n");
