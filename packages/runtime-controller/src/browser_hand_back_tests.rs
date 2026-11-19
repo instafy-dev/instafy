@@ -1853,10 +1853,13 @@ async fn a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards(
             .map_err(|error| controller_error("check the routed card's turn", error))?;
             transaction.rollback().await?;
             drop(connection);
-            // Its task is the person's own words: their own turn, marked so.
+            // Its task is the person's own words: their own turn, marked so, with
+            // what the card answers (`a_routed_cards_browser_turn_is_leased_with_what_its_card_answers`).
             assert_eq!(
                 stamp,
-                Some(json!({ "version": 1, "cardJobId": routed, "routed": true }))
+                Some(json!({
+                    "version": 1, "cardJobId": routed, "routed": true, "answers": "message",
+                }))
             );
 
             let browser = chain
@@ -1898,6 +1901,218 @@ async fn a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards(
                     String::new()
                 ]
             );
+            Ok(())
+        })
+    })
+    .await
+}
+
+impl Chain {
+    /// The browser turn Studio opens for the routed card `routed` posted for
+    /// `words`, with the stamp dispatch puts on it once its check passes
+    /// (`system_turns::verify_browser_card_turn`), and the browser.
+    async fn checked_routed_browser_turn(
+        &self,
+        routed: &Uuid,
+        words: &str,
+    ) -> anyhow::Result<(Uuid, serde_json::Value)> {
+        let claim = json!({
+            "browserRequestOf": format!("job:{routed}"),
+            "browserTransport": "shared",
+            "browserAutoStarted": true,
+        });
+        let mut connection = self.pool.get().await?;
+        let transaction = connection.transaction().await?;
+        let stamp = crate::system_turns::verify_browser_card_turn(
+            &transaction,
+            &self.conversation_id,
+            &self.context(&self.owner),
+            words,
+            &claim,
+        )
+        .await
+        .map_err(|error| controller_error("check the routed card's turn", error))?
+        .context("the routed card's turn is stamped")?;
+        transaction.rollback().await?;
+        drop(connection);
+        let browser = self
+            .send(
+                &self.owner,
+                words,
+                json!({ "browserRequestOf": format!("job:{routed}") }),
+            )
+            .await
+            .map_err(|error| controller_error("browser turn", error))?;
+        let browser = self.job_of(&browser).await?;
+        self.make_browser_turn(&browser).await?;
+        sql(
+            &self.pool,
+            "update agent_jobs
+                set payload = jsonb_set(payload, '{metadata,browserCardTurn}', $2::jsonb, true)
+              where id = $1",
+            &[&browser, &PgJson(&stamp)],
+        )
+        .await?;
+        Ok((browser, stamp))
+    }
+
+    async fn run_of(&self, job_id: &Uuid) -> anyhow::Result<Uuid> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one("select run_id from agent_jobs where id = $1", &[job_id])
+            .await?
+            .get(0))
+    }
+}
+
+/// The browser turn of a card the routing step posted for the person's own
+/// message, as the controller leases it: the lease the runtime picks the
+/// turn's browser thread from (runtime-agent
+/// `leave_a_long_browser_thread_of_earlier_messages`), which
+/// `routedCardTurnLease` in the fixtures is. The runtime posts the card as
+/// progress, so the controller's own history query lists no card, and a rule
+/// that looked the card up there never ran on a live stack (a local test, Nov
+/// 19: seven browser parts resumed long threads for 140 of 236 credits). The
+/// turn's stamp says what the card answers instead: the person's new message,
+/// or Studio's Continue under a Stop, with when the request it sends again
+/// first went out, through every earlier turn of that request.
+#[tokio::test]
+async fn a_routed_cards_browser_turn_is_leased_with_what_its_card_answers() -> anyhow::Result<()> {
+    with_chain("routed-card-answers", |chain| {
+        Box::pin(async move {
+            let fixture = &fixtures()["routedCardTurnLease"];
+            let words = fixture["message"].as_str().context("message")?;
+            let routed = chain.routed_message(words, false).await?;
+            // The card as the controller stores it: a progress row, with the
+            // runtime's own metadata one level down.
+            let card: serde_json::Value = chain
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select metadata from conversation_messages
+                      where conversation_id = $1 and metadata #>> '{jobId}' = $2
+                        and metadata #>> '{messageType}' = 'action_request'",
+                    &[&chain.conversation_id, &routed.to_string()],
+                )
+                .await?
+                .get::<_, PgJson<serde_json::Value>>(0)
+                .0;
+            for (key, value) in [
+                ("source", "agent"),
+                ("kind", "update"),
+                ("outcome", "in_progress"),
+            ] {
+                assert_eq!(card[key], json!(value), "{card}");
+            }
+            assert_eq!(
+                card["details"]["details"]["browserRequest"]["routed"],
+                json!(true)
+            );
+
+            let (browser, stamp) = chain.checked_routed_browser_turn(&routed, words).await?;
+            let mut expected = fixture["stamp"].clone();
+            expected["cardJobId"] = json!(routed.to_string());
+            assert_eq!(stamp, expected);
+            let mut client = chain.pool.get().await?;
+            let transaction = client.transaction().await?;
+            let history = crate::agent::load_conversation_history_for_agent(
+                &transaction,
+                &chain.conversation_id,
+                None,
+                None,
+                None,
+                80,
+            )
+            .await
+            .map_err(|error| controller_error("history", error))?;
+            transaction.commit().await?;
+            drop(client);
+            assert!(
+                history
+                    .iter()
+                    .all(|entry| entry["metadata"]["jobId"] != json!(routed.to_string())),
+                "{history:?}"
+            );
+            let listed: Vec<serde_json::Value> = history
+                .iter()
+                .map(|entry| {
+                    let mut listed = json!({ "role": entry["role"], "content": entry["content"] });
+                    if let Some(lane) = entry.get("lane") {
+                        listed["lane"] = lane.clone();
+                    }
+                    listed
+                })
+                .collect();
+            assert_eq!(json!(listed), fixture["history"]);
+
+            // The person stops the browser turn, and Studio's Continue sends
+            // the message again, naming the run the Stop ended.
+            let first_run = chain.run_of(&browser).await?;
+            chain.finish(&browser, Some(""), "failed").await?;
+            let continued = chain
+                .routed_message_sent_with(
+                    words,
+                    false,
+                    json!({
+                        "writeIntent": true,
+                        "continuedStopMessageId": Uuid::new_v4().to_string(),
+                        "continuedRunIds": [first_run.to_string()],
+                    }),
+                )
+                .await?;
+            let sent: chrono::DateTime<Utc> = chain
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select created_at from agent_jobs where id = $1",
+                    &[&routed],
+                )
+                .await?
+                .get(0);
+            let (continued_browser, stamp) =
+                chain.checked_routed_browser_turn(&continued, words).await?;
+            let mut expected = fixture["continueStamp"].clone();
+            expected["cardJobId"] = json!(continued.to_string());
+            expected["requestSentAt"] = json!(sent.to_rfc3339());
+            assert_eq!(stamp, expected);
+            chain.finish(&continued_browser, Some(""), "failed").await?;
+
+            // A Continue of that Continue, naming the run of its routing
+            // step, still goes back to the message the person sent.
+            let again = chain
+                .routed_message_sent_with(
+                    words,
+                    false,
+                    json!({
+                        "writeIntent": true,
+                        "continuedStopMessageId": Uuid::new_v4().to_string(),
+                        "continuedRunIds": [chain.run_of(&continued).await?.to_string()],
+                    }),
+                )
+                .await?;
+            let (again_browser, stamp) = chain.checked_routed_browser_turn(&again, words).await?;
+            assert_eq!(stamp["answers"], json!("continue"), "{stamp}");
+            assert_eq!(stamp["requestSentAt"], json!(sent.to_rfc3339()), "{stamp}");
+            chain.finish(&again_browser, Some(""), "failed").await?;
+
+            // A Continue whose runs the conversation doesn't hold can't say.
+            let unknown = chain
+                .routed_message_sent_with(
+                    words,
+                    false,
+                    json!({
+                        "writeIntent": true,
+                        "continuedRunIds": [Uuid::new_v4().to_string()],
+                    }),
+                )
+                .await?;
+            let (_, stamp) = chain.checked_routed_browser_turn(&unknown, words).await?;
+            assert_eq!(stamp["answers"], json!("continue"), "{stamp}");
+            assert!(stamp.get("requestSentAt").is_none(), "{stamp}");
             Ok(())
         })
     })

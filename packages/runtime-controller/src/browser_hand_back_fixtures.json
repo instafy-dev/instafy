@@ -87,5 +87,26 @@
     ],
     "reply": "",
     "replyTruncated": false
+  },
+  "routedCardTurnLease": {
+    "_comment": "The browser turn of a card the routing step posted for the person's own message, as the controller leases it (browser_hand_back_tests.rs a_routed_cards_browser_turn_is_leased_with_what_its_card_answers). Its history is the controller's own query (agent.rs load_conversation_history_for_agent), which lists no card: the runtime posts every card as progress, which that query leaves out. So the stamp the controller puts on the turn's send (system_turns.rs verify_browser_card_turn) says what the card answers: the person's new `message`, or a `continue` under a Stop with `requestSentAt`, when the request it sends again first went out. The runtime picks the turn's browser thread from that stamp alone (runtime-agent jobs/mod.rs leave_a_long_browser_thread_of_earlier_messages). The card ids and the time are the test's own.",
+    "message": "Compare the three newest laptops on their makers' pages, as a comparison page.",
+    "history": [
+      { "role": "user", "content": "Compare the three newest laptops on their makers' pages, as a comparison page." },
+      { "role": "user", "content": "Compare the three newest laptops on their makers' pages, as a comparison page.", "lane": "browser" }
+    ],
+    "stamp": {
+      "version": 1,
+      "cardJobId": "00000000-0000-4000-8000-0000000000c1",
+      "routed": true,
+      "answers": "message"
+    },
+    "continueStamp": {
+      "version": 1,
+      "cardJobId": "00000000-0000-4000-8000-0000000000c2",
+      "routed": true,
+      "answers": "continue",
+      "requestSentAt": "2026-11-19T12:41:02.118204+00:00"
+    }
   }
 }

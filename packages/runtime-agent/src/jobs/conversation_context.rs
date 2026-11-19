@@ -157,51 +157,6 @@ fn continued_runs_of(entry: &JsonValue) -> impl Iterator<Item = &str> {
     .filter(|run| !run.is_empty())
 }
 
-/// The message of the person's that a card the routing step posted answers
-/// ([`routed_card_message`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RoutedCardMessage {
-    /// A new message: one they wrote ([`is_person_message`]) that carries on no run a Stop ended.
-    New,
-    /// Studio's Continue under a Stop, which sends the stopped request again, naming the runs it
-    /// carries on ([`continued_runs_of`]). `request_sent` is when the person sent that request:
-    /// the history's `createdAt` of its words ([`persons_request_at`]), when it says.
-    Continue {
-        request_sent: Option<chrono::DateTime<chrono::Utc>>,
-    },
-}
-
-/// What the card the routing step's job `card` posted answers: a new message of the person's, or
-/// a Continue under a Stop ([`RoutedCardMessage`]). The card's entry names its job, and its run is
-/// the message's own. None when the history shows neither.
-pub(super) fn routed_card_message(
-    history: Option<&JsonValue>,
-    card: &str,
-) -> Option<RoutedCardMessage> {
-    let entries = history.and_then(JsonValue::as_array)?;
-    let run = entries.iter().find_map(|entry| {
-        let names_the_card = entry_text(entry, "role") == Some("assistant")
-            && entry
-                .pointer("/metadata/jobId")
-                .and_then(JsonValue::as_str)
-                .is_some_and(|job| job.trim().eq_ignore_ascii_case(card.trim()));
-        names_the_card.then(|| entry_text(entry, "runId")).flatten()
-    })?;
-    let mut messages = entries
-        .iter()
-        .filter(|entry| entry_text(entry, "runId") == Some(run) && is_person_message(entry))
-        .peekable();
-    messages.peek()?;
-    if messages.any(|entry| continued_runs_of(entry).next().is_none()) {
-        return Some(RoutedCardMessage::New);
-    }
-    let request_sent = persons_request_at(entries, run)
-        .and_then(|at| entry_text(&entries[at], "createdAt"))
-        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-        .map(|at| at.with_timezone(&chrono::Utc));
-    Some(RoutedCardMessage::Continue { request_sent })
-}
-
 /// The browser run a Let Octo continue goes on with: the paused turn of the same request, which
 /// Studio names (`browserContinuesRunId`, `useChatBrowserHandoff.ts`). A card's browser turn may
 /// name one too, the earlier turn whose approvals a follow-up carries over, but it carries on its
@@ -227,15 +182,6 @@ fn is_let_octo_continue(entry: &JsonValue) -> bool {
     is_browser_entry(entry)
         && entry_text(entry, "role") == Some("user")
         && entry_text(entry, "content") == Some(LET_OCTO_CONTINUE_PROMPT)
-}
-
-/// Whether an assistant entry is the card the routing step posts for a message it sends to the
-/// browser: that run's routing step ran no turn of the building thread.
-fn is_routed_browser_card(entry: &JsonValue) -> bool {
-    entry
-        .pointer("/metadata/details/browserRequest/routed")
-        .and_then(JsonValue::as_bool)
-        == Some(true)
 }
 
 /// Whether an entry is a hand-back's stored prompt: Studio's words, which the person never typed
@@ -621,12 +567,12 @@ fn stopped_requests(entries: &[JsonValue]) -> Vec<StoppedRequest<'_>> {
 }
 
 /// Whether an entry is a step or a reply of a turn of `lane`: a browser turn's for the browser
-/// lane, any other for the building lane, never a routed card's (that run's routing step ran no
-/// turn of a thread) nor the controller's own lines.
+/// lane, any other for the building lane, never the controller's own lines. A routed message's
+/// routing step leaves none: the controller lists its card as progress, which no history holds,
+/// and it posts no reply.
 fn is_turn_entry(entry: &JsonValue, lane: ThreadLane) -> bool {
     entry_text(entry, "role") == Some("assistant")
         && is_browser_entry(entry) == (lane == ThreadLane::SharedBrowser)
-        && !is_routed_browser_card(entry)
         && entry
             .pointer("/metadata/source")
             .and_then(JsonValue::as_str)
@@ -635,17 +581,30 @@ fn is_turn_entry(entry: &JsonValue, lane: ThreadLane) -> bool {
 
 /// Whether `run` ran a turn of `lane`, or may have when a Stop ended it: for the browser lane, a
 /// browser turn's run, whose entries the controller marks; for the building lane, any other run
-/// but the routing step's that posted a card for the browser, which runs no turn of a thread.
-fn run_of_lane(entries: &[JsonValue], run: &str, lane: ThreadLane) -> bool {
+/// but the routing step's of a message it sent to the browser (`routed`,
+/// [`routed_message_runs`]), which runs no turn of a thread.
+fn run_of_lane(entries: &[JsonValue], run: &str, lane: ThreadLane, routed: &HashSet<&str>) -> bool {
     let mut of_run = entries
         .iter()
         .filter(|entry| entry_text(entry, "runId") == Some(run));
     match lane {
         ThreadLane::SharedBrowser => of_run.any(is_browser_entry),
         ThreadLane::Building => {
-            of_run.all(|entry| !is_browser_entry(entry) && !is_routed_browser_card(entry))
+            !routed.contains(run) && of_run.all(|entry| !is_browser_entry(entry))
         }
     }
+}
+
+/// The runs of the person's messages the routing step sent to the browser: each message a browser
+/// turn of its routed card repeats ([`repeated_person_messages`]), whose run is the routing
+/// step's. The history lists no card, as it lists no other progress row, so that browser turn,
+/// which the controller stamps, is what shows the routing step posted one. A Stop before that
+/// turn began leaves the message's run as one that may have run a building turn.
+fn routed_message_runs(entries: &[JsonValue]) -> HashSet<&str> {
+    repeated_person_messages(entries)
+        .into_values()
+        .filter_map(|message| entry_text(&entries[message], "runId"))
+        .collect()
 }
 
 /// What names a Stop's notice from one lease to the next: its message id, or, in a history
@@ -684,13 +643,14 @@ pub(super) fn stop_to_leave_lane_thread_for<'a>(
         })
     });
     let stopped = stopped_requests(entries);
+    let routed = routed_message_runs(entries);
     let ran_in_the_lane = stopped
         .iter()
         .filter(|stopped| {
             stopped
                 .runs
                 .iter()
-                .any(|run| run_of_lane(entries, run, lane))
+                .any(|run| run_of_lane(entries, run, lane, &routed))
         })
         .map(|stopped| stopped.notice);
     let read_by_the_browser_thread = match lane {
@@ -953,13 +913,19 @@ fn entry_text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
 /// Try again sends that task once more, for the card the routing step posted, which the
 /// controller stamps only on the first turn that carries it on: read as the person's, it put the
 /// routing step's summary line in their name in the next message's routing (a local test, Nov 6).
+/// So a Try again is known by the card that first turn's stamp names (`browserCardTurn.cardJobId`):
+/// the history lists no card, as it lists no other progress row.
 fn repeated_person_messages(entries: &[JsonValue]) -> HashMap<usize, usize> {
     let routed_cards: HashSet<String> = entries
         .iter()
-        .filter(|entry| {
-            entry_text(entry, "role") == Some("assistant") && is_routed_browser_card(entry)
+        .filter(|entry| is_browser_entry(entry) && entry_text(entry, "role") == Some("user"))
+        .filter_map(|entry| entry.pointer("/metadata/prompt_metadata"))
+        .filter(|metadata| super::browser_hand_back::carries_on_a_routed_card(metadata))
+        .filter_map(|metadata| {
+            metadata
+                .pointer("/browserCardTurn/cardJobId")
+                .and_then(JsonValue::as_str)
         })
-        .filter_map(|entry| entry.pointer("/metadata/jobId").and_then(JsonValue::as_str))
         .map(|job| job.trim().to_ascii_lowercase())
         .collect();
     let mut said: HashMap<&str, usize> = HashMap::new();
@@ -1994,12 +1960,6 @@ mod tests {
             {"role": "assistant", "content": "Added the section.", "runId": "run-1"},
             undo(undone, "controller"),
             {"role": "user", "content": "Now find the metro route.", "runId": "run-2"},
-            {
-                "role": "assistant",
-                "content": "Continue this task in Instafy's browser.",
-                "runId": "run-2",
-                "metadata": {"messageType": "action_request", "details": {"browserRequest": {"task": "Now find the metro route.", "routed": true}}},
-            },
             {"role": "user", "content": "Now find the metro route.", "runId": "run-3", "lane": "browser"},
             {"role": "assistant", "content": "Read the planner.", "runId": "run-3", "lane": "browser"},
             {"role": "user", "content": "keep going", "runId": "run-4"},
@@ -2544,10 +2504,11 @@ mod tests {
     }
 
     /// A comparison's first message, as the controller lists it for its fill-in's browser part:
-    /// the person's message, its routed card, its browser turn's request and the note its two
-    /// passes' findings and missing lines went into, after its words, then the build's reply and
-    /// the person's next message with its card. Its words claim a review no finding gives, as a
-    /// comparison's fill-in claimed second reviews (a local test, Nov 17).
+    /// the person's message, its browser turn's request and the note its two passes' findings and
+    /// missing lines went into, after its words, then the build's reply and the person's next
+    /// message. Neither routed card is listed: the controller lists a card as progress, which no
+    /// history holds. Its words claim a review no finding gives, as a comparison's fill-in claimed
+    /// second reviews (a local test, Nov 17).
     fn comparison_and_its_fill_in() -> JsonValue {
         let note = [
             "Read 5 pages on the maker's site and a review site. I also found second independent reviews for the Twelve and the Sixteen.",
@@ -2558,7 +2519,6 @@ mod tests {
         .join("\n");
         json!([
             {"role": "user", "content": "Compare the maker's three newest laptops with two independent reviews each, as a comparison page.", "runId": "run-1"},
-            {"role": "assistant", "content": "", "runId": "run-1", "metadata": {"jobId": "card-1", "messageType": "action_request", "details": {"browserRequest": {"task": "Compare the maker's three newest laptops.", "routed": true}}}},
             {"role": "user", "content": "Compare the maker's three newest laptops with two independent reviews each, as a comparison page.", "runId": "run-2", "lane": "browser", "metadata": {"prompt_metadata": {
                 "browserTransport": "shared", "browserRequestOf": "job:card-1", "browserHandsBack": true,
                 "browserCardTurn": {"version": 1, "cardJobId": "card-1", "routed": true},
@@ -2567,7 +2527,6 @@ mod tests {
             {"role": "user", "content": HAND_BACK_PROMPT, "runId": "run-3"},
             {"role": "assistant", "content": "Built the comparison page. The Sixteen's weight is still unknown.", "runId": "run-3", "metadata": {"jobId": "build-1"}},
             {"role": "user", "content": "Fill in what's still missing.", "runId": "run-4"},
-            {"role": "assistant", "content": "", "runId": "run-4", "metadata": {"jobId": "card-2", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}},
         ])
     }
 
@@ -2602,33 +2561,6 @@ mod tests {
             assert!(!text.contains(words), "{words}: {text}");
         }
         assert_eq!(context.metrics["mode"], "stateless_full");
-
-        // The card of the next message answers a new message; a build's reply and a card the
-        // history doesn't show answer none of the person's.
-        let new = Some(RoutedCardMessage::New);
-        assert_eq!(routed_card_message(Some(&history), "card-2"), new);
-        assert_eq!(routed_card_message(Some(&history), "CARD-1"), new);
-        assert_eq!(routed_card_message(Some(&history), "build-1"), None);
-        assert_eq!(routed_card_message(Some(&history), "card-9"), None);
-        assert_eq!(routed_card_message(None, "card-2"), None);
-        // A Continue under a Stop carries a stopped request on: here the comparison, which its
-        // browser turn repeated, sent when the history says.
-        let mut continued = history.clone();
-        continued[6]["metadata"] = json!({"prompt_metadata": {"continuedStopMessageId": "stop-1", "continuedRunIds": ["run-2"]}});
-        assert_eq!(
-            routed_card_message(Some(&continued), "card-2"),
-            Some(RoutedCardMessage::Continue { request_sent: None })
-        );
-        continued[0]["createdAt"] = json!("2026-11-17T14:31:05.250+00:00");
-        continued[6]["createdAt"] = json!("2026-11-17T14:52:40Z");
-        assert_eq!(
-            routed_card_message(Some(&continued), "card-2"),
-            Some(RoutedCardMessage::Continue {
-                request_sent: chrono::DateTime::parse_from_rfc3339("2026-11-17T14:31:05.250Z")
-                    .ok()
-                    .map(|at| at.with_timezone(&chrono::Utc)),
-            })
-        );
     }
 
     /// The routing step reads a browser turn's findings note as one line the runtime writes, how
@@ -3047,8 +2979,9 @@ mod tests {
 
     /// Try again sends a routed card's task once more, and the controller stamps only the first
     /// turn that carries a card on, so Try again's request has no stamp. It still repeats the
-    /// person's message: routing and a building thread read their words once and never the
-    /// routing step's summary line in their name, and the browser thread reads the whole task.
+    /// person's message, by the card the first turn's stamp names (the history lists no card):
+    /// routing and a building thread read their words once and never the routing step's summary
+    /// line in their name, and the browser thread reads the whole task.
     #[test]
     fn try_again_on_a_routed_card_repeats_the_persons_message() {
         let words = "Fill in what's still missing.";
@@ -3065,8 +2998,6 @@ mod tests {
             json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-0", "createdAt": "2026-11-06T09:37:53Z"}),
             json!({"role": "assistant", "content": "I couldn't read the maker's pages. Please send them.", "runId": "run-0", "createdAt": "2026-11-06T09:39:36Z"}),
             json!({"role": "user", "content": words, "runId": "run-1", "createdAt": "2026-11-06T09:41:26Z"}),
-            json!({"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-1", "createdAt": "2026-11-06T09:41:31Z",
-                   "metadata": {"jobId": "card-1", "messageType": "action_request", "details": {"browserRequest": {"task": task, "routed": true}}}}),
             first,
             failed("run-2", "2026-11-06T09:42:10Z"),
             json!({"role": "user", "content": task, "runId": "run-3", "lane": "browser", "createdAt": "2026-11-06T09:42:58Z",
@@ -3858,27 +3789,18 @@ mod tests {
             "In your browser, compare the three latest Framework laptops as a comparison page.";
         const WARRANTY: &str = "Add each laptop's warranty from its own page.";
         const BATTERY: &str = "Add each laptop's battery life.";
-        let card = |run: &str, job: &str| {
-            json!({
-                "role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": run,
-                "metadata": {"jobId": job, "details": {"browserRequest": {"routed": true}}},
-            })
-        };
         let mut chat = vec![
             json!({"role": "user", "content": COMPARE, "runId": "run-1", "createdAt": "2026-11-06T09:44:22Z"}),
-            card("run-1", "card-1"),
             routed(COMPARE, "run-2", "card-1", "2026-11-06T09:44:28Z"),
             json!({"role": "assistant", "content": r#"{"url":"https://frame.work/laptop13","title":"Laptop 13","facts":["The 13 Pro weighs 1.4 kg."]}"#, "runId": "run-2", "lane": "browser", "createdAt": "2026-11-06T09:45:44Z"}),
             hand_back("run-3", "card-1", "2026-11-06T09:45:44.7Z"),
             json!({"role": "assistant", "content": "I built the comparison page.", "runId": "run-3", "createdAt": "2026-11-06T09:47:19Z", "metadata": {"jobId": "job-run-3"}}),
             json!({"role": "user", "content": WARRANTY, "runId": "run-4", "createdAt": "2026-11-06T09:50:29Z"}),
-            card("run-4", "card-4"),
             routed(WARRANTY, "run-5", "card-4", "2026-11-06T09:50:37Z"),
             json!({"role": "assistant", "content": r#"{"url":"https://frame.work/warranty","title":"Warranty","facts":["The EU limited warranty is two years."]}"#, "runId": "run-5", "lane": "browser", "createdAt": "2026-11-06T09:51:14Z"}),
             hand_back("run-6", "card-4", "2026-11-06T09:51:15.2Z"),
             stop_notice("run-6", "2026-11-06T09:51:15.4Z"),
             json!({"role": "user", "content": BATTERY, "runId": "run-7", "createdAt": "2026-11-06T09:53:00Z"}),
-            card("run-7", "card-7"),
             routed(BATTERY, "run-8", "card-7", "2026-11-06T09:53:06Z"),
         ];
         let history = json!(chat);
@@ -3917,7 +3839,9 @@ mod tests {
     }
 
     /// A Stop of a request only the browser ran leaves the building thread, which never ran it,
-    /// to be resumed: it reads the Stop's line after its restore note.
+    /// to be resumed: it reads the Stop's line after its restore note. The history lists no card:
+    /// the browser turn that carries the routed card on shows the message's routing step ran no
+    /// building turn.
     #[test]
     fn a_thread_a_stopped_request_never_reached_is_resumed() {
         const HOURS: &str = "Find Livraria Lello's opening hours.";
@@ -3927,7 +3851,6 @@ mod tests {
             json!({"role": "user", "content": "Put the hours on a small page.", "runId": "run-0", "createdAt": "2026-11-06T09:50:00Z"}),
             json!({"role": "assistant", "content": "I built a small page.", "runId": "run-0", "createdAt": "2026-11-06T09:51:00Z", "metadata": {"jobId": "job-0"}}),
             json!({"role": "user", "content": HOURS, "runId": "run-1", "createdAt": "2026-11-06T09:52:19Z"}),
-            json!({"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-1", "metadata": {"jobId": "card-1", "details": {"browserRequest": {"routed": true}}}}),
             routed(HOURS, "run-2", "card-1", "2026-11-06T09:52:24Z"),
             json!({"role": "assistant", "content": "Opened visitporto.travel", "runId": "run-2", "lane": "browser", "metadata": {"source": "agent", "kind": "update"}}),
             notice,
@@ -3999,12 +3922,6 @@ mod tests {
         const PAUSED: &str = "Sign in to GitHub in the browser, then press Let Octo continue.";
         const FOUND: &str = "You have 3 open notifications on GitHub.";
         const RELEASES: &str = "Open the repository's releases page.";
-        let card = |run: &str, job: &str| {
-            json!({
-                "role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": run,
-                "metadata": {"jobId": job, "details": {"browserRequest": {"routed": true}}},
-            })
-        };
         let browser_notice = |run: &str, at: &str| {
             let mut notice = stop_notice(run, at);
             notice["lane"] = json!("browser");
@@ -4014,7 +3931,6 @@ mod tests {
             json!({"role": "user", "content": "Put the hours on a small page.", "runId": "run-0", "createdAt": "2026-11-06T10:04:00Z"}),
             json!({"role": "assistant", "content": "I made a small page.", "runId": "run-0", "createdAt": "2026-11-06T10:04:30Z", "metadata": {"jobId": "job-0"}}),
             json!({"role": "user", "content": STAR, "runId": "run-1", "createdAt": "2026-11-06T10:05:00Z"}),
-            card("run-1", "card-1"),
             routed(STAR, "run-2", "card-1", "2026-11-06T10:05:05Z"),
             json!({"role": "assistant", "content": PAUSED, "runId": "run-2", "lane": "browser", "createdAt": "2026-11-06T10:05:40Z", "metadata": {"jobId": "job-run-2"}}),
             json!({
@@ -4028,7 +3944,6 @@ mod tests {
         let mut stopped = paused.clone();
         stopped.push(browser_notice("run-3", "2026-11-06T10:06:45Z"));
         stopped.push(json!({"role": "user", "content": RELEASES, "runId": "run-4", "createdAt": "2026-11-06T10:07:00Z"}));
-        stopped.push(card("run-4", "card-4"));
         stopped.push(routed(RELEASES, "run-5", "card-4", "2026-11-06T10:07:05Z"));
         let history = json!(stopped);
         assert!(leaves(&history, ThreadLane::SharedBrowser, None));
@@ -4076,7 +3991,6 @@ mod tests {
         // carry its approvals over: stopped, it is its own request, and the earlier one stays.
         follow_up.push(json!({"role": "assistant", "content": "I starred the repository.", "runId": "run-4", "createdAt": "2026-11-06T10:07:30Z", "metadata": {"jobId": "job-run-4"}}));
         follow_up.push(json!({"role": "user", "content": RELEASES, "runId": "run-6", "createdAt": "2026-11-06T10:08:00Z"}));
-        follow_up.push(card("run-6", "card-6"));
         let mut carried = routed(RELEASES, "run-7", "card-6", "2026-11-06T10:08:05Z");
         carried["metadata"]["prompt_metadata"]["browserContinuesRunId"] = json!("run-3");
         follow_up.push(carried);
@@ -4111,7 +4025,6 @@ mod tests {
             json!({"role": "assistant", "content": "Applied file changes: sites/framework-13-vs-16/index.html", "runId": "run-1", "createdAt": "2026-11-08T08:16:30Z", "metadata": {"messageType": "file_change", "jobId": "job-run-1"}}),
             json!({"role": "assistant", "content": FIRST_REPLY, "runId": "run-1", "createdAt": "2026-11-08T08:16:32.647Z", "metadata": {"jobId": "job-run-1"}}),
             json!({"role": "user", "content": FILL_IN, "runId": "run-2", "createdAt": "2026-11-08T08:17:40.566Z"}),
-            json!({"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-2", "metadata": {"jobId": "card-2", "details": {"browserRequest": {"routed": true}}}}),
             routed(
                 &format!(
                     "{FILL_IN}\n\nWhat this carries on: \"Research the missing comparison details, then update the page.\""
@@ -4219,12 +4132,6 @@ mod tests {
             "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.";
         const METRO: &str = "Now find how to get there by metro from São Bento.";
         const PAUSE: &str = "Answer the highlighted cookie notice in Instafy's browser, then choose Let Octo continue.";
-        let card = |run: &str, job: &str| {
-            json!({
-                "role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": run,
-                "metadata": {"jobId": job, "details": {"browserRequest": {"routed": true}}},
-            })
-        };
         let press = |run: &str, paused: &str, at: &str| {
             json!({
                 "role": "user", "content": LET_OCTO_CONTINUE_PROMPT, "runId": run, "lane": "browser", "createdAt": at,
@@ -4233,13 +4140,11 @@ mod tests {
         };
         let history = json!([
             {"role": "user", "content": HOURS, "runId": "run-1", "createdAt": "2026-11-08T08:19:16Z"},
-            card("run-1", "card-1"),
             routed(HOURS, "run-2", "card-1", "2026-11-08T08:19:20Z"),
             {"role": "assistant", "content": PAUSE, "runId": "run-2", "lane": "browser", "createdAt": "2026-11-08T08:20:01Z"},
             press("run-3", "run-2", "2026-11-08T08:21:11Z"),
             {"role": "assistant", "content": "The Visit Porto homepage is open, but I couldn't find Livraria Lello's opening hours.", "runId": "run-3", "lane": "browser", "createdAt": "2026-11-08T08:22:40Z"},
             {"role": "user", "content": METRO, "runId": "run-4", "createdAt": "2026-11-08T08:22:50Z"},
-            card("run-4", "card-4"),
             routed(METRO, "run-5", "card-4", "2026-11-08T08:22:54Z"),
             {"role": "assistant", "content": PAUSE, "runId": "run-5", "lane": "browser", "createdAt": "2026-11-08T08:24:00Z"},
             press("run-6", "run-5", "2026-11-08T08:24:42Z"),
@@ -4318,7 +4223,6 @@ mod tests {
             "Open www.visitporto.travel in your browser and find the Livraria Lello opening hours.";
         let mut chat = vec![
             json!({"role": "user", "content": HOURS, "runId": "run-p", "createdAt": "2026-11-08T08:10:00Z"}),
-            json!({"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-p", "metadata": {"jobId": "card-p", "details": {"browserRequest": {"routed": true}}}}),
             routed(HOURS, "run-q", "card-p", "2026-11-08T08:10:05Z"),
             json!({"role": "assistant", "content": "Livraria Lello opens at 9:30.", "runId": "run-q", "lane": "browser", "createdAt": "2026-11-08T08:11:00Z"}),
         ];
@@ -4371,13 +4275,12 @@ mod tests {
             json!({"role": "user", "content": ADDRESS, "runId": "run-1", "createdAt": "2026-11-08T08:02:00Z"}),
             json!({"role": "assistant", "content": "I put your address on the contact page.", "runId": "run-1", "createdAt": "2026-11-08T08:02:30Z"}),
             json!({"role": "user", "content": HOURS, "runId": "run-2", "createdAt": "2026-11-08T08:03:00Z"}),
-            json!({"role": "assistant", "content": "Continue this task in Instafy's browser.", "runId": "run-2", "metadata": {"jobId": "card-2", "details": {"browserRequest": {"routed": true}}}}),
             routed(HOURS, "run-3", "card-2", "2026-11-08T08:03:05Z"),
             json!({"role": "assistant", "content": "The bookshop opens at 9:30.", "runId": "run-3", "lane": "browser", "createdAt": "2026-11-08T08:04:00Z"}),
         ];
         // The browser thread began with that turn, and its replay read the address.
         let replay = build_prompt_conversation_context(
-            Some(&json!(chat[..7])),
+            Some(&json!(chat[..6])),
             None,
             ThreadLane::SharedBrowser,
         )

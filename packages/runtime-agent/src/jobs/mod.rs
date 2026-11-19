@@ -785,26 +785,29 @@ const LONG_BROWSER_THREAD_INPUT_TOKENS: u64 = 60_000;
 /// request was about 114k tokens, made 25 requests of 117k to 193k tokens, nearly all cached, and
 /// cost 49 credits; the seven browser parts of that local test that resumed their chat's thread
 /// cost 122 of its 252 credits (Nov 17). So the browser part of a new message the routing step
-/// sent to the browser (`browser_hand_back::carries_on_a_routed_card`) leaves a thread whose
-/// latest request sent more than [`LONG_BROWSER_THREAD_INPUT_TOKENS`]
-/// (`codex::thread_last_request`): the lane's keys go, as after a Stop
-/// ([`leave_thread_holding_a_stopped_request`]), and the turn starts a new thread from the chat's
-/// replay, which gives it the chat's browser turns, what each was asked and, quoted as builds
-/// read them, its findings and what it didn't find (`conversation_context::parse_lane_history`).
-/// A shorter thread is cheap and holds what the chat's last browser turn just saw, so it is
-/// resumed.
+/// sent to the browser leaves a thread whose latest request sent more than
+/// [`LONG_BROWSER_THREAD_INPUT_TOKENS`] (`codex::thread_last_request`): the lane's keys go, as
+/// after a Stop ([`leave_thread_holding_a_stopped_request`]), and the turn starts a new thread
+/// from the chat's replay, which gives it the chat's browser turns, what each was asked and,
+/// quoted as builds read them, its findings and what it didn't find
+/// (`conversation_context::parse_lane_history`). A shorter thread is cheap and holds what the
+/// chat's last browser turn just saw, so it is resumed. What the part's card answers comes from
+/// the controller's stamp on its send (`browser_hand_back::routed_card_message`), never from the
+/// lease's history, which lists no card: looked up there, the card was never found, and seven
+/// parts that resumed long threads cost 140 of a local test's 236 credits (Nov 19).
 ///
 /// The turns of one message keep their thread: a second pass and the wrap-up run on their turn's
 /// own thread and never come here, and Let Octo continue and a building turn's card carry on a
 /// request of their own. A Continue under a Stop sends the stopped request again, as a message
-/// whose card the routing step posts (`conversation_context::RoutedCardMessage::Continue`), and
+/// whose card the routing step posts (`browser_hand_back::RoutedCardMessage::Continue`), and
 /// its browser part goes on with what that request's turn did on the thread, when the thread
-/// holds it: when the thread's latest request came after the person sent the request. A turn the
-/// person stopped saves no thread, so when the stopped part had left a long thread, or never
-/// began (a Stop during the routing step), the state still names an earlier message's thread,
-/// whose latest request came before: the Continue's part leaves it as a new message's would. A
-/// Continue whose history says nothing of when the request was sent, or whose thread's rollout
-/// says nothing of when its latest request was, keeps the thread. A turn that fails saves no
+/// holds it: when the thread's latest request came after the request first went out (the stamp's
+/// `requestSentAt`). A turn the person stopped saves no thread, so when the stopped part had left
+/// a long thread, or never began (a Stop during the routing step), the state still names an
+/// earlier message's thread, whose latest request came before: the Continue's part leaves it as a
+/// new message's would. A Continue whose stamp says nothing of when the request went out, or
+/// whose thread's rollout says nothing of when its latest request was, keeps the thread, and so
+/// does a part whose stamp doesn't say what its card answers. A turn that fails saves no
 /// thread either: the job reports the state this rule left ([`LeftThread`]), so its Try again,
 /// which carries no routed stamp, does not resume the long thread. The browser itself (its tabs,
 /// a page the person signs in on) is no part of a thread, and the building thread is untouched.
@@ -819,17 +822,10 @@ fn leave_a_long_browser_thread_of_earlier_messages(
     if lane != ThreadLane::SharedBrowser {
         return (state, None);
     }
-    let Some(card) = job
+    let Some(message) = job
         .payload
         .get("metadata")
-        .filter(|metadata| browser_hand_back::carries_on_a_routed_card(metadata))
-        .and_then(|metadata| metadata.pointer("/browserCardTurn/cardJobId"))
-        .and_then(JsonValue::as_str)
-    else {
-        return (state, None);
-    };
-    let Some(message) =
-        conversation_context::routed_card_message(job.payload.get("conversation_history"), card)
+        .and_then(browser_hand_back::routed_card_message)
     else {
         return (state, None);
     };
@@ -838,7 +834,7 @@ fn leave_a_long_browser_thread_of_earlier_messages(
     else {
         return (state, None);
     };
-    if let conversation_context::RoutedCardMessage::Continue { request_sent } = message {
+    if let browser_hand_back::RoutedCardMessage::Continue { request_sent } = message {
         let holds_no_turn_of_the_request = latest
             .at
             .zip(request_sent)
@@ -28020,13 +28016,22 @@ mod tests {
     /// riding along. A shorter thread is resumed, and so is the thread of a turn that carries on
     /// a request of its own: a Let Octo continue, a building turn's card, and a Continue under a
     /// Stop whose thread ran a turn of the request it sends again. A Continue whose thread's
-    /// latest request came before the person sent that request leaves a long one as a new
+    /// latest request came before that request first went out leaves a long one as a new
     /// message's part would: the stopped part saved no thread, so that thread is an earlier
-    /// message's. A local test (Nov 17): a comparison's fill-in resumed a thread whose latest
-    /// request was about 114k tokens, and its browser part cost 49 credits.
+    /// message's. The lease is the controller's own (`routedCardTurnLease`, which the
+    /// controller's database test checks against its history query and its card check): its
+    /// history lists no card, and the turn's stamp says what the card answers. A local test (Nov
+    /// 17): a comparison's fill-in resumed a thread whose latest request was about 114k tokens,
+    /// and its browser part cost 49 credits; looked up in that history, the card was never found,
+    /// and seven parts resumed long threads for 140 of 236 credits (Nov 19).
     #[test]
     fn a_messages_browser_part_leaves_a_long_browser_thread_of_earlier_messages() {
         use crate::codex::ThreadLastRequest;
+        let fixtures: JsonValue = serde_json::from_str(include_str!(
+            "../../../runtime-controller/src/browser_hand_back_fixtures.json"
+        ))
+        .expect("fixtures");
+        let leased = &fixtures["routedCardTurnLease"];
         let tmp = tempdir().expect("temp dir");
         let rollout = tmp.path().join("browser.jsonl");
         fs::write(&rollout, "").expect("write rollout");
@@ -28043,28 +28048,20 @@ mod tests {
             "sharedBrowserHistoryReplayRequired": false,
             "historyReplayRequired": false,
         });
-        let card_turn = |card: &str| {
+        // A browser send of the card's, as Studio sends it, with the controller's stamp.
+        let card_turn = |stamp: &JsonValue| {
+            let card = stamp["cardJobId"].as_str().expect("card job");
             json!({
                 "browserTransport": "shared",
                 "browserRequestOf": format!("job:{card}"),
                 "browserHandsBack": true,
-                "browserCardTurn": {"version": 1, "cardJobId": card, "routed": true},
+                "browserCardTurn": stamp,
             })
         };
-        let mut history = vec![
-            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-1", "createdAt": "2026-11-17T14:30:00Z"}),
-            json!({"role": "assistant", "content": "", "runId": "run-1", "createdAt": "2026-11-17T14:30:04Z", "metadata": {"jobId": "card-1", "messageType": "action_request", "details": {"browserRequest": {"task": "Compare the three latest laptops, as a comparison page.", "routed": true}}}}),
-            json!({"role": "user", "content": "Compare the three latest laptops, as a comparison page.", "runId": "run-2", "lane": "browser", "createdAt": "2026-11-17T14:30:06Z", "metadata": {"prompt_metadata": card_turn("card-1")}}),
-            json!({"role": "assistant", "content": "{\"url\":\"https://maker.example/\",\"title\":\"Laptops\",\"facts\":[\"Lists three laptops.\"]}", "runId": "run-2", "lane": "browser", "createdAt": "2026-11-17T14:41:02Z", "metadata": {"details": {"browserFindings": {"pages": 1, "pagesRead": 1}}}}),
-            json!({"role": "user", "content": "Continue building with what the browser turn found.", "runId": "run-3", "createdAt": "2026-11-17T14:41:03Z"}),
-            json!({"role": "assistant", "content": "Built the comparison page.", "runId": "run-3", "createdAt": "2026-11-17T14:43:30Z", "metadata": {"jobId": "build-1"}}),
-            json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-4", "createdAt": "2026-11-17T14:50:00Z"}),
-            json!({"role": "assistant", "content": "", "runId": "run-4", "createdAt": "2026-11-17T14:50:04Z", "metadata": {"jobId": "card-2", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}}),
-        ];
-        let job_with = |history: &[JsonValue], metadata: JsonValue| {
+        let job_with = |metadata: JsonValue| {
             test_lease_job(
                 Some("feature"),
-                json!({"conversation_history": history, "metadata": metadata}),
+                json!({"conversation_history": leased["history"], "metadata": metadata}),
             )
         };
         let request = |input_tokens: u64, at: &str| {
@@ -28074,9 +28071,8 @@ mod tests {
             assert!(at.is_some(), "a time");
             move |_: Option<&JsonValue>| Some(ThreadLastRequest { input_tokens, at })
         };
-        // The comparison's browser part's second pass, before the fill-in was sent.
         let long = request(113_864, "2026-11-17T14:40:51.441Z");
-        let fill_in = job_with(&history, card_turn("card-2"));
+        let fill_in = job_with(card_turn(&leased["stamp"]));
 
         let (left_state, left) = leave_a_long_browser_thread_of_earlier_messages(
             Some(state.clone()),
@@ -28106,7 +28102,7 @@ mod tests {
                 Some(state.clone()),
                 &fill_in,
                 ThreadLane::SharedBrowser,
-                request(113_864, "2026-11-17T14:51:30Z")
+                request(113_864, "2026-11-19T12:51:30Z")
             ),
             (Some(left_state.clone()), Some(113_864))
         );
@@ -28126,7 +28122,7 @@ mod tests {
             unchanged.clone(),
             "an empty rollout records no request"
         );
-        // A short thread is resumed: what the chat's last browser turn saw is still in it.
+        // A short thread is resumed: what the chat's last browser turn just saw is still in it.
         for tokens in [20_000, LONG_BROWSER_THREAD_INPUT_TOKENS] {
             assert_eq!(
                 leave_a_long_browser_thread_of_earlier_messages(
@@ -28154,26 +28150,29 @@ mod tests {
         let never = |_: Option<&JsonValue>| -> Option<ThreadLastRequest> {
             panic!("read the thread's rollout")
         };
-        let building_turn = job_with(&history, json!({}));
+        let card = leased["stamp"]["cardJobId"].as_str().expect("card job");
+        let building_turn = job_with(json!({}));
         let let_octo_continue = job_with(
-            &history,
             json!({"browserTransport": "shared", "browserContinuesRunId": Uuid::new_v4().to_string()}),
         );
         let building_turns_card = job_with(
-            &history,
-            json!({"browserTransport": "shared", "browserRequestOf": "job:build-1", "browserHandsBack": true}),
+            json!({"browserTransport": "shared", "browserRequestOf": format!("job:{}", Uuid::new_v4()), "browserHandsBack": true}),
         );
         // A Try again of a failed browser part: the controller stamps a card's first turn only.
         let try_again = job_with(
-            &history,
-            json!({"browserTransport": "shared", "browserRequestOf": "job:card-2", "browserHandsBack": true}),
+            json!({"browserTransport": "shared", "browserRequestOf": format!("job:{card}"), "browserHandsBack": true}),
         );
+        // A stamp that doesn't say what its card answers, as a controller from before put it.
+        let mut unsaid = leased["stamp"].clone();
+        unsaid.as_object_mut().expect("stamp").remove("answers");
+        let unsaid = job_with(card_turn(&unsaid));
         for (job, lane) in [
             (&building_turn, ThreadLane::Building),
             (&fill_in, ThreadLane::Building),
             (&let_octo_continue, ThreadLane::SharedBrowser),
             (&building_turns_card, ThreadLane::SharedBrowser),
             (&try_again, ThreadLane::SharedBrowser),
+            (&unsaid, ThreadLane::SharedBrowser),
         ] {
             assert_eq!(
                 leave_a_long_browser_thread_of_earlier_messages(
@@ -28185,46 +28184,33 @@ mod tests {
                 unchanged.clone()
             );
         }
-        // A card the history doesn't show is no message to start again for.
-        assert_eq!(
-            leave_a_long_browser_thread_of_earlier_messages(
-                Some(state.clone()),
-                &job_with(&history, card_turn("card-9")),
-                ThreadLane::SharedBrowser,
-                never
-            ),
-            unchanged.clone()
-        );
 
         // A Continue under a Stop sends the stopped request again, as a message of its own whose
-        // card the routing step posts. The person stopped the fill-in while its card was being
-        // posted, so no browser turn of it ran: the stored thread is the comparison's, whose
-        // latest request came before the fill-in was sent, and the Continue's part leaves it.
-        history.push(json!({"role": "assistant", "content": "Stopped this run.", "runId": "run-4", "createdAt": "2026-11-17T14:50:05Z", "metadata": {
-            "source": "controller", "kind": "run_cancellation", "details": {
-                "reason": "Stopped", "runIds": ["run-4"], "stopRequested": true, "actorUserId": "person-1",
-            },
-        }}));
-        history.push(json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-5", "createdAt": "2026-11-17T14:52:30Z", "metadata": {"prompt_metadata": {"continuedStopMessageId": "stop-1", "continuedRunIds": ["run-4"]}}}));
-        history.push(json!({"role": "assistant", "content": "", "runId": "run-5", "createdAt": "2026-11-17T14:52:34Z", "metadata": {"jobId": "card-3", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}}));
-        let continued = job_with(&history, card_turn("card-3"));
+        // card the routing step posts. Its stamp says when that request first went out
+        // (`requestSentAt`). The person stopped it before any browser turn of it ran on the
+        // thread: the stored thread is an earlier message's, whose latest request came before,
+        // and the Continue's part leaves it.
+        let continue_stamp = &leased["continueStamp"];
+        let sent = continue_stamp["requestSentAt"].as_str().expect("sent");
+        let continued = job_with(card_turn(continue_stamp));
         assert_eq!(
             leave_a_long_browser_thread_of_earlier_messages(
                 Some(state.clone()),
                 &continued,
                 ThreadLane::SharedBrowser,
-                long
+                request(113_864, "2026-11-19T12:40:51.441Z")
             ),
             (Some(left_state.clone()), Some(113_864))
         );
         // A Continue whose stopped part ran on the thread goes on there: its latest request came
-        // after the fill-in was sent. So does one that can't tell when either was.
+        // after the request went out. So does one that can't tell when either was.
+        assert!(sent < "2026-11-19T12:41:30.008Z", "{sent}");
         assert_eq!(
             leave_a_long_browser_thread_of_earlier_messages(
                 Some(state.clone()),
                 &continued,
                 ThreadLane::SharedBrowser,
-                request(75_000, "2026-11-17T14:50:31.008Z")
+                request(75_000, "2026-11-19T12:41:30.008Z")
             ),
             unchanged.clone()
         );
@@ -28240,38 +28226,19 @@ mod tests {
             ),
             unchanged.clone()
         );
-        let mut undated = history.clone();
-        for entry in &mut undated {
-            entry.as_object_mut().expect("entry").remove("createdAt");
-        }
+        let mut undated = continue_stamp.clone();
+        undated
+            .as_object_mut()
+            .expect("stamp")
+            .remove("requestSentAt");
         assert_eq!(
             leave_a_long_browser_thread_of_earlier_messages(
                 Some(state.clone()),
-                &job_with(&undated, card_turn("card-3")),
+                &job_with(card_turn(&undated)),
                 ThreadLane::SharedBrowser,
                 long
             ),
             unchanged.clone()
-        );
-        // The person stopped the fill-in's browser part, which had left the comparison's thread:
-        // its Continue, which names that part's run, leaves it too.
-        let mut stopped_part = history[..8].to_vec();
-        stopped_part.push(json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-6", "lane": "browser", "createdAt": "2026-11-17T14:50:06Z", "metadata": {"prompt_metadata": card_turn("card-2")}}));
-        stopped_part.push(json!({"role": "assistant", "content": "Stopped this run.", "runId": "run-6", "createdAt": "2026-11-17T14:51:40Z", "metadata": {
-            "source": "controller", "kind": "run_cancellation", "details": {
-                "reason": "Stopped", "runIds": ["run-6"], "stopRequested": true, "actorUserId": "person-1",
-            },
-        }}));
-        stopped_part.push(json!({"role": "user", "content": "Fill in what's still missing.", "runId": "run-7", "createdAt": "2026-11-17T14:52:30Z", "metadata": {"prompt_metadata": {"continuedStopMessageId": "stop-2", "continuedRunIds": ["run-6"]}}}));
-        stopped_part.push(json!({"role": "assistant", "content": "", "runId": "run-7", "createdAt": "2026-11-17T14:52:34Z", "metadata": {"jobId": "card-4", "messageType": "action_request", "details": {"browserRequest": {"task": "Fill in what's still missing.", "routed": true}}}}));
-        assert_eq!(
-            leave_a_long_browser_thread_of_earlier_messages(
-                Some(state.clone()),
-                &job_with(&stopped_part, card_turn("card-4")),
-                ThreadLane::SharedBrowser,
-                long
-            ),
-            (Some(left_state), Some(113_864))
         );
     }
 
