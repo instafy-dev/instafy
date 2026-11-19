@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
 import { unreachableLocalUrl } from "./loopback-servers.mjs";
+import { cliLoginConfirmationCode } from "../src/auth.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,7 +74,10 @@ describe("@instafy/cli login callback", () => {
     const callbackUrl = loginUrl.searchParams.get("cliCallbackUrl");
     const state = loginUrl.searchParams.get("cliState");
     expect(callbackUrl).toMatch(/^http:\/\/(127\.0\.0\.1|localhost)/);
-    expect(state).toBeTruthy();
+    // The Studio page accepts only this shape and shows its first 8 characters as the code.
+    expect(state).toMatch(/^[0-9a-f]{32}$/);
+    // Without this marker the page treats the CLI as one that prints no code and offers no Connect.
+    expect(loginUrl.searchParams.get("cliCode")).toBe("1");
 
     const callbackResponse = await fetch(callbackUrl!, {
       method: "POST",
@@ -87,9 +91,23 @@ describe("@instafy/cli login callback", () => {
     });
     expect(exitCode).toBe(0);
 
+    // The URL comes with the code the page shows, and the step that asks for both.
+    const printed = stdoutChunks.join("").replace(/\x1b\[[0-9;]*m/g, "");
+    const code = `${state!.slice(0, 4)}-${state!.slice(4, 8)}`.toUpperCase();
+    expect(printed).toContain(`${loginUrl.toString()}\nConfirmation code: ${code}\n`);
+    expect(printed).toContain("2) Sign in, check that the page shows this code, and press Connect.");
+
     const configPath = path.join(homeDir, ".instafy", "config.json");
     const configRaw = fs.readFileSync(configPath, "utf8");
     const parsed = JSON.parse(configRaw) as { accessToken?: string };
     expect(parsed.accessToken).toBe("test-token");
+  });
+});
+
+describe("@instafy/cli login confirmation code", () => {
+  // The Studio page shows the same code for the same state:
+  // packages/frontend/src/screens/__tests__/CliLoginPage.test.tsx checks this pair.
+  it("is the state's first 8 characters, uppercased, as XXXX-XXXX", () => {
+    expect(cliLoginConfirmationCode("0f1e2d3c4b5a69788796a5b4c3d2e1f0")).toBe("0F1E-2D3C");
   });
 });
