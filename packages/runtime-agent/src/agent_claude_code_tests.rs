@@ -1,7 +1,8 @@
 //! Local-engine turns in the job loop (docs/Local-Engine-Turns.md 3.1, 3.2, 3.6, 3.8 and 3.9;
 //! section 8: "Branch", "Refusals", "Results", the Stop of "Supervision", and registering again
-//! when a probe changes the capability), end to end against a stand-in controller and origin, with
-//! the `--print` scenarios of tests/fixtures/fake-claude.
+//! when a probe changes the capability; 11.9, 11.11 and 11.12: sessions that resume anywhere,
+//! plan limits that hold waiting turns, and turns that only plan), end to end against a stand-in
+//! controller and origin, with the `--print` scenarios of tests/fixtures/fake-claude.
 //!
 //! Hermetic: temporary folders, loopback stand-ins, and the fake started through a wrapper each
 //! space writes, as the lane starts the person's own `claude`: from the checked target the probe
@@ -891,6 +892,9 @@ fn a_failed_turn_saves_nothing_and_reports_its_code() {
                 completion["proxy_metadata"]["conversation"].is_null(),
                 "{completion:#}"
             );
+            // The plan's limit said it reset at a time that has passed: nothing holds the lane,
+            // and the next turn runs (11.11).
+            assert_eq!(space.lane.plan_limit_hold(), None);
         }
         assert!(space.requests_to("/lease/acquire").is_empty());
         assert!(space.origin_requests.lock().is_empty());
@@ -902,54 +906,246 @@ fn a_failed_turn_saves_nothing_and_reports_its_code() {
     });
 }
 
-/// `--resume` is passed only with a session that this runtime's own registration started, and a
-/// resume miss fails as `session_unavailable` with the reset state, starting no second process.
+/// `--resume` is passed with the lane's session whichever registration saved it (11.9). When
+/// this computer does not have it, `claude` reports it missing before its `init`, and the turn
+/// starts `claude` once more without `--resume`, with the same words, runs in a new session and
+/// saves that session's state. Nothing resets the session or fails the turn.
 #[test]
-fn only_this_runtimes_session_is_resumed_and_a_miss_resets_it() {
+fn a_session_resumes_whichever_computer_saved_it_and_a_miss_starts_a_new_one() {
     static LATCH: AtomicBool = AtomicBool::new(false);
     on_a_worker_stack(async {
         let space = Space::new(&LATCH).await;
-        let state = |runtime_id: Uuid| {
+        let state = |session: &str, runtime_id: Uuid| {
             json!({
                 "provider": "claude-code",
                 "version": 1,
-                "sessionId": SESSION,
+                "sessionId": session,
                 "runtimeId": runtime_id.to_string(),
             })
         };
         space.scenario("success");
-        let mut resumed = space.job();
-        resumed.payload["provider_conversation_state"] = state(space.registration.runtime_id);
-        space.handle(resumed.clone(), 0).await;
-        assert_eq!(space.completion(resumed.id)["outcome"], "succeeded");
-        let calls = space.print_calls();
-        let argv = &calls.last().unwrap().0;
-        let at = argv
-            .iter()
-            .position(|arg| arg == "--resume")
-            .expect("resumed");
-        assert_eq!(argv[at + 1], SESSION);
+        for runtime_id in [space.registration.runtime_id, Uuid::new_v4()] {
+            let mut resumed = space.job();
+            resumed.payload["provider_conversation_state"] = state(SESSION, runtime_id);
+            space.handle(resumed.clone(), 0).await;
+            assert_eq!(space.completion(resumed.id)["outcome"], "succeeded");
+            let calls = space.print_calls();
+            let argv = &calls.last().unwrap().0;
+            let at = argv
+                .iter()
+                .position(|arg| arg == "--resume")
+                .expect("resumed");
+            assert_eq!(argv[at + 1], SESSION);
+        }
 
-        let mut elsewhere = space.job();
-        elsewhere.payload["provider_conversation_state"] = state(Uuid::new_v4());
-        space.handle(elsewhere.clone(), 0).await;
-        assert_eq!(space.completion(elsewhere.id)["outcome"], "succeeded");
-        let calls = space.print_calls();
-        assert!(!calls.last().unwrap().0.iter().any(|arg| arg == "--resume"));
-
-        space.scenario("resume-miss");
+        // Another computer's session, which this one does not have.
+        space.set("FAKE_CLAUDE_RESUME_SCENARIO", "resume-miss-result");
+        let missing = Uuid::new_v4().to_string();
         let before = space.print_calls().len();
         let mut missed = space.job();
-        missed.payload["provider_conversation_state"] = state(space.registration.runtime_id);
+        missed.payload["provider_conversation_state"] = state(&missing, Uuid::new_v4());
         space.handle(missed.clone(), 0).await;
         let completion = space.completion(missed.id);
-        assert_eq!(completion["outcome"], "failed", "{completion:#}");
-        assert_eq!(failure_code(&completion), Some("session_unavailable"));
+        assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
+        assert!(failure_code(&completion).is_none(), "{completion:#}");
+        assert_eq!(
+            completion["summary"],
+            "Renamed the project in README.md and wrote docs/notes.md."
+        );
+        // The new session's state, with this runtime's id.
         assert_eq!(
             completion["proxy_metadata"]["conversation"],
-            json!({ "provider": "claude-code", "version": 1, "reset": true })
+            json!({
+                "provider": "claude-code",
+                "version": 1,
+                "sessionId": SESSION,
+                "runtimeId": space.registration.runtime_id.to_string(),
+            })
         );
-        assert_eq!(space.print_calls().len(), before + 1, "no second run");
+        let calls = space.print_calls().split_off(before);
+        assert_eq!(calls.len(), 2, "one start again, and no more");
+        let (first, first_stdin) = &calls[0];
+        let (second, second_stdin) = &calls[1];
+        assert_eq!(
+            first[first.len() - 2..],
+            ["--resume".to_string(), missing.clone()]
+        );
+        assert_eq!(second[..], first[..first.len() - 2]);
+        assert_eq!(first_stdin.as_slice(), PROMPT.as_bytes());
+        assert_eq!(second_stdin.as_slice(), PROMPT.as_bytes());
+        let run_log = artifact(&completion, "claude-code/run-log").expect("a run log");
+        assert!(
+            run_log["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["type"] == "instafy.started_without_the_missing_session"),
+            "{run_log:#}"
+        );
+    });
+}
+
+/// An automation's `plan_only` turn (11.12): the job loop runs it on the lane, `claude` runs in
+/// its plan mode, and the turn saves nothing, whatever changed in the folder, while its reply is
+/// delivered. An agent's turn that nobody typed runs as any other (11.4). A turn whose write
+/// scope is `read_only` runs the same way.
+#[test]
+fn a_plan_only_turn_runs_in_plan_mode_and_saves_nothing() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::new(&LATCH).await;
+        space.scenario("plan-only");
+        let mut job = space.job();
+        job.payload["executionMode"] = json!("shared_read");
+        job.payload["metadata"]["execution_mode"] = json!("plan_only");
+        job.payload["metadata"]["automation"] = json!({ "id": "nightly-plan" });
+        job.payload["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("input");
+        space.handle(job.clone(), 60).await;
+
+        let completion = space.completion(job.id);
+        assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
+        assert_eq!(
+            completion["summary"],
+            "Plan: rename the project in README.md, then update its tests."
+        );
+        assert_eq!(
+            completion["proxy_metadata"]["conversation"]["sessionId"],
+            SESSION
+        );
+        let files = artifact(&completion, "apply/files").expect("the turn's files");
+        assert_eq!(files["files"], json!([]), "{files:#}");
+        assert!(artifact(&completion, "origin/apply").is_none());
+        assert!(space.origin_requests.lock().is_empty(), "nothing was saved");
+        assert!(space.requests_to("/lease/acquire").is_empty());
+        assert!(
+            space.read("notes/plan.md").is_some(),
+            "it stays on this computer"
+        );
+        let calls = space.print_calls();
+        assert_eq!(calls.len(), 1);
+        let argv = &calls[0].0;
+        let at = argv
+            .iter()
+            .position(|arg| arg == "--permission-mode")
+            .unwrap();
+        assert_eq!(argv[at + 1], "plan");
+
+        // A target of a multi-agent send without write intent: its write scope is `read_only`,
+        // and it runs read-only the same way, whatever its mode says.
+        let mut read_only = space.job();
+        let scope = json!({ "mode": "read_only", "ownedPaths": [], "readOnlyPaths": [] });
+        read_only.payload["metadata"]["writeScope"] = scope.clone();
+        read_only.payload["metadata"]["agent"]["writeScope"] = scope;
+        space.handle(read_only.clone(), 0).await;
+        let completion = space.completion(read_only.id);
+        assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
+        assert!(artifact(&completion, "origin/apply").is_none());
+        assert!(space.origin_requests.lock().is_empty(), "nothing was saved");
+        assert_eq!(space.print_calls()[1].0[at + 1], "plan");
+
+        // A turn that applies its changes is the same turn but for the mode: it saves them.
+        space.scenario("success");
+        let applied = space.job();
+        space.handle(applied.clone(), 0).await;
+        let completion = space.completion(applied.id);
+        assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
+        assert!(artifact(&completion, "origin/apply").is_some());
+        let argv = &space.print_calls()[2].0;
+        assert_eq!(argv[at + 1], "acceptEdits");
+        assert!(!LATCH.load(Ordering::SeqCst));
+    });
+}
+
+/// A turn that fails at the Claude plan's limit holds the lane until the limit resets (11.11):
+/// the runtime registers again saying it is not ready, as `plan_limit` with the reset time; a
+/// turn leased meanwhile fails as `plan_limit` at its probe, before Claude Code starts; and at the
+/// reset time the runtime probes again, registers again as ready, and turns run.
+#[test]
+fn a_plan_limit_holds_the_lane_until_it_resets() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    on_a_worker_stack(async {
+        let space = Space::new(&LATCH).await;
+        space.answer_registrations();
+        assert!(space.lane.probe_and_publish().await.readiness.is_ready());
+        let ready = space.lane.capability().expect("published");
+        let mut registration = space.registration.clone();
+        registration.agent_token_expires_at =
+            Some((chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339());
+        let (renewal, mut renewed) = space.renewal_task(Registered {
+            registration,
+            claude_code: Some(ready.clone()),
+        });
+
+        // A turn reaches the limit, which resets in an hour.
+        let resets_at = chrono::Utc::now().timestamp() + 3_600;
+        space.set("FAKE_CLAUDE_RESETS_AT", &resets_at.to_string());
+        space.scenario("plan-limit-resets");
+        let limited = space.job();
+        space.handle(limited.clone(), 0).await;
+        let completion = space.completion(limited.id);
+        assert_eq!(
+            failure_code(&completion),
+            Some("plan_limit"),
+            "{completion:#}"
+        );
+        tokio::time::timeout(Duration::from_secs(30), renewed.changed())
+            .await
+            .expect("registered again")
+            .unwrap();
+        let reset = chrono::DateTime::from_timestamp(resets_at, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert_eq!(
+            space.registered_capability(),
+            json!({ "version": 1, "ready": false, "reason": "plan_limit", "resetsAt": reset })
+        );
+
+        // A turn leased meanwhile fails at its probe, and Claude Code never starts.
+        space.scenario("success");
+        let starts = space.print_calls().len();
+        let held = space.job();
+        space.handle(held.clone(), 0).await;
+        let completion = space.completion(held.id);
+        assert_eq!(completion["outcome"], "failed", "{completion:#}");
+        assert_eq!(failure_code(&completion), Some("plan_limit"));
+        assert!(
+            completion["error_message"]
+                .as_str()
+                .unwrap()
+                .contains("The limit resets at"),
+            "{completion:#}"
+        );
+        assert_eq!(space.print_calls().len(), starts);
+
+        // The limit resets sooner than it said: at that time the lane probes again, and this
+        // runtime registers again as ready.
+        let reprobe = tokio::spawn(space.lane.reprobe_while_not_ready(Duration::from_secs(600)));
+        let sooner = space
+            .lane
+            .hold_for_plan_limit(Some(chrono::Utc::now().timestamp() + 2))
+            .expect("a hold");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                renewed.changed().await.unwrap();
+                if space.registered_capability()["ready"] == true {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("registered again as ready");
+        assert!(chrono::Utc::now() >= sooner.resets_at());
+        assert_eq!(space.registered_capability(), ready);
+        reprobe.abort();
+
+        let next = space.job();
+        space.handle(next.clone(), 0).await;
+        assert_eq!(space.completion(next.id)["outcome"], "succeeded");
+        renewal.abort().await;
+        assert!(!LATCH.load(Ordering::SeqCst));
     });
 }
 
@@ -1344,11 +1540,34 @@ fn a_refused_turn_starts_no_claude() {
         unknown.engine = Some("another-engine".into());
         let mut again = space.job();
         again.lease_attempts = 2;
-        let mut typed_by_nobody = space.job();
-        typed_by_nobody.payload["metadata"]["automation"] = json!({ "id": "nightly" });
+        let mut approval = space.job();
+        approval.payload["metadata"]["execution_mode"] = json!("approval_required");
+        let mut browser = space.job();
+        browser.payload["metadata"]["browserTransport"] = json!("shared");
+        let mut team_plan = space.job();
+        team_plan.payload["metadata"]["multiAgentPlan"] = json!({ "role": "worker" });
+        let mut attachments = space.job();
+        attachments.payload["metadata"]["attachments"] = json!([{ "name": "photo.png" }]);
+        let mut owned = space.job();
+        owned.payload["metadata"]["writeScope"] =
+            json!({ "mode": "owned", "ownedPaths": ["src/app.ts"] });
+        let mut coordination = space.job();
+        coordination.payload["metadata"]["agent"]["writeScope"] =
+            json!({ "mode": "coordination_required" });
         let mut command = space.job();
         command.payload["prompt_text"] = json!("/terminal ls");
-        for job in [&someone_else, &unknown, &again, &typed_by_nobody, &command] {
+        for job in [
+            &someone_else,
+            &unknown,
+            &again,
+            &approval,
+            &browser,
+            &team_plan,
+            &attachments,
+            &owned,
+            &coordination,
+            &command,
+        ] {
             space.handle(job.clone(), 60).await;
             let completion = space.completion(job.id);
             assert_eq!(completion["outcome"], "failed", "{completion:#}");

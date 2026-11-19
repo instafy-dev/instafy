@@ -153,7 +153,8 @@ const USAGE_MODEL_MAX_CHARS: usize = 200;
 /// 5.5). Any other code is left off, and Studio words the failure as one with
 /// no code. It is runtime-contracts' list, which the runtime and Studio are
 /// tested against too.
-pub(crate) const RUNTIME_FAILURE_CODES: [&str; 15] =
+pub(crate) const RUNTIME_FAILURE_CODES: [&str;
+    runtime_contracts::claude_code_lane::RUNTIME_FAILURE_CODES.len()] =
     runtime_contracts::claude_code_lane::RUNTIME_FAILURE_CODES;
 /// The failure code of a lane job a runtime stop failed: the computer's
 /// Instafy stopped while the turn ran or before it started.

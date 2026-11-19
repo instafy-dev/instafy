@@ -126,12 +126,17 @@ impl std::fmt::Debug for RollingSaves {
 /// Whether a job saves its working folder as it runs, decided from what the
 /// runtime knows when the job starts. Only a write job on a hosted checkout
 /// with a canonical remote and an origin in this process does; a Desktop
-/// folder and a read-only job never do. Whether the turn could take a
-/// workspace lease plays no part.
+/// folder, a read-only job and a local-engine turn never do. Whether the turn
+/// could take a workspace lease plays no part.
 pub(crate) struct Gate<'a> {
     pub(crate) hosted_checkout: bool,
     pub(crate) has_git_remote: bool,
     pub(crate) read_only_job: bool,
+    /// A local-engine turn (`job.engine` set), whatever its mode or write
+    /// scope: it saves once, through its lane's filter, at its end, or never
+    /// (docs/Local-Engine-Turns.md 3.8, 11.12), and nothing saves its folder on
+    /// a timer.
+    pub(crate) local_engine_job: bool,
     pub(crate) workspace_token: Option<String>,
     pub(crate) local_origin: Option<LocalOriginSync>,
     pub(crate) controller_base_url: &'a Url,
@@ -163,7 +168,11 @@ struct RefusalBody {
 
 impl RollingSaves {
     pub(crate) fn from_gate(gate: Gate<'_>) -> Option<Self> {
-        if !gate.hosted_checkout || !gate.has_git_remote || gate.read_only_job {
+        if !gate.hosted_checkout
+            || !gate.has_git_remote
+            || gate.read_only_job
+            || gate.local_engine_job
+        {
             return None;
         }
         let origin = gate

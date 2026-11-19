@@ -5,7 +5,8 @@
     "binary_unsafe",
     "probe_failed",
     "unsupported_version",
-    "bare_default"
+    "bare_default",
+    "plan_limit"
   ],
   "runtimeFailureCodes": [
     "not_signed_in",
@@ -15,7 +16,6 @@
     "unsupported_version",
     "probe_failed",
     "bare_default",
-    "session_unavailable",
     "turn_timeout",
     "stalled",
     "crashed",

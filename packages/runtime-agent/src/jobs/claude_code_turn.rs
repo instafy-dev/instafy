@@ -1,6 +1,6 @@
-//! A local-engine turn (docs/Local-Engine-Turns.md 3.1): the person's own Claude Code, signed in
-//! on this computer, carries out one message they typed, in the space's folder, and the turn saves
-//! what it changed. In order:
+//! A local-engine turn (docs/Local-Engine-Turns.md 3.1, 11.12): the person's own Claude Code,
+//! signed in on this computer, carries out one turn of their agent, in the space's folder, and the
+//! turn saves what it changed, unless it only plans (`plan_only`). In order:
 //!
 //! 1. The job's process-environment lock, then whether its lease still holds.
 //! 2. The workspace token, verified: the end-of-turn save needs it, and a lane job has no
@@ -10,30 +10,34 @@
 //! 4. The pre-flight of 3.9 (`claude_code::preflight`), which a Stop ends.
 //! 5. The starting point: the folder's `git status` (without one the turn ends here), the record a
 //!    Stop reports from, and the pages of other chats the turn holds.
-//! 6. The per-turn probe, which decides; then whether the lease still holds, as the last step
-//!    before the spawn.
+//! 6. The per-turn probe, which decides, and which a plan limit's hold fails (11.11); then whether
+//!    the lease still holds, as the last step before the spawn.
 //! 7. `claude`, run and stopped by `claude_code::supervise`, its steps and reply draft streamed
-//!    through the handler every turn shares.
-//! 8. The save of a successful run, through the lane filter (`claude_code::saves`), and the turn's
-//!    [`JobExecution`]: provider `claude-code`, the lane's conversation state, `apply/files`,
-//!    `origin/apply`, `claude-code/usage` and `claude-code/run-log`, never a `codex/run-log`.
+//!    through the handler every turn shares. It resumes the lane's session whichever computer saved
+//!    it; when this one does not have it, `claude` starts once more in a new session (11.9).
+//! 8. The save of a successful run that applies its changes, through the lane filter
+//!    (`claude_code::saves`), and the turn's [`JobExecution`]: provider `claude-code`, the lane's
+//!    conversation state, `apply/files`, `origin/apply`, `claude-code/usage` and
+//!    `claude-code/run-log`, never a `codex/run-log`. A `plan_only` turn saves nothing.
 //!
 //! However `claude` ended, what it changed under another chat's page is put back first. A failure
-//! saves nothing and fails the job with its `claude-code/failure` code; a resume miss also resets
-//! the session (2.7). A save that fails after a run that went well fails nothing: the reply is
-//! delivered, with a note that the changes stayed on this computer (D-C/D-V). A Stop ends as a
-//! lost lease, and the executor reports what the turn changed. While the runtime shuts down, the
-//! turn reports nothing.
+//! saves nothing and fails the job with its `claude-code/failure` code; one at the Claude plan's
+//! limit also holds the lane until the limit resets (11.11). A save that fails after a run that
+//! went well fails nothing: the reply is delivered, with a note that the changes stayed on this
+//! computer (D-C/D-V). A Stop ends as a lost lease, and the executor reports what the turn
+//! changed. While the runtime shuts down, the turn reports nothing.
 //!
 //! Every status step the turn sends as a note (what stayed on this computer, what was not saved,
 //! permission denials, programs stopped) carries `presentation.placement: "reply_note"`: Studio
 //! shows it under the reply once the turn is done, whether Details is open or not.
 
 use super::*;
-use crate::claude_code::command::{McpConfigFile, turn_command};
+use crate::claude_code::command::{McpConfigFile, StartAgain, turn_command};
 use crate::claude_code::events::{EventAdapter, LaneFailure, PROVIDER, Redactor};
 use crate::claude_code::events::{redact_tokens, reply_note};
-use crate::claude_code::job::{LaneJob, failure_artifacts, not_ready_failure, resume_session};
+use crate::claude_code::job::{
+    LaneJob, failure_artifacts, not_ready_failure, plan_limit_hold_failure, resume_session,
+};
 use crate::claude_code::saves::{KeptOff, kept_off_all, kept_off_sentence};
 use crate::claude_code::supervise::{TurnEnd, TurnSpec, supervise};
 use crate::claude_code::{FailureCode, Readiness};
@@ -122,6 +126,7 @@ impl JobProcessor {
             .map_err(|reason| lane_error(not_ready_failure(reason), Vec::new()))?;
         let lane_job =
             LaneJob::of(job, lane.grant()).map_err(|failure| lane_error(failure, Vec::new()))?;
+        let mode = lane_job.mode();
 
         // 1. One turn's process environment at a time, as for every turn.
         let _job_process_env_guard = JOB_PROCESS_ENV_LOCK.lock().await;
@@ -167,10 +172,11 @@ impl JobProcessor {
         } else {
             None
         };
-        // A turn whose save would be refused ends before anything starts. Every lane turn may
-        // write files, so the lane asks as a turn that must write them does.
+        // A turn whose save would be refused ends before anything starts. Every lane turn that
+        // applies its changes may write files, so the lane asks as a turn that must write them
+        // does; a `plan_only` turn saves nothing, so a refused save does not end it.
         let writes_files = RuntimeJobExpectations {
-            workspace_file_changes: true,
+            workspace_file_changes: mode.saves(),
             ..RuntimeJobExpectations::default()
         };
         if let Some(failure) = turn_that_cannot_save(
@@ -227,7 +233,9 @@ impl JobProcessor {
         );
 
         // 6. The per-turn probe decides. One that disagrees with the registered capability
-        // publishes the new value, and the registration loop registers again (3.2).
+        // publishes the new value, and the registration loop registers again (3.2). While a plan
+        // limit holds the lane, a turn that was leased all the same fails as `plan_limit`
+        // (11.11).
         let probe = lane.probe_and_publish().await;
         if probe.capability_changed {
             tracing::info!(
@@ -241,14 +249,16 @@ impl JobProcessor {
             Readiness::NotReady(reason) => {
                 return Err(lane_error(not_ready_failure(reason), Vec::new()));
             }
+            Readiness::Held(hold) => {
+                return Err(lane_error(plan_limit_hold_failure(&hold), Vec::new()));
+            }
         };
         confirm_lease_held(cancel_signal.as_ref(), "before Claude Code started").await?;
 
-        // 7. `claude`, supervised.
-        let resume = resume_session(
-            job.payload.get("provider_conversation_state"),
-            registration.runtime_id,
-        );
+        // 7. `claude`, supervised. It resumes the lane's session whichever computer saved it; when
+        // this one does not have it, the turn starts `claude` once more without `--resume`, in a
+        // new session (11.9).
+        let resume = resume_session(job.payload.get("provider_conversation_state"));
         let mcp_config = McpConfigFile::create(lane.grant()).map_err(|error| {
             lane_error(
                 uncoded(format!(
@@ -257,8 +267,15 @@ impl JobProcessor {
                 Vec::new(),
             )
         })?;
-        let command = turn_command(lane.grant(), &ready, &mcp_config, resume, &folder);
-        let mut adapter = EventAdapter::for_turn(lane.grant(), &folder);
+        let command = turn_command(lane.grant(), &ready, &mcp_config, mode, resume, &folder);
+        let start_again = resume.map(|_| StartAgain {
+            grant: lane.grant(),
+            ready: &ready,
+            mcp_config: &mcp_config,
+            mode,
+            folder: &folder,
+        });
+        let mut adapter = EventAdapter::for_turn(lane.grant(), &folder, mode);
         let mut reply_draft = progress
             .as_ref()
             .and_then(|progress| progress.reply_draft.clone())
@@ -272,6 +289,7 @@ impl JobProcessor {
         tracing::info!(
             job_id = %job.id,
             cli = %ready.cli(),
+            mode = mode.as_str(),
             resumed = resume.is_some(),
             "starting the person's Claude Code for a local-engine turn"
         );
@@ -291,7 +309,7 @@ impl JobProcessor {
                 command,
                 TurnSpec {
                     prompt: lane_job.prompt(),
-                    resumed: resume.is_some(),
+                    start_again,
                     stop: &stop,
                     shutdown: &shutdown,
                 },
@@ -308,6 +326,7 @@ impl JobProcessor {
             end = ?outcome.end,
             exit = ?outcome.exit_status,
             cleanup_confirmed = outcome.cleanup_confirmed,
+            started_again = outcome.started_again,
             "Claude Code's turn ended"
         );
         // However the run ended, the runtime's shutdown included, a page another chat made is as
@@ -339,23 +358,17 @@ impl JobProcessor {
                     code = ?failure.code,
                     "Claude Code's turn failed; nothing is saved"
                 );
-                let reset = (failure.code == Some(FailureCode::SessionUnavailable)).then(|| {
-                    FailedTurnState {
-                        message: failure.message.clone(),
-                        state: EventAdapter::reset_conversation_state(),
-                    }
-                });
-                let error = lane_error(failure, artifacts);
-                // The session is gone: the person's next lane message starts a new one, and this
-                // turn starts no second process (2.7).
-                return Err(match reset {
-                    Some(reset) => error.context(reset),
-                    None => error,
-                });
+                // The person's other waiting turns wait for the plan's limit to reset, instead of
+                // each starting and failing in turn (11.11).
+                if failure.code == Some(FailureCode::PlanLimit) {
+                    lane.hold_for_plan_limit(failure.resets_at);
+                }
+                return Err(lane_error(failure, artifacts));
             }
         }
 
-        // 8. The save.
+        // 8. The save, of a turn that applies its changes: a `plan_only` turn saves nothing, and
+        // its reply is delivered all the same (11.12).
         let progress_sender = progress.as_ref().map(|progress| progress.sender.clone());
         let mut status_steps: Vec<JobMessage> = Vec::new();
         let mut not_saved = pre_turn_refresh
@@ -364,7 +377,7 @@ impl JobProcessor {
             .unwrap_or_default();
         let mut files: Vec<CodexFileDescriptor> = Vec::new();
         let mut saved = false;
-        if commit_to_workspace {
+        if commit_to_workspace && mode.saves() {
             match collect_git_status_porcelain(&folder).await {
                 Some(after) => {
                     files = status_delta_files_for_checkpoint(&git_status_before, &after, &[]);
