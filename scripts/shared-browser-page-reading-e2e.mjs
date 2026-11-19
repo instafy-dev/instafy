@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -88,6 +88,27 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    moves the focus, opens a field of its own or replaces the field as text
 //    goes in keeps the whole text, in order. A click on a plain link the page
 //    does not take in time opens the link's address in the tab.
+// 11. A field's own suggestion is chosen by a click, whatever its list does
+//    as the click comes: the click leaves the focus in the field, so a list
+//    that closes as the field loses it is still there, and a stop the list
+//    drew anew under the pointer is found again by the reading's record of
+//    it and clicked once. A stop the list no longer shows is not clicked, and
+//    the step answers with the field's suggestions as they read now.
+// 12. A ticket shop's controls that have no name of their own are named by
+//    the row or card they sit in ("+ beside “Adult”"), so they read apart and
+//    the person's step can be highlighted by its name; the same rows in a
+//    frame are named by the frame's site, and none of them is listed or
+//    counted.
+// 13. A row's words only tell its controls apart where they are named: a
+//    reading step in a row whose words a step's checks ask about ("delete",
+//    "Book", "Save") goes without a prompt, in Octo's own tab too; a pause on
+//    a booking's icon button in a part that speaks of cookies is the
+//    person's step; a key beside an icon button, which the page's text
+//    masks, names no control, whole or in part; a withheld page's controls
+//    are named without their rows' words, in its reading and in a step's
+//    words. A stop drawn anew under the pointer, for a field that names no
+//    list of its own beside a "Sort by" list, is not clicked, and no other
+//    list's options are named as its suggestions.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -511,6 +532,79 @@ to.addEventListener("keyup", () => {
   }, 300);
 });
 </script>`;
+// A stop list a planner draws under its field as a person types, which keeps
+// the focus in the field while a stop is pressed and chooses it on the click,
+// as such lists do: one that closes as the field loses the focus, one that
+// draws its stops anew the first time the pointer reaches them, and one that
+// shows other stops then. `window.chosen` counts the stops chosen.
+const SUGGESTION_LIST = (more) => `<h1>Journey planner</h1>
+<p><label for="from">From</label><input id="from" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="from-stops" autocomplete="off"></p>
+<ul id="from-stops" role="listbox"></ul>
+<p id="chosen"></p>
+<script>
+const field = document.getElementById("from");
+const list = document.getElementById("from-stops");
+window.chosen = 0;
+const draw = (stops) => {
+  list.innerHTML = stops.map((stop) => '<li role="option">' + stop + '</li>').join("");
+  field.setAttribute("aria-expanded", stops.length ? "true" : "false");
+};
+field.addEventListener("input", () => draw(field.value ? ["Central Station", "Central Square"] : []));
+list.addEventListener("mousedown", (event) => event.preventDefault());
+list.addEventListener("click", (event) => {
+  const option = event.target.closest("[role=option]");
+  if (!option) return;
+  window.chosen += 1;
+  field.value = option.textContent;
+  document.getElementById("chosen").textContent = "From: " + option.textContent;
+  draw([]);
+});
+${more}
+</script>`;
+// A ticket shop's rows and card, whose buttons have no name of their own: a
+// row's "−" and "+", a row's two buttons drawn by icons alone (one marked as
+// a plus), and the card's arrow. The same rows sit in a frame of another
+// site too.
+const TICKET_ROWS = `<h2>Tickets</h2>
+<div><p><span>Adult</span> <span>22.50 euros</span></p>
+<p><button type="button">\u2212</button> <span>0</span> <button type="button">+</button></p></div>
+<div><p><span>Child</span> <span>Free</span></p>
+<p><button type="button"><svg width="16" height="16"><path d="M2 8h12"/></svg></button> <span>0</span>
+<button type="button" class="icon-plus"><svg width="16" height="16"><path d="M2 8h12M8 2v12"/></svg></button></p></div>
+<article><h3>Museum entrance</h3><p>The permanent collection</p><div><button type="button"><svg width="16" height="16"><path d="M4 8h8"/></svg></button></div></article>`;
+// Controls named only by marks, or by nothing, in rows whose first words
+// hold words a step's checks ask about ("delete", "Book", "Save"): an
+// answer's "+", a tour's "−" and "+", an offer's "×" and a card's arrow,
+// each a reading step.
+const ROW_WORDS = `<h1>Help</h1>
+<div><h3>How do I delete my account?</h3><button type="button" aria-expanded="false" onclick="this.setAttribute('aria-expanded', 'true'); document.getElementById('answer').hidden = false">+</button><p id="answer" hidden>Open Settings, then Account.</p></div>
+<div><p><span>Book a guided tour</span> <span>12 euros</span></p><p><button type="button">\u2212</button> <span id="tours">0</span> <button type="button" onclick="document.getElementById('tours').textContent = String(Number(document.getElementById('tours').textContent) + 1)">+</button></p></div>
+<div id="offer"><button type="button" onclick="document.getElementById('offer').remove()">\u00d7</button><h2>Save 10% on your first order</h2></div>
+<article><h3>Book a guided tour</h3><p>Two hours with a guide</p><div><button type="button" onclick="document.getElementById('tour-card').textContent = 'Meet at the main entrance.'"><svg width="16" height="16"><path d="M4 8h8"/></svg></button></div><p id="tour-card"></p></article>`;
+// A booking's icon button under a line that speaks of cookies: a step of the
+// person's, never a cookie notice's choice.
+const BOOKING_COOKIE_ROW = `<h1>Your booking</h1><p>Friday, 19:00, 2 people.</p>
+<div><p>Cookies keep your booking while you finish it here today.</p><div><button type="button" onclick="window.consentAnswer = 'booked'"><svg width="16" height="16"><path d="M4 8h8"/></svg></button></div></div>`;
+// Keys beside icon buttons, which the page's text masks by the words above
+// them: as a row's first words and as the text right beside a button. The
+// keys are made when the fixture runs, so the source holds none.
+const ICON_BUTTON = '<button type="button"><svg width="16" height="16"><path d="M4 8h8"/></svg></button>';
+const ROW_KEYS = (keys) => `<h1>Developer settings</h1>${keys.slice(0, -1).map((key) =>
+  `<h2>Deploy key</h2><div><p><code>${key}</code></p><p>${ICON_BUTTON}</p></div>`).join("")}
+<h2>Deploy key</h2><div><code>${keys.at(-1)}</code>${ICON_BUTTON}</div>`;
+// A page that shows a key, so its reading is withheld, with a row's
+// controls: an edit icon and a "+".
+const WITHHELD_ROWS = (key) => `<h1>Backup codes</h1><p>Each code works once.</p><pre><code>${key}</code></pre>
+<div><p><span>river stone</span></p><p><button type="button" class="icon-pencil"><svg width="16" height="16"><path d="M4 8h8"/></svg></button>
+<button type="button">+</button></p></div>`;
+// A planner whose field says it opens a list and names none, beside a "Sort
+// by" list: it draws its stops as a person types and other stops as the
+// pointer comes to them.
+const UNNAMED_LIST = SUGGESTION_LIST('list.addEventListener("mouseover", () => draw(["Harbour", "Harbour (Metro)"]), { once: true });')
+  .replace('<p><label for="from">', '<div role="listbox" aria-label="Sort by"><div role="option" aria-selected="true">Fastest</div><div role="option">Fewest changes</div></div>\n<p><label for="from">')
+  .replace(' role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="from-stops"', ' aria-autocomplete="list"')
+  .replace('<ul id="from-stops" role="listbox"></ul>', '<ul id="from-stops"></ul>')
+  .replace('  field.setAttribute("aria-expanded", stops.length ? "true" : "false");\n', "");
 // A link that keeps moving, which the page never lets a click take, to a
 // page that loads at once.
 const MOVING_LINK = `<style>@keyframes sway { from { transform: translateX(0); } to { transform: translateX(24px); } }
@@ -621,6 +715,18 @@ export async function runSharedBrowserPageReadingFixture() {
     const requests = [];
     let port = 0;
     const sites = () => ({ site: `http://site.test:${port}`, frame: `http://frame.test:${port}` });
+    // Key-shaped values for ROW_KEYS and WITHHELD_ROWS, made here so the
+    // source holds none: random-looking ones longer and shorter than a name
+    // holds, a long hex one and one of a known format.
+    const digest = (seed, encoding) => createHash("sha256").update(seed).digest(encoding);
+    const rowKeys = [
+      digest("a deploy key", "base64url"),
+      digest("a signing key", "hex"),
+      `${"github_pa"}t_${digest("a fine-grained key", "base64url").replace(/[^A-Za-z0-9]/g, "")}_${digest("its second half", "hex")}`,
+      digest("an access key", "base64url").slice(0, 32),
+      digest("a key beside its button", "base64url").slice(0, 32),
+    ];
+    const withheldKey = digest("a recovery key", "base64url");
     const pages = {
       "site.test /reading/collapsed": page("Visit", COLLAPSED),
       "site.test /reading/choices": page("Order", CHOICES),
@@ -682,12 +788,23 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/sorted-search": page("Museums", SORTED_SEARCH),
       "site.test /reading/moving-fields": page("Find a place", MOVING_FIELDS),
       "site.test /reading/presentation-cover": page("Timetable", PRESENTATION_COVER),
+      "site.test /reading/blur-list": page("Journey planner", SUGGESTION_LIST('field.addEventListener("blur", () => draw([]));')),
+      "site.test /reading/redraw-list": page("Journey planner", SUGGESTION_LIST('list.addEventListener("mouseover", () => draw(["Central Station", "Central Square"]), { once: true });')),
+      "site.test /reading/moving-list": page("Journey planner", SUGGESTION_LIST('list.addEventListener("mouseover", () => draw(["Harbour", "Harbour (Metro)"]), { once: true });')),
+      "site.test /reading/tickets": page("Tickets", TICKET_ROWS),
+      "site.test /reading/tickets-framed": page("Tickets", '<h1>Book your visit</h1><iframe src="{frame}/tickets" title="Tickets" width="600" height="400"></iframe>'),
+      "site.test /reading/row-words": page("Help", ROW_WORDS),
+      "site.test /reading/booking-cookie-row": page("Your booking", BOOKING_COOKIE_ROW),
+      "site.test /reading/row-keys": page("Developer settings", ROW_KEYS(rowKeys)),
+      "site.test /reading/withheld-rows": page("Backup codes", WITHHELD_ROWS(withheldKey)),
+      "site.test /reading/unnamed-list": page("Journey planner", UNNAMED_LIST),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
       "frame.test /banner": page("Cookies", BANNER("frame_consent")),
       "frame.test /card": page("Card", '<label>Card number <input autocomplete="cc-number"></label><label>CVC <input autocomplete="cc-csc"></label>'),
       "frame.test /booking": page("Booking", "<h2>Booking engine</h2><label>Check-in <input type=\"date\"></label><button>Search rooms</button><p>Rooms from 140 euros</p>"),
       "frame.test /pixel": page("Pixel", "<p>pixel</p>"),
       "frame.test /fields": page("Payment", SECRET_FIELDS),
+      "frame.test /tickets": page("Tickets", TICKET_ROWS),
     };
     server = createServer((request, response) => {
       const url = new URL(request.url, `http://${request.headers.host}`);
@@ -1554,6 +1671,175 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.equal(new URL(runPage.url()).pathname, "/reading/visit", "the link's address opened elsewhere than its tab");
     assert.deepEqual(requests, [`GET ${sites().site}/reading/visit`], "the link's address was not opened once");
     assert.ok(measurements.movingLinkMs < 12_000, `the moving link waited ${measurements.movingLinkMs} ms`);
+
+    // 11. A field's own suggestion, chosen by a click. Every click on a
+    // planner's named stop failed on an option no longer in the page: the
+    // focus the click took out of the field first closed its list. The turn
+    // went on with arrow keys and Enter, which sent the planner's form with no
+    // stop chosen.
+    for (const pathname of ["/reading/blur-list", "/reading/redraw-list"]) {
+      // The pointer is away from the list as it opens, and comes to the stop
+      // from elsewhere, as a person's does.
+      await runPage.mouse.move(1, 1);
+      reading = await read(pathname);
+      const typedStops = await ok("POST", "/v1/type", { index: control(reading, "From").index, snapshotId: reading.snapshotId, text: "Central" });
+      const clickedStop = await runTool("POST", "/v1/click", { index: control(typedStops, "Central Station").index, snapshotId: typedStops.snapshotId });
+      assert.equal(clickedStop.code, 0, `${pathname}: the click on a suggestion failed: ${clickedStop.stderr}`);
+      assert.match(clickedStop.payload.visibleText, /From: Central Station/u, `${pathname}: the stop was not chosen`);
+      assert.equal(clickedStop.payload.activity.step, "click", pathname);
+      assert.equal(await runPage.evaluate(() => window.chosen), 1, `${pathname}: the stop was not chosen once`);
+    }
+    // A stop the list no longer shows is not clicked: the step answers with
+    // the field's suggestions as the page reads now.
+    await runPage.mouse.move(1, 1);
+    reading = await read("/reading/moving-list");
+    const typedMoving = await ok("POST", "/v1/type", { index: control(reading, "From").index, snapshotId: reading.snapshotId, text: "Central" });
+    const goneStop = await runTool("POST", "/v1/click", { index: control(typedMoving, "Central Station").index, snapshotId: typedMoving.snapshotId });
+    assert.equal(goneStop.code, 0, `the click on a stop the list redrew failed: ${goneStop.stderr}`);
+    const stopsNow = goneStop.payload.interactiveElements.filter((entry) => entry.role === "option");
+    assert.deepEqual(stopsNow.map((entry) => entry.label), ["Harbour", "Harbour (Metro)"]);
+    assert.equal(
+      goneStop.payload.done,
+      `"Central Station" was no longer in the list under "From" when the click came, so nothing was clicked. 2 suggestions under "From": ${stopsNow.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. If the one wanted is among them, click it; otherwise type into "From" again.`,
+    );
+    assert.equal(goneStop.payload.activity.step, "snapshot", "a click that clicked nothing was listed as one");
+    assert.equal(await runPage.evaluate(() => window.chosen), 0, "a stop the list no longer showed was chosen");
+
+    // 12. A ticket shop's controls with no name of their own. A reading
+    // listed a ticket page's buttons as "unnamed button", none told apart,
+    // and named no ticket's control: whether such controls sit in a frame or
+    // in the page itself is what the reading's frame marks and its count of
+    // the controls it leaves out say. In the page, each is named by its row
+    // or card, and none is left out; in a frame, the frame's site is named
+    // where it shows, and none is listed or counted.
+    reading = await read("/reading/tickets");
+    assert.deepEqual(labels(reading), [
+      "\u2212 beside \u201cAdult\u201d",
+      "+ beside \u201cAdult\u201d",
+      "button beside \u201cChild\u201d",
+      "add button beside \u201cChild\u201d",
+      "button beside \u201cMuseum entrance\u201d",
+    ]);
+    assert.equal(reading.omittedControls, undefined, "a ticket's control was left out");
+    assert.doesNotMatch(reading.visibleText, /\[frame not read/u);
+    const framedTickets = await read("/reading/tickets-framed");
+    assert.equal(framedTickets.visibleText, "Book your visit\n[frame not read: frame.test]");
+    assert.deepEqual(framedTickets.interactiveElements, [], "a frame's ticket control was listed");
+    assert.equal(framedTickets.omittedControls, undefined, "a frame's ticket control was counted");
+    // The person's step on a row's control is highlighted by its name, as
+    // any of the page's own controls is.
+    reading = await read("/reading/tickets");
+    const actionsBeforeTickets = fs.readFileSync(actionsPath, "utf8").length;
+    const ticketPause = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, "+ beside \u201cAdult\u201d").index], snapshotId: reading.snapshotId });
+    assert.equal(ticketPause.code, 1, ticketPause.stdout);
+    assert.ok(ticketPause.stderr.includes("[human_step_required_non_retryable]"), ticketPause.stderr);
+    const ticketPauses = humanInputsSince(actionsBeforeTickets);
+    assert.equal(ticketPauses.length, 1, "the row's control was not highlighted");
+    assert.deepEqual(ticketPauses[0].humanInputRequest.fields, [{ label: "Highlighted button 1" }]);
+    assert.equal(await outlined(), 1, "the row's control was not outlined");
+
+    // 13. A row's words only tell its controls apart where they are named.
+    // When a step's checks read them, a "+" beside "How do I delete my
+    // account?" and a "×" over "Save 10%" asked under routine browsing and
+    // were refused in Octo's own tab, a booking's icon button under a line
+    // that speaks of cookies was paused on as a cookie notice's, a key the
+    // page's text masked named the button beside it by its first 40
+    // characters, and a withheld page's rows named its controls. And a stop
+    // drawn anew, for a field that names no list of its own, answered with
+    // every option on the page as its suggestions, and said to click one.
+    // Each case runs on its own, and every one that fails is reported.
+    const rowProblems = [];
+    const rowCase = async (what, check) => {
+      try {
+        await check();
+      } catch (error) {
+        rowProblems.push(`${what}: ${error.message}`);
+        // A prompt the fixture did not answer stays behind for the next step.
+        fs.rmSync(path.join(approvalDirectory, "request.json"), { force: true });
+      }
+    };
+    const ROW_WORDS_LABELS = [
+      "+ beside \u201cHow do I delete my account?\u201d",
+      "\u2212 beside \u201cBook a guided tour\u201d",
+      "+ beside \u201cBook a guided tour\u201d",
+      "\u00d7 beside \u201cSave 10% on your first order\u201d",
+      "button beside \u201cBook a guided tour\u201d",
+    ];
+    await rowCase("reading steps in rows whose words a step's checks ask about", async () => {
+      reading = await read("/reading/row-words");
+      const promptsBeforeRows = prompts.length;
+      // By their places in the reading: an answer's "+", then a tour's.
+      const answered = await ok("POST", "/v1/click", { index: reading.interactiveElements[0].index, snapshotId: reading.snapshotId });
+      assert.match(answered.visibleText, /Open Settings, then Account\./u);
+      await ok("POST", "/v1/click", { index: answered.interactiveElements[2].index, snapshotId: answered.snapshotId });
+      assert.equal(await runPage.evaluate(() => document.getElementById("tours").textContent), "1");
+      assert.equal(prompts.length, promptsBeforeRows, "a reading step in a row asked");
+      assert.deepEqual(labels(reading), ROW_WORDS_LABELS);
+    });
+    await rowCase("the same steps in Octo's own tab", async () => {
+      const ownRows = await ok("POST", "/v1/tabs/open", { url: `${sites().site}/reading/row-words` });
+      try {
+        let ownReading = await ok("GET", "/v1/snapshot");
+        assert.equal(ownReading.tabId, ownRows.tabId, "read in Octo's own tab");
+        // A card's arrow, then an offer's "×".
+        ownReading = await ok("POST", "/v1/click", { index: ownReading.interactiveElements[4].index, snapshotId: ownReading.snapshotId });
+        assert.match(ownReading.visibleText, /Meet at the main entrance\./u);
+        ownReading = await ok("POST", "/v1/click", { index: ownReading.interactiveElements[3].index, snapshotId: ownReading.snapshotId });
+        assert.doesNotMatch(ownReading.visibleText, /Save 10%/u);
+      } finally {
+        await runTool("POST", "/v1/tabs/close", { tabId: ownRows.tabId });
+      }
+    });
+    await rowCase("a pause on a booking's icon button in a part that speaks of cookies", async () => {
+      reading = await read("/reading/booking-cookie-row");
+      const actionsBeforeRowPause = fs.readFileSync(actionsPath, "utf8").length;
+      const paused = await runTool("POST", "/v1/request-human-input", { indices: [control(reading, "button beside \u201cCookies keep your booking while you\u201d").index], snapshotId: reading.snapshotId });
+      assert.equal(paused.code, 1, paused.stdout);
+      assert.ok(paused.stderr.includes("[human_step_required_non_retryable]"), paused.stderr);
+      const published = humanInputsSince(actionsBeforeRowPause);
+      assert.equal(published.length, 1, "one pause is published");
+      assert.equal(published[0].humanInputRequest.kind, undefined);
+      assert.equal(await consentAnswer(), null, "the booking's button was pressed");
+    });
+    await rowCase("keys beside icon buttons", async () => {
+      reading = await read("/reading/row-keys");
+      assert.equal(reading.secretScreen, false, "the page was withheld");
+      assert.equal(reading.interactiveElements.length, rowKeys.length);
+      const said = JSON.stringify(reading);
+      for (const key of rowKeys) {
+        for (let at = 0; at + 10 <= key.length; at += 1) {
+          assert.ok(!said.includes(key.slice(at, at + 10)), `part of a key was read: ${labels(reading).join(", ")}`);
+        }
+      }
+    });
+    await rowCase("a withheld page's controls", async () => {
+      reading = await read("/reading/withheld-rows");
+      assert.equal(reading.secretScreen, true, "the page was not withheld");
+      assert.doesNotMatch(JSON.stringify(reading), /river stone/u);
+      const added = reading.interactiveElements.find((entry) => entry.label === "+");
+      assert.ok(added, labels(reading).join(", "));
+      // A step's own words name it as the reading does: a pause on it, which
+      // never hands over a withheld page's control, names it so.
+      const paused = await runTool("POST", "/v1/request-human-input", { indices: [added.index], snapshotId: reading.snapshotId });
+      assert.equal(paused.code, 1, paused.stdout);
+      assert.ok(paused.stderr.includes('"+" may show or change a secret, so nothing was highlighted.'), paused.stderr);
+      assert.doesNotMatch(paused.stderr, /river stone/u);
+    });
+    await rowCase("a stop drawn anew for a field that names no list of its own", async () => {
+      await runPage.mouse.move(1, 1);
+      reading = await read("/reading/unnamed-list");
+      const typedUnnamed = await ok("POST", "/v1/type", { index: control(reading, "From").index, snapshotId: reading.snapshotId, text: "Central" });
+      assert.match(typedUnnamed.done, /2 suggestions under "From": "Central Station" \(index \d+\), "Central Square" \(index \d+\)\. Click one\./u);
+      const gone = await runTool("POST", "/v1/click", { index: control(typedUnnamed, "Central Station").index, snapshotId: typedUnnamed.snapshotId });
+      assert.equal(gone.code, 0, gone.stderr);
+      assert.equal(
+        gone.payload.done,
+        '"Central Station" was no longer in its list when the click came, so nothing was clicked. Type into "From" again to see its suggestions.',
+      );
+      assert.equal(await runPage.evaluate(() => window.chosen), 0, "a stop was chosen");
+    });
+    assert.deepEqual(rowProblems, [], rowProblems.join("\n"));
+
     for (const [name, ms] of [
       ["a click that changed the page", measurements.changedClickMs],
       ["a click that scrolled the page", measurements.scrolledClickMs],
@@ -1582,6 +1868,9 @@ export async function runSharedBrowserPageReadingFixture() {
         "a cookie notice is never Octo's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's settings or limited accept is a cookie notice's pause, while one on a refusal no list knows or a booking's button in small print that speaks of cookies is a step of the person's, the booking's button scrolled into view, each outlined and published with fixed labels and nothing pressed; a pause on an account's deletion dressed up as a notice is refused, outlining and publishing nothing, as is any pause in Octo's own tab; under a bar whose only button accepts the planner's own button works with no prompt",
         "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first, and one whose result comes 5 s later reads it too; one whose page still reads as before 6 s on says so and that its reading is the page as it is now, leaving no snapshot to take; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
         "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; a click on a plain link that keeps moving opens the link's address in the tab, once",
+        "a field's own suggestion is chosen by a click that leaves the focus in the field, from a list that closes as the field loses it and from one that draws its stops anew under the pointer, found again by the reading's record and clicked once; a stop the list no longer shows is not clicked, and the step answers with the field's suggestions as they read now",
+        "a ticket shop's controls with no name of their own are named by their row or card (\"+ beside “Adult”\"), listed and highlighted by that name, while the same rows in a frame are named by the frame's site and none is listed or counted",
+        "a row's words only tell its controls apart where they are named: reading steps in rows that speak of deleting, booking or saving go without a prompt, in Octo's own tab too, a pause on a booking's icon button under a line about cookies is the person's step, a key beside an icon button names no control, whole or in part, a withheld page's controls are named without their rows' words in its reading and a step's words, and a stop drawn anew for a field that names no list of its own names no other list's options",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

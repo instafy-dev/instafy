@@ -14,8 +14,11 @@ For every reader and browser. Pages are found as "Finding a page" in `instafy-br
 
 ## Where a route comes from
 
+- Look for a route only when the message asks for one, or carries on one that did.
 - A route comes from the transit operator's own journey planner, reached from the operator's site. A listing, a map snippet or a guide only leads to it; never a route from memory.
 - In the planner, choose the start, the stop nearest the place (the one the place's own page names, else your pick) and the person's day and time (else a daytime hour); then press its button and read the route.
+- Choose each stop by clicking it in its field's own suggestions, not with Enter, which can send the form before a stop is chosen. Press the button once, when every field is filled.
+- Say there's no route only when the planner's own results say so. When a stop couldn't be chosen, say that instead.
 
 ## A route's finding
 

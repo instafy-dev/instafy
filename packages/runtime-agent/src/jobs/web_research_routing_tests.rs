@@ -2666,6 +2666,29 @@ fn a_routes_destination_is_the_stop_the_places_own_page_names() {
     assert!(carried.contains("Never use a sign-in that belongs to someone else in this space"));
 }
 
+/// A planner's stops were never chosen: every click on a named stop failed, a turn pressed Enter
+/// in a field, which sent the planner's form with no stop chosen, and a reply said the planner
+/// returned no route for a form it never sent; a later message that asked for no route went back
+/// to the planner (a local test, Nov 19). `instafy-getting-around` says to look for a route only
+/// when the message asks for one, to choose each stop by clicking it in its field's own
+/// suggestions, to press the button once with every field filled, and to say there's no route
+/// only from the planner's own results, or that a stop couldn't be chosen. The line that says
+/// what to choose stays.
+#[test]
+fn a_planners_stops_are_clicked_and_no_route_comes_only_from_its_results() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let route = flat(GETTING_AROUND_SKILL);
+    for line in [
+        "- Look for a route only when the message asks for one, or carries on one that did.",
+        "- Choose each stop by clicking it in its field's own suggestions, not with Enter, which can send the form before a stop is chosen. Press the button once, when every field is filled.",
+        "- Say there's no route only when the planner's own results say so. When a stop couldn't be chosen, say that instead.",
+        "then press its button and read the route.",
+    ] {
+        assert!(route.contains(line), "{line}");
+    }
+    assert!(GETTING_AROUND_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+}
+
 /// A cookie notice is never a step Octo pauses on by itself: the skill's line of the person's steps once named
 /// consent beside sign-in and one-time codes, both browser turns of a local test (Nov 9) read it, and one paused on a
 /// notice's "Accept all" while another pressed a bar's accept and stopped. A notice's accept is no longer listed, so no

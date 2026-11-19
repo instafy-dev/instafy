@@ -117,17 +117,18 @@ const ALLOWED_PRESS_KEYS = new Set([
 // label or a dialog's title), for the page-side checks: the describer's
 // consent context and a click's cover (clickLandingInPage).
 const CONSENT_NAMES_SOURCE = "cookie|consent|gdpr|rgpd|dsgvo|privacy|datenschutz|privacidade|confidentialit";
-// Regular-expression sources the page-side checks need, the same ones Send
-// page uses, and the consent names. Values are tested in the page and only
-// yes/no answers come back.
-const PAGE_POLICY_SOURCES = Object.freeze({
-  ...pageCapture.pagePolicySources(redaction),
-  consentNames: CONSENT_NAMES_SOURCE,
-});
 // A document keeps this mark until a new page loads. It makes a page that was
 // a secret screen, or on which a credential step ran, stay withheld across the
 // separate controller processes of one run.
 const WITHHELD_DOCUMENT_KEY = "instafy.sharedBrowser.withheldDocument";
+// Regular-expression sources the page-side checks need, the same ones Send
+// page uses, the consent names, and the key of a withheld page's mark. Values
+// are tested in the page and only yes/no answers come back.
+const PAGE_POLICY_SOURCES = Object.freeze({
+  ...pageCapture.pagePolicySources(redaction),
+  consentNames: CONSENT_NAMES_SOURCE,
+  withheldKey: WITHHELD_DOCUMENT_KEY,
+});
 // Named categories ask even under routine browsing. Ordinary record changes
 // ("change") still ask only at submission, except a button whose label commits
 // a change (`commit: true`). Menus, tabs and navigation items never carry it.
@@ -1633,8 +1634,9 @@ function describeInPage(rule, forms, names, element, sources, mode) {
 
   // Hints for naming a control the page left unnamed (an avatar or icon
   // button), so a prompt reads "profile picture button in the top right"
-  // rather than an index. Attributes, image text and geometry only: never a
-  // field value or nearby page text.
+  // rather than an index: attributes, image text and geometry, and page text
+  // only right beside it or at the start of its row or card. Never a field
+  // value.
   let nameHints = null;
   try {
     const read = (node, name) =>
@@ -1707,6 +1709,38 @@ function describeInPage(rule, forms, names, element, sources, mode) {
         nearby = "";
       }
     }
+    // The first words of its row or card, for a control with no words of its
+    // own: none, or only marks ("+", "−"). A ticket shop's reading listed its
+    // rows' buttons as "unnamed button", none told apart, and the turn could
+    // neither highlight nor name the one for a ticket. They only tell it
+    // apart where it is shown (describeElement's displayLabel), and never on
+    // a withheld page (WITHHELD_DOCUMENT_KEY): they are the page's text,
+    // which such a page does not show.
+    let row = "";
+    const worded = (value) => /[\p{L}\p{N}]/u.test(String(value || ""));
+    const labelWords = element.labels && element.labels.length
+      ? Array.from(element.labels, (label) => label.textContent || "").join(" ")
+      : "";
+    const withheld = (() => {
+      try {
+        const doc = element.ownerDocument;
+        return Object.getOwnPropertyDescriptor(doc, Symbol.for(String(sources && sources.withheldKey))) !== undefined ||
+          !Object.isExtensible(doc);
+      } catch (_) {
+        return true;
+      }
+    })();
+    if (
+      !withheld &&
+      ![ownText, ownName, read(element, "aria-label"), read(element, "title"), read(element, "placeholder"), labelWords]
+        .some(worded) && !read(element, "aria-labelledby")
+    ) {
+      try {
+        row = names.rowTextOf(element);
+      } catch (_) {
+        row = "";
+      }
+    }
     nameHints = {
       tooltip: bounded(
         read(element, "data-bs-original-title") || read(element, "data-original-title") ||
@@ -1720,6 +1754,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       ownName: bounded(ownName || "", 120),
       sprite: bounded(read(sprite, "href") || read(sprite, "xlink:href") || "", 160),
       nearby: bounded(nearby, 40),
+      row: bounded(row, 40),
       hasImage:
         Boolean(element.querySelector("img, picture, [role='img']")) ||
         /url\(/.test(view?.getComputedStyle(element).backgroundImage || ""),
@@ -1907,6 +1942,7 @@ function nameHintsOf(raw) {
     ownName: text(raw?.ownName, 120),
     sprite: text(raw?.sprite, 160),
     nearby: text(raw?.nearby, 40),
+    row: text(raw?.row, 40),
     hasImage: valid && raw.hasImage === true,
     position: valid && NAME_POSITIONS.has(raw.position) ? raw.position : "",
   };
@@ -1914,8 +1950,8 @@ function nameHintsOf(raw) {
 
 // The hints that name a control, without the ones that change while a
 // person hovers (described-by tooltips), the layout moves (position) or the
-// page around it updates (nearby text), so fingerprints stay stable across
-// an approval.
+// page around it updates (the text beside it or in its row), so fingerprints
+// stay stable across an approval.
 function stableNameHints(description) {
   const hints = description.nameHints || nameHintsOf(null);
   return {
@@ -2169,21 +2205,33 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     ?.trim();
   // An unnamed control gets a name from its own hints, never its index: the
   // index means nothing to the person reading a prompt.
-  const label = (
-    named ||
-    actionPolicy.unnamedControlName({
-      tag: attributes.tag,
-      role: attributes.role,
-      type: attributes.inputType,
-      ...nameHints,
-      // An inner element's label names an unnamed control like its image.
-      image: nameHints.image || nameHints.innerName,
-      iconHint: [policy ? policy.iconHint : "", nameHints.sprite].filter(Boolean).join(" "),
-    })
-  ).slice(0, MAX_LABEL_CHARS);
+  const unnamed = {
+    tag: attributes.tag,
+    role: attributes.role,
+    type: attributes.inputType,
+    ...nameHints,
+    // An inner element's label names an unnamed control like its image.
+    image: nameHints.image || nameHints.innerName,
+    iconHint: [policy ? policy.iconHint : "", nameHints.sprite].filter(Boolean).join(" "),
+  };
+  // `label` is the name a step's checks read (its risk words, a cookie
+  // notice's own choices, a pause's fields): its own hints, never its row.
+  const label = (named || actionPolicy.unnamedControlName({ ...unnamed, row: "" })).slice(0, MAX_LABEL_CHARS);
+  // Where it is shown (a reading, a prompt, a step's result), one with no
+  // words of its own is told apart from the alike controls of its list by
+  // its row or card, and one named only by marks ("+", "−") keeps them ("+
+  // beside “Adult”"). The row's words never change what a step does: a "+"
+  // beside "How do I delete my account?" and a "×" over "Save 10%" asked
+  // under routine browsing when its checks read them, and a booking's icon
+  // button in a part that speaks of cookies was paused on as a cookie
+  // notice's.
+  const marks = named && !/[\p{L}\p{N}]/u.test(named) ? named : "";
+  const displayLabel = ((marks ? "" : named) || actionPolicy.unnamedControlName({ ...unnamed, marks }))
+    .slice(0, MAX_LABEL_CHARS);
   return {
     index,
     label,
+    displayLabel,
     tag: attributes.tag,
     role: attributes.role,
     idAttribute: attributes.idAttribute,
@@ -2358,11 +2406,12 @@ function approvalCategoryTitle(classification) {
 // two differ ("Agree and close", also called "Agree and close: Agree to our
 // data processing and close"). The text it shows leads: it is what the
 // person finds on the page, and the other name can say more than it shows.
+// One with no words of its own is told apart by its row ("+ beside “Adult”").
 function controlNames(description) {
   const labels = actionPolicy.stepLabels(policyTarget(description));
   return labels.differ
     ? { shown: maskedDisplayText(labels.visible), other: maskedDisplayText(labels.accessible) }
-    : { shown: maskedDisplayText(description.label), other: "" };
+    : { shown: maskedDisplayText(description.displayLabel || description.label), other: "" };
 }
 
 // The control's name, quoted, for the action log and the ticker:
@@ -2670,9 +2719,9 @@ async function fieldListAfterTyping(page, target, before) {
 // the type step answers with (readingControls): how many options it shows and
 // the first ones, by the names and indices that reading gives them, of the set
 // fieldListAfterTyping chose. A planner that lists a stop's names as a person
-// types sends nothing until one is chosen. Null when the reading lists none
-// of them, or withholds the page.
-async function fieldListLine(target, reading, before, set) {
+// types sends nothing until one is chosen. `next` ends it: what to do with
+// them. Null when the reading lists none of them, or withholds the page.
+async function fieldListLine(target, reading, before, set, next = "Click one.") {
   const controls = readingControls;
   if (!set || !before || !controls || !reading || reading.secretScreen === true ||
     !Array.isArray(reading.interactiveElements) || reading.interactiveElements.length !== controls.length) {
@@ -2690,7 +2739,7 @@ async function fieldListLine(target, reading, before, set) {
   };
   const named = options.slice(0, FIELD_LIST_NAMED).map((option) => `"${name(option.label)}" (index ${option.index})`);
   const count = options.length === 1 ? "1 suggestion" : `${options.length} suggestions`;
-  return `${count} under ${quotedControlLabel(target.description)}: ${named.join(", ")}${options.length > FIELD_LIST_NAMED ? ", …" : ""}. Click one.`;
+  return `${count} under ${quotedControlLabel(target.description)}: ${named.join(", ")}${options.length > FIELD_LIST_NAMED ? ", …" : ""}. ${next}`;
 }
 
 function isCheckableDescription(description) {
@@ -3606,7 +3655,7 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
   const marked = await documentWithheld(page);
   assertReadStayedOnOneSite(page, startUrl);
   const checkFailed = signals === null;
-  const shownNames = interactive.map(({ description }) => description.label);
+  const shownNames = interactive.map(({ description }) => description.displayLabel || description.label);
   const observeText = (text, names, forceWithhold) =>
     redaction.redactPageObservation({
       url: rawUrl,
@@ -3634,6 +3683,11 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
       (withhold || carried || !checkFailed || observe(false).secretScreen);
   } catch (_) {
     throw new Error("Shared Browser could not mask this page, so it was not read");
+  }
+  // A withheld page's controls are named by their own hints only: the words
+  // of a row or card around one are the page's text, which it does not show.
+  if (view.secretScreen) {
+    view = { ...view, names: interactive.map(({ description }) => strictlyMasked(description.label)) };
   }
   if (detected) {
     await withholdDocument(page);
@@ -4084,9 +4138,9 @@ async function clickLanding(target) {
 // view and still, before the click is made; the click's own wait for the
 // load it starts is the click's as ever. A page that does not take it in
 // that time throws ClickNotTaken.
-async function clickControlItself(page, target, wait = {}) {
+async function clickControlItself(page, target, wait = {}, { keepFocus = false } = {}) {
   await refuseUnlandableClick(page, target, wait);
-  await pointAtControl(target);
+  await pointAtControl(target, { keepFocus });
   const before = await readingBefore(page);
   if (wait.timeout) {
     await target.locator.click({ trial: true, timeout: wait.timeout }).catch((error) => {
@@ -4095,6 +4149,92 @@ async function clickControlItself(page, target, wait = {}) {
   }
   await target.locator.click();
   return before;
+}
+
+// Whether a step's click failed because its control was no longer in the
+// page when the browser came to act on it (the page took it out, or drew it
+// again, after the step found it): nothing was clicked then. Only a failure
+// that says so is asked about, and only for a moment: a click whose load the
+// site never answered waited out the step's time on that question.
+async function controlLeftThePage(target, error) {
+  if (!/Element is not attached to the DOM/u.test(String(error && error.message ? error.message : error))) return false;
+  const place = await within(FIELD_READ_MS, controlPlace(target.locator), null);
+  return place !== null && place.connected === false;
+}
+
+// The control of a step nobody was asked about, found again after the page
+// drew it anew before the click reached it (a field's list that redraws its
+// options): by its reading's record of it, its fingerprint (its name, role
+// and the rest) and the text around it, the check approvedTarget makes after
+// a prompt, on the same address. Of the controls that match, the one in its
+// place among those the reading recorded alike (two stops of one name); with
+// no record, the only one. Null when it is gone, or the ones alike to it came
+// or went.
+async function controlFoundAgain(page, body, target) {
+  const around = target.asked ? target.asked.around : null;
+  if (typeof around !== "string" || page.url() !== target.asked.url) return null;
+  const fingerprint = targetFingerprint(target.description);
+  const matching = [];
+  for (const entry of await collectInteractiveElements(page)) {
+    if (targetFingerprint(entry.description) !== fingerprint) continue;
+    const place = await controlPlace(entry.locator);
+    if (place && place.connected && place.around === around) matching.push(entry);
+  }
+  const reading = recordedReading(page, body);
+  const read = reading ? reading.controls[body.index] : null;
+  if (!read || read.target !== fingerprint) return matching.length === 1 ? matching[0] : null;
+  const listed = [];
+  reading.controls.forEach((control, index) => {
+    if (control.target === read.target && control.around === read.around) listed.push(index);
+  });
+  return listed.length === matching.length ? matching[listed.indexOf(body.index)] || null : null;
+}
+
+// The field whose own suggestions hold the control a step clicks
+// (suggestionFieldInPage), as a handle, or null.
+async function suggestionFieldOf(target) {
+  const handle = await within(
+    FIELD_READ_MS,
+    (async () => target.locator.evaluateHandle(suggestionFieldInPage))().catch(() => null),
+    null,
+  );
+  const field = typeof handle?.asElement === "function" ? handle.asElement() : null;
+  if (!field) await (async () => handle?.dispose())().catch(() => {});
+  return field;
+}
+
+// What a click on a field's suggestion answers when the option was gone by
+// the time the click came and is not in the page again: nothing was clicked,
+// and the field's own suggestions as the page reads now, by the names and
+// indices of the reading it answers with (fieldListLine), or to type into it
+// again. Only a list the field names as its own is listed: with no record of
+// what the page showed before the step typed, every option on the page would
+// read as the suggestions of a field that names none (a "Sort by" beside
+// it). They are named, and never one to click: a turn told to click one may
+// choose a stop nobody asked for. A turn whose clicks on a planner's stops
+// all failed went on with arrow keys and Enter, which sent the planner's form
+// with no stop chosen.
+async function goneSuggestionResult(page, target, field, withholding) {
+  const reading = await snapshotAfterStep(page, withholding);
+  const description = await describeElement(field, -1, null).catch(() => null);
+  const option = quotedControlLabel(target.description);
+  let now = "";
+  let own = false;
+  if (description && reading.secretScreen !== true) {
+    const fieldTarget = { locator: field, description };
+    const name = quotedControlLabel(description);
+    const controls = readingControls ? readingControls.map(({ locator }) => locator) : [];
+    const answer = controls.length ? await fieldListOf(fieldTarget, controls, [], true) : null;
+    own = Boolean(answer && answer.own);
+    now = (own && await fieldListLine(fieldTarget, reading, { shown: [], own: [] }, "listed",
+      `If the one wanted is among them, click it; otherwise type into ${name} again.`)) ||
+      `Type into ${name} again to see its suggestions.`;
+  }
+  const list = own ? `the list under ${quotedControlLabel(description)}` : "its list";
+  return withActivity(
+    { ...reading, done: [`${option} was no longer in ${list} when the click came, so nothing was clicked.`, now].filter(Boolean).join(" ") },
+    stepActivity(page, "snapshot", readingApproval()),
+  );
 }
 
 // What a click on a plain link throws when the page does not take it in time
@@ -4502,27 +4642,75 @@ const FORM_ENTRIES_IN_PAGE = new Function(
   `return (${formEntriesInPage})((${formSubmission.formSubmissionRulesInPage})(), ...args);`,
 );
 
+// The mark a type step leaves on the field it typed into (typedFieldMarkInPage),
+// so the prompt of a step that sends the page's form names it first.
+const TYPED_FIELD_KEY = "instafy.sharedBrowser.typedField";
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Marks the field a type step typed into. The mark is the
+// field's own, like the covered mark (coveredBeforeInPage): the page cannot
+// take it away, and a new page loads without it.
+function typedFieldMarkInPage(element, request) {
+  try {
+    const key = Symbol.for(request.key);
+    if (Object.getOwnPropertyDescriptor(element, key) === undefined) {
+      Object.defineProperty(element, key, { value: true });
+    }
+  } catch (_) {
+    // A field the page froze is named as before.
+  }
+  return true;
+}
+
+// Runs inside the page (SENT_FIELDS_IN_PAGE), so it must not use anything
+// from this file's scope. The fields of `element`'s page a type step marked
+// (typedFieldMarkInPage), in tree order, inside open shadow roots too: at
+// most 24, among the page's first 50,000 elements.
+function typedFieldsInPage(element, request) {
+  const found = [];
+  try {
+    const key = Symbol.for(request.key);
+    const doc = element.ownerDocument;
+    const roots = [doc];
+    let seen = 0;
+    while (roots.length && found.length < 24 && seen < 50_000) {
+      const walker = doc.createTreeWalker(roots.shift(), 1);
+      for (let node = walker.nextNode(); node && found.length < 24 && seen < 50_000; node = walker.nextNode()) {
+        seen += 1;
+        const mark = Object.getOwnPropertyDescriptor(node, key);
+        if (mark && mark.value === true) found.push(node);
+        if (node.shadowRoot) roots.push(node.shadowRoot);
+      }
+    }
+  } catch (_) {
+    return found;
+  }
+  return found;
+}
+
 // The fields a form step sends something from, named the way the page
 // labels them, never their values, and how many it sends in all
-// (formSubmission's sentFields).
+// (formSubmission's sentFields): first those a step typed into on the page.
 const SENT_FIELDS_IN_PAGE = new Function(
   "element",
   "request",
-  `return (${formSubmission.formSubmissionRulesInPage})().sentFields(element, Boolean(request && request.typed));`,
+  `return (${formSubmission.formSubmissionRulesInPage})().sentFields(element, Boolean(request && request.typed), (${typedFieldsInPage})(element, request));`,
 );
 
 // A step that sends no fields.
 const NO_SENT_FIELDS = Object.freeze({ names: [], count: 0 });
 
 // What a prompt says a form step sends: the masked names of its first 24
-// fields, and how many it sends in all (`count`, which the prompt says when
-// the names are fewer); none when the step sends no form, sends nothing (a
+// fields, those a step typed into on the page first (a planner's stops,
+// which a prompt left out while it named the form's day and time fields),
+// and how many it sends in all (`count`, which the prompt says when the
+// names are fewer); none when the step sends no form, sends nothing (a
 // dialog form) or the page did not say. `typed` is the text a type step puts
 // in the field first.
 async function sentFields(target, submission, typed = null) {
   if (!submission || submission.method === "dialog") return NO_SENT_FIELDS;
   const sent = await target.locator
-    .evaluate(SENT_FIELDS_IN_PAGE, { kind: "sent-fields", typed: typeof typed === "string" && typed !== "" })
+    .evaluate(SENT_FIELDS_IN_PAGE, { kind: "sent-fields", typed: typeof typed === "string" && typed !== "", key: TYPED_FIELD_KEY })
     .catch(() => null);
   if (!sent || !Array.isArray(sent.names)) return NO_SENT_FIELDS;
   const reported = sent.names.filter((name) => typeof name === "string" && name.trim());
@@ -5126,6 +5314,61 @@ const PAGE_READING_IN_PAGE = new Function(
   `return (${pageReadingInPage})((${shownRuleInPage})(), (${shownTextInPage}), ...args);`,
 );
 
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. The field whose own list of suggestions holds `element`,
+// an option a person picks as they type (a planner's stops): the focused
+// field, inside open shadow roots too, when the option is in a list it or the
+// combobox it sits in names as its own (`aria-controls`, `aria-owns`, the list
+// its active option is in) or holds, or, for a field that says it opens a
+// list and names none, any option. Null for anything else.
+function suggestionFieldInPage(element) {
+  try {
+    if (!element || typeof element.matches !== "function" || !element.matches("[role=option]")) return null;
+    const doc = element.ownerDocument;
+    let field = doc.activeElement;
+    for (let depth = 0; field && field.shadowRoot && field.shadowRoot.activeElement && depth < 64; depth += 1) {
+      field = field.shadowRoot.activeElement;
+    }
+    if (!field || field === element || typeof field.matches !== "function" ||
+      !field.matches("input, textarea, [contenteditable], [role=combobox], [role=searchbox], [role=textbox]")) {
+      return null;
+    }
+    const inside = (node, list) => {
+      for (let current = node, depth = 0; current && depth < 512; current = current.parentNode || current.host, depth += 1) {
+        if (current === list) return true;
+      }
+      return false;
+    };
+    const lists = [];
+    let opensOne = false;
+    const combobox = field.closest("[role=combobox]");
+    for (const node of [field, combobox]) {
+      if (!node) continue;
+      const attribute = (name) => String(node.getAttribute(name) || "").toLowerCase().trim();
+      if (attribute("role") === "combobox" || ["list", "both", "inline"].includes(attribute("aria-autocomplete")) ||
+        (attribute("aria-haspopup") !== "" && attribute("aria-haspopup") !== "false") || node.hasAttribute("aria-expanded")) {
+        opensOne = true;
+      }
+      const root = node.getRootNode();
+      const byId = (id) => typeof root.getElementById === "function" ? root.getElementById(id) : doc.getElementById(id);
+      for (const name of ["aria-controls", "aria-owns"]) {
+        for (const id of String(node.getAttribute(name) || "").split(/\s+/).filter(Boolean).slice(0, 16)) {
+          const list = byId(id);
+          if (list) lists.push(list);
+        }
+      }
+      const activeId = node.getAttribute("aria-activedescendant");
+      const active = activeId ? byId(activeId) : null;
+      if (active) lists.push(active.closest("[role=listbox], [role=grid], [role=tree], [role=menu]") || active);
+      if (node === combobox && combobox !== field) lists.push(combobox);
+    }
+    if (lists.length) return lists.some((list) => inside(element, list)) ? field : null;
+    return opensOne ? field : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // Runs inside the page. Moves focus as a press of `element` is about to: to
 // the control, or out of the field that holds it when the control takes none.
 // The field that holds it is looked for inside open shadow roots too, where
@@ -5199,13 +5442,18 @@ async function documentOf(page) {
 // the step reads it (readingBefore): the pointer over it and the focus on it.
 // Read before them, a tip shown on hover, or a field's suggestions closed as
 // it lost focus, read as the page answering the press, and the step returned
-// before its result was drawn.
-async function pointAtControl(target, { hover = true } = {}) {
+// before its result was drawn. An option of the field's own suggestions
+// (`keepFocus`, suggestionFieldInPage) leaves the focus in the field: a
+// person's press on one does, as such a list keeps it there, while the focus
+// taken out of the field first closed a planner's list, and every click on a
+// named stop failed on an option no longer in the page (a local test, Nov 19).
+async function pointAtControl(target, { hover = true, keepFocus = false } = {}) {
   if (hover && typeof target.locator.hover === "function") {
     await Promise.resolve()
       .then(() => target.locator.hover({ timeout: POINT_AT_CONTROL_MS }))
       .catch(() => {});
   }
+  if (keepFocus) return;
   await Promise.resolve()
     .then(() => target.locator.evaluate(focusLikeAPressInPage, { kind: "press-focus" }))
     .catch(() => {});
@@ -6979,7 +7227,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // about is looked at right before it is made (clickControlItself). The
     // person is then asked about the page as it is: the look may have brought
     // the control into view, and the page may have answered that.
-    if (!consentRejection && !(readingStep && approvalProtocol.routineBrowsingAllowed())) {
+    const asksPerson = !consentRejection && !(readingStep && approvalProtocol.routineBrowsingAllowed());
+    if (asksPerson) {
       try {
         await refuseUnlandableClick(page, target, linkWait);
       } catch (error) {
@@ -7044,13 +7293,42 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       ...size,
     });
     const beforeUrl = page.url();
+    // The field whose own suggestions the control is one of: the click
+    // leaves the focus there (pointAtControl), and answers with them when the
+    // option is gone before the click comes (goneSuggestionResult). Looked
+    // at before the pointer moves, which may redraw the list.
+    const suggestionField = await suggestionFieldOf(target);
+    const keepFocus = { keepFocus: suggestionField !== null };
     let before;
     try {
-      before = await clickControlItself(page, target, linkWait);
+      before = await clickControlItself(page, target, linkWait, keepFocus);
     } catch (error) {
       const opened = await openedInstead(error);
       if (opened) return opened;
-      throw error;
+      // The page drew the control again after the step found it, so the
+      // click had nothing to land on and nothing was clicked: a planner's
+      // list that redraws its stops failed every click on a named stop (a
+      // local test, Nov 19). A step nobody was asked about finds it again by
+      // its reading's record and clicks once; one the person said yes to
+      // keeps to the control they were asked about.
+      if (asksPerson || !(await controlLeftThePage(target, error))) throw error;
+      const again = await controlFoundAgain(page, body, target);
+      if (!again) {
+        if (suggestionField) return await goneSuggestionResult(page, target, suggestionField, withholding);
+        throw controlChanged();
+      }
+      target = { ...again, asked: target.asked };
+      assertSameTarget(target, page.url(), approvedTargetFingerprint, destination);
+      approvalProtocol.authority();
+      assertStepOnTime();
+      try {
+        before = await clickControlItself(page, target, linkWait, keepFocus);
+      } catch (retryError) {
+        if (suggestionField && (await controlLeftThePage(target, retryError))) {
+          return await goneSuggestionResult(page, target, suggestionField, withholding);
+        }
+        throw retryError;
+      }
     }
     const unchanged = await settleAfterAction(page, before);
     page = await resolveExpectedPage(browser);
@@ -7190,10 +7468,20 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const optionsBefore = submitting ? null : await optionsShownBefore(page, target);
     const typedOn = submitting ? null : { url: page.url(), documentId: await documentOf(page) };
     let listed = null;
+    // The field keeps a mark of the step, so a step that sends the page's
+    // form names it first (sentFields), whatever its form sends of it. A
+    // page busy with a load the typing started is not waited on for it.
+    const markTyped = () => within(
+      FIELD_READ_MS,
+      target.locator.evaluate(typedFieldMarkInPage, { kind: "typed-mark", key: TYPED_FIELD_KEY }),
+      null,
+    ).catch(() => {});
     if (submitting) {
       await target.locator.fill(body.text);
+      await markTyped();
     } else {
       await typeLikeAPerson(page, target, body.text);
+      await markTyped();
       listed = await fieldListAfterTyping(page, target, optionsBefore);
     }
     // A page that went on by itself while the step looked for its list (a

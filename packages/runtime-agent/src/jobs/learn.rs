@@ -841,6 +841,14 @@ const GETTING_AROUND_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-getting-around/SKILL.md"
 ));
+/// The SHA-256 of each earlier bundled copy of the getting-around skill, which a scaffold may
+/// replace. A copy someone edited is kept.
+const LEGACY_GETTING_AROUND_SHA256: &[&str] = &[
+    // From before a route was looked for only when the message asks for one, each stop was
+    // chosen by clicking it in its field's own suggestions, the planner's button was pressed once,
+    // and "no route" came only from the planner's own results.
+    "c796aec8725dd590b9f3955bc90f7c44d5831ad75d14eff487433dc8db50bed9", // v1
+];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-web-research/references/link-only-sites.json"
@@ -1261,10 +1269,9 @@ pub fn ensure_project_memory_scaffold_in(workspace_dir: &Path, scope: ScaffoldSc
             WEB_RESEARCH_LINK_ONLY_TEMPLATE,
         ),
         (&comparing_path, LEGACY_COMPARING_SHA256, COMPARING_TEMPLATE),
-        // New in every space, and an edited copy is kept: there is no earlier copy yet.
         (
             &getting_around_path,
-            &[] as &[&str],
+            LEGACY_GETTING_AROUND_SHA256,
             GETTING_AROUND_TEMPLATE,
         ),
     ] {
@@ -2991,7 +2998,11 @@ mod tests {
             WEB_RESEARCH_LINK_ONLY_TEMPLATE,
         ),
         ("comparing", LEGACY_COMPARING_SHA256, COMPARING_TEMPLATE),
-        ("getting around", &[], GETTING_AROUND_TEMPLATE),
+        (
+            "getting around",
+            LEGACY_GETTING_AROUND_SHA256,
+            GETTING_AROUND_TEMPLATE,
+        ),
         (
             "skill reading",
             LEGACY_SKILL_READING_SHA256,

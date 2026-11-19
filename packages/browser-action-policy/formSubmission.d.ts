@@ -39,9 +39,12 @@ export type FormSubmissionRules = {
    * sends something from (a label, a group's legend or the name attribute),
    * never a value and no hidden field: the first 24 names, and how many
    * fields it sends in all (`count`, which may be more). `typed` counts
-   * `element` as filled.
+   * `element` as filled. The fields a step typed into on the page
+   * (`typedFields`, and `element` when `typed`) come first, by their labels,
+   * name attribute or not, while they hold text: only the form's own, never
+   * one of another form or of none.
    */
-  sentFields(element: Element, typed?: boolean): { names: string[]; count: number };
+  sentFields(element: Element, typed?: boolean, typedFields?: Element[]): { names: string[]; count: number };
 };
 
 /**

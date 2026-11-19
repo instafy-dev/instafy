@@ -111,13 +111,18 @@ export type UnnamedControlHints = {
   position?: string | null;
   /** The short text right beside it (controlNameRulesInPage's nearbyTextOf). */
   nearby?: string | null;
+  /** The first words of the row or card it sits in (controlNameRulesInPage's rowTextOf). */
+  row?: string | null;
+  /** Its own name when that is only marks ("+", "−", "×"), which name it before its row does. */
+  marks?: string | null;
 };
-/** A short generic name such as "profile picture button, top right"; never "button 5". */
+/** A short generic name such as "profile picture button in the top right" or "+ beside “Adult”"; never "button 5". */
 export declare function unnamedControlName(hints: UnnamedControlHints): string;
-/** Run inside the page from its source: the text a control draws, and the text right beside it. */
+/** Run inside the page from its source: the text a control draws, the text right beside it, and the first words of its row or card. */
 export declare function controlNameRulesInPage(): {
   shownTextOf(element: Element, max?: number): string;
   nearbyTextOf(element: Element, max?: number): string;
+  rowTextOf(element: Element, max?: number): string;
 };
 /** True for text that names nothing, such as a bare media type ("image/svg+xml"). */
 export declare function isPlaceholderName(value: unknown): boolean;
