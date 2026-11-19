@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { webcrypto } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
@@ -135,6 +135,38 @@ test("an unnamed control is named by the first words of its row or card, so the 
   );
   // Words and digits are a name, never marks: they keep it.
   assert.equal(policy.unnamedControlName({ tag: "button", marks: "2", row: "Results" }), "button beside \u201cResults\u201d");
+});
+
+test("a row's words and the text beside a control name it whole, never cut, and never as a value the redaction rules mask", () => {
+  // A key the page's text masked ("[redacted secret]") named the icon button
+  // beside it by its first 40 characters: a key cut short is no value the
+  // redaction rules know, and a name quoting a whole one lacks the words
+  // around it ("Deploy key") that mask it in the page's text. Key-shaped
+  // values are made here, so the source holds none.
+  const digest = (seed, encoding) => createHash("sha256").update(seed).digest(encoding);
+  const longKey = digest("a deploy key", "base64url");
+  const hexKey = digest("a signing key", "hex");
+  const shortKey = digest("an access key", "base64url").slice(0, 32);
+  const window = page(`
+    <div><p><code>${longKey}</code></p><p><button id="long-key"></button></p></div>
+    <div><p><code>${hexKey}</code> rotated today</p><p><button id="hex-key"></button></p></div>
+    <div><p>Deploy key ${longKey}</p><p><button id="after-words"></button></p></div>`);
+  const { rowTextOf } = rules(window);
+  const byId = (id) => window.document.getElementById(id);
+  assert.equal(rowTextOf(byId("long-key")), "");
+  assert.equal(rowTextOf(byId("hex-key")), "");
+  assert.equal(rowTextOf(byId("after-words")), "Deploy key");
+  for (const key of [shortKey, digest("an access key", "hex").slice(0, 40), `Key ${shortKey}`]) {
+    assert.equal(policy.unnamedControlName({ tag: "button", row: key, position: "middle" }), "unnamed button in the middle");
+    assert.equal(policy.unnamedControlName({ tag: "button", nearby: key }), "unnamed button");
+    assert.equal(policy.unnamedControlName({ tag: "button", marks: "+", row: key }), "+");
+    assert.equal(policy.unnamedControlName({ tag: "button", iconHint: "icon-pencil", row: key }), "edit button");
+  }
+  // Words longer than a name holds are left out whole, never cut into one.
+  assert.equal(
+    policy.unnamedControlName({ tag: "button", row: "An admission ticket for the whole day, with the audio tour" }),
+    "unnamed button",
+  );
 });
 
 test("names come from what a control draws, never from text that names nothing", () => {

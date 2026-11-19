@@ -117,17 +117,18 @@ const ALLOWED_PRESS_KEYS = new Set([
 // label or a dialog's title), for the page-side checks: the describer's
 // consent context and a click's cover (clickLandingInPage).
 const CONSENT_NAMES_SOURCE = "cookie|consent|gdpr|rgpd|dsgvo|privacy|datenschutz|privacidade|confidentialit";
-// Regular-expression sources the page-side checks need, the same ones Send
-// page uses, and the consent names. Values are tested in the page and only
-// yes/no answers come back.
-const PAGE_POLICY_SOURCES = Object.freeze({
-  ...pageCapture.pagePolicySources(redaction),
-  consentNames: CONSENT_NAMES_SOURCE,
-});
 // A document keeps this mark until a new page loads. It makes a page that was
 // a secret screen, or on which a credential step ran, stay withheld across the
 // separate controller processes of one run.
 const WITHHELD_DOCUMENT_KEY = "instafy.sharedBrowser.withheldDocument";
+// Regular-expression sources the page-side checks need, the same ones Send
+// page uses, the consent names, and the key of a withheld page's mark. Values
+// are tested in the page and only yes/no answers come back.
+const PAGE_POLICY_SOURCES = Object.freeze({
+  ...pageCapture.pagePolicySources(redaction),
+  consentNames: CONSENT_NAMES_SOURCE,
+  withheldKey: WITHHELD_DOCUMENT_KEY,
+});
 // Named categories ask even under routine browsing. Ordinary record changes
 // ("change") still ask only at submission, except a button whose label commits
 // a change (`commit: true`). Menus, tabs and navigation items never carry it.
@@ -1687,14 +1688,8 @@ function describeInPage(rule, forms, names, element, sources, mode) {
           : "";
     // An svg sprite's symbol (`<use href="#icon-search">`) names its icon.
     const sprite = element.querySelector("use");
-    // The text beside it, and the first words of its row or card, are read
-    // only for a control with no words of its own: none, or only marks ("+",
-    // "−"). A ticket shop's reading listed its rows' buttons as "unnamed
-    // button", none told apart, and the turn could neither highlight nor
-    // name the one for a ticket. The text beside it is not read for one an
-    // image names either.
+    // The text beside it is read only for a control with no name of its own.
     let nearby = "";
-    let row = "";
     const ownText = (() => {
       if (element instanceof HTMLTextAreaElement) return "";
       try {
@@ -1703,11 +1698,40 @@ function describeInPage(rule, forms, names, element, sources, mode) {
         return "";
       }
     })();
+    if (
+      !ownText && !ownName && !imageText && !innerName &&
+      !read(element, "aria-label") && !read(element, "aria-labelledby") && !read(element, "title") &&
+      !read(element, "placeholder") && !(element.labels && element.labels.length)
+    ) {
+      try {
+        nearby = names.nearbyTextOf(element);
+      } catch (_) {
+        nearby = "";
+      }
+    }
+    // The first words of its row or card, for a control with no words of its
+    // own: none, or only marks ("+", "−"). A ticket shop's reading listed its
+    // rows' buttons as "unnamed button", none told apart, and the turn could
+    // neither highlight nor name the one for a ticket. They only tell it
+    // apart where it is shown (describeElement's displayLabel), and never on
+    // a withheld page (WITHHELD_DOCUMENT_KEY): they are the page's text,
+    // which such a page does not show.
+    let row = "";
     const worded = (value) => /[\p{L}\p{N}]/u.test(String(value || ""));
     const labelWords = element.labels && element.labels.length
       ? Array.from(element.labels, (label) => label.textContent || "").join(" ")
       : "";
+    const withheld = (() => {
+      try {
+        const doc = element.ownerDocument;
+        return Object.getOwnPropertyDescriptor(doc, Symbol.for(String(sources && sources.withheldKey))) !== undefined ||
+          !Object.isExtensible(doc);
+      } catch (_) {
+        return true;
+      }
+    })();
     if (
+      !withheld &&
       ![ownText, ownName, read(element, "aria-label"), read(element, "title"), read(element, "placeholder"), labelWords]
         .some(worded) && !read(element, "aria-labelledby")
     ) {
@@ -1715,13 +1739,6 @@ function describeInPage(rule, forms, names, element, sources, mode) {
         row = names.rowTextOf(element);
       } catch (_) {
         row = "";
-      }
-      if (!imageText && !innerName) {
-        try {
-          nearby = names.nearbyTextOf(element);
-        } catch (_) {
-          nearby = "";
-        }
       }
     }
     nameHints = {
@@ -2187,26 +2204,34 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     .find((value) => typeof value === "string" && value.trim() && !actionPolicy.isPlaceholderName(value))
     ?.trim();
   // An unnamed control gets a name from its own hints, never its index: the
-  // index means nothing to the person reading a prompt. One whose name is
-  // only marks ("+", "−") keeps them, told apart from the alike controls of
-  // its list by its row ("+ beside “Adult”").
+  // index means nothing to the person reading a prompt.
+  const unnamed = {
+    tag: attributes.tag,
+    role: attributes.role,
+    type: attributes.inputType,
+    ...nameHints,
+    // An inner element's label names an unnamed control like its image.
+    image: nameHints.image || nameHints.innerName,
+    iconHint: [policy ? policy.iconHint : "", nameHints.sprite].filter(Boolean).join(" "),
+  };
+  // `label` is the name a step's checks read (its risk words, a cookie
+  // notice's own choices, a pause's fields): its own hints, never its row.
+  const label = (named || actionPolicy.unnamedControlName({ ...unnamed, row: "" })).slice(0, MAX_LABEL_CHARS);
+  // Where it is shown (a reading, a prompt, a step's result), one with no
+  // words of its own is told apart from the alike controls of its list by
+  // its row or card, and one named only by marks ("+", "−") keeps them ("+
+  // beside “Adult”"). The row's words never change what a step does: a "+"
+  // beside "How do I delete my account?" and a "×" over "Save 10%" asked
+  // under routine browsing when its checks read them, and a booking's icon
+  // button in a part that speaks of cookies was paused on as a cookie
+  // notice's.
   const marks = named && !/[\p{L}\p{N}]/u.test(named) ? named : "";
-  const label = (
-    (marks ? "" : named) ||
-    actionPolicy.unnamedControlName({
-      tag: attributes.tag,
-      role: attributes.role,
-      type: attributes.inputType,
-      ...nameHints,
-      // An inner element's label names an unnamed control like its image.
-      image: nameHints.image || nameHints.innerName,
-      iconHint: [policy ? policy.iconHint : "", nameHints.sprite].filter(Boolean).join(" "),
-      marks,
-    })
-  ).slice(0, MAX_LABEL_CHARS);
+  const displayLabel = ((marks ? "" : named) || actionPolicy.unnamedControlName({ ...unnamed, marks }))
+    .slice(0, MAX_LABEL_CHARS);
   return {
     index,
     label,
+    displayLabel,
     tag: attributes.tag,
     role: attributes.role,
     idAttribute: attributes.idAttribute,
@@ -2381,11 +2406,12 @@ function approvalCategoryTitle(classification) {
 // two differ ("Agree and close", also called "Agree and close: Agree to our
 // data processing and close"). The text it shows leads: it is what the
 // person finds on the page, and the other name can say more than it shows.
+// One with no words of its own is told apart by its row ("+ beside “Adult”").
 function controlNames(description) {
   const labels = actionPolicy.stepLabels(policyTarget(description));
   return labels.differ
     ? { shown: maskedDisplayText(labels.visible), other: maskedDisplayText(labels.accessible) }
-    : { shown: maskedDisplayText(description.label), other: "" };
+    : { shown: maskedDisplayText(description.displayLabel || description.label), other: "" };
 }
 
 // The control's name, quoted, for the action log and the ticker:
@@ -2693,9 +2719,9 @@ async function fieldListAfterTyping(page, target, before) {
 // the type step answers with (readingControls): how many options it shows and
 // the first ones, by the names and indices that reading gives them, of the set
 // fieldListAfterTyping chose. A planner that lists a stop's names as a person
-// types sends nothing until one is chosen. Null when the reading lists none
-// of them, or withholds the page.
-async function fieldListLine(target, reading, before, set) {
+// types sends nothing until one is chosen. `next` ends it: what to do with
+// them. Null when the reading lists none of them, or withholds the page.
+async function fieldListLine(target, reading, before, set, next = "Click one.") {
   const controls = readingControls;
   if (!set || !before || !controls || !reading || reading.secretScreen === true ||
     !Array.isArray(reading.interactiveElements) || reading.interactiveElements.length !== controls.length) {
@@ -2713,7 +2739,7 @@ async function fieldListLine(target, reading, before, set) {
   };
   const named = options.slice(0, FIELD_LIST_NAMED).map((option) => `"${name(option.label)}" (index ${option.index})`);
   const count = options.length === 1 ? "1 suggestion" : `${options.length} suggestions`;
-  return `${count} under ${quotedControlLabel(target.description)}: ${named.join(", ")}${options.length > FIELD_LIST_NAMED ? ", …" : ""}. Click one.`;
+  return `${count} under ${quotedControlLabel(target.description)}: ${named.join(", ")}${options.length > FIELD_LIST_NAMED ? ", …" : ""}. ${next}`;
 }
 
 function isCheckableDescription(description) {
@@ -3629,7 +3655,7 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
   const marked = await documentWithheld(page);
   assertReadStayedOnOneSite(page, startUrl);
   const checkFailed = signals === null;
-  const shownNames = interactive.map(({ description }) => description.label);
+  const shownNames = interactive.map(({ description }) => description.displayLabel || description.label);
   const observeText = (text, names, forceWithhold) =>
     redaction.redactPageObservation({
       url: rawUrl,
@@ -3657,6 +3683,11 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
       (withhold || carried || !checkFailed || observe(false).secretScreen);
   } catch (_) {
     throw new Error("Shared Browser could not mask this page, so it was not read");
+  }
+  // A withheld page's controls are named by their own hints only: the words
+  // of a row or card around one are the page's text, which it does not show.
+  if (view.secretScreen) {
+    view = { ...view, names: interactive.map(({ description }) => strictlyMasked(description.label)) };
   }
   if (detected) {
     await withholdDocument(page);
@@ -4174,24 +4205,32 @@ async function suggestionFieldOf(target) {
 
 // What a click on a field's suggestion answers when the option was gone by
 // the time the click came and is not in the page again: nothing was clicked,
-// and the field's suggestions as the page reads now, by the names and
-// indices of the reading it answers with (fieldListLine), or that it shows
-// none. A turn whose clicks on a planner's stops all failed went on with
-// arrow keys and Enter, which sent the planner's form with no stop chosen.
+// and the field's own suggestions as the page reads now, by the names and
+// indices of the reading it answers with (fieldListLine), or to type into it
+// again. Only a list the field names as its own is listed: with no record of
+// what the page showed before the step typed, every option on the page would
+// read as the suggestions of a field that names none (a "Sort by" beside
+// it). They are named, and never one to click: a turn told to click one may
+// choose a stop nobody asked for. A turn whose clicks on a planner's stops
+// all failed went on with arrow keys and Enter, which sent the planner's form
+// with no stop chosen.
 async function goneSuggestionResult(page, target, field, withholding) {
   const reading = await snapshotAfterStep(page, withholding);
   const description = await describeElement(field, -1, null).catch(() => null);
   const option = quotedControlLabel(target.description);
   let now = "";
+  let own = false;
   if (description && reading.secretScreen !== true) {
     const fieldTarget = { locator: field, description };
+    const name = quotedControlLabel(description);
     const controls = readingControls ? readingControls.map(({ locator }) => locator) : [];
     const answer = controls.length ? await fieldListOf(fieldTarget, controls, [], true) : null;
-    const set = answer && answer.own ? "listed" : answer && answer.named ? "fresh" : null;
-    now = (await fieldListLine(fieldTarget, reading, { shown: [], own: [] }, set)) ||
-      `${quotedControlLabel(description)} shows no suggestions now: type into it again to see them.`;
+    own = Boolean(answer && answer.own);
+    now = (own && await fieldListLine(fieldTarget, reading, { shown: [], own: [] }, "listed",
+      `If the one wanted is among them, click it; otherwise type into ${name} again.`)) ||
+      `Type into ${name} again to see its suggestions.`;
   }
-  const list = description ? `the list under ${quotedControlLabel(description)}` : "its list";
+  const list = own ? `the list under ${quotedControlLabel(description)}` : "its list";
   return withActivity(
     { ...reading, done: [`${option} was no longer in ${list} when the click came, so nothing was clicked.`, now].filter(Boolean).join(" ") },
     stepActivity(page, "snapshot", readingApproval()),

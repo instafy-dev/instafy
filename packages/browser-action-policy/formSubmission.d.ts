@@ -41,7 +41,8 @@ export type FormSubmissionRules = {
    * fields it sends in all (`count`, which may be more). `typed` counts
    * `element` as filled. The fields a step typed into on the page
    * (`typedFields`, and `element` when `typed`) come first, by their labels,
-   * name attribute or not, while they hold text.
+   * name attribute or not, while they hold text: only the form's own, never
+   * one of another form or of none.
    */
   sentFields(element: Element, typed?: boolean, typedFields?: Element[]): { names: string[]; count: number };
 };

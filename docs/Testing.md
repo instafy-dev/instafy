@@ -1743,7 +1743,7 @@ itself is refused by its name and counted, and the planner's button asks once
 with a snapshot from before a turn and the route is read; a planner whose stops
 have no name its form posts them by names the stops typed into first in the
 prompt of its button and of Enter in a stop ("Sends: From, To, Day, Time"),
-never a field typed into in another form; and Ask mode asks for each choice, naming the option and the
+never a field typed into in another form or in none; and Ask mode asks for each choice, naming the option and the
 list, or the option alone for a list with no label. Last, other lists: one inside its own label is named by the label's own
 words, a car list with a "Swift" is no payment field, a list that holds several
 options is left to the person, an option past the first thousand is found, a
@@ -1856,10 +1856,17 @@ nothing was searched yet. A field's own suggestion is chosen by a click from a
 list that closes as its field loses focus and from one that draws its stops
 anew under the pointer, found again by the reading's record and clicked once;
 a stop the list no longer shows is not clicked, and the step answers with the
-field's suggestions as they read now. A ticket shop's controls with no name of
-their own are named by their row or card ("+ beside “Adult”") and highlighted
-by that name, while the same rows in a frame are named by the frame's site
-and none is listed or counted. The Personal
+field's suggestions as they read now; for a field that names no list of its
+own beside a "Sort by" list, it names no other list's options. A ticket shop's
+controls with no name of their own are named by their row or card ("+ beside
+“Adult”") and highlighted by that name, while the same rows in a frame are
+named by the frame's site and none is listed or counted. A row's words only
+tell its controls apart where they are named: reading steps in rows that speak
+of deleting, booking or saving go without a prompt, in Octo's own tab too; a
+pause on a booking's icon button under a line about cookies is the person's
+step; a key beside an icon button names no control, whole or in part; and a
+withheld page's controls are named without their rows' words, in its reading
+and in a step's words. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 

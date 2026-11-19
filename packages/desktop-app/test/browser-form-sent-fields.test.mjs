@@ -168,6 +168,22 @@ test("the fields a step typed into on the page come first, by their labels, whet
   }
 });
 
+test("a field typed into is named only for its own form, never for one it is not in", () => {
+  // Stops typed into fields that sit in no form, beside a sign-up form that
+  // posts only an e-mail address: its prompt said it sent the stops too.
+  const window = page(`
+    <label for="from">From</label><input id="from" role="combobox" value="Sao Bento">
+    <label for="to">To</label><input id="to" role="combobox" value="Trindade">
+    <form method="post" action="/newsletter">
+      <label for="mail">Your e-mail</label><input id="mail" name="mail" value="reader@example.test">
+      <button id="sign-up">Sign up</button>
+    </form>`);
+  const rules = window.eval(`(${formSubmission.formSubmissionRulesInPage.toString()})()`);
+  const byId = (id) => window.document.getElementById(id);
+  const answer = rules.sentFields(byId("sign-up"), false, ["from", "to", "mail"].map(byId));
+  assert.deepEqual({ names: [...answer.names], count: answer.count }, { names: ["Your e-mail"], count: 1 });
+});
+
 test("names come from the page's own words: aria names, a label's words without its controls, a placeholder", () => {
   const window = page(`
     <span id="mail-label">Your e-mail</span>

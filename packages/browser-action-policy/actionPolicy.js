@@ -752,7 +752,8 @@
    * is named by them, told apart the same way ("+ beside “Adult”"). Never
    * field values. An image text that is an address or an email address is
    * replaced by the icon noun, and words beside it or in its row that are
-   * one are not used.
+   * one, hold a value the redaction rules mask or are longer than 40
+   * characters are not used.
    */
   function unnamedControlName(hints) {
     const source = hints && typeof hints === "object" ? hints : {};
@@ -764,10 +765,15 @@
     if (tooltip) return tooltip;
     // Words of the page around it, quoted as where it sits, never as its own
     // name: the short text right beside it ("button next to “Idioma”"), and
-    // the first words of its row or card.
+    // the first words of its row or card. Whole or not at all: a key's first
+    // 40 characters are no value the redaction rules know. Never words that
+    // are an address, or that hold a value the redaction rules mask (a key, a
+    // code): the page's text masks one by the words around it ("Deploy
+    // key"), which a name quoting it does not carry.
     const words = (value) => {
-      const text = short(value, 40);
-      return text && /\p{L}/u.test(text) && !/@|:\/\/|^www\./i.test(text) ? text : "";
+      const text = nameText(value);
+      return text && Array.from(text).length <= 40 && /\p{L}/u.test(text) &&
+        !/@|:\/\/|^www\./i.test(text) && !looksKeyLike(text) ? text : "";
     };
     const nearby = words(source.nearby);
     const row = words(source.row);
@@ -881,7 +887,9 @@
     // shows words outside any control, the first of them in reading order,
     // when that element is small (a row or a card, not the page). Never a
     // control's own words, nor a field's value. At most `max` characters,
-    // cut between words; empty when there are none.
+    // cut between words, never inside one: empty when there are none, or
+    // when the first is longer (a key whose first 40 characters were read
+    // as a row's words, while the page's text masked the key).
     const ROW_MAX_CHARS = 400;
     const rowTextOf = (element, max = 40) => {
       if (!isElement(element)) return "";
@@ -918,9 +926,8 @@
         const words = firstWords(node);
         if (!words) continue;
         if (words.length <= max) return words;
-        const cut = words.slice(0, max + 1);
-        const end = cut.lastIndexOf(" ");
-        return end > 0 ? cut.slice(0, end) : words.slice(0, max);
+        const end = words.slice(0, max + 1).lastIndexOf(" ");
+        return end > 0 ? words.slice(0, end) : "";
       }
       return "";
     };

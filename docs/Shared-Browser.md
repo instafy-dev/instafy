@@ -617,8 +617,8 @@ values ("Sends: Customer name, Telephone, E-mail address"). The fields typed
 into on that page come first, by their labels, whether the form's own post
 sends them or a script of the page does: a planner's stops often have no name
 attribute, and a prompt named only the planner's day and time fields while its
-script sent the stops. A field typed into in another form, or one the page has
-emptied since, is not named. Every field is named
+script sent the stops. A field typed into in another form or in none, or one
+the page has emptied since, is not named. Every field is named
 while the prompt's label holds them (its 240 bytes, after the step's category,
 the tab's name and the control's), whole, since the prompt wraps. The page
 names a form's first 24 fields and counts the rest, so a form that sends more
@@ -802,7 +802,17 @@ has some, when that element holds at most 400 characters, never a field's
 value. A control whose own name is only marks ("+", "−", "×") keeps them and
 is told apart the same way ("+ beside “Adult”"). A ticket page's reading listed
 its rows' buttons as "unnamed button", none told apart, so the turn could
-neither highlight the one for a ticket nor name it. The text beside
+neither highlight the one for a ticket nor name it. The row's words only tell
+it apart where it is named (a reading, a prompt, a step's result, the action
+log): a step's checks read its name without them, so they never make a step
+ask, refuse it in Octo's own tab or make a pause a cookie notice's (a "+"
+beside "How do I delete my account?", a "×" over "Save 10% on your first
+order", a booking's icon button under a line about cookies). A withheld page's
+controls are named without them: they are the page's text. The text beside it
+and a row's words are used whole or not at all, never cut inside a word, and
+never when they are an address or hold a value the redaction rules mask: a key
+beside an icon button, which the page's text masks by the words around it,
+named the button by its first 40 characters. The text beside
 it names only what it sits next to, never the control itself. An inner
 element's label and the text beside it never set the step's category; like
 any name, their words can only make a routine step ask (the consequential
@@ -2259,10 +2269,15 @@ it, on a step nobody was asked about, is found again by its reading's record
 address; of alike ones, the one in its place among them) and clicked once. A
 step the person said yes to keeps to the control they were asked about. When
 an option of a field's suggestions is gone, nothing is clicked, and the step
-answers with the page as it is now and the field's suggestions as they read
-then: ""Central Station" was no longer in the list under "From" when the click
-came, so nothing was clicked. 2 suggestions under "From": "Harbour" (index 1),
-"Harbour (Metro)" (index 2). Click one.", or that the field shows none. A page
+answers with the page as it is now and the suggestions of a list the field
+names as its own as they read then: ""Central Station" was no longer in the
+list under "From" when the click came, so nothing was clicked. 2 suggestions
+under "From": "Harbour" (index 1), "Harbour (Metro)" (index 2). If the one
+wanted is among them, click it; otherwise type into "From" again." It never
+says to click one: a turn told to may choose a stop nobody asked for. For a
+field that names no list, or one that shows none, it says to type into the
+field again: with no record of the page before the step typed, every option
+on the page (a "Sort by" beside it) would read as that field's. A page
 that still reads as it did then, in the reading the step answers with too,
 says so in the step's `done`, and that this reading is the page as it is
 now: "The page still reads as it did before this step, 6 seconds after it:

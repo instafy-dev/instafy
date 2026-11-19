@@ -45,9 +45,10 @@
  *     counts `element` as filled. The fields a step typed into on the page
  *     (`typedFields`, and `element` when `typed`) come first, by their
  *     labels, whether the browser's own post sends them or a script of the
- *     page does: a planner's stops often have no name attribute. { names,
- *     count }: the first 24 names, and how many it sends in all, so a prompt
- *     never reads a longer form as complete.
+ *     page does: a planner's stops often have no name attribute. Only the
+ *     form's own: never one of another form, or of none. { names, count }:
+ *     the first 24 names, and how many it sends in all, so a prompt never
+ *     reads a longer form as complete.
  *
  * The rules, from the HTML form submission and implicit submission
  * algorithms, as Chromium runs them:
@@ -509,12 +510,13 @@
     // `typed` counts `element` as filled: a step that types into it and
     // submits fills it first. The fields a step typed into on the page come
     // first, by their labels, whether or not the browser's own post sends
-    // them (`typedFields`, and `element` when `typed`), unless they are
-    // another form's: a page's script reads its fields itself, and a
-    // planner's stops, with no name attribute, were left out of a prompt
-    // that named only its day and time fields. Then the rest, in tree order.
-    // None for a dialog submission, which sends nothing, and for an element
-    // with no form.
+    // them (`typedFields`, and `element` when `typed`), when they are this
+    // form's: a page's script reads its fields itself, and a planner's stops,
+    // with no name attribute, were left out of a prompt that named only its
+    // day and time fields. A field of another form, or of none, is never
+    // named for it: a newsletter's prompt said it sent the stops typed beside
+    // it. Then the rest, in tree order. None for a dialog submission, which
+    // sends nothing, and for an element with no form.
     function sentFields(element, typed, typedFields) {
       const none = { names: [], count: 0 };
       let submission = null;
@@ -549,9 +551,7 @@
         ...(Array.isArray(typedFields) ? typedFields.slice(0, MAX_FIELD_NAMES) : []),
       ];
       for (const field of typedHere.filter((field, index) => typedHere.indexOf(field) === index)) {
-        // One of another form goes with that form, not this one.
-        const owner = formOwnerOf(field);
-        if (owner && owner !== submission.form) continue;
+        if (formOwnerOf(field) !== submission.form) continue;
         if (!holdsText(field, typed === true && field === element)) continue;
         const name = fieldName(field, boxes);
         if (name) add(name);
