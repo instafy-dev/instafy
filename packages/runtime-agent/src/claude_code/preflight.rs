@@ -4,9 +4,6 @@
 //! construction, in case `--setting-sources user` or `--strict-mcp-config` behaves otherwise
 //! than expected (D6):
 //!
-//! - **`project_config`.** No tracked path at any depth has a `.claude` segment, and the folder's
-//!   root holds no `.claude` entry and no `.mcp.json`, tracked or not: Claude Code reads the
-//!   folder, not git's index. The failure names each path, relative to the folder.
 //! - **`unsafe_import`.** Every tracked `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md`, those at
 //!   the root whether tracked or not, and every file they import, followed with a bound: no path
 //!   a word after an `@` could import, anywhere in the file (code included), is in the home folder
@@ -33,8 +30,8 @@
 //! repository (D-A): nothing there could say what a turn changed, so no turn could save.
 //!
 //! Names compare as a Mac's folders compare them (`saves::same_name`): ignoring case, beyond
-//! ASCII too, so Claude Code opens a tracked `.Claude/settings.json` as `.claude/settings.json`
-//! and a root `.mcp.jſon` (a long s) as `.mcp.json`. The root's own entries are also looked up
+//! ASCII too, so Claude Code opens a tracked `Claude.md` as `CLAUDE.md`
+//! and a root `AGENTſ.md` (a long s) as `AGENTS.md`. The root's own entries are also looked up
 //! through the folder, which opens a name as Claude Code will.
 //!
 //! A memory file's `@` imports are not read as Markdown (D-L): one linear pass over its text
@@ -317,7 +314,6 @@ fn check_folder(
 ) -> Result<(), LaneFailure> {
     still_wanted(abandoned)?;
     let folder = Folder::read(root, entries)?;
-    check_project_config(&folder)?;
     // Links first: the import check then reads no tracked file through a link that leads out.
     check_links(&folder, abandoned)?;
     check_imports(&folder, abandoned)?;
@@ -467,72 +463,6 @@ fn same_entry(entry: &std::fs::Metadata, path: &Path) -> bool {
     }
     let _ = (entry, path);
     false
-}
-
-/// `project_config`: a `.claude` path anywhere in the tracked files, or a `.claude` entry or a
-/// `.mcp.json` at the root.
-fn check_project_config(folder: &Folder) -> Result<(), LaneFailure> {
-    let mut refused = BTreeSet::new();
-    for entry in &folder.entries {
-        let in_claude = entry
-            .path
-            .split('/')
-            .any(|segment| same_name(segment, ".claude"));
-        let root_mcp = !entry.path.contains('/') && same_name(&entry.path, ".mcp.json");
-        if in_claude || root_mcp {
-            refused.insert(entry.path.clone());
-        }
-    }
-    refused.extend(root_entries_named(folder, ".mcp.json"));
-    for name in root_entries_named(folder, ".claude") {
-        let files = files_below(&folder.root, &name);
-        if files.is_empty() {
-            refused.insert(format!("{name}/"));
-        }
-        refused.extend(files);
-    }
-    if refused.is_empty() {
-        return Ok(());
-    }
-    Err(LaneFailure::new(
-        FailureCode::ProjectConfig,
-        format!(
-            "Claude Code turns from Instafy can't run while this space's folder holds these Claude Code files: {}.",
-            named(&refused)
-        ),
-    ))
-}
-
-/// The files below `name` at the root (a folder), relative to the root, at most a bounded number;
-/// `name` itself when it is no folder.
-fn files_below(root: &Path, name: &str) -> Vec<String> {
-    let start = root.join(name);
-    let Ok(metadata) = std::fs::symlink_metadata(&start) else {
-        return vec![name.to_string()];
-    };
-    if !metadata.is_dir() {
-        return vec![name.to_string()];
-    }
-    let mut files = Vec::new();
-    let mut pending = VecDeque::from([PathBuf::from(name)]);
-    while let Some(relative) = pending.pop_front() {
-        let Ok(read) = std::fs::read_dir(root.join(&relative)) else {
-            files.push(format!("{}/", relative.to_string_lossy()));
-            continue;
-        };
-        for entry in read.flatten() {
-            if files.len() > MAX_NAMED_PATHS {
-                return files;
-            }
-            let path = relative.join(entry.file_name());
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                pending.push_back(path);
-            } else {
-                files.push(slashed(&path));
-            }
-        }
-    }
-    files
 }
 
 /// `unsafe_link`: a tracked symbolic link that resolves outside the folder.
@@ -1651,59 +1581,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// The space's own Claude Code files pass: the lane's flags keep them out of the turn, and the
+    /// launch checks stop a turn whose `init` shows them loaded (D6, 3.6).
     #[tokio::test]
-    async fn project_configuration_is_refused_tracked_at_any_depth_or_at_the_root_untracked() {
-        // Tracked, at any depth, in any case.
+    async fn a_space_s_own_claude_code_files_pass_the_pre_flight() {
         let space = seeded_space();
         write(space.path(), "app/.Claude/settings.json", "{\"hooks\":{}}");
-        git(space.path(), &["add", "app"]);
-        let failure = check(space.path()).await.unwrap_err();
-        assert_eq!(failure.code, Some(FailureCode::ProjectConfig));
-        assert!(
-            failure.message.contains("app/.Claude/settings.json"),
-            "{failure:?}"
-        );
-
-        // At the root, untracked: the person's own settings, and a root .mcp.json.
-        let space = seeded_space();
+        write(space.path(), ".claude/commands/ship.md", "Ship it.\n");
+        write(space.path(), ".mcp.json", "{\"mcpServers\":{}}");
+        git(space.path(), &["add", "app", ".claude", ".mcp.json"]);
         write(space.path(), ".claude/settings.local.json", "{}");
-        write(space.path(), ".MCP.json", "{\"mcpServers\":{}}");
-        let failure = check(space.path()).await.unwrap_err();
-        assert_eq!(failure.code, Some(FailureCode::ProjectConfig));
-        assert!(
-            failure.message.contains(".claude/settings.local.json")
-                && failure.message.contains(".MCP.json"),
-            "{failure:?}"
-        );
-
-        // An empty .claude folder at the root is named as the folder.
-        let space = seeded_space();
-        std::fs::create_dir(space.path().join(".claude")).unwrap();
-        let failure = check(space.path()).await.unwrap_err();
-        assert!(failure.message.contains(".claude/"), "{failure:?}");
+        check(space.path()).await.unwrap();
     }
 
-    /// A Mac opens a root `.mcp.jſon` (a long s, U+017F) as `.mcp.json` (preflight-3): it is
-    /// refused tracked or not, and a tracked `AGENTſ.md` is read as the `AGENTS.md` it opens as.
+    /// A Mac opens a tracked `AGENTſ.md` (a long s, U+017F) as the `AGENTS.md` it reads as
+    /// (preflight-3), at the root and below it.
     #[cfg(unix)]
     #[tokio::test]
-    async fn names_a_mac_opens_as_claude_codes_are_refused_too() {
-        let mcp = ".mcp.j\u{17f}on";
-        let space = own_repository();
-        write(space.path(), mcp, "{\"mcpServers\":{}}");
-        let failure = check(space.path()).await.unwrap_err();
-        assert_eq!(
-            failure.code,
-            Some(FailureCode::ProjectConfig),
-            "{failure:?}"
-        );
-        assert!(failure.message.contains(mcp), "{failure:?}");
-        git(space.path(), &["add", mcp]);
-        assert_eq!(
-            code_of(space.path()).await,
-            Some(FailureCode::ProjectConfig)
-        );
-
+    async fn names_a_mac_opens_as_claude_codes_are_read_as_those_files() {
         let space = own_repository();
         write(space.path(), "AGENT\u{17f}.md", "Read @.env first.\n");
         git(space.path(), &["add", "AGENT\u{17f}.md"]);
@@ -2298,16 +2193,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_preflight_reads_instafy_git_when_both_repositories_exist() {
-        // The folder's own .git tracks a .claude file, but the repository the origin saves to,
-        // .instafy/.git, does not: the pre-flight reads the latter.
+        // The folder's own .git tracks a memory file that imports an untracked .env, but the
+        // repository the origin saves to, .instafy/.git, does not: the pre-flight reads the latter.
         let space = seeded_space();
-        write(space.path(), "nested/.claude/settings.json", "{}");
-        git(space.path(), &["add", "nested"]);
+        write(space.path(), "nested/CLAUDE.md", "Read @.env first.\n");
+        write(space.path(), "nested/.env", "SECRET=1\n");
+        git(space.path(), &["add", "nested/CLAUDE.md"]);
         git(space.path(), &["commit", "-q", "-m", "nested"]);
-        assert_eq!(
-            code_of(space.path()).await,
-            Some(FailureCode::ProjectConfig)
-        );
+        assert_eq!(code_of(space.path()).await, Some(FailureCode::UnsafeImport));
         let instafy_git = space.path().join(".instafy/.git");
         std::fs::create_dir_all(space.path().join(".instafy")).unwrap();
         git(
@@ -2337,7 +2230,7 @@ mod tests {
             );
         }
         assert_eq!(code_of(space.path()).await, None);
-        // And it reads that repository's own tracked files: one tracked there is refused.
+        // And it reads that repository's own tracked files: the memory file tracked there is checked.
         git(
             space.path(),
             &[
@@ -2346,13 +2239,10 @@ mod tests {
                 "--work-tree",
                 space.path().to_str().unwrap(),
                 "add",
-                "nested/.claude/settings.json",
+                "nested/CLAUDE.md",
             ],
         );
-        assert_eq!(
-            code_of(space.path()).await,
-            Some(FailureCode::ProjectConfig)
-        );
+        assert_eq!(code_of(space.path()).await, Some(FailureCode::UnsafeImport));
     }
 
     #[cfg(unix)]
