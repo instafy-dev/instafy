@@ -3271,12 +3271,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     humanPeerContext: conversationHumanPeerContext,
     // The rail's AIs, so a reply stamped with the viewer's own Octo id is that Octo.
     rosterAgents: conversationRosterAgents,
-    // A recent page or a targeted search result cannot tell us who authored
-    // the older conversation. Never fetch extra history for cosmetic layout.
-    historyComplete: Boolean(activeConversationEntry) &&
+    // The newest page decides. Older pages fill with hidden progress rows, and
+    // one that loads with another author switches the layout then (see the
+    // resolver), so neither more pages on the server nor an older page on its
+    // way takes part. A targeted search window or a job thread is not this
+    // chat's own transcript. Never fetch extra history for cosmetic layout.
+    historyLoaded: Boolean(activeConversationEntry) &&
       activeConversationEntry?.visibility != null &&
-      hasResolvedRecentHistory && !hasMoreRecentHistory &&
-      !isRecentHistoryLoading && !recentHistoryError &&
+      hasResolvedRecentHistory && !recentHistoryError &&
       !messageTargetActive && !jobThread,
     messages: recentMessages,
     runAgentIdentityByRunId,
@@ -3288,9 +3290,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     conversationHumanPeerContext,
     conversationRosterAgents,
     currentUserId,
-    hasMoreRecentHistory,
     hasResolvedRecentHistory,
-    isRecentHistoryLoading,
     jobThread,
     messageTargetActive,
     recentHistoryError,
