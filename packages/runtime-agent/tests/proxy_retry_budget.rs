@@ -624,13 +624,10 @@ async fn responses(
         // So does an ordinary turn whose config asks for web search.
         "native_search_authorized" | "native_search_custom_provider" | "native_search_managed" => {
             if ordinal == 1 && offers_standalone_web_search(&body) {
-                // A managed run's search goes through the proxy's search bridge, which sends no
-                // query that looks like a key: the AI asks for one, and the room never names it.
-                let commands = if state.scenario == "native_search_managed" {
-                    json!({"search_query":[{"q":"local fixture source"},{"q":"password: hunter2"}]})
-                } else {
-                    json!({"search_query":[{"q":"local fixture source"}]})
-                };
+                // The AI asks for a query that looks like a key too. A managed run's search goes
+                // through the proxy's search bridge, which never sends it; a person's own login
+                // searches it as it is. Either way the room never names it.
+                let commands = json!({"search_query":[{"q":"local fixture source"},{"q":"password: hunter2"}]});
                 return sse(if offers_namespaced_tool(&body, "web", "run") {
                     json!({"type":"function_call", "call_id":"local-search",
                         "namespace":"web", "name":"run", "arguments":commands.to_string()})
@@ -1260,10 +1257,17 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
         );
     }
     // Each search the proxy answered is one search step in the room, with the words searched for
-    // and the page the search returned, and a turn that did not search has none.
+    // and the page the search returned, and a turn that did not search has none. A person's own
+    // login searched the key-like words too, and the page may answer them, so its step names only
+    // the words the query rules pass and lists no page.
     if has_native_search_grant(scenario) || scenario == "web_search_requested" {
         let steps: Vec<Value> =
             serde_json::from_slice(&fs::read(workspace.join(SEARCH_STEPS_FILE))?)?;
+        let pages = if managed_native_search_grant(scenario) {
+            json!([{"url": "https://example.invalid/source"}])
+        } else {
+            json!([])
+        };
         let expected: Vec<Value> = search_requests
             .iter()
             .map(|search| {
@@ -1275,7 +1279,7 @@ async fn run_scenario(scenario: &str, expected_requests: usize) -> Result<()> {
                 json!({
                     "id": "local-search", "type": "web_search",
                     "query": query, "queries": [query],
-                    "pages": [{"url": "https://example.invalid/source"}],
+                    "pages": pages,
                     "status": "completed",
                 })
             })

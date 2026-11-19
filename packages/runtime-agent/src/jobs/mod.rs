@@ -42676,6 +42676,101 @@ mod tests {
         }
     }
 
+    /// A person's own ChatGPT login searches the AI's words as they are, and nothing on the way
+    /// says which it searched. The chat stores the step's words only as the query rules a managed
+    /// search is sent by pass them, as it stores Instafy AI's: no e-mail address, long number or
+    /// key-like words, and when the rules held anything back, none of the pages that answered the
+    /// search. A search none of whose words pass ends as one that searched nothing: no step.
+    #[test]
+    fn an_own_login_search_is_stored_without_what_the_query_rules_hold_back() {
+        use crate::codex::CodexEventStreamAdapter;
+        use codex_protocol::protocol::Event;
+
+        let mut adapter = CodexEventStreamAdapter::default();
+        let mut events = Vec::new();
+        let page = json!({"type": "text_result", "url": "https://www.kobo.com/gb/en/p/kobo-clara-bw",
+                          "title": "Kobo Clara BW"});
+        for (call, action) in [
+            (
+                "search-1",
+                json!({"type": "search", "queries": [
+                    "kobo clara bw weight", "kobo clara bw price ana@example.com", "password: hunter2",
+                ]}),
+            ),
+            (
+                "search-2",
+                json!({"type": "search", "query": "ana@example.com +351 912 345 678"}),
+            ),
+            (
+                "search-3",
+                json!({"type": "search", "query": "kobo clara bw review"}),
+            ),
+        ] {
+            for event in [
+                json!({"type": "web_search_begin", "call_id": call}),
+                json!({
+                    "type": "web_search_end", "call_id": call, "query": "ignored",
+                    "action": action, "results": [page.clone()],
+                }),
+            ] {
+                events.extend(adapter.collect(&Event {
+                    id: "turn-1".into(),
+                    msg: serde_json::from_value(event).unwrap(),
+                }));
+            }
+        }
+        let messages = extract_codex_messages(&events);
+        let metadata = |index: usize| messages[index].metadata.clone().expect("metadata");
+        let steps: Vec<(&str, JsonValue)> = messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| (message.content.as_str(), metadata(index)["status"].clone()))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("Web search started", json!("in_progress")),
+                (
+                    "Web search completed: \"kobo clara bw weight · kobo clara bw price\"",
+                    json!("completed")
+                ),
+                ("Web search started", json!("in_progress")),
+                ("Web search searched nothing", json!("declined")),
+                ("Web search started", json!("in_progress")),
+                (
+                    "Web search completed: \"kobo clara bw review\"",
+                    json!("completed")
+                ),
+            ]
+        );
+        let first = metadata(1);
+        assert_eq!(first["itemId"], json!("search-1"));
+        assert_eq!(first["activity"]["count"], json!(2));
+        assert!(first.get("pages").is_none(), "{first}");
+        let stored = first.to_string();
+        for absent in ["ana@example.com", "hunter2", "kobo.com"] {
+            assert!(!stored.contains(absent), "{absent} in {stored}");
+        }
+        // Nothing of the second search's words passed: its step ends with none, and no label.
+        let nothing = metadata(3);
+        assert_eq!(nothing["itemId"], json!("search-2"));
+        for absent in ["activity", "query", "pages"] {
+            assert!(nothing.get(absent).is_none(), "{absent} in {nothing}");
+        }
+
+        // Words the rules pass whole keep the page that answered them.
+        assert_eq!(
+            metadata(5)["pages"],
+            json!([{"url": "https://www.kobo.com/gb/en/p/kobo-clara-bw", "title": "Kobo Clara BW"}])
+        );
+        let stored =
+            serde_json::to_string(&messages.iter().map(|m| &m.metadata).collect::<Vec<_>>())
+                .unwrap();
+        for absent in ["ana@example.com", "hunter2", "+351", "912 345", "ignored"] {
+            assert!(!stored.contains(absent), "{absent} in {stored}");
+        }
+    }
+
     /// A search step that failed reads as one that was tried, not as one that searched.
     #[test]
     fn a_failed_web_search_step_reads_as_tried() {

@@ -654,13 +654,22 @@ that ended.
 never says "searched the web" for it, and a search after it that found results is the one the line
 counts.
 
-Whose words the step shows depends on who searched. A person's own ChatGPT login searches the words
-the AI wrote, as they are, so those are the step's. For Instafy AI the proxy's search bridge says
+Whose words the step shows depends on who searched. For Instafy AI the proxy's search bridge says
 which queries it searched, as it sent them (`searched_queries` in the answer's `results`, which
 Codex never gives the model; see the proxy README), and the step shows those and counts them: it
-takes e-mail addresses and long numbers out of a query, does not send one that looks like a key, a
-repeat or more than 4, and runs no image or other command. A query it did not search, or whose
-search failed, is not shown, and a call it searched nothing for is no step.
+takes e-mail addresses, account numbers and long numbers out of a query, does not send one that
+looks like a key, a repeat or more than 4, and runs no image or other command. A query it did not
+search, or whose search failed, is not shown, and a call it searched nothing for is no step.
+
+A person's own ChatGPT login searches the words the AI wrote, as they are, on the person's own
+plan, and nothing on the way says which it searched. Those words can carry what the AI took from
+the conversation or the workspace, so the step shows them only as the bridge's query rules would
+have sent them (runtime-agent `search_query.rs`, held against the same cases as the proxy's): an
+e-mail address, an account number or a number of 9 or more digits is taken out, and words that
+look like a key or a password, are longer than 200 characters or have nothing left are not shown.
+The pages answered the words as they were searched, and a page found by an e-mail address can name
+its owner, so when the rules took anything out of a search's words or held any of them back, its
+step lists no pages. A search none of whose words pass is no step.
 
 An Instafy AI message runs at most 2 searches in all, or 8 when the person asks for deeper
 research, whichever of its jobs runs them: a team plan's lead and workers, and the build after the
