@@ -28,7 +28,7 @@ pub const NOT_READY_REASONS: [&str; 6] = [
 /// its failure message as `claudeCodeFailure` (2.6): the rows of 5.5's table above
 /// `claude_code_turn_not_allowed`, in its order. The controller leaves any other code off, and
 /// Studio words such a failure as one with no code.
-pub const RUNTIME_FAILURE_CODES: [&str; 15] = [
+pub const RUNTIME_FAILURE_CODES: [&str; 14] = [
     "not_signed_in",
     "plan_limit",
     "binary_missing",

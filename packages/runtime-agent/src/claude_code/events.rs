@@ -3281,19 +3281,19 @@ mod tests {
         kept_out["skills"] = json!(["deep-research"]);
         kept_out["agents"] = json!(["claude"]);
         kept_out["slash_commands"] = json!(["deep-research", "review"]);
-        assert!(check_init(&kept_out, &folder).is_ok());
+        assert!(check_init(&kept_out, &folder, ExecutionMode::Apply).is_ok());
         // The space's output style took effect.
         let mut styled = kept_out.clone();
         styled["output_style"] = json!("team-terse");
-        let error = check_init(&styled, &folder).unwrap_err();
+        let error = check_init(&styled, &folder, ExecutionMode::Apply).unwrap_err();
         assert!(error.contains("output style, team-terse"), "{error}");
-        assert!(check_later_init(&styled, &folder).is_err());
+        assert!(check_later_init(&styled, &folder, ExecutionMode::Apply).is_err());
         // Every skill, agent and command it defines loaded.
         let mut loaded = kept_out.clone();
         loaded["skills"] = json!(["deep-research", "team-review"]);
         loaded["agents"] = json!(["claude", "team-helper"]);
         loaded["slash_commands"] = json!(["deep-research", "team-review", "ship"]);
-        let error = check_init(&loaded, &folder).unwrap_err();
+        let error = check_init(&loaded, &folder, ExecutionMode::Apply).unwrap_err();
         assert!(
             error.contains("(ship, team-helper, team-review)"),
             "{error}"
@@ -3301,7 +3301,7 @@ mod tests {
         // One of them alone may be the person's own of the same name.
         let mut one = kept_out.clone();
         one["slash_commands"] = json!(["deep-research", "ship"]);
-        assert!(check_init(&one, &folder).is_ok());
+        assert!(check_init(&one, &folder, ExecutionMode::Apply).is_ok());
     }
 
     #[test]
@@ -3312,11 +3312,11 @@ mod tests {
         std::fs::write(folder.join(".claude/commands/ship.md"), "Ship it.\n").unwrap();
         let mut listed = init(&folder);
         listed["slash_commands"] = json!(["ship"]);
-        assert!(check_init(&listed, &folder).is_ok());
+        assert!(check_init(&listed, &folder, ExecutionMode::Apply).is_ok());
         // A space with no .claude folder names nothing.
         std::fs::remove_dir_all(folder.join(".claude")).unwrap();
         listed["output_style"] = json!("anything");
-        assert!(check_init(&listed, &folder).is_ok());
+        assert!(check_init(&listed, &folder, ExecutionMode::Apply).is_ok());
     }
 
     #[test]

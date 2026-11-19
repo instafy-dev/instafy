@@ -205,7 +205,7 @@ pub enum FailureCode {
 }
 
 impl FailureCode {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 14] = [
         Self::NotSignedIn,
         Self::PlanLimit,
         Self::BinaryMissing,
