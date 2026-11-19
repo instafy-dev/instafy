@@ -2454,6 +2454,27 @@ async fn an_automation_an_agents_job_made_never_runs_on_claude_code() -> anyhow:
             if let Some(thread) = thread {
                 assert!(lane.jobs_in(thread).await?.is_empty(), "a turn started");
             }
+            // Its owner saves it, as Studio's editor does, with no metadata:
+            // its words are theirs now, and it runs on Claude Code.
+            let (status, response) = lane
+                .harness
+                .call(
+                    "PATCH",
+                    format!("/automations/{automation}"),
+                    Some(&lane.owner()),
+                    Some(json!({ "name": "Made by an agent, saved by its owner" })),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "save: {status} {response}");
+            assert_eq!(
+                sql_one::<Option<JsonValue>>(
+                    lane.pool(),
+                    "select metadata -> 'madeByAnAgentsJob' from automations where id = $1",
+                    &[&automation],
+                )
+                .await?,
+                None
+            );
             Ok(())
         },
     )

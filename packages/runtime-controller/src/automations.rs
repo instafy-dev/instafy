@@ -792,8 +792,8 @@ async fn execute_automation_once(
             next_run_at,
             status_override,
             Some(AutomationLaunchFailure::minted(
-                "An agent made this automation, so it doesn't run on Claude Code. Open it and \
-                 save it yourself to run it there.",
+                "An agent made this automation, so it doesn't run on Claude Code. Open it in \
+                 Automations and save it yourself to run it there.",
                 CODE_CLAUDE_CODE_AGENT_MADE,
             )),
         )
@@ -2298,10 +2298,18 @@ async fn update_automation(
         None => existing_record.prompt_text.clone(),
     };
 
-    let metadata = match body.metadata {
+    let mut metadata = match body.metadata {
         Some(value) => normalize_metadata(Some(value))?,
         None => existing_record.metadata.clone(),
     };
+    // Its owner saving it themselves makes an agent's words theirs: the mark
+    // that keeps an automation an agent's job made off Claude Code goes, on
+    // any save of theirs, as Studio's editor makes it (crate::claude_code_lane).
+    if active_job.is_none() {
+        if let Some(map) = metadata.as_object_mut() {
+            map.remove(MADE_BY_AN_AGENTS_JOB_KEY);
+        }
+    }
 
     let schedule_kind = match body.schedule_kind.as_deref() {
         Some(raw) => normalize_schedule_kind(raw)?,
