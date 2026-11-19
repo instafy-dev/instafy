@@ -812,6 +812,12 @@ pub(crate) async fn agent_login(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
+    // A person's login admits a machine for them: serialize it with a
+    // membership change's fence for that person (see `runtime::revocation`).
+    if let Some(owner) = runtime::self_hosted_person_owner(&state, Some(runtime_owner)) {
+        runtime::share_runtime_owner_lock(&transaction, owner).await?;
+    }
+
     let project = load_project_record(&transaction, &project_id).await?;
 
     ensure_project_write_access(&transaction, &project, &auth_context, None).await?;

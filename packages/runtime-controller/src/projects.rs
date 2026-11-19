@@ -302,10 +302,10 @@ pub(crate) async fn resolve_scope(
 }
 
 pub(crate) async fn load_project_record(
-    transaction: &tokio_postgres::Transaction<'_>,
+    client: &impl tokio_postgres::GenericClient,
     project_id: &Uuid,
 ) -> Result<ProjectRecord, (StatusCode, Json<ApiError>)> {
-    let row = transaction
+    let row = client
         .query_typed_opt(
             "select id, org_id, name, sandbox_session_id, project_type, owner_user_id, status
              from projects
@@ -370,11 +370,57 @@ pub(crate) async fn ensure_project_not_deleted(
 }
 
 pub(crate) async fn resolve_effective_project_access(
-    transaction: &tokio_postgres::Transaction<'_>,
+    client: &impl tokio_postgres::GenericClient,
     project: &ProjectRecord,
     context: &RequestContext,
     session_id: Option<Uuid>,
 ) -> Result<ProjectAccess, (StatusCode, Json<ApiError>)> {
+    if let Some(access) = effective_project_access(client, project, context, session_id).await? {
+        return Ok(access);
+    }
+
+    if let Some(user_id) = context.user_id {
+        tracing::warn!(
+            project_id = %project.id,
+            org_id = ?project.org_id,
+            owner_user_id = ?project.owner_user_id,
+            request_user_id = %user_id,
+            session_id = ?session_id,
+            project_type = ?project.project_type,
+            "project access denied"
+        );
+    }
+
+    Err(forbidden("You do not have access to this project"))
+}
+
+/// Whether `user_id` can write `project` now, as their own unscoped sign-in
+/// could: what a private self-hosted runtime acting for them is held to.
+/// Unlike [`ensure_project_write_access`] it logs no denial, since the person
+/// made no request. A deleted space is still refused as not found.
+pub(crate) async fn user_may_write_project(
+    client: &impl tokio_postgres::GenericClient,
+    project: &ProjectRecord,
+    user_id: Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let context = RequestContext {
+        user_id: Some(user_id),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    Ok(effective_project_access(client, project, &context, None)
+        .await?
+        .is_some_and(|access| access.can_write()))
+}
+
+/// The access `context` has to `project`, or `None` when it has none at all.
+/// A deleted space, a scoped token and a request with no user are refused.
+async fn effective_project_access(
+    client: &impl tokio_postgres::GenericClient,
+    project: &ProjectRecord,
+    context: &RequestContext,
+    session_id: Option<Uuid>,
+) -> Result<Option<ProjectAccess>, (StatusCode, Json<ApiError>)> {
     if project
         ._status
         .as_deref()
@@ -385,7 +431,7 @@ pub(crate) async fn resolve_effective_project_access(
     }
 
     if context.is_service_role {
-        return Ok(ProjectAccess::owner());
+        return Ok(Some(ProjectAccess::owner()));
     }
 
     // A scoped token is a capability, not a project membership. Generic read
@@ -405,7 +451,7 @@ pub(crate) async fn resolve_effective_project_access(
                 (project.sandbox_session_id, session_id)
             {
                 if project_session == request_session {
-                    return Ok(ProjectAccess::builder());
+                    return Ok(Some(ProjectAccess::builder()));
                 }
             }
         }
@@ -417,13 +463,13 @@ pub(crate) async fn resolve_effective_project_access(
 
     if let Some(owner) = project.owner_user_id {
         if owner == user_id {
-            return Ok(ProjectAccess::owner());
+            return Ok(Some(ProjectAccess::owner()));
         }
     }
 
     let mut effective_access: Option<ProjectAccess> = None;
 
-    let project_membership = transaction
+    let project_membership = client
         .query_opt(
             "select role from project_memberships where project_id = $1 and user_id = $2 limit 1",
             &[&project.id, &user_id],
@@ -446,7 +492,7 @@ pub(crate) async fn resolve_effective_project_access(
     }
 
     if let Some(org_id) = project.org_id {
-        let membership = transaction
+        let membership = client
             .query_opt(
                 "select role from org_memberships where org_id = $1 and user_id = $2 limit 1",
                 &[&org_id, &user_id],
@@ -474,21 +520,7 @@ pub(crate) async fn resolve_effective_project_access(
         }
     }
 
-    if let Some(access) = effective_access {
-        return Ok(access);
-    }
-
-    tracing::warn!(
-        project_id = %project.id,
-        org_id = ?project.org_id,
-        owner_user_id = ?project.owner_user_id,
-        request_user_id = %user_id,
-        session_id = ?session_id,
-        project_type = ?project.project_type,
-        "project access denied"
-    );
-
-    Err(forbidden("You do not have access to this project"))
+    Ok(effective_access)
 }
 
 /// Prevents a project-scoped token from minting a child token with capabilities
@@ -528,16 +560,16 @@ pub(crate) fn ensure_scoped_project_match(
 }
 
 pub(crate) async fn ensure_project_read_access(
-    transaction: &tokio_postgres::Transaction<'_>,
+    client: &impl tokio_postgres::GenericClient,
     project: &ProjectRecord,
     context: &RequestContext,
     session_id: Option<Uuid>,
 ) -> Result<ProjectAccess, (StatusCode, Json<ApiError>)> {
-    resolve_effective_project_access(transaction, project, context, session_id).await
+    resolve_effective_project_access(client, project, context, session_id).await
 }
 
 pub(crate) async fn ensure_project_write_access(
-    transaction: &tokio_postgres::Transaction<'_>,
+    client: &impl tokio_postgres::GenericClient,
     project: &ProjectRecord,
     context: &RequestContext,
     session_id: Option<Uuid>,
@@ -547,7 +579,7 @@ pub(crate) async fn ensure_project_write_access(
             "Scoped access tokens cannot authorize project writes",
         ));
     }
-    let access = ensure_project_read_access(transaction, project, context, session_id).await?;
+    let access = ensure_project_read_access(client, project, context, session_id).await?;
     if !access.can_write() {
         return Err(forbidden("Read-only members cannot modify this project"));
     }
@@ -2614,6 +2646,15 @@ async fn update_project_member(
     if updated == 0 {
         return Err(not_found("project member not found"));
     }
+    // Made a viewer here and nowhere else: their machines in this space stop
+    // working now. A role that can still write rotates nothing.
+    crate::runtime::fence_runtimes_of_a_lost_writer(
+        &state,
+        &transaction,
+        user_id,
+        crate::runtime::MembershipChangeScope::Project(project_id),
+    )
+    .await?;
 
     let member = load_project_member(&transaction, &project_id, &user_id).await?;
 
@@ -2664,6 +2705,13 @@ async fn remove_project_member(
     if deleted == 0 {
         return Err(not_found("project member not found"));
     }
+    crate::runtime::fence_runtimes_of_a_lost_writer(
+        &state,
+        &transaction,
+        user_id,
+        crate::runtime::MembershipChangeScope::Project(project_id),
+    )
+    .await?;
 
     transaction.commit().await.map_err(|error| {
         internal_error(format!(
@@ -2992,6 +3040,15 @@ async fn update_org_member(
         )
         .await
         .map_err(|error| internal_error(format!("failed to update org membership: {error}")))?;
+    // Made a viewer of the team: their machines in the team's spaces they can
+    // no longer write stop working now.
+    crate::runtime::fence_runtimes_of_a_lost_writer(
+        &state,
+        &transaction,
+        user_id,
+        crate::runtime::MembershipChangeScope::Org(org_id),
+    )
+    .await?;
 
     let member = load_org_member(&transaction, &org_id, &user_id, None).await?;
     transaction.commit().await.map_err(|error| {
@@ -3048,6 +3105,13 @@ async fn remove_org_member(
         )
         .await
         .map_err(|error| internal_error(format!("failed to remove org membership: {error}")))?;
+    crate::runtime::fence_runtimes_of_a_lost_writer(
+        &state,
+        &transaction,
+        user_id,
+        crate::runtime::MembershipChangeScope::Org(org_id),
+    )
+    .await?;
 
     transaction.commit().await.map_err(|error| {
         internal_error(format!(

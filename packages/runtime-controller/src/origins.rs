@@ -416,8 +416,9 @@ struct ScopedGitMintContext {
 fn runtime_token_has_capability(claims: &AccessTokenClaims, capability: &str) -> bool {
     claims.scopes.iter().any(|scope| scope == capability)
         // Tokens minted before the dedicated machine capabilities shipped
-        // carried the complete compatibility baseline. Keep those live
-        // runtimes working until their short-lived tokens rotate.
+        // carried the complete compatibility baseline, and registration renews
+        // a token with the scopes it holds, so a runtime started on one keeps
+        // it: a token with the whole baseline holds every machine capability.
         || claims_have_scopes(claims, RUNTIME_TOKEN_DEFAULT_SCOPES)
 }
 
@@ -571,6 +572,24 @@ async fn authorize_runtime_capability_on(
         lease_released_at,
     ) {
         return Err(forbidden("runtime is not active"));
+    }
+    // The person a private machine acts for must still be able to write the
+    // space. After the deleted-space refusal, so a deleted space stays gone.
+    if !provider_managed {
+        if let Some(owner) = crate::runtime::self_hosted_person_owner(
+            state,
+            crate::runtime::self_hosted_owner_user_id(&capabilities),
+        ) {
+            let project = load_project_record(connection, project_id).await?;
+            if project
+                ._status
+                .as_deref()
+                .is_some_and(|status| status.eq_ignore_ascii_case("deleted"))
+            {
+                return Err(space_deleted(StatusCode::GONE));
+            }
+            crate::runtime::ensure_self_hosted_owner_may_write(connection, &project, owner).await?;
+        }
     }
 
     Ok(RuntimeCapabilityContext {

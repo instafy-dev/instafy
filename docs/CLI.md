@@ -374,6 +374,7 @@ that runtime child-process credential, even if it is explicitly supplied.
 
 - When `--access-token` (or `INSTAFY_ACCESS_TOKEN`) is provided and `--runtime-token` is not, the CLI mints a **runtime access token** via `POST /projects/:spaceId/runtime/token`.
 - The minted token is exported to the runtime as `RUNTIME_ACCESS_TOKEN` and mirrored to `ORIGIN_INTERNAL_TOKEN` for the bundled origin server.
+- Each registration renews the runtime token for the same person with the scopes it already holds, never more: a token minted with `instafy runtime token --scope` stays that narrow, and gains another scope only from a new mint. A token that keeps every `agent.*` and `origin.*` scope, `git.read` and `git.write` still mints Git tokens and reads workspace leases, as one minted before `git.token.mint` and `workspace.lease.read` existed does; leave out one of those to withhold them. Renewal ends when that person can no longer write the space, and a stop with their own sign-in, a removal of the runtime or a member change that takes their write access ends the tokens a registered runtime holds, so the next start mints again. See [Self-hosted runtime security](Self-Hosted-Runtime-Security.md#immutable-private-ownership).
 
 Runtime/origin tokens require the server to be configured with the Ed25519 signing pair:
 
