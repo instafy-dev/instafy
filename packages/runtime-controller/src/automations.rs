@@ -305,17 +305,10 @@ fn normalize_schedule_kind(raw: &str) -> Result<String, (StatusCode, Json<ApiErr
     }
 }
 
-/// An automation's prompt metadata, as create and update store it. It never
-/// carries a claim to run on its person's own Claude Code: an automation is
-/// not a message its person typed (crate::claude_code_lane), and its runs
-/// would only be refused.
+/// An automation's prompt metadata, as create and update store it.
 fn normalize_metadata(raw: Option<JsonValue>) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
     match raw {
-        Some(JsonValue::Object(map)) => {
-            let metadata = JsonValue::Object(map);
-            crate::claude_code_lane::refuse_claim_outside_a_send(Some(&metadata), "automation")?;
-            Ok(metadata)
-        }
+        Some(JsonValue::Object(map)) => Ok(JsonValue::Object(map)),
         Some(_) => Err(bad_request("metadata must be a JSON object")),
         None => Ok(json!({})),
     }
@@ -767,118 +760,46 @@ async fn execute_automation_once(
 
     let runtime_mode = record.runtime_mode.trim().to_ascii_lowercase();
 
-    let runtime_id = match runtime_mode.as_str() {
-        "hosted" => {
-            let runtime_provider = record
-                .runtime_provider
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| state.provider_registry.default_provider_id());
-            let provider_is_self_hosted =
-                crate::runtime::provider_is_private_self_hosted_or_quarantined(
-                    state,
-                    &runtime_provider,
-                );
-            if !hosted_automation_provider_is_managed(&runtime_provider, provider_is_self_hosted) {
-                finalize_automation_attempt(
-                    state,
-                    record,
-                    now,
-                    next_run_at,
-                    status_override,
-                    Some(AutomationLaunchFailure::minted(
-                        "Hosted automations require a controller-managed runtime provider",
-                        CODE_HOSTED_PROVIDER_UNSUPPORTED,
-                    )),
-                )
-                .await?;
+    // A run whose every agent is a Claude Code agent needs no runtime of the
+    // space's: it waits for its person's own computer, so no runtime is picked
+    // or launched for it. While its last run still waits, a due run is
+    // skipped rather than piled up behind it (crate::claude_code_lane,
+    // docs/Local-Engine-Turns.md 11.7).
+    let runs_on_claude_code =
+        crate::dispatch::selects_only_claude_code_agents(state, record.user_id, &metadata).await?;
+    if runs_on_claude_code {
+        if let Some(conversation_id) = record.conversation_id {
+            if crate::claude_code_lane::a_turn_waits_in(state, &conversation_id, &record.user_id)
+                .await?
+            {
+                finalize_automation_attempt(state, record, now, next_run_at, status_override, None)
+                    .await?;
                 return Ok(());
             }
-            let response = crate::runtime::ensure_runtime_for_automation(
-                state,
-                record.project_id,
-                Some(runtime_provider),
-                None,
-                None,
-                None,
-                Some(json!({
-                    "source": "automation",
-                    "automation_id": record.id.to_string(),
-                })),
-            )
-            .await;
-            match response {
-                Ok(response) => match Uuid::from_str(&response.runtime_id) {
-                    Ok(runtime_id) => Some(runtime_id),
-                    Err(error) => {
-                        finalize_automation_attempt(
-                            state,
-                            record,
-                            now,
-                            next_run_at,
-                            status_override,
-                            Some(unusable_runtime_id_failure(&response.runtime_id, &error)),
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                },
-                Err((status, Json(api_error))) => {
-                    finalize_automation_attempt(
-                        state,
-                        record,
-                        now,
-                        next_run_at,
-                        status_override,
-                        Some(AutomationLaunchFailure::from_api_error(status, api_error)),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            }
         }
-        "auto" => {
-            let viable_runtime_id = match select_viable_runtime_id(
-                state,
-                record.project_id,
-                record.user_id,
-                record.runtime_provider.as_deref(),
-            )
-            .await
-            {
-                Ok(runtime_id) => runtime_id,
-                Err(error) => {
-                    finalize_automation_attempt(
-                        state,
-                        record,
-                        now,
-                        next_run_at,
-                        status_override,
-                        Some(AutomationLaunchFailure::minted(
-                            format!(
-                                "the controller could not check which machines are available: {error}"
-                            ),
-                            CODE_CONTROLLER_UNAVAILABLE,
-                        )),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-            if let Some(runtime_id) = viable_runtime_id {
-                Some(runtime_id)
-            } else {
-                let requested_provider = record
+    }
+
+    let runtime_id = if runs_on_claude_code {
+        None
+    } else {
+        match runtime_mode.as_str() {
+            "hosted" => {
+                let runtime_provider = record
                     .runtime_provider
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                let provider_is_self_hosted = requested_provider.is_some_and(|provider| {
-                    crate::runtime::provider_is_private_self_hosted_or_quarantined(state, provider)
-                });
-                if let Some(message) = no_live_self_hosted_runtime_error(provider_is_self_hosted) {
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| state.provider_registry.default_provider_id());
+                let provider_is_self_hosted =
+                    crate::runtime::provider_is_private_self_hosted_or_quarantined(
+                        state,
+                        &runtime_provider,
+                    );
+                if !hosted_automation_provider_is_managed(
+                    &runtime_provider,
+                    provider_is_self_hosted,
+                ) {
                     finalize_automation_attempt(
                         state,
                         record,
@@ -886,8 +807,8 @@ async fn execute_automation_once(
                         next_run_at,
                         status_override,
                         Some(AutomationLaunchFailure::minted(
-                            message,
-                            CODE_SELF_HOSTED_RUNTIME_OFFLINE,
+                            "Hosted automations require a controller-managed runtime provider",
+                            CODE_HOSTED_PROVIDER_UNSUPPORTED,
                         )),
                     )
                     .await?;
@@ -896,7 +817,7 @@ async fn execute_automation_once(
                 let response = crate::runtime::ensure_runtime_for_automation(
                     state,
                     record.project_id,
-                    record.runtime_provider.clone(),
+                    Some(runtime_provider),
                     None,
                     None,
                     None,
@@ -936,8 +857,110 @@ async fn execute_automation_once(
                     }
                 }
             }
+            "auto" => {
+                let viable_runtime_id = match select_viable_runtime_id(
+                    state,
+                    record.project_id,
+                    record.user_id,
+                    record.runtime_provider.as_deref(),
+                )
+                .await
+                {
+                    Ok(runtime_id) => runtime_id,
+                    Err(error) => {
+                        finalize_automation_attempt(
+                        state,
+                        record,
+                        now,
+                        next_run_at,
+                        status_override,
+                        Some(AutomationLaunchFailure::minted(
+                            format!(
+                                "the controller could not check which machines are available: {error}"
+                            ),
+                            CODE_CONTROLLER_UNAVAILABLE,
+                        )),
+                    )
+                    .await?;
+                        return Ok(());
+                    }
+                };
+                if let Some(runtime_id) = viable_runtime_id {
+                    Some(runtime_id)
+                } else {
+                    let requested_provider = record
+                        .runtime_provider
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    let provider_is_self_hosted = requested_provider.is_some_and(|provider| {
+                        crate::runtime::provider_is_private_self_hosted_or_quarantined(
+                            state, provider,
+                        )
+                    });
+                    if let Some(message) =
+                        no_live_self_hosted_runtime_error(provider_is_self_hosted)
+                    {
+                        finalize_automation_attempt(
+                            state,
+                            record,
+                            now,
+                            next_run_at,
+                            status_override,
+                            Some(AutomationLaunchFailure::minted(
+                                message,
+                                CODE_SELF_HOSTED_RUNTIME_OFFLINE,
+                            )),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    let response = crate::runtime::ensure_runtime_for_automation(
+                        state,
+                        record.project_id,
+                        record.runtime_provider.clone(),
+                        None,
+                        None,
+                        None,
+                        Some(json!({
+                            "source": "automation",
+                            "automation_id": record.id.to_string(),
+                        })),
+                    )
+                    .await;
+                    match response {
+                        Ok(response) => match Uuid::from_str(&response.runtime_id) {
+                            Ok(runtime_id) => Some(runtime_id),
+                            Err(error) => {
+                                finalize_automation_attempt(
+                                    state,
+                                    record,
+                                    now,
+                                    next_run_at,
+                                    status_override,
+                                    Some(unusable_runtime_id_failure(&response.runtime_id, &error)),
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        },
+                        Err((status, Json(api_error))) => {
+                            finalize_automation_attempt(
+                                state,
+                                record,
+                                now,
+                                next_run_at,
+                                status_override,
+                                Some(AutomationLaunchFailure::from_api_error(status, api_error)),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            _ => None,
         }
-        _ => None,
     };
 
     let mut request_metadata = metadata;

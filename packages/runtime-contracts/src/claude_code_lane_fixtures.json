@@ -1,5 +1,5 @@
 {
-  "_comment": "Local-engine turns (docs/Local-Engine-Turns.md): the codes the runtime writes, the controller keeps and Studio words, and one lane job's payload, named once. runtime-contracts (claude_code_lane.rs) checks NOT_READY_REASONS, RUNTIME_FAILURE_CODES and STOP_AND_SWEEP_FAILURE_CODES against notReadyReasons, runtimeFailureCodes and stopAndSweepFailureCodes. The controller keeps the first two as its own lists (runtime/register.rs, claude_code_lane.rs) and checks its stop and sweep codes against the third (claude_code_lane.rs, runtime/sweeps.rs); runtime-agent checks NotReadyReason and FailureCode (claude_code/mod.rs); Studio checks runtimes.ts, claudeCodeCopy.ts and claudeCodeTurnPresentation.ts. laneJobPayload is the payload agent::build_agent_job_payload writes for an admitted lane turn, the first in its chat: the controller's test a_lane_job_payload_is_the_one_runtime_contracts_records builds it the way dispatch does and compares, and runtime-agent's lane tests run it through LaneJob::of (claude_code/job.rs). Its ids are placeholders: <project_id>, <user_id> (the sender), <conversation_id>, <prompt_id>, <run_id>, <agent_id> (the sender's own @octo) and <runtime_id> (the computer the turn was admitted on).",
+  "_comment": "Local-engine turns (docs/Local-Engine-Turns.md): the codes the runtime writes, the controller keeps and Studio words, and one lane job's payload, named once. runtime-contracts (claude_code_lane.rs) checks NOT_READY_REASONS, RUNTIME_FAILURE_CODES and STOP_AND_SWEEP_FAILURE_CODES against notReadyReasons, runtimeFailureCodes and stopAndSweepFailureCodes. The controller keeps the first two as its own lists (runtime/register.rs, claude_code_lane.rs) and checks its stop and sweep codes against the third (claude_code_lane.rs, runtime/sweeps.rs); runtime-agent checks NotReadyReason and FailureCode (claude_code/mod.rs); Studio checks runtimes.ts, claudeCodeCopy.ts and claudeCodeTurnPresentation.ts. laneJobPayload is the payload dispatch writes for a turn of an agent whose AI is Claude Code, the first in its chat: the controller's test a_lane_job_payload_is_the_one_runtime_contracts_records dispatches it to the sender's own @octo set to Claude Code and compares, and runtime-agent's lane tests run it through LaneJob::of (claude_code/job.rs). Its ids are placeholders: <project_id>, <user_id> (the sender), <conversation_id>, <prompt_id>, <run_id> and <agent_id> (the sender's own @octo). It names no runtime: a send whose every agent uses Claude Code has none until one of its person's computers leases its turn.",
   "notReadyReasons": [
     "binary_missing",
     "binary_unsafe",
@@ -62,11 +62,6 @@
         "source": "dispatch"
       },
       "conversationVisibility": "public",
-      "runtimePreference": {
-        "runtimeId": "<runtime_id>",
-        "source": "conversation",
-        "updatedAt": "2026-11-13T16:41:07.512345+00:00"
-      },
       "input": { "kind": "person" },
       "writeIntent": true,
       "claudeCode": { "version": 1 },

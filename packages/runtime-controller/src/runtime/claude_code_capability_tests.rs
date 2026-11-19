@@ -8,15 +8,20 @@
 //!   fields, and its renewal carries the scope forward; it drops it for hosted,
 //!   service-owned and unscoped runtimes;
 //! - the status route shows `claudeCode` only to the runtime's owner while the
-//!   switch covers them, and `claudeCodeLane` only to a viewer it covers.
+//!   switch covers them, and `claudeCodeLane` only to a viewer it covers;
+//! - a not-ready capability's `resetsAt`, when a Claude plan's limit resets
+//!   (11.11), is attested and shown only while not ready, as an RFC 3339 time
+//!   at most eight days ahead, in UTC to the second.
 //!
-//! Requires `TEST_DATABASE_URL` like the tests in `tests.rs`.
+//! Requires `TEST_DATABASE_URL` like the tests in `tests.rs`, apart from the
+//! plain `#[test]`s.
 
 use std::future::Future;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use axum::Router;
+use chrono::{Duration, FixedOffset, SecondsFormat, Utc};
 use serde_json::{json, Value as JsonValue};
 use tokio_postgres::types::Json as PgJson;
 use tower::ServiceExt;
@@ -737,6 +742,155 @@ async fn status_shows_claude_code_only_to_its_owner_with_the_switch_on() -> anyh
             assert!(status.get("claudeCodeLane").is_none(), "{status}");
             assert!(entry(&status, owner_desktop).is_some());
             assert_no_claude_code(&status, "an empty switch");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A not-ready capability's `resetsAt` (docs/Local-Engine-Turns.md 11.11) is
+/// kept only as an RFC 3339 time at most eight days ahead, written again in
+/// UTC to the second; a ready capability keeps none, and anything else is
+/// left off while the rest of the capability stays.
+#[test]
+fn a_reset_time_is_kept_only_while_not_ready_and_at_most_eight_days_ahead() {
+    let reset_of = |ready: bool, resets_at: JsonValue| {
+        super::ClaudeCodeCapability::from_reported(&json!({
+            "version": 1,
+            "ready": ready,
+            "resetsAt": resets_at,
+        }))
+        .expect("a capability")
+        .resets_at
+    };
+    let in_two_hours = Utc::now() + Duration::hours(2);
+    let utc = in_two_hours.to_rfc3339_opts(SecondsFormat::Secs, true);
+    // Written in another offset, to the millisecond, or with spaces around.
+    let elsewhere = in_two_hours
+        .with_timezone(&FixedOffset::east_opt(5 * 3600 + 1800).expect("an offset"))
+        .to_rfc3339_opts(SecondsFormat::Millis, false);
+    for written in [elsewhere, utc.clone(), format!(" {utc} ")] {
+        assert_eq!(
+            reset_of(false, json!(written)),
+            Some(utc.clone()),
+            "{written}"
+        );
+    }
+    let in_a_week = (Utc::now() + Duration::days(7) + Duration::hours(23))
+        .to_rfc3339_opts(SecondsFormat::Secs, true);
+    assert_eq!(reset_of(false, json!(in_a_week)), Some(in_a_week.clone()));
+    // A ready capability keeps none.
+    assert_eq!(reset_of(true, json!(utc)), None);
+    // Too far ahead, or no RFC 3339 time.
+    for resets_at in [
+        json!((Utc::now() + Duration::days(8) + Duration::minutes(5)).to_rfc3339()),
+        json!("tomorrow"),
+        json!("2026-11-20"),
+        json!("2026-11-20T10:00:00"),
+        json!(1_800_000_000),
+        json!({ "at": utc }),
+        JsonValue::Null,
+    ] {
+        assert_eq!(reset_of(false, resets_at.clone()), None, "{resets_at}");
+    }
+    let capability = super::ClaudeCodeCapability::from_reported(&json!({
+        "version": 1,
+        "ready": false,
+        "reason": "probe_failed",
+        "resetsAt": "tomorrow",
+    }))
+    .expect("a capability without its reset time");
+    assert_eq!(
+        (capability.ready, capability.reason, capability.resets_at),
+        (false, Some("probe_failed"), None)
+    );
+}
+
+/// Registration attests a not-ready capability's `resetsAt` beside its other
+/// fields, in UTC to the second, and the owner's status entry shows it
+/// (docs/Local-Engine-Turns.md 11.11). Once the runtime reports ready again,
+/// neither keeps one, whatever its report still says, and the status entry
+/// has no `resetsAt`.
+#[tokio::test]
+async fn a_plan_limits_reset_time_is_attested_and_shown_only_while_not_ready() -> anyhow::Result<()>
+{
+    with_space(
+        "claude-code-resets-at",
+        |config, people| {
+            config.claude_code_lane =
+                ClaudeCodeLaneUsers(DeviceGrantUsers::Only(vec![people.owner]));
+        },
+        |space| async move {
+            let owner = space.person_token(space.people.owner)?;
+            let (status, minted) = space
+                .mint(&owner, json!({ "localEngine": "claude-code" }))
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{minted}");
+            let desktop: Uuid = minted["runtimeId"]
+                .as_str()
+                .expect("a machine mint names its runtime")
+                .parse()?;
+            let reset = Utc::now() + Duration::hours(3);
+            let attested_reset = reset.to_rfc3339_opts(SecondsFormat::Secs, true);
+            let (stored, renewed) = space
+                .register(
+                    minted["token"].as_str().expect("token"),
+                    desktop,
+                    "self-hosted",
+                    json!({
+                        "version": 1,
+                        "ready": false,
+                        "cli": "2.1.314",
+                        "verified": true,
+                        "planSignIn": true,
+                        "resetsAt": reset
+                            .with_timezone(&FixedOffset::west_opt(5 * 3600).expect("an offset"))
+                            .to_rfc3339(),
+                    }),
+                )
+                .await?;
+            assert_eq!(
+                stored["claudeCode"],
+                json!({
+                    "version": 1,
+                    "ready": false,
+                    "cli": "2.1.314",
+                    "verified": true,
+                    "planSignIn": true,
+                    "resetsAt": attested_reset,
+                })
+            );
+            let status = space.status(&owner).await?;
+            assert_eq!(
+                entry(&status, desktop).expect("the owner's desktop")["claudeCode"],
+                json!({
+                    "ready": false,
+                    "reason": null,
+                    "cli": "2.1.314",
+                    "verified": true,
+                    "planSignIn": true,
+                    "resetsAt": attested_reset,
+                })
+            );
+
+            // Ready again, though its report still names a reset time.
+            let mut report = ready_report();
+            report["resetsAt"] = json!(attested_reset);
+            let (stored, _) = space
+                .register(&renewed, desktop, "self-hosted", report)
+                .await?;
+            assert_eq!(stored["claudeCode"], ready_attested());
+            let status = space.status(&owner).await?;
+            assert_eq!(
+                entry(&status, desktop).expect("the owner's desktop")["claudeCode"],
+                json!({
+                    "ready": true,
+                    "reason": null,
+                    "cli": "2.1.314",
+                    "verified": true,
+                    "planSignIn": true,
+                })
+            );
             Ok(())
         },
     )

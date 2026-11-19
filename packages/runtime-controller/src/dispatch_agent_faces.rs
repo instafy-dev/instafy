@@ -452,6 +452,7 @@ mod tests {
             display_name: None,
             description: None,
             avatar_seed: None,
+            claude_code: false,
         }
     }
 

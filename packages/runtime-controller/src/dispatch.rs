@@ -42,7 +42,7 @@ const DEFAULT_PROMPT_PRIORITY: i32 = 100;
 pub(crate) const EXECUTION_MODE_APPLY: &str = "apply";
 const EXECUTION_MODE_APPROVAL: &str = "approval_required";
 const EXECUTION_MODE_PLAN_ONLY: &str = "plan_only";
-const WORKSPACE_MODE_SHARED_READ: &str = "shared_read";
+pub(crate) const WORKSPACE_MODE_SHARED_READ: &str = "shared_read";
 pub(crate) const WORKSPACE_MODE_SHARED_WRITE: &str = "shared_write";
 const WORKSPACE_MODE_ISOLATED_WRITE: &str = "isolated_write";
 const SHARED_BROWSER_CONSENT_VERSION: u64 = 1;
@@ -230,6 +230,10 @@ struct AgentTarget {
     display_name: Option<String>,
     description: Option<String>,
     avatar_seed: Option<String>,
+    /// The agent's owner chose Claude Code as its AI (crate::claude_code_lane):
+    /// its turn runs on their own computer, with no credential and no runtime
+    /// pin, and is never Instafy AI.
+    claude_code: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -285,10 +289,10 @@ pub(crate) struct DispatchPromptNormalized {
     /// The device grants its one job holds. Set only by dispatch itself
     /// ([`crate::device_grants::grants_for_dispatch`]).
     pub(crate) grant_ids: Vec<Uuid>,
-    /// Its one job runs on its sender's own Claude Code, on this admitted
-    /// runtime (`agent_jobs.engine`). Set only by dispatch itself, when
-    /// [`crate::claude_code_lane::admit`] admits the turn, never from a
-    /// request body.
+    /// Its job runs on its person's own Claude Code (`agent_jobs.engine`).
+    /// Set only by dispatch itself, never from a request body: on a target's
+    /// own copy when that target is a Claude Code agent, and on the dispatch's
+    /// request when every target is one ([`crate::claude_code_lane`]).
     pub(crate) claude_code_lane: Option<crate::claude_code_lane::LaneAdmission>,
 }
 
@@ -590,6 +594,34 @@ fn extract_agent_selection_handles(metadata: &JsonValue) -> Vec<String> {
     out
 }
 
+/// Whether every agent a dispatch with `metadata` reaches, for `user_id`, is
+/// a Claude Code agent (crate::claude_code_lane): its handles as dispatch
+/// resolves them, against that person's own saved agents. An automation asks
+/// before it picks a runtime, which such a run never needs (11.7).
+pub(crate) async fn selects_only_claude_code_agents(
+    state: &AppState,
+    user_id: Uuid,
+    metadata: &JsonValue,
+) -> anyhow::Result<bool> {
+    let handles = extract_agent_selection_handles(metadata);
+    let row = state
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*) filter (where provider = $3 and credential_id is null),
+                    count(*)
+               from user_agents
+              where user_id = $1
+                and lower(handle) = any($2::text[])
+                and deleted_at is null",
+            &[&user_id, &handles, &crate::claude_code_lane::PROVIDER],
+        )
+        .await?;
+    let (claude_code, saved): (i64, i64) = (row.get(0), row.get(1));
+    Ok(saved == handles.len() as i64 && claude_code == saved)
+}
+
 async fn resolve_agent_targets(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
@@ -606,6 +638,7 @@ async fn resolve_agent_targets(
         let mut display_name: Option<String> = None;
         let mut description: Option<String> = None;
         let mut avatar_seed: Option<String> = None;
+        let mut claude_code = false;
 
         if let Some(user_uuid) = user_id {
             let row = transaction
@@ -615,7 +648,8 @@ async fn resolve_agent_targets(
                             uaps.runtime_id as runtime_id,
                             ua.display_name as display_name,
                             ua.description as description,
-                            ua.avatar_seed as avatar_seed
+                            ua.avatar_seed as avatar_seed,
+                            ua.provider = $4 and ua.credential_id is null as claude_code
                      from user_agents ua
                      left join user_credentials uc
                        on uc.id = ua.credential_id
@@ -629,7 +663,12 @@ async fn resolve_agent_targets(
                        and lower(ua.handle) = lower($2)
                        and ua.deleted_at is null
                      limit 1",
-                    typed![&user_uuid, &handle, project_id],
+                    typed![
+                        &user_uuid,
+                        &handle,
+                        project_id,
+                        &crate::claude_code_lane::PROVIDER
+                    ],
                 )
                 .await
                 .map_err(|error| {
@@ -642,6 +681,7 @@ async fn resolve_agent_targets(
                 display_name = row.get("display_name");
                 description = row.get("description");
                 avatar_seed = Some(row.get("avatar_seed"));
+                claude_code = row.get::<_, Option<bool>>("claude_code").unwrap_or(false);
             }
         }
 
@@ -660,8 +700,16 @@ async fn resolve_agent_targets(
             avatar_seed = Some("octo".to_string());
         }
 
-        let resolved_credential_id =
-            credentials::usable_user_credential_id(credential_id.or(default_credential_id));
+        // A Claude Code agent takes no credential, not even the person's
+        // default one, and no runtime pin (crate::claude_code_lane).
+        let (resolved_credential_id, runtime_id) = if claude_code {
+            (None, None)
+        } else {
+            (
+                credentials::usable_user_credential_id(credential_id.or(default_credential_id)),
+                runtime_id,
+            )
+        };
         targets.push(AgentTarget {
             handle,
             agent_id,
@@ -670,6 +718,7 @@ async fn resolve_agent_targets(
             display_name,
             description,
             avatar_seed,
+            claude_code,
         });
     }
 
@@ -690,6 +739,7 @@ async fn resolve_agent_targets(
             display_name,
             description,
             avatar_seed: Some("octo".to_string()),
+            claude_code: false,
         });
     }
 
@@ -922,7 +972,9 @@ async fn platform_runs_on_private_self_hosted_runtimes(
     let mut privacy_by_runtime: HashMap<Uuid, (bool, bool)> = HashMap::new();
     let mut private_runs = Vec::new();
     for (run_id, target) in agent_runs {
-        if target.credential_id.is_some() {
+        // A Claude Code agent's run is no platform run: it waits for its
+        // person's own computer (crate::claude_code_lane).
+        if target.credential_id.is_some() || target.claude_code {
             continue;
         }
         let (runtime_id, spread_plan_parent) =
@@ -1010,6 +1062,55 @@ async fn skip_managed_ai_ambient_participant(
     if updated != 1 {
         return Err(internal_error(
             "skipped managed AI participant has no queued run",
+        ));
+    }
+    Ok(())
+}
+
+/// What a skipped Claude Code participant's run says (11.7).
+const CLAUDE_CODE_COMPUTER_AWAY_MESSAGE: &str =
+    "None of this person's computers could run Claude Code for this message, so their agent \
+     sat it out.";
+
+/// Close the already-inserted run of an ambient participant that is a Claude
+/// Code agent none of whose person's computers could take the evaluation now
+/// (crate::claude_code_lane, 11.7). It gets no job, and nothing is written to
+/// the conversation on the agent's behalf: the reason stays on the run.
+async fn skip_claude_code_ambient_participant(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    run_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let updated = transaction
+        .execute(
+            "update runs
+             set status = 'canceled',
+                 progress_stage = null,
+                 last_message = $3,
+                 metadata =
+                     (case
+                        when jsonb_typeof(metadata) = 'object' then metadata
+                        else '{}'::jsonb
+                      end)
+                     || $4::jsonb,
+                 updated_at = now()
+             where id = $1
+               and project_id = $2
+               and status = 'queued'",
+            &[
+                run_id,
+                project_id,
+                &CLAUDE_CODE_COMPUTER_AWAY_MESSAGE,
+                &crate::claude_code_lane::skipped_run_metadata(),
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to close skipped Claude Code run: {error}"))
+        })?;
+    if updated != 1 {
+        return Err(internal_error(
+            "skipped Claude Code participant has no queued run",
         ));
     }
     Ok(())
@@ -1127,25 +1228,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
         // the controller dispatches the team itself, as the service role.
         conversations::strip_client_plan_claims(&mut request.metadata);
     }
-    // "Run this on my own Claude Code" is the controller's to grant
-    // (crate::claude_code_lane): the claim is taken from every caller, the
-    // service role included, and never persisted, and the controller's own
-    // lane stamps never come from a client. A claimed send passes Stage 1 here
-    // or is refused before anything is written.
-    let lane_send = if crate::claude_code_lane::take_claim(&mut request.metadata)? {
-        Some(crate::claude_code_lane::check_sender(
-            &state.config,
-            context,
-            &mut request,
-            crate::claude_code_lane::TakenClaims {
-                site_intent: site_intent_claim.is_some(),
-                hand_back: hand_back_claim.is_some(),
-                automatic_retry: automatic_retry_claim.is_some(),
-            },
-        )?)
-    } else {
-        None
-    };
+    // Only the controller stamps a turn as run on its person's own Claude
+    // Code, writes its failure code and marks a skipped one
+    // (crate::claude_code_lane): no caller's copy survives, the service
+    // role's included.
+    crate::claude_code_lane::strip_client_marks(&mut request.metadata);
     // Browser control is bound to the runtime that owns the visible page.
     // Capture the caller's explicit runtime before project/conversation
     // preferences are considered so these requests can never drift to an
@@ -1404,11 +1491,6 @@ pub(crate) async fn process_dispatch_prompt_timed(
     )
     .await?
     {
-        // A claimed send is refused here rather than recorded as a message
-        // that started nothing.
-        if lane_send.is_some() {
-            return Err(crate::claude_code_lane::conversation_granted());
-        }
         let user_message = if existing_recorded_message.is_some()
             || should_suppress_dispatch_user_message(&request.metadata)
         {
@@ -1581,17 +1663,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     }
 
     // Goal authority depends on authenticated ingress and verified system-turn
-    // provenance, not just the person whose access an internal send uses. A
-    // lane turn is never bound, so it never becomes a goal's source.
-    if lane_send.is_none() {
-        crate::conversation_goals::bind_dispatch(
-            &transaction,
-            context,
-            &conversation,
-            &mut request,
-        )
+    // provenance, not just the person whose access an internal send uses.
+    crate::conversation_goals::bind_dispatch(&transaction, context, &conversation, &mut request)
         .await?;
-    }
 
     // An ambient multi-human turn dispatches to the default agent stamped with
     // the agent_evaluation marker; the agent's participation skill decides
@@ -1611,9 +1685,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
             has_repo_request: request.repo.is_some(),
             has_preview_request: request.requested_preview == Some(true),
             execution_mode: &request.execution_mode,
-            // A lane send, like a strict browser target, is never turned into
-            // an evaluation.
-            strict_browser_target: strict_browser_runtime_id.is_some() || lane_send.is_some(),
+            strict_browser_target: strict_browser_runtime_id.is_some(),
             authenticated_human: context.user_id.is_some() && !context.is_service_role,
             verified_custom_agent_mention,
         });
@@ -1880,48 +1952,46 @@ pub(crate) async fn process_dispatch_prompt_timed(
         && !metadata_allows_runtime_spread(&request.metadata)
         && !skill_mode_ambient_evaluation
         && request.plan_seed.is_none();
-    // Stage 2 of a claimed send (crate::claude_code_lane): admitted here, or
-    // refused before anything is written, a conversation this send inserted
-    // included. An admitted turn's one job runs on its sender's own computer,
-    // with no credential, no grant and no runtime preference of the chat's,
-    // and the runtime row admission loaded is the dispatch's strict record.
-    let (lane, strict_runtime_record) = match lane_send.as_ref() {
-        Some(send) => {
-            let targets = agent_targets
-                .iter()
-                .map(|target| crate::claude_code_lane::Target {
-                    handle: &target.handle,
-                    agent_id: target.agent_id,
-                })
-                .collect::<Vec<_>>();
-            let (admission, record) = crate::claude_code_lane::admit(
-                state,
-                &transaction,
-                &project.id,
-                &conversation,
+    // Each target that is a Claude Code agent passes L1-L3 here
+    // (crate::claude_code_lane, docs/Local-Engine-Turns.md 11.6), before
+    // anything is written: a target that cannot take this turn refuses the
+    // whole send, which never runs on another engine. A terminal command is
+    // no AI turn, and runs as it would for any agent.
+    if dispatch_requires_ai_access(&request.intent) {
+        let uses_browser = strict_browser_runtime_id.is_some()
+            || metadata_uses_personal_browser(&request.metadata)
+            || metadata_uses_shared_browser(&request.metadata);
+        for target in agent_targets.iter().filter(|target| target.claude_code) {
+            crate::claude_code_lane::check_target(
+                &state.config,
+                context,
                 &request,
-                send,
-                crate::claude_code_lane::Turn {
-                    plain_turn,
-                    skill_mode_ambient_evaluation,
-                    targets: &targets,
-                    recorded_earlier: existing_recorded_message.is_some(),
+                crate::claude_code_lane::Target {
+                    agent_id: target.agent_id,
+                    uses_browser,
                 },
-            )
-            .await?;
-            for target in agent_targets.iter_mut() {
-                target.credential_id = None;
-            }
-            request.runtime_id = Some(admission.runtime_id);
-            request.prefer_runtime = false;
-            crate::claude_code_lane::stamp(ensure_object(&mut request.metadata));
-            request.claude_code_lane = Some(admission);
-            (Some(admission), Some(record))
+            )?;
         }
-        None => (None, strict_browser_runtime_record),
-    };
+    } else {
+        for target in agent_targets.iter_mut() {
+            target.claude_code = false;
+        }
+    }
+    // A send whose every target is a Claude Code agent needs no runtime of
+    // the space's: its jobs wait for their person's own computer (11.7). It
+    // neither names nor prefers one, and the person's message and prompt
+    // carry the lane's stamps.
+    let all_claude_code =
+        !agent_targets.is_empty() && agent_targets.iter().all(|target| target.claude_code);
+    if all_claude_code {
+        request.runtime_id = None;
+        request.prefer_runtime = false;
+        crate::claude_code_lane::stamp(ensure_object(&mut request.metadata));
+        request.claude_code_lane = Some(crate::claude_code_lane::LaneAdmission);
+    }
+    let strict_runtime_record = strict_browser_runtime_record;
     request.grant_ids = match agent_targets.as_slice() {
-        [target] if plain_turn && lane.is_none() => {
+        [target] if plain_turn && !target.claude_code => {
             crate::device_grants::grants_for_dispatch(
                 &state.config,
                 &transaction,
@@ -1942,7 +2012,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
     let mut runtime_display_name = request.runtime_display_name.clone();
 
     let allow_runtime_spread = metadata_allows_runtime_spread(&request.metadata);
-    if runtime_id.is_none() && !allow_runtime_spread && lane.is_none() {
+    if runtime_id.is_none() && !allow_runtime_spread && !all_claude_code {
         if let Some(entry) = project_runtime_preference.as_ref() {
             if let Some(preference_id) = entry.runtime_id {
                 runtime_id = Some(preference_id);
@@ -1981,6 +2051,19 @@ pub(crate) async fn process_dispatch_prompt_timed(
         &agent_handles_for_scope,
         &prompt_segments,
     );
+    // A Claude Code agent's turn can be held to the whole space or to none of
+    // it: it runs read-only under a read-only scope (11.12). One that would
+    // own part of the space, or must coordinate its writes with other agents
+    // writing at once, is refused before anything is written
+    // (crate::claude_code_lane).
+    for (_, target) in agent_runs.iter().filter(|(_, target)| target.claude_code) {
+        if write_scope_plan
+            .get(&target.handle)
+            .is_some_and(|scope| !scope.is_unscoped_or_read_only())
+        {
+            return Err(crate::claude_code_lane::cannot_share_a_write_scope());
+        }
+    }
     let primary_run_id = agent_runs
         .first()
         .map(|(run_id, _)| *run_id)
@@ -2004,11 +2087,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
 
     for (run_id, target) in agent_runs.iter() {
         let mut run_request = request.clone();
-        // A lane turn's words are the recorded message's, whole.
-        if lane.is_none() {
-            apply_agent_prompt_segment(&mut run_request, &prompt_segments, target);
-        }
+        apply_agent_prompt_segment(&mut run_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut run_request.metadata, target);
+        if target.claude_code {
+            crate::claude_code_lane::stamp(ensure_object(&mut run_request.metadata));
+        }
         apply_agent_write_scope_metadata(
             &mut run_request.metadata,
             write_scope_plan.get(&target.handle),
@@ -2047,13 +2130,15 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // A natural reply can resolve pending worker questions only for one ordinary
     // human turn. Never race several independently routed agents or reinterpret
     // an explicitly addressed, browser, automation or controller-owned turn, or
-    // a lane turn, whose words go to the sender's own Claude Code alone.
+    // one a Claude Code agent takes, whose words go to its person's own Claude
+    // Code alone.
     if should_route_worker_input(
         &request,
         context,
         conversation.thread_kind.as_deref(),
         agent_runs.len(),
-        strict_browser_runtime_id.is_some() || lane_send.is_some(),
+        strict_browser_runtime_id.is_some()
+            || agent_runs.iter().any(|(_, target)| target.claude_code),
     ) {
         if let Some(message) = user_message.as_ref() {
             if let Some(snapshot) = crate::user_input_requests::routing::snapshot(
@@ -2122,9 +2207,13 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .or(selected_runtime_provider.as_deref())
         .unwrap_or(default_provider_id.as_str());
 
-    let runtime_record = if let Some(record) = strict_runtime_record {
-        // Exact browser targets, and a lane turn's runtime, were already
-        // validated under this transaction. Re-ensuring them with the
+    let runtime_record = if all_claude_code {
+        // Its jobs wait for their person's own computer: no runtime of the
+        // space is ensured, started or launched for them.
+        None
+    } else if let Some(record) = strict_runtime_record {
+        // Exact browser targets were already validated under this
+        // transaction. Re-ensuring them with the
         // project's default provider can both mutate the record and
         // misclassify a valid self-hosted Personal runtime as an unavailable
         // Instafy Cloud runtime.
@@ -2226,14 +2315,14 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // Terminal commands are executed directly by the selected runtime before
     // the Codex/provider lane is entered. They must remain usable when the
     // assistant is disabled or the user has not connected an AI credential,
-    // and must not consume an included-AI prompt or credit. A lane turn has no
-    // credential and is not Instafy AI either: it has no unpin, no private
-    // runtime refusal, no managed gate, reserve or daily count.
-    let platform_lane_ai_dispatch = lane.is_none()
-        && dispatch_requires_ai_access(&request.intent)
+    // and must not consume an included-AI prompt or credit. A Claude Code
+    // agent's target has no credential and is not Instafy AI either: it has
+    // no unpin, no private runtime refusal, no managed gate, reserve or daily
+    // count.
+    let platform_lane_ai_dispatch = dispatch_requires_ai_access(&request.intent)
         && agent_runs
             .iter()
-            .any(|(_, target)| target.credential_id.is_none());
+            .any(|(_, target)| target.credential_id.is_none() && !target.claude_code);
     let uses_managed_ai = platform_lane_ai_dispatch && !context.is_service_role;
 
     // The runtime alert below unpins this dispatch's queued jobs from its
@@ -2541,7 +2630,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 "failed to persist managed AI credit trace onto queued runs"
             );
         }
-    } else if lane.is_some() {
+    } else if all_claude_code {
         crate::claude_code_lane::stamp(ensure_object(&mut request.metadata));
     } else {
         let map = ensure_object(&mut request.metadata);
@@ -2564,15 +2653,26 @@ pub(crate) async fn process_dispatch_prompt_timed(
         split_run_ids_by_credential(&agent_runs)
     } else {
         (
-            agent_runs.iter().map(|(run_id, _)| *run_id).collect(),
+            agent_runs
+                .iter()
+                .filter(|(_, target)| !target.claude_code)
+                .map(|(run_id, _)| *run_id)
+                .collect(),
             Vec::new(),
         )
     };
+    // A Claude Code agent's run answers on its person's own Claude Code,
+    // whatever its siblings answer on.
+    let claude_code_run_ids: Vec<Uuid> = agent_runs
+        .iter()
+        .filter(|(_, target)| target.claude_code)
+        .map(|(run_id, _)| *run_id)
+        .collect();
     // Deferred skill-mode evaluations audit as managed access without a usage
     // mark: managedAiUsed flips to true (and the burn lands) only when the
     // run's first visible assistant message persists.
     let managed_ai_used_at_dispatch = uses_managed_ai && !skill_mode_ambient_evaluation;
-    let access_mode = if lane.is_some() {
+    let access_mode = if all_claude_code {
         crate::claude_code_lane::AI_ACCESS_MODE
     } else {
         ai_access_mode(uses_managed_ai)
@@ -2598,6 +2698,44 @@ pub(crate) async fn process_dispatch_prompt_timed(
         false,
     )
     .await?;
+    persist_run_ai_access_mode(
+        &transaction,
+        &claude_code_run_ids,
+        crate::claude_code_lane::AI_ACCESS_MODE,
+        false,
+    )
+    .await?;
+
+    // An ambient evaluation asks an agent whether to join in now. A Claude
+    // Code agent none of whose person's computers could take it now sits the
+    // message out: its run is closed, and it gets no job that would wait
+    // (crate::claude_code_lane, docs/Local-Engine-Turns.md 11.7).
+    let mut claude_code_skipped_runs: Vec<Uuid> = Vec::new();
+    if skill_mode_ambient_evaluation {
+        if let Some(person) = context.user_id {
+            let mut a_computer_is_ready: Option<bool> = None;
+            for (run_id, _) in agent_runs.iter().filter(|(_, target)| target.claude_code) {
+                let ready = match a_computer_is_ready {
+                    Some(ready) => ready,
+                    None => {
+                        let ready = crate::claude_code_lane::a_computer_is_ready(
+                            state,
+                            &transaction,
+                            &project.id,
+                            person,
+                        )
+                        .await?;
+                        a_computer_is_ready = Some(ready);
+                        ready
+                    }
+                };
+                if !ready {
+                    skip_claude_code_ambient_participant(&transaction, &project.id, run_id).await?;
+                    claude_code_skipped_runs.push(*run_id);
+                }
+            }
+        }
+    }
 
     let supports_provider_state = runtime_record
         .as_ref()
@@ -2619,16 +2757,17 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // agent's delivered turn can name the peers that are also evaluating it
     // (the wrapper excludes the agent itself). Job-payload-only: the persisted
     // human message keeps only the server-authored participation marker.
-    let is_managed_ai_skipped = |run_id: &Uuid| {
+    let is_skipped = |run_id: &Uuid| {
         managed_ai_skipped_runs
             .iter()
             .any(|(skipped, _)| skipped == run_id)
+            || claude_code_skipped_runs.contains(run_id)
     };
     let ambient_ai_participants = skill_mode_ambient_evaluation
         .then(|| {
             let evaluating_runs: Vec<(Uuid, AgentTarget)> = agent_runs
                 .iter()
-                .filter(|(run_id, _)| !is_managed_ai_skipped(run_id))
+                .filter(|(run_id, _)| !is_skipped(run_id))
                 .cloned()
                 .collect();
             build_ambient_ai_participants(&evaluating_runs)
@@ -2637,15 +2776,17 @@ pub(crate) async fn process_dispatch_prompt_timed(
 
     let mut research_dispatch_parent = None;
     for (run_id, target) in agent_runs.iter() {
-        if is_managed_ai_skipped(run_id) {
+        if is_skipped(run_id) {
             continue;
         }
         let mut agent_request = request.clone();
-        // A lane turn's words are the recorded message's, whole.
-        if lane.is_none() {
-            apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
-        }
+        apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut agent_request.metadata, target);
+        // Only this target's own copy says whether its job runs on its
+        // person's own Claude Code.
+        agent_request.claude_code_lane = target
+            .claude_code
+            .then_some(crate::claude_code_lane::LaneAdmission);
         // Job-payload-only, and never the sender's word for it.
         ensure_object(&mut agent_request.metadata).insert(
             CONVERSATION_VISIBILITY_KEY.to_string(),
@@ -2692,9 +2833,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 );
             }
         }
-        // A lane turn continues no worker and resumes no Codex thread: each
-        // engine resumes only its own state.
-        let input_source_job = if lane.is_some() {
+        // A Claude Code agent's turn continues no worker and resumes no Codex
+        // thread: each engine resumes only its own state.
+        let input_source_job = if target.claude_code {
             None
         } else {
             crate::multi_agent_plan::user_input::continuation_source_for_dispatch(
@@ -2715,26 +2856,24 @@ pub(crate) async fn process_dispatch_prompt_timed(
         // can cap. So each granted turn starts afresh from the history its
         // lease carries: its person's words and the granted turns' replies.
         let resumes_provider_thread =
-            lane.is_none() && supports_provider_state && agent_request.grant_ids.is_empty();
-        // A lane turn resumes only its own engine's session: its sender's,
-        // with this agent, in this conversation, on the computer it was
-        // admitted on (docs/Local-Engine-Turns.md 2.7).
-        let lane_session = match (lane, lane_send.as_ref(), request.conversation_id) {
-            (Some(admission), Some(send), Some(conversation_id)) => {
-                crate::claude_code_lane::load_session(
-                    &transaction,
-                    &project.id,
-                    &conversation_id,
-                    &send.sender,
-                    target.agent_id.as_ref(),
-                    &admission.runtime_id,
-                )
-                .await?
+            !target.claude_code && supports_provider_state && agent_request.grant_ids.is_empty();
+        // A Claude Code agent's turn resumes only its own engine's session:
+        // its person's, with this agent, in this conversation, on whichever of
+        // their computers holds it (docs/Local-Engine-Turns.md 11.9).
+        let provider_conversation_state = if target.claude_code {
+            match (context.user_id, request.conversation_id) {
+                (Some(person), Some(conversation_id)) => {
+                    crate::claude_code_lane::load_session(
+                        &transaction,
+                        &project.id,
+                        &conversation_id,
+                        &person,
+                        target.agent_id.as_ref(),
+                    )
+                    .await?
+                }
+                _ => None,
             }
-            _ => None,
-        };
-        let provider_conversation_state = if lane.is_some() {
-            lane_session
         } else if resumes_provider_thread {
             if let Some(conversation_id) = request.conversation_id {
                 load_provider_conversation_state_for_job(
@@ -2753,14 +2892,14 @@ pub(crate) async fn process_dispatch_prompt_timed(
         } else {
             None
         };
-        // A lane job is pinned to the runtime it was admitted on, as a
-        // browser job is to its explicit runtime: neither the agent's own
-        // per-project runtime nor spread metadata can move it.
-        let target_runtime_id = match lane {
-            Some(admission) => Some(admission.runtime_id),
-            None => {
-                target_runtime_for_agent_job(&agent_request.metadata, target.runtime_id, runtime_id)
-            }
+        // A Claude Code agent's job has no pin: it waits for one of its
+        // person's own computers in this space with Claude Code ready, and
+        // neither the agent's own per-project runtime nor spread metadata can
+        // move it (docs/Local-Engine-Turns.md 11.7).
+        let target_runtime_id = if target.claude_code {
+            None
+        } else {
+            target_runtime_for_agent_job(&agent_request.metadata, target.runtime_id, runtime_id)
         };
         ensure_runtime_target_owner(
             &state,
@@ -2772,8 +2911,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
             metadata_uses_personal_browser(&agent_request.metadata),
         )
         .await?;
-        let queued_runtime_id =
-            queued_job_runtime_id(target_runtime_id, target.credential_id, unpinned_runtime_id);
+        let queued_runtime_id = if target.claude_code {
+            None
+        } else {
+            queued_job_runtime_id(target_runtime_id, target.credential_id, unpinned_runtime_id)
+        };
         let research_parent_job_id = match agent_request.delegating_job_id {
             Some(parent) => Some(parent),
             None => {
@@ -2810,9 +2952,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
             // A credential-less AI job runs on the platform key, service-role
             // dispatches included, so it gets its platform job record here.
             // The waiver follows this dispatch's own ambient decision, never
-            // the job payload. A lane job runs on no Instafy key.
+            // the job payload. A Claude Code agent's job runs on no Instafy key.
             let platform_org_id = project.org_id.filter(|_| {
-                lane.is_none()
+                !target.claude_code
                     && dispatch_requires_ai_access(&request.intent)
                     && target.credential_id.is_none()
             });
@@ -2965,6 +3107,45 @@ pub(crate) async fn process_dispatch_prompt_timed(
             }),
         );
     }
+    for run_id in claude_code_skipped_runs.iter() {
+        let (event_session, run_payload) =
+            match runs::load_run_snapshot(&mut *connection, run_id).await {
+                Ok(Some(snapshot)) => (
+                    snapshot.session_id.or(request.session_id),
+                    runs::run_snapshot_to_json(&snapshot),
+                ),
+                Ok(None) => (request.session_id, JsonValue::Null),
+                Err((status, Json(api_error))) => {
+                    warn!(
+                        run_id = %run_id,
+                        status = status.as_u16(),
+                        error = %api_error.message,
+                        "failed to load skipped Claude Code run snapshot"
+                    );
+                    (request.session_id, JsonValue::Null)
+                }
+            };
+        publish_controller_event_with_conversation(
+            &state.events,
+            "run.completed",
+            Some(project.id),
+            event_session,
+            request.conversation_id,
+            Some(*run_id),
+            None,
+            json!({
+                "outcome": "canceled",
+                "finalStatus": "canceled",
+                "runStatus": "canceled",
+                "summary": CLAUDE_CODE_COMPUTER_AWAY_MESSAGE,
+                "errorMessage": null,
+                crate::claude_code_lane::SKIPPED_KEY: {
+                    "reason": crate::claude_code_lane::COMPUTER_AWAY,
+                },
+                "run": run_payload,
+            }),
+        );
+    }
 
     if request.conversation_is_new {
         let conversation_metadata = conversation
@@ -3015,7 +3196,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
     let mut runtime_alert_reason: Option<&'static str> = None;
     let mut runtime_alert_detail: Option<String> = None;
 
-    if let Some(record) = runtime_record.as_ref() {
+    if all_claude_code {
+        // Its jobs need no runtime of the space's: they wait for their
+        // person's own computer, which Studio words on each turn's row.
+    } else if let Some(record) = runtime_record.as_ref() {
         match workspace::fetch_runtime_candidate_with_client(&*connection, &project.id, &record.id)
             .await
         {
@@ -3056,11 +3240,11 @@ pub(crate) async fn process_dispatch_prompt_timed(
         let mut retargeted_job_ids: Vec<Uuid> = unpinned_job_ids.clone();
         let mut cleared_runtime_preference = false;
         let mut reconnect_metadata: Option<JsonValue> = None;
-        // A lane job, like a strict browser one, stays on its runtime: it is
-        // never unpinned, the preference is never cleared, and nothing is
-        // reconnected or launched for it.
-        let strict_runtime_id = strict_browser_runtime_id.or(lane.map(|lane| lane.runtime_id));
-        if should_retarget_unavailable_runtime(reason, strict_runtime_id) {
+        // A strict browser job stays on its runtime: it is never unpinned, the
+        // preference is never cleared, and nothing is reconnected or launched
+        // for it. A Claude Code agent's job has no pin to move (the update
+        // below also leaves out every job with an engine).
+        if should_retarget_unavailable_runtime(reason, strict_browser_runtime_id) {
             if let Some(target_runtime_id) = runtime_id {
                 for job_id in &job_ids {
                     match connection
@@ -3245,7 +3429,13 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 map.insert("reconnect".to_string(), reconnect);
             }
         }
-        let queued_run_ids: Vec<Uuid> = agent_runs.iter().map(|(run_id, _)| *run_id).collect();
+        // A Claude Code agent's run never used this runtime: its alert is not
+        // that run's.
+        let queued_run_ids: Vec<Uuid> = agent_runs
+            .iter()
+            .filter(|(_, target)| !target.claude_code)
+            .map(|(run_id, _)| *run_id)
+            .collect();
         if let Err(error) = persist_run_runtime_alert_metadata(
             &mut connection,
             &project.id,
@@ -5501,6 +5691,11 @@ fn split_run_ids_by_credential(agent_runs: &[(Uuid, AgentTarget)]) -> (Vec<Uuid>
     let mut platform_run_ids = Vec::new();
     let mut own_credential_run_ids = Vec::new();
     for (run_id, target) in agent_runs {
+        // A Claude Code agent's run is neither: it bills nothing of Instafy's
+        // or of a credential's account (crate::claude_code_lane).
+        if target.claude_code {
+            continue;
+        }
         if target.credential_id.is_none() {
             platform_run_ids.push(*run_id);
         } else {
@@ -6872,6 +7067,7 @@ mod tests {
             display_name: None,
             description: None,
             avatar_seed: Some("hatchling:3".to_string()),
+            claude_code: false,
         };
         // The controller's stamp replaces whatever `agent` the request carried.
         let mut metadata =
@@ -7832,6 +8028,7 @@ mod tests {
             display_name: None,
             description: None,
             avatar_seed: None,
+            claude_code: false,
         };
 
         apply_agent_prompt_segment(&mut normalized, &segments, &target);
@@ -7908,6 +8105,7 @@ mod tests {
             display_name: None,
             description: None,
             avatar_seed: None,
+            claude_code: false,
         };
         let (managed, own_key, other_managed) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let runs = vec![

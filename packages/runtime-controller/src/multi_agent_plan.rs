@@ -236,9 +236,15 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
         // runs platform AI jobs. They stay in the parent's workspace, so the
         // plan cannot run: the planning turn fails with the reason instead of
         // ending as if its workers were on their way.
+        // A plan that names a Claude Code agent among its workers is refused
+        // the same way, before any worker starts: a worker must keep to its
+        // write scope and report through Instafy's tools, which Claude Code
+        // cannot be held to (crate::claude_code_lane, 11.4).
         Err(error)
             if is_managed_ai_hosted_runtime_refusal(&error)
-                || error.1 .0.code.as_deref() == Some("multi_agent_plan_invalid") =>
+                || error.1 .0.code.as_deref() == Some("multi_agent_plan_invalid")
+                || error.1 .0.code.as_deref()
+                    == Some(crate::claude_code_lane::TURN_UNSUPPORTED) =>
         {
             // Dispatch validates capacity again in its transaction, so a
             // settings change after parsing is refused before workers commit.
@@ -248,7 +254,9 @@ pub(crate) async fn maybe_execute_multi_agent_plan_message(
                 .code
                 .as_deref()
                 .unwrap_or(MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE);
-            let reason = if code == "multi_agent_plan_invalid" {
+            let reason = if code == "multi_agent_plan_invalid"
+                || code == crate::claude_code_lane::TURN_UNSUPPORTED
+            {
                 error.1 .0.message.clone()
             } else {
                 format!("The plan's agents could not start. {}", error.1 .0.message)
