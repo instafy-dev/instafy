@@ -21,7 +21,7 @@ function message(overrides: Partial<ChatMessage>): ChatMessage {
   };
 }
 
-const UNSENT = message({ id: "local-2", metadata: { clientMessageId: "client-2", turnEngine: "claude-code" } });
+const UNSENT = message({ id: "local-2", metadata: { clientMessageId: "client-2" } });
 
 function stateWith(messages: ChatMessage[]): ConversationsState {
   const chat = { ...createInitialConversation({ localId: "chat" }), messages };
@@ -29,15 +29,16 @@ function stateWith(messages: ChatMessage[]): ConversationsState {
   return { projectKey: "project", conversations: [chat, other], activeId: chat.localId, sequence: 2, runMap: {} };
 }
 
-// docs/Local-Engine-Turns.md 5.5: a send the controller refused was never
-// recorded, so only this page's copy of the person's message goes.
+// docs/Local-Engine-Turns.md 11.6: a send the controller refused because a
+// turn engine can't take it was never recorded, so only this page's copy of
+// the person's message goes.
 describe("REMOVE_UNSENT_MESSAGE", () => {
   it("takes the person's unsent message out of that chat only, by its client id", () => {
     const earlier = message({ id: "server-1", metadata: { clientMessageId: "client-1" } });
     const refusal = message({
       id: "error-1",
       role: "assistant",
-      content: "Your computer is busy with another turn. Send this when it's done.",
+      content: "Claude Code can't take attachments yet. Send your message without them.",
       messageType: "error",
       metadata: { messageType: "error" },
     });

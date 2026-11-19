@@ -775,32 +775,34 @@ account that needs to be selected as default.
 
 In Instafy Desktop on macOS, and only for a person `CLAUDE_CODE_LANE_USER_IDS` covers (the space's
 runtime status carries `claudeCodeLane`), Connections also shows **Claude Code on this computer**
-after saved connections and before **Connect an account**: the status of local-engine turns on this
-computer ([Local-engine turns](Local-Engine-Turns.md)). Like the Instafy AI row it is not a
-connection; unlike it, it is never the default, has no Make default action and never appears in the
-connection chooser. It shows where Desktop found `claude` ("Found at …", a path shown only on this
-computer) or "Not found", with the actions **Find** (Desktop looks for `claude` from the person's
-login shell and the usual install folders), **Locate…** (a file picker), and **Use for my
-messages**, which opens Desktop's own consent dialog, or **Turn off** once it is on. While it is on,
-the path is always the one in use, and Locate… switches to the file picked at once, since the person
-chose it in a native picker. What the last Find or Locate… turned up shows as a second line: "Also
-found at …" with "Choose Use for my messages to use it instead." or why Desktop won't use that copy;
-"Find didn't turn up any other copy. Your messages keep using this one."; or, when the settings in
-use no longer pass and Find read ones that do, "Find read new settings from your login shell that
-Instafy Desktop can use with this copy. Choose Use for my messages to use them." That last line
-also shows for a copy the person located because their login shell's `claude` is an alias or a
-function, as long as Find turns up no other copy (a copy in the usual install folders shows as
-"Also found at …" instead, or with why Desktop won't use it). It never shows after a Find whose
-login shell gave no answer, such as one that timed out, and once the new settings are confirmed the
-second line again reads "Find didn't turn up any other copy. Your messages keep using this one."
-**Use for my messages** shows beside **Turn off** for a new copy or new settings Desktop can use,
-and confirms them through the consent dialog. A login-shell setting Desktop can't use is named, and
-Use for my messages refuses it without asking: "Your login shell sets CLAUDE_CONFIG_DIR to
-something Instafy Desktop can't use. It must be the full path of a folder that only you can change.
-Fix it, then choose Find." (for
-`NODE_EXTRA_CA_CERTS`, "of a file"). After an action Desktop refused, such as a change the person
-kept from being made with **Keep working** while a turn ran, the row reads the status again, so it
-never shows that change as made. Its sign-in line says "Runs on your own Claude plan, under
+after saved connections and before **Connect an account**: whether this computer can run the turns
+of the person's agents whose AI is Claude Code ([Local-engine turns](Local-Engine-Turns.md)). Like
+the Instafy AI row it is not a connection; unlike it, it is never the default, has no Make default
+action and never appears in the connection chooser. It shows where Desktop found `claude` ("Found
+at …", a path shown only on this computer) or "Not found", with the actions **Find** (Desktop looks
+for `claude` from the person's login shell and the usual install folders), **Locate…** (a file
+picker), and **Use Claude Code on this computer**, which opens Desktop's own consent dialog, or
+**Turn off** once it is on. While it is on it says "On. Your agents that use Claude Code take their
+turns here while this computer runs their space.", the path is always the one in use, and Locate…
+switches to the file picked at once, since the person chose it in a native picker. What the last
+Find or Locate… turned up shows as a second line: "Also found at …" with "Choose Use Claude Code on
+this computer to use it instead." or why Desktop won't use that copy; "Find didn't turn up any other
+copy, so this one stays in use."; or, when the settings in use no longer pass and Find read ones
+that do, "Find read new settings from your login shell that Instafy Desktop can use with this copy.
+Choose Use Claude Code on this computer to use them." That last line also shows for a copy the
+person located because their login shell's `claude` is an alias or a function, as long as Find turns
+up no other copy (a copy in the usual install folders shows as "Also found at …" instead, or with
+why Desktop won't use it). It never shows after a Find whose login shell gave no answer, such as one
+that timed out, and once the new settings are confirmed the second line again reads "Find didn't
+turn up any other copy, so this one stays in use." **Use Claude Code on this computer** shows beside
+**Turn off** for a new copy or new settings Desktop can use, and confirms them through the consent
+dialog. A login-shell setting Desktop can't use is named, and Use Claude Code on this computer
+refuses it without asking: "Your login shell sets CLAUDE_CONFIG_DIR to something Instafy Desktop
+can't use. It must be the full path of a folder that only you can change. Fix it, then choose
+Find." (for `NODE_EXTRA_CA_CERTS`, "of a file"). Turning it off leaves the agents' choice of Claude
+Code as it is: their turns wait for a computer where it is on. After an action Desktop refused, such
+as a change the person kept from being made with **Keep working** while a turn ran, the row reads
+the status again, so it never shows that change as made. Its sign-in line says "Runs on your own Claude plan, under
 Anthropic's current terms." only when this computer's Claude Code reports a Claude plan sign-in, and
 otherwise "Uses your own Claude Code sign-in, under Anthropic's current terms."; nothing on the row
 says included, free or unlimited, or mentions credits. Once it is on, the row says whether this
@@ -963,6 +965,19 @@ Bot creation and editing use the same `SettingsIdentityRow`, persistent fields a
 for a bot without a picture, then Handle and About. Keep provider, credential, model and
 Style guidance in a separate Bot behavior section. Changing a public profile must not pin or
 change inherited runtime defaults.
+
+For a person `CLAUDE_CODE_LANE_USER_IDS` covers (the open space's runtime status carries
+`claudeCodeLane`), the Provider choice of every agent, @octo included, also offers **Claude Code**
+after the providers of their connections ([Local-engine turns](Local-Engine-Turns.md)), and
+Instafy AI too when they have no connection. An agent that already uses Claude Code shows it
+whatever the status says. With Claude Code chosen the editor hides the credential and model, says
+"Runs on your own Claude Code, on your computer. Its turns wait while your computer is off.", and,
+in Instafy Desktop on a computer where Claude Code isn't set up, "Claude Code isn't set up on this
+computer yet. Set it up in Connections, under Claude Code on this computer." Saving sends
+`provider: "claude-code"` and nothing about a credential or model; going back sends the chosen
+connection, or no credential for Instafy AI. The agents list names the AI after the agent's name
+("Reviewer · Claude Code"), and so does the chat's participants drawer, in place of the model and
+reasoning.
 
 Bot pictures use the shared PNG/JPEG/WebP validation and 2 MB limit. Native file selection
 creates a local preview; Save profile uploads and then saves the URL. Cancel discards the

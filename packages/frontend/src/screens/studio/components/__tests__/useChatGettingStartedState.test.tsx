@@ -28,7 +28,6 @@ function baseOptions(overrides: Partial<HookOptions> = {}): HookOptions {
     isHistoryLoading: false,
     remoteHistoryPresenceResolved: true,
     runtimeControllerEnabled: true,
-    turnEngineChosen: false,
     ...overrides,
   };
 }
@@ -125,38 +124,6 @@ describe("useChatGettingStartedState", () => {
       );
     });
     expect(show()).toBe("true");
-  });
-
-  it("folds the card to its row while Claude Code is chosen for the next message, as it does over a draft", async () => {
-    await act(async () => {
-      root.render(<Harness options={baseOptions()} />);
-    });
-    expect(show()).toBe("true");
-    expect(collapsed()).toBe("false");
-
-    // The message goes to the person's own engine: the offer to connect an AI doesn't apply to it.
-    await act(async () => {
-      root.render(<Harness options={baseOptions({ turnEngineChosen: true })} />);
-    });
-    expect(show()).toBe("true");
-    expect(collapsed()).toBe("true");
-
-    // Dropping the choice opens the card again.
-    await act(async () => {
-      root.render(<Harness options={baseOptions({ turnEngineChosen: false })} />);
-    });
-    expect(collapsed()).toBe("false");
-    await act(async () => {
-      root.render(<Harness options={baseOptions({ turnEngineChosen: true })} />);
-    });
-    expect(collapsed()).toBe("true");
-
-    // Import asked for explicitly stays open over the chosen engine.
-    await act(async () => {
-      captured?.beginGithubImport();
-    });
-    expect(mode()).toBe("github");
-    expect(collapsed()).toBe("false");
   });
 
   it("keeps explicit GitHub import reachable from a human-only conversation", async () => {

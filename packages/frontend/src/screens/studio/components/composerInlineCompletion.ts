@@ -39,14 +39,8 @@ export function shouldRequestComposerInlineCompletion(params: {
   onboardingInputLocked: boolean;
   sendingAttachment: boolean;
   inlineCompletionEnabled: boolean;
-  /**
-   * An engine is chosen for the next message (a turn engine): the draft is
-   * what that engine gets, and nothing Instafy runs for such a turn sends it
-   * to a model (docs/Local-Engine-Turns.md 5.2, 7.2).
-   */
-  turnEnginePending: boolean;
 }): boolean {
-  if (!params.inlineCompletionEnabled || params.turnEnginePending) {
+  if (!params.inlineCompletionEnabled) {
     return false;
   }
   if (!params.projectId || !params.anyAgentsEnabled || !params.credentialsReady) {

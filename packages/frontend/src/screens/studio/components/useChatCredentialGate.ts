@@ -401,7 +401,7 @@ export function useChatCredentialGate({
       if (!isExpiredCredentialProxyError(candidate.content)) {
         continue;
       }
-      // A turn-engine turn ran on the sender's own engine, not on an AI
+      // A turn-engine turn ran on its person's own engine, not on an AI
       // connection of theirs, so its failure is not one to reconnect
       // (docs/Local-Engine-Turns.md 5.6).
       if (usesTurnEngine(candidate.metadata)) {

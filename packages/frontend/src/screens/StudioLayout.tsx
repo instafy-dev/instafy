@@ -135,6 +135,11 @@ import { useCreatePrivateConversation } from "./studio/hooks/useCreatePrivateCon
 import { useConversations } from "../conversations/ConversationsProvider";
 import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
+import {
+  canStartSpaceOnThisComputer,
+  describeDesktopSpaceStartOutcome,
+  startSpaceOnThisComputer,
+} from "../runtime/desktopSpaceStart";
 import { INSTAFY_CLI_URL } from "../config/externalLinks";
 import { isWorkspaceLoadingChats, resolveMobileOverviewSection, resolveTopbarLocation, resolveWorkspaceEmptyState, useStudioNavigationPosture, type TopbarLocation } from "./studio/useStudioNavigationPosture";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceTabsProvider";
@@ -2211,10 +2216,7 @@ function DesktopRuntimeHelpDialog() {
   const serverUrl =
     controllerClient.core.baseUrl || "http://127.0.0.1:8788";
   const cliCommand = `instafy runtime start --space ${activeProjectId ?? "<space-id>"} --server-url ${serverUrl} --supabase-access-token <your-supabase-token>`;
-  const canUseDesktopApp =
-    typeof window !== "undefined" &&
-    typeof window.instafyDesktop?.startDesktopRuntime === "function" &&
-    typeof window.instafyDesktop?.desktopRuntimeStatus === "function";
+  const canUseDesktopApp = canStartSpaceOnThisComputer();
 
   // The dialog otherwise only closes via its (x); Escape must work too.
   useEffect(() => {
@@ -2278,30 +2280,20 @@ function DesktopRuntimeHelpDialog() {
       showStatus("Select a space before starting it on this computer.", "error", 4000);
       return;
     }
-    if (!canUseDesktopApp || !window.instafyDesktop?.startDesktopRuntime) {
-      showStatus("Use Instafy Desktop to start this space on your computer.", "warning", 4500);
-      return;
-    }
     if (desktopRuntimeBusy) {
       return;
     }
 
     setDesktopRuntimeBusy(true);
     try {
-      const requestContext = await controllerClient.core.resolveRequestContext(null);
-      if (!requestContext.accessToken) {
-        showStatus("Sign in again to start this space on this computer.", "error", 4500);
+      // The same start as a waiting turn's Start (desktopSpaceStart.ts).
+      const outcome = await startSpaceOnThisComputer(activeProjectId);
+      const status = describeDesktopSpaceStartOutcome(outcome);
+      showStatus(status.message, status.intent, status.durationMs);
+      if (outcome.kind !== "started") {
         return;
       }
-      const desktopRuntimeOptions = {
-        projectId: activeProjectId,
-        controllerUrl: requestContext.baseUrl,
-        controllerAccessToken: requestContext.accessToken,
-        controllerCredentialMode: requestContext.credentialSource ?? "fixed",
-        displayName: "Instafy Desktop",
-      } as const;
-      await window.instafyDesktop.startDesktopRuntime(desktopRuntimeOptions);
-      const refreshed = await window.instafyDesktop.desktopRuntimeStatus?.().catch(() => null);
+      const refreshed = outcome.status;
       if (refreshed) {
         setDesktopRuntimeStatus({
           running: Boolean(refreshed.running),
@@ -2310,11 +2302,7 @@ function DesktopRuntimeHelpDialog() {
             typeof refreshed.logFilePath === "string" ? refreshed.logFilePath : undefined,
         });
       }
-      showStatus("Started this space on this computer.", "success", 3200);
       hideDesktopRuntimeHelp();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      showStatus(`Couldn't start this space on this computer: ${message}`, "error", 5000);
     } finally {
       setDesktopRuntimeBusy(false);
     }

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   Bookmark,
   Expand,
@@ -10,7 +10,6 @@ import {
   NavArrowLeft,
   NavArrowRight,
   OpenNewWindow,
-  Play,
   PlugTypeC,
   Plus,
   Safari,
@@ -33,27 +32,7 @@ import { AVAILABLE_FEATURED_CONNECTORS, type ProductConnector } from "./connecto
 
 type ComposerActionMenuView = "main" | "commands" | "connect";
 
-/**
- * An engine the next message can run on instead of the runtime's own, as its
- * feature module offers it (FrontendTurnEngineComposerOffer). The menu knows
- * nothing about the engine beyond what the row says.
- */
-export type ComposerTurnEngineRow = {
-  id: string;
-  icon: ReactNode;
-  title: string;
-  description: string;
-  hint: string | null;
-  testId: string;
-  /** Chosen for the next message. */
-  pending: boolean;
-  /** Why it cannot be chosen now; null when it can. */
-  disabledReason: string | null;
-  action: { label: string; testId: string; onPress: () => void } | null;
-};
-
 const NO_INSTALLED_SKILLS: ReadonlySet<string> = new Set();
-const NO_TURN_ENGINE_ROWS: readonly ComposerTurnEngineRow[] = [];
 
 function commandTestId(command: string): string {
   const normalized = command.replace(/^\//, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "");
@@ -69,11 +48,10 @@ function ActionRow({
   testId,
   disabled = false,
   hoverTitle,
-  wrapTitle = false,
 }: {
   icon: ReactNode;
   title: string;
-  description?: ReactNode;
+  description?: string;
   onPress: () => void;
   end?: ReactNode;
   testId?: string;
@@ -83,8 +61,6 @@ function ActionRow({
    * even when the action itself is disabled.
    */
   hoverTitle?: string;
-  /** Wrap a long title rather than cutting it to one line. */
-  wrapTitle?: boolean;
 }) {
   const row = (
     <StudioMenuAction
@@ -93,7 +69,7 @@ function ActionRow({
       isDisabled={disabled}
       data-testid={testId}
     >
-      <MenuItemContent start={icon} end={end} description={description} wrapTitle={wrapTitle}>
+      <MenuItemContent start={icon} end={end} description={description}>
         {title}
       </MenuItemContent>
     </StudioMenuAction>
@@ -133,8 +109,6 @@ export function ComposerActionMenu({
   triggerIconClassName,
   mutationDisabled = false,
   inviteActionLabel = "Invite teammates",
-  turnEngineRows = NO_TURN_ENGINE_ROWS,
-  onChooseTurnEngine,
 }: {
   disabled?: boolean;
   showBrowserAction?: boolean;
@@ -178,9 +152,6 @@ export function ComposerActionMenu({
   triggerIconClassName: string;
   mutationDisabled?: boolean;
   inviteActionLabel?: string;
-  /** Engines the next message can run on, beside "Ask AI for a new tab". */
-  turnEngineRows?: readonly ComposerTurnEngineRow[];
-  onChooseTurnEngine?: (engineId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<ComposerActionMenuView>("main");
@@ -451,53 +422,6 @@ export function ComposerActionMenu({
                 testId="composer-action-menu-open-new-browser"
               />
             ) : null}
-            {!mutationDisabled && onChooseTurnEngine
-              ? turnEngineRows.map((row) => (
-                  <Fragment key={row.id}>
-                    <ActionRow
-                      icon={row.icon}
-                      title={row.title}
-                      description={
-                        row.disabledReason ? (
-                          row.disabledReason
-                        ) : (
-                          <>
-                            <span className="block">{row.description}</span>
-                            {row.hint ? <span className="mt-0.5 block">{row.hint}</span> : null}
-                          </>
-                        )
-                      }
-                      onPress={() => {
-                        closeMenu();
-                        onChooseTurnEngine(row.id);
-                      }}
-                      end={
-                        row.pending ? (
-                          <Badge tone="info" size="xs">
-                            Next
-                          </Badge>
-                        ) : null
-                      }
-                      disabled={Boolean(row.disabledReason)}
-                      hoverTitle={row.disabledReason ?? undefined}
-                      testId={row.testId}
-                      // "Claude Code for the next message" is cut short at the menu's width.
-                      wrapTitle
-                    />
-                    {row.disabledReason && row.action ? (
-                      <ActionRow
-                        icon={<Play className="h-4 w-4" aria-hidden="true" />}
-                        title={row.action.label}
-                        onPress={() => {
-                          closeMenu();
-                          row.action?.onPress();
-                        }}
-                        testId={row.action.testId}
-                      />
-                    ) : null}
-                  </Fragment>
-                ))
-              : null}
             {showInviteAction ? (
               <ActionRow
                 icon={<Group className="h-4 w-4" aria-hidden="true" />}

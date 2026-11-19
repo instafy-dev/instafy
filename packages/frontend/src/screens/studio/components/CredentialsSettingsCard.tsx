@@ -64,11 +64,55 @@ import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
 import { isExpiredCredentialProxyError } from "./proxyError";
 import { canChooseManagedAi, describeManagedAiUnavailable } from "./managedAiAllowance";
 import { APPLICATION_FRONTEND_FEATURES } from "../../../features/applicationFrontendFeatureComposition";
+import type { FrontendTurnEngineAgentAi } from "../../../features/frontendFeatureModule";
+import { useOptionalActiveProjectId } from "../../../projects/ProjectStateProvider";
 import type { FetchRuntimeStatusParams } from "../../../services/runtimeController/runtimes";
 
 function fetchTurnEngineRuntimeStatus(params: FetchRuntimeStatusParams) {
   return controllerClient.runtimes.fetchStatus(params);
 }
+
+/**
+ * A turn engine an agent's AI can be, beside Instafy AI and the person's own
+ * connections (docs/Local-Engine-Turns.md 11.3), as its feature module names
+ * it. The editor offers one only where its module says so; an agent that
+ * already uses one keeps showing it.
+ */
+type AgentAiEngine = { id: string; agentAi: FrontendTurnEngineAgentAi };
+
+const AGENT_AI_ENGINES: readonly AgentAiEngine[] = APPLICATION_FRONTEND_FEATURES.turnEngines.flatMap((engine) =>
+  engine.agentAi ? [{ id: engine.id, agentAi: engine.agentAi }] : [],
+);
+
+const NO_AGENT_AI_ENGINE_IDS: ReadonlySet<string> = new Set();
+
+/** The engine an agent's `provider` names as its AI, or null for a provider of a connection. */
+function agentAiEngineOf(provider: string | null | undefined): AgentAiEngine | null {
+  const normalized = (provider ?? "").trim().toLowerCase();
+  return normalized ? AGENT_AI_ENGINES.find((engine) => engine.id === normalized) ?? null : null;
+}
+
+/** An engine's sentence for a save of an agent's AI the controller refused, or null. */
+function describeAgentAiSaveRefusal(result: { code?: string | null; details?: unknown }): string | null {
+  const code = result.code?.trim() ?? "";
+  if (!code) {
+    return null;
+  }
+  for (const engine of AGENT_AI_ENGINES) {
+    const sentence = engine.agentAi.describeSaveRefusal({ code, details: result.details ?? null });
+    if (sentence) {
+      return sentence;
+    }
+  }
+  return null;
+}
+
+/**
+ * The agent editor's choice of no connection while it also offers an engine:
+ * Instafy AI, the AI of an agent with no credential, for a person who has no
+ * connection to choose instead.
+ */
+const INSTAFY_AI_CHOICE = "instafy-ai";
 
 async function resolveTurnEngineControllerUrl(): Promise<string | null> {
   const requestContext = await controllerClient.core.resolveRequestContext(null);
@@ -358,6 +402,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   const [agentDescriptionDraft, setAgentDescriptionDraft] = useState("");
   const [agentCredentialDraft, setAgentCredentialDraft] = useState<string | null>(null);
   const [agentProviderDraft, setAgentProviderDraft] = useState<AiProviderId>("openai");
+  /** The turn engine chosen as the agent's AI, or null for Instafy AI or a connection. */
+  const [agentEngineDraft, setAgentEngineDraft] = useState<string | null>(null);
   const [agentModelDraft, setAgentModelDraft] = useState<string | null>(null);
   const [agentCredentialDirty, setAgentCredentialDirty] = useState(false);
   const [agentModelDirty, setAgentModelDirty] = useState(false);
@@ -389,6 +435,9 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     }
     return { octoAgent: octo, botAgents: bots };
   }, [agents]);
+  // @octo's AI when it is not a connection, such as Claude Code
+  // (docs/Local-Engine-Turns.md 11.3): the list names it as it names a bot's.
+  const octoAiLabel = octoAgent ? agentAiEngineOf(octoAgent.provider)?.agentAi.label ?? null : null;
   // A new bot's face, and the one a bot gets back when its picture is
   // removed: the hatchling the owner's picture-less bots wear least, counting
   // down from 8 (docs/Brand.md, "Octo's hatchlings").
@@ -727,6 +776,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentBioDraft("");
     setAgentCredentialDraft(null);
     setAgentProviderDraft("openai");
+    setAgentEngineDraft(null);
     setAgentModelDraft(null);
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
@@ -803,6 +853,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentBioDraft("");
     setAgentCredentialDraft(credentialId);
     setAgentProviderDraft(provider);
+    setAgentEngineDraft(null);
     setAgentModelDraft(credential ? modelOptionsForProvider(provider)[0]?.id ?? null : null);
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
@@ -852,6 +903,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     const credential = resolvedCredentialId ? credentialsById.get(resolvedCredentialId) ?? null : null;
     const provider = credential ? resolveCredentialProviderId(credential) : normalizeAiProviderId(agent.provider);
     setAgentProviderDraft(provider);
+    setAgentEngineDraft(agentAiEngineOf(agent.provider)?.id ?? null);
     setAgentModelDraft(() => {
       const options = modelOptionsForProvider(provider);
       const fallback = options[0]?.id ?? null;
@@ -881,6 +933,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     const credential = resolvedCredentialId ? credentialsById.get(resolvedCredentialId) ?? null : null;
     const provider = credential ? resolveCredentialProviderId(credential) : normalizeAiProviderId(agent.provider);
     setAgentProviderDraft(provider);
+    setAgentEngineDraft(agentAiEngineOf(agent.provider)?.id ?? null);
     setAgentModelDraft(() => {
       const options = modelOptionsForProvider(provider);
       const fallback = options[0]?.id ?? null;
@@ -952,7 +1005,9 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     };
 
     if (agentProfileModal.mode === "create") {
-      const credentialId = (agentCredentialDraft ?? "").trim();
+      // A turn engine as the agent's AI takes no connection (docs/Local-Engine-Turns.md 11.3).
+      const engineId = agentEngineDraft;
+      const credentialId = engineId ? "" : (agentCredentialDraft ?? "").trim();
       const handleDraftTrimmed = agentHandleDraft.trim();
       const handleNormalized =
         handleDraftTrimmed.length > 0 ? normalizeAgentHandle(handleDraftTrimmed) : null;
@@ -972,19 +1027,26 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         const picture = await resolvePicture();
         if (!mounted.current) return;
         const avatarSeed = picture ?? (agentFaceDraft ? hatchlingSeed(agentFaceDraft) : undefined);
-        const result = await createMyAgent({
-          credentialId: credentialId || null,
-          ...(!credentialId ? { provider: agentProviderDraft } : {}),
+        const profile = {
           handle: handleForRequest,
           displayName: trimmedName.length > 0 ? trimmedName : undefined,
           avatarSeed,
           description: trimmedDescription.length > 0 ? trimmedDescription : undefined,
           bio: trimmedBio || undefined,
-          model: agentModelDraft,
-        });
+        };
+        const result = await createMyAgent(
+          engineId
+            ? { ...profile, provider: engineId }
+            : {
+                ...profile,
+                credentialId: credentialId || null,
+                ...(!credentialId ? { provider: agentProviderDraft } : {}),
+                model: agentModelDraft,
+              },
+        );
         if (!mounted.current) return;
         if (!result.success || !result.agent) {
-          showStatus(result.error ?? "Unable to create bot.", "error", 4500);
+          showStatus(describeAgentAiSaveRefusal(result) ?? result.error ?? "Unable to create bot.", "error", 4500);
           return;
         }
         // A bot created without a handle is named after its connection and
@@ -1029,11 +1091,34 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     const handleForRequest = normalizedHandle ?? undefined;
 
     const credentialId = (agentCredentialDraft ?? "").trim();
-    const credentialSelectionRequired = agentCredentialDirty && codexCredentials.length > 0;
+    // The agent's AI (docs/Local-Engine-Turns.md 11.3): a turn engine by its
+    // provider, a connection by its credential, or Instafy AI by none. Leaving
+    // an engine always sends what replaces it, which the controller then
+    // stores in the engine's place, also when the pickers show their defaults.
+    const savedEngineId = agentAiEngineOf(existingAgent?.provider)?.id ?? null;
+    const engineChanged = agentEngineDraft !== savedEngineId;
+    const hasConnections = codexCredentials.length > 0;
+    const credentialSelectionRequired =
+      agentEngineDraft === null && hasConnections && (agentCredentialDirty || engineChanged);
     if (credentialSelectionRequired && !credentialId) {
       showStatus("Select a credential to power this agent.", "error", 4500);
       return;
     }
+    const aiPatch =
+      agentEngineDraft !== null
+        ? engineChanged
+          ? { provider: agentEngineDraft }
+          : {}
+        : engineChanged
+          ? hasConnections
+            ? { credentialId, ...(agentModelDirty ? { model: agentModelDraft } : {}) }
+            : { credentialId: null }
+          : {
+              // The picker displays effective defaults for inherited/unknown values.
+              // Saving profile text must not turn those display defaults into pins.
+              ...(agentCredentialDirty ? { credentialId: credentialId || null } : {}),
+              ...(agentModelDirty ? { model: agentModelDraft } : {}),
+            };
 
     agentSaveLock.current = true;
     setAgentActionPendingId(agentId);
@@ -1057,14 +1142,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         avatarSeed: nextAvatarSeed,
         description: trimmedDescription.length > 0 ? trimmedDescription : null,
         bio: trimmedBio || null,
-        // The picker displays effective defaults for inherited/unknown values.
-        // Saving profile text must not turn those display defaults into pins.
-        ...(agentCredentialDirty ? { credentialId: credentialId || null } : {}),
-        ...(agentModelDirty ? { model: agentModelDraft } : {}),
+        ...aiPatch,
       });
       if (!mounted.current) return;
       if (!result.success || !result.agent) {
-        showStatus(result.error ?? "Unable to update bot.", "error", 4500);
+        showStatus(describeAgentAiSaveRefusal(result) ?? result.error ?? "Unable to update bot.", "error", 4500);
         return;
       }
       showStatus(`Updated @${result.agent.handle}.`, "success", 2500);
@@ -1087,6 +1169,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     user,
     agentCredentialDraft,
     agentCredentialDirty,
+    agentEngineDraft,
     agentProviderDraft,
     codexCredentials.length,
     agents,
@@ -1139,6 +1222,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
 
   const editingAgent = agents.find(agent => agent.id === agentProfileModal?.agentId);
   const editingAgentFace = editingAgent ? savedAgentHatchling(editingAgent) : null;
+  // The engine the agent being edited uses as its AI now, and the one chosen.
+  const savedAgentEngineId = agentAiEngineOf(editingAgent?.provider)?.id ?? null;
+  const chosenAgentAiEngine = agentEngineDraft
+    ? AGENT_AI_ENGINES.find((engine) => engine.id === agentEngineDraft) ?? null
+    : null;
   const agentProfileDirty = agentProfileModal?.mode === "create" || Boolean(agentAvatarFileDraft) ||
     agentNameDraft.trim() !== (editingAgent?.displayName ?? (agentProfileModal?.mode === "octo" ? "Octo" : "")) ||
     agentAvatarUrlDraft.trim() !== resolveAgentAvatarUrlDraftFromSeed(editingAgent?.avatarSeed ?? "") ||
@@ -1146,11 +1234,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     agentBioDraft.trim() !== (editingAgent?.bio ?? "") ||
     agentDescriptionDraft.trim() !== (editingAgent?.description ?? "") ||
     (agentProfileModal?.mode === "edit" && normalizeAgentHandle(agentHandleDraft) !== editingAgent?.handle) ||
-    agentCredentialDirty || agentModelDirty;
+    agentCredentialDirty || agentModelDirty || agentEngineDraft !== savedAgentEngineId;
 
   const agentEditorDirty = agentProfileModal?.mode === "create"
     ? Boolean(agentNameDraft || agentHandleDraft || agentAvatarUrlDraft || agentAvatarFileDraft ||
-        agentBioDraft || agentDescriptionDraft || agentCredentialDirty || agentModelDirty) ||
+        agentBioDraft || agentDescriptionDraft || agentCredentialDirty || agentModelDirty || agentEngineDraft) ||
       agentFaceDraft !== defaultBotFace
     : agentProfileDirty;
   const dismissAgentProfileModal = useStudioEditorDismissal({
@@ -1175,14 +1263,18 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
       ? (() => {
           const credentialId = (agentCredentialDraft ?? "").trim();
           const credential = credentialId ? credentialsById.get(credentialId) ?? null : null;
-          const label = credential ? resolveCredentialLabel(credential) : null;
+          const label = chosenAgentAiEngine
+            ? chosenAgentAiEngine.agentAi.label
+            : credential ? resolveCredentialLabel(credential) : null;
           return label ? `Powered by ${label}.` : "Choose a name, handle and instructions. You can connect AI later.";
         })()
       : agentProfileModalMode === "octo"
         ? (() => {
             const credentialId = (agentCredentialDraft ?? "").trim();
             const credential = credentialId ? credentialsById.get(credentialId) ?? null : null;
-            const label = credential ? resolveCredentialLabel(credential) : null;
+            const label = chosenAgentAiEngine
+              ? chosenAgentAiEngine.agentAi.label
+              : credential ? resolveCredentialLabel(credential) : null;
             return label
               ? `Powered by ${label}.`
               : "Your agent’s public profile and response preferences.";
@@ -1253,6 +1345,93 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     [agentProviderDraft, credentialsByProvider]
   );
 
+  // The turn engines the open space's runtime status says the editor may
+  // offer this person (docs/Local-Engine-Turns.md 11.3), read each time the
+  // editor opens: a person the controller's switch doesn't cover sees none.
+  const activeProjectId = useOptionalActiveProjectId();
+  const agentEditorOpen = agentProfileModal !== null;
+  const [offeredAgentAiEngineIds, setOfferedAgentAiEngineIds] =
+    useState<ReadonlySet<string>>(NO_AGENT_AI_ENGINE_IDS);
+  useEffect(() => {
+    const projectId = activeProjectId?.trim() ?? "";
+    if (!agentEditorOpen || !projectId || AGENT_AI_ENGINES.length === 0 || !runtimeControllerEnabled) {
+      setOfferedAgentAiEngineIds(NO_AGENT_AI_ENGINE_IDS);
+      return undefined;
+    }
+    let cancelled = false;
+    void fetchTurnEngineRuntimeStatus({ projectId, quietOnAbort: true })
+      .catch(() => null)
+      .then((status) => {
+        if (cancelled) {
+          return;
+        }
+        setOfferedAgentAiEngineIds(
+          status
+            ? new Set(AGENT_AI_ENGINES.filter((engine) => engine.agentAi.offeredBy(status)).map((engine) => engine.id))
+            : NO_AGENT_AI_ENGINE_IDS,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId, agentEditorOpen]);
+
+  // The engines this editor shows: the offered ones, and the one the agent
+  // already uses, so its AI always shows as what it is.
+  const agentAiEngineChoices = useMemo(
+    () =>
+      AGENT_AI_ENGINES.filter(
+        (engine) => offeredAgentAiEngineIds.has(engine.id) || engine.id === savedAgentEngineId,
+      ),
+    [offeredAgentAiEngineIds, savedAgentEngineId],
+  );
+  const hasAgentAiConnections = codexCredentials.length > 0;
+  // Without an engine to offer, the AI choice is the connections' provider
+  // alone, as it always was. With one, it sits beside them, and beside
+  // Instafy AI for a person who has no connection to go back to.
+  const agentAiOptions = useMemo(() => {
+    if (agentAiEngineChoices.length === 0) {
+      return creatingWithoutConnection ? [] : agentProviderOptions;
+    }
+    const withoutEngine = hasAgentAiConnections
+      ? agentProviderOptions
+      : [{
+          id: INSTAFY_AI_CHOICE,
+          label: managedAiEnabled ? managedAi?.label?.trim() || "Instafy AI" : "No AI connected",
+          icon: <OctoMark className="h-4 w-4" />,
+        }];
+    return [
+      ...withoutEngine,
+      ...agentAiEngineChoices.map((engine) => ({
+        id: engine.id,
+        label: engine.agentAi.label,
+        icon: engine.agentAi.icon,
+      })),
+    ];
+  }, [
+    agentAiEngineChoices,
+    agentProviderOptions,
+    creatingWithoutConnection,
+    hasAgentAiConnections,
+    managedAi?.label,
+    managedAiEnabled,
+  ]);
+  const agentAiChoice = agentEngineDraft ??
+    (agentAiEngineChoices.length > 0 && !hasAgentAiConnections ? INSTAFY_AI_CHOICE : agentProviderDraft);
+  const handleAgentAiChange = useCallback(
+    (choice: string) => {
+      if (AGENT_AI_ENGINES.some((engine) => engine.id === choice)) {
+        setAgentEngineDraft(choice);
+        return;
+      }
+      setAgentEngineDraft(null);
+      if (choice !== INSTAFY_AI_CHOICE) {
+        handleAgentProviderChange(normalizeAiProviderId(choice));
+      }
+    },
+    [handleAgentProviderChange],
+  );
+
   const handleCreateBotFromManager = useCallback(() => {
     openCreateBotModal(defaultCredentialId);
   }, [defaultCredentialId, openCreateBotModal]);
@@ -1284,15 +1463,27 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         subtitle={agentProfileModalSubtitle}
         pending={Boolean(agentActionPendingId)}
         credentialId={agentCredentialDraft}
-        credentials={agentCredentialOptions}
+        // A turn engine as the agent's AI takes no connection, model or
+        // effort: it runs on the person's own defaults (11.3).
+        credentials={chosenAgentAiEngine ? [] : agentCredentialOptions}
         onCredentialChange={handleAgentCredentialChange}
         onConnectCredential={handleConnectCredentialFromModal}
-        providerId={agentProviderDraft}
-        providerOptions={creatingWithoutConnection ? [] : agentProviderOptions}
-        onProviderChange={handleAgentProviderChange}
+        providerId={agentAiChoice}
+        providerOptions={agentAiOptions}
+        onProviderChange={handleAgentAiChange}
+        aiNote={chosenAgentAiEngine ? (
+          <>
+            <Text as="p" variant="caption" tone="muted" data-testid="agent-profile-ai-description">
+              {chosenAgentAiEngine.agentAi.description}
+            </Text>
+            {chosenAgentAiEngine.agentAi.Note ? (
+              <chosenAgentAiEngine.agentAi.Note resolveControllerUrl={resolveTurnEngineControllerUrl} />
+            ) : null}
+          </>
+        ) : null}
         modelId={agentModelDraft}
-        modelOptions={creatingWithoutConnection ? [] : agentModelOptions}
-        connectionHint={creatingWithoutConnection
+        modelOptions={creatingWithoutConnection || chosenAgentAiEngine ? [] : agentModelOptions}
+        connectionHint={creatingWithoutConnection && !chosenAgentAiEngine
           ? !credentialRequirements?.success
             ? "Uses your account's default AI when available. You can save this profile now."
             : managedAiSelected
@@ -1305,11 +1496,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         handle={agentHandleDraft}
         onHandleChange={setAgentHandleDraft}
         handleDisabled={agentProfileModalMode === "octo"}
-        handleRequired={agentProfileModalMode === "create" && !agentCredentialDraft}
-        handlePlaceholder={agentProfileModalMode === "create" && agentCredentialDraft ? "@bot (optional)" : "@reviewer"}
+        handleRequired={agentProfileModalMode === "create" && (!agentCredentialDraft || chosenAgentAiEngine !== null)}
+        handlePlaceholder={
+          agentProfileModalMode === "create" && agentCredentialDraft && !chosenAgentAiEngine ? "@bot (optional)" : "@reviewer"
+        }
         handleHelpText={
           agentProfileModalMode === "create"
-            ? agentCredentialDraft
+            ? agentCredentialDraft && !chosenAgentAiEngine
               ? "Leave empty to auto-generate a handle from the connection label."
               : "Required. Use this handle to mention your agent in chats."
             : undefined
@@ -1790,7 +1983,12 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                     <EntityRow
                       surface="outlined"
                       title="@octo"
-                      subtitle={octoAgent.displayName ? octoAgent.displayName : "Octo"}
+                      subtitle={
+                        <>
+                          {octoAgent.displayName ? octoAgent.displayName : "Octo"}
+                          {octoAiLabel ? ` · ${octoAiLabel}` : ""}
+                        </>
+                      }
                       start={<AgentAvatar agent={octoAgent} />}
                       density="compact"
                       isDisabled={agentActionPendingId === octoAgent.id}
@@ -1816,7 +2014,10 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
 
                 {botAgents.map((agent) => {
                   const connectedCredential = agent.credentialId ? credentialsById.get(agent.credentialId) : null;
-                  const connectedLabel = connectedCredential ? resolveCredentialLabel(connectedCredential) : null;
+                  // Its AI: an engine such as Claude Code by name (11.3), else the connection it pins.
+                  const connectedLabel =
+                    agentAiEngineOf(agent.provider)?.agentAi.label ??
+                    (connectedCredential ? resolveCredentialLabel(connectedCredential) : null);
                   const pending = agentActionPendingId === agent.id;
                   return (
                     <li key={agent.id}>

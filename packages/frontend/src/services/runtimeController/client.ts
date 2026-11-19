@@ -1,6 +1,6 @@
 import {
   controllerBaseUrl,
-  readControllerError,
+  readControllerApiError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
   type ControllerRequestContext,
@@ -29,6 +29,10 @@ export type ControllerJsonRequestSuccess<T> = {
 export type ControllerJsonRequestFailure = {
   success: false;
   error: string;
+  /** The controller's error code, present only when its answer named one. */
+  code?: string;
+  /** The controller's error details, present only when its answer had any. */
+  details?: unknown;
 };
 
 export type ControllerJsonRequestResult<T> =
@@ -105,13 +109,18 @@ export async function controllerJsonRequest<T>(
     });
 
     if (!response.ok) {
+      const failure = await readControllerApiError(
+        response,
+        options.fallbackError,
+        requestContext,
+      );
+      // A code and details only when the answer had them, so a failure
+      // that named none reads as it always has.
       return {
         success: false,
-        error: await readControllerError(
-          response,
-          options.fallbackError,
-          requestContext,
-        ),
+        error: failure.message,
+        ...(failure.code ? { code: failure.code } : {}),
+        ...(failure.details !== null && failure.details !== undefined ? { details: failure.details } : {}),
       };
     }
 

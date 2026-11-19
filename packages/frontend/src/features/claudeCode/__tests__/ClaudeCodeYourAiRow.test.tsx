@@ -31,7 +31,14 @@ type DesktopStatus = {
   shellSetting?: string;
 };
 
-const READY: ControllerRuntimeClaudeCode = { ready: true, reason: null, cli: "2.1.320", verified: true, planSignIn: true };
+const READY: ControllerRuntimeClaudeCode = {
+  ready: true,
+  reason: null,
+  cli: "2.1.320",
+  verified: true,
+  planSignIn: true,
+  resetsAt: null,
+};
 
 let desktopStatus: DesktopStatus;
 let desktopRuntime: { running: boolean; projectId?: string; runtimeId?: string };
@@ -195,7 +202,7 @@ describe("Claude Code in Your AI", () => {
     expect(text("credentials-claude-code-path")).toBe("Not found");
     // Nothing to consent to before a program is found, so the row doesn't ask for it.
     expect(text("credentials-claude-code-status")).toBe(
-      "Off. Choose Find or Locate… to pick the claude program, then Use for my messages.",
+      "Off. Choose Find or Locate… to pick the claude program, then Use Claude Code on this computer.",
     );
     expect(button("credentials-claude-code-enable")?.disabled).toBe(true);
 
@@ -205,9 +212,9 @@ describe("Claude Code in Your AI", () => {
     );
     expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
     expect(text("credentials-claude-code-status")).toBe(
-      "Off. Choose Use for my messages to turn it on for this computer.",
+      "Off. Choose Use Claude Code on this computer to turn it on.",
     );
-    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
+    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use Claude Code on this computer");
     expect(button("credentials-claude-code-enable")?.disabled).toBe(false);
 
     await press("credentials-claude-code-enable");
@@ -331,9 +338,9 @@ describe("Claude Code in Your AI", () => {
     expect(text("credentials-claude-code-path")).toBe(`Found at ${CLAUDE}`);
     expect(text("credentials-claude-code-status")).toBe("Ready on this computer.");
     expect(text("credentials-claude-code-candidate-path")).toBe(`Also found at ${NATIVE_CLAUDE}`);
-    expect(text("credentials-claude-code-candidate-status")).toBe("Choose Use for my messages to use it instead.");
+    expect(text("credentials-claude-code-candidate-status")).toBe("Choose Use Claude Code on this computer to use it instead.");
     expect(button("credentials-claude-code-disable")?.textContent).toBe("Turn off");
-    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
+    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use Claude Code on this computer");
 
     // Desktop's own consent dialog confirms it.
     await press("credentials-claude-code-enable");
@@ -345,9 +352,9 @@ describe("Claude Code in Your AI", () => {
 
   // D26: a recorded NODE_EXTRA_CA_CERTS whose file went away after consent
   // makes every turn refuse. Once the person fixes their login shell, Find
-  // reads new settings for the copy in use, and only Use for my messages,
-  // through Desktop's consent dialog, puts them in use (4.1). The answers are
-  // Desktop's own (packages/desktop-app/test/claude-code-desktop.test.mjs).
+  // reads new settings for the copy in use, and only Use Claude Code on this
+  // computer, through Desktop's consent dialog, puts them in use (4.1). The
+  // answers are Desktop's own (packages/desktop-app/test/claude-code-desktop.test.mjs).
   it("offers new login-shell settings Find read for the copy in use, once the recorded ones no longer work", async () => {
     const on = { supported: true, found: true, consented: true, path: CLAUDE };
     const stale = { ...on, found: false, problem: "shell_setting_unusable", shellSetting: "NODE_EXTRA_CA_CERTS" };
@@ -379,10 +386,10 @@ describe("Claude Code in Your AI", () => {
     expect(text("credentials-claude-code-row")).not.toContain("Fix it, then choose Find.");
     expect(text("credentials-claude-code-status")).toBe(CLAUDE_CODE_COPY.yourAi.notReady.binary_unsafe);
     expect(text("credentials-claude-code-candidate-status")).toBe(
-      "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use for my messages to use them.",
+      "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use Claude Code on this computer to use them.",
     );
     expect(button("credentials-claude-code-disable")?.textContent).toBe("Turn off");
-    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
+    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use Claude Code on this computer");
     expect(button("credentials-claude-code-enable")?.disabled).toBe(false);
     expect(bannedWordIn(text("credentials-claude-code-row") ?? "")).toBeNull();
 
@@ -414,7 +421,7 @@ describe("Claude Code in Your AI", () => {
     expect(text("credentials-claude-code-status")).toBe("Ready on this computer.");
     expect(text("credentials-claude-code-candidate-path")).toBeNull();
     expect(text("credentials-claude-code-candidate-status")).toBe(
-      "Find didn't turn up any other copy. Your messages keep using this one.",
+      "Find didn't turn up any other copy, so this one stays in use.",
     );
     expect(button("credentials-claude-code-enable")).toBeNull();
 
@@ -511,10 +518,10 @@ describe("Claude Code in Your AI", () => {
       "Instafy is still working on this computer, so that change was not made.",
     );
     expect(text("credentials-claude-code-status")).toBe(
-      "Off. Choose Use for my messages to turn it on for this computer.",
+      "Off. Choose Use Claude Code on this computer to turn it on.",
     );
     expect(button("credentials-claude-code-disable")).toBeNull();
-    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use for my messages");
+    expect(button("credentials-claude-code-enable")?.textContent).toBe("Use Claude Code on this computer");
   });
 
   // Turning it on alters the running runtime's grant, so Desktop replaces that
@@ -571,7 +578,7 @@ describe("Claude Code in Your AI", () => {
 
     it("says it is checking this computer, then the new runtime's readiness, and stops reading", async () => {
       await render();
-      expect(text(STATUS)).toBe("Off. Choose Use for my messages to turn it on for this computer.");
+      expect(text(STATUS)).toBe("Off. Choose Use Claude Code on this computer to turn it on.");
 
       await press("credentials-claude-code-enable");
       // Not "Start this space on this computer": the space runs, on a runtime not listed yet.
@@ -597,7 +604,7 @@ describe("Claude Code in Your AI", () => {
       Object.assign(window, { __INSTAFY_ACTIVE_PROJECT_ID__: PROJECT_ID });
       fetchRuntimeStatus.mockResolvedValue(statusAnswer(null, { listed: false }));
       await render();
-      expect(text(STATUS)).toBe("Off. Choose Use for my messages to turn it on for this computer.");
+      expect(text(STATUS)).toBe("Off. Choose Use Claude Code on this computer to turn it on.");
 
       // The space starts on this computer, and nothing makes the row read again.
       desktopRuntime = { running: true, projectId: PROJECT_ID, runtimeId: RUNTIME_ID };
@@ -749,7 +756,7 @@ describe("Claude Code in Your AI", () => {
         throw new Error("unexpected");
       });
       await press("credentials-claude-code-disable");
-      expect(text(STATUS)).toBe("Off. Choose Use for my messages to turn it on for this computer.");
+      expect(text(STATUS)).toBe("Off. Choose Use Claude Code on this computer to turn it on.");
       const afterOff = fetchRuntimeStatus.mock.calls.length;
       await wait(60_000);
       expect(fetchRuntimeStatus.mock.calls.length).toBe(afterOff);

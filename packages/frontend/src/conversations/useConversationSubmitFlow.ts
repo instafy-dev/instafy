@@ -80,7 +80,6 @@ import { useConversationAutoTitle } from "./useConversationAutoTitle";
 import { useConversationControllerDispatch } from "./useConversationControllerDispatch";
 import { TurnEngineSendRefusedError } from "./turnEngineSendRefusal";
 import { withUserMentionMetadata } from "./userMentions";
-import { carriesTurnEngineClaim, readTurnEngineClaim } from "../features/frontendFeatureModule";
 
 export type {
   SubmitConversationOptions,
@@ -214,10 +213,7 @@ export function useConversationSubmitFlow({
         mode: "unchanged",
         metadata: input.metadata,
       });
-      // A browser task, and a send that claims a turn engine, goes to its
-      // agent as sent: participation never turns it into a message that is
-      // only recorded.
-      if (input.hasBrowserTask || carriesTurnEngineClaim(input.metadata)) {
+      if (input.hasBrowserTask) {
         return {
           mode: "unchanged",
           metadata: withGroupParticipationPreflightMetadata(
@@ -420,11 +416,6 @@ export function useConversationSubmitFlow({
         showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
         return;
       }
-      // A send whose routing claimed a turn engine for its one turn
-      // (useChatSubmitFlow). It keeps the agents its routing chose, always
-      // goes to the controller, which admits or refuses it, and is never
-      // only recorded, taken by a local capability or sent for a title.
-      const claimedTurnEngine = readTurnEngineClaim(submittedMetadata);
       const terminalRequest = parseTerminalCommandRequest(trimmed);
       if (terminalRequest && terminalRequest.command.length === 0) {
         showStatus("Add a command after /terminal.", "error", 4000);
@@ -773,15 +764,9 @@ export function useConversationSubmitFlow({
             ? "thread"
             : "inline"
           : null;
-      const keepsRoutedAgentSelection = Boolean(
-        claimedTurnEngine &&
-          promptMetadata?.agentSelection &&
-          typeof promptMetadata.agentSelection === "object",
-      );
       if (
-        !keepsRoutedAgentSelection &&
-        (effectiveAgentSelection.activeHandles.length > 0 ||
-          effectiveAgentSelection.mentionedHandles.length > 0)
+        effectiveAgentSelection.activeHandles.length > 0 ||
+        effectiveAgentSelection.mentionedHandles.length > 0
       ) {
         const agentSelectionMetadata = {
           active: effectiveAgentSelection.activeHandles,
@@ -834,12 +819,11 @@ export function useConversationSubmitFlow({
 
       const aiOverride = startsWithAssistantMention(trimmed);
       const shouldRunAssistant =
-        Boolean(claimedTurnEngine) ||
         effectiveAgentSelection.targetHandles.length > 0 ||
         aiOverride ||
         Boolean(terminalRequest);
       let deferGroupParticipationToController = false;
-      if (shouldRunAssistant && !claimedTurnEngine) {
+      if (shouldRunAssistant) {
         const { replyToOcto, replyToHuman } = resolveGroupParticipationReplyTargets(
           promptMetadata,
           targetConversation.messages,
@@ -973,10 +957,7 @@ export function useConversationSubmitFlow({
       }
 
       const localBuiltInCapabilityHandle =
-        !terminalRequest &&
-        !deferGroupParticipationToController &&
-        !requiredBrowserDispatch &&
-        !claimedTurnEngine
+        !terminalRequest && !deferGroupParticipationToController && !requiredBrowserDispatch
           ? resolveSingleLocalCapabilityHandleForPrompt({
             targetHandles: effectiveAgentSelection.targetHandles,
             prompt: trimmed,
@@ -1362,11 +1343,11 @@ export function useConversationSubmitFlow({
           options?.expectedLaneIdle ?? false,
         );
         if (dispatched.turnEngineRefusal) {
-          // The controller refused a send that claimed a turn engine before
-          // it recorded anything (docs/Local-Engine-Turns.md 5.5): the
-          // message never went out, so it leaves the chat, where the
-          // engine's sentence says why, and the composer gets its words back
-          // with the engine still chosen.
+          // The controller refused it before it recorded anything, because a
+          // turn it would start runs on a turn engine that cannot take it
+          // (docs/Local-Engine-Turns.md 11.6): the message never went out, so
+          // it leaves the chat, where the engine's sentence says why, and the
+          // composer gets its words back to change and send again.
           removeUnsentMessage(displayConversationId, clientMessageId);
           throw new TurnEngineSendRefusedError(dispatched.turnEngineRefusal);
         }

@@ -234,7 +234,7 @@ export function useAgentJobThreadPreviewState({
   hideThreadSpine?: boolean;
 }): AgentJobThreadPreviewState | null {
   const { activeConversation, conversations } = useConversations();
-  const { runs } = useRuntime();
+  const { runs, runtimeStatuses } = useRuntime();
   const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
   const jobId = typeof metadata?.jobId === "string" ? metadata.jobId.trim() : "";
   // A browser turn and the hand-back that went on from it are one row: its
@@ -716,11 +716,11 @@ export function useAgentJobThreadPreviewState({
     }
     return recorded.length > 0 ? recorded : null;
   }, [jobId, threadMessages, turnJobIds]);
-  // A turn a turn engine runs words its own start until its first step
-  // (docs/Local-Engine-Turns.md 5.7): its run says so, or, on a page that has
-  // no metadata for that run (a teammate's, while it runs), its prompt does.
-  // It is worded for whoever views it, by who sent the turn, as its reply's
-  // line is: it starts on its sender's computer, not a teammate's.
+  // A turn a turn engine runs words its own wait for a computer and its start
+  // until its first step (docs/Local-Engine-Turns.md 5.7, 11.14): its run says
+  // so, or, on a page that has no metadata for that run, its prompt does. It
+  // is worded for whoever views it, by whose turn it is, as its reply's line
+  // is: it waits for, and starts on, its person's computer, not a teammate's.
   const turnStarting = activityPhase === "starting" || activityPhase === "running";
   // Whether the space's machine is still starting, as the typing row reads it
   // (ChatPanel), so the turn's line and that row say the same word.
@@ -743,10 +743,21 @@ export function useAgentJobThreadPreviewState({
       : null;
     return turnEngineStartingLine({
       runMetadata: run?.metadata ?? null,
+      runStatus: run?.status ?? null,
       promptMetadata: prompt?.metadata ?? null,
       owner: firstMessage ? turnEngineOwnerOf?.(firstMessage) ?? null : null,
+      runtimes: runtimeStatuses,
     });
-  }, [jobId, owningConversationMessages, runMessages, runs, threadMessages, turnEngineOwnerOf, turnStarting]);
+  }, [
+    jobId,
+    owningConversationMessages,
+    runMessages,
+    runs,
+    runtimeStatuses,
+    threadMessages,
+    turnEngineOwnerOf,
+    turnStarting,
+  ]);
   const activity = useMemo(() => {
     const options = {
       jobId: jobId || null,

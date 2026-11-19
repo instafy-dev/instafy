@@ -9,11 +9,6 @@ export interface MenuItemContentProps {
   startClassName?: string;
   endClassName?: string;
   textClassName?: string;
-  /**
-   * With a description, the title wraps instead of being cut to one line: for
-   * a title that must be read whole, such as "Claude Code for the next message".
-   */
-  wrapTitle?: boolean;
 }
 
 const DEFAULT_ICON_CLASS =
@@ -27,7 +22,6 @@ export function MenuItemContent({
   startClassName = DEFAULT_ICON_CLASS,
   endClassName = DEFAULT_ICON_CLASS,
   textClassName,
-  wrapTitle = false,
 }: MenuItemContentProps) {
   return (
     <>
@@ -36,7 +30,7 @@ export function MenuItemContent({
         <span className={["min-w-0 flex-1 text-left", !description && "truncate", textClassName].filter(Boolean).join(" ")}>
           {description ? (
             <>
-              <span className={wrapTitle ? "block whitespace-normal break-words" : "block truncate"}>{children}</span>
+              <span className="block truncate">{children}</span>
               <Text as="span" variant="caption" tone="muted" className="block whitespace-normal">
                 {description}
               </Text>

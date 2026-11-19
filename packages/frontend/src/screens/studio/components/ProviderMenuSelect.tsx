@@ -1,29 +1,32 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { MenuTrigger } from "react-aria-components";
 import { DeepSeekIcon, GeminiIcon, OpenAIIcon, ZaiIcon } from "../../../components/ProviderIcons";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { FormPickerPopover, FormPickerTrigger } from "../../../components/FormPicker";
 import type { AiProviderId } from "../../../utils/aiProviderModels";
 
-type ProviderMenuOption = {
-  id: AiProviderId;
+export type ProviderMenuOption = {
+  /** An AI provider's id, or another AI an agent can use, such as a turn engine's. */
+  id: string;
   label: string;
   disabled?: boolean;
+  /** Its glyph, for an AI that is not one of the AI providers; never a brand logo it doesn't own. */
+  icon?: ReactNode;
 };
 
 export interface ProviderMenuSelectProps {
   options: ProviderMenuOption[];
-  value: AiProviderId;
+  value: string;
   disabled?: boolean;
   ariaLabel: string;
   id?: string;
   ariaLabelledBy?: string;
-  onSelect: (provider: AiProviderId) => void;
+  onSelect: (provider: string) => void;
   triggerTestId?: string;
   menuTestId?: string;
 }
 
-function providerIcon(provider: AiProviderId) {
+function providerIcon(provider: AiProviderId | string) {
   const className = "h-4 w-4";
   switch (provider) {
     case "deepseek":
@@ -70,7 +73,7 @@ export function ProviderMenuSelect({
             setMenuOpen(true);
           }
         }}
-        leading={providerIcon(value)}
+        leading={selected?.icon ?? providerIcon(value)}
       >
         {label}
       </FormPickerTrigger>
@@ -83,8 +86,7 @@ export function ProviderMenuSelect({
           selectionMode="single"
           selectedKeys={selectedKeys}
           onAction={(key) => {
-            const resolved = String(key) as AiProviderId;
-            onSelect(resolved);
+            onSelect(String(key));
             setMenuOpen(false);
           }}
           className="space-y-1"
@@ -92,7 +94,7 @@ export function ProviderMenuSelect({
           {options.map((option) => (
             <StudioMenuItem key={option.id} id={option.id} isDisabled={option.disabled}>
               <span className="flex items-center gap-2">
-                {providerIcon(option.id)}
+                {option.icon ?? providerIcon(option.id)}
                 <span>{option.label}</span>
               </span>
             </StudioMenuItem>

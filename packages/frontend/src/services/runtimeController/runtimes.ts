@@ -124,7 +124,17 @@ export interface ControllerRuntimeClaudeCode {
   verified: boolean | null;
   /** True only when the probe found a Claude plan sign-in. */
   planSignIn: boolean;
+  /**
+   * While the runtime holds the person's Claude Code turns until their Claude
+   * plan's limit resets (not ready for `plan_limit`, docs/Local-Engine-Turns.md
+   * 11.11): when it resets, as attested (RFC 3339). Null otherwise.
+   */
+  resetsAt: string | null;
 }
+
+// The not-ready reason of a runtime that holds the person's turns until their
+// Claude plan's limit resets, which `resetsAt` comes with (11.11).
+const CLAUDE_CODE_PLAN_LIMIT_REASON = "plan_limit";
 
 const CLAUDE_CODE_CLI_VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,64})?$/;
 
@@ -151,12 +161,20 @@ export function mapControllerRuntimeClaudeCode(value: unknown): ControllerRuntim
     !record.ready && typeof record.reason === "string" && CLAUDE_CODE_NOT_READY_REASONS.has(record.reason)
       ? (record.reason as ControllerRuntimeClaudeCodeNotReadyReason)
       : null;
+  const resetsAt =
+    !record.ready &&
+    record.reason === CLAUDE_CODE_PLAN_LIMIT_REASON &&
+    typeof record.resetsAt === "string" &&
+    Number.isFinite(Date.parse(record.resetsAt))
+      ? record.resetsAt
+      : null;
   return {
     ready: record.ready,
     reason,
     cli,
     verified: typeof record.verified === "boolean" ? record.verified : null,
     planSignIn: record.planSignIn === true,
+    resetsAt,
   };
 }
 

@@ -81,6 +81,13 @@ export interface ParticipantAgent extends ConversationRosterAgent {
   runtime?: ParticipantRuntimeInfo | null;
   /** Provider label for display, e.g. "OpenAI". */
   providerLabel: string | null;
+  /**
+   * The agent's AI by name when it runs on a turn engine rather than on a
+   * model and connection (docs/Local-Engine-Turns.md 11.3), such as Claude
+   * Code: the row shows it in place of the model and reasoning controls, and
+   * no credential line. Absent for any other agent.
+   */
+  aiLabel?: string | null;
   /** Id of the credential this agent draws from (dedupes shared meters). */
   credentialId: string | null;
   /** Human-readable name of the credential this agent draws from. */

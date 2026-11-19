@@ -11,13 +11,13 @@ import { readRowStopNotice, rowWentOnFromStop } from "./chatMessagePresentation"
 
 /**
  * Who copies the chat, as its rows word a failed turn for them: a failed
- * turn of someone's own AI (a turn engine) reads one way for its sender and
+ * turn of someone's own AI (a turn engine) reads one way for its person and
  * another for everyone else (RunFailureNotice).
  */
 export type ChatCopyReader = {
-  /** Who sent the turn-engine turn a message belongs to, as the chat tells it (RunFailureRetryContextValue). */
+  /** Whose turn-engine turn a message belongs to, as the chat tells it (RunFailureRetryContextValue). */
   turnEngineOwnerOf?: (message: ChatMessage) => TurnEngineTurnOwner | null;
-  /** The runtimes the reader's chat knows: its sender's sentence names what the one that ran the turn says. */
+  /** The runtimes the reader's chat knows: its person's sentence names what the one that ran the turn says. */
   runtimeStatuses?: readonly ControllerRuntimeStatusEntry[] | null;
 };
 

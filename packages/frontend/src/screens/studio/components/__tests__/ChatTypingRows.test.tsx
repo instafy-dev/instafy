@@ -92,6 +92,38 @@ describe("ChatTypingRows", () => {
     expect(text?.classList.contains("truncate")).toBe(!wraps);
   });
 
+  // docs/Local-Engine-Turns.md 11.14: under a turn that waits for the
+  // person's computer, what makes it run, while the row shows.
+  it("shows a note under the label while the row shows, and never on a lingering row", async () => {
+    const note = <span data-testid="waiting-note">Start this space on this computer to run it.</span>;
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          {...soloStatusProps}
+          typingIndicatorState={{ phase: "waiting", label: null }}
+          typingStatusLabel="Waiting for your computer…"
+          typingStatusNote={note}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="assistant-typing-note"]')?.textContent).toBe(
+      "Start this space on this computer to run it.",
+    );
+    // The turn's own row takes over: the status lingers hidden, without its note.
+    await act(async () => {
+      root.render(
+        <ChatTypingRows
+          {...soloStatusProps}
+          isAssistantTyping={false}
+          typingIndicatorState={{ phase: "waiting", label: null }}
+          typingStatusLabel="Waiting for your computer…"
+          typingStatusNote={note}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="assistant-typing-note"]')).toBeNull();
+  });
+
   it("keeps the solo thinking face still when reduced motion is requested", async () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: query === "(prefers-reduced-motion: reduce)",

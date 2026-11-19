@@ -1,10 +1,9 @@
 import { useCallback, useRef, useState, type MutableRefObject } from "react";
 import type { ResolvedPromptAgentSelection } from "../../../conversations/assistantMentions";
-import {
-  withGroupParticipationPreflightMetadata,
-  type ConversationGroupParticipationPreflightInput,
-  type ConversationGroupParticipationPreflightResult,
-  type ConversationHumanPeerPresence,
+import type {
+  ConversationGroupParticipationPreflightInput,
+  ConversationGroupParticipationPreflightResult,
+  ConversationHumanPeerPresence,
 } from "../../../conversations/groupParticipation";
 import type { SubmitConversationRuntimeOverride } from "../../../conversations/useConversation";
 import type { ControllerConversationParticipant } from "../../../services/runtimeController/conversations";
@@ -41,21 +40,6 @@ import { buildServerSendQueuePromptBody } from "./useChatServerSendQueue";
 import type { PersonalBrowserAgentPhase } from "./usePersonalBrowserBridge";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 import { withUserMentionMetadata } from "../../../conversations/userMentions";
-import {
-  TURN_ENGINE_CLAIM_KEY,
-  carriesTurnEngineClaim,
-  readTurnEngineClaim,
-  withoutTurnEngineClaim,
-  type FrontendTurnEngineComposerOffer,
-  type FrontendTurnEngineSendDecision,
-} from "../../../features/frontendFeatureModule";
-
-/**
- * The composer's own Send chose an engine its feature module no longer offers
- * here: nothing goes out, so the message never runs on another engine.
- */
-export const TURN_ENGINE_UNAVAILABLE_NOTICE =
-  "That choice for the next message isn't available here now. Your message is kept.";
 
 export type SubmitMessageFn = (
   override?: ChatSubmitOverride,
@@ -84,13 +68,6 @@ export type SubmitMessageFn = (
      * resolves `false`.
      */
     requireAgentTurn?: boolean;
-    /**
-     * The composer's own Send of the draft it shows, while this engine is
-     * chosen for the next message. Only such a send can carry a turn-engine
-     * claim: the engine routes it or blocks it, and it never goes out
-     * without the engine. Any other send goes out without a claim.
-     */
-    turnEngine?: string | null;
   },
 ) => Promise<boolean>;
 
@@ -177,12 +154,7 @@ type ShowStatus = (
 type ConversationEntryLike = {
   controllerId?: string | null;
   visibility?: string | null;
-  threadKind?: string | null;
 } | null;
-
-type TurnEngineRoute = Extract<FrontendTurnEngineSendDecision, { kind: "route" }>;
-
-const NO_TURN_ENGINE_OFFERS: Readonly<Record<string, FrontendTurnEngineComposerOffer>> = Object.freeze({});
 
 export function useChatSubmitFlow({
   activeConversationEntry,
@@ -195,7 +167,6 @@ export function useChatSubmitFlow({
   clearComposerAfterQueue,
   clearComposerIfUnchanged,
   clearPendingBrowserLaunchMode,
-  consumeTurnEngineChoice,
   createConversation,
   createOrgInvitation,
   credentialsReady,
@@ -253,7 +224,6 @@ export function useChatSubmitFlow({
   skillSetupConversation = false,
   submitSendIntent,
   targetsOverlapActiveRuns,
-  turnEngineOffers = NO_TURN_ENGINE_OFFERS,
 }: {
   activeConversationEntry: ConversationEntryLike;
   activeConversationId: string | null;
@@ -265,8 +235,6 @@ export function useChatSubmitFlow({
   clearComposerAfterQueue: (conversationId: string, expectedDraft: string) => void;
   clearComposerIfUnchanged: (conversationId: string, expectedDraft: string) => void;
   clearPendingBrowserLaunchMode: () => void;
-  /** A send that carried this engine's claim went out: the choice was for that one message. */
-  consumeTurnEngineChoice?: (engineId: string) => void;
   createConversation: () => { localId: string };
   createOrgInvitation: (input: {
     orgId: string;
@@ -393,8 +361,6 @@ export function useChatSubmitFlow({
     expectedActiveJobId: string | null;
   }) => Promise<boolean>;
   targetsOverlapActiveRuns: (targetAgentHandles: string[]) => boolean;
-  /** What each turn engine offers this composer now, by engine id. */
-  turnEngineOffers?: Readonly<Record<string, FrontendTurnEngineComposerOffer>>;
 }) {
   const personalBrowserActive = personalBrowserShown && !skillSetupConversation;
   const sharedBrowserActive = sharedBrowserShown && !skillSetupConversation;
@@ -443,104 +409,15 @@ export function useChatSubmitFlow({
     }
 
     const submittedEditorState = override ? override.editorState : trimmed ? inputEditorState : null;
-    const incomingMetadata = override?.metadata ?? options?.metadata;
-    const requestedTurnEngine = options?.turnEngine ?? null;
-    const turnEngineSendInput = (input: { chatBusy: boolean; opensInvitePrompt: boolean }) => ({
-      message: messageToSend,
-      intent: requestedIntent,
-      automatic,
-      requiresAgentTurn: messageRequiresAi,
-      terminalCommand: Boolean(terminalRequest),
-      attachmentCount: imageFiles.length,
-      threadKind: activeConversationEntry?.threadKind ?? null,
-      targetHandles: agentSelection.targetHandles,
-      browserComposer: personalBrowserActive || sharedBrowserActive,
-      newBrowserTab: browserLaunchMode === "new_page",
-      ...input,
-    });
-    // The app never sends a turn-engine claim on the person's behalf: an
-    // automatic send whose own metadata carries one is refused outright.
-    if (automatic && carriesTurnEngineClaim(incomingMetadata)) {
-      const claimedEngine = readTurnEngineClaim(incomingMetadata);
-      const offer = claimedEngine ? turnEngineOffers[claimedEngine] : undefined;
-      const decision = offer
-        ? await offer.resolveSend(turnEngineSendInput({ chatBusy: false, opensInvitePrompt: false }))
-        : null;
-      if (decision?.kind === "blocked") {
-        showStatus(decision.notice, "warning", 5000);
-      }
-      logAppWarn("Refused an automatic send that carried a turn-engine claim.");
-      return false;
-    }
     let baseSubmitMetadata: Record<string, unknown>;
     try {
-      // Only the routing below adds a claim: every other send goes out
-      // without one, whatever its caller put in its metadata.
       baseSubmitMetadata = withPersonInput(
-        withUserMentionMetadata(withoutTurnEngineClaim(incomingMetadata), submittedEditorState),
+        withUserMentionMetadata(override?.metadata ?? options?.metadata, submittedEditorState),
         automatic,
       );
     } catch (error) {
       showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
       return false;
-    }
-
-    // The composer's own Send while an engine is chosen for it: the engine
-    // routes it, or it is blocked with the engine's notice and the text and
-    // the choice stay. It never goes out on another engine. This runs before
-    // the participation preflight, which a claimed send bypasses.
-    let turnEngineRoute: TurnEngineRoute | null = null;
-    if (requestedTurnEngine) {
-      const offer = turnEngineOffers[requestedTurnEngine];
-      if (!offer) {
-        showStatus(TURN_ENGINE_UNAVAILABLE_NOTICE, "warning", 4500);
-        focusInput();
-        return false;
-      }
-      // The same test runChatSubmitPreflight uses to queue a send.
-      const chatBusy =
-        !allowWhileBusy &&
-        (isAssistantTyping || sendingAttachment) &&
-        (sendingAttachment || targetsOverlapActiveRuns(agentSelection.targetHandles));
-      const opensInvitePrompt =
-        requestedIntent === "send" && !automatic
-          ? Boolean(
-              await resolvePrivateConversationInvitePrompt({
-                activeConversationId,
-                browserLaunchMode: null,
-                browserPageTarget: null,
-                controllerId: activeConversationEntry?.controllerId ?? null,
-                editorState: submittedEditorState,
-                imageFiles: [],
-                isPrivateConversation: activeConversationEntry?.visibility === "private",
-                listConversationParticipants,
-                message: messageToSend,
-                expectedLaneIdle: true,
-              }),
-            )
-          : false;
-      const decision = await offer.resolveSend(turnEngineSendInput({ chatBusy, opensInvitePrompt }));
-      // Whatever an engine answers, only a plain Send the person made carries a claim.
-      if (decision.kind === "blocked" || automatic || requestedIntent !== "send") {
-        if (decision.kind === "blocked") {
-          showStatus(
-            decision.notice,
-            "warning",
-            6000,
-            decision.action
-              ? { actionLabel: decision.action.label, onAction: decision.action.onAction }
-              : undefined,
-          );
-        }
-        focusInput();
-        return false;
-      }
-      turnEngineRoute = decision;
-      baseSubmitMetadata = {
-        ...baseSubmitMetadata,
-        ...decision.metadata,
-        [TURN_ENGINE_CLAIM_KEY]: requestedTurnEngine,
-      };
     }
 
     const participationPreflight = await resolveGroupParticipationBeforeSubmit({
@@ -558,14 +435,11 @@ export function useChatSubmitFlow({
           shouldApplyNewBrowserLaunch),
       humanPeerContext,
     });
-    // A claimed send is bypassed there, and is never only recorded or left to
-    // the controller's participation check whatever came back.
-    const participationMode = turnEngineRoute ? "unchanged" : participationPreflight.mode;
-    const participationRecordOnly = participationMode === "record_only";
+    const participationRecordOnly = participationPreflight.mode === "record_only";
     const participationControllerDeferred =
-      participationMode === "controller_deferred";
+      participationPreflight.mode === "controller_deferred";
     const participationControllerCoverage =
-      participationMode === "controller_coverage";
+      participationPreflight.mode === "controller_coverage";
     const participationNeutralizesLocalPreflight =
       participationRecordOnly ||
       participationControllerDeferred ||
@@ -581,26 +455,22 @@ export function useChatSubmitFlow({
     const effectiveTargetAgentHandles = participationRecordOnly
       ? []
       : agentSelection.targetHandles;
-    // A claimed send carries no participation decision, only the bypass.
-    const resolvedBaseSubmitMetadata = turnEngineRoute
-      ? withGroupParticipationPreflightMetadata(baseSubmitMetadata, "bypassed")
-      : participationPreflight.metadata;
+    const resolvedBaseSubmitMetadata = participationPreflight.metadata;
     if (options?.requireAgentTurn && (participationRecordOnly || effectiveTargetAgentHandles.length === 0)) {
       return false;
     }
 
-    const queuedRuntimeOverride = !turnEngineRoute && override?.runtimeOverride?.runtimeId
+    const queuedRuntimeOverride = override?.runtimeOverride?.runtimeId
       ? override.runtimeOverride
       : null;
     const personalBrowserRouting = resolvePersonalBrowserSubmitRouting({
-      active: !turnEngineRoute && !queuedRuntimeOverride && !automatic && personalBrowserActive,
+      active: !queuedRuntimeOverride && !automatic && personalBrowserActive,
       messageRequiresAi: effectiveMessageRequiresAi,
       runtimeOverride: personalBrowserRuntimeOverride,
       terminalRequest,
     });
     const sharedBrowserRouting = resolveSharedBrowserSubmitRouting({
       active:
-        !turnEngineRoute &&
         !queuedRuntimeOverride &&
         !automatic &&
         sharedBrowserActive &&
@@ -649,7 +519,6 @@ export function useChatSubmitFlow({
       return false;
     }
     const submitRuntimeOverride =
-      turnEngineRoute?.runtimeOverride ??
       queuedRuntimeOverride ??
       personalBrowserRouting.runtimeOverride ??
       sharedBrowserRouting.runtimeOverride;
@@ -947,7 +816,6 @@ export function useChatSubmitFlow({
       targetAgentHandles: effectiveTargetAgentHandles,
       targetsOverlapActiveRuns,
       trimmed,
-      turnEngineSend: Boolean(turnEngineRoute),
     });
     if (preflight.status === "handled") {
       if (preflight.queued) {
@@ -969,8 +837,7 @@ export function useChatSubmitFlow({
     }
 
     const submitImageFiles = override ? [] : imageFiles;
-    // A claimed send checked this before its engine routed it.
-    const invitePromptRequest = turnEngineRoute ? null : await resolvePrivateConversationInvitePrompt({
+    const invitePromptRequest = await resolvePrivateConversationInvitePrompt({
       activeConversationId,
       browserLaunchMode: shouldApplyNewBrowserLaunch ? browserLaunchMode : null,
       browserPageTarget: shouldApplyBrowserPageTarget ? browserPageTarget : null,
@@ -1003,27 +870,19 @@ export function useChatSubmitFlow({
       imageFiles: submitImageFiles,
       metadata: submitMetadata,
       runtimeOverride: submitRuntimeOverride,
-      expectedLaneIdle: turnEngineRoute
-        ? true
-        : !allowWhileBusy && !participationBypassesBusySerialization,
+      expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
       automatic,
     });
     if (!sent) {
-      // An attachment upload failed, or the controller refused a send that
-      // claimed a turn engine, and the draft is back in the composer: it
-      // keeps the browser page or new-page launch it was aimed at, and the
-      // engine stays chosen for it.
+      // An attachment upload failed, or the controller refused it because a
+      // turn engine can't take it, and the draft is back in the composer: it
+      // keeps the browser page or new-page launch it was aimed at.
       return false;
     }
     consumeBrowserComposerTarget();
-    if (turnEngineRoute && requestedTurnEngine) {
-      // The choice was for this one message.
-      consumeTurnEngineChoice?.(requestedTurnEngine);
-    }
     return true;
   }, [
     activeConversationEntry?.controllerId,
-    activeConversationEntry?.threadKind,
     activeConversationEntry?.visibility,
     activeConversationId,
     activeConversationMessages,
@@ -1035,7 +894,6 @@ export function useChatSubmitFlow({
     clearComposerAfterQueue,
     clearComposerIfUnchanged,
     clearPendingBrowserLaunchMode,
-    consumeTurnEngineChoice,
     createConversation,
     createOrgInvitation,
     credentialsReady,
@@ -1091,7 +949,6 @@ export function useChatSubmitFlow({
     skillSetupConversation,
     submitSendIntent,
     targetsOverlapActiveRuns,
-    turnEngineOffers,
   ]);
 
   const submitMessage = useCallback<SubmitMessageFn>(async (override, options) => {

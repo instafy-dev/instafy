@@ -2,27 +2,18 @@ import type { ControllerRuntimeClaudeCodeNotReadyReason } from "../../services/r
 import type { ClaudeCodeDesktopProblem, ClaudeCodeShellSetting } from "./claudeCodeDesktop";
 
 /**
- * Every sentence the composer shows for Claude Code turns
- * (docs/Local-Engine-Turns.md 5.1, 5.4). They state plainly that a turn runs
- * the person's own Claude Code, never make "Claude Code" the name of an
- * Instafy feature (D28), never say "included", "free" or "unlimited" or
+ * Every sentence Studio shows about Claude Code outside a turn's own row
+ * (docs/Local-Engine-Turns.md 5.3, 5.4, 11.3, 11.14). They state plainly that
+ * a turn runs the person's own Claude Code, never make "Claude Code" the name
+ * of an Instafy feature (D28), never say "included", "free" or "unlimited" or
  * mention credits, and use none of the words docs/Chat-Activity.md keeps out
  * of failure sentences.
  */
 export const CLAUDE_CODE_COPY = {
-  rowTitle: "Claude Code for the next message",
   /** Only when this computer's runtime reports a Claude plan sign-in (5.4). */
   planLine: "Runs on your own Claude plan, under Anthropic's current terms.",
   signInLine: "Uses your own Claude Code sign-in, under Anthropic's current terms.",
-  rowHint:
-    "Instafy gives Claude Code only your message. Everyone who can see this chat sees its steps and reply.",
-  tokenLabel: "Claude Code · next message",
-  tokenCancel: "Don't use Claude Code",
-  startAction: "Start on this computer",
 
-  inThread: "Claude Code takes messages in a chat, not in a thread.",
-  notSetUp: "Set up Claude Code on this computer in Your AI first.",
-  notRunningHere: "This space isn't running on this computer.",
   notReadyYet: "Claude Code isn't ready on this computer yet.",
   notReady: {
     binary_missing:
@@ -38,23 +29,25 @@ export const CLAUDE_CODE_COPY = {
       "This version of Claude Code no longer lets other apps use your sign-in for a turn, so Instafy can't use it yet.",
   } satisfies Record<ControllerRuntimeClaudeCodeNotReadyReason, string>,
 
-  sendNotYours: "Claude Code takes only a message you send yourself.",
-  sendWhileReplying: "Octo is still working on another message in this chat. Send this when it's done.",
-  sendQueued:
-    "Claude Code messages aren't queued. Send this when Octo is done, or remove Claude Code to queue it.",
-  sendFromBrowser: "Claude Code takes messages from the chat, not from the browser.",
-  sendNewTab:
-    "Claude Code can't ask for a new browser tab. Cancel the new tab to send this to Claude Code.",
-  sendAttachments: "Claude Code takes your message without images. Remove them to send it.",
-  sendCommand: "Claude Code takes a plain message, not a command.",
-  sendNotOcto: "Claude Code takes only a message to Octo.",
-  sendTooLong: "Claude Code takes at most 100,000 characters in one message.",
-  sendInvitePrompt:
-    "This message would first invite someone into this private chat, so Claude Code can't take it. Invite them first, then send it.",
-  sendNotAllowed: "Claude Code turns aren't on for your account yet.",
-  sendNotConnected:
-    "Your computer isn't connected to this space. Start it on this computer, then send your message.",
-  sendNotChecked: "Instafy couldn't check Claude Code on this computer. Try again in a moment.",
+  /** Claude Code as an agent's AI, in Your AI's agent editor (11.3). */
+  agentAi: {
+    label: "Claude Code",
+    description: "Runs on your own Claude Code, on your computer. Its turns wait while your computer is off.",
+    /** In Instafy Desktop, on a computer where Claude Code isn't set up yet. */
+    setUpHere:
+      "Claude Code isn't set up on this computer yet. Set it up in Connections, under Claude Code on this computer.",
+    /** A save the controller refused because the switch doesn't cover the person (11.3). */
+    notAllowed: "Claude Code turns aren't on for your account.",
+  },
+
+  /** What a waiting turn's row adds for its person: what makes it run (11.14). */
+  waiting: {
+    startHere: "Start this space on this computer to run it.",
+    startAction: "Start",
+    startingAction: "Starting…",
+    elsewhere: "It runs when Instafy Desktop runs this space on your computer.",
+    setUpHere: "Set up Claude Code on this computer in Your AI to run it here.",
+  },
 
   /**
    * The Your AI row (5.3). Like the Instafy AI row it is not a connection, and
@@ -66,16 +59,16 @@ export const CLAUDE_CODE_COPY = {
     notFound: "Not found",
     find: "Find",
     locate: "Locate…",
-    enable: "Use for my messages",
+    enable: "Use Claude Code on this computer",
     disable: "Turn off",
-    on: "On for your messages when you choose it in the composer.",
-    off: "Off. Choose Use for my messages to turn it on for this computer.",
+    on: "On. Your agents that use Claude Code take their turns here while this computer runs their space.",
+    off: "Off. Choose Use Claude Code on this computer to turn it on.",
     /**
      * Off, while Desktop has no find to offer and no problem to report: before
      * any Find or Locate, or after Turn off when it holds none. After one that
      * turned up nothing it can use, the row gives Desktop's reason instead.
      */
-    offNotFound: "Off. Choose Find or Locate… to pick the claude program, then Use for my messages.",
+    offNotFound: "Off. Choose Find or Locate… to pick the claude program, then Use Claude Code on this computer.",
     /** While Desktop replaces this computer's runtime after a change that leaves it on (4.3). */
     checking: "Checking this computer…",
     ready: "Ready on this computer.",
@@ -116,16 +109,16 @@ export const CLAUDE_CODE_COPY = {
     } satisfies Record<ClaudeCodeShellSetting, string>,
     /** While it is on: another copy Find or Locate turned up, which turns don't use yet. */
     candidateFoundAt: "Also found at",
-    candidateUse: "Choose Use for my messages to use it instead.",
+    candidateUse: "Choose Use Claude Code on this computer to use it instead.",
     /**
      * While it is on: Find read login-shell settings for the copy in use that
      * Instafy Desktop can use in place of the ones it has, which it no longer
      * can (D26). Turns don't use them yet.
      */
     candidateRenewed:
-      "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use for my messages to use them.",
+      "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use Claude Code on this computer to use them.",
     /** While it is on: Find turned up nothing, and the copy in use stays. */
-    candidateNotFound: "Find didn't turn up any other copy. Your messages keep using this one.",
+    candidateNotFound: "Find didn't turn up any other copy, so this one stays in use.",
     actionFailed: "Instafy Desktop couldn't do that. Try again.",
     /**
      * The one-time note once it is on (5.3). It is left out while this

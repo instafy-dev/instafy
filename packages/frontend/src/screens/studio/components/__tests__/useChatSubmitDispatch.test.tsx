@@ -278,15 +278,14 @@ describe("useChatSubmitDispatch", () => {
     });
   });
 
-  describe("when the controller refuses a send that claimed a turn engine", () => {
-    // docs/Local-Engine-Turns.md 5.5: nothing went out, so the words go back
-    // in the composer and the send resolves false, which keeps the engine
-    // chosen for them (useChatSubmitFlow uses the choice up only for a send
-    // that went out).
+  describe("when the controller refuses a send because a turn engine can't take it", () => {
+    // docs/Local-Engine-Turns.md 11.6: nothing went out, so the words go back
+    // in the composer, for the person to change and send again, and the send
+    // resolves false.
     const refused = new TurnEngineSendRefusedError({
       engineId: "claude-code",
-      code: "claude_code_machine_busy",
-      sentence: "Your computer is busy with another turn. Send this when it's done.",
+      code: "claude_code_turn_unsupported",
+      sentence: "Claude Code can't take attachments yet. Send your message without them.",
     });
 
     it("puts the words back in the composer, with their editor state, and reports nothing sent", async () => {
@@ -317,7 +316,7 @@ describe("useChatSubmitDispatch", () => {
           message: "@octo fix the failing login test",
           editorState: "{\"root\":{}}",
           imageFiles: [],
-          metadata: { turnEngine: "claude-code" },
+          metadata: { input: { kind: "person" } },
           expectedLaneIdle: true,
         });
       });

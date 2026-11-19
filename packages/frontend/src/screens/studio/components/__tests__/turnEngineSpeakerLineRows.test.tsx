@@ -130,7 +130,7 @@ describe("a turn-engine reply whose header the chat leaves out", () => {
   });
 
   it("adds nothing to a reply the controller did not stamp", async () => {
-    await render([reply("reply-1", 0, { turnEngine: "claude-code" }), reply("reply-2", 1, {})], "solo");
+    await render([reply("reply-1", 0, { aiAccessMode: "claude-code" }), reply("reply-2", 1, {})], "solo");
     expect(container.querySelectorAll('[data-testid="turn-engine-speaker-line"]')).toHaveLength(0);
     expect(container.querySelector('[data-testid="chat-speaker-inline"]')).toBeNull();
   });

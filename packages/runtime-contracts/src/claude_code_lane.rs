@@ -46,16 +46,13 @@ pub const RUNTIME_FAILURE_CODES: [&str; 15] = [
 /// The `claudeCodeFailure` of a lane turn that a runtime stop failed: the computer's Instafy
 /// stopped while the turn ran or before it started (2.9).
 pub const MACHINE_STOPPED: &str = "claude_code_machine_stopped";
-/// The `claudeCodeFailure` of a lane turn that the run-once sweep failed because nothing started
-/// it within its minute (2.9). The sweep gives every run-once job it fails so this `kind`.
-pub const START_BY_PASSED: &str = "start_by_passed";
 /// The `claudeCodeFailure` of a lane turn whose lease ended while it ran, which never runs again
 /// (2.9). The sweeps give every run-once job they fail so this `kind`.
 pub const RUN_ONCE_INTERRUPTED: &str = "run_once_interrupted";
 /// The codes the controller itself writes as a lane turn's `claudeCodeFailure`, a runtime
-/// stop's and the sweeps' (2.9, 5.5). None of them is copied from a runtime's artifact.
-pub const STOP_AND_SWEEP_FAILURE_CODES: [&str; 3] =
-    [MACHINE_STOPPED, START_BY_PASSED, RUN_ONCE_INTERRUPTED];
+/// stop's and the sweeps' (2.9, 5.5). None of them is copied from a runtime's artifact. A lane
+/// turn has no start window in version 2, so no sweep fails one for not starting in time (11.7).
+pub const STOP_AND_SWEEP_FAILURE_CODES: [&str; 2] = [MACHINE_STOPPED, RUN_ONCE_INTERRUPTED];
 
 #[cfg(test)]
 mod tests {

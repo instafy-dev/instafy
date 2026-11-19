@@ -6,12 +6,14 @@ import type { TurnEngineFailureInput } from "../../../conversations/runFailurePr
 import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
 import {
   CLAUDE_CODE_FAILURE_SENTENCES,
-  CLAUDE_CODE_RESEND_LABEL,
   CLAUDE_CODE_SEND_REFUSAL_SENTENCES,
   CLAUDE_CODE_STEER_REFUSED,
   CLAUDE_CODE_TURN_PRESENTATION,
+  CLAUDE_CODE_UNSUPPORTED_SENTENCES,
+  claudeCodePlanLimitResetsAt,
   claudeCodeSpeakerLine,
   claudeCodeTeammateFailureSentence,
+  claudeCodeWaitingLine,
   describeClaudeCodeSendRefusal,
   describeClaudeCodeTurnFailure,
   isClaudeCodeControllerStamped,
@@ -48,8 +50,11 @@ function failure(
   };
 }
 
-function runtimeEntry(claudeCode: ControllerRuntimeStatusEntry["claudeCode"]): ControllerRuntimeStatusEntry {
-  return { runtimeId: "runtime-1", claudeCode } as ControllerRuntimeStatusEntry;
+function runtimeEntry(
+  claudeCode: Omit<NonNullable<ControllerRuntimeStatusEntry["claudeCode"]>, "resetsAt"> & { resetsAt?: string | null },
+  runtimeId = "runtime-1",
+): ControllerRuntimeStatusEntry {
+  return { runtimeId, claudeCode: { resetsAt: null, ...claudeCode } } as ControllerRuntimeStatusEntry;
 }
 
 // docs/Local-Engine-Turns.md 5.5, one row per code.
@@ -84,7 +89,6 @@ const EXPECTED: Record<ClaudeCodeFailureCode, string> = {
   preflight_failed: "Instafy couldn't check this space's folder on this computer, so Claude Code didn't start.",
   claude_code_machine_stopped:
     "Instafy Desktop stopped on your computer while Claude Code was working, so the turn ended. Send it again to run it.",
-  start_by_passed: "This Claude Code turn didn't start in time, so it won't run. Send it again.",
   run_once_interrupted:
     "This Claude Code turn stopped because Instafy on your computer stopped, and it won't run again. Send it again to start over.",
 };
@@ -104,11 +108,17 @@ function everyTurnSentence(): string[] {
     ...Object.keys(CLAUDE_CODE_SEND_REFUSAL_SENTENCES).map(
       (code) => describeClaudeCodeSendRefusal({ code, details: null }) ?? "",
     ),
-    describeClaudeCodeSendRefusal({ code: "claude_code_turn_active", details: { reason: "start_window_passed" } }) ?? "",
-    describeClaudeCodeSendRefusal({ code: "claude_code_runtime_not_ready", details: { reason: "capability_not_ready" } }) ?? "",
+    ...Object.keys(CLAUDE_CODE_UNSUPPORTED_SENTENCES).map(
+      (reason) => describeClaudeCodeSendRefusal({ code: "claude_code_turn_unsupported", details: { reason } }) ?? "",
+    ),
     describeClaudeCodeSendRefusal({ code: "claude_code_turn_engine_unknown", details: null }) ?? "",
     CLAUDE_CODE_STEER_REFUSED,
-    CLAUDE_CODE_RESEND_LABEL,
+    claudeCodeWaitingLine({ isViewer: true, name: null }),
+    claudeCodeWaitingLine({ isViewer: false, name: "Sam" }),
+    claudeCodeWaitingLine(null),
+    claudeCodeWaitingLine({ isViewer: true, name: null }, [
+      runtimeEntry({ ready: false, reason: null, cli: null, verified: null, planSignIn: true, resetsAt: "2099-01-01T10:00:00Z" }),
+    ]),
     claudeCodeSpeakerLine({ isViewer: true, name: null }),
     claudeCodeSpeakerLine({ isViewer: false, name: "Sam" }),
     claudeCodeSpeakerLine(null),
@@ -190,67 +200,55 @@ describe("Claude Code turn wording", () => {
     );
   });
 
-  it("words every send refusal by its code, and the busy chat's when the send claimed Claude Code", () => {
+  // docs/Local-Engine-Turns.md 11.4, 11.6: the refusals a send to a Claude
+  // Code agent can get, before anything is recorded.
+  it("words every send refusal by its code, and a turn Claude Code can't take by its reason", () => {
     const refusal = (code: string, details: unknown = null) => describeClaudeCodeSendRefusal({ code, details });
-    expect(refusal("claude_code_turn_not_allowed")).toBe("Claude Code turns aren't on for your account yet.");
-    expect(refusal("claude_code_turn_not_person")).toBe("Claude Code takes only a message you send yourself.");
-    expect(refusal("claude_code_turn_not_plain")).toBe(
-      "Claude Code takes only a plain message to Octo, of at most 100,000 characters, without attachments or a command.",
+    expect(refusal("claude_code_turn_not_allowed")).toBe(
+      "Claude Code turns aren't on for your account. Choose another AI for this agent in Your AI.",
     );
-    expect(refusal("claude_code_conversation_granted")).toBe(
-      "In this chat, Octo takes turns only from the person who started the chat, so Claude Code can't run your message here.",
+    const unsupported = (reason: unknown) => refusal("claude_code_turn_unsupported", { reason });
+    expect(unsupported("browser")).toBe("Claude Code can't use Instafy's browser. Ask an agent that uses another AI.");
+    expect(unsupported("team_plan")).toBe("Claude Code agents can't take part in a team plan yet.");
+    expect(unsupported("attachments")).toBe("Claude Code can't take attachments yet. Send your message without them.");
+    expect(unsupported("command")).toBe(
+      "Claude Code reads a message that starts with / as its own command, so it wasn't sent. Start your message another way.",
     );
-    expect(refusal("claude_code_turn_active", { reason: "turn_active" })).toBe(
-      "You already have a Claude Code turn running. Send this when it ends.",
+    expect(unsupported("empty")).toBe("There's nothing to send.");
+    expect(unsupported("too_long")).toBe("Claude Code takes messages of at most 100,000 characters.");
+    expect(unsupported("execution_mode")).toBe("Claude Code can't take a turn that waits for your approval.");
+    expect(unsupported("write_scope")).toBe(
+      "Claude Code can't be held to part of the space's files while other agents write, so it can't take this turn. Send it the message on its own.",
     );
-    expect(refusal("claude_code_turn_active", { reason: "start_window_passed" })).toBe(
-      "Your last Claude Code turn didn't start in time. Send this again in a few seconds.",
+    // A reason this client does not know yet, or none, never shows the
+    // controller's raw text.
+    expect(unsupported("something_new")).toBe("Claude Code couldn't take this message.");
+    expect(unsupported(null)).toBe("Claude Code couldn't take this message.");
+    expect(refusal("claude_code_turn_unsupported")).toBe("Claude Code couldn't take this message.");
+    expect(Object.keys(CLAUDE_CODE_UNSUPPORTED_SENTENCES).sort()).toEqual(
+      ["attachments", "browser", "command", "empty", "execution_mode", "team_plan", "too_long", "write_scope"],
     );
-    expect(refusal("claude_code_machine_busy", { reason: "machine_busy" })).toBe(
-      "Your computer is busy with another turn. Send this when it's done.",
-    );
-    expect(refusal("claude_code_runtime_not_ready", { reason: "not_attested" })).toBe(
-      "Your computer isn't connected to this space. Open this space in Instafy Desktop, then send your message again.",
-    );
-    expect(refusal("dispatch_lane_busy")).toBe(
-      "Octo is still working on another message in this chat. Send this when it's done.",
-    );
-    // A Claude Code refusal this client does not know yet never shows the
-    // controller's raw text; any other code is not Claude Code's to word.
-    expect(refusal("claude_code_turn_engine_unknown")).toBe("Claude Code couldn't take this message.");
-    expect(refusal("project_not_found")).toBeNull();
   });
 
-  // The test drive of Nov 13: a send refused because Claude Code itself
-  // wasn't ready (too old, signed out, not found) said the computer wasn't
-  // connected. G6's `details.reason` says which it is.
-  it("says Claude Code on this computer isn't ready when that is the reason, and that the computer isn't connected otherwise", () => {
-    const refusal = (reason: unknown) =>
-      describeClaudeCodeSendRefusal({ code: "claude_code_runtime_not_ready", details: { reason } });
-    const notReady =
-      "Claude Code on this computer isn't ready to take turns. Check it in Your AI, then send your message again.";
-    const notConnected =
-      "Your computer isn't connected to this space. Open this space in Instafy Desktop, then send your message again.";
-    expect(refusal("capability_not_ready")).toBe(notReady);
-    expect(refusal("capability_missing")).toBe(notReady);
-    for (const reason of [
-      "no_runtime",
-      "runtime_missing",
-      "not_private",
-      "not_owner",
-      "personal_browser",
-      "not_dispatch_ready",
-      "something_new",
-      null,
-      42,
+  // Version 1's refusals are gone (11.14): any other Claude Code code reads
+  // the one plain sentence, and a code that is not Claude Code's is not its
+  // to word.
+  it("words any other Claude Code refusal plainly, and no other code", () => {
+    const refusal = (code: string) => describeClaudeCodeSendRefusal({ code, details: { reason: "turn_active" } });
+    for (const code of [
+      "claude_code_turn_not_person",
+      "claude_code_turn_not_plain",
+      "claude_code_conversation_granted",
+      "claude_code_turn_active",
+      "claude_code_machine_busy",
+      "claude_code_runtime_not_ready",
+      "claude_code_turn_engine_unknown",
     ]) {
-      expect(refusal(reason), String(reason)).toBe(notConnected);
+      expect(refusal(code), code).toBe("Claude Code couldn't take this message.");
     }
-    expect(describeClaudeCodeSendRefusal({ code: "claude_code_runtime_not_ready", details: null })).toBe(notConnected);
-    // The reason belongs to this code alone.
-    expect(describeClaudeCodeSendRefusal({ code: "claude_code_machine_busy", details: { reason: "capability_not_ready" } })).toBe(
-      "Your computer is busy with another turn. Send this when it's done.",
-    );
+    expect(Object.keys(CLAUDE_CODE_SEND_REFUSAL_SENTENCES)).toEqual(["claude_code_turn_not_allowed"]);
+    expect(refusal("dispatch_lane_busy")).toBeNull();
+    expect(refusal("project_not_found")).toBeNull();
   });
 
   it("words a refused Steer, and only Claude Code's own refusal", () => {
@@ -258,6 +256,38 @@ describe("Claude Code turn wording", () => {
       "This Claude Code turn can't take more words while it runs. Queue your message instead.",
     );
     expect(CLAUDE_CODE_TURN_PRESENTATION.describeSteerRefusal("no_active_job")).toBeNull();
+  });
+
+  // 11.14: while no computer has taken it, by viewer.
+  it("waits for its person's computer, or their Claude plan's limit while one of their computers holds it", () => {
+    const now = Date.UTC(2026, 10, 19, 12, 0);
+    const holding = (resetsAt: string, runtimeId = "runtime-1") =>
+      runtimeEntry({ ready: false, reason: null, cli: "2.1.325", verified: true, planSignIn: true, resetsAt }, runtimeId);
+    expect(claudeCodeWaitingLine({ isViewer: true, name: "Sam" }, [], now)).toBe("Waiting for your computer…");
+    expect(claudeCodeWaitingLine({ isViewer: false, name: "Sam" }, [], now)).toBe("Waiting for Sam's computer…");
+    expect(claudeCodeWaitingLine({ isViewer: false, name: null }, [], now)).toBe("Waiting for the sender's computer…");
+    expect(claudeCodeWaitingLine(null, [], now)).toBe("Waiting for the sender's computer…");
+
+    const at = Date.UTC(2026, 10, 19, 14, 30);
+    const local = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(at));
+    expect(claudeCodeWaitingLine({ isViewer: true, name: null }, [holding("2026-11-19T14:30:00Z")], now)).toBe(
+      `Waiting for your Claude plan's limit to reset at ${local}…`,
+    );
+    // The earliest reset of the person's computers here, never a past one.
+    expect(
+      claudeCodePlanLimitResetsAt([holding("2026-11-19T16:00:00Z", "a"), holding("2026-11-19T14:30:00Z", "b")], now),
+    ).toBe(at);
+    expect(claudeCodePlanLimitResetsAt([holding("2026-11-19T11:00:00Z")], now)).toBeNull();
+    // A ready computer of theirs takes the turn: it waits for nothing else.
+    const ready = runtimeEntry({ ready: true, reason: null, cli: "2.1.325", verified: true, planSignIn: true }, "c");
+    expect(claudeCodePlanLimitResetsAt([holding("2026-11-19T14:30:00Z"), ready], now)).toBeNull();
+    expect(claudeCodeWaitingLine({ isViewer: true, name: null }, [holding("2026-11-19T14:30:00Z"), ready], now)).toBe(
+      "Waiting for your computer…",
+    );
+    // Only the person's own computers say anything about their plan: a teammate reads whose computer it waits for.
+    expect(claudeCodeWaitingLine({ isViewer: false, name: "Sam" }, [holding("2026-11-19T14:30:00Z")], now)).toBe(
+      "Waiting for Sam's computer…",
+    );
   });
 
   it("says whose own Claude Code ran a reply, in plain words", () => {

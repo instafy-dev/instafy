@@ -71,14 +71,10 @@ const CONTROLLER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const USER_ID = "99999999-8888-4777-8666-555555555555";
 const RUNTIME_ID = "dddddddd-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
-// What the composer's routing puts on a send it routes to Claude Code.
-const ROUTED_METADATA = {
-  input: { kind: "person" },
-  turnEngine: "claude-code",
-  agentSelection: { active: ["octo"], mentions: ["octo"] },
-  groupParticipationPreflight: { status: "bypassed" },
-};
-const ROUTED_RUNTIME = { runtimeId: RUNTIME_ID, runtimeDisplayName: null, preferRuntime: false };
+// A person's message: nothing in it says which AI its agent uses
+// (docs/Local-Engine-Turns.md 11.3). The controller knows from the agent.
+const PERSON_METADATA = { input: { kind: "person" } };
+const PINNED_RUNTIME = { runtimeId: RUNTIME_ID, runtimeDisplayName: null, preferRuntime: false };
 
 const OCTO_SELECTION: ResolvedPromptAgentSelection = {
   activeHandles: ["octo"],
@@ -124,7 +120,7 @@ function HookHarness({
   return null;
 }
 
-describe("useConversationSubmitFlow for a send that claims a turn engine", () => {
+describe("useConversationSubmitFlow and a turn engine's refusal", () => {
   let container: HTMLDivElement;
   let root: Root;
   let flow: SubmitFlow | null;
@@ -189,8 +185,11 @@ describe("useConversationSubmitFlow for a send that claims a turn engine", () =>
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("bypasses the participation preflight, so the send is never only recorded", async () => {
-    const result = await flow!.resolveGroupParticipationBeforeSubmit({
+  // Version 1's claim is gone (11.14): a key of that name gets nothing of what
+  // the composer's choice once got.
+  it("treats a send whatever its metadata holds as any send: participation, agents and a title", async () => {
+    resolveParticipationMock.mockResolvedValue("unsupported");
+    const preflight = await flow!.resolveGroupParticipationBeforeSubmit({
       conversationId: "conversation-local",
       displayPrompt: "Fix the failing login test",
       dispatchPrompt: "Fix the failing login test",
@@ -200,63 +199,31 @@ describe("useConversationSubmitFlow for a send that claims a turn engine", () =>
       hasBrowserTask: false,
       humanPeerContext: { hasHumanPeer: true, resolved: true },
     });
-    expect(result).toEqual({
-      mode: "unchanged",
-      metadata: {
-        turnEngine: "claude-code",
-        input: { kind: "person" },
-        groupParticipationPreflight: { status: "bypassed" },
-      },
-    });
-    expect(resolveParticipationMock).not.toHaveBeenCalled();
-  });
+    expect(preflight.metadata).not.toMatchObject({ groupParticipationPreflight: { status: "bypassed" } });
 
-  it("dispatches it as routed: its own agents and runtime, no participation check, no title", async () => {
     await act(async () => {
-      await flow!.handleSubmit("conversation-local", "@octo fix the failing login test", {
-        metadata: ROUTED_METADATA,
-        runtimeOverride: ROUTED_RUNTIME,
-        expectedLaneIdle: true,
+      await flow!.handleSubmit("conversation-local", "Fix the failing login test", {
+        metadata: { ...PERSON_METADATA, turnEngine: "claude-code" },
       });
     });
-
     expect(sendPromptToControllerMock).toHaveBeenCalledTimes(1);
-    const [targetId, prompt, metadata, runtimeOverride, , intent, expectedLaneIdle] =
-      sendPromptToControllerMock.mock.calls[0];
-    expect(targetId).toBe("conversation-local");
-    expect(prompt).toBe("@octo fix the failing login test");
-    expect(metadata).toMatchObject({
-      turnEngine: "claude-code",
-      agentSelection: { active: ["octo"], mentions: ["octo"] },
-      groupParticipationPreflight: { status: "bypassed" },
-    });
-    // The words' own mention never rewrites what the routing chose.
-    expect(metadata).not.toHaveProperty("agentCollaboration");
-    expect(runtimeOverride).toEqual(ROUTED_RUNTIME);
-    expect(intent).toBeUndefined();
-    expect(expectedLaneIdle).toBe(true);
-    expect(resolveParticipationMock).not.toHaveBeenCalled();
-    expect(recordMessageToControllerMock).not.toHaveBeenCalled();
-    expect(resolveLocalCapabilityHandleMock).not.toHaveBeenCalled();
-    // No title request at send: a title is asked of a model.
-    expect(queueAutoTitleConversationMock).not.toHaveBeenCalled();
+    expect(queueAutoTitleConversationMock).toHaveBeenCalledTimes(1);
   });
 
   it("takes a refused send's message out of the chat and says so to the composer", async () => {
     const refusal = {
       engineId: "claude-code",
-      code: "claude_code_machine_busy",
-      sentence: "Your computer is busy with another turn. Send this when it's done.",
+      code: "claude_code_turn_unsupported",
+      sentence: "Claude Code can't take attachments yet. Send your message without them.",
     };
     sendPromptToControllerMock.mockResolvedValue({ ok: false, errorMessage: refusal.sentence, turnEngineRefusal: refusal });
 
     let thrown: unknown = null;
     await act(async () => {
       await flow!
-        .handleSubmit("conversation-local", "@octo fix the failing login test", {
-          metadata: ROUTED_METADATA,
-          runtimeOverride: ROUTED_RUNTIME,
-          expectedLaneIdle: true,
+        .handleSubmit("conversation-local", "@reviewer fix the failing login test", {
+          metadata: PERSON_METADATA,
+          runtimeOverride: PINNED_RUNTIME,
         })
         .catch((error: unknown) => {
           thrown = error;
@@ -277,46 +244,12 @@ describe("useConversationSubmitFlow for a send that claims a turn engine", () =>
   it("leaves a send that failed any other way in the chat", async () => {
     sendPromptToControllerMock.mockResolvedValue({ ok: false, errorMessage: "Controller unavailable. Try again shortly." });
     await act(async () => {
-      await flow!.handleSubmit("conversation-local", "@octo fix the failing login test", {
-        metadata: ROUTED_METADATA,
-        runtimeOverride: ROUTED_RUNTIME,
-        expectedLaneIdle: true,
+      await flow!.handleSubmit("conversation-local", "@reviewer fix the failing login test", {
+        metadata: PERSON_METADATA,
+        runtimeOverride: PINNED_RUNTIME,
       });
     });
+    expect(sendPromptToControllerMock).toHaveBeenCalledTimes(1);
     expect(removeUnsentMessageMock).not.toHaveBeenCalled();
-  });
-
-  it("asks for a title for the same first message without the claim", async () => {
-    await act(async () => {
-      await flow!.handleSubmit("conversation-local", "Fix the failing login test", {
-        metadata: { input: { kind: "person" } },
-      });
-    });
-    expect(sendPromptToControllerMock).toHaveBeenCalledTimes(1);
-    expect(queueAutoTitleConversationMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("dispatches it even when its words name no agent of the chat, and leaves the answer to the controller", async () => {
-    conversation = { ...conversation, assistantEnabled: false };
-    await mount();
-    await act(async () => {
-      await flow!.handleSubmit("conversation-local", "Fix the failing login test", {
-        metadata: ROUTED_METADATA,
-        runtimeOverride: ROUTED_RUNTIME,
-        expectedLaneIdle: true,
-      });
-    });
-    expect(sendPromptToControllerMock).toHaveBeenCalledTimes(1);
-    expect(recordMessageToControllerMock).not.toHaveBeenCalled();
-
-    // The same words without the claim are only recorded in this chat.
-    sendPromptToControllerMock.mockClear();
-    await act(async () => {
-      await flow!.handleSubmit("conversation-local", "Fix the failing login test", {
-        metadata: { input: { kind: "person" } },
-      });
-    });
-    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
-    expect(recordMessageToControllerMock).toHaveBeenCalledTimes(1);
   });
 });

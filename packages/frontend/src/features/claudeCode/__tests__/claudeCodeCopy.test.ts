@@ -20,7 +20,7 @@ const { notReadyReasons } = JSON.parse(
   readFileSync(resolve(repo, "packages/runtime-contracts/src/claude_code_lane_fixtures.json"), "utf8"),
 ) as { notReadyReasons: ControllerRuntimeClaudeCodeNotReadyReason[] };
 
-describe("Claude Code composer wording", () => {
+describe("Claude Code wording outside a turn's own row", () => {
   it("never uses a word the product keeps out of these sentences", () => {
     for (const sentence of stringsIn(CLAUDE_CODE_COPY)) {
       expect(bannedWordIn(sentence), sentence).toBeNull();
@@ -35,13 +35,29 @@ describe("Claude Code composer wording", () => {
     expect(claudeCodeSignInLine(false)).not.toContain("plan");
   });
 
-  it("keeps the design's row and token words", () => {
-    expect(CLAUDE_CODE_COPY.rowTitle).toBe("Claude Code for the next message");
-    expect(CLAUDE_CODE_COPY.rowHint).toBe(
-      "Instafy gives Claude Code only your message. Everyone who can see this chat sees its steps and reply.",
+  // docs/Local-Engine-Turns.md 11.3: Claude Code as an agent's AI.
+  it("keeps the design's agent editor words", () => {
+    expect(CLAUDE_CODE_COPY.agentAi.label).toBe("Claude Code");
+    expect(CLAUDE_CODE_COPY.agentAi.description).toBe(
+      "Runs on your own Claude Code, on your computer. Its turns wait while your computer is off.",
     );
-    expect(CLAUDE_CODE_COPY.tokenLabel).toBe("Claude Code · next message");
-    expect(CLAUDE_CODE_COPY.tokenCancel).toBe("Don't use Claude Code");
+    // The pointer names the row of Your AI that sets it up.
+    expect(CLAUDE_CODE_COPY.agentAi.setUpHere).toContain(CLAUDE_CODE_COPY.yourAi.title);
+    expect(CLAUDE_CODE_COPY.agentAi.notAllowed).toBe("Claude Code turns aren't on for your account.");
+  });
+
+  // 11.14: what a waiting turn's row adds for its person.
+  it("keeps the design's words for what makes a waiting turn run", () => {
+    expect(CLAUDE_CODE_COPY.waiting.startHere).toBe("Start this space on this computer to run it.");
+    expect(CLAUDE_CODE_COPY.waiting.elsewhere).toBe("It runs when Instafy Desktop runs this space on your computer.");
+    expect(CLAUDE_CODE_COPY.waiting.startAction).toBe("Start");
+  });
+
+  // 11.14: Claude Code is an agent's AI now, never a choice for one message.
+  it("never speaks of a message's own choice of Claude Code", () => {
+    for (const sentence of stringsIn(CLAUDE_CODE_COPY)) {
+      expect(sentence, sentence).not.toMatch(/next message|for my messages|your messages|composer/i);
+    }
   });
 
   it("has a sentence for every reason a runtime attests, and only for those", () => {
@@ -56,7 +72,7 @@ describe("Claude Code composer wording", () => {
 
   it("keeps the design's Your AI words", () => {
     expect(CLAUDE_CODE_COPY.yourAi.title).toBe("Claude Code on this computer");
-    expect(CLAUDE_CODE_COPY.yourAi.enable).toBe("Use for my messages");
+    expect(CLAUDE_CODE_COPY.yourAi.enable).toBe("Use Claude Code on this computer");
     expect(CLAUDE_CODE_COPY.yourAi.firstUse).toBe(
       "Sign in to Claude Code on this computer first: run claude in a terminal once.",
     );
@@ -76,7 +92,7 @@ describe("Claude Code composer wording", () => {
   // the recorded ones no longer work; the button the sentence names confirms them.
   it("names the button that confirms new login-shell settings for the copy in use", () => {
     expect(CLAUDE_CODE_COPY.yourAi.candidateRenewed).toBe(
-      "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use for my messages to use them.",
+      "Find read new settings from your login shell that Instafy Desktop can use with this copy. Choose Use Claude Code on this computer to use them.",
     );
     expect(CLAUDE_CODE_COPY.yourAi.candidateRenewed).toContain(`Choose ${CLAUDE_CODE_COPY.yourAi.enable}`);
     expect(bannedWordIn(CLAUDE_CODE_COPY.yourAi.candidateRenewed)).toBeNull();

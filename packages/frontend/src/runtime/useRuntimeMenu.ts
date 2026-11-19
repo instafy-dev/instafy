@@ -16,7 +16,6 @@ import type {
   ControllerRuntimeStatusEntry,
   RuntimeResourceUsage,
 } from "../sdk/instafy";
-import type { ControllerRuntimeClaudeCode } from "../services/runtimeController/runtimes";
 
 export type RuntimeMenuBadgeTone = "neutral" | "warning" | "danger";
 
@@ -40,8 +39,6 @@ export interface RuntimeMenuOption {
   runtimeImage?: string | null;
   runtimeHealth?: string | null;
   runtimeLastSeenAt?: string | null;
-  /** The runtime's attested Claude Code capability (its status entry's `claudeCode`). */
-  claudeCode?: ControllerRuntimeClaudeCode | null;
 }
 
 export interface RuntimeMenuAutoOption extends RuntimeMenuOption {}
@@ -234,7 +231,6 @@ export function useRuntimeMenuOptions(): RuntimeMenuData & {
         runtimeImage: entry.runtimeImage ?? null,
         runtimeHealth: entry.health ?? null,
         runtimeLastSeenAt: entry.lastSeenAt ?? null,
-        claudeCode: entry.claudeCode ?? null,
       };
     });
   }, [runtimeInfos, sessionRuntimeId, tunnelGrants]);

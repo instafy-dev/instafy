@@ -93,17 +93,6 @@ type ChatComposerSurfaceProps = {
    * that cancels the request. Null when no new tab is pending.
    */
   pendingNewTab?: { onCancel: () => void } | null;
-  /**
-   * An engine chosen for the next message (FrontendTurnEngineToken): a token
-   * in the same row, whose cancel action drops the choice. Null when none is.
-   */
-  pendingTurnEngine?: {
-    icon: ReactNode;
-    label: string;
-    cancelLabel: string;
-    testId: string;
-    onCancel: () => void;
-  } | null;
   /** Compact conversation views stay in the measured overlay above the input. */
   viewNavigation?: ReactNode;
   /**
@@ -280,13 +269,11 @@ function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): Status
 export const COMPOSER_EDITOR_WRAPPER_CLASS = `flex ${CHAT_INPUT_CONTROL_HEIGHT_CLASS} min-w-0 flex-1 flex-col justify-center`;
 
 /**
- * Where or how the next message goes, as one removable token in the
- * composer's context row, like a reply recipient: a new browser tab, or an
- * engine chosen for that message. The browser pane's own tab picker chooses
- * every other tab a message refers to.
+ * Where the next message goes, as one removable token in the composer's
+ * context row, like a reply recipient: a new browser tab. The browser pane's
+ * own tab picker chooses every other tab a message refers to.
  */
-function ComposerContextToken({ icon, label, cancelLabel, onCancel, testId }: {
-  icon: ReactNode;
+function ComposerContextToken({ label, cancelLabel, onCancel, testId }: {
   label: string;
   cancelLabel: string;
   onCancel: () => void;
@@ -295,7 +282,7 @@ function ComposerContextToken({ icon, label, cancelLabel, onCancel, testId }: {
   return (
     <div className="flex min-w-0 max-w-full" data-testid={`${testId}-token`}>
       <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-slate-100 py-0.5 pl-2.5 pr-0.5 text-slate-700 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-300">
-        <span className="flex flex-none [&>svg]:h-3.5 [&>svg]:w-3.5">{icon}</span>
+        <Globe className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
         <Text as="span" variant="caption" tone="inherit" className="truncate">{label}</Text>
         <IconButton
           type="button"
@@ -322,7 +309,6 @@ export function ChatComposerSurface({
   aboveComposer,
   replyContext,
   pendingNewTab = null,
-  pendingTurnEngine = null,
   viewNavigation,
   touchLikeInput = false,
   compactBrowserViewport,
@@ -1158,29 +1144,13 @@ export function ChatComposerSurface({
   // Where the next message goes, when that is not this chat as usual: in the
   // composer's own row, beside the view switch, so it never floats above the
   // composer over the newest message.
-  const newTabToken = pendingNewTab ? (
+  const contextToken = pendingNewTab ? (
     <ComposerContextToken
-      icon={<Globe className="h-3.5 w-3.5" aria-hidden="true" />}
       label="New tab for the next message"
       cancelLabel="Cancel new tab"
       onCancel={pendingNewTab.onCancel}
       testId="composer-new-tab"
     />
-  ) : null;
-  const turnEngineToken = pendingTurnEngine ? (
-    <ComposerContextToken
-      icon={pendingTurnEngine.icon}
-      label={pendingTurnEngine.label}
-      cancelLabel={pendingTurnEngine.cancelLabel}
-      onCancel={pendingTurnEngine.onCancel}
-      testId={pendingTurnEngine.testId}
-    />
-  ) : null;
-  const contextToken = newTabToken || turnEngineToken ? (
-    <>
-      {newTabToken}
-      {turnEngineToken}
-    </>
   ) : null;
 
   return (

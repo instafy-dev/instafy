@@ -134,8 +134,10 @@ function hasUserMessageAfter(messages: ChatMessage[], failureId: string): boolea
  *   now ({@link isRunFailureRecentForAutoRetry}), checked when the countdown
  *   starts and again when it ends. A failure without a timestamp stays
  *   manual.
- * - Never a turn-engine turn: its failure and its prompt name the engine
- *   (docs/Local-Engine-Turns.md 5.6), and only its sender sends it again.
+ * - Never a turn-engine turn, whose failure and prompt name the engine:
+ *   none of its failures clears by itself within seconds, such as a
+ *   computer that is off, a sign-in or a plan's limit
+ *   (docs/Local-Engine-Turns.md 11.14). Try again sends it by hand.
  * - A prompt that was itself a retry, carried attachments or a reply
  *   context, or went to more than one agent (or whose other run succeeded)
  *   stays manual (see {@link resolveRunFailureAutoRetryDelayMs} and
@@ -342,8 +344,8 @@ export function useRunFailureAutoRetry({
       return;
     }
     if (presentation.turnEngine || usesTurnEngine(candidate.metadata)) {
-      // A turn-engine turn is one turn its sender started: nothing sends it
-      // again by itself (docs/Local-Engine-Turns.md 5.6).
+      // A turn-engine turn's failure doesn't clear by itself within seconds,
+      // so nothing sends it again by itself (docs/Local-Engine-Turns.md 11.14).
       return;
     }
     if (!isRunFailureRecentForAutoRetry(candidate)) {

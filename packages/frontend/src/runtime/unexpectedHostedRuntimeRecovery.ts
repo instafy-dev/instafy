@@ -1,4 +1,5 @@
 import { readRunInterruption, readRunInterruptionIdentity } from "../conversations/runInterruption";
+import { namesTurnEngineAccessMode } from "../features/frontendFeatureModule";
 import type { RunRecord } from "../types";
 
 export const UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS = 20_000;
@@ -92,7 +93,13 @@ const PENDING_RUN_STATUSES = new Set<RunRecord["status"]>([
   "awaiting_approval",
 ]);
 
-/** A queued message or a turn still open in `projectId`, as this client knows it. */
+/**
+ * A queued message or a turn still open in `projectId`, as this client knows
+ * it, that a hosted machine could take. A turn a turn engine runs, such as a
+ * person's own Claude Code, runs only on that person's own computer, so its
+ * run is no hosted machine's work, also while it waits for that computer
+ * (docs/Local-Engine-Turns.md 11.7).
+ */
 export function hasPendingRunInProject(
   runs: Record<string, RunRecord> | null | undefined,
   projectId: string | null | undefined,
@@ -102,7 +109,10 @@ export function hasPendingRunInProject(
     return false;
   }
   return Object.values(runs).some(
-    (run) => run?.projectId === normalizedProjectId && PENDING_RUN_STATUSES.has(run.status),
+    (run) =>
+      run?.projectId === normalizedProjectId &&
+      PENDING_RUN_STATUSES.has(run.status) &&
+      !namesTurnEngineAccessMode(run.metadata),
   );
 }
 

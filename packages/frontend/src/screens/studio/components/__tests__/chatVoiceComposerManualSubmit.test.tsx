@@ -6,13 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatVoiceComposerController } from "../useChatVoiceComposerController";
 
 // A dictated turn into an empty composer is sent by itself, with its words as
-// an override. ChatPanel sets `manualSubmitOnly` while an engine is chosen for
-// the next message (docs/Local-Engine-Turns.md 5.2), because such a send never
-// carries the choice: the words then stay in the composer for the person's own
-// Send, which the engine routes or blocks. A dictated turn that was held once
-// never sends itself later, whatever then happens to the choice. The capture
-// itself is faked here; every hook it needs returns stable functions, as the
-// real ones do.
+// an override. ChatPanel sets `manualSubmitOnly` while the composer holds sends
+// for the person's review, as a reply to a worker's question does: the words
+// then stay in the composer for the person's own Send. A dictated turn that
+// was held once never sends itself later, whatever then ends the hold. The
+// capture itself is faked here; every hook it needs returns stable functions,
+// as the real ones do.
 
 const TRANSCRIPT = "fix the failing login test";
 
@@ -229,12 +228,11 @@ describe("a dictated turn into an empty composer", () => {
 
   describe("when the composer starts holding sends after the mic was pressed", () => {
     it("keeps the words for the person's own Send after the hold ends without a Send", async () => {
-      // An engine is chosen while it listens, and still is when the words land.
+      // A worker's question is answered while it listens, and still is when the words land.
       await dictate(false, { whileListening: true });
       expect(invokeSubmitMessage).not.toHaveBeenCalled();
       expect(latestInputValueRef.current).toBe(TRANSCRIPT);
-      // The choice is then dropped ("Don't use Claude Code") or lost with its
-      // offer, and nobody presses Send.
+      // The reply is then cancelled, and nobody presses Send.
       await render(false);
       await settle();
       expect(invokeSubmitMessage).not.toHaveBeenCalled();
@@ -242,12 +240,12 @@ describe("a dictated turn into an empty composer", () => {
       expect(latestInputValueRef.current).toBe(TRANSCRIPT);
     });
 
-    it("never sends the words again by itself once the person's own Send has used the choice", async () => {
+    it("never sends the words again by itself once the person's own Send took them", async () => {
       await dictate(false, { whileListening: true });
       expect(invokeSubmitMessage).not.toHaveBeenCalled();
-      // The person's Send takes the words to the chosen engine through the
-      // panel's own submit, not this hook's: it clears the composer and uses
-      // up the choice. A Stash clears both the same way.
+      // The person's Send takes the words as the reply through the panel's
+      // own submit, not this hook's: it clears the composer and ends the
+      // hold. A Stash clears it the same way.
       latestInputValueRef.current = "";
       await render(false);
       await settle();
@@ -255,7 +253,7 @@ describe("a dictated turn into an empty composer", () => {
     });
 
     it("keeps the words for the person's own Send when the hold ends before they land", async () => {
-      // An engine is chosen and then dropped again while it listens.
+      // A reply starts and is cancelled again while it listens.
       await dictate(false, { whileListening: true, whenHeard: false });
       expect(invokeSubmitMessage).not.toHaveBeenCalled();
       expect(onInputChange).toHaveBeenLastCalledWith("conversation-1", TRANSCRIPT, null);

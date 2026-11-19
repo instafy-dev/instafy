@@ -25,6 +25,16 @@ describe("the turn-engine registry", () => {
     );
   });
 
+  it("finds the engine an agent's provider names as its AI, once the composition registered it", async () => {
+    await import("../applicationFrontendFeatureComposition");
+    const { turnEngineAgentAiOf } = await import("../turnEngineRegistry");
+    expect(turnEngineAgentAiOf("claude-code")?.agentAi.label).toBe("Claude Code");
+    expect(turnEngineAgentAiOf(" Claude-Code ")?.engineId).toBe("claude-code");
+    expect(turnEngineAgentAiOf("openai")).toBeNull();
+    expect(turnEngineAgentAiOf("assistant")).toBeNull();
+    expect(turnEngineAgentAiOf(null)).toBeNull();
+  });
+
   it("keeps the core run-failure presentation off the application's composition", () => {
     const source = fs.readFileSync(path.join(sourceRoot, "conversations/runFailurePresentation.ts"), "utf8");
     expect(source).not.toContain("applicationFrontendFeatureComposition");

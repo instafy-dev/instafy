@@ -34,8 +34,8 @@ vi.mock("../../../../features/applicationFrontendFeatureComposition", async (imp
     APPLICATION_FRONTEND_FEATURES: {
       ...actual.APPLICATION_FRONTEND_FEATURES,
       turnEngines: [
-        { id: "engine-with-row", ComposerBridge: () => null, YourAiRow: EngineRow },
-        { id: "engine-without-row", ComposerBridge: () => null },
+        { id: "engine-with-row", YourAiRow: EngineRow },
+        { id: "engine-without-row" },
       ],
     },
   };

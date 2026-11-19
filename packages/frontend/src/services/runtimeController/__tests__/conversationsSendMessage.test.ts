@@ -24,14 +24,14 @@ describe("sendControllerConversationMessage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("sends a turn-engine claim and a one-send runtime pin as given", async () => {
+  it("sends its metadata and a one-send runtime pin as given", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: "run-1" })));
     vi.stubGlobal("fetch", fetchMock);
     await sendControllerConversationMessage({
       conversationId: CONVERSATION_ID,
       projectId: "project-1",
       promptText: "Fix the failing login test",
-      metadata: { turnEngine: "claude-code", agentSelection: { active: ["octo"], mentions: ["octo"] } },
+      metadata: { agentSelection: { active: ["reviewer"], mentions: ["reviewer"] } },
       runtimeId: "runtime-1",
       preferRuntime: false,
       expectedLaneIdle: true,
@@ -39,7 +39,7 @@ describe("sendControllerConversationMessage", () => {
     const body = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
     expect(body).toMatchObject({
       promptText: "Fix the failing login test",
-      metadata: { turnEngine: "claude-code", agentSelection: { active: ["octo"], mentions: ["octo"] } },
+      metadata: { agentSelection: { active: ["reviewer"], mentions: ["reviewer"] } },
       runtimeId: "runtime-1",
       preferRuntime: false,
       expectedLaneIdle: true,
@@ -52,11 +52,11 @@ describe("sendControllerConversationMessage", () => {
       vi.fn().mockResolvedValue(
         new Response(
           JSON.stringify({
-            message: "Claude Code turn already active",
-            code: "claude_code_turn_active",
-            details: { reason: "start_window_passed" },
+            message: "Claude Code can't take attachments",
+            code: "claude_code_turn_unsupported",
+            details: { reason: "attachments" },
           }),
-          { status: 409 },
+          { status: 422 },
         ),
       ),
     );
@@ -67,10 +67,10 @@ describe("sendControllerConversationMessage", () => {
     }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ControllerApiError);
     expect(failure).toMatchObject({
-      message: "Claude Code turn already active",
-      status: 409,
-      code: "claude_code_turn_active",
-      details: { reason: "start_window_passed" },
+      message: "Claude Code can't take attachments",
+      status: 422,
+      code: "claude_code_turn_unsupported",
+      details: { reason: "attachments" },
     });
   });
 
