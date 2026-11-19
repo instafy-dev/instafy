@@ -571,7 +571,11 @@ Two steps never ask, in Ask too:
   what you need, open that link by its address, or another official source."
   They never say the notice covers the page, which only a covered click does:
   a turn told so of a bar that covered nothing wrote that a page it had read
-  was covered, asked the person to accept, and paused on that bar twice. A
+  was covered, asked the person to accept, and paused on that bar twice. The
+  browser skill's "Finding a page" tells a turn the same: it says "nothing
+  found" or "covered" only when a step said so, since a turn whose reading
+  showed a notice, with no step refused under it, wrote that the notice
+  covered a booking site's search controls (a local test, Nov 19). A
   link is refused too, which plain-link navigation would
   otherwise take. Only these words count: a banner's "Disagree" toggles, its
   cookie policy link, its settings ("Manage consent", a "Consent" tab) stay
@@ -1447,7 +1451,8 @@ when Octo then makes or changes something in the space (a page, a map, a
 table); the browser skill's last section, "Routing preflight", says when, and
 a space whose copy of the skill lacks it keeps today's routes. Research whose
 answer ends in a page (a comparison, prices, a route) is `browser_then_build`
-from the first message too, while research answered in a reply (facts, a
+from the first message too, unless it searches first (below), while research
+answered in a reply (facts, a
 price, opening hours, reviews) stays with Octo, whose turn reads public pages
 itself. News put on a page is research that ends in a page too: Instafy's
 browser has no web search, but it opens the company's own site, while a
@@ -1460,7 +1465,10 @@ answered in a reply, then stays with Octo, as other research answered in a
 reply does, and searches first (search finds the places, then at most one card
 checks their pages). On a runtime with `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST`
 on, a second line says research that ends in a page searches first too, and
-such research stays with Octo as well. Without the first line, on every AI
+such research stays with Octo as well; the `browser_then_build` line says so
+too ("unless it searches first"), since while it said "from the first message"
+news, a comparison and a page of places whose routing input had both lines
+still went to the browser first (a local test, Nov 19). Without the first line, on every AI
 with no web search of its own, the routing input is as it was, and without the
 second, which is every runtime while the setting is off, research that ends in
 a page goes to the browser first, availability for dates put on a page among
@@ -1533,7 +1541,11 @@ chat names, by name and not by address, and what to find: one that named no
 laptop sent its browser turn to a blank page with nothing to look up (a local
 test, Nov 6). Like any card's task, the line names no address the person could
 not have seen in the chat, and is left out when it would, so the summary names
-a site by its name. Studio opens it as it opens any card, and
+a site by its name. A page a reply in the chat linked goes by its address,
+whatever the person calls it: told only "by address", the summary for "Open
+that article in your browser." after a reply that linked a company's newsroom
+and a share-price page named "the article linked in this chat", and the
+browser turn opened the company's home page (a local test, Nov 19). Studio opens it as it opens any card, and
 the chat reads it as one turn: the turn's line says "Opening Instafy's
 browser…" until the browser turn shows something, and neither the card nor
 the continuation is shown. The chat keeps the continuation as any card's, as
