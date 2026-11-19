@@ -1,4 +1,4 @@
-{"type":"system","subtype":"init","cwd":"@CWD@","session_id":"@SESSION@","tools":["Bash","Read","Edit","Write","Agent"],"mcp_servers":[],"model":"claude-sonnet-4-5","permissionMode":"acceptEdits","apiKeySource":"none","claude_code_version":"2.1.314","uuid":"0b8f1a2c-3d4e-4f50-8a6b-7c8d9e0f1a2b"}
+{"type":"system","subtype":"init","cwd":"@CWD@","session_id":"@SESSION@","tools":["Bash","Read","Edit","Write","Agent"],"mcp_servers":[],"model":"claude-sonnet-4-5","permissionMode":"acceptEdits","apiKeySource":"none","claude_code_version":"2.1.325","uuid":"0b8f1a2c-3d4e-4f50-8a6b-7c8d9e0f1a2b"}
 #!sleeper devserver
 {"type":"system","subtype":"task_started","task_id":"bash_1","tool_use_id":"toolu_dev","description":"npm run dev","task_type":"local_bash","uuid":"3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b","session_id":"@SESSION@"}
 {"type":"system","subtype":"task_started","task_id":"watch_1","tool_use_id":"toolu_watch","description":"Watch the server log","task_type":"local_bash","uuid":"4f5a6b7c-8d9e-4f0a-9b1c-2d3e4f5a6b7c","session_id":"@SESSION@"}

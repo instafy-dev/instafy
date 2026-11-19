@@ -1556,7 +1556,7 @@ fn a_probe_that_changes_the_capability_registers_again() {
             .unwrap();
         let capability = space.registered_capability();
         assert_eq!(capability["ready"], true, "{capability}");
-        assert_eq!(capability["cli"], "2.1.314");
+        assert_eq!(capability["cli"], "2.1.325");
         reprobe.abort();
         renewal.abort().await;
         assert_eq!(space.requests_to("/runtime/register").len(), 2);

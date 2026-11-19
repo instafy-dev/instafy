@@ -242,7 +242,7 @@ async fn a_supported_claude_gives_the_ready_capability_from_its_three_probe_call
         Some(json!({
             "version": 1,
             "ready": true,
-            "cli": "2.1.314",
+            "cli": "2.1.325",
             "verified": true,
             "planSignIn": true,
             "partialMessages": true,
@@ -1035,7 +1035,7 @@ fn the_capture_scrubs_the_grant_and_reports_the_capability_only_on_macos() {
             Some(json!({
                 "version": 1,
                 "ready": true,
-                "cli": "2.1.314",
+                "cli": "2.1.325",
                 "verified": true,
                 "planSignIn": true,
                 "partialMessages": true,

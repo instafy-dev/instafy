@@ -87,10 +87,11 @@ pub const SNAPSHOT_ENV_KEYS: [&str; 12] = [
     "SSL_CERT_DIR",
 ];
 
-/// The oldest Claude Code the lane runs (3.2). It is the evidence for the flags of 3.3:
-/// `--permission-prompts` (2.1.259), the time limit on background commands in `-p` runs
-/// (2.1.285), and the 2.1.314 fixes to `-p` startup failures and to `--setting-sources`.
-pub const MIN_SUPPORTED_VERSION: CliVersion = CliVersion::new(2, 1, 314);
+/// The oldest Claude Code the lane runs (3.2): 2.1.325, the version Phase 0's checks ran on
+/// (B.4). It is also the evidence for the flags of 3.3: `--permission-prompts` (2.1.259),
+/// the time limit on background commands in `-p` runs (2.1.285), and the 2.1.314 fixes to
+/// `-p` startup failures and to `--setting-sources`.
+pub const MIN_SUPPORTED_VERSION: CliVersion = CliVersion::new(2, 1, 325);
 /// Before this version `auth status` also reported a Console sign-in's stored API key as
 /// `claude.ai`, so an earlier report never counts as a Claude plan sign-in (3.2).
 pub const PLAN_SIGN_IN_REPORTED_FROM: CliVersion = CliVersion::new(2, 1, 286);
@@ -1757,31 +1758,31 @@ mod tests {
 
     #[test]
     fn versions_are_read_from_the_start_of_the_output() {
-        let floor = CliVersion::new(2, 1, 314);
-        assert_eq!(CliVersion::parse("2.1.314 (Claude Code)\n"), Some(floor));
-        assert_eq!(CliVersion::parse("\n  2.1.314"), Some(floor));
-        assert_eq!(CliVersion::parse("2.1.314-beta.2"), Some(floor));
+        let floor = CliVersion::new(2, 1, 325);
+        assert_eq!(CliVersion::parse("2.1.325 (Claude Code)\n"), Some(floor));
+        assert_eq!(CliVersion::parse("\n  2.1.325"), Some(floor));
+        assert_eq!(CliVersion::parse("2.1.325-beta.2"), Some(floor));
         assert_eq!(
-            CliVersion::parse("2.1.3140"),
-            Some(CliVersion::new(2, 1, 3140))
+            CliVersion::parse("2.1.3250"),
+            Some(CliVersion::new(2, 1, 3250))
         );
         for text in [
-            "Claude Code 2.1.314",
-            "v2.1.314",
+            "Claude Code 2.1.325",
+            "v2.1.325",
             "2.1",
             "2.1.",
-            "2..314",
+            "2..325",
             "",
             "99999999999999999999.1.1",
         ] {
             assert_eq!(CliVersion::parse(text), None, "{text:?}");
         }
-        assert_eq!(floor.to_string(), "2.1.314");
+        assert_eq!(floor.to_string(), "2.1.325");
         assert_eq!(MIN_SUPPORTED_VERSION, floor);
         // Numbers compare as numbers.
         assert!(CliVersion::new(2, 1, 1000) > CliVersion::new(2, 1, 999));
         assert!(CliVersion::new(2, 2, 0) > CliVersion::new(2, 1, 999));
-        assert!(CliVersion::new(2, 1, 313) < MIN_SUPPORTED_VERSION);
+        assert!(CliVersion::new(2, 1, 324) < MIN_SUPPORTED_VERSION);
     }
 
     #[test]
@@ -2005,13 +2006,13 @@ mod tests {
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let versions = root.join("opt/claude/versions");
         std::fs::create_dir_all(&versions).unwrap();
-        std::fs::write(versions.join("2.1.314"), "").unwrap();
+        std::fs::write(versions.join("2.1.325"), "").unwrap();
         std::fs::create_dir_all(root.join("home/.local/bin")).unwrap();
         // A relative directory link that climbs, an absolute file link, and a directory link
         // on the way to the granted path.
         symlink("../claude/versions", root.join("opt/claude/current")).unwrap();
         symlink(
-            root.join("opt/claude/current/2.1.314"),
+            root.join("opt/claude/current/2.1.325"),
             root.join("home/.local/bin/claude"),
         )
         .unwrap();
@@ -2019,7 +2020,7 @@ mod tests {
         let granted = root.join("alias/bin/claude");
         let walk = walk_symlinks(&granted).unwrap();
         assert_eq!(walk.target, std::fs::canonicalize(&granted).unwrap());
-        assert_eq!(walk.target, versions.join("2.1.314"));
+        assert_eq!(walk.target, versions.join("2.1.325"));
         assert_eq!(
             walk.links,
             [
@@ -2229,7 +2230,7 @@ mod tests {
         let lane = Lane::new(grant);
         let launched = json!({
             "agent": true,
-            "claudeCode": { "version": 1, "ready": true, "cli": "2.1.314" },
+            "claudeCode": { "version": 1, "ready": true, "cli": "2.1.325" },
             "claude_code": { "ready": true },
         });
         // Before any probe the launch value stands.
