@@ -3896,9 +3896,14 @@ mod tests {
     /// Studio words from runtime-contracts' list of stop and sweep codes.
     #[test]
     fn the_run_once_codes_are_the_lanes_shared_ones() {
-        use runtime_contracts::claude_code_lane::{RUN_ONCE_INTERRUPTED, START_BY_PASSED};
-        assert_eq!(super::START_BY_PASSED_CODE, START_BY_PASSED);
+        use runtime_contracts::claude_code_lane::{
+            RUN_ONCE_INTERRUPTED, STOP_AND_SWEEP_FAILURE_CODES,
+        };
         assert_eq!(super::RUN_ONCE_INTERRUPTED_CODE, RUN_ONCE_INTERRUPTED);
+        // A lane turn that never started waits for its person's computer
+        // (docs/Local-Engine-Turns.md 11.7): only a device-grant job is ever
+        // late, so `start_by_passed` is no lane code.
+        assert!(!STOP_AND_SWEEP_FAILURE_CODES.contains(&super::START_BY_PASSED_CODE));
     }
 
     #[tokio::test]
