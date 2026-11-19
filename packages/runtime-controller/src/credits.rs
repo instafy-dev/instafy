@@ -2316,8 +2316,10 @@ pub(crate) enum ManagedAiRefundOutcome {
 /// holds it no longer, and neither does a queued one no runtime has held in
 /// a deleted space, which never runs: a space delete marks the space deleted
 /// before it cancels the space's work, in the same transaction. A turn on
-/// its own credential (`credential_id`) never holds the reserve.
-async fn other_instafy_ai_turns_hold_reserve(
+/// its own credential (`credential_id`) never holds the reserve, and neither
+/// does a local-engine turn (`engine`, crate::claude_code_lane), which has no
+/// credential but runs on its person's own Claude Code.
+pub(crate) async fn other_instafy_ai_turns_hold_reserve(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     prompt_id: &Uuid,
@@ -2331,6 +2333,7 @@ async fn other_instafy_ai_turns_hold_reserve(
                     and aj.prompt_id = $2
                     and aj.id <> $3
                     and aj.credential_id is null
+                    and aj.engine is null
                     and aj.status not in ('failed', 'expired', 'canceled', 'cancelled')
                     and not (
                         aj.status = 'queued'

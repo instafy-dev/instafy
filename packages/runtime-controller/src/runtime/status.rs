@@ -138,8 +138,10 @@ pub(crate) struct RuntimeStatusEntry {
 }
 
 /// `claudeCode` on a runtime status entry: `{ready, reason, cli, verified,
-/// planSignIn}`. `reason`, `cli` and `verified` are null, and `planSignIn`
-/// false, when the runtime did not say.
+/// planSignIn}`, and `resetsAt` while a not-ready capability says when it
+/// expects to be ready again, such as a Claude plan's limit's reset
+/// (docs/Local-Engine-Turns.md 11.11). `reason`, `cli` and `verified` are
+/// null, and `planSignIn` false, when the runtime did not say.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RuntimeClaudeCodeStatus {
@@ -148,6 +150,8 @@ pub(crate) struct RuntimeClaudeCodeStatus {
     cli: Option<String>,
     verified: Option<bool>,
     plan_sign_in: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resets_at: Option<String>,
 }
 
 /// `claudeCode` from a runtime's stored capabilities, read as registration
@@ -165,6 +169,7 @@ fn claude_code_status_from_capabilities(
         cli: capability.cli,
         verified: capability.verified,
         plan_sign_in: capability.plan_sign_in == Some(true),
+        resets_at: capability.resets_at,
     })
 }
 

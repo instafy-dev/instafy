@@ -51,6 +51,10 @@ const CLAUDE_CODE_CAPABILITY_VERSION: u64 = 1;
 const CLAUDE_CODE_NOT_READY_REASONS: [&str;
     runtime_contracts::claude_code_lane::NOT_READY_REASONS.len()] =
     runtime_contracts::claude_code_lane::NOT_READY_REASONS;
+/// How far ahead a not-ready capability's `resetsAt` may be: a Claude plan's
+/// longest limit is weekly, and the runtime holds at most 7 days
+/// (docs/Local-Engine-Turns.md 11.11).
+const CLAUDE_CODE_RESETS_AT_MAX_DAYS: i64 = 8;
 
 /// A runtime's `claudeCode` capability, read from what the runtime reported
 /// (docs/Local-Engine-Turns.md 2.10): version 1 with a boolean `ready`, and
@@ -72,6 +76,10 @@ pub(super) struct ClaudeCodeCapability {
     pub(super) plan_sign_in: Option<bool>,
     /// Whether the runtime streams partial messages.
     pub(super) partial_messages: Option<bool>,
+    /// When a not-ready capability expects to be ready again, such as a
+    /// Claude plan's limit's reset (11.11), as an RFC 3339 UTC time; never
+    /// set while ready.
+    pub(super) resets_at: Option<String>,
 }
 
 impl ClaudeCodeCapability {
@@ -99,6 +107,11 @@ impl ClaudeCodeCapability {
             .filter(|cli| is_claude_code_cli_version(cli))
             .map(str::to_string);
         let flag = |key: &str| reported.get(key).and_then(JsonValue::as_bool);
+        let resets_at = reported
+            .get("resetsAt")
+            .and_then(JsonValue::as_str)
+            .filter(|_| !ready)
+            .and_then(claude_code_resets_at);
         Some(Self {
             ready,
             reason,
@@ -106,6 +119,7 @@ impl ClaudeCodeCapability {
             verified: flag("verified"),
             plan_sign_in: flag("planSignIn"),
             partial_messages: flag("partialMessages"),
+            resets_at,
         })
     }
 
@@ -120,6 +134,9 @@ impl ClaudeCodeCapability {
         if let Some(cli) = &self.cli {
             capability.insert("cli".to_string(), json!(cli));
         }
+        if let Some(resets_at) = &self.resets_at {
+            capability.insert("resetsAt".to_string(), json!(resets_at));
+        }
         for (key, value) in [
             ("verified", self.verified),
             ("planSignIn", self.plan_sign_in),
@@ -131,6 +148,19 @@ impl ClaudeCodeCapability {
         }
         JsonValue::Object(capability)
     }
+}
+
+/// A not-ready capability's `resetsAt` as registration keeps it: an RFC 3339
+/// time no more than [`CLAUDE_CODE_RESETS_AT_MAX_DAYS`] ahead, written again
+/// in UTC to the second. Anything else is left off.
+fn claude_code_resets_at(text: &str) -> Option<String> {
+    let at = chrono::DateTime::parse_from_rfc3339(text.trim())
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    if at > chrono::Utc::now() + chrono::Duration::days(CLAUDE_CODE_RESETS_AT_MAX_DAYS) {
+        return None;
+    }
+    Some(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 /// A Claude Code version as a semver, read as Studio reads it:

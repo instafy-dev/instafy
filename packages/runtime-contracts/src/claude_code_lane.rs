@@ -122,7 +122,6 @@ mod tests {
             ("/prompt_id", "<prompt_id>"),
             ("/run_id", "<run_id>"),
             ("/metadata/agent/id", "<agent_id>"),
-            ("/metadata/runtimePreference/runtimeId", "<runtime_id>"),
         ] {
             assert_eq!(
                 payload.pointer(pointer).and_then(Value::as_str),
@@ -130,5 +129,9 @@ mod tests {
                 "{pointer}"
             );
         }
+        // A send whose every target is a Claude Code agent names no runtime:
+        // its job waits for its person's own computer
+        // (docs/Local-Engine-Turns.md 11.7).
+        assert_eq!(payload.pointer("/metadata/runtimePreference"), None);
     }
 }

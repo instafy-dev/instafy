@@ -69,8 +69,8 @@ impl TriggerKind {
 pub(crate) struct JobTrigger {
     pub(crate) user_id: Uuid,
     /// What its client says the person did, unless it is a resend or a goal's
-    /// next turn, or neither device grants nor local-engine turns are on for
-    /// the person. None when it says neither.
+    /// next turn, or device grants are not on for the person. None when it
+    /// says neither.
     pub(crate) kind: Option<TriggerKind>,
     /// The device that relayed a [`TriggerKind::Device`] send.
     pub(crate) device_id: Option<String>,
@@ -83,10 +83,8 @@ impl JobTrigger {
     /// The trigger of a message `context` sent with `metadata`: none unless a
     /// person's own signed-in session sent it, so none for the service role or
     /// a scoped token (an agent job's, which acts as its subject). Where
-    /// neither device grants nor local-engine turns are on for that person it
-    /// has no kind: those are the features that read it. A person on the
-    /// local-engine list only gets the kind; device grants still check their
-    /// own switch ([`crate::device_grants`]).
+    /// device grants are not on for that person it has no kind: they are the
+    /// feature that reads it ([`crate::device_grants`]).
     pub(crate) fn of_send(
         config: &AppConfig,
         context: &RequestContext,
@@ -96,8 +94,7 @@ impl JobTrigger {
         let marked = |key: &str| metadata.get(key).is_some_and(|value| !value.is_null());
         let resent =
             marked(RETRY_OF_MESSAGE_ID_KEY) || GOAL_CONTINUATION_KEYS.into_iter().any(marked);
-        let kinded = !resent
-            && (config.device_grants.allow(user_id) || config.claude_code_lane.allow(user_id));
+        let kinded = !resent && config.device_grants.allow(user_id);
         let (kind, device_id) = match input_of(metadata).filter(|_| kinded) {
             Some((kind, device_id)) => (Some(kind), device_id),
             None => (None, None),
@@ -143,7 +140,7 @@ mod tests {
 
     use super::{JobTrigger, TriggerKind};
     use crate::auth::RequestContext;
-    use crate::config::{ClaudeCodeLaneUsers, DeviceGrantUsers};
+    use crate::config::DeviceGrantUsers;
 
     /// Only a person's own session's word makes a send theirs: what its client
     /// says they did, unless it is a resend or a goal's next turn, or device
@@ -261,81 +258,6 @@ mod tests {
         assert_eq!(
             JobTrigger::of_send(&config, &own_session, &person(json!({}))),
             own(None, None)
-        );
-    }
-
-    /// A person on the local-engine list gets a kind for their own typed
-    /// send even with device grants off for them, and still none for a
-    /// resend, a goal's next turn, or anyone else's credential. Everyone else
-    /// stays without one.
-    #[test]
-    fn local_engine_users_get_a_kind_without_device_grants() {
-        let user_id = Uuid::new_v4();
-        let mut config = crate::tests::build_app_config(
-            crate::tests::test_origin_private_key(),
-            crate::tests::test_origin_public_key(),
-            "job-trigger-lane",
-        );
-        config.device_grants = DeviceGrantUsers::Nobody;
-        config.claude_code_lane = ClaudeCodeLaneUsers(DeviceGrantUsers::Only(vec![user_id]));
-        let own_session = RequestContext {
-            user_id: Some(user_id),
-            is_service_role: false,
-            scoped_claims: None,
-        };
-        let person = |extra: serde_json::Value| {
-            let mut metadata = json!({ "input": { "kind": "person" } });
-            for (key, value) in extra.as_object().expect("object") {
-                metadata[key] = value.clone();
-            }
-            metadata
-        };
-        let own = |kind| {
-            Some(JobTrigger {
-                user_id,
-                kind,
-                device_id: None,
-                received_at: None,
-            })
-        };
-        for (metadata, kind) in [
-            (person(json!({})), Some(TriggerKind::Person)),
-            (json!({}), None),
-            (
-                person(json!({ "retryOfMessageId": Uuid::new_v4().to_string() })),
-                None,
-            ),
-            (person(json!({ "goalContinuation": { "turn": 2 } })), None),
-            (
-                person(json!({ "goal_continuation": { "source": "manual_resume" } })),
-                None,
-            ),
-        ] {
-            assert_eq!(
-                JobTrigger::of_send(&config, &own_session, &metadata),
-                own(kind),
-                "{metadata}"
-            );
-        }
-        let service = RequestContext {
-            user_id: Some(user_id),
-            is_service_role: true,
-            scoped_claims: None,
-        };
-        assert_eq!(
-            JobTrigger::of_send(&config, &service, &person(json!({}))),
-            None
-        );
-        // Someone the list leaves out gets no kind.
-        let other = RequestContext {
-            user_id: Some(Uuid::new_v4()),
-            is_service_role: false,
-            scoped_claims: None,
-        };
-        assert_eq!(
-            JobTrigger::of_send(&config, &other, &person(json!({})))
-                .and_then(|trigger| trigger.kind),
-            None
         );
     }
 }

@@ -1,32 +1,29 @@
-//! Local-engine turns: one @octo turn that a person sends from Instafy Desktop
-//! and that their own Claude Code, signed in on their own computer, carries
-//! out. docs/Local-Engine-Turns.md calls the mechanism "the lane".
+//! Local-engine turns: the turns of an agent whose owner chose Claude Code as
+//! its AI, which the owner's own Claude Code, signed in on their own computer,
+//! carries out. docs/Local-Engine-Turns.md calls the mechanism "the lane";
+//! section 11 is version 2, which this module builds.
 //!
-//! Dispatch marks and admits such a turn here, inside its one funnel
-//! (`dispatch::process_dispatch_prompt_timed`):
-//! - [`take_claim`] takes the client's claim, `metadata.turnEngine:
-//!   "claude-code"`, from every caller, the service role included, and drops
-//!   any client copy of the controller's own stamps;
-//! - [`check_sender`] (Stage 1: G1-G3) runs right after it: the lane is on for
-//!   the sender, their own session sent the message now, and it carries no
-//!   mark of anything Instafy wrote, queued, resent or delegated;
-//! - [`admit`] (Stage 2: G4-G8) runs once the turn's targets are known: one
-//!   plain turn to the sender's own @octo, on their own ready and idle
-//!   computer, with no other lane turn of theirs running or waiting to start.
+//! An agent is a Claude Code agent when its provider is [`PROVIDER`] and it has
+//! no credential (`ai_agents`). Dispatch resolves every handle against the
+//! agents of its own person, so a lane turn is always its person's own: a
+//! teammate's message never reaches another person's agent (11.5). For each
+//! target that is a Claude Code agent, [`check_target`] runs before dispatch
+//! writes anything:
+//! - L1: the rollout switch covers the agent's owner;
+//! - L2: the owner rule: the agent is the dispatch's own person's;
+//! - L3: the turn is one Claude Code can take (11.4).
 //!
-//! Every refusal comes before dispatch writes a prompt, run, message or job,
-//! so it writes nothing and burns no credit. Each is a 4xx with a
-//! `claude_code_*` code and a `details.reason`. Nothing here falls back to
-//! another engine. An admitted job is stamped `agent_jobs.engine =
+//! A refusal writes nothing and burns no credit. Nothing here falls back to
+//! another engine. An admitted target's job is stamped `agent_jobs.engine =
 //! 'claude-code'` ([`ENGINE`]), whose CHECK forbids a credential, grants and a
-//! plan role, and whose partial unique index ([`ONE_ACTIVE_TURN_INDEX`]) allows
-//! one active lane turn per person.
+//! plan role. It has no runtime pin: it waits, queued, until one of its
+//! person's own runtimes in its space with Claude Code ready leases it, and one
+//! runs at a time for each person ([`ONE_RUNNING_TURN_INDEX`]).
 //!
 //! The rest of an admitted job's life reads that column, never payload
-//! metadata (docs/Local-Engine-Turns.md 2.4-2.9):
-//! - it is leased once, within a minute, only by its pinned, attested runtime,
-//!   with no proxy envelope, model-facing token, history or extras
-//!   (`agent::lease_next_agent_job`, `device_grants::run_once_job_cannot_start`);
+//! metadata (docs/Local-Engine-Turns.md 2.4-2.9, 11.7):
+//! - it is leased once, only by such a runtime, with no proxy envelope,
+//!   model-facing token, history or extras (`agent::lease_next_agent_job`);
 //! - it gets no secrets, proxy renewal, job token, steer, plan, question or
 //!   hand-back ([`takes_no_secrets`], [`has_no_proxy`], [`has_no_job_token`],
 //!   [`takes_no_input`], [`refuse_message_that_starts_a_turn`],
@@ -34,8 +31,8 @@
 //! - its completion keeps only what the lane writes ([`completion_provider`],
 //!   [`completion_conversation_state`], [`drop_codex_run_logs`],
 //!   [`reported_usage`], [`reported_failure_code`]) and bills nothing;
-//! - nothing retries, requeues or moves it: a runtime stop, an expired lease
-//!   and the run-once sweep fail it with a message its author's Studio words
+//! - once it started, nothing runs it again: a runtime stop and an expired
+//!   lease fail it with a message its person's Studio words
 //!   ([`stamp_failure`]);
 //! - its next turn resumes only its own session ([`load_session`]).
 
@@ -49,27 +46,27 @@ use uuid::Uuid;
 
 use crate::auth::RequestContext;
 use crate::config::{AppConfig, CLAUDE_CODE_LANE_MAX_PROMPT_CHARS};
-use crate::conversations::ConversationRecord;
 use crate::dispatch::DispatchPromptNormalized;
-use crate::job_trigger::TriggerKind;
 use crate::{internal_error, runtime, workspace, ApiError, AppState};
 
 type Refusal = (StatusCode, Json<ApiError>);
 
-/// `agent_jobs.engine` of a lane job. Only [`admit`]'s admission writes it,
-/// through `agent::enqueue_agent_job_record`.
+/// `agent_jobs.engine` of a lane job. Only dispatch writes it, for a Claude
+/// Code agent's target, through `agent::enqueue_agent_job_record`.
 pub(crate) const ENGINE: &str = "claude-code";
 /// The `aiAccessMode` of a lane turn's run, messages and job.
 pub(crate) const AI_ACCESS_MODE: &str = "claude-code";
 /// The workspace mode a lane job's payload names as its top-level
-/// `executionMode`, whatever a client's metadata asked for: a lane turn is
-/// one write turn in its space's own folder, and the runtime reads the key as
-/// written (docs/Local-Engine-Turns.md 2.5).
+/// `executionMode`, whatever a client's metadata asked for: a lane turn works
+/// in its space's own folder, and the runtime reads the key as written
+/// (docs/Local-Engine-Turns.md 2.5). A read-only turn's is
+/// [`READ_ONLY_WORKSPACE_MODE`].
 pub(crate) const WORKSPACE_MODE: &str = crate::dispatch::WORKSPACE_MODE_SHARED_WRITE;
-/// The client's claim on a send, and the one value it may have. Both
-/// spellings are read, as the controller reads its other metadata, so a send
-/// can never carry the claim past the gate under the other one.
-const CLAIM_KEYS: [&str; 2] = ["turnEngine", "turn_engine"];
+/// The workspace mode of a lane job in the `plan_only` execution mode (11.12).
+pub(crate) const READ_ONLY_WORKSPACE_MODE: &str = crate::dispatch::WORKSPACE_MODE_SHARED_READ;
+/// The execution modes a lane turn takes (11.4): `apply`, and an
+/// automation's read-only `plan_only`.
+const EXECUTION_MODE_PLAN_ONLY: &str = "plan_only";
 /// The controller's stamp on a lane turn's run, messages, job and reply:
 /// `{"version": 1}`. A client's copy never survives intake.
 pub(crate) const STAMP_KEY: &str = "claudeCode";
@@ -79,12 +76,19 @@ const STAMP_VERSION: u64 = 1;
 pub(crate) const FAILURE_KEY: &str = "claudeCodeFailure";
 /// The lane keys of a send's or a recorded message's metadata that only the
 /// controller writes, in both spellings: a client's copy is never kept.
-const CONTROLLER_KEYS: [&str; 4] = [STAMP_KEY, "claude_code", FAILURE_KEY, "claude_code_failure"];
+const CONTROLLER_KEYS: [&str; 6] = [
+    STAMP_KEY,
+    "claude_code",
+    FAILURE_KEY,
+    "claude_code_failure",
+    SKIPPED_KEY,
+    "claude_code_skipped",
+];
 /// Nested copies of a message's metadata a client could also fill in.
 const NESTED_METADATA_KEYS: [&str; 3] = ["prompt_metadata", "promptMetadata", "details"];
-/// The partial unique index that allows one active lane turn per person
-/// (supabase/migrations/20261113113604).
-pub(crate) const ONE_ACTIVE_TURN_INDEX: &str = "agent_jobs_one_active_claude_code_turn_idx";
+/// The partial unique index that lets one lane turn run at a time for each
+/// person (11.7): any number may wait.
+pub(crate) const ONE_RUNNING_TURN_INDEX: &str = "agent_jobs_one_running_claude_code_turn_idx";
 /// The runtime capability that registration attests for a lane-capable
 /// runtime, and its one version.
 const CAPABILITY_KEY: &str = "claudeCode";
@@ -94,25 +98,15 @@ const CAPABILITY_VERSION: f64 = 1.0;
 /// the lease reads it.
 const SELF_HOSTED_ACCESS_KEY: &str = "_instafySelfHostedAccess";
 
-/// G1: the lane is not on for the sender.
+/// L1: the lane is not on for the agent's owner.
 pub(crate) const TURN_NOT_ALLOWED: &str = "claude_code_turn_not_allowed";
-/// G2, G3: not the person's own message, sent now.
-pub(crate) const TURN_NOT_PERSON: &str = "claude_code_turn_not_person";
-/// G4, G5: not one plain turn to the sender's own @octo.
-pub(crate) const TURN_NOT_PLAIN: &str = "claude_code_turn_not_plain";
-/// G6: not the sender's own computer, ready for a lane turn.
-pub(crate) const RUNTIME_NOT_READY: &str = "claude_code_runtime_not_ready";
-/// G7: the computer has another job queued or running.
-pub(crate) const MACHINE_BUSY: &str = "claude_code_machine_busy";
-/// G8: the sender already has a lane turn running or waiting to start.
-pub(crate) const TURN_ACTIVE: &str = "claude_code_turn_active";
-/// A chat whose device grants name someone else.
-pub(crate) const CONVERSATION_GRANTED: &str = "claude_code_conversation_granted";
-/// A claim naming an engine that is not [`ENGINE`].
-pub(crate) const TURN_ENGINE_UNKNOWN: &str = "claude_code_turn_engine_unknown";
-/// G8's `details.reason` when the blocking turn can no longer start: the run
-/// once sweep is about to mark it as not run.
-pub(crate) const START_WINDOW_PASSED: &str = "start_window_passed";
+/// L2, L3: a turn a Claude Code agent cannot take (11.4, 11.6).
+pub(crate) const TURN_UNSUPPORTED: &str = "claude_code_turn_unsupported";
+/// The run metadata key of an ambient evaluation that no computer of its
+/// person's could take when it was sent (11.7): `{"reason": "computer_away"}`.
+pub(crate) const SKIPPED_KEY: &str = "claudeCodeSkipped";
+/// [`SKIPPED_KEY`]'s one reason.
+pub(crate) const COMPUTER_AWAY: &str = "computer_away";
 
 /// A steer into a running lane turn: nothing can deliver words into a running
 /// `claude -p` (docs/Local-Engine-Turns.md 2.8).
@@ -127,8 +121,8 @@ pub(crate) const TURN_HAS_NO_JOB_TOKEN: &str = "claude_code_turn_has_no_job_toke
 /// question that waits for an answer, or a browser card and its hand-back.
 pub(crate) const TURN_STARTS_NO_TURNS: &str = "claude_code_turn_starts_no_turns";
 
-/// The provider id a lane job's completion stores, and the `provider` of its
-/// conversation state.
+/// The provider id of a Claude Code agent (`user_agents.provider`), the one a
+/// lane job's completion stores, and the `provider` of its conversation state.
 pub(crate) const PROVIDER: &str = "claude-code";
 /// The version of a lane conversation state.
 const CONVERSATION_STATE_VERSION: u64 = 1;
@@ -157,684 +151,367 @@ pub(crate) const RUNTIME_FAILURE_CODES: [&str;
     runtime_contracts::claude_code_lane::RUNTIME_FAILURE_CODES.len()] =
     runtime_contracts::claude_code_lane::RUNTIME_FAILURE_CODES;
 /// The failure code of a lane job a runtime stop failed: the computer's
-/// Instafy stopped while the turn ran or before it started.
+/// Instafy stopped while the turn ran.
 pub(crate) const MACHINE_STOPPED: &str = runtime_contracts::claude_code_lane::MACHINE_STOPPED;
 /// What the failure message of a lane job a runtime stop failed says, before
 /// Studio words it from [`FAILURE_KEY`].
 pub(crate) const MACHINE_STOPPED_MESSAGE: &str = "Instafy Desktop stopped on this turn's \
      computer, so the turn ended and won't run again. Send it again to run it.";
 
-/// A send's metadata keys that mark something Instafy wrote, queued, resent or
-/// delegated (G3), with the `details.reason` of the refusal. A key counts
-/// whatever its value, null included.
-const NOT_A_PERSON_KEYS: [(&str, &str); 22] = [
-    // Studio's marks on a resend, by hand or by itself (crate::job_trigger,
-    // crate::system_turns).
-    ("retryOfMessageId", "resend"),
-    ("retryAutomatic", "resend"),
-    // A goal's next turn.
-    ("goalContinuation", "goal_continuation"),
-    ("goal_continuation", "goal_continuation"),
-    // What the app dispatches in place of the text it shows.
-    ("dispatchContent", "dispatch_content"),
-    ("dispatch_content", "dispatch_content"),
-    // What Studio shows in place of the stored text, so everyone would not
-    // see the words the turn ran.
-    ("displayContent", "display_content"),
-    ("display_content", "display_content"),
-    ("composerMessage", "display_content"),
-    ("composer_message", "display_content"),
-    // Every key `dispatch::metadata_marks_special_dispatch` reads.
-    ("browserTransport", "special_dispatch"),
-    ("browser_transport", "special_dispatch"),
-    ("agentThread", "special_dispatch"),
-    ("agent_thread", "special_dispatch"),
-    ("automation", "special_dispatch"),
-    ("command", "special_dispatch"),
-    ("linkedThreadId", "special_dispatch"),
-    ("linked_thread_id", "special_dispatch"),
-    ("multiAgentPlan", "special_dispatch"),
-    ("multi_agent_plan", "special_dispatch"),
-    // Any controller dispatch, and a space review.
-    ("controllerDispatch", "controller_dispatch"),
-    ("controller_dispatch", "controller_dispatch"),
-];
-/// More G3 keys: a hand-back's own stamp, a space review, and a browser
-/// card's continuation (crate::system_turns), which asks the card's task in
-/// Instafy's words.
-const MORE_NOT_A_PERSON_KEYS: [(&str, &str); 5] = [
-    (crate::browser_hand_back::HAND_BACK_KEY, "hand_back"),
-    ("browser_hand_back", "hand_back"),
-    ("spaceReview", "space_review"),
-    ("space_review", "space_review"),
-    ("browserRequestOf", "browser_card"),
-];
-/// Metadata keys the write-scope plan reads (crate::agent_write_scopes), at
-/// the top level, in either spelling and with any value, null included. Any
-/// of them can make the turn's scope `coordination_required`, which refuses
-/// workspace writes; without them a single-agent write is `unscoped`.
-const WRITE_SCOPE_KEYS: [&str; 6] = [
-    "writeScope",
-    "write_scope",
-    "writeScopes",
-    "write_scopes",
-    "agentWriteScopes",
-    "agent_write_scopes",
-];
-/// The same plan's keys under `agentSelection`.
-const SELECTION_WRITE_SCOPE_KEYS: [&str; 2] = ["writeScopes", "write_scopes"];
 /// The keys a lane job's payload metadata keeps from dispatch's own
-/// (docs/Local-Engine-Turns.md 2.5), beside the stamps: the controller's
-/// `agent`, `writeScope`, `conversationVisibility` and `runtimePreference`,
-/// and the client's `input` and `writeIntent`. Nothing else a client sent,
-/// such as a `userId` of its choosing, reaches the runtime.
-const PAYLOAD_METADATA_KEYS: [&str; 6] = [
+/// (docs/Local-Engine-Turns.md 2.5, 11.12), beside the stamps and the turn's
+/// execution mode: the controller's `agent`, `writeScope`,
+/// `conversationVisibility`, `runtimePreference` and `groupParticipation` (an
+/// evaluation's marker, which completion reads to take a decline), and the
+/// client's `input` and `writeIntent`. Nothing else a client sent, such as a
+/// `userId` of its choosing, reaches the runtime.
+const PAYLOAD_METADATA_KEYS: [&str; 7] = [
     "agent",
     "writeScope",
     crate::dispatch::CONVERSATION_VISIBILITY_KEY,
     "runtimePreference",
+    "groupParticipation",
     "input",
     "writeIntent",
 ];
 
-/// What dispatch already took out of a send's metadata before Stage 1, so
-/// Stage 1 can refuse a send that carried any of them.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct TakenClaims {
-    /// "Via a site" (crate::site_intent).
-    pub(crate) site_intent: bool,
-    /// "This continues a browser turn" (crate::browser_hand_back).
-    pub(crate) hand_back: bool,
-    /// "Instafy sent this again by itself" (crate::system_turns).
-    pub(crate) automatic_retry: bool,
-}
-
-/// A claimed send that passed Stage 1 ([`check_sender`]).
+/// Marks a dispatch request, or one target's copy of it, whose job runs on
+/// its person's own Claude Code (`agent_jobs.engine`, 11.6). Only dispatch
+/// sets it: on a target's copy when that target is a Claude Code agent, and
+/// on the dispatch's own request when every target is one. Never from a
+/// request body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LaneSend {
-    /// The person whose own session sent it.
-    pub(crate) sender: Uuid,
-    /// The runtime the request itself named, if any, recorded before the
-    /// conversation's stored preference can fill a missing one.
-    pub(crate) runtime_id: Option<Uuid>,
-}
+pub(crate) struct LaneAdmission;
 
-/// An admitted lane turn ([`admit`]): its one job runs on this runtime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LaneAdmission {
-    pub(crate) runtime_id: Uuid,
-}
-
-/// One agent a turn goes to, as dispatch resolved it against the sender's own
-/// agents.
+/// What dispatch knows of a target that is a Claude Code agent when
+/// [`check_target`] runs.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Target<'a> {
-    pub(crate) handle: &'a str,
+    /// The agent's saved id; a target with none is never a Claude Code agent.
     pub(crate) agent_id: Option<Uuid>,
-}
-
-/// What dispatch knows of a claimed turn when Stage 2 runs.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Turn<'a> {
-    /// Dispatch's `plain_turn`: no browser target or transport, no runtime
-    /// spread, no evaluation and no plan seed.
-    pub(crate) plain_turn: bool,
-    pub(crate) skill_mode_ambient_evaluation: bool,
-    pub(crate) targets: &'a [Target<'a>],
-    /// A message was recorded earlier under the send's client message id.
-    pub(crate) recorded_earlier: bool,
+    /// The turn needs Instafy's browser: a strict browser target, or a
+    /// Personal or Shared Browser request.
+    pub(crate) uses_browser: bool,
+    /// The words this target's job gets: its own part of a message to several
+    /// agents (`dispatch::apply_agent_prompt_segment`), or the whole text.
+    pub(crate) prompt_text: &'a str,
 }
 
 fn refusal(status: StatusCode, code: &str, message: &str, details: JsonValue) -> Refusal {
     (status, Json(ApiError::with_details(message, code, details)))
 }
 
-fn not_allowed(reason: &str) -> Refusal {
+/// L1's refusal, and an agent update's that chooses Claude Code for an owner
+/// the switch does not cover (`ai_agents`).
+pub(crate) fn not_allowed() -> Refusal {
     refusal(
         StatusCode::FORBIDDEN,
         TURN_NOT_ALLOWED,
-        "Claude Code turns aren't on for your account yet.",
-        json!({ "reason": reason }),
+        "Claude Code turns aren't on for your account. Choose another AI for this agent in \
+         Your AI.",
+        json!({ "reason": "not_allowed" }),
     )
 }
 
-fn not_person(reason: &str) -> Refusal {
-    refusal(
-        StatusCode::FORBIDDEN,
-        TURN_NOT_PERSON,
-        "Claude Code takes only a message you send yourself.",
-        json!({ "reason": reason }),
-    )
-}
-
-fn not_person_key(reason: &str, key: &str) -> Refusal {
-    refusal(
-        StatusCode::FORBIDDEN,
-        TURN_NOT_PERSON,
-        "Claude Code takes only a message you send yourself.",
-        json!({ "reason": reason, "key": key }),
-    )
-}
-
-fn not_plain(reason: &str) -> Refusal {
+fn unsupported(reason: &str, message: &str) -> Refusal {
     refusal(
         StatusCode::UNPROCESSABLE_ENTITY,
-        TURN_NOT_PLAIN,
-        "Claude Code takes only a plain message to Octo, of at most 100,000 characters, \
-         without attachments or a command.",
+        TURN_UNSUPPORTED,
+        message,
         json!({ "reason": reason }),
     )
-}
-
-fn not_plain_key(reason: &str, key: &str) -> Refusal {
-    refusal(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        TURN_NOT_PLAIN,
-        "Claude Code takes only a plain message to Octo, of at most 100,000 characters, \
-         without attachments or a command.",
-        json!({ "reason": reason, "key": key }),
-    )
-}
-
-fn runtime_not_ready(reason: &str) -> Refusal {
-    refusal(
-        StatusCode::CONFLICT,
-        RUNTIME_NOT_READY,
-        "Your computer isn't connected to this space. Open this space in Instafy Desktop, \
-         then send your message again.",
-        json!({ "reason": reason }),
-    )
-}
-
-fn machine_busy() -> Refusal {
-    refusal(
-        StatusCode::CONFLICT,
-        MACHINE_BUSY,
-        "Your computer is busy with another turn. Send this when it's done.",
-        json!({ "reason": "machine_busy" }),
-    )
-}
-
-/// G8's refusal, and the one-active-turn index's (`agent::enqueue_agent_job_record`).
-/// `start_window_passed`: the blocking turn can no longer start, and the
-/// sweep, every 10 s, is about to mark it as not run.
-pub(crate) fn turn_active(start_window_passed: bool) -> Refusal {
-    if start_window_passed {
-        refusal(
-            StatusCode::CONFLICT,
-            TURN_ACTIVE,
-            "Your last Claude Code turn didn't start in time and is about to be marked as \
-             not run. Send this again in a few seconds.",
-            json!({ "reason": START_WINDOW_PASSED }),
-        )
-    } else {
-        refusal(
-            StatusCode::CONFLICT,
-            TURN_ACTIVE,
-            "You already have a Claude Code turn running. Send this when it ends.",
-            json!({ "reason": "turn_active" }),
-        )
-    }
-}
-
-/// The refusal of a claimed send in a chat whose device grants name someone
-/// else, where dispatch would only record it (`device_grants::starts_agent_turns`):
-/// it is refused before anything is recorded.
-pub(crate) fn conversation_granted() -> Refusal {
-    refusal(
-        StatusCode::CONFLICT,
-        CONVERSATION_GRANTED,
-        "In this chat, Octo takes turns only from the person who started the chat, so \
-         Claude Code can't run your message here.",
-        json!({ "reason": "conversation_granted" }),
-    )
-}
-
-fn engine_unknown() -> Refusal {
-    refusal(
-        StatusCode::BAD_REQUEST,
-        TURN_ENGINE_UNKNOWN,
-        "turnEngine must be \"claude-code\".",
-        json!({ "reason": "unknown_engine" }),
-    )
-}
-
-/// Whether `metadata` carries the claim, whatever its value: what the send
-/// queue, automations and the busy chat's queue fallback refuse or skip,
-/// since none of them may ever hold a lane turn.
-pub(crate) fn carries_claim(metadata: Option<&JsonValue>) -> bool {
-    metadata
-        .and_then(JsonValue::as_object)
-        .is_some_and(|map| CLAIM_KEYS.iter().any(|key| map.contains_key(*key)))
-}
-
-/// The refusal of a claim outside a send: a send-queue entry, its edit, or an
-/// automation's prompt. None of them may ever start a lane turn.
-pub(crate) fn refuse_claim_outside_a_send(
-    metadata: Option<&JsonValue>,
-    reason: &str,
-) -> Result<(), Refusal> {
-    if carries_claim(metadata) {
-        return Err(not_person(reason));
-    }
-    Ok(())
 }
 
 /// Removes every key only the controller may write from a client's
-/// `metadata`: the claim, the `claudeCode` stamp and the failure code, at the
-/// top level and in its nested copies. Recorded messages go through this for
-/// every caller, the service role included
+/// `metadata`: the `claudeCode` stamp, the failure code and the skip marker,
+/// at the top level and in its nested copies. Sends and recorded messages go
+/// through this for every caller, the service role included
 /// (`conversations::sanitize_client_recorded_message_metadata`).
 pub(crate) fn strip_client_marks(metadata: &mut JsonValue) {
     let Some(map) = metadata.as_object_mut() else {
         return;
     };
-    for key in CLAIM_KEYS.iter().chain(CONTROLLER_KEYS.iter()) {
-        map.remove(*key);
+    for key in CONTROLLER_KEYS {
+        map.remove(key);
     }
     for nested_key in NESTED_METADATA_KEYS {
         if let Some(nested) = map.get_mut(nested_key).and_then(JsonValue::as_object_mut) {
-            for key in CLAIM_KEYS.iter().chain(CONTROLLER_KEYS.iter()) {
-                nested.remove(*key);
+            for key in CONTROLLER_KEYS {
+                nested.remove(key);
             }
         }
     }
 }
 
-/// Takes the claim out of a send's `metadata`, for every caller, the service
-/// role included, and drops the client's copies of the controller's own
-/// marks ([`strip_client_marks`]). `true` when the send claims the lane:
-/// `turnEngine` is `"claude-code"`. Any other value, null included, is a 400:
-/// the send never runs on another engine instead. The claim is never
-/// persisted anywhere.
-pub(crate) fn take_claim(metadata: &mut JsonValue) -> Result<bool, Refusal> {
-    let mut claimed = false;
-    let mut unknown = false;
-    if let Some(map) = metadata.as_object_mut() {
-        for key in CLAIM_KEYS {
-            match map.remove(key) {
-                Some(value) if value.as_str() == Some(ENGINE) => claimed = true,
-                Some(_) => unknown = true,
-                None => {}
-            }
-        }
-    }
-    strip_client_marks(metadata);
-    if unknown {
-        return Err(engine_unknown());
-    }
-    Ok(claimed)
-}
-
-/// Stage 1, for a claimed send, directly after the claims are taken
-/// (docs/Local-Engine-Turns.md 2.2):
-/// - G1: the lane is on for the sender;
-/// - G2: the person's own session sent it, now, to a conversation that
-///   already existed, and no job delegated it;
-/// - G3: it carries no mark of anything Instafy wrote, queued or resent.
-///
-/// It records the runtime the request named, before the conversation's
-/// stored preference can fill a missing one, and makes the busy chat check
-/// refuse rather than overlap (`expected_lane_idle`). Dispatch reads the
-/// returned [`LaneSend`] for Stage 1's other effects: a granted chat's 409, no
-/// goal binding, no evaluation and no worker-input routing.
-pub(crate) fn check_sender(
+/// L1-L3 for one target of `request` that is a Claude Code agent, before
+/// dispatch writes anything (docs/Local-Engine-Turns.md 11.6):
+/// - L1: the rollout switch covers the agent's owner, the dispatch's person;
+/// - L2: the agent is that person's own, as `dispatch::resolve_agent_targets`
+///   resolves it, and has a saved id;
+/// - L3: the turn is one Claude Code can take (11.4).
+pub(crate) fn check_target(
     config: &AppConfig,
     context: &RequestContext,
-    request: &mut DispatchPromptNormalized,
-    taken: TakenClaims,
-) -> Result<LaneSend, Refusal> {
-    // G1.
-    let Some(sender) = context
-        .user_id
-        .filter(|user_id| config.claude_code_lane.allow(*user_id))
-    else {
-        return Err(not_allowed("not_allowed"));
-    };
-    // G2. Only authenticated ingress sets a trigger, from the caller's own
-    // credential; a job token's send names the job that delegated it.
-    if context.is_service_role {
-        return Err(not_person("service_role"));
-    }
-    let Some(trigger) = request.trigger.as_ref() else {
-        return Err(not_person("not_own_session"));
-    };
-    if trigger.user_id != sender {
-        return Err(not_person("not_own_session"));
-    }
-    if request.delegating_job_id.is_some() {
-        return Err(not_person("delegated"));
-    }
-    // G3 before the rest of G2, which shares its code: a resend's or a goal
-    // turn's trigger has no kind, and the refusal names the mark instead.
-    let instafy_marks = [
-        (request.dispatch_queue_entry_id.is_some(), "queued"),
-        (request.goal_wakeup.is_some(), "goal_wakeup"),
-        (request.goal_parent_job_id.is_some(), "goal_parent_job"),
-        (request.allow_silent_automation_decline, "automation"),
-        (request.allow_internal_review, "internal_review"),
-        (taken.site_intent, "site_intent"),
-        (taken.hand_back, "hand_back"),
-        (taken.automatic_retry, "automatic_retry"),
-        (request.thread_kind.is_some(), "thread_kind"),
-    ];
-    if let Some((_, reason)) = instafy_marks.iter().find(|(marked, _)| *marked) {
-        return Err(not_person(reason));
-    }
-    if let Some((key, reason)) = instafy_mark_key(&request.metadata) {
-        return Err(not_person_key(reason, key));
-    }
-    // The rest of G2: typed by the person, received now, in a conversation
-    // that already existed. `ensure_conversation_record` may still insert one
-    // a `POST /dispatch-prompt` names; Stage 2 checks again.
-    if trigger.kind != Some(TriggerKind::Person) {
-        return Err(not_person("not_typed"));
-    }
-    if trigger.received_at.is_some() {
-        return Err(not_person("received_earlier"));
-    }
-    if request.conversation_is_new {
-        return Err(not_person("new_conversation"));
-    }
-    // Stage 1's effect on the busy chat check: a lane send is refused when
-    // this chat's @octo is busy, never queued behind it.
-    request.expected_lane_idle = true;
-    Ok(LaneSend {
-        sender,
-        runtime_id: request.runtime_id,
-    })
-}
-
-/// The first G3 key `metadata` carries, with its refusal's reason.
-fn instafy_mark_key(metadata: &JsonValue) -> Option<(&'static str, &'static str)> {
-    let map = metadata.as_object()?;
-    NOT_A_PERSON_KEYS
-        .iter()
-        .chain(MORE_NOT_A_PERSON_KEYS.iter())
-        .find(|(key, _)| map.contains_key(*key))
-        .copied()
-}
-
-/// G4 and G5 over what dispatch already holds: one plain turn to the
-/// sender's own @octo, of a plain shape.
-fn check_turn_shape(
     request: &DispatchPromptNormalized,
-    conversation_thread_kind: Option<&str>,
-    turn: &Turn<'_>,
+    target: Target<'_>,
 ) -> Result<(), Refusal> {
-    // G4. Handles resolve only against the sender's own agents.
-    if !turn.plain_turn || turn.skill_mode_ambient_evaluation {
-        return Err(not_plain("not_plain_turn"));
-    }
-    let [target] = turn.targets else {
-        return Err(not_plain("targets"));
+    // L2 first: without a person there is no owner for L1 to look up.
+    let Some(owner) = context.user_id else {
+        return Err(unsupported(
+            "no_owner",
+            "Claude Code takes only its own person's turns.",
+        ));
     };
-    if target.handle != "octo" || target.agent_id.is_none() {
-        return Err(not_plain("not_octo"));
+    if target.agent_id.is_none() {
+        return Err(unsupported(
+            "no_owner",
+            "Claude Code takes only its own person's turns.",
+        ));
     }
-    if turn.recorded_earlier {
-        return Err(not_plain("recorded_earlier"));
+    // L1.
+    if !config.claude_code_lane.allow(owner) {
+        return Err(not_allowed());
     }
-    // G5.
-    if request.intent != crate::dispatch::DEFAULT_PROMPT_INTENT {
-        return Err(not_plain("intent"));
+    // L3.
+    check_turn_shape(request, target.uses_browser)?;
+    check_prompt_text(target.prompt_text)
+}
+
+/// L3 (11.4): what a Claude Code agent's turn cannot ask for. Each refusal
+/// names its reason; Studio words it by that reason.
+fn check_turn_shape(request: &DispatchPromptNormalized, uses_browser: bool) -> Result<(), Refusal> {
+    let metadata = &request.metadata;
+    let has_key = |keys: &[&str]| {
+        metadata
+            .as_object()
+            .is_some_and(|map| keys.iter().any(|key| map.contains_key(*key)))
+    };
+    if uses_browser
+        || has_key(&[
+            "browserTransport",
+            "browser_transport",
+            crate::browser_hand_back::HAND_BACK_KEY,
+            "browser_hand_back",
+        ])
+    {
+        return Err(unsupported(
+            "browser",
+            "Claude Code can't use Instafy's browser. Ask an agent that uses another AI.",
+        ));
     }
-    if request.execution_mode != crate::dispatch::EXECUTION_MODE_APPLY {
-        return Err(not_plain("execution_mode"));
+    if request.intent == "multi_agent_plan"
+        || request.plan_seed.is_some()
+        || has_key(&["multiAgentPlan", "multi_agent_plan"])
+    {
+        return Err(unsupported(
+            "team_plan",
+            "Claude Code agents can't take part in a team plan yet.",
+        ));
     }
-    let request_extras = [
-        (request.plan_seed.is_some(), "plan_seed"),
-        (request.tool_limits.is_some(), "tool_limits"),
-        (request.repo.is_some(), "repo"),
-        (request.requested_preview.is_some(), "requested_preview"),
-        (
-            request.thread_kind.is_some() || conversation_thread_kind.is_some(),
-            "thread_kind",
-        ),
-        (
-            crate::system_turns::carries_attachments(&request.metadata),
+    if crate::system_turns::carries_attachments(metadata) {
+        return Err(unsupported(
             "attachments",
-        ),
-    ];
-    if let Some((_, reason)) = request_extras.iter().find(|(present, _)| *present) {
-        return Err(not_plain(reason));
+            "Claude Code can't take attachments yet. Send your message without them.",
+        ));
     }
-    check_prompt_text(&request.prompt_text)?;
-    if request.metadata.get("writeIntent") != Some(&JsonValue::Bool(true)) {
-        return Err(not_plain("write_intent"));
+    if request.intent != crate::dispatch::DEFAULT_PROMPT_INTENT
+        || request.allow_internal_review
+        || request.tool_limits.is_some()
+        || request.repo.is_some()
+        || request.requested_preview.is_some()
+        || has_key(&["spaceReview", "space_review"])
+    {
+        return Err(unsupported(
+            "instafy_feature",
+            "Claude Code can't do this: it needs one of Instafy's own tools.",
+        ));
     }
-    if let Some(key) = write_scope_key(&request.metadata) {
-        return Err(not_plain_key("write_scope", key));
-    }
-    Ok(())
-}
-
-/// G5's words: not empty, at most [`CLAUDE_CODE_LANE_MAX_PROMPT_CHARS`]
-/// characters (Unicode scalar values), and not a `/` command once leading
-/// whitespace is removed.
-fn check_prompt_text(prompt_text: &str) -> Result<(), Refusal> {
-    if prompt_text.trim().is_empty() {
-        return Err(not_plain("empty"));
-    }
-    if prompt_text.chars().count() > CLAUDE_CODE_LANE_MAX_PROMPT_CHARS {
-        return Err(not_plain("too_long"));
-    }
-    if prompt_text.trim_start().starts_with('/') {
-        return Err(not_plain("command"));
+    if request.execution_mode != crate::dispatch::EXECUTION_MODE_APPLY
+        && request.execution_mode != EXECUTION_MODE_PLAN_ONLY
+    {
+        return Err(unsupported(
+            "execution_mode",
+            "Claude Code can't take a turn that waits for your approval.",
+        ));
     }
     Ok(())
 }
 
-/// The first key of the write-scope plan's that `metadata` carries.
-fn write_scope_key(metadata: &JsonValue) -> Option<&'static str> {
-    let map = metadata.as_object()?;
-    if let Some(key) = WRITE_SCOPE_KEYS.iter().find(|key| map.contains_key(**key)) {
-        return Some(key);
-    }
-    let selection = map.get("agentSelection").and_then(JsonValue::as_object)?;
-    SELECTION_WRITE_SCOPE_KEYS
-        .iter()
-        .find(|key| selection.contains_key(**key))
-        .copied()
+/// The refusal of a Claude Code turn an agent's job would start: a send its
+/// job token makes, or an automation it makes (docs/Local-Engine-Turns.md
+/// 11.5). An agent's job reads what teammates
+/// wrote in a shared chat, so its words could be theirs, and a Claude Code
+/// turn runs only its own person's: their own messages, their own
+/// automations and goals, and what dispatch starts for those.
+pub(crate) fn not_from_an_agents_job() -> Refusal {
+    unsupported(
+        "delegated",
+        "Claude Code takes turns only from its own person, never from another agent's job.",
+    )
 }
 
-/// Stage 2, for a send that passed [`check_sender`], right after dispatch
-/// computed `plain_turn` and before device grants
-/// (docs/Local-Engine-Turns.md 2.2), in the dispatch's own transaction:
-/// - G2 again: the conversation was not inserted by this send, whose insert
-///   the refusal rolls back;
-/// - G4: one plain turn to the sender's own @octo, not recorded earlier;
-/// - G5: of a plain shape;
-/// - G6: on the runtime the send named, which is the sender's own private
-///   self-hosted runtime in this project, dispatch-ready, without a Personal
-///   Browser, and with the `claudeCode` capability the controller attested;
-/// - G7: that runtime has no other job of this project queued or leased;
-/// - G8: the sender has no other lane turn running or waiting to start.
-///
-/// The runtime row is loaded `for share`, and dispatch uses it as its strict
-/// runtime record.
-pub(crate) async fn admit(
-    state: &AppState,
-    transaction: &Transaction<'_>,
-    project_id: &Uuid,
-    conversation: &ConversationRecord,
-    request: &DispatchPromptNormalized,
-    send: &LaneSend,
-    turn: Turn<'_>,
-) -> Result<(LaneAdmission, runtime::RuntimeRecord), Refusal> {
-    if request.conversation_is_new {
-        return Err(not_person("new_conversation"));
-    }
-    check_turn_shape(request, conversation.thread_kind.as_deref(), &turn)?;
-    // G6. `ensure_conversation_record` may since have filled a missing
-    // runtime from the chat's stored preference: only the one the request
-    // named counts.
-    let Some(runtime_id) = send.runtime_id else {
-        return Err(runtime_not_ready("no_runtime"));
-    };
-    let record = load_own_ready_runtime(state, transaction, project_id, &runtime_id, send).await?;
-    // G7.
-    let busy = transaction
+/// Whether any agent a dispatch with `metadata` reaches, for `person`, is a
+/// Claude Code agent: its handles as dispatch resolves them, against that
+/// person's own saved agents.
+pub(crate) async fn selects_a_claude_code_agent(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    person: Uuid,
+    metadata: &JsonValue,
+) -> Result<bool, Refusal> {
+    let handles = crate::dispatch::agent_selection_handles(metadata);
+    client
         .query_one(
             "select exists (
-                 select 1 from agent_jobs
-                  where project_id = $1
-                    and status in ('queued', 'leased')
-                    and (target_runtime_id = $2 or leased_by_runtime_id = $2)
+                 select 1 from user_agents
+                  where user_id = $1
+                    and lower(handle) = any($2::text[])
+                    and deleted_at is null
+                    and provider = $3
+                    and credential_id is null
              )",
-            &[project_id, &runtime_id],
+            &[&person, &handles, &PROVIDER],
         )
         .await
+        .map(|row| row.get::<_, bool>(0))
         .map_err(|error| {
             internal_error(format!(
-                "failed to check the computer's other jobs: {error}"
+                "failed to read the person's Claude Code agents: {error}"
             ))
-        })?
-        .get::<_, bool>(0);
-    if busy {
-        return Err(machine_busy());
-    }
-    // G8: the one-active-turn index's own predicate, so the two never
-    // disagree. Two concurrent admissions both pass here; the index fails the
-    // second insert, which `agent::enqueue_agent_job_record` answers the same.
-    let active = transaction
-        .query_opt(
-            "select status = 'queued'
-                    and trigger_received_at + $2::int * interval '1 second'
-                        <= statement_timestamp() as start_window_passed
-               from agent_jobs
-              where engine = 'claude-code'
-                and (payload ->> 'user_id') = $1
-                and (status = 'leased' or (status = 'queued' and lease_attempts = 0))
-              limit 1",
-            &[
-                &send.sender.to_string(),
-                &crate::device_grants::GRANTED_TURN_START_WITHIN_SECONDS,
-            ],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!(
-                "failed to check the person's other Claude Code turns: {error}"
-            ))
-        })?;
-    if let Some(row) = active {
-        let start_window_passed = row
-            .get::<_, Option<bool>>("start_window_passed")
-            .unwrap_or(false);
-        return Err(turn_active(start_window_passed));
-    }
-    Ok((LaneAdmission { runtime_id }, record))
+        })
 }
 
-/// G6: `runtime_id`'s row in this project, loaded `for share`, when it is
-/// the sender's own private self-hosted runtime, dispatch-ready, without a
-/// Personal Browser, and with an attested, ready `claudeCode` capability.
-async fn load_own_ready_runtime(
+/// L3's refusal of a write scope a Claude Code agent's turn cannot be held
+/// to: part of the space's files, or writes coordinated with other agents
+/// writing at once. Only the whole space, or a read-only turn, is.
+pub(crate) fn cannot_share_a_write_scope() -> Refusal {
+    unsupported(
+        "write_scope",
+        "Claude Code can't be held to part of the space's files while other agents write, so it \
+         can't take this turn. Send it the message on its own.",
+    )
+}
+
+/// L3's words: not empty, at most [`CLAUDE_CODE_LANE_MAX_PROMPT_CHARS`]
+/// characters (Unicode scalar values), and not a `/` command once leading
+/// whitespace is removed, which Claude Code would read as its own.
+fn check_prompt_text(prompt_text: &str) -> Result<(), Refusal> {
+    if prompt_text.trim().is_empty() {
+        return Err(unsupported("empty", "There's nothing to send."));
+    }
+    if prompt_text.chars().count() > CLAUDE_CODE_LANE_MAX_PROMPT_CHARS {
+        return Err(unsupported(
+            "too_long",
+            "Claude Code takes messages of at most 100,000 characters.",
+        ));
+    }
+    if prompt_text.trim_start().starts_with('/') {
+        return Err(unsupported(
+            "command",
+            "Claude Code reads a message that starts with / as its own command, so it wasn't \
+             sent. Start your message another way.",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether one of `person`'s own runtimes in `project_id` could take a lane
+/// turn now, by the lease clause's runtime conditions: private self-hosted,
+/// attested as theirs, without a Personal Browser, dispatch-ready, and with
+/// an attested `claudeCode` capability that is ready. An ambient evaluation
+/// that none could take is never queued (11.7).
+pub(crate) async fn a_computer_is_ready(
     state: &AppState,
     transaction: &Transaction<'_>,
     project_id: &Uuid,
-    runtime_id: &Uuid,
-    send: &LaneSend,
-) -> Result<runtime::RuntimeRecord, Refusal> {
-    let row = transaction
-        .query_opt(
+    person: Uuid,
+) -> Result<bool, Refusal> {
+    let rows = transaction
+        .query(
             "select id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
                     endpoint_url, capabilities, display_name, active_lease_id
                from runtimes
-              where project_id = $1 and id = $2
-              for share",
-            &[project_id, runtime_id],
+              where project_id = $1
+                and capabilities #>> '{_instafySelfHostedAccess,mode}' = 'private'
+                and capabilities #>> '{_instafySelfHostedAccess,ownerUserId}' = $2
+                and capabilities #> '{claudeCode,ready}' = 'true'::jsonb",
+            &[project_id, &person.to_string()],
         )
         .await
         .map_err(|error| {
             internal_error(format!(
-                "failed to load the computer for a Claude Code turn: {error}"
+                "failed to look for a computer that runs Claude Code: {error}"
             ))
         })?;
-    let Some(row) = row else {
-        return Err(runtime_not_ready("runtime_missing"));
-    };
-    let record = runtime::RuntimeRecord {
-        id: row.get("id"),
-        project_id: row.get("project_id"),
-        provider: row.get("provider"),
-        status: row.get("status"),
-        idle_ttl_seconds: row.get("idle_ttl_seconds"),
-        capabilities: row.get("capabilities"),
-        display_name: row.get("display_name"),
-        active_lease_id: row.get("active_lease_id"),
-    };
-    let candidate = workspace::RuntimeCandidate {
-        id: record.id,
-        provider: record.provider.clone(),
-        capabilities: record.capabilities.clone(),
-        status: record.status.clone(),
-        endpoint_url: row.get("endpoint_url"),
-        last_seen_at: row.get("last_seen_at"),
-        idle_ttl_seconds: record.idle_ttl_seconds,
-        display_name: record.display_name.clone(),
-    };
-    check_own_ready_runtime(state, &record, &candidate, send.sender)?;
-    Ok(record)
+    let now = Utc::now();
+    Ok(rows.iter().any(|row| {
+        let record = runtime::RuntimeRecord {
+            id: row.get("id"),
+            project_id: row.get("project_id"),
+            provider: row.get("provider"),
+            status: row.get("status"),
+            idle_ttl_seconds: row.get("idle_ttl_seconds"),
+            capabilities: row.get("capabilities"),
+            display_name: row.get("display_name"),
+            active_lease_id: row.get("active_lease_id"),
+        };
+        let candidate = workspace::RuntimeCandidate {
+            id: record.id,
+            provider: record.provider.clone(),
+            capabilities: record.capabilities.clone(),
+            status: record.status.clone(),
+            endpoint_url: row.get("endpoint_url"),
+            last_seen_at: row.get("last_seen_at"),
+            idle_ttl_seconds: record.idle_ttl_seconds,
+            display_name: record.display_name.clone(),
+        };
+        runtime_takes_lane_turns(state, &record, person)
+            && crate::dispatch::runtime_not_dispatch_ready_detail(&record, Some(&candidate), now)
+                .is_none()
+    }))
 }
 
-/// G6 over a runtime row: see [`load_own_ready_runtime`].
-fn check_own_ready_runtime(
+/// The lease clause's runtime conditions over a runtime row, apart from
+/// readiness to take jobs: private self-hosted, its attested owner `person`
+/// and never the service runtime user, no Personal Browser, and an attested
+/// `claudeCode` capability of version 1 that is ready.
+fn runtime_takes_lane_turns(
     state: &AppState,
     record: &runtime::RuntimeRecord,
-    candidate: &workspace::RuntimeCandidate,
-    sender: Uuid,
-) -> Result<(), Refusal> {
+    person: Uuid,
+) -> bool {
     let capabilities = &record.capabilities;
     if !runtime::runtime_is_private_self_hosted(state, &record.provider, capabilities) {
-        return Err(runtime_not_ready("not_private"));
+        return false;
     }
-    // The owner the controller attested at registration, as the lease reads
-    // it, and never the service runtime user.
-    let sender_text = sender.to_string();
+    let person_text = person.to_string();
     let attested_owner = capabilities
         .get(SELF_HOSTED_ACCESS_KEY)
         .filter(|access| access.get("mode").and_then(JsonValue::as_str) == Some("private"))
         .and_then(|access| access.get("ownerUserId"))
         .and_then(JsonValue::as_str);
-    if attested_owner != Some(sender_text.as_str())
-        || runtime::self_hosted_owner_user_id(capabilities) != Some(sender)
-        || state.config.service_runtime_user_id == Some(sender)
+    if attested_owner != Some(person_text.as_str())
+        || runtime::self_hosted_owner_user_id(capabilities) != Some(person)
+        || state.config.service_runtime_user_id == Some(person)
     {
-        return Err(runtime_not_ready("not_owner"));
+        return false;
     }
-    // A Personal Browser runtime leases only browser jobs.
     if capabilities.get("personalBrowser").is_some()
         || capabilities.get("personal_browser").is_some()
     {
-        return Err(runtime_not_ready("personal_browser"));
+        return false;
     }
-    if crate::dispatch::runtime_not_dispatch_ready_detail(record, Some(candidate), Utc::now())
-        .is_some()
-    {
-        return Err(runtime_not_ready("not_dispatch_ready"));
-    }
-    // The capability registration attests for a lane-capable runtime, read
-    // as the lease reads it: version 1 (as a number) and ready true.
     let capability = capabilities.get(CAPABILITY_KEY);
-    if !capability
+    capability
         .and_then(|capability| capability.get("version"))
         .and_then(JsonValue::as_f64)
         .is_some_and(|version| version == CAPABILITY_VERSION)
-    {
-        return Err(runtime_not_ready("capability_missing"));
-    }
-    if capability.and_then(|capability| capability.get("ready")) != Some(&JsonValue::Bool(true)) {
-        return Err(runtime_not_ready("capability_not_ready"));
-    }
-    Ok(())
+        && capability.and_then(|capability| capability.get("ready")) == Some(&JsonValue::Bool(true))
 }
 
 /// Stamps a lane turn's metadata as only the controller does:
 /// `claudeCode: {"version": 1}`, `aiAccessMode: "claude-code"` and
-/// `managedAiUsed: false`. Dispatch stamps the request at admission, so its
-/// prompt, runs and the person's message carry it; the job payload
+/// `managedAiUsed: false`. Dispatch stamps each Claude Code target's run, and
+/// the person's message and prompt when every target is one; the job payload
 /// ([`payload_metadata`]) and the reply
 /// (`agent::stamp_ai_access_mode_from_job_payload`) are stamped again by their
 /// own builders.
@@ -847,28 +524,83 @@ pub(crate) fn stamp(map: &mut JsonMap<String, JsonValue>) {
     map.insert("managedAiUsed".to_string(), JsonValue::Bool(false));
 }
 
-/// A lane job's payload metadata (docs/Local-Engine-Turns.md 2.5): only
-/// [`PAYLOAD_METADATA_KEYS`] of dispatch's `metadata`, and the stamps.
-pub(crate) fn payload_metadata(metadata: &JsonValue) -> JsonMap<String, JsonValue> {
+/// A lane job's payload metadata (docs/Local-Engine-Turns.md 2.5, 11.12):
+/// only [`PAYLOAD_METADATA_KEYS`] of dispatch's `metadata`, the stamps, and,
+/// for a read-only turn, its `execution_mode`, where the runtime reads it
+/// for any job. An `apply` turn names none, which the runtime reads as
+/// `apply`.
+pub(crate) fn payload_metadata(
+    metadata: &JsonValue,
+    execution_mode: &str,
+) -> JsonMap<String, JsonValue> {
     let mut map = JsonMap::new();
     for key in PAYLOAD_METADATA_KEYS {
         if let Some(value) = metadata.get(key) {
             map.insert(key.to_string(), value.clone());
         }
     }
+    if execution_mode == EXECUTION_MODE_PLAN_ONLY {
+        map.insert(
+            "execution_mode".to_string(),
+            JsonValue::String(EXECUTION_MODE_PLAN_ONLY.to_string()),
+        );
+    }
     stamp(&mut map);
     map
 }
 
-/// Whether `error`, from inserting a job, is the one-active-turn index
-/// refusing a person's second lane turn: 23505 on
-/// [`ONE_ACTIVE_TURN_INDEX`].
-pub(crate) fn is_second_active_turn(error: &tokio_postgres::Error) -> bool {
+/// The workspace mode a lane job's payload names (2.5, 11.12): read-only for
+/// the `plan_only` execution mode, else a write in the space's folder.
+pub(crate) fn workspace_mode(execution_mode: &str) -> &'static str {
+    if execution_mode == EXECUTION_MODE_PLAN_ONLY {
+        READ_ONLY_WORKSPACE_MODE
+    } else {
+        WORKSPACE_MODE
+    }
+}
+
+/// The run metadata of an ambient evaluation no computer of its person's
+/// could take (11.7), which dispatch closes without a job.
+pub(crate) fn skipped_run_metadata() -> JsonValue {
+    json!({ SKIPPED_KEY: { "reason": COMPUTER_AWAY } })
+}
+
+/// Whether a lane turn of `person`'s waits in `conversation_id`, queued for
+/// their computer: an automation whose thread holds one of its owner's skips
+/// its due run rather than pile another up behind it (11.7). A teammate's
+/// waiting turn there never makes it skip.
+pub(crate) async fn a_turn_waits_in(
+    state: &AppState,
+    conversation_id: &Uuid,
+    person: &Uuid,
+) -> anyhow::Result<bool> {
+    Ok(state
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select exists (
+                 select 1 from agent_jobs
+                  where conversation_id = $1
+                    and engine is not null
+                    and status = 'queued'
+                    and (payload ->> 'user_id') = $2
+             )",
+            &[conversation_id, &person.to_string()],
+        )
+        .await?
+        .get(0))
+}
+
+/// Whether `error`, from leasing a lane job, is the one-running-turn index
+/// refusing a person's second running turn: 23505 on
+/// [`ONE_RUNNING_TURN_INDEX`]. That lease takes nothing.
+pub(crate) fn is_second_running_turn(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&SqlState::UNIQUE_VIOLATION)
         && error
             .as_db_error()
             .and_then(|error| error.constraint())
-            .is_some_and(|constraint| constraint == ONE_ACTIVE_TURN_INDEX)
+            .is_some_and(|constraint| constraint == ONE_RUNNING_TURN_INDEX)
 }
 
 /// The refusal of a steer into a running lane turn, for everyone, its author
@@ -1310,19 +1042,20 @@ pub(crate) fn stamp_failure(map: &mut JsonMap<String, JsonValue>, code: &str) {
 }
 
 /// The conversation state the next lane turn resumes
-/// (docs/Local-Engine-Turns.md 2.7): that of the latest lane job, of those
-/// that saved a lane-shaped one, in `conversation_id` of `project_id`, for
-/// `agent_id`, of `sender` (`payload.user_id`) and targeted at `runtime_id`.
-/// A job that saved none, such as a stopped turn or one a sweep or runtime
+/// (docs/Local-Engine-Turns.md 2.7, 11.9): that of the latest lane job, of
+/// those that saved a lane-shaped one, in `conversation_id` of `project_id`,
+/// for `agent_id` and of `person` (`payload.user_id`), whichever computer ran
+/// it. A job that saved none, such as a stopped turn or one a sweep or runtime
 /// stop failed, is passed over. None when there is no such job, or when its
-/// state is the reset: the next turn then starts a new session.
+/// state is the reset: the next turn then starts a new session. The runtime
+/// resumes the session where its computer holds it, and starts a new one in
+/// the same turn where it does not.
 pub(crate) async fn load_session(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     conversation_id: &Uuid,
-    sender: &Uuid,
+    person: &Uuid,
     agent_id: Option<&Uuid>,
-    runtime_id: &Uuid,
 ) -> Result<Option<JsonValue>, Refusal> {
     let Some(agent_id) = agent_id else {
         return Ok(None);
@@ -1336,18 +1069,16 @@ pub(crate) async fn load_session(
                 and j.engine = 'claude-code'
                 and (j.payload ->> 'user_id') = $3
                 and (j.payload #>> '{metadata,agent,id}') = $4
-                and j.target_runtime_id = $5
                 and j.proxy_metadata -> 'conversation' is not null
                 and j.proxy_metadata -> 'conversation' <> 'null'::jsonb
-                and (j.proxy_metadata #>> '{conversation,provider}') = $6
+                and (j.proxy_metadata #>> '{conversation,provider}') = $5
               order by j.created_at desc, j.id desc
               limit 1",
             &[
                 project_id,
                 conversation_id,
-                &sender.to_string(),
+                &person.to_string(),
                 &agent_id.to_string(),
-                runtime_id,
                 &PROVIDER,
             ],
         )
@@ -1362,16 +1093,7 @@ pub(crate) async fn load_session(
         return Ok(None);
     };
     Ok(match lane_state(&state) {
-        Some(LaneState::Session {
-            session_id,
-            runtime_id: state_runtime,
-        }) if state_runtime == *runtime_id => Some(
-            LaneState::Session {
-                session_id,
-                runtime_id: state_runtime,
-            }
-            .to_json(),
-        ),
+        Some(session @ LaneState::Session { .. }) => Some(session.to_json()),
         _ => None,
     })
 }
@@ -1395,103 +1117,162 @@ mod tests {
         )
     }
 
-    /// The claim is taken from every send, its value decides, and a client's
-    /// copies of the controller's own marks never survive, nested ones
-    /// included.
-    #[test]
-    fn the_claim_is_taken_and_only_claude_code_claims_the_lane() {
-        let mut metadata = json!({
-            "turnEngine": "claude-code",
-            "claudeCode": { "version": 1 },
-            "claudeCodeFailure": "plan_limit",
-            "prompt_metadata": { "turnEngine": "claude-code", "claudeCode": { "version": 1 } },
-            "details": { "claudeCodeFailure": "not_signed_in" },
-            "keep": true,
+    /// A dispatch request as `POST /dispatch-prompt` would normalize it, with
+    /// `extra` merged into its body.
+    fn request(extra: JsonValue) -> DispatchPromptNormalized {
+        let mut body = json!({
+            "projectId": Uuid::new_v4().to_string(),
+            "promptText": "fix the build",
+            "metadata": { "input": { "kind": "person" }, "writeIntent": true },
         });
-        assert_eq!(take_claim(&mut metadata).expect("claim"), true);
-        assert_eq!(
-            metadata,
-            json!({ "prompt_metadata": {}, "details": {}, "keep": true })
-        );
-
-        let mut snake = json!({ "turn_engine": "claude-code" });
-        assert_eq!(take_claim(&mut snake).expect("claim"), true);
-        assert_eq!(snake, json!({}));
-
-        let mut unclaimed = json!({ "claude_code": {}, "claude_code_failure": "x" });
-        assert_eq!(take_claim(&mut unclaimed).expect("no claim"), false);
-        assert_eq!(unclaimed, json!({}));
-        assert_eq!(take_claim(&mut JsonValue::Null).expect("no claim"), false);
-
-        for value in [
-            json!("codex"),
-            json!("Claude-Code"),
-            json!(" claude-code"),
-            json!(null),
-            json!(true),
-            json!({ "engine": "claude-code" }),
-        ] {
-            let mut metadata = json!({ "turnEngine": value.clone() });
-            let refusal = take_claim(&mut metadata).expect_err("unknown engine");
-            assert_eq!(
-                code_and_reason(&refusal),
-                (
-                    StatusCode::BAD_REQUEST,
-                    TURN_ENGINE_UNKNOWN.to_string(),
-                    "unknown_engine".to_string()
-                ),
-                "{value}"
-            );
-            assert_eq!(metadata, json!({}), "{value}");
+        for (key, value) in extra.as_object().expect("an object") {
+            body[key] = value.clone();
         }
-        // Two spellings that disagree are refused too.
-        let mut both = json!({ "turnEngine": "claude-code", "turn_engine": "codex" });
-        assert!(take_claim(&mut both).is_err());
+        crate::dispatch::normalize_dispatch_request(
+            serde_json::from_value(body).expect("a dispatch request"),
+        )
+        .expect("a normalized request")
     }
 
+    /// Whatever started a turn, it passes L3 when Claude Code can take it: a
+    /// typed message, an automation's (also read-only), a goal's next step, a
+    /// resend, a queued message and an evaluation alike (11.4).
     #[test]
-    fn a_claim_anywhere_outside_a_send_is_refused() {
-        assert!(!carries_claim(None));
-        assert!(!carries_claim(Some(&json!({ "claudeCode": {} }))));
-        for metadata in [
-            json!({ "turnEngine": "claude-code" }),
-            json!({ "turnEngine": null }),
-            json!({ "turn_engine": "codex" }),
+    fn any_turn_claude_code_can_take_passes_whoever_started_it() {
+        for (what, extra) in [
+            ("a typed message", json!({})),
+            (
+                "an automation's run",
+                json!({
+                    "threadKind": "automation",
+                    "metadata": { "execution_mode": "plan_only", "writeIntent": false },
+                }),
+            ),
+            (
+                "a goal's next step and a resend",
+                json!({
+                    "metadata": {
+                        "goalContinuation": true,
+                        "retryOfMessageId": Uuid::new_v4().to_string(),
+                        "dispatchContent": "Continue toward the goal.",
+                    },
+                }),
+            ),
+            (
+                "an evaluation",
+                json!({ "metadata": { "groupParticipation": { "reason": "skill_mode_ambient" } } }),
+            ),
+            ("no person's input at all", json!({ "metadata": {} })),
         ] {
-            assert!(carries_claim(Some(&metadata)), "{metadata}");
-            let refusal =
-                refuse_claim_outside_a_send(Some(&metadata), "queued").expect_err("refused");
-            assert_eq!(
-                code_and_reason(&refusal),
-                (
-                    StatusCode::FORBIDDEN,
-                    TURN_NOT_PERSON.to_string(),
-                    "queued".to_string()
-                )
-            );
-        }
-        assert!(refuse_claim_outside_a_send(Some(&json!({})), "queued").is_ok());
-    }
-
-    #[test]
-    fn every_mark_of_instafy_names_its_key() {
-        assert_eq!(
-            instafy_mark_key(&json!({ "input": { "kind": "person" } })),
-            None
-        );
-        for (key, reason) in NOT_A_PERSON_KEYS
-            .iter()
-            .chain(MORE_NOT_A_PERSON_KEYS.iter())
-        {
-            for value in [json!(null), json!(false), json!("x"), json!({})] {
-                let mut metadata = json!({ "input": { "kind": "person" } });
-                metadata[*key] = value.clone();
-                assert_eq!(
-                    instafy_mark_key(&metadata),
-                    Some((*key, *reason)),
-                    "{key}: {value}"
-                );
+            let mut request = request(extra);
+            if what == "an automation's run" {
+                request.execution_mode = EXECUTION_MODE_PLAN_ONLY.to_string();
             }
+            assert!(check_turn_shape(&request, false).is_ok(), "{what}");
+        }
+    }
+
+    /// What Claude Code cannot give refuses the turn with its reason, and
+    /// never moves it to another engine (11.4).
+    #[test]
+    fn a_turn_claude_code_cannot_take_is_refused_with_its_reason() {
+        let cases: Vec<(&str, DispatchPromptNormalized, bool)> = vec![
+            ("browser", request(json!({})), true),
+            (
+                "browser",
+                request(json!({ "metadata": { "browserTransport": "shared" } })),
+                false,
+            ),
+            (
+                "team_plan",
+                request(json!({ "intent": "multi_agent_plan" })),
+                false,
+            ),
+            (
+                "team_plan",
+                request(json!({ "metadata": { "multiAgentPlan": { "role": "worker" } } })),
+                false,
+            ),
+            ("team_plan", request(json!({ "planSeed": {} })), false),
+            (
+                "attachments",
+                request(json!({ "metadata": { "attachments": [{ "id": "a" }] } })),
+                false,
+            ),
+            // Empty tool limits are none (`dispatch::normalize_tool_limits`).
+            (
+                "instafy_feature",
+                request(json!({ "toolLimits": { "maxSteps": 3 } })),
+                false,
+            ),
+            (
+                "instafy_feature",
+                request(json!({ "metadata": { "spaceReview": {} } })),
+                false,
+            ),
+        ];
+        for (reason, request, uses_browser) in cases {
+            let refusal = check_turn_shape(&request, uses_browser).expect_err(reason);
+            assert_eq!(
+                code_and_reason(&refusal),
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    TURN_UNSUPPORTED.to_string(),
+                    reason.to_string()
+                ),
+                "{reason}"
+            );
+        }
+        let mut approval = request(json!({}));
+        approval.execution_mode = "approval_required".to_string();
+        assert_eq!(
+            code_and_reason(&check_turn_shape(&approval, false).expect_err("mode")).2,
+            "execution_mode"
+        );
+        let mut internal_review = request(json!({}));
+        internal_review.allow_internal_review = true;
+        assert_eq!(
+            code_and_reason(&check_turn_shape(&internal_review, false).expect_err("review")).2,
+            "instafy_feature"
+        );
+    }
+
+    /// L3 reads the words the target's job gets, its own part of a message
+    /// to several agents included, not only the whole message's text.
+    #[test]
+    fn a_targets_own_words_are_checked() {
+        let owner = Uuid::new_v4();
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "lane-target-words",
+        );
+        config.claude_code_lane =
+            crate::config::ClaudeCodeLaneUsers(crate::config::DeviceGrantUsers::Only(vec![owner]));
+        let context = RequestContext {
+            user_id: Some(owner),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        let request = request(json!({ "promptText": "hi" }));
+        fn target(prompt_text: &str) -> Target<'_> {
+            Target {
+                agent_id: Some(Uuid::new_v4()),
+                uses_browser: false,
+                prompt_text,
+            }
+        }
+        assert!(check_target(&config, &context, &request, target("fix the build")).is_ok());
+        for (words, reason) in [
+            ("/init".to_string(), "command"),
+            (
+                "a".repeat(CLAUDE_CODE_LANE_MAX_PROMPT_CHARS + 1),
+                "too_long",
+            ),
+        ] {
+            let refusal =
+                check_target(&config, &context, &request, target(&words)).expect_err(reason);
+            assert_eq!(code_and_reason(&refusal).2, reason);
         }
     }
 
@@ -1517,30 +1298,73 @@ mod tests {
                 code_and_reason(&refusal),
                 (
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    TURN_NOT_PLAIN.to_string(),
+                    TURN_UNSUPPORTED.to_string(),
                     reason.to_string()
                 )
             );
         }
     }
 
+    /// A client's copies of the controller's own marks never survive, nested
+    /// ones included; everything else stays.
     #[test]
-    fn any_write_scope_key_is_found_with_any_value() {
-        assert_eq!(write_scope_key(&json!({ "writeIntent": true })), None);
+    fn a_clients_copies_of_the_controllers_marks_are_stripped() {
+        let mut metadata = json!({
+            "claudeCode": { "version": 1 },
+            "claudeCodeFailure": "plan_limit",
+            "claudeCodeSkipped": { "reason": "computer_away" },
+            "claude_code": {},
+            "claude_code_failure": "x",
+            "claude_code_skipped": {},
+            "prompt_metadata": { "claudeCode": { "version": 1 }, "keep": 1 },
+            "details": { "claudeCodeFailure": "not_signed_in" },
+            "keep": true,
+        });
+        strip_client_marks(&mut metadata);
         assert_eq!(
-            write_scope_key(&json!({ "agentSelection": { "active": ["octo"] } })),
-            None
+            metadata,
+            json!({ "prompt_metadata": { "keep": 1 }, "details": {}, "keep": true })
         );
-        for key in WRITE_SCOPE_KEYS {
-            assert_eq!(write_scope_key(&json!({ key: null })), Some(key), "{key}");
-        }
-        for key in SELECTION_WRITE_SCOPE_KEYS {
-            assert_eq!(
-                write_scope_key(&json!({ "agentSelection": { key: {} } })),
-                Some(key),
-                "{key}"
-            );
-        }
+        strip_client_marks(&mut JsonValue::Null);
+    }
+
+    /// The not-allowed refusal tells the person what to do instead.
+    #[test]
+    fn not_allowed_names_the_switch_and_what_to_do() {
+        let refusal = not_allowed();
+        assert_eq!(
+            code_and_reason(&refusal),
+            (
+                StatusCode::FORBIDDEN,
+                TURN_NOT_ALLOWED.to_string(),
+                "not_allowed".to_string()
+            )
+        );
+        assert!(refusal.1 .0.message.contains("Your AI"));
+    }
+
+    /// A read-only turn's payload says so where the runtime reads it, and
+    /// names the read-only workspace mode; an apply turn names neither.
+    #[test]
+    fn a_read_only_turn_says_its_mode() {
+        assert_eq!(workspace_mode("apply"), WORKSPACE_MODE);
+        assert_eq!(
+            workspace_mode(EXECUTION_MODE_PLAN_ONLY),
+            READ_ONLY_WORKSPACE_MODE
+        );
+        let metadata = json!({ "execution_mode": "apply", "input": { "kind": "person" } });
+        let apply = payload_metadata(&metadata, "apply");
+        assert!(!apply.contains_key("execution_mode"));
+        let read_only = payload_metadata(&metadata, EXECUTION_MODE_PLAN_ONLY);
+        assert_eq!(read_only["execution_mode"], json!(EXECUTION_MODE_PLAN_ONLY));
+    }
+
+    #[test]
+    fn a_skipped_evaluations_run_names_its_reason() {
+        assert_eq!(
+            skipped_run_metadata(),
+            json!({ "claudeCodeSkipped": { "reason": "computer_away" } })
+        );
     }
 
     /// Each refusal of the rest of a lane job's life has its status and code.
@@ -1908,14 +1732,18 @@ mod tests {
             "managedAiUsed": true,
             "claudeCode": { "version": 2 },
             "goal": { "text": "x" },
+            "groupParticipation": { "reason": "skill_mode_ambient" },
+            "groupAiParticipants": [{ "handle": "helper" }],
+            "managedAiBillingDeferred": true,
         });
         assert_eq!(
-            JsonValue::Object(payload_metadata(&metadata)),
+            JsonValue::Object(payload_metadata(&metadata, "apply")),
             json!({
                 "agent": { "handle": "octo" },
                 "writeScope": { "mode": "unscoped" },
                 "conversationVisibility": "public",
                 "runtimePreference": { "runtimeId": "r" },
+                "groupParticipation": { "reason": "skill_mode_ambient" },
                 "input": { "kind": "person" },
                 "writeIntent": true,
                 "claudeCode": { "version": 1 },

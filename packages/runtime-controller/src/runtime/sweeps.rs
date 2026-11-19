@@ -1564,8 +1564,9 @@ const RUN_ONCE_INTERRUPTED_MESSAGE: &str = "This turn stopped and won't run agai
 /// Fails the queued jobs that run only once, holding device grants or running
 /// on their person's own engine, that the lease will never hand out
 /// (`device_grants::run_once_job_cannot_start`): one a lease of which ended,
-/// as `run_once_interrupted`, and one past its minute to start, as
-/// `start_by_passed`. Their open provider requests are canceled with them. A
+/// as `run_once_interrupted`, and a granted one past its minute to start, as
+/// `start_by_passed`. A local-engine turn that never started is never late:
+/// it waits for its person's computer (crate::claude_code_lane). Their open provider requests are canceled with them. A
 /// tick with nothing to fail runs one update, on the tick's connection.
 async fn fail_jobs_that_can_no_longer_start(
     state: &AppState,
