@@ -523,7 +523,7 @@ describe("a browser prompt inside Octo's turn", () => {
     ];
     await act(async () => { root.render(<Chat state={approval()} showTurn threadMessages={done} />); });
     expect(byTestId("turn-activity-line")?.textContent).toContain(
-      "Opened carris.pt · skipped a form on visitlisboa.com: no answer in time",
+      "Opened carris.pt · skipped a form on visitlisboa.com: no answer from you",
     );
   });
 

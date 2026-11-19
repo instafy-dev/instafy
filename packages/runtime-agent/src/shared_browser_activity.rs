@@ -127,6 +127,15 @@ fn approval_of_terminal_code(code: &str) -> Option<&'static str> {
     }
 }
 
+/// The terminal codes of a person's answer to a step's prompt, the ones
+/// [`approval_of_terminal_code`] names: they said no, didn't answer in time, or the page changed
+/// after their yes. Such an answer ends that step, not the message
+/// (`jobs::browser_hand_back::ends_only_its_step`), and the step stopped no page
+/// (`codex::BrowserTried::answered`). The controller and Studio know the same codes (`answerCodes`
+/// in runtime-controller `browser_hand_back_fixtures.json`).
+pub(crate) const ANSWER_CODES: [&str; 3] =
+    ["approval_denied", "approval_timeout", "approval_stale"];
+
 /// The facts of one Shared Browser tool call, or `None` for a tool that is not a browser step
 /// (a manual field handoff). `payload` is the controller's result (the call's structured
 /// content) once the call ended; `last_host` is the last host the turn's browser steps named,
@@ -289,8 +298,11 @@ pub(crate) fn step_tried_addresses(
 
 /// What only the browser can say stopped a step, by the word a browser turn's finding line gives
 /// it (`jobs::browser_hand_back`): the step, or the load it began, didn't answer in time, or the
-/// page was still too busy to be read (`timed-out`), or something on the page covered the control
-/// the step was for (`covered`). Read from the controller's own words for each
+/// page was still too busy to be read (`timed-out`), the browser couldn't reach the site at all
+/// (`unreachable`), or something on the page covered the control the step was for (`covered`).
+/// Called `timed-out`, a site the browser's network couldn't reach read "didn't answer in time",
+/// and its turns wrote `no-page` for it, which reads "wasn't at the address Octo tried" (a local
+/// test, Nov 19). Read from the controller's own words for each
 /// (`assets/shared-browser-cli.js`): a failed step's reason, a step's `message` and how a
 /// succeeded step's `done` starts, never the labels and options a `done` quotes from the page;
 /// and from a step whose time ran out (`stepTimedOut`) or that paused on a cookie notice for the
@@ -308,9 +320,8 @@ pub(crate) fn step_stop(
 ) -> Option<&'static str> {
     // A step Playwright gave up waiting on; a site that did not answer, then or earlier in the
     // chat; a page still loading when an earlier step's time ran out, still too busy to be read,
-    // or not read in time; a step whose time ran out; and a site the browser couldn't reach,
-    // which did not answer either.
-    const TIMED_OUT: [&str; 8] = [
+    // or not read in time; and a step whose time ran out.
+    const TIMED_OUT: [&str; 7] = [
         "did not take this step in time",
         "did not answer in time",
         "did not answer in Instafy's browser",
@@ -318,13 +329,16 @@ pub(crate) fn step_stop(
         "The page is still busy",
         "could not be read in time",
         "time ran out",
-        "it did not answer",
     ];
+    // A site the browser's network couldn't reach (`shared_browser::SITE_UNREACHABLE_REASON`).
+    const UNREACHABLE: [&str; 1] = ["couldn't reach that site"];
     // A cookie notice the browser could not decline, or anything else over the control.
     const COVERED: [&str; 2] = ["A cookie notice covers", "Something else on the page"];
     // The stop the browser's words in `said` give, found in it by `known`.
     fn stop_by(said: &str, known: impl Fn(&str, &str) -> bool) -> Option<&'static str> {
-        if TIMED_OUT.iter().any(|words| known(said, *words)) {
+        if UNREACHABLE.iter().any(|words| known(said, *words)) {
+            Some("unreachable")
+        } else if TIMED_OUT.iter().any(|words| known(said, *words)) {
             Some("timed-out")
         } else {
             COVERED
@@ -384,11 +398,35 @@ pub(crate) fn step_ended_at(
 
 /// The links a page's reading listed: the reading's id, and each link's index with its
 /// address. Kept only so that a step that presses one has tried the link's own address
-/// ([`pressed_link`]), never projected into a message.
+/// ([`pressed_link`]), and the indices of the site's own search boxes, so that typing into one
+/// reads as the search it is ([`types_into_a_search_box`]); never projected into a message.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PageLinks {
     reading: String,
     links: Vec<(u64, String)>,
+    search_boxes: Vec<u64>,
+}
+
+/// Whether a control a reading lists is a site's own search box, by what the browser says of its
+/// kind, never by its words: a search field (`inputType` `search`, or the `searchbox` role), or a
+/// field in the page's search area, as the browser's policy judges one by its structure
+/// (`isSearchField`, browser-action-policy).
+fn is_search_box(element: &JsonValue) -> bool {
+    let field = |name: &str| {
+        element
+            .get(name)
+            .and_then(JsonValue::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    let (tag, role) = (field("tag"), field("role"));
+    if tag == "textarea" {
+        return false;
+    }
+    field("inputType") == "search"
+        || role == "searchbox"
+        || (field("area") == "search"
+            && (tag == "input" || role == "combobox" || role == "textbox"))
 }
 
 /// The links of the page a browser step's answer read: its `snapshotId` and each of its
@@ -402,9 +440,13 @@ pub(crate) fn step_page_links(payload: Option<&JsonValue>) -> Option<PageLinks> 
         .get("url")
         .and_then(JsonValue::as_str)
         .and_then(http_url);
-    let links = payload
-        .get("interactiveElements")?
-        .as_array()?
+    let elements = payload.get("interactiveElements")?.as_array()?;
+    let search_boxes = elements
+        .iter()
+        .filter(|element| is_search_box(element))
+        .filter_map(|element| element.get("index")?.as_u64())
+        .collect();
+    let links = elements
         .iter()
         .filter_map(|element| {
             let index = element.get("index")?.as_u64()?;
@@ -421,7 +463,43 @@ pub(crate) fn step_page_links(payload: Option<&JsonValue>) -> Option<PageLinks> 
             Some((index, address))
         })
         .collect();
-    Some(PageLinks { reading, links })
+    Some(PageLinks {
+        reading,
+        links,
+        search_boxes,
+    })
+}
+
+/// The fact a `type` step that sends nothing carries when it types into a site's own search box
+/// of the reading it targets ([`types_into_a_search_box`]): its line reads "Searching <site>" as
+/// the person would say it, not "Filling in a form on <site>" (`activity_labels`).
+pub(crate) const SEARCH_BOX_FACT: &str = "searchBox";
+
+/// Whether a browser step types into a site's own search box without sending it: a `type` with
+/// no `submit`, whose target (`index`, `snapshotId`) the reading `links` the run was last given
+/// lists as a search box. Typing that sends is a search already (`step_of_tool`, and the
+/// controller's own `search`).
+pub(crate) fn types_into_a_search_box(
+    tool: &str,
+    arguments: Option<&JsonValue>,
+    links: Option<&PageLinks>,
+) -> bool {
+    let Some(arguments) = arguments.filter(|_| tool == "type") else {
+        return false;
+    };
+    if arguments.get("submit").and_then(JsonValue::as_bool) == Some(true) {
+        return false;
+    }
+    let target = arguments
+        .get("index")
+        .and_then(JsonValue::as_u64)
+        .zip(arguments.get("snapshotId").and_then(JsonValue::as_str));
+    match (target, links) {
+        (Some((index, reading)), Some(links)) => {
+            links.reading == reading && links.search_boxes.contains(&index)
+        }
+        _ => false,
+    }
 }
 
 /// What is known of the address a `click` or `press` leads to, from the reading its target
@@ -468,6 +546,37 @@ pub(crate) fn pressed_link(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A person's answer to a prompt is one of the codes that name their answer, and only those:
+    /// a pause, a safety stop or a closed browser is none.
+    #[test]
+    fn the_answer_codes_are_the_codes_of_a_persons_answer() {
+        for code in [
+            "human_input_required",
+            "cookie_notice_required",
+            "human_step_required",
+            "approval_denied",
+            "approval_timeout",
+            "approval_stale",
+            "approval_stale_or_replayed",
+            "approval_authority_revoked",
+            "approval_storage_invalid",
+            "approval_protocol_invalid",
+            "approval_state_invalid",
+            "approval_state_full",
+            "browser_unavailable",
+        ] {
+            assert!(
+                crate::shared_browser::canonical_terminal_consent_failure_code(code).is_some(),
+                "{code}"
+            );
+            assert_eq!(
+                ANSWER_CODES.contains(&code),
+                approval_of_terminal_code(code).is_some(),
+                "{code}"
+            );
+        }
+    }
 
     /// A stop only the browser can say is read from its own words for a step, never from what
     /// a page says: a step that didn't answer in time, a site that didn't, a step whose time ran
@@ -525,13 +634,15 @@ mod tests {
                 None,
                 Some("timed-out"),
             ),
+            // A site the browser's network couldn't reach is its own stop: written `timed-out`
+            // or `no-page`, the person read that it didn't answer in time or wasn't there.
             (
                 false,
                 failed(
                     "Instafy's browser couldn't reach that site: it did not answer, refused the connection, or is an address the browser does not open.",
                 ),
                 None,
-                Some("timed-out"),
+                Some("unreachable"),
             ),
             (
                 true,
@@ -764,6 +875,83 @@ mod tests {
             step_ended_at("navigate", Some(&json!({ "url": " " })), Some(&ended)),
             None
         );
+    }
+
+    /// Typing into a site's own search box, as the reading it targets lists one (a `search`
+    /// field, the `searchbox` role, or a field in the page's search area), is marked so: its line
+    /// reads "Searching <site>", not "Filling in a form on <site>" (a local test, Nov 19). Typing
+    /// that sends is a search already; any other field, a field of another reading, a text area
+    /// or another step is not marked.
+    #[test]
+    fn typing_into_a_sites_own_search_box_is_marked() {
+        let reading = json!({
+            "snapshotId": "reading-1",
+            "url": "https://shop.example/",
+            "interactiveElements": [
+                { "index": 0, "tag": "input", "inputType": "search", "label": "Search products" },
+                { "index": 1, "tag": "input", "role": "searchbox", "label": "Find" },
+                { "index": 2, "tag": "input", "area": "search", "label": "Query" },
+                { "index": 3, "tag": "input", "inputType": "email", "label": "Email" },
+                { "index": 4, "tag": "textarea", "area": "search", "label": "Notes" },
+                { "index": 5, "tag": "a", "href": "/help", "label": "Help" },
+            ],
+        });
+        let links = step_page_links(Some(&reading)).expect("its reading");
+        let typing = |index: u64, reading: &str, submit: Option<bool>| {
+            let mut arguments = json!({ "index": index, "snapshotId": reading, "text": "reader" });
+            if let Some(submit) = submit {
+                arguments["submit"] = json!(submit);
+            }
+            arguments
+        };
+        for index in [0, 1, 2] {
+            assert!(
+                types_into_a_search_box(
+                    "type",
+                    Some(&typing(index, "reading-1", None)),
+                    Some(&links)
+                ),
+                "{index}"
+            );
+            assert!(types_into_a_search_box(
+                "type",
+                Some(&typing(index, "reading-1", Some(false))),
+                Some(&links)
+            ));
+            // Sent, it is a search, which the step's own kind says.
+            assert!(!types_into_a_search_box(
+                "type",
+                Some(&typing(index, "reading-1", Some(true))),
+                Some(&links)
+            ));
+            // A field of another reading is not known.
+            assert!(!types_into_a_search_box(
+                "type",
+                Some(&typing(index, "reading-2", None)),
+                Some(&links)
+            ));
+            assert!(!types_into_a_search_box(
+                "click",
+                Some(&typing(index, "reading-1", None)),
+                Some(&links)
+            ));
+        }
+        for index in [3, 4, 5, 9] {
+            assert!(
+                !types_into_a_search_box(
+                    "type",
+                    Some(&typing(index, "reading-1", None)),
+                    Some(&links)
+                ),
+                "{index}"
+            );
+        }
+        assert!(!types_into_a_search_box(
+            "type",
+            Some(&typing(0, "reading-1", None)),
+            None
+        ));
+        assert!(!types_into_a_search_box("type", None, Some(&links)));
     }
 
     /// A step that presses a link tried the link's own address, as the page's reading listed
