@@ -3639,7 +3639,10 @@ missing: weight
             .copied()
             .chain(["approval_stale_or_replayed", "browser_unavailable"])
         {
-            assert_eq!(step_not_done(&artifacts(code, "search", "transit.example")), None);
+            assert_eq!(
+                step_not_done(&artifacts(code, "search", "transit.example")),
+                None
+            );
         }
         assert_eq!(step_not_done(&json!([])), None);
         assert_eq!(step_not_done(&JsonValue::Null), None);

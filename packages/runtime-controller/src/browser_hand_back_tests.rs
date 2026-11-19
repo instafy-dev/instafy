@@ -2223,6 +2223,10 @@ async fn a_prompt_that_ended_a_step_hands_back_what_the_turn_read() -> anyhow::R
                     json!({ "answer": answer, "step": "search", "host": "transit.example" }),
                     "{record}"
                 );
+                // Its build makes the page; the chat's next message starts from there.
+                chain
+                    .finish(&hand_back_job, Some("Made the page."), "succeeded")
+                    .await?;
             }
 
             // A pause the person continues in the browser still holds the build back.
@@ -2277,14 +2281,25 @@ async fn a_build_request_after_a_part_that_read_nothing_carries_where_it_stopped
                 assert_eq!(hand_backs.len(), 1, "{hand_backs:?}");
                 let record = &chain.payload_metadata(&hand_backs[0]).await?[HAND_BACK_KEY];
                 assert_eq!(record[BUILD_REQUEST_RECORD_KEY], json!(true), "{record}");
-                assert_eq!(record[CONTINUE_BUILDING_RECORD_KEY], json!(true), "{record}");
+                assert_eq!(
+                    record[CONTINUE_BUILDING_RECORD_KEY],
+                    json!(true),
+                    "{record}"
+                );
                 assert_eq!(record["personRequest"], json!(words));
                 assert_eq!(record["reply"], json!(""), "none of its words: {record}");
-                assert_eq!(record["findings"].as_array().map(Vec::len), Some(1), "{record}");
+                assert_eq!(
+                    record["findings"].as_array().map(Vec::len),
+                    Some(1),
+                    "{record}"
+                );
                 assert_eq!(record["findings"][0]["url"], "https://maker.example/");
                 assert_eq!(record["findings"][0]["stopped"], "unreachable");
                 assert_eq!(record["missing"], json!(["weight"]), "{record}");
-                assert!(!record.to_string().contains("couldn't reach the maker"), "{record}");
+                assert!(
+                    !record.to_string().contains("couldn't reach the maker"),
+                    "{record}"
+                );
                 match prompt {
                     Some(_) => assert_eq!(
                         record[STEP_NOT_DONE_RECORD_KEY],
@@ -2293,6 +2308,9 @@ async fn a_build_request_after_a_part_that_read_nothing_carries_where_it_stopped
                     ),
                     None => assert!(record.get(STEP_NOT_DONE_RECORD_KEY).is_none(), "{record}"),
                 }
+                chain
+                    .finish(&hand_backs[0], Some("Filled in what I could."), "succeeded")
+                    .await?;
             }
             Ok(())
         })

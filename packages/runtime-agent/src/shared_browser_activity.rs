@@ -866,7 +866,11 @@ mod tests {
         };
         for index in [0, 1, 2] {
             assert!(
-                types_into_a_search_box("type", Some(&typing(index, "reading-1", None)), Some(&links)),
+                types_into_a_search_box(
+                    "type",
+                    Some(&typing(index, "reading-1", None)),
+                    Some(&links)
+                ),
                 "{index}"
             );
             assert!(types_into_a_search_box(
@@ -886,15 +890,27 @@ mod tests {
                 Some(&typing(index, "reading-2", None)),
                 Some(&links)
             ));
-            assert!(!types_into_a_search_box("click", Some(&typing(index, "reading-1", None)), Some(&links)));
+            assert!(!types_into_a_search_box(
+                "click",
+                Some(&typing(index, "reading-1", None)),
+                Some(&links)
+            ));
         }
         for index in [3, 4, 5, 9] {
             assert!(
-                !types_into_a_search_box("type", Some(&typing(index, "reading-1", None)), Some(&links)),
+                !types_into_a_search_box(
+                    "type",
+                    Some(&typing(index, "reading-1", None)),
+                    Some(&links)
+                ),
                 "{index}"
             );
         }
-        assert!(!types_into_a_search_box("type", Some(&typing(0, "reading-1", None)), None));
+        assert!(!types_into_a_search_box(
+            "type",
+            Some(&typing(0, "reading-1", None)),
+            None
+        ));
         assert!(!types_into_a_search_box("type", None, Some(&links)));
     }
 

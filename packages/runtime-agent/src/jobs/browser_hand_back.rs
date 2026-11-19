@@ -2389,7 +2389,9 @@ mod tests {
             // A prompt the person said no to or left stopped no page: Instafy says which step
             // didn't run, so no turn calls it `timed-out` (a local test, Nov 19).
             assert!(
-                section.contains("A step the person said no to, or didn't answer in time, stopped no page"),
+                section.contains(
+                    "A step the person said no to, or didn't answer in time, stopped no page"
+                ),
                 "{section}"
             );
             // Its findings end with the values it didn't find, by name, and the pages it didn't
@@ -4210,14 +4212,16 @@ mod tests {
             vec![maker.to_string()],
         );
         for written in ["no-page", "timed-out", "unreachable"] {
-            let mut summary = format!("I couldn't open the maker's site.\n{}", line(maker, written));
+            let mut summary = format!(
+                "I couldn't open the maker's site.\n{}",
+                line(maker, written)
+            );
             leave_out_addresses_never_opened(&mut summary, &[], &[], &tried);
+            let (words, kept) = summary.split_once('\n').expect("its line");
+            assert_eq!(words, "I couldn't open the maker's site.", "{written}");
             assert_eq!(
-                summary,
-                format!(
-                    "I couldn't open the maker's site.\n{}",
-                    json!({ "url": maker, "stopped": "unreachable" })
-                ),
+                serde_json::from_str::<JsonValue>(kept).expect("a finding line"),
+                json!({ "url": maker, "stopped": "unreachable" }),
                 "{written}"
             );
         }
@@ -4245,7 +4249,10 @@ mod tests {
             museum.to_string(),
             "https://museum.example/old-page".to_string(),
         ]);
-        began_there.keep_step(Some("unreachable"), vec![maker.to_string(), museum.to_string()]);
+        began_there.keep_step(
+            Some("unreachable"),
+            vec![maker.to_string(), museum.to_string()],
+        );
         let read_there = format!(
             "{}\n{}\n{}",
             json!({ "url": museum, "title": "Visit", "facts": ["Open daily."] }),
@@ -4273,30 +4280,67 @@ mod tests {
     fn a_step_a_prompt_ended_reads_as_the_persons_step() {
         let mut record = fixtures()["stampedRecord"].clone();
         for (answer, step, host, words) in [
-            ("expired", "search", Some("transit.example"), "a search on transit.example: no answer from you"),
-            ("denied", "navigate", Some("planner.example"), "opening planner.example: you said no"),
-            ("stale", "click", None, "a click: the page changed after you said yes"),
-            ("denied", "drag", Some("www.planner.example"), "a step: you said no"),
+            (
+                "expired",
+                "search",
+                Some("transit.example"),
+                "a search on transit.example: no answer from you",
+            ),
+            (
+                "denied",
+                "navigate",
+                Some("planner.example"),
+                "opening planner.example: you said no",
+            ),
+            (
+                "stale",
+                "click",
+                None,
+                "a click: the page changed after you said yes",
+            ),
+            (
+                "denied",
+                "drag",
+                Some("www.planner.example"),
+                "a step: you said no",
+            ),
         ] {
             let mut step_not_done = json!({ "answer": answer, "step": step });
             if let Some(host) = host {
                 step_not_done["host"] = json!(host);
             }
             record[STEP_NOT_DONE_RECORD_KEY] = step_not_done;
-            let section =
-                format_browser_hand_back_section(Some(&json!({ "browserHandBack": record.clone() })))
-                    .expect("section");
-            assert_eq!(fenced_data(&section)[STEP_NOT_DONE_RECORD_KEY], json!(words));
-            assert!(section.contains(&format!("\n- {STEP_NOT_DONE_LINE}")), "{section}");
+            let section = format_browser_hand_back_section(Some(
+                &json!({ "browserHandBack": record.clone() }),
+            ))
+            .expect("section");
+            assert_eq!(
+                fenced_data(&section)[STEP_NOT_DONE_RECORD_KEY],
+                json!(words)
+            );
+            assert!(
+                section.contains(&format!("\n- {STEP_NOT_DONE_LINE}")),
+                "{section}"
+            );
             assert!(section.contains("write \"not checked\""), "{section}");
             assert!(section.contains("Don't try it again, or another way, in this turn."));
         }
-        for other in [json!({ "answer": "allowed" }), json!("expired"), JsonValue::Null] {
+        for other in [
+            json!({ "answer": "allowed" }),
+            json!("expired"),
+            JsonValue::Null,
+        ] {
             record[STEP_NOT_DONE_RECORD_KEY] = other.clone();
-            let section =
-                format_browser_hand_back_section(Some(&json!({ "browserHandBack": record.clone() })))
-                    .expect("section");
-            assert!(fenced_data(&section).get(STEP_NOT_DONE_RECORD_KEY).is_none(), "{other}");
+            let section = format_browser_hand_back_section(Some(
+                &json!({ "browserHandBack": record.clone() }),
+            ))
+            .expect("section");
+            assert!(
+                fenced_data(&section)
+                    .get(STEP_NOT_DONE_RECORD_KEY)
+                    .is_none(),
+                "{other}"
+            );
             assert!(!section.contains(STEP_NOT_DONE_LINE), "{other}");
         }
     }
@@ -4321,7 +4365,8 @@ mod tests {
             "viewer": "Instafy's browser in the workspace",
         }]);
         record["missing"] = json!(["weight"]);
-        record[STEP_NOT_DONE_RECORD_KEY] = json!({ "answer": "denied", "step": "search", "host": "shop.example" });
+        record[STEP_NOT_DONE_RECORD_KEY] =
+            json!({ "answer": "denied", "step": "search", "host": "shop.example" });
         record[BUILD_REQUEST_RECORD_KEY] = json!(true);
         record[CONTINUE_BUILDING_RECORD_KEY] = json!(true);
         let section =
@@ -4335,7 +4380,10 @@ mod tests {
         let data = fenced_data(&section);
         assert_eq!(data["findings"][0]["stopped"], "unreachable");
         assert_eq!(data["notFound"], json!(["I didn't find weight"]));
-        assert_eq!(data[STEP_NOT_DONE_RECORD_KEY], "a search on shop.example: you said no");
+        assert_eq!(
+            data[STEP_NOT_DONE_RECORD_KEY],
+            "a search on shop.example: you said no"
+        );
         for said in [
             "what your own tools find for it.",
             "`unreachable`: the page couldn't be reached",
@@ -4358,7 +4406,10 @@ mod tests {
         let section =
             format_browser_hand_back_section(Some(&json!({ "browserHandBack": opened_none })))
                 .expect("section");
-        assert!(section.contains("Read no site the request doesn't name"), "{section}");
+        assert!(
+            section.contains("Read no site the request doesn't name"),
+            "{section}"
+        );
         assert!(!section.contains("```"), "{section}");
         // A message the routing step sent with no build after it is unchanged.
         let mut no_build = record.clone();
@@ -4366,7 +4417,10 @@ mod tests {
         let section =
             format_browser_hand_back_section(Some(&json!({ "browserHandBack": no_build })))
                 .expect("section");
-        assert!(section.contains("Read any public page it needs yourself."), "{section}");
+        assert!(
+            section.contains("Read any public page it needs yourself."),
+            "{section}"
+        );
     }
 
     /// A browser part with its build after it hands the person's message to that build when its
@@ -4385,7 +4439,10 @@ mod tests {
         let read = r#"{"url":"https://maker.example/reader","title":"Reader","facts":["174 g."]}"#;
         let answer = format!("I couldn't reach the maker.\n{stop}\n{missing}");
         assert!(hands_its_message_to_its_build(Some(&routed), &answer));
-        assert!(hands_its_message_to_its_build(Some(&routed), "I read nothing."));
+        assert!(hands_its_message_to_its_build(
+            Some(&routed),
+            "I read nothing."
+        ));
         assert!(!hands_its_message_to_its_build(
             Some(&routed),
             &format!("{answer}\n{read}")
@@ -5470,14 +5527,17 @@ mod tests {
     /// left (that step ended, not the message), or any other step is no stop.
     #[test]
     fn a_turn_stopped_for_the_person_when_it_paused_for_them_or_met_a_secret() {
-        let blocked = |code: &str| {
-            json!({ "state": "blocked", "terminal": true, "retryable": false, "code": code })
-        };
+        let blocked = |code: &str| json!({ "state": "blocked", "terminal": true, "retryable": false, "code": code });
         for server in ["instafy_personal_browser", "instafy_shared_browser"] {
             for code in PAUSE_CODES {
                 assert!(
                     stopped_for_the_person(
-                        &[step(server, "request_human_input", "completed", blocked(code))],
+                        &[step(
+                            server,
+                            "request_human_input",
+                            "completed",
+                            blocked(code)
+                        )],
                         false
                     ),
                     "{server} {code}"
@@ -5498,7 +5558,12 @@ mod tests {
                 );
             }
             // A step after a no failed and asked nothing: no pause either.
-            let after_a_no = step(server, "request_human_input", "failed", blocked("approval_denied"));
+            let after_a_no = step(
+                server,
+                "request_human_input",
+                "failed",
+                blocked("approval_denied"),
+            );
             assert!(!stopped_for_the_person(&[after_a_no], false), "{server}");
             let opened = step(server, "navigate", "completed", JsonValue::Null);
             let paused = step(server, "request_human_input", "completed", JsonValue::Null);

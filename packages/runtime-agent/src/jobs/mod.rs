@@ -16705,7 +16705,11 @@ fn shared_browser_terminal_consent_failure(messages: &[JobMessage]) -> Option<&'
 /// not a later one: `shared_browser::ENDED_EARLIER_KEY`). The controller reads them for a
 /// hand-back's `stepNotDone` (runtime-controller `browser_hand_back.rs`), so its build says
 /// which step didn't run without a word of the turn's.
-fn terminal_consent_artifact(code: &str, messages: &[JobMessage], attempt: Option<u32>) -> JsonValue {
+fn terminal_consent_artifact(
+    code: &str,
+    messages: &[JobMessage],
+    attempt: Option<u32>,
+) -> JsonValue {
     let mut metadata = json!({
         "transport": "shared",
         "state": "blocked",
@@ -33510,7 +33514,10 @@ mod tests {
                 messages_streamed: false,
                 final_messages: Vec::new(),
             };
-            assert!(!browser_hand_back::stopped_for_the_person(&execution.messages, false));
+            assert!(!browser_hand_back::stopped_for_the_person(
+                &execution.messages,
+                false
+            ));
             browser_hand_back::move_findings_into_details(&job, &mut execution);
             assert_eq!(execution.summary, "", "{code}: its build answers");
             assert_eq!(execution.final_messages.len(), 1);
@@ -33564,9 +33571,10 @@ mod tests {
             "approval_denied",
             json!({ "step": "navigate", "host": "museum.example" }),
         );
-        later.metadata.as_mut().unwrap()["terminalConsent"][crate::shared_browser::ENDED_EARLIER_KEY] =
-            json!(true);
-        let artifact = terminal_consent_artifact("approval_denied", &[later.clone(), ended], Some(2));
+        later.metadata.as_mut().unwrap()["terminalConsent"]
+            [crate::shared_browser::ENDED_EARLIER_KEY] = json!(true);
+        let artifact =
+            terminal_consent_artifact("approval_denied", &[later.clone(), ended], Some(2));
         assert_eq!(
             artifact,
             json!({
@@ -33641,7 +33649,11 @@ mod tests {
         let job = browser_then_build_job();
         let (ended, summary) = end(job.clone(), answer.clone()).await;
         assert!(ended.hands_the_message_to_its_build);
-        assert!(ended.artifacts.is_empty(), "no pass ran: {:?}", ended.artifacts);
+        assert!(
+            ended.artifacts.is_empty(),
+            "no pass ran: {:?}",
+            ended.artifacts
+        );
         assert_eq!(summary, format!("{stop}\n{missing}"));
         // The job ends it with the build request note; the person reads nothing, and the note
         // keeps where it stopped and what it didn't find, which the controller gives the build.
@@ -33659,7 +33671,10 @@ mod tests {
         assert_eq!(execution.summary, "");
         assert_eq!(execution.final_messages.len(), 2);
         let note = &execution.final_messages[1];
-        assert_eq!(note.content, format!("{stop}\n{}", r#"{"missing":["weight","price"]}"#));
+        assert_eq!(
+            note.content,
+            format!("{stop}\n{}", r#"{"missing":["weight","price"]}"#)
+        );
         assert_eq!(
             note.metadata.as_ref().unwrap()["browserFindings"],
             json!({ "pages": 1, "pagesRead": 0 })
@@ -33688,7 +33703,10 @@ mod tests {
         );
         let (ended, summary) = end(card, answer.clone()).await;
         assert!(!ended.hands_the_message_to_its_build);
-        assert!(summary.starts_with("I couldn't reach the maker's site"), "{summary}");
+        assert!(
+            summary.starts_with("I couldn't reach the maker's site"),
+            "{summary}"
+        );
     }
 
     /// A turn that paused for the person, or that a step's approval ended, keeps the finding

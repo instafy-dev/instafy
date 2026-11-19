@@ -6024,9 +6024,7 @@ impl CodexEventStreamAdapter {
                     let answered_code = terminal_code.filter(|_| {
                         terminal_consent
                             .as_ref()
-                            .and_then(|signal| {
-                                signal.get(crate::shared_browser::ENDED_EARLIER_KEY)
-                            })
+                            .and_then(|signal| signal.get(crate::shared_browser::ENDED_EARLIER_KEY))
                             .and_then(JsonValue::as_bool)
                             != Some(true)
                     });
@@ -13135,9 +13133,16 @@ required = true
     /// prompt left to run out.
     #[test]
     fn only_the_call_that_ended_the_run_carries_the_persons_answer() {
-        for (code, answer) in [("approval_denied", "denied"), ("approval_timeout", "expired")] {
+        for (code, answer) in [
+            ("approval_denied", "denied"),
+            ("approval_timeout", "expired"),
+        ] {
             let mut adapter = CodexEventStreamAdapter::default();
-            let event = |call: &str, tool: &str, arguments: JsonValue, signal: JsonValue, error: bool| Event {
+            let event = |call: &str,
+                         tool: &str,
+                         arguments: JsonValue,
+                         signal: JsonValue,
+                         error: bool| Event {
                 id: format!("evt_{call}"),
                 msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
                     call_id: call.to_string(),
@@ -13164,7 +13169,8 @@ required = true
                     turn_id: "turn-1".to_string(),
                 }),
             };
-            let signal = json!({ "state": "blocked", "terminal": true, "retryable": false, "code": code });
+            let signal =
+                json!({ "state": "blocked", "terminal": true, "retryable": false, "code": code });
             let mut later_signal = signal.clone();
             later_signal[crate::shared_browser::ENDED_EARLIER_KEY] = json!(true);
             // The page the run read before its prompt names the site.
@@ -13204,14 +13210,26 @@ required = true
                 signal.clone(),
                 code == "approval_denied",
             ));
-            assert_eq!(ended[0]["item"]["browserStep"]["approval"], answer, "{code}");
-            assert_eq!(ended[0]["item"]["browserStep"]["host"], "planner.example.org");
+            assert_eq!(
+                ended[0]["item"]["browserStep"]["approval"], answer,
+                "{code}"
+            );
+            assert_eq!(
+                ended[0]["item"]["browserStep"]["host"],
+                "planner.example.org"
+            );
             // A later step fails, and the browser's status still answers.
             for (call, tool, arguments, error) in [
-                ("call_later_open", "navigate", json!({ "url": "https://museum.example.org/" }), true),
+                (
+                    "call_later_open",
+                    "navigate",
+                    json!({ "url": "https://museum.example.org/" }),
+                    true,
+                ),
                 ("call_status", "status", json!({}), false),
             ] {
-                let later = adapter.collect(&event(call, tool, arguments, later_signal.clone(), error));
+                let later =
+                    adapter.collect(&event(call, tool, arguments, later_signal.clone(), error));
                 let step = &later[0]["item"]["browserStep"];
                 assert!(step.get("approval").is_none(), "{code} {call}: {step}");
                 assert_eq!(
