@@ -229,16 +229,16 @@ const compareData = () => ({
   filter: { key: "price", max: 600, label: "€600 or less", rest: "over €600" },
   items: [
     item("read", "Read Model", {
-      price: { v: "€549", src: "Shop One", url: "https://shop-one.example/read", date: DAY },
-      battery: { v: "180 min", src: "Maker", url: "https://maker.example/read", date: DAY },
-      suction: { v: "8,000 Pa", src: "Review Two", url: "https://review-two.example/read", date: DAY },
+      price: { v: "€549", src: "Shop One", url: "https://shop-one.example/read", date: DAY, viewer: "server fetch" },
+      battery: { v: "180 min", src: "Maker", url: "https://maker.example/read", date: DAY, viewer: "server fetch" },
+      suction: { v: "8,000 Pa", src: "Review Two", url: "https://review-two.example/read", date: DAY, viewer: "server fetch" },
     }),
-    item("over", "Over Model", { price: { v: "€699", src: "Shop One", url: "https://shop-one.example/over", date: DAY } }),
+    item("over", "Over Model", { price: { v: "€699", src: "Shop One", url: "https://shop-one.example/over", date: DAY, viewer: "server fetch" } }),
     // the maker's page was read and gives no price; its suction is a dash
     item("silent", "Silent Model", {
-      price: { src: "Maker", url: "https://maker.example/silent", date: DAY },
-      suction: { v: "—", src: "Maker", url: "https://maker.example/silent", date: DAY },
-      battery: { v: "n/a", src: "Maker", url: "https://maker.example/silent", date: DAY },
+      price: { src: "Maker", url: "https://maker.example/silent", date: DAY, viewer: "server fetch" },
+      suction: { v: "—", src: "Maker", url: "https://maker.example/silent", date: DAY, viewer: "server fetch" },
+      battery: { v: "n/a", src: "Maker", url: "https://maker.example/silent", date: DAY, viewer: "server fetch" },
     }),
     // the shop blocks automated reads: the note says so
     item("blocked", "Blocked Model", { price: { note: "shop-two.example blocks automated price checks" } }, { store: { name: "Shop Two", url: "https://shop-two.example/blocked", readable: false } }),
@@ -379,7 +379,7 @@ test("a fact only a web search gave reads \"from a web search\", never \"checked
     var price = ${JSON.stringify(price)};
     document.getElementById("list").replaceChildren(
       site.h("p", { id: "searched" }, site.trust(searched)),
-      site.h("p", { id: "read" }, site.trust({ v: "Results come out on 21 Jan", src: "Maker", url: "https://maker.example/investors", date: "${DAY}" })),
+      site.h("p", { id: "read" }, site.trust({ v: "Results come out on 21 Jan", src: "Maker", url: "https://maker.example/investors", date: "${DAY}", viewer: "server fetch" })),
       site.h("p", { id: "inline" }, "Shares: ", site.cite(searched)),
       site.h("p", { id: "price" }, site.trust(price, { price: true })),
       site.h("p", { id: "at-store" }, site.trust(price, { price: true, store: { name: "Shop One" } })),
@@ -411,7 +411,7 @@ test("a fact only a web search gave reads \"from a web search\", never \"checked
 // Values from one page on one day are cited once under the list. A value only a web search gave, from the same page
 // and day, is not one of them: it keeps its own caption, so the line's "checked" never covers it.
 test("compare: a value only a web search gave keeps its own caption, never cited as checked with the values read", async () => {
-  const specs = (v, extra = {}) => ({ weight: { v, src: "Maker", url: "https://maker.example/specs", date: DAY, ...extra } });
+  const specs = (v, extra = {}) => ({ weight: { v, src: "Maker", url: "https://maker.example/specs", date: DAY, viewer: "server fetch", ...extra } });
   const data = {
     title: "Three readers",
     sort: [],
@@ -432,7 +432,7 @@ test("compare: a value only a web search gave keeps its own caption, never cited
 // One page on one day giving every price is named once under the list ("Prices: Shop ↗ · seen 27 Oct"); a price only
 // a web search gave is never under it.
 test("ranked: a price only a web search gave is never named with the prices read on its page", async () => {
-  const price = (v, extra = {}) => ({ v, src: "Shop", url: "https://shop.example/prices", date: DAY, ...extra });
+  const price = (v, extra = {}) => ({ v, src: "Shop", url: "https://shop.example/prices", date: DAY, viewer: "server fetch", ...extra });
   const data = {
     title: "Top three",
     items: [
@@ -449,16 +449,16 @@ test("ranked: a price only a web search gave is never named with the prices read
 });
 
 // Values read on one page on one day share its line under the list whichever reader read them ("viewer": "server
-// fetch", "shared browser", or none): keyed on the reader's name, one reader of a different name broke the line into
-// a caption on every row. Only a value a web search gave keeps a caption of its own.
+// fetch", "shared browser", "personal browser"): keyed on the reader's name, one reader of a different name broke the
+// line into a caption on every row. Only a value a web search gave keeps a caption of its own.
 test("compare and ranked: values read on one page share its line whatever read them; a web search's keeps its own", async () => {
-  const specs = (v, viewer) => ({ weight: { v, src: "Maker", url: "https://maker.example/specs", date: DAY, ...(viewer ? { viewer } : {}) } });
+  const specs = (v, viewer) => ({ weight: { v, src: "Maker", url: "https://maker.example/specs", date: DAY, viewer } });
   const data = {
     title: "Four readers",
     sort: [],
     columns: [{ key: "weight", label: "Weight", type: "text" }],
     items: [item("a", "Reader A", specs("174 g", "server fetch")), item("b", "Reader B", specs("180 g", "shared browser")),
-      item("c", "Reader C", specs("185 g")), item("d", "Reader D", specs("199 g", "provider search"))],
+      item("c", "Reader C", specs("185 g", "personal browser")), item("d", "Reader D", specs("199 g", "provider search"))],
   };
   for (const width of [1280, 390]) {
     const { document } = await draw("compare", data, { width });
@@ -467,17 +467,88 @@ test("compare and ranked: values read on one page share its line whatever read t
     for (const ref of ["option:a", "option:b", "option:c"]) assert.doesNotMatch(rowText(document, ref), /checked|from a web search/, `${width}px: ${ref}`);
     assert.match(rowText(document, "option:d").replace(/ 2026\b/g, ""), /199 g · from a web search, 27 Oct · maker\.example ↗/, `${width}px`);
   }
-  const price = (v, viewer) => ({ v, src: "Shop", url: "https://shop.example/prices", date: DAY, ...(viewer ? { viewer } : {}) });
+  const price = (v, viewer) => ({ v, src: "Shop", url: "https://shop.example/prices", date: DAY, viewer });
   const { document } = await draw("ranked", {
     title: "Top three",
     items: [
       { ref: "option:a", rank: 1, name: "Option A", price: price("$129", "server fetch") },
       { ref: "option:b", rank: 2, name: "Option B", price: price("$139", "shared browser") },
-      { ref: "option:c", rank: 3, name: "Option C", price: price("$149") },
+      { ref: "option:c", rank: 3, name: "Option C", price: price("$149", "personal browser") },
     ],
   });
   assert.match(document.getElementById("list").textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, ""), /Prices: Shop ↗ · seen 27 Oct/);
   for (const ref of ["option:a", "option:b", "option:c"]) assert.doesNotMatch(rowText(document, ref), /seen|from a web search/, ref);
+});
+
+// A comparison captioned what a web search's excerpts said "checked 19 Nov on <site>" and a shop's listing "seen 19 Nov
+// on <site>" (a local test, Nov 19): its data gave each a source and a day, said nowhere how it was read ("viewer"), and
+// called the review "not read" in its own source line. "checked" and "seen" say a page was read there, so only a value
+// that says how it was read gets them: any other shows its page alone. One read on its page ("viewer": the reader, a
+// browser or a skill's command) keeps "checked", and no line under the list cites a value that doesn't say so with ones
+// that do.
+test("a value that doesn't say how it was read shows its page alone, never \"checked\" or \"seen\"; one read on its page keeps them", async () => {
+  const review = { v: "A five-star all-rounder", src: "Review One · search result, review not read", url: "https://review-one.example/headphones", date: DAY };
+  const listing = { v: "€349", src: "Shop One", url: "https://shop-one.example/headphones", date: DAY };
+  APP.unsaid = `site.start({ data: null, render: function () {
+    var review = ${JSON.stringify(review)}, listing = ${JSON.stringify(listing)};
+    document.getElementById("list").replaceChildren(
+      site.h("p", { id: "review" }, site.trust(review)),
+      site.h("p", { id: "cite" }, "Review: ", site.cite(review)),
+      site.h("p", { id: "price" }, site.trust(listing, { price: true })),
+      site.h("p", { id: "at-store" }, site.trust(listing, { price: true, store: { name: "Shop One" } })),
+      site.h("p", { id: "list-price" }, site.trust(Object.assign({ list: true, asof: "2026-08-05" }, listing), { price: true })),
+      site.h("p", { id: "seen" }, "Prices: ", site.seen(listing)),
+      site.h("p", { id: "not-found" }, site.trust({ src: "Maker", url: "https://maker.example/specs", date: "${DAY}" }, { label: "Weight" })),
+      site.h("p", { id: "unlinked" }, site.trust({ v: "Open daily", src: "Visitor centre", date: "${DAY}", viewer: " " })),
+      site.h("p", { id: "read" }, site.trust(Object.assign({}, review, { src: "Review One", viewer: "server fetch" }))),
+      site.h("p", { id: "read-price" }, site.trust(Object.assign({}, listing, { viewer: "shared browser" }), { price: true })),
+      site.h("p", { id: "read-by-skill" }, site.trust({ v: "Open daily", src: "Visitor centre", date: "${DAY}", viewer: "uw cite" })));
+  } });`;
+  try {
+    const { document, site } = await draw("unsaid", null);
+    const text = (id) => document.getElementById(id).textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, "");
+    assert.deepEqual(["review", "cite", "price", "at-store", "list-price", "seen", "not-found", "unlinked"].map(text), [
+      "A five-star all-rounder · review-one.example ↗",
+      "Review: review-one.example ↗",
+      "€349 · shop-one.example ↗",
+      "€349 · at Shop One ↗",
+      "€349 · list price on shop-one.example ↗ · may have changed",
+      "Prices: ",
+      "Weight not found · maker.example ↗",
+      "Open daily · Visitor centre",
+    ]);
+    assert.deepEqual(["read", "read-price", "read-by-skill"].map(text), [
+      "A five-star all-rounder · checked 27 Oct on review-one.example ↗",
+      "€349 · seen 27 Oct on shop-one.example ↗",
+      "Open daily · Visitor centre · checked 27 Oct",
+    ]);
+    assert.deepEqual([site.readThere(review), site.readThere({ ...review, viewer: "provider search" }), site.readThere({ ...review, viewer: "server fetch" })], [false, false, true]);
+  } finally {
+    delete APP.unsaid;
+  }
+  // a comparison: a value that doesn't say how it was read keeps its page alone on its row, and the line under the list
+  // cites only the values read there
+  const specs = (v, viewer) => ({ weight: { v, src: "Maker", url: "https://maker.example/specs", date: DAY, ...(viewer ? { viewer } : {}) } });
+  const data = {
+    title: "Four readers",
+    sort: [],
+    columns: [{ key: "weight", label: "Weight", type: "text" }],
+    items: [item("a", "Reader A", specs("174 g", "server fetch")), item("b", "Reader B", specs("180 g", "shared browser")),
+      item("c", "Reader C", specs("185 g", "server fetch")), item("d", "Reader D", specs("199 g"))],
+  };
+  for (const width of [1280, 390]) {
+    const { document } = await draw("compare", data, { width });
+    const list = document.getElementById("list").textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, "");
+    assert.match(list, /Weight: checked 27 Oct on maker\.example ↗, unless a value says otherwise/, `${width}px: ${list}`);
+    const unsaid = rowText(document, "option:d").replace(/ 2026\b/g, "");
+    assert.match(unsaid, /199 g · maker\.example ↗/, `${width}px: ${unsaid}`);
+    assert.doesNotMatch(unsaid, /checked|seen/, `${width}px: ${unsaid}`);
+  }
+  // none says how it was read: no cell, and no line under the list, says "checked"
+  const none = { ...data, items: data.items.map((i) => ({ ...i, facts: { weight: { ...i.facts.weight, viewer: undefined } } })) };
+  const page = (await draw("compare", none)).document.getElementById("list").textContent.replace(/\s+/g, " ");
+  assert.match(page, /Weight: maker\.example ↗/, page);
+  assert.doesNotMatch(page, /checked|seen/, page);
 });
 
 // A price only a web search gave is no price read this turn ("Search never proves live stock or prices"): its row
@@ -573,7 +644,7 @@ test("a web search's fact keeps the search's day in its label and its article's 
 // wide table held the same gaps tidily. A phone's row shows the values found, each with its source line, and the page
 // names the rest once, in the columns' order, under "Still to confirm"; the table, the ids, the order and Details are
 // as they were.
-const MAKER = (v, ref) => ({ v, src: "Maker", url: `https://maker.example/${ref}`, date: DAY });
+const MAKER = (v, ref) => ({ v, src: "Maker", url: `https://maker.example/${ref}`, date: DAY, viewer: "server fetch" });
 const laptopsData = () => ({
   title: "Three laptops",
   lede: "The maker's site gives each CPU; battery, weight, price and reviews are not checked.",
@@ -845,10 +916,10 @@ test("compare on a phone: a missing value that can still be checked or opened st
     item("air", "Maker Laptop Air", { cpu: MAKER("Chip Series 3", "air"), price: { note: "not read yet" }, battery: { note: "Battery not checked." }, weight: { note: "Unknown" } },
       { store: { name: "Shop", url: "https://shop.example/air", readable: true } }),
     // the maker's page was read and the weight was not found there: named once, with the page it was looked for on
-    item("max", "Maker Laptop Max", { cpu: MAKER("Other Chip AI 300 Series", "max"), weight: { src: "Maker", url: "https://maker.example/max/specs", date: DAY }, battery: { v: "85 Wh", url: "https://maker.example/max" } }),
+    item("max", "Maker Laptop Max", { cpu: MAKER("Other Chip AI 300 Series", "max"), weight: { src: "Maker", url: "https://maker.example/max/specs", date: DAY, viewer: "server fetch" }, battery: { v: "85 Wh", url: "https://maker.example/max" } }),
     // two values looked for on one page share it, and a note that says why stays beside it
-    item("mini", "Maker Laptop Mini", { cpu: MAKER("Chip Series 2", "mini"), battery: { src: "Maker", url: "https://maker.example/mini/specs", date: DAY },
-      weight: { src: "Maker", url: "https://maker.example/mini/specs", date: DAY }, reviews: { src: "Maker", url: "https://maker.example/mini", date: DAY, note: "looked in its press section" } }),
+    item("mini", "Maker Laptop Mini", { cpu: MAKER("Chip Series 2", "mini"), battery: { src: "Maker", url: "https://maker.example/mini/specs", date: DAY, viewer: "server fetch" },
+      weight: { src: "Maker", url: "https://maker.example/mini/specs", date: DAY, viewer: "server fetch" }, reviews: { src: "Maker", url: "https://maker.example/mini", date: DAY, viewer: "server fetch", note: "looked in its press section" } }),
   ];
   const { document } = await draw("compare", data, { width: 375 });
   const line = (name) => missingEntry(document, name)?.textContent ?? "";
@@ -1333,7 +1404,7 @@ test("compare: every missing value is named once, under \"Still to confirm\", wi
     { key: "price", label: "Price", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" }];
   data.items = [
     item("pro", "Maker Laptop Pro", { cpu: MAKER("Chip Ultra Series 3", "pro"), battery: MAKER("Up to 20 hours (the maker's claim)", "pro/battery"),
-      weight: { src: "Maker", url: "https://maker.example/pro/specs", date: DAY }, price: { note: "Not checked" }, reviews: { note: "Its own page wasn’t opened." } }),
+      weight: { src: "Maker", url: "https://maker.example/pro/specs", date: DAY, viewer: "server fetch" }, price: { note: "Not checked" }, reviews: { note: "Its own page wasn’t opened." } }),
     item("air", "Maker Laptop Air", { cpu: unopened, battery: unopened, weight: unopened, price: unopened, reviews: unopened }),
     item("12", "Maker Laptop 12", { cpu: notRead("Laptop 12"), battery: notRead("Laptop 12"), weight: notRead("Laptop 12"), price: notRead("Laptop 12"),
       reviews: { note: "Two independent reviews not checked" } }),

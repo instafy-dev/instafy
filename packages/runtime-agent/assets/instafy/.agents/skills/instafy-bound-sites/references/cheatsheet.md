@@ -222,8 +222,9 @@ Never a second parallel theme, a webfont, a gradient or pill buttons unless aske
   ("Check train times on Taiwan Railway before you book"), never how you worked ("no timetable was read"). A
   comparison's footer first names what each row is still missing, from its cells, with each value's `note`: its
   `unchecked` never says again that they are missing.
-- `url` is the page you read and `date` the day you read it: each value cites them ("checked 17 Oct on
-  fleetfeet.com ↗"; a price "seen 17 Oct"); add `asof` when the source dates the fact itself
+- `url` is the page you read, `date` the day you read it and `viewer` how (`server fetch` for `instafy web read`,
+  `shared browser`): each value cites them ("checked 17 Oct on fleetfeet.com ↗"; a price "seen 17 Oct"), and one
+  without `viewer` shows its page alone; add `asof` when the source dates the fact itself
   (shown instead: "seen 5 Aug"; a price over 30 days old also says "may have changed"), so an old list price never
   looks fresh. A fact only a web search gave, its page not read, keeps `"viewer": "provider search"`: it reads "from
   a web search, 17 Oct · fleetfeet.com ↗", and no limit or sort counts it. A store known to block checks gets

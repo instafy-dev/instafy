@@ -38,10 +38,13 @@
  *                          (`instafy bind check` fails them), and reads "<value>, not checked", as a ranked row's value
  *                          without a source does; the line under the title says "From what Octo knows; nothing
  *                          checked." Nothing on the page cites a page or offers a check.
- *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05", "est": false}
- *   Each value cites its page and day ("checked 17 Oct on maker.com ↗"; one only a web search gave, with "viewer":
- *   "provider search", "from a web search, 17 Oct · maker.com ↗"), and no cell is blank: a source you read
- *   without finding the value on it is the fact without "v" ({"src", "url", "date"}): "Weight (not found · checked
+ *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "asof"?: "2026-08-05",
+ *          "viewer": "server fetch", "est": false}
+ *   Each value cites its page and day, and "viewer" says how it was read ("server fetch" for `instafy web read`,
+ *   "shared browser", a skill's own command): "checked 17 Oct on maker.com ↗"; without a "viewer" just
+ *   "maker.com ↗"; one only a web search gave, with "viewer": "provider search", "from a web search, 17 Oct ·
+ *   maker.com ↗". No cell is blank: a source you read without finding the value on it is the fact without "v"
+ *   ({"src", "url", "date", "viewer"}): "Weight (not found · checked
  *   17 Oct on maker.com ↗)"; any other missing value says why with {"note": "the store blocks price checks"}. A value
  *   of an item whose own page wasn't opened is {"note": "its own page wasn't opened"}. "Still to confirm" names each
  *   missing value once, with its note; its cell reads "Unknown". Never a dash. A value cites only a page that gives
@@ -94,10 +97,10 @@
     return live || seed;
   }
   /** A fact's page and day: two values share a citation only when one page on one day gives both, read there (by any
-   * reader) or both from a web search. */
+   * reader), both from a web search, or neither saying how it was read. */
   function citeKey(f) {
     var page = site.safeUrl(f.url);
-    return [page ? page.split("#")[0] : "src:" + f.src, f.date || "", f.asof || "", site.fromSearch(f) ? "search" : ""].join("|");
+    return [page ? page.split("#")[0] : "src:" + f.src, f.date || "", f.asof || "", site.fromSearch(f) ? "search" : site.readThere(f) ? "read" : ""].join("|");
   }
   /** Per column: the page most of its cells share ({src, date, asof, url}), when two or more cells and over half do. */
   function sharedSources(data, items) {

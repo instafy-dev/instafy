@@ -195,7 +195,7 @@ export function referenceReply(kase, readAt, { key, links }) {
     lines.push(`- Brightvac S8 Pro: price unknown, not read: ${pro.page.url} (closed to automated reads). Suction 7,000 Pa, battery 200 minutes and a lifting mop come from one review (checked ${day} on ${host(r1pro.url)}). Brightvac S8 Pro: 1 of 2 reviews found.`);
     lines.push("600 EUR or less: the Brightvac Q5. The Brightvac S8 and the Brightvac S8 Pro are listed apart, as their prices are unknown.");
     lines.push(`To check the prices yourself: open ${s8.page.url} and ${pro.page.url} in your own tab and press Send page to Octo on each, or look on Amazon: ${links[s8.slug]} and ${links[pro.slug]}`);
-    lines.push(`This space has no search key, so I read the maker's site and ${host(r1pro.url)}'s reviews directly. Add a key in the card if you want me to look for more reviews and shops next time, or send me review pages you find with Send page to Octo.`);
+    lines.push(`I read the maker's site and ${host(r1pro.url)}'s reviews directly, without a search. You can send me review pages you find with Send page to Octo.`);
   }
   return lines.join("\n");
 }
@@ -205,7 +205,8 @@ export function referenceReply(kase, readAt, { key, links }) {
 export function referencePage(kase, readAt, { key }) {
   const date = readAt.slice(0, 10);
   const [s8, pro, q5] = kase.items;
-  const at = (url, src) => ({ src, url, date });
+  // each read with `instafy web read`, as the reference turn read it: "checked" on the page
+  const at = (url, src) => ({ src, url, date, viewer: "server fetch" });
   const spec = (url, src, v) => ({ v, ...at(url, src) });
   const reviews = (slug) => kase.reviews.filter((r) => r.item === slug && !r.model && r.independent !== false);
   // with a key, the reviews a search found; without one, those a reviewer's home page links to
@@ -268,7 +269,7 @@ export function officialDownReply(kase, readAt, { links }) {
     `- ${q5.name}: price unknown, as ${maker} did not answer. No mop (checked ${day} on ${reviewHost}); suction and battery unknown. ${q5.name}: 1 of 2 reviews found.`,
     "600 EUR or less: none is known, as no price could be read; all three are listed apart.",
     `To check the prices yourself, look on Amazon: ${links[s8.slug]}, ${links[pro.slug]} and ${links[q5.slug]}, or open ${kase.brand}'s pages in your own tab and press Send page to Octo.`,
-    `This space has no search key, so I read ${reviewHost}'s reviews directly. Add a key in the card if you want me to look for more reviews and shops next time.`,
+    `I read ${reviewHost}'s reviews directly, without a search.`,
   ].join("\n");
 }
 
@@ -278,7 +279,7 @@ export function officialDownPage(kase, readAt) {
   const date = readAt.slice(0, 10);
   const [s8, pro, q5] = kase.items;
   const review = (slug) => kase.reviews.find((r) => r.item === slug && hubReviews(kase).has(r.url));
-  const spec = (slug, v) => ({ v, src: "Review One", url: review(slug).url, date });
+  const spec = (slug, v) => ({ v, src: "Review One", url: review(slug).url, date, viewer: "server fetch" });
   const unread = (what) => ({ note: what });
   const price = { note: `${host(kase.official.url)} did not answer; no shop page was read` };
   const row = (item, why, facts) => ({
@@ -587,19 +588,18 @@ export function gradeCompare(transcript, kase = CASE) {
     ...Object.entries(perHost).filter(([, n]) => n > 4).map(([h, n]) => `${n} reads of ${h} (at most 4)`),
   ]);
   // Without a search key the turn still researches and builds (28 Oct drive: it asked for a key and the browser at once
-  // and built nothing): something read without a search, the reviews a reviewer's home page links, the key card at
-  // most once (only as the search offered it, never asked for in chat) and no browser card instead of reading.
+  // and built nothing): something read without a search, the reviews a reviewer's home page links, no key card (it is
+  // only for a person who asks to set up search, and no ask here does) and no key asked for in chat, and no browser
+  // card instead of reading.
   const noProvider = web.filter((s) => s.status === "no_provider");
-  const offers = web.map((s) => s.offer).filter(Boolean);
   const cards = (transcript.actions || []).filter((a) => a.type === "request_secret");
   const browserCards = (transcript.actions || []).filter((a) => a.type === "request_browser");
   check("keeps_going_without_key", noProvider.length
     ? [
         ...(findings.length ? [] : ["read nothing without a search (reference search finds the official site; pages are read with no key)"]),
         ...(wanted && !items.some((item) => counted(item) > 0) ? ["read no review without a search (a reviewer's home page needs no key)"] : []),
-        ...(cards.length > 1 ? [`puts ${cards.length} key cards in the reply (at most once)`] : []),
-        ...(cards.some((c) => !offers.some((o) => o.name === c.name)) ? ["puts a key card the search did not offer"] : []),
-        ...(/\bkey\b/i.test(reply) && !cards.length ? ["talks about a key with no card for it (never ask for a key in chat)"] : []),
+        ...(cards.length ? ["puts the key card in a reply nobody asked to set up search with"] : []),
+        ...(/\bkey\b/i.test(reply) ? ["talks about a search key (never ask for a key in chat)"] : []),
         ...(browserCards.length && !reads.some((r) => r.status === "needs_browser") ? ["asks for the browser instead of reading the pages (a browser card is for a page that needs one)"] : []),
       ]
     : []);
@@ -672,8 +672,8 @@ export const NO_PROVIDER_BREAKERS = [
     actions: [...t.actions, { type: "request_browser", task: `Open ${k.wikidata.website} and read the latest models` }],
   }), ["keeps_going_without_key", "limit_never_counts_unknown", "page_built", "price_fallback", "reviews_counted", "tries_www_once", "unknown_prices_said"]],
   ["asks for the browser instead of reading the reviews", (t) => ({ ...t, actions: [...t.actions, { type: "request_browser", task: "Find two reviews of each model" }] }), ["keeps_going_without_key"]],
-  ["puts the key card in twice", (t) => ({ ...t, actions: [...t.actions, ...t.actions] }), ["keeps_going_without_key"]],
-  ["asks for the key in chat instead of the card", (t) => ({ ...t, actions: [] }), ["keeps_going_without_key"]],
+  ["puts the key card in the reply", (t) => ({ ...t, actions: [...t.actions, t.searches.find((s) => s.offer).offer] }), ["keeps_going_without_key"]],
+  ["asks for a search key in chat", (t) => ({ ...t, reply: `${t.reply}\nAdd a search key so I can look for more reviews next time.` }), ["keeps_going_without_key"]],
   ["asks the address that did not answer again", (t, k) => ({ ...t, reads: [...t.reads, { url: `${k.wikidata.website}s8`, status: "failed", code: "unreachable" }] }), ["tries_www_once"]],
   ["claims reviews it did not read", (t) => ({ ...t, reply: t.reply.replace("Brightvac S8: 1 of 2 reviews found", "Brightvac S8: 2 of 2 reviews found") }), ["reviews_counted"]],
   ["gives no way to check the prices it could not read", (t) => ({ ...t, reply: t.reply.replace(/\nTo check the prices yourself:[^\n]*/, "") }), ["price_fallback"]],

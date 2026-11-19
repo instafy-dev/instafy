@@ -9,14 +9,17 @@
  *   Only the keys in `state` go in the query, so Studio's Present / Follow and shared links show the same view.
  * - Rows: give each row id="row-<slug>" and data-ref="<kind>:<slug>" (site.rowAttrs(ref)). A "select" command from
  *   chat scrolls to the row and marks it; "highlight" fades the rows it names. "toast" and "reload" are the client's.
- * - Facts: one shape everywhere, {"v": "8.9 oz", "src": "Maker", "url": "https://…", "date": "2026-10-17", "est": false}.
- *   "url" is the page it was read on and "date" the day it was read; each value cites them: "checked 17 Oct on
- *   maker.com ↗" (a price: "seen 17 Oct on shop.com ↗"). Optional "asof": the source's own date, shown in place of
- *   "date" ("seen 5 Aug on …"); a price with an "asof" over 30 days old is muted and says "may have changed", like a
- *   live price past its time. "viewer": "provider search" marks a fact only a web search gave (what the search
- *   provider wrote, not a page that was read): it reads "from a web search, 17 Oct · maker.com ↗" (the day of the
- *   search; a source's own date follows its page: "maker.com ↗, 5 Oct"), never "checked" or "seen", and no filter or
- *   sort counts it as read. A value that only says nothing is known ("—", "n/a", "?", "unknown") is no value.
+ * - Facts: one shape everywhere, {"v": "8.9 oz", "src": "Maker", "url": "https://…", "date": "2026-10-17",
+ *   "viewer": "server fetch", "est": false}. "url" is the page it was read on, "date" the day it was read and "viewer"
+ *   how: the reader that read it ("server fetch" for `instafy web read`, "shared browser" or "personal browser" for a
+ *   browser, a skill's own command). Each value cites them: "checked 17 Oct on maker.com ↗" (a price: "seen 17 Oct on
+ *   shop.com ↗"). A fact that doesn't say how it was read shows its page alone ("maker.com ↗"), never "checked" or
+ *   "seen". Optional "asof": the source's own date, shown in place of "date" ("seen 5 Aug on …"); a price with an
+ *   "asof" over 30 days old is muted and says "may have changed", like a live price past its time. "viewer": "provider
+ *   search" marks a fact only a web search gave (what the search provider wrote, not a page that was read): it reads
+ *   "from a web search, 17 Oct · maker.com ↗" (the day of the search; a source's own date follows its page:
+ *   "maker.com ↗, 5 Oct"), never "checked" or "seen", and no filter or sort counts it as read. A value that only says
+ *   nothing is known ("—", "n/a", "?", "unknown") is no value.
  *   site.trust(fact | record, opts) draws the one trust line: "checked 17 Oct on maker.com ↗", "at Store ↗ · checked
  *   4 min ago", "Estimate", "Price not checked" (nobody checked it), "Not found · checked 16 Oct on maker.com ↗" (a
  *   fact with a source and no value: the source was read and the value not found on it); in a table of options a value nobody
@@ -315,13 +318,17 @@
   }
   /** A fact only a web search gave ("viewer": "provider search"): what the search provider wrote, no page read. */
   function fromSearch(x) { return !!x && typeof x.viewer === "string" && x.viewer.trim().toLowerCase() === "provider search"; }
+  /** A fact that says how its page was read ("viewer": the reader, a browser or a skill's command): only such a fact is
+   * "checked" or "seen" there. A page captioned "checked 19 Nov on <site>" what a web search's excerpt said, with no
+   * reader named, and the excerpt's own data said its review was never read (a local test, Nov 19). */
+  function readThere(x) { return !!x && typeof x.viewer === "string" && !!x.viewer.trim() && !fromSearch(x); }
   /** A web search's label: "from a web search, 17 Oct", the day of the search ("date"); without a day, just that. */
   function searchText(x) { return "from a web search" + (date(x.date) ? ", " + date(x.date) : ""); }
   /** "seen 17 Oct": the source's own date when it gives one, else the day it was read; a fact a web search gave reads
-   * its label ("from a web search, 17 Oct"), with a day or without. */
+   * its label ("from a web search, 17 Oct"), with a day or without, and one that doesn't say how it was read nothing. */
   function seenText(x) {
     if (fromSearch(x)) return searchText(x);
-    var when = x && (x.asof || x.date);
+    var when = readThere(x) && (x.asof || x.date);
     return when && date(when) ? "seen " + date(when) : "";
   }
   /** Where and when a value was read, as one caption part: "checked 17 Oct on maker.com ↗" (the host links the page it
@@ -329,7 +336,8 @@
    * "checked", so it does not read as today's price. A fact a web search gave was read on no page: "from a web search,
    * 17 Oct · maker.com ↗" (the day of the search, and the page the search named, with the source's own date after it:
    * "maker.com ↗, 5 Aug"), never "checked" or "seen". Without a page link it names the source: "Maker · checked 17
-   * Oct". o.price: the value is a price. */
+   * Oct". A fact that doesn't say how it was read ("viewer") shows its page alone, "maker.com ↗", or its source
+   * ("Maker"): no day. o.price: the value is a price. */
   function citeParts(x, o) {
     o = o || {};
     if (!x) return [];
@@ -341,7 +349,7 @@
       var label = h("span", { "class": "age", text: searchText(x) });
       return site ? [label, named] : named ? [named, label] : [label];
     }
-    var when = x.asof || x.date;
+    var when = readThere(x) && (x.asof || x.date);
     var day = when && date(when) ? ((o.price || x.asof ? "seen " : "checked ") + date(when)) : "";
     if (site) return [h("span", { "class": "cite" }, day ? day + " on " : "", link(x.url, site))];
     var out = [];
@@ -402,7 +410,8 @@
   /**
    * The one trust line for a fact or a live record: the value, then a quiet caption.
    *   value · checked 17 Oct on maker.com ↗    (a seed fact: the page it was read on and the day; "seen 5 Aug on …"
-   *                                            for a price or the source's own date)
+   *                                            for a price or the source's own date; "maker.com ↗" alone for a
+   *                                            fact that doesn't say how it was read)
    *   value at Store ↗ · checked 4 min ago     (a live check; " · may have changed" once it is old)
    *   value · Estimate · how ↗
    *   Price not checked · reason · where to check ↗
@@ -491,7 +500,8 @@
           var when = seenText(x);
           if (when) add(h("span", { "class": "age", text: when }));
         } else {
-          // every value cites the page it was read on and the day: "checked 17 Oct on maker.com ↗"
+          // every value cites the page it was read on and the day: "checked 17 Oct on maker.com ↗" (its page alone
+          // when it doesn't say how it was read)
           citeParts(x, { price: opts.price }).forEach(add);
         }
         if (seedOld) add("may have changed");
@@ -1163,9 +1173,9 @@
   }
 
   window.site = {
-    version: "1.11.0",
+    version: "1.12.0",
     h: h, append: append, icon: icon, link: link, clip: clip, slug: slug, rowAttrs: rowAttrs, safeUrl: safeUrl,
-    date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText, fromSearch: fromSearch,
+    date: date, dayDate: dayDate, ago: ago, money: money, num: num, valueText: valueText, host: host, seen: seenText, fromSearch: fromSearch, readThere: readThere,
     cite: cite, shown: shown, known: known, within: within, byFilter: byFilter, old: isOld, expired: expired,
     live: live, trust: trust, rowAction: rowAction, checkButton: checkButton, checkAll: checkAll, canCheck: canCheck,
     anyPending: anyPending, priceNotice: priceNotice, storesBlocked: storesBlocked, blocked: blockedRecord, tidy: tidyCaptions, remember: remember, recall: recall,

@@ -158,15 +158,11 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
   await read(CASE.items.map((i) => i.page.url));
 
   const pick: string[] = [];
-  let offer: Transcript | null = null;
   const queries = key ? [...CASE.items.map((i) => `${i.name} reviews`), `${CASE.items[0]!.name} price`] : [`${CASE.items[0]!.name} reviews`];
   for (const query of queries) {
     const search = await webSearch({ query }, { ...common, stateDir: searchState });
     searches.push({ query: search.query, status: search.status, results: search.results, tell: search.tell, ...(search.offer ? { offer: search.offer } : {}) });
-    if (search.status === "no_provider") {
-      offer = search.offer ?? null;
-      break;
-    }
+    if (search.status === "no_provider") break;
     // Leads only: an independent review of that exact model, or a shop's page; never the link-only hit, the poisoned
     // result, a sibling model's review or the maker's own page.
     for (const result of search.results) {
@@ -200,7 +196,7 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
   const site = path.join(tmp, "sites", `compare-${turnNo}`);
   initSite(site, { starter: "compare" });
   fs.writeFileSync(path.join(site, "data.json"), JSON.stringify(referencePage(CASE, readAt, { key }), null, 2));
-  return { searches, reads, findings, links: links.map(({ slug: _slug, ...l }) => l), reply, site, actions: offer ? [offer] : [] };
+  return { searches, reads, findings, links: links.map(({ slug: _slug, ...l }) => l), reply, site, actions: [] };
 }
 
 /**
@@ -239,7 +235,7 @@ async function officialDownTurn(): Promise<Transcript> {
   const site = path.join(tmp, "sites", `compare-${turnNo}`);
   initSite(site, { starter: "compare" });
   fs.writeFileSync(path.join(site, "data.json"), JSON.stringify(officialDownPage(kase, readAt), null, 2));
-  return { searches, reads, findings, links: guided, reply: officialDownReply(kase, readAt, { links }), site, actions: search.offer ? [search.offer] : [] };
+  return { searches, reads, findings, links: guided, reply: officialDownReply(kase, readAt, { links }), site, actions: [] };
 }
 
 /**
@@ -334,7 +330,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     }
   });
 
-  it("without a search key: the turn reads the maker's site at its www. address and a publisher's reviews, builds the page, and offers the key card at most once", async () => {
+  it("without a search key: the turn reads the maker's site at its www. address and a publisher's reviews, builds the page, and puts no key card in its reply", async () => {
     const reference = await referenceTurn({ key: false });
     expect(reference.searches[1]).toMatchObject({ status: "no_provider", offer: { type: "request_secret", name: "BRAVE_SEARCH_API_KEY" } });
     // the search's tell says to go on without it, never to stop and ask
@@ -428,7 +424,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
       "reviewers' homepages and links,",
       "An address that does not answer: once with `www.` added or removed, as its `tell` says.",
-      "Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.",
+      "Its `offer` (the key card, a `request_secret` action) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
       "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",
     ]) {
       expect(research, rule).toContain(rule);

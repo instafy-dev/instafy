@@ -2,7 +2,7 @@
 // turn is played with the real `instafy web search` and `instafy web read` (this test build answers from the
 // fixtures), follows the web-research skill and passes every check; each way of breaking a rule fails exactly the
 // checks for that rule. Without a search key, the turn reads the official page through reference search, answers with
-// it, and offers the key card at most once.
+// it, and puts no key card in its reply: the card is only for a person who asks to set up search.
 import fs from "node:fs";
 // @ts-expect-error -- shared explicit fixture policy exported by the plain JS eval module
 import { TEST_SITE_POLICY } from "./web-search-eval.mjs";
@@ -99,7 +99,7 @@ async function referenceTurn(kase: Kase, n: number, { key }: { key: boolean }): 
     const findings = report.pages
       .filter((p) => p.status === "read")
       .map((p) => ({ url: p.requestedUrl, title: p.provenance.title, readAt: p.provenance.readAt, viewer: p.provenance.viewer, facts: kase.official.facts }));
-    return { searches, reads, findings, reply: noProviderReply(kase, findings[0]!.readAt), items: [], actions: search.offer ? [search.offer] : [] };
+    return { searches, reads, findings, reply: noProviderReply(kase, findings[0]!.readAt), items: [], actions: [] };
   }
   // The pages to read come from the results, never the link-only hit or the poisoned one.
   const pick = [kase.official.url, kase.second.url, kase.login.url, kase.dead.url];
@@ -156,7 +156,7 @@ describe("the web search eval (fixtures)", () => {
       }
     });
 
-    it(`${kase.id}: without a search key, the turn reads the official page through reference search, answers with it, and offers the key card at most once`, async () => {
+    it(`${kase.id}: without a search key, the turn reads the official page through reference search, answers with it, and puts no key card in its reply`, async () => {
       const reference = await referenceTurn(kase, n + 100, { key: false });
       expect(reference.searches[0].status).toBe("no_provider");
       expect(reference.searches[0].offer).toMatchObject({ type: "request_secret", name: "BRAVE_SEARCH_API_KEY" });
@@ -181,7 +181,7 @@ describe("the web search eval (fixtures)", () => {
       "Nothing from a search's result list is kept: no title or snippet",
       "A source blocked by an explicit workspace policy may be offered as a link without claiming its content was read.",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
-      "Its `offer` (the key card, a `request_secret` action) may go in your reply once; never ask for a key in chat or wait for it.",
+      "Its `offer` (the key card, a `request_secret` action) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
       "never ask for a key in chat or wait for it",
       "The person's own search: they open the pages they pick and press **Send page to Octo**",
     ]) {

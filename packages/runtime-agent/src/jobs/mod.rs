@@ -2538,6 +2538,7 @@ fn format_project_memory_snapshot(
         false,
         &[],
         &[],
+        false,
     )
 }
 
@@ -2748,6 +2749,14 @@ fn is_browser_turn(job: &LeaseJob) -> bool {
         || crate::shared_browser::payload_requests_shared_browser(&job.payload)
 }
 
+/// Whether a turn may run the AI's own web search, as its run decides it (`codex.rs`): the job's
+/// grant lets it search, and it is no browser turn (nor a granted one, whose prompt is its own).
+/// Such a turn carries the research skill whatever its words.
+fn turn_may_search_the_web(job: &LeaseJob) -> bool {
+    !is_browser_turn(job)
+        && crate::job_proxy_auth::current().is_some_and(|auth| auth.allows_native_web_search())
+}
+
 /// A Personal or Shared Browser turn carries the browser skill whatever its
 /// words. The router weighs words, and a browser turn's request often has none
 /// of the skill's ("Now find how to get there by tram", or a task that names an
@@ -2928,7 +2937,9 @@ fn sections_left_out(metadata: &SkillMetadata, no_shell: bool, routed: bool) -> 
 /// `routed`: the turn is a browser turn that carries on the person's own message
 /// ([`browser_hand_back::carries_on_a_routed_card`]). `left_out` names skills this turn's
 /// snapshot does not carry, whatever its words. `untold` names skills the turn is not told of
-/// at all: no line in the index, no copy, no routing place.
+/// at all: no line in the index, no copy, no routing place. `searches`: the turn may run the
+/// AI's own web search ([`turn_may_search_the_web`]).
+#[allow(clippy::too_many_arguments)]
 fn format_project_memory_snapshot_with_preferences(
     workspace_dir: &Path,
     prompt_text: &str,
@@ -2937,8 +2948,15 @@ fn format_project_memory_snapshot_with_preferences(
     routed: bool,
     left_out: &[&str],
     untold: &[&str],
+    searches: bool,
 ) -> Option<ProjectMemorySnapshot> {
     let pinned_skill = pinned.map(|pinned| pinned.id);
+    // The skill this turn carries whatever its words: its pinned skill, or, for a turn that may
+    // run the AI's own web search, the research skill, which says how to say what a search
+    // found ("a web search on <date> found: …"). Searching turns whose words routed other skills
+    // stated a search's excerpts as facts, and called a page they never read "checked" (a local
+    // test, Nov 19). A turn with a pinned skill has no shell and never searches.
+    let carried_skill = pinned_skill.or(searches.then_some(WEB_RESEARCH_SKILL_ID));
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
     if remaining == 0 {
         return None;
@@ -3130,21 +3148,24 @@ fn format_project_memory_snapshot_with_preferences(
             }
 
             // A skill such a turn cannot use takes no routing place: the space's memory and
-            // routing skills are still walked (they are always included), and its pinned skill
-            // loads whatever its words, so it takes none either.
+            // routing skills are still walked (they are always included), and the skill it
+            // carries loads whatever its words, so it takes none either: the skills its words
+            // route keep theirs.
             let mut selected_contexts = select_recursive_context_nodes_admitting(
                 &contexts,
                 prompt_text,
                 &|context| match pinned {
                     Some(pinned) => admitted_beside_pinned(context, pinned),
-                    None => true,
+                    None => Some(context.id.as_str()) != carried_skill,
                 },
-                pinned_skill,
+                carried_skill,
             );
-            // A pinned skill the words did not route is loaded too, under its parent.
-            if let Some(pinned) = pinned_skill
-                && !selected_contexts.iter().any(|context| context.id == pinned)
-                && let Some(context) = contexts.iter().find(|context| context.id == pinned)
+            // A carried skill the words did not route is loaded too, under its parent.
+            if let Some(carried) = carried_skill
+                && !selected_contexts
+                    .iter()
+                    .any(|context| context.id == carried)
+                && let Some(context) = contexts.iter().find(|context| context.id == carried)
             {
                 selected_contexts.push(SelectedContextNode {
                     id: context.id.clone(),
@@ -3229,12 +3250,12 @@ fn format_project_memory_snapshot_with_preferences(
             // contexts score 0 and follow, so they can no longer use up the budget before the
             // instructions specific to this request (an imported skill routed for the prompt was
             // otherwise left with a few hundred bytes after the built-in meta skills).
-            // A pinned skill loads first, so the budget never runs out before it.
+            // A carried skill loads first, so the budget never runs out before it.
             let mut ordered_contexts: Vec<&SelectedContextNode> =
                 selected_contexts.iter().collect();
             ordered_contexts.sort_by_key(|context| {
                 (
-                    Some(context.id.as_str()) != pinned_skill,
+                    Some(context.id.as_str()) != carried_skill,
                     std::cmp::Reverse(context.score),
                 )
             });
@@ -11821,6 +11842,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                     .is_some_and(browser_hand_back::carries_on_a_routed_card),
                 left_out,
                 untold,
+                turn_may_search_the_web(job),
             ) {
                 append_prompt_section(
                     &mut prompt,

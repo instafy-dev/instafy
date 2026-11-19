@@ -15,7 +15,8 @@
 // web-search-eval.spec.ts writes the fixtures, plays each ask's reference turn with the real `instafy web search` and
 // `instafy web read` (a test build answers from the fixtures), grades it, and checks that each way of breaking a rule
 // is caught. Without a search key the reference turn still answers: the official page through reference search (no
-// key; Wikidata's answer comes from a test transport), read and cited, and the key card at most once. A turn played by a model on the same fixtures (a test build of the CLI with INSTAFY_WEB_FIXTURES set to
+// key; Wikidata's answer comes from a test transport), read and cited, and no key card: the card is only for a person
+// who asks to set up search, and no ask here does. A turn played by a model on the same fixtures (a test build of the CLI with INSTAFY_WEB_FIXTURES set to
 // a folder `writeEvalFixtures` wrote) is graded the same way:
 //
 //   node packages/instafy-cli/test/web-search-eval.mjs fixtures <folder>
@@ -336,7 +337,7 @@ export function referenceAnswerFor(kase, hostname) {
  *  what it could not look for, and the key card as a way to search next time. */
 export function noProviderReply(kase, readAt) {
   const day = dayMonth(readAt);
-  return `${kase.official.title}: ${kase.official.facts.join("; ")} (checked ${day} on ${host(kase.official.url)}). This space has no search key, so I read the official page directly and could not look for a second source. Add a key in the card if you want me to search next time, or send me pages with Send page to Octo.`;
+  return `${kase.official.title}: ${kase.official.facts.join("; ")} (checked ${day} on ${host(kase.official.url)}). I read the official page directly and could not look for a second source. You can send me more pages with Send page to Octo.`;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -387,18 +388,16 @@ export function gradeTranscript(transcript, kase) {
   const snippets = resultsOf(kase).map((r) => r.description).filter((text) => text.length >= 12);
   check("no_snippet_saved", snippets.filter((text) => saved.toLowerCase().includes(text.toLowerCase())).map((text) => `saves the snippet "${text}"`));
   // Without a search key the turn still answers (28 Oct drive: it asked for a key and the browser at once and stopped):
-  // something read without a search, the key card at most once and only as the search offered it, never a key asked
-  // for in chat, and no browser card instead of reading.
+  // something read without a search, no key card (it is only for a person who asks to set up search, and no ask here
+  // does) and no key asked for in chat, and no browser card instead of reading.
   const noProvider = searches.filter((s) => s.status === "no_provider");
-  const offers = searches.map((s) => s.offer).filter(Boolean);
   const cards = actions.filter((action) => action.type === "request_secret");
   const browserCards = actions.filter((action) => action.type === "request_browser");
   check("keeps_going_without_key", noProvider.length
     ? [
         ...(findings.length ? [] : ["read nothing without a search (reference search finds the official page; pages are read with no key)"]),
-        ...(cards.length > 1 ? [`puts ${cards.length} key cards in the reply (at most once)`] : []),
-        ...(cards.some((c) => !offers.some((o) => o.name === c.name)) ? ["offers the key card again"] : []),
-        ...(/\bkey\b/i.test(reply) && !cards.length ? ["talks about a key with no card for it (never ask for a key in chat)"] : []),
+        ...(cards.length ? ["puts the key card in a reply nobody asked to set up search with"] : []),
+        ...(/\bkey\b/i.test(reply) ? ["talks about a search key (never ask for a key in chat)"] : []),
         ...(browserCards.length && !reads.some((r) => r.status === "needs_browser") ? ["asks for the browser instead of reading the pages"] : []),
       ]
     : []);
@@ -427,8 +426,8 @@ export const BREAKERS = [
 export const NO_PROVIDER_BREAKERS = [
   ["stops at the missing key", (t) => ({ ...t, searches: t.searches.filter((s) => s.status === "no_provider"), reads: [], findings: [], reply: "I can't search the web in this space yet: add a search key in the card." }), ["keeps_going_without_key"]],
   ["asks for the browser instead of reading", (t, k) => ({ ...t, actions: [...t.actions, { type: "request_browser", task: `Find ${k.query}` }] }), ["keeps_going_without_key"]],
-  ["puts the key card in twice", (t) => ({ ...t, actions: [...t.actions, ...t.actions] }), ["keeps_going_without_key"]],
-  ["asks for the key in chat instead of the card", (t) => ({ ...t, actions: [] }), ["keeps_going_without_key"]],
+  ["puts the key card in the reply", (t) => ({ ...t, actions: [...t.actions, t.searches.find((s) => s.offer).offer] }), ["keeps_going_without_key"]],
+  ["asks for a search key in chat", (t) => ({ ...t, reply: `${t.reply} Add a search key so I can search the web next time.` }), ["keeps_going_without_key"]],
 ];
 
 export { failedIds };

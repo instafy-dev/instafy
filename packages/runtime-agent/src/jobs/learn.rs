@@ -448,6 +448,9 @@ const LEGACY_BOUND_SITES_CHEATSHEET_SHA256: &[&str] = &[
     // From before a fact only a web search gave kept `"viewer": "provider search"`, so its page
     // drew it "from a web search", never as checked, and no limit or sort counted it.
     "6ee191db7370c31d57111cf5f2b6496765f1344c97b9e877dad380363dfc35fa", // v7
+    // From before a value said how it was read (`viewer`), so a page called "checked" only a value
+    // read on its page and showed any other one's page alone.
+    "a77f0bc3e09ca632f6b23284f448722110f839a73db4788922f3d801c90cf93e", // v8
 ];
 /// The hub for pages people tap through: it picks the builder from the installed skills (a skill
 /// pack's own skill, bound sites, or a starter site) and shows the result as a preview card.
@@ -525,6 +528,9 @@ const LEGACY_INTERACTIVE_ARTIFACTS_SHA256: &[&str] = &[
     // From before `AGENTS.md`'s "Replies" said, for every turn, what to do with a choice the
     // request leaves open (it said "Never stop to ask before building").
     "d1343227c3c3db58e8d742098ffff1ef58d92ced1df21953cbf7bcaa2e1bdee2", // v21
+    // From before a page's captions came only from the starter's `site.trust` or `site.cite`,
+    // never typed, and a fact kept how it was read (`viewer`).
+    "820a5231a8084be210d1719ece8a61dfce1e22459ab46227fb227c1c1f19f491", // v22
 ];
 const LEGACY_RESEARCH_TEAM_SHA256: &[&str] = &[
     "0855d10b442722d484f3c9fec42ba0f149fcf5102e55a6868170b0e0ab8d8fd2", // v1
@@ -804,6 +810,11 @@ const LEGACY_WEB_RESEARCH_SHA256: &[&str] = &[
     // price no item page gave was searched for as "Finding sources" says, the AI's own web search
     // first.
     "3bd5d5159d5e678bfefa30f30dab0a0b5860d5e22e5217a53cb19d787fd6b266", // v20
+    // From before a search's fact was said as one where the search is ("a web search on <date>
+    // found: …", or its page read first), the key card went only to a person who asks to set up
+    // search, a news question with no search read the subject's own news page, and a policy
+    // question beside an order number, unnamed hotels and a price each had their own source.
+    "4aeb4ed59b69b9d887c0ab7db7d91e90140a0ea2b3036bd3d893b1c498f99731", // v21
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its
 /// values and the reviews asked for, and what a value nobody found says. A topic of the browser,
@@ -3399,6 +3410,10 @@ mod tests {
         assert!(
             sheet_text.contains("each value cites them (\"checked 17 Oct on fleetfeet.com ↗\"")
         );
+        assert!(sheet_text.contains(
+            "`date` the day you read it and `viewer` how (`server fetch` for `instafy web read`, `shared browser`)"
+        ));
+        assert!(sheet_text.contains("and one without `viewer` shows its page alone"));
     }
 
     #[test]
