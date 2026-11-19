@@ -49,25 +49,29 @@
           "v": "$145",
           "src": "Example Store",
           "url": "https://example.com/option-a",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         },
         "weight": {
           "v": "8.9 oz",
           "src": "Maker",
           "url": "https://example.com/option-a/specs",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         },
         "rating": {
           "v": "4.6 of 5",
           "src": "Example Reviews",
           "url": "https://example.com/reviews/option-a",
-          "date": "2026-10-16"
+          "date": "2026-10-16",
+          "viewer": "server fetch"
         },
         "warranty": {
           "v": "2 years",
           "src": "Maker",
           "url": "https://example.com/option-a/warranty",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         }
       },
       "store": {
@@ -82,7 +86,8 @@
             "v": "Black, white",
             "src": "Maker",
             "url": "https://example.com/option-a/specs",
-            "date": "2026-10-17"
+            "date": "2026-10-17",
+            "viewer": "server fetch"
           }
         }
       ],
@@ -101,7 +106,8 @@
           "v": "$129",
           "src": "Example Store",
           "url": "https://example.com/option-b",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         },
         "weight": {
           "v": "about 9.5 oz",
@@ -113,12 +119,14 @@
           "v": "4.3 of 5",
           "src": "Example Reviews",
           "url": "https://example.com/reviews/option-b",
-          "date": "2026-10-16"
+          "date": "2026-10-16",
+          "viewer": "server fetch"
         },
         "warranty": {
           "src": "Maker",
           "url": "https://example.com/option-b/specs",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         }
       },
       "store": {
@@ -140,19 +148,22 @@
           "v": "9.8 oz",
           "src": "Maker",
           "url": "https://example.com/option-c/specs",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         },
         "rating": {
           "v": "4.4 of 5",
           "src": "Example Reviews",
           "url": "https://example.com/reviews/option-c",
-          "date": "2026-10-16"
+          "date": "2026-10-16",
+          "viewer": "server fetch"
         },
         "warranty": {
           "v": "1 year",
           "src": "Maker",
           "url": "https://example.com/option-c/warranty",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         }
       },
       "store": {

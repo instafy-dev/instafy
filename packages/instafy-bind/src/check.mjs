@@ -612,9 +612,10 @@ export function numberIn(text) {
   return Number(m[1] + whole + (dec >= 0 ? `.${parts[dec].slice(1)}` : ""));
 }
 
-/** A fact only a web search gave ("viewer": "provider search", site.fromSearch): shown with that label, never counted
- *  as within a limit nor named first under the title. */
-const fromSearch = (fact) => !!fact && typeof fact.viewer === "string" && fact.viewer.trim().toLowerCase() === "provider search";
+/** A fact only a web search gave (a "viewer" that names a search: "provider search", or "search result" as `instafy
+ *  web search` gives it; site.fromSearch): shown with that label, never counted as within a limit nor named first
+ *  under the title. */
+const fromSearch = (fact) => !!fact && typeof fact.viewer === "string" && /(^|[^a-z])search/i.test(fact.viewer);
 
 /** The number a page shows for a seed fact (site.known): a value with its source, or an estimate; else null. */
 export function knownNumber(fact) {
@@ -798,8 +799,36 @@ export function uncheckedRepeats(data) {
   return out;
 }
 
+/** The values data.json gives a day ("date" or "asof") with their source and not how they were read ("viewer": the
+ *  reader, a browser or a skill's command), each named by what it is about and its key ("Option A · price"): a page
+ *  shows such a value's page alone, never "checked" or "seen" (site.readThere). A page captioned "checked 19 Nov on
+ *  <site>" what a web search's excerpt said, with no reader named (a local test, Nov 19). An estimate says it is one,
+ *  a value only a web search gave says so ("viewer": "provider search"), and a page from what Octo knows cites
+ *  nothing (memoryCitations). */
+export function unsaidReaders(data) {
+  if (!data || typeof data !== "object" || fromMemory(data)) return [];
+  const said = (v) => typeof v === "string" && v.trim() !== "";
+  const out = [];
+  const visit = (value, name, key) => {
+    if (Array.isArray(value)) {
+      for (const v of value) visit(v, name, key);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (said(value.src) && (said(value.date) || said(value.asof)) && !value.est && !said(value.viewer)) {
+      out.push(name ? `${name} · ${key}` : key);
+      return;
+    }
+    const own = [value.name, value.text].find(said);
+    for (const [k, v] of Object.entries(value)) visit(v, own ? own.trim() : name, said(value.label) ? value.label.trim() : k);
+  };
+  for (const [k, v] of Object.entries(data)) visit(v, "", k);
+  return out;
+}
+
 /** The values of a site's page of options, and where its rows come from: problems to fix before the card, and notes
- *  for the reply or on what the page already says. */
+ *  for the reply or on what the page already says. On any page, a note names each value that doesn't say how it was
+ *  read (unsaidReaders). */
 export function checkValues(dir) {
   const root = path.resolve(dir);
   const problems = [];
@@ -809,6 +838,11 @@ export function checkValues(dir) {
     data = JSON.parse(fs.readFileSync(path.join(root, "data.json"), "utf8"));
   } catch {
     return { checked: false, problems, notes };
+  }
+  const unsaid = unsaidReaders(data);
+  if (unsaid.length) {
+    const named = unsaid.length > 8 ? `${unsaid.slice(0, 8).join(", ")} and ${unsaid.length - 8} more` : listed(unsaid);
+    notes.push(`${unsaid.length} value(s) give a day but not how they were read ("viewer"), so the page shows each one's page alone, never "checked" or "seen": ${named}. For each one read on its page, add the reader that read it: "viewer": "server fetch" (instafy web read), "shared browser" or "personal browser" (Instafy's browser), or a skill's own command. A value only a web search gave gets "provider search".`);
   }
   if (!isOptionsData(data)) return { checked: false, problems, notes };
   const memory = fromMemory(data);
@@ -833,7 +867,7 @@ export function checkValues(dir) {
     if (memory || !hasValue(fact) || fact.est) continue;
     const lacks = [!fact.src && '"src"', !httpsUrl(fact.url) && '"url" (the page)', !fact.date && !fact.asof && '"date" (the day)'].filter(Boolean);
     const list = lacks.length > 1 ? `${lacks.slice(0, -1).join(", ")} or ${lacks[lacks.length - 1]}` : lacks[0];
-    if (lacks.length) problems.push(`${where}: "${valueOf(fact)}" has no ${list}: add the page that gives this value and the day you read it ("checked 27 Oct on maker.com"). When no page gives it (such as a count of what you found, with none found), leave out "v" and say why in "note".${fact.src ? "" : " Without a source the page shows it as not checked."}`);
+    if (lacks.length) problems.push(`${where}: "${valueOf(fact)}" has no ${list}: add the page that gives this value and the day you read it, and how in "viewer" ("checked 27 Oct on maker.com"). When no page gives it (such as a count of what you found, with none found), leave out "v" and say why in "note".${fact.src ? "" : " Without a source the page shows it as not checked."}`);
   }
   for (const row of uncitedRows(data)) problems.push(row.problem);
   problems.push(...memoryCitations(data));
@@ -1079,7 +1113,7 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   }
   if (unlinked.length) {
     lines.push(`UNLINKED: ${unlinked.length} source line(s) link no page: ${unlinked.map((u) => `"${u.line}" (${u.file})`).join(", ")}.`);
-    lines.push('Draw each fact with site.trust({"v", "src", "url", "date"}), which links the page it was read on ("checked 8 Nov on maker.com ↗"), or link that page in the line. Something no page gave says "not checked".');
+    lines.push('Draw each fact with site.trust({"v", "src", "url", "date", "viewer"}), which links the page it was read on ("checked 8 Nov on maker.com ↗"), or link that page in the line. Something no page gave says "not checked".');
   }
   for (const note of values.notes) lines.push(`NOTE: ${note}`);
   lines.push(...markupNotes);

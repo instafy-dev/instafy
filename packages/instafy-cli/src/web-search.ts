@@ -11,7 +11,8 @@
 //   the turn has a time limit, else while the turn's own folder is there), never a published app, a person's own
 //   code, a terminal command or a process left over from an earlier turn;
 // - a chain's providers are tried in order and one whose key (`key_env`) is not set is skipped. With none left the
-//   answer is `no_provider`, with a secret-request card for the first one's key to offer once per space;
+//   answer is `no_provider`, with a secret-request card for the first one's key, only for a person who asks to set up
+//   search;
 // - a key goes only, over https, to the host of its own entry's `url`, in the header the entry names. It is never
 //   printed or written: not in the output, not in errors, not in the turn's state. Nothing is cached, and no result
 //   list is written anywhere;
@@ -893,16 +894,6 @@ class SearchState {
     });
   }
 
-  /** True the first time it is asked in this space, and records that it was: the key card is offered once. */
-  firstKeyOffer(): Promise<boolean> {
-    const file = this.file(`key-card-offered-${this.space}.json`);
-    return withFileLock(this.file("offer.lock"), () => {
-      if (readJson(file)) return false;
-      writeFileAtomic(file, { at: new Date(this.now()).toISOString() });
-      return true;
-    });
-  }
-
   providerLock<T>(provider: string, fn: () => Promise<T>, waitMs: number): Promise<T> {
     return withFileLock(this.file(`provider-${provider}.lock`), fn, { staleMs: SEARCH_LIMITS.requestTimeoutMs + 10_000, waitMs: Math.max(0, waitMs) });
   }
@@ -985,7 +976,7 @@ export type WebSearchReport = {
   results: SearchResult[];
   tell: string;
   notice: string;
-  /** with `no_provider`, the first time in a space: the card that asks the person for a search key */
+  /** with `no_provider`: the card that asks for a search key, only for a person who asks to set up search */
   offer?: SecretRequestAction;
   budget: { scope: string; searchesUsed: number; searchesLeft: number; searchesPerTurn: number };
   warnings: string[];
@@ -1046,12 +1037,12 @@ function tellFor(status: SearchStatus, chain: string): string {
     case "unavailable":
       return `Search is not available for this. ${keyless(chain)}`;
     case "no_provider":
-      return `This space has no search key, and the key card was already offered: never ask for it again. ${keyless(chain)}`;
+      return `This space has no search key. ${keyless(chain)}`;
   }
 }
 const offerTell = (chain: string) =>
-  `This space has no search key. ${keyless(chain)} The card in \`offer\` (a \`request_secret\` action) may go in your ` +
-  "reply once, as a way to find more next time; never ask for the key in chat, and never wait for it.";
+  `This space has no search key. ${keyless(chain)} The card in \`offer\` (a \`request_secret\` action) is only for a ` +
+  "person who asks to set up search; never ask for the key in chat, and never wait for it.";
 const CODE_TELL: Partial<Record<SearchCode, string>> = {
   turn_limit: `This turn has used its ${SEARCH_LIMITS.searchesPerTurn} searches.`,
   day_limit: "This space's key has made its searches for today.",
@@ -1185,7 +1176,7 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
 
   if (!usable.length) {
     const first = members.find((provider) => provider.keyEnv && provider.keyRequest);
-    if (first && (await state.firstKeyOffer())) {
+    if (first) {
       const offer: SecretRequestAction = {
         type: "request_secret",
         name: first.keyEnv!,
@@ -1194,7 +1185,7 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
       };
       return report("no_provider", { offer, tell: offerTell(chainName) });
     }
-    return report("no_provider", first ? {} : { tell: `Every provider of ${chainName} is switched off in this space. ${tellFor("unavailable", chainName)}` });
+    return report("no_provider", { tell: `Every provider of ${chainName} is switched off in this space. ${tellFor("unavailable", chainName)}` });
   }
 
   // One search of this turn's budget, unless it ran already.

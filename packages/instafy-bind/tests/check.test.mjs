@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, uncheckedRepeats, uncitedRows, unsortedNumbers } from "../src/check.mjs";
+import { UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, uncheckedRepeats, uncitedRows, unsaidReaders, unsortedNumbers } from "../src/check.mjs";
 import { readScript } from "../src/script-text.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
@@ -192,7 +192,7 @@ test("check fails a source line written by hand that links no page, and names it
     const out = run("check", dir, "--expect", "Livraria Lello, Opening hours");
     assert.equal(out.status, 1, out.stdout + out.stderr);
     assert.match(out.stdout, /^UNLINKED: 2 source line\(s\) link no page: "Source: Livraria Lello · checked November 8, 2026" \(app\.js\), "Source: Metro do Porto journey planner ·" \(app\.js\)\.$/m);
-    assert.match(out.stdout, /^Draw each fact with site\.trust\(\{"v", "src", "url", "date"\}\), which links the page it was read on/m);
+    assert.match(out.stdout, /^Draw each fact with site\.trust\(\{"v", "src", "url", "date", "viewer"\}\), which links the page it was read on/m);
     assert.match(out.stdout, /2 of 2 expected item\(s\) shown/);
     const json = JSON.parse(run("check", dir, "--expect", "Livraria Lello", "--json").stdout);
     assert.equal(json.ok, false);
@@ -622,6 +622,77 @@ test("the starters pass their own value check, with a stated limit too", () => {
   }
 });
 
+// A comparison captioned what a web search's excerpts said "checked 19 Nov on <site>" (a local test, Nov 19): its data
+// gave each value a source and a day and never said how it was read ("viewer"), and the check passed it. A page now
+// shows such a value's page alone (site.readThere), and the check names each one, so the build can say how it read the
+// ones it read on their pages. A note, never a failure: the page says nothing untrue without it.
+test("check names each value that gives a day and not how it was read, and never fails it", () => {
+  const DAY = "2026-11-19";
+  const dir = optionsSite("compare", (data) => {
+    data.columns = [{ key: "price", label: "Price", type: "price" }, { key: "review", label: "Independent review", type: "text" },
+      { key: "weight", label: "Weight", type: "text" }];
+    data.sort = [{ key: "price", label: "Price, low to high", dir: "asc" }];
+    data.items = [
+      { ref: "option:a", name: "Option A", facts: {
+        price: { v: "€349", src: "Shop One · search listing", url: "https://shop-one.example/a", date: DAY },
+        review: { v: "A five-star all-rounder", src: "Review One · search result, review not read", url: "https://review-one.example/a", date: DAY },
+        weight: { v: "250 g", src: "Maker", url: "https://maker.example/a", date: DAY, viewer: "server fetch" } } },
+      { ref: "option:b", name: "Option B", facts: {
+        price: { v: "€379", src: "Shop Two", url: "https://shop-two.example/b", date: DAY, viewer: "provider search" },
+        review: { v: "Comfortable", src: "Review Two", url: "https://review-two.example/b", date: DAY, viewer: "shared browser" },
+        weight: { src: "Maker", url: "https://maker.example/b", date: DAY } } },
+      { ref: "option:c", name: "Option C", facts: {
+        price: { note: "no shop's page gave a price" },
+        review: { v: "Bass-heavy", src: "Review Three", url: "https://review-three.example/c", asof: "2026-10-02" },
+        weight: { v: "about 260 g", est: true, url: "https://maker.example/c" } } },
+    ];
+    return data;
+  });
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(dir, "data.json"), "utf8"));
+    assert.deepEqual(unsaidReaders(data), ["Option A · price", "Option A · review", "Option B · weight", "Option C · review"]);
+    const values = checkValues(dir);
+    assert.deepEqual(values.problems, []);
+    const note = values.notes.find((n) => n.includes('"viewer"'));
+    assert.equal(note, '4 value(s) give a day but not how they were read ("viewer"), so the page shows each one\'s page alone, never "checked" or "seen": Option A · price, Option A · review, Option B · weight and Option C · review. For each one read on its page, add the reader that read it: "viewer": "server fetch" (instafy web read), "shared browser" or "personal browser" (Instafy\'s browser), or a skill\'s own command. A value only a web search gave gets "provider search".');
+    const out = run("check", dir, "--expect", "Option A, Option B, Option C");
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.match(out.stdout, /^NOTE: 4 value\(s\) give a day but not how they were read \("viewer"\)/m);
+    // each one read on its page says so: nothing is named
+    data.items[0].facts.price.viewer = "server fetch";
+    data.items[0].facts.review.viewer = "server fetch";
+    data.items[1].facts.weight.viewer = "server fetch";
+    data.items[2].facts.review.viewer = "uw cite";
+    fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(data, null, 2));
+    assert.deepEqual(unsaidReaders(data), []);
+    assert.equal(checkValues(dir).notes.some((n) => n.includes('"viewer"')), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // every page, not only a page of options: by what each value is about and its key
+  const plan = { title: "A day", days: [{ n: 1, date: DAY, stops: [{ ref: "stop:museum", name: "Museum", time: { v: "10:00", src: "Museum", url: "https://museum.example/hours", date: DAY } },
+    { ref: "stop:walk", name: "Walk", time: { v: "11:00", est: true } }] }] };
+  assert.deepEqual(unsaidReaders(plan), ["Museum · time"]);
+  const list = { title: "Pack", groups: [{ id: "g", title: "Bags", items: [{ ref: "item:plug", text: "A plug adapter", fact: { v: "Type G", src: "Travel advice", url: "https://travel.example/plugs", date: DAY } }] }] };
+  assert.deepEqual(unsaidReaders(list), ["A plug adapter · fact"]);
+  const ranked = { title: "Top", items: [{ ref: "option:a", rank: 1, name: "Option A", details: [{ label: "Review score", fact: { v: "4.6", src: "Reviews", url: "https://reviews.example/a", date: DAY } }] }] };
+  assert.deepEqual(unsaidReaders(ranked), ["Option A · Review score"]);
+  // a page from what Octo knows cites nothing, and the check fails anything it cites
+  assert.deepEqual(unsaidReaders({ ...list, from: "memory" }), []);
+  const timeline = optionsSite("timeline", (data) => {
+    data.days[0].stops[1].time = { v: "14:00", src: "Venue booking", url: "https://example.com/booking", date: DAY };
+    return data;
+  });
+  try {
+    const values = checkValues(timeline);
+    assert.equal(values.checked, false);
+    assert.deepEqual(values.problems, []);
+    assert.match(values.notes[0], /^1 value\(s\) give a day but not how they were read \("viewer"\), so the page shows each one's page alone, never "checked" or "seen": Sound check · time\./);
+  } finally {
+    fs.rmSync(timeline, { recursive: true, force: true });
+  }
+});
+
 test("check fails for a value that only says nothing and for a value without its page and day", () => {
   const dir = optionsSite("compare", (data) => {
     data.items[0].facts.weight = { v: "—", src: "Maker", url: "https://example.com/a", date: "2026-10-27" };
@@ -638,7 +709,7 @@ test("check fails for a value that only says nothing and for a value without its
     assert.match(problems[1], /^Option B · Rating: "n\/a" says nothing/);
     // the page to add is one that gives the value: a count of what was found, with none found ("0 of 2 reviews
     // found"), cites no page and is a note instead, never the one page that was read
-    assert.match(problems[2], /^Option C · Rating: "4\.4 of 5" has no "src", "url" \(the page\) or "date" \(the day\): add the page that gives this value and the day you read it \("checked 27 Oct on maker\.com"\)\. When no page gives it \(such as a count of what you found, with none found\), leave out "v" and say why in "note"\. Without a source the page shows it as not checked\.$/);
+    assert.match(problems[2], /^Option C · Rating: "4\.4 of 5" has no "src", "url" \(the page\) or "date" \(the day\): add the page that gives this value and the day you read it, and how in "viewer" \("checked 27 Oct on maker\.com"\)\. When no page gives it \(such as a count of what you found, with none found\), leave out "v" and say why in "note"\. Without a source the page shows it as not checked\.$/);
     assert.match(problems[3], /^Option C · Warranty: "2 years" has no "url" \(the page\): add the page that gives this value and the day you read it/);
     const out = run("check", dir, "--expect", "Option A, Option B, Option C");
     assert.equal(out.status, 1, "every item is shown, and the values still fail the check");
@@ -700,24 +771,25 @@ test("a price a check read counts for the filter; a check that found the shop bl
   }
 });
 
-// A price only a web search gave ("viewer": "provider search") is shown with its label, and the page lists its row
-// apart, never as within the limit (site.within), nor names it the lowest under the title: the note says so, for the
-// reply to say it too, and the sort check reads it as the page does.
+// A price only a web search gave ("viewer": "provider search", or any viewer that names a search, such as the "search
+// result" `instafy web search` gives its answers) is shown with its label, and the page lists its row apart, never as
+// within the limit (site.within), nor names it the lowest under the title: the note says so, for the reply to say it
+// too, and the sort check reads it as the page does.
 test("a price only a web search gave is noted as listed apart, as the page lists it", () => {
-  for (const starter of ["compare", "ranked"]) {
+  for (const [starter, viewer] of [["compare", "provider search"], ["ranked", "provider search"], ["compare", "search result"], ["ranked", "web search"]]) {
     const dir = optionsSite(starter, (data) => {
       const b = data.items[1];
-      if (starter === "compare") b.facts.price = { ...b.facts.price, viewer: "provider search" };
-      else b.price = { ...b.price, viewer: "provider search" };
+      if (starter === "compare") b.facts.price = { ...b.facts.price, viewer };
+      else b.price = { ...b.price, viewer };
       return { ...data, filter: { key: "price", max: 140, label: "Under $140" } };
     });
     try {
       const { notes, problems } = checkValues(dir);
-      assert.deepEqual(problems, [], starter);
-      assert.equal(notes.length, 2, `${starter}: ${notes.join("\n")}`);
-      assert.match(notes[0], /^1 item\(s\) have no price the page can show: Option C\./, starter);
+      assert.deepEqual(problems, [], `${starter}, ${viewer}`);
+      assert.equal(notes.length, 2, `${starter}, ${viewer}: ${notes.join("\n")}`);
+      assert.match(notes[0], /^1 item\(s\) have no price the page can show: Option C\./, `${starter}, ${viewer}`);
       const say = starter === "compare" ? "the reply" : "the lede and the reply";
-      assert.equal(notes[1], `1 item(s) have a price only a web search gave: Option B. The page lists them apart ("Price unknown"), never as "Under $140"; say so in ${say}.`, starter);
+      assert.equal(notes[1], `1 item(s) have a price only a web search gave: Option B. The page lists them apart ("Price unknown"), never as "Under $140"; say so in ${say}.`, `${starter}, ${viewer}`);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -730,7 +802,11 @@ test("a price only a web search gave is noted as listed apart, as the page lists
     items: [{ ref: "option:a", name: "A", facts: { price: priced("€449") } }, { ref: "option:b", name: "B", facts: { price: priced("€399", { viewer: "provider search" }) } }],
   };
   assert.deepEqual(unsortedNumbers(data), []);
+  data.items[1].facts.price = priced("€399", { viewer: "search result" });
+  assert.deepEqual(unsortedNumbers(data), []);
   data.items[1].facts.price = priced("€399");
+  assert.deepEqual(unsortedNumbers(data), [{ key: "price", label: "Price" }]);
+  data.items[1].facts.price = priced("€399", { viewer: "server fetch" });
   assert.deepEqual(unsortedNumbers(data), [{ key: "price", label: "Price" }]);
 });
 
@@ -815,7 +891,7 @@ test("check notes an \"unchecked\" entry that names what the page already names 
   const reader = (ref, name) => ({
     ref: `reader:${ref}`, name,
     facts: {
-      screen: { v: "6 in", src: "Maker", url: `https://maker.example/${ref}`, date: DAY },
+      screen: { v: "6 in", src: "Maker", url: `https://maker.example/${ref}`, date: DAY, viewer: "server fetch" },
       weight: { note: "I didn't find weight" },
       price: { note: "I didn't find price" },
       reviews: { note: `I didn't find two independent reviews for ${name}` },
@@ -843,7 +919,7 @@ test("check notes an \"unchecked\" entry that names what the page already names 
   assert.deepEqual(uncheckedRepeats({ ...readers(), unchecked: ["Prices for each model"] }).map((r) => r.labels), [["Price"]]);
   // a column one row has a value for: the entry may say more than the missing ones
   const somePrice = readers();
-  somePrice.items[0].facts.price = { v: "€149", src: "Shop", url: "https://shop.example/a", date: DAY };
+  somePrice.items[0].facts.price = { v: "€149", src: "Shop", url: "https://shop.example/a", date: DAY, viewer: "server fetch" };
   assert.deepEqual(uncheckedRepeats(somePrice).map((r) => r.labels), [["Weight (g)", "Independent reviews"]]);
   // a price every store can still check is on its row
   const stores = readers();

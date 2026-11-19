@@ -7,7 +7,8 @@
  *           stops: [{ref: "stop:museum", name, time?: fact, note?, facts?: [fact], sources?: [{name, url}]}],
  *           legs: [{from: "<stop ref>", to: "<stop ref>", mode: "walk"|"train"|…, duration: fact}]}]
  *   unchecked: ["what was not checked", …]
- *   fact: {"v": "10:00", "src": "Opening hours", "url": "https://…", "date": "2026-10-17", "est": false}
+ *   fact: {"v": "10:00", "src": "Opening hours", "url": "https://…", "date": "2026-10-17", "viewer": "server fetch",
+ *          "est": false}   ("viewer": how it was read; without one a time shows its page alone, never "checked")
  * A time shows only when it has a source; otherwise the order carries the sequence. Five days or fewer are all
  * open; six or more fold, with day 1 (or ?day=<n>) open, and a folded day's caption counts what was not checked.
  * A leg's time is "Estimate" unless it has a source; give an estimate a "url" (a route search) so it ends in "how ↗".
