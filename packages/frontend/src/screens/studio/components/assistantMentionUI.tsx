@@ -1,3 +1,4 @@
+import { MENTION_CLASSES } from "../../../components/mentionStyles";
 import type { AssistantMentionToken } from "../../../conversations/assistantMentions";
 import {
   getBuiltInAssistantMentionPatternSource,
@@ -5,12 +6,8 @@ import {
   resolveBuiltInAssistantMentionToken,
 } from "../../../assistants/localBuiltInAssistantCatalog";
 
-const ASSISTANT_MENTION_BASE =
-  "inline-flex items-center rounded-full px-2 py-0.5 font-semibold leading-none ring-1 align-baseline";
-const ASSISTANT_MENTION_STYLE =
-  `${ASSISTANT_MENTION_BASE} bg-secondary-50 text-secondary-800 ring-secondary-200 dark:bg-secondary-500/15 dark:text-secondary-200 dark:ring-secondary-500/30`;
 const ASSISTANT_MENTION_STYLES = Object.fromEntries(
-  listBuiltInAssistantMentionTokens().map((token) => [token, ASSISTANT_MENTION_STYLE]),
+  listBuiltInAssistantMentionTokens().map((token) => [token, MENTION_CLASSES.agent]),
 ) as Record<AssistantMentionToken, string>;
 
 const ASSISTANT_MENTION_REGEX = new RegExp(

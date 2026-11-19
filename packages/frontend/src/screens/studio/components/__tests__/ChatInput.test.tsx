@@ -274,7 +274,7 @@ describe("ChatInput", () => {
     expect(input?.textContent).toBe("Suggested next step");
   });
 
-  it("clips a multiline ghost suggestion to the editable input bounds", async () => {
+  it("keeps a multiline suggestion separate from the editable draft", async () => {
     await act(async () => {
       root.render(
         <ChatInput
@@ -290,14 +290,9 @@ describe("ChatInput", () => {
     });
 
     const ghost = container.querySelector('[data-testid="chat-input-ghost-suggestion"]');
-    expect(ghost).not.toBeNull();
-    expect(ghost?.className).toContain("bottom-0");
-    expect(ghost?.className).toContain("overflow-hidden");
-    expect(ghost?.className).toContain("whitespace-pre-wrap");
-    // It starts on the first line: the editor's own top padding.
-    for (const token of CHAT_INPUT_OVERLAY_TOP_CLASS.split(/\s+/)) {
-      expect(ghost?.className.split(/\s+/)).toContain(token);
-    }
+    expect(ghost?.textContent).toBe("A wrapped starter prompt\nFirst follow-up\nSecond follow-up");
+    expect(ghost?.closest('[aria-hidden="true"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-input"]')?.textContent).toBe("A wrapped starter prompt");
   });
 
   it("sizes the one-row editor to the composer controls and folds the padding into its line cap", async () => {

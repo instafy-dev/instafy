@@ -19,7 +19,7 @@ const baselineActionAppearance = {
 const reviewImageBytes = Uint8Array.from(atob(reviewImageUrl.split(",")[1]), character => character.charCodeAt(0));
 
 /** The real composer and Lexical editor; only submission and peripheral panes are inert. */
-export function Composer({ controller, readOnly, recording, viewNavigation, queueReview, utilityReview, attachmentCount, attachmentSending = false, fullPage = false, newTab = false, stashMessages, composerActions, scrollbarInset }: { controller: ChatRunStopController; readOnly: boolean; recording: boolean; viewNavigation?: ReactNode; queueReview?: { count: number; initialDraft?: string; withStash?: boolean }; utilityReview?: { goalStatus: "active" | "paused" | "blocked" }; attachmentCount?: number; attachmentSending?: boolean; fullPage?: boolean; newTab?: boolean; stashMessages?: string[]; composerActions?: Partial<Parameters<typeof ChatComposerSurface>[0]["composerActionMenuProps"]>; scrollbarInset?: number }) {
+export function Composer({ controller, readOnly, recording, viewNavigation, queueReview, utilityReview, attachmentCount, attachmentSending = false, fullPage = false, newTab = false, stashMessages, composerActions, scrollbarInset, accessNotice, accessChecking, chatInputOverrides }: { controller: ChatRunStopController; readOnly: boolean; recording: boolean; viewNavigation?: ReactNode; queueReview?: { count: number; initialDraft?: string; withStash?: boolean }; utilityReview?: { goalStatus: "active" | "paused" | "blocked" }; attachmentCount?: number; attachmentSending?: boolean; fullPage?: boolean; newTab?: boolean; stashMessages?: string[]; composerActions?: Partial<Parameters<typeof ChatComposerSurface>[0]["composerActionMenuProps"]>; scrollbarInset?: number; accessNotice?: string; accessChecking?: boolean; chatInputOverrides?: Partial<Parameters<typeof ChatComposerSurface>[0]["chatInputProps"]> }) {
   const overlay = useRef<HTMLDivElement>(null);
   const input = useRef<ChatInputHandle>(null);
   const image = useRef<HTMLInputElement>(null);
@@ -72,6 +72,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
   return <>
     <div className={[fullPage ? "" : "relative", viewNavigation ? "min-h-48" : "min-h-28"].filter(Boolean).join(" ")} data-testid="composer-preview">
       <ChatComposerSurface
+        accessNotice={accessNotice} accessChecking={accessChecking}
         composerOverlayRef={overlay} {...{scrollbarInset}} composerAutoHidden={false} compactBrowserViewport={matchMedia("(max-width: 639px)").matches}
         viewNavigation={viewNavigation} touchLikeInput={Boolean(viewNavigation)}
         pendingNewTab={newTabPending ? { onCancel: () => setNewTabPending(false) } : null}
@@ -91,7 +92,7 @@ export function Composer({ controller, readOnly, recording, viewNavigation, queu
         onDragOver={noop} onDrop={noop} chatInputRef={input}
         chatInputProps={{ draftKey: "playground-draft", value: draft, editorState, placeholder: "Message Octo…",
           agentHandles: ["octo", "scribe"], onChange: onDraftChange,
-          onKeyDown: event => { if (!viewNavigation && event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } } }}
+          onKeyDown: event => { if (!viewNavigation && event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } }, ...chatInputOverrides }}
         imageInputRef={image} onImageInputChange={noop} imageAttachments={attachments} onOpenImage={(src, alt) => setImageLightbox({ src, alt })} onRemoveImageAttachment={id => setAttachments(current => current.filter(attachment => attachment.id !== id))}
         showVoiceStatus={recording} voiceStatusMessage={recording ? "Recording…" : ""} providerTriggerNoticeProps={null}
         showComposerNavigationButton={new URLSearchParams(location.search).get("navigation") === "compact"}

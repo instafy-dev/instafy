@@ -1,5 +1,5 @@
 import type { ClipboardEvent, KeyboardEvent } from "react";
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
 import { ContentEditable, type ContentEditableProps } from "@lexical/react/LexicalContentEditable";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
@@ -9,6 +9,7 @@ import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext
 import type { EditorState, LexicalEditor } from "lexical";
 import { $getRoot, $getSelection, $isRangeSelection } from "lexical";
 import { RecordingIndicator } from "../RecordingIndicator";
+import { textTones } from "../../../../styles/typography";
 import { AgentMentionNode } from "./AgentMentionNode";
 import { AssistantMentionNode } from "./AssistantMentionNode";
 import { $applyChatInputText } from "./chatInputState";
@@ -18,6 +19,7 @@ import { SlashCommandsPlugin } from "./SlashCommandsPlugin";
 import { UserMentionNode } from "./UserMentionNode";
 import {
   CHAT_INPUT_CONTROL_HEIGHT_CLASS,
+  CHAT_INPUT_TYPOGRAPHY_CLASS,
   CHAT_INPUT_OVERLAY_TOP_CLASS,
   CHAT_INPUT_VERTICAL_PADDING_CLASS,
   resolveChatInputMaxHeightPx,
@@ -115,11 +117,12 @@ function ChatInputEditor(
   // items-end) centres on the controls (see chatInputGrowth.ts). The
   // Browser-session condensed bar (compact) keeps its own tighter box. The
   // overlays sit on the first line, so they carry the same top offset.
+  const textPaddingClass = compact && !expanded ? "py-0.5" : CHAT_INPUT_VERTICAL_PADDING_CLASS;
   const editorBoxClass = expanded
-    ? `h-full min-h-0 ${CHAT_INPUT_VERTICAL_PADDING_CLASS}`
+    ? "h-full min-h-0"
     : compact
-    ? "min-h-7 max-h-24 py-0.5"
-    : `${CHAT_INPUT_CONTROL_HEIGHT_CLASS} ${CHAT_INPUT_VERTICAL_PADDING_CLASS}`;
+    ? "min-h-7 max-h-24"
+    : CHAT_INPUT_CONTROL_HEIGHT_CLASS;
   const overlayTopClass = compact ? "top-1 sm:top-0.5" : CHAT_INPUT_OVERLAY_TOP_CLASS;
   const overlayPaddingClass = compact ? "py-1 sm:py-0.5" : CHAT_INPUT_VERTICAL_PADDING_CLASS;
   const maxHeightPx = expanded || compact ? null : resolveChatInputMaxHeightPx({ compactViewport, coarsePointer });
@@ -127,6 +130,32 @@ function ChatInputEditor(
   const displayedGhostSuggestionRemainder = showGhostSuggestion
     ? formatGhostSuggestionRemainderForDisplay(ghostSuggestionRemainder ?? "")
     : "";
+
+  const ghostViewportRef = useRef<HTMLDivElement>(null);
+  const syncGhostViewport = useCallback(() => {
+    const input = editor.getRootElement();
+    const preview = ghostViewportRef.current;
+    if (!input || !preview) return;
+
+    // Keep the fractional layout width: rounding it to clientWidth can
+    // wrap a long prefix differently. Subtract only a classic scrollbar.
+    const scrollbarWidth = input.offsetWidth - input.clientWidth;
+    preview.style.width = scrollbarWidth ? `calc(100% - ${scrollbarWidth}px)` : "";
+    preview.scrollTop = input.scrollTop;
+    // Suggestions belong at the end of the draft. Scrolling back to read
+    // earlier lines must not paint a fragment against the bottom edge.
+    preview.style.visibility = input.scrollHeight - input.clientHeight - input.scrollTop > 1 ? "hidden" : "";
+  }, [editor]);
+
+  useLayoutEffect(() => {
+    if (!showGhostSuggestion) return;
+    syncGhostViewport();
+    const input = editor.getRootElement();
+    if (!input || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(syncGhostViewport);
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [editor, showGhostSuggestion, syncGhostViewport]);
 
   useEffect(() => {
     if (import.meta.env.DEV) {
@@ -148,7 +177,7 @@ function ChatInputEditor(
           "aria-placeholder": placeholder,
           placeholder: (
             <div
-              className={`pointer-events-none absolute inset-x-0 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:text-sm dark:text-slate-500 ${overlayTopClass} ${
+              className={`pointer-events-none absolute inset-x-0 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 ${CHAT_INPUT_TYPOGRAPHY_CLASS} ${textTones.subtle} ${overlayTopClass} ${
                 readOnly ? "opacity-60" : ""
               }`}
             >
@@ -285,17 +314,24 @@ function ChatInputEditor(
       {showGhostSuggestion ? (
         <div
           aria-hidden="true"
-          data-testid="chat-input-ghost-suggestion"
-          className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 overflow-hidden whitespace-pre-wrap break-words pr-2 text-base leading-5 text-slate-400 sm:text-sm dark:text-slate-600 ${overlayTopClass}`}
+          className={`pointer-events-none absolute inset-0 z-10 ${textPaddingClass}`}
         >
-          <span className="invisible">{value}</span>
-          <span className="opacity-70 dark:opacity-45">{displayedGhostSuggestionRemainder}</span>
+          {/* Use only whole lines of the editor's text area, including when
+              the expanded composer has a fractional line of space left. */}
+          <div
+            ref={ghostViewportRef}
+            data-testid="chat-input-ghost-suggestion"
+            className={`h-full max-h-[round(down,100%,1lh)] overflow-hidden whitespace-pre-wrap break-words ${CHAT_INPUT_TYPOGRAPHY_CLASS} ${textTones.subtle}`}
+          >
+            <span className="invisible">{value}</span>
+            <span className="opacity-70 dark:opacity-45">{displayedGhostSuggestionRemainder}</span>
+          </div>
         </div>
       ) : null}
       {showRecordingIndicator ? (
         <div
           aria-hidden="true"
-          className={`pointer-events-none absolute inset-0 z-10 overflow-hidden text-base leading-5 sm:text-sm ${overlayPaddingClass}`}
+          className={`pointer-events-none absolute inset-0 z-10 overflow-hidden ${CHAT_INPUT_TYPOGRAPHY_CLASS} ${overlayPaddingClass}`}
         >
           {value.length > 0 ? (
             <span className="whitespace-pre-wrap break-words text-transparent">{value}</span>
@@ -329,6 +365,7 @@ function ChatInputEditor(
               }
               onKeyDown?.(event);
             }}
+            onScroll={showGhostSuggestion ? syncGhostViewport : undefined}
             onPaste={onPaste}
             // The editor is a single line at rest and auto-grows with content
             // until the per-viewport line cap, then scrolls inside. The cap is
@@ -336,7 +373,7 @@ function ChatInputEditor(
             // truth (see chatInputGrowth.ts).
             style={maxHeightPx === null ? undefined : { maxHeight: `${maxHeightPx}px` }}
             data-max-height-px={maxHeightPx ?? undefined}
-            className={`relative z-0 w-full overflow-auto whitespace-pre-wrap break-words text-base leading-5 text-slate-900 outline-none sm:text-sm dark:text-slate-100 ${editorBoxClass} ${
+            className={`relative z-0 w-full overflow-auto whitespace-pre-wrap break-words outline-none ${CHAT_INPUT_TYPOGRAPHY_CLASS} ${textTones.primary} ${editorBoxClass} ${textPaddingClass} ${
               readOnly ? "cursor-not-allowed opacity-60" : ""
             }`}
           />
