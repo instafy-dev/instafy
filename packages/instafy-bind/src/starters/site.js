@@ -15,8 +15,9 @@
  *   browser, a skill's own command). Each value cites them: "checked 17 Oct on maker.com ↗" (a price: "seen 17 Oct on
  *   shop.com ↗"). A fact that doesn't say how it was read shows its page alone ("maker.com ↗"), never "checked" or
  *   "seen". Optional "asof": the source's own date, shown in place of "date" ("seen 5 Aug on …"); a price with an
- *   "asof" over 30 days old is muted and says "may have changed", like a live price past its time. "viewer": "provider
- *   search" marks a fact only a web search gave (what the search provider wrote, not a page that was read): it reads
+ *   "asof" over 30 days old is muted and says "may have changed", like a live price past its time. A "viewer" that names
+ *   a search ("provider search", or "search result" as `instafy web search` gives it) marks a fact only a web search
+ *   gave (what the search provider wrote, not a page that was read): it reads
  *   "from a web search, 17 Oct · maker.com ↗" (the day of the search; a source's own date follows its page:
  *   "maker.com ↗, 5 Oct"), never "checked" or "seen", and no filter or sort counts it as read. A value that only says
  *   nothing is known ("—", "n/a", "?", "unknown") is no value.
@@ -316,8 +317,10 @@
     var d = parseDate(x.asof);
     return !!d && Date.now() - d.getTime() > OLD_SEED_MS;
   }
-  /** A fact only a web search gave ("viewer": "provider search"): what the search provider wrote, no page read. */
-  function fromSearch(x) { return !!x && typeof x.viewer === "string" && x.viewer.trim().toLowerCase() === "provider search"; }
+  /** A fact only a web search gave: its "viewer" names a search ("provider search"; "search result", as `instafy web
+   * search` gives its answers; "web search"), so it is what the search provider wrote, no page read. A value that kept
+   * the search command's own "search result" was captioned "checked" (a review, Nov 19). */
+  function fromSearch(x) { return !!x && typeof x.viewer === "string" && /(^|[^a-z])search/i.test(x.viewer); }
   /** A fact that says how its page was read ("viewer": the reader, a browser or a skill's command): only such a fact is
    * "checked" or "seen" there. A page captioned "checked 19 Nov on <site>" what a web search's excerpt said, with no
    * reader named, and the excerpt's own data said its review was never read (a local test, Nov 19). */

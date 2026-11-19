@@ -125,7 +125,8 @@ pub(crate) use self::project_preferences::ProjectPreferencesSnapshot;
 use self::workspace_change_detection::GitStatusEntry;
 
 /// The room a turn's memory snapshot has for the space's files and the skills its words route
-/// (topic skills draw on [`TOPIC_SKILLS_MAX_BYTES`] first). `AGENTS.md`, read whole and first,
+/// (topic skills draw on [`TOPIC_SKILLS_MAX_BYTES`] first, and the research skill a turn that may
+/// search carries whatever its words has a room of its own). `AGENTS.md`, read whole and first,
 /// took the rules on when to ask and on what a reply didn't find from the runtime's own lines and
 /// the skills (Nov 16), about 500 bytes, and the room grew by as much: the skills loaded after it,
 /// the router last of all, keep the room they had.
@@ -2955,8 +2956,11 @@ fn format_project_memory_snapshot_with_preferences(
     // run the AI's own web search, the research skill, which says how to say what a search
     // found ("a web search on <date> found: …"). Searching turns whose words routed other skills
     // stated a search's excerpts as facts, and called a page they never read "checked" (a local
-    // test, Nov 19). A turn with a pinned skill has no shell and never searches.
-    let carried_skill = pinned_skill.or(searches.then_some(WEB_RESEARCH_SKILL_ID));
+    // test, Nov 19). A turn with a pinned skill has no shell and never searches. The research skill
+    // a searching turn carries draws on a room of its own, as the topic skills do: taken from the
+    // shared room, it left the skills loaded after it, the router last of all, without theirs.
+    let searching_skill = (searches && pinned.is_none()).then_some(WEB_RESEARCH_SKILL_ID);
+    let carried_skill = pinned_skill.or(searching_skill);
     let mut remaining = PROJECT_MEMORY_MAX_TOTAL_BYTES;
     if remaining == 0 {
         return None;
@@ -3263,7 +3267,8 @@ fn format_project_memory_snapshot_with_preferences(
                 let node = contexts.iter().find(|node| node.id == context.id);
                 let topic = Some(context.id.as_str()) != pinned_skill
                     && node.is_some_and(|node| is_topic_skill(node, &contexts));
-                if remaining == 0 && (!topic || topic_room == 0) {
+                let own_room = Some(context.id.as_str()) == searching_skill;
+                if remaining == 0 && !own_room && (!topic || topic_room == 0) {
                     continue;
                 }
                 let label = format!("Context: {}", context.label);
@@ -3276,6 +3281,16 @@ fn format_project_memory_snapshot_with_preferences(
                         &context.path,
                         &omitted_sections,
                         &mut remaining,
+                        &mut out,
+                    );
+                } else if own_room {
+                    // Up to as much as a skill its words route has, none of it the shared room's.
+                    let mut room = PROJECT_MEMORY_MAX_FILE_BYTES;
+                    append_file(
+                        &label,
+                        &context.path,
+                        &omitted_sections,
+                        &mut room,
                         &mut out,
                     );
                 } else if topic {
@@ -12361,7 +12376,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             prompt.push_str(SECRET_REJECTION_CONTRACT);
             prompt.push_str(
             "- The skill's own check rejects a held value when its token request answers 401 or its status says the credential is wrong. When the provider's answer does not say which value it rejected, ask again for all of them, so the person gets the fields back in the chat instead of a detour to settings. Say in one sentence that the provider did not accept the values, quote the provider's own reason when it gives one, and give the skill's copy hints for those values.\n\
-            - Missing secret/env UX: emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n",
+            - Missing secret/env UX: when the task asked for cannot be done without a credential the space lacks, emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question: whether the user already has the credential and whether they want help finding/creating it.\n",
             );
             prompt.push_str(
             "- For auth/integration tasks, check which values the space already has before requesting a new secret. The inventory is already in your environment as `INSTAFY_PROJECT_SECRET_INVENTORY`; read that rather than shelling out for it, and never run a command to list secrets during first-run skill setup. When the person says they saved a value, the environment is the answer to what is present, not the wording of their message: check it, or run the skill's status check, before saying any value is still missing.\n",

@@ -612,9 +612,10 @@ export function numberIn(text) {
   return Number(m[1] + whole + (dec >= 0 ? `.${parts[dec].slice(1)}` : ""));
 }
 
-/** A fact only a web search gave ("viewer": "provider search", site.fromSearch): shown with that label, never counted
- *  as within a limit nor named first under the title. */
-const fromSearch = (fact) => !!fact && typeof fact.viewer === "string" && fact.viewer.trim().toLowerCase() === "provider search";
+/** A fact only a web search gave (a "viewer" that names a search: "provider search", or "search result" as `instafy
+ *  web search` gives it; site.fromSearch): shown with that label, never counted as within a limit nor named first
+ *  under the title. */
+const fromSearch = (fact) => !!fact && typeof fact.viewer === "string" && /(^|[^a-z])search/i.test(fact.viewer);
 
 /** The number a page shows for a seed fact (site.known): a value with its source, or an estimate; else null. */
 export function knownNumber(fact) {
