@@ -1298,6 +1298,16 @@ pre-change source loading for before/after comparisons without duplicating the U
 This is presentation and local-interaction evidence. It does not exercise audio
 capture, native keyboards, browser transport or controller persistence.
 
+The [browser/composer consistency fixture](../packages/frontend/tests/fixtures/browser-composer-consistency/README.md)
+extends this review to long Personal Browser tabs, shared-tab controls, taking
+back control, composer access notices and mention/editor typography. It mounts
+the production components with inert sharing and account boundaries. Use its
+focused configuration for mobile/desktop theme checks, keyboard interactions,
+pending/error recovery and enlarged-text layouts. The same fixture can load
+pre-change sources for matched before/after captures; keep the resulting images
+outside source control. These checks do not establish native Personal Browser
+availability on mobile or exercise a real control grant or streamed page.
+
 ## Support workflow simulation
 
 The support component browser suite exercises the production profile menu, report composer,

@@ -9,6 +9,7 @@ import { readLocalTabControlState, type LocalTabControlState } from "../../../se
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MoreHoriz, NavArrowDown, NavArrowLeft, Xmark } from "iconoir-react";
 import { BrowserToolsPopover } from "./BrowserToolsPopover";
+import { BROWSER_TOOLBAR_DIVIDER_CLASS, BROWSER_TOOLBAR_SURFACE_CLASS } from "./browserChromeStyles";
 import { Button, IconButton } from "../../../components/Button";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
@@ -203,8 +204,8 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
   // mode readable, with Release available in More when the pane is crowded.
   const narrowToolbar = bounds.width > 0 && bounds.width < 360;
   const panel = <Surface role="region" aria-label="Shared local browser tab" tone="default" radius={fullscreen ? "none" : "lg"} shadow="none" className={`relative flex min-h-0 min-w-0 flex-col overflow-hidden ${fullscreen ? "h-full border-0" : ""}`} style={{ paddingBottom: keyboardOccupiedHeight }} data-testid="local-browser-share-viewer">
-    <div role="toolbar" aria-label="Shared tab controls" data-testid="local-tab-toolbar" className="flex min-h-12 min-w-0 shrink-0 items-center gap-2 bg-slate-100 p-1 text-slate-800 dark:bg-slate-900 dark:text-slate-100">
-      {exploring ? <IconButton className="shrink-0" variant="ghost" aria-label="Back in your browsing page" onPress={() => command("exploreNavigate", {viewId:explore!.view!.viewId,action:"back"})}><NavArrowLeft aria-hidden="true" className="h-5 w-5" /></IconButton> : null}
+    <div role="toolbar" aria-label="Shared tab controls" data-testid="local-tab-toolbar" className={`flex min-h-12 min-w-0 shrink-0 items-center gap-2 p-1 ${BROWSER_TOOLBAR_DIVIDER_CLASS} ${BROWSER_TOOLBAR_SURFACE_CLASS}`}>
+      {exploring ? <IconButton className="shrink-0" variant="ghost" aria-label="Back in your browsing page" onPress={() => command("exploreNavigate", {viewId:explore!.view!.viewId,action:"back"})}><NavArrowLeft aria-hidden="true" className="h-4 w-4" /></IconButton> : null}
       <BrowserToolsPopover label="Shared tab view" isOpen={modeOpen} onOpenChange={setModeOpen} trigger={
         <Button ref={modeTriggerRef} preset="toolbar" variant="ghost" className="min-w-0 max-w-56" aria-label="Choose shared tab view" data-testid="local-tab-view-mode">
           <span className="truncate">{exploring ? "Browsing" : selfControls ? "You control" : explore?.requested ? "Browse requested" : control?.requested ? "Control requested" : "Following"}</span><NavArrowDown aria-hidden="true" className="h-4 w-4 shrink-0" />
@@ -224,7 +225,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
       {selfControls && !exploring && !narrowToolbar ? <Button preset="inline" className="shrink-0" variant="secondary" data-testid="local-tab-control-action" aria-label="Release control" onPress={() => command("releaseControl")}>Release</Button> : null}
       <RemoteBrowserMobileKeyboard inlineTrigger enabled={(selfControls || exploring) && !panOnly && hasPicture} onMessage={sendInput} onOccupiedHeightChange={setKeyboardOccupiedHeight} />
       <BrowserToolsPopover label="Shared tab options" isOpen={toolsOpen} onOpenChange={setToolsOpen} trigger={
-        <IconButton className="shrink-0" variant="ghost" aria-label="Shared tab options"><MoreHoriz aria-hidden="true" className="h-5 w-5" /></IconButton>
+        <IconButton className="shrink-0" variant="ghost" aria-label="Shared tab options"><MoreHoriz aria-hidden="true" className="h-4 w-4" /></IconButton>
       }>
         <Select aria-label="Shared tab zoom" value={zoom} disabled={!hasPicture} size="sm" onChange={event => {
           setZoom(event.target.value);
@@ -241,7 +242,7 @@ export function SharedLocalTabViewer({ projectId, share, onClose, onEnded }: { p
         </div>
         <Text variant="caption" tone="muted">{exploring ? "Your page and scroll are separate. Website logins and saved data are shared. Reload to see others’ changes; behavior depends on the website." : selfControls ? "You can click and type using the owner’s account. Release returns control to the owner." : "You are viewing the shared page. Request control to click and type using the owner’s account."}</Text>
       </BrowserToolsPopover>
-      <IconButton className="shrink-0" variant="ghost" aria-label="Leave shared tab" onPress={onClose}><Xmark aria-hidden="true" className="h-5 w-5" /></IconButton>
+      <IconButton className="shrink-0" variant="ghost" aria-label="Leave shared tab" onPress={onClose}><Xmark aria-hidden="true" className="h-4 w-4" /></IconButton>
       </div>
     </div>
     {!hasPicture ? (
