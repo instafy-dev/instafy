@@ -28,6 +28,7 @@ import { browserSessionPageIsPlaceholder } from "./browserSessionPages";
 import { Checkbox } from "../../../components/Checkbox";
 import { Select } from "../../../components/Select";
 import { Button, IconButton } from "../../../components/Button";
+import { tabItemStyles } from "../../../components/tabs/TabPresentation";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
 import { Surface } from "../../../components/Surface";
@@ -42,7 +43,9 @@ import { BrowserExpandButton } from "./BrowserExpandButton";
 import { SendPageToOctoButton } from "./SendPageToOctoButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
+import { BrowserStateBadge } from "./BrowserStateBadge";
 import { BrowserReadingRow } from "./BrowserReadingRow";
+import { BROWSER_TOOLBAR_DIVIDER_CLASS, BROWSER_TOOLBAR_SURFACE_CLASS } from "./browserChromeStyles";
 import { personalBrowserTabPages, resolveAgentReadingPages, shownBrowserPageTitle } from "./browserAgentTabs";
 import { browserPageOrigin } from "./browserHandoffRouting";
 import {
@@ -157,7 +160,7 @@ export function PersonalBrowserTabRow({
   if (tabs.length < 2) return null;
   return (
     <div
-      className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-slate-200 px-2 py-1 dark:border-slate-800"
+      className={`flex min-w-0 items-stretch gap-2 overflow-x-auto p-2 ${BROWSER_TOOLBAR_DIVIDER_CLASS} ${BROWSER_TOOLBAR_SURFACE_CLASS}`}
       role="group"
       aria-label="Browser tabs"
       data-testid="personal-browser-tabs"
@@ -168,7 +171,7 @@ export function PersonalBrowserTabRow({
         return (
           <div
             key={tab.id}
-            className={`flex min-w-0 max-w-[14rem] items-center rounded-md ${tab.active ? "bg-slate-200 dark:bg-slate-800" : ""}`}
+            className={`${tabItemStyles("contained", tab.active)} min-w-0 max-w-[14rem]`}
             data-testid="personal-browser-tab"
             data-active={tab.active ? "true" : "false"}
             data-opened-by={tab.openedBy}
@@ -176,18 +179,15 @@ export function PersonalBrowserTabRow({
             <Button
               variant="ghost"
               size="xs"
-              className="min-w-0 flex-1 justify-start"
+              radius="xl"
+              className="min-w-0 flex-1 self-stretch justify-start"
               aria-pressed={tab.active}
               aria-label={byOcto ? `${label} (opened by Octo)` : label}
               title={locked && !tab.active ? "Pause Octo to switch tabs" : tab.url}
               isDisabled={locked && !tab.active}
               onPress={() => onSelect(tab.id)}
             >
-              {byOcto ? (
-                <span className="shrink-0 rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-700 dark:bg-violet-900/50 dark:text-violet-200">
-                  Octo
-                </span>
-              ) : null}
+              {byOcto ? <BrowserStateBadge tone="agent" size="xs" compact>Octo</BrowserStateBadge> : null}
               <span className="min-w-0 truncate">{label}</span>
             </Button>
             {byOcto ? (

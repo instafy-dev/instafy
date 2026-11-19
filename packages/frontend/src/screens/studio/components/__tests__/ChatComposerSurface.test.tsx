@@ -83,6 +83,9 @@ vi.mock("../chat-input/ChatInput", () => ({
         data-expanded={String(_props.expanded === true)}
         data-read-only={String(_props.readOnly === true)}
         data-testid="chat-input"
+        onKeyDown={() => {
+          if (_props.readOnly) (_props.onReadOnlyKeyDown as (() => void) | undefined)?.();
+        }}
       >
         Ask for something…
       </div>
@@ -1290,6 +1293,43 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-read-only")).toBe(
       "true",
     );
+  });
+
+  it("keeps a slow access check announced without changing the blocked draft", async () => {
+    vi.useFakeTimers();
+    await act(async () => root.render(<ChatComposerSurface {...createProps({ accessChecking: true })} />));
+    const notice = container.querySelector('[data-testid="project-access-checking-notice"]');
+    const input = container.querySelector('[data-testid="chat-input"]');
+    expect(notice?.getAttribute("role")).toBe("status");
+    expect(notice?.getAttribute("aria-live")).toBe("polite");
+    expect(notice?.querySelector(".instafy-status-sweep")?.textContent).toBe("Checking your access…");
+
+    await act(async () => { vi.advanceTimersByTime(10_000); });
+    expect(notice?.textContent).toBe("Still checking your access. The workspace may be slow to respond.");
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    expect(input?.getAttribute("data-read-only")).toBe("true");
+
+    await act(async () => root.render(<ChatComposerSurface {...createProps({ accessChecking: false })} />));
+    expect(container.querySelector('[data-testid="project-access-checking-notice"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    expect(input?.getAttribute("data-read-only")).toBe("false");
+  });
+
+  it.each(["checking", "read-only"] as const)("briefly highlights the %s notice when input is blocked", async (state) => {
+    vi.useFakeTimers();
+    await act(async () => root.render(<ChatComposerSurface {...createProps({
+      accessChecking: state === "checking",
+      mutationDisabled: state === "read-only",
+      accessNotice: state === "read-only" ? "Read-only access — ask an admin for edit access." : null,
+    })} />));
+    const notice = container.querySelector(`[data-testid="project-${state === "checking" ? "access-checking" : "read-only"}-notice"]`);
+    const input = container.querySelector('[data-testid="chat-input"]');
+    expect(notice?.classList.contains("ring-2")).toBe(false);
+    await act(async () => { input?.dispatchEvent(new KeyboardEvent("keydown", { key: "x", bubbles: true })); });
+    expect(notice?.classList.contains("ring-2")).toBe(true);
+    await act(async () => { vi.advanceTimersByTime(650); });
+    expect(notice?.classList.contains("ring-2")).toBe(false);
+    expect(input?.getAttribute("data-read-only")).toBe("true");
   });
 
   it.each(["tap", "continuous"] as const)("keeps the integrated active %s voice strip", async (voiceInteractionMode) => {

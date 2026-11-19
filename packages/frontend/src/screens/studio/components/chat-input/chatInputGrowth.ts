@@ -2,6 +2,9 @@
 // cap is a line count, not a pixel budget: with the keyboard up on a phone
 // the vertical space is the scarce thing, so narrow viewports stop earlier.
 export const CHAT_INPUT_LINE_HEIGHT_PX = 20;
+// The editor and each overlaid line use exactly the same text metrics. Keep
+// mobile text at 16px to avoid focus zoom, with 14px on wider viewports.
+export const CHAT_INPUT_TYPOGRAPHY_CLASS = "text-base leading-5 sm:text-sm";
 export const CHAT_INPUT_MAX_LINES_COMPACT_VIEWPORT = 6;
 export const CHAT_INPUT_MAX_LINES_WIDE_VIEWPORT = 10;
 

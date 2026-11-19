@@ -1,8 +1,8 @@
 import type { EditorConfig, LexicalNode, NodeKey, SerializedTextNode } from "lexical";
 import { TextNode } from "lexical";
+import { MENTION_CLASSES } from "../../../../components/mentionStyles";
 
-export const USER_MENTION_CLASS =
-  "inline-flex items-center rounded-full px-2 py-0.5 font-semibold leading-none ring-1 align-baseline bg-slate-100 text-slate-700 ring-slate-200 dark:bg-slate-800/70 dark:text-slate-100 dark:ring-slate-700";
+export const USER_MENTION_CLASS = MENTION_CLASSES.person;
 
 export type SerializedUserMentionNode = SerializedTextNode & {
   type: "user-mention";

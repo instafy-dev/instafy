@@ -180,6 +180,12 @@ type ChatComposerSurfaceProps = {
   composerRunStopController?: ChatRunStopController | null;
 };
 
+// These notices occupy the same strip above the field. Their tone and type
+// come from the shared components; only placement and attempted-input feedback
+// belong to the composer.
+const ACCESS_NOTICE_LAYOUT = "mx-1 px-3 py-2 transition-shadow sm:mx-2";
+const ACCESS_NOTICE_ATTENTION = "ring-2 ring-current/30";
+
 // The access check is a pending state, not a warning: neutral, quiet, with the
 // product's standard working shimmer instead of an amber slab. If it runs long
 // the copy escalates honestly rather than spinning forever.
@@ -193,9 +199,12 @@ function AccessCheckingNotice({ flash }: { flash: boolean }) {
     ? "Still checking your access. The workspace may be slow to respond."
     : "Checking your access…";
   return (
-    <div
-      className={`mx-2 rounded-lg px-1.5 py-1 text-xs text-slate-500 transition-shadow dark:text-slate-400 ${
-        flash ? "ring-2 ring-slate-400/50 dark:ring-slate-500/50" : ""
+    <Text
+      as="div"
+      variant="caption"
+      tone="muted"
+      className={`${ACCESS_NOTICE_LAYOUT} rounded-xl ${
+        flash ? ACCESS_NOTICE_ATTENTION : ""
       }`}
       data-testid="project-access-checking-notice"
       role="status"
@@ -204,7 +213,7 @@ function AccessCheckingNotice({ flash }: { flash: boolean }) {
       <span className="instafy-status-sweep" data-sweep-text={text}>
         {text}
       </span>
-    </div>
+    </Text>
   );
 }
 
@@ -1401,16 +1410,21 @@ export function ChatComposerSurface({
               </Surface>
             ) : null}
             {accessNotice ? (
-              <div
-                className={`mx-1 flex items-center gap-2 rounded-xl border border-secondary-300/70 bg-secondary-50/90 px-3 py-2 text-xs font-medium text-secondary-900 shadow-sm transition-shadow dark:border-secondary-400/30 dark:bg-secondary-400/10 dark:text-secondary-100 sm:mx-2 ${
-                  blockedInputFlash ? "ring-2 ring-secondary-400/70 dark:ring-secondary-300/50" : ""
+              <Surface
+                tone="warning"
+                radius="xl"
+                shadow="none"
+                className={`${ACCESS_NOTICE_LAYOUT} ${
+                  blockedInputFlash ? ACCESS_NOTICE_ATTENTION : ""
                 }`}
                 data-testid="project-read-only-notice"
                 role="status"
               >
-                <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span>{accessNotice}</span>
-              </div>
+                <Text as="div" variant="caption" tone="warning" className="flex items-start gap-2">
+                  <Lock className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{accessNotice}</span>
+                </Text>
+              </Surface>
             ) : accessChecking ? (
               <AccessCheckingNotice flash={blockedInputFlash} />
             ) : null}
