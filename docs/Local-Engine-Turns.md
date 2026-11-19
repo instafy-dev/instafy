@@ -1828,8 +1828,8 @@ A Desktop restart forgets the hold. The next turn then fails at the limit, which
 
 ### 11.12 Runtime agent
 
-- **`LaneJob::of`** (3.9) keeps the job shape (the engine, `lease_attempts == 1`, no envelope, controller token, grants or credential, and a workspace token that verifies), the person (`payload.user_id` equals the granted user) and the prompt rules, and adds 11.4's refusals of browser turns and attachments. It drops `input.kind == "person"` and the markers: unattended, automation, evaluation, plan, retry, goal continuation and `dispatchContent`.
-- **Execution mode.** `apply` runs as 3.3 says. `plan_only`, an automation's read-only mode, passes `--permission-mode plan` in place of `acceptEdits`, the launch check expects `plan`, and the turn saves nothing. Any other mode is refused.
+- **`LaneJob::of`** (3.9) keeps the job shape (the engine, `lease_attempts == 1`, no envelope, controller token, grants or credential, and a workspace token that verifies), the person (`payload.user_id` equals the granted user) and the prompt rules, and adds 11.4's refusals of browser turns and attachments. It drops `input.kind == "person"` and the markers of who started a turn: unattended, automation, evaluation, retry, goal continuation and `dispatchContent`. It keeps refusing a team plan's markers, as a backstop for 11.4.
+- **Execution mode.** The payload's `metadata.execution_mode` says it, as for any job, and the controller's payload allowlist (2.5) now keeps it. `apply` runs as 3.3 says. `plan_only`, an automation's read-only mode, passes `--permission-mode plan` in place of `acceptEdits`, the launch check expects `plan`, the turn saves nothing, and the payload's workspace mode is `shared_read`. Any other mode is refused.
 - **Resume** as 11.9 says, and **plan limits** as 11.11 says.
 
 ### 11.13 Desktop
