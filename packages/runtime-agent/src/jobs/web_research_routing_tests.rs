@@ -755,10 +755,10 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
     for words in [
         "`browser`",
         "`browser_then_build`",
-        "sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find.",
-        "Stay `direct`, even when the message names Instafy's browser",
+        "sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find.",
+        "Stay `direct`, even when it names the browser",
         "what only this space or another chat holds",
-        "the site runs in this space",
+        "the site runs here",
         "says not to use the browser",
         "or it carries on browser work this chat started, whether or not that found the answer.",
         "Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email;",
@@ -784,9 +784,9 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
 /// to get there by metro" stayed with Octo because the chat's browser turn had not found the
 /// opening hours it was after, and a comparison page stayed with Octo, whose turn read no page and
 /// only posted a browser card. The section says that a page, a map or a table to make with no site
-/// to use first stays `direct`, that research ending in a page is `browser_then_build` from the
-/// first message while research answered in a reply stays `direct`, and that browser work carries
-/// on whether or not it found the answer.
+/// to use first stays `direct`, that research ending in a page is `browser_then_build` unless it
+/// searches first while research answered in a reply stays `direct`, and that browser work
+/// carries on whether or not it found the answer.
 #[test]
 fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() {
     let start = BROWSER_SKILL
@@ -808,7 +808,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
     );
     assert_eq!(
         line("browser_then_build"),
-        "- `browser_then_build`: the same, then Octo makes or changes something here (a page, a map, a table). So is research that ends in a page (a comparison, prices, a route), from the first message. So is a page or change with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on. So is a change that needs what a web page says."
+        "- `browser_then_build`: the same, then Octo makes or changes something here (a page, a map, a table). So is research that ends in a page (a comparison, prices, a route), unless it searches first. So is a page or change with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on. So is a change that needs what a web page says."
     );
     let reply = section
         .lines()
@@ -898,7 +898,7 @@ fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
         + 1;
     let section = &BROWSER_SKILL[start..];
     assert!(section.contains(
-        "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find."
+        "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find."
     ));
     let stay = section
         .lines()
@@ -906,7 +906,7 @@ fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
         .expect("the line that keeps a message direct");
     assert!(
         stay.starts_with(
-            "- Stay `direct`, even when the message names Instafy's browser, when the site runs in this space (a preview card) or the person says not to use the browser. Also when the browser part needs what only this space or another chat holds (a page, map or file here)"
+            "- Stay `direct`, even when it names the browser, when the site runs here (a preview card) or the person says not to use the browser. Also when the browser part needs what only this space or another chat holds (a page, map or file here)"
         ),
         "{stay}"
     );
@@ -2334,7 +2334,7 @@ fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
     let build = rule("browser_then_build");
     assert!(
         build.ends_with(
-            "So is research that ends in a page (a comparison, prices, a route), from the first message. So is a page or change with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on. So is a change that needs what a web page says."
+            "So is research that ends in a page (a comparison, prices, a route), unless it searches first. So is a page or change with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on. So is a change that needs what a web page says."
         ),
         "{build}"
     );
@@ -2656,7 +2656,7 @@ fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
     );
     assert!(!stay.contains("changes nothing here"), "{stay}");
     assert!(section.contains(
-        "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find."
+        "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find."
     ));
     for gone in [
         "with no site to use first",
@@ -2732,7 +2732,7 @@ fn a_routed_browser_part_is_told_what_to_find_and_an_unconfirmed_page_browses_fi
     let section = BROWSER_SKILL[start..].trim_end();
     assert!(
         section.contains(
-            "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find."
+            "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find."
         ),
         "{section}"
     );
@@ -3406,9 +3406,12 @@ fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
 /// lines the routing input is as it was. Both are the first rule's, ahead of the routes: with
 /// search on, a comparison page whose input said so went to the browser, its reason that the
 /// answer ends in a page, the rule's exception sitting mid-sentence in the `browser_then_build`
-/// line (a local test, Nov 17). Checking the person's own account is work on a website, which
-/// the browser does with their sign-in: no search reaches it. The routing step reads the whole
-/// section for each.
+/// line (a local test, Nov 17). That line's own sentence on research that ends in a page says so
+/// too ("unless it searches first"): while it said "from the first message", news, a comparison
+/// and a page of places whose routing input had both lines still went to the browser first,
+/// their reasons citing it, and two of them made no page (a local test, Nov 19). Checking the
+/// person's own account is work on a website, which the browser does with their sign-in: no
+/// search reaches it. The routing step reads the whole section for each.
 #[test]
 fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     let section = routing_section(BROWSER_SKILL);
@@ -3420,7 +3423,7 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     };
     assert!(
         line("- `browser_then_build`:").contains(
-            "So is research that ends in a page (a comparison, prices, a route), from the first message. So is a page or change"
+            "So is research that ends in a page (a comparison, prices, a route), unless it searches first. So is a page or change"
         ),
         "{section}"
     );

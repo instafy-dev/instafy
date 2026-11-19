@@ -1195,7 +1195,7 @@ mod tests {
             assert!(input.browser_routes_offered, "{}", case.id);
             assert!(input.prompt.contains(line), "{}: {}", case.id, input.prompt);
             assert!(input.prompt.contains(
-                "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find."
+                "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find."
             ));
             assert_eq!(
                 input.history_metrics["includedTurns"],
@@ -1497,9 +1497,9 @@ mod tests {
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "339b24c9e853e9c39f8d08098623168f123fce4ccfc5b303e66fd9e63a1e1aca";
+            "245b96d49ce1628d18815a09c0e6a30944abc4f695650ae5cee8d10e21a35782";
         const CASE_PROMPTS_SHA256: &str =
-            "20907c67c5846a082e35e8c3b6e268d770f8e00e5988e81a6f8b121923b87a38";
+            "f99f9b6916f9e49e520a0280b0c98328a4bc2b18e251ce6faa9ee1c5486dc7fd";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1710,14 +1710,16 @@ mod tests {
     /// person's own words, and a place added to a map, after replies that said something wasn't
     /// found. Those sent where Octo can search the web for the message have one line saying so
     /// in their routing input, and a second where research that ends in a page searches first:
-    /// news and a comparison put on a page stay `direct` only with both, a page that needs prices
-    /// for dates or a route still browses first, an order in the person's own account is still
-    /// the browser's, and news answered in a reply and a hotel for dates nobody named stay
-    /// `direct`, while hotels for dates nobody named put on a page browse first unless research
-    /// that ends in a page searches first. A question about a shop's policy beside an order number
-    /// stays `direct`, with search or without, while that order's own status is the browser's, a
-    /// reply's article opened in the browser goes by its address, and a change to another chat's
-    /// page, which the routing input's pages name, stays `direct` with no change.
+    /// news put on a page, a comparison page and a page of places stay `direct` only with both,
+    /// browsing first without them, a page that needs prices for dates or a route still browses
+    /// first, an order in the person's own account is still the browser's, and news answered in a
+    /// reply and a hotel for dates nobody named stay `direct`, while hotels for dates nobody named
+    /// put on a page browse first unless research that ends in a page searches first. A question
+    /// about a shop's policy beside an order number stays `direct`, with search or without, while
+    /// that order's own status is the browser's, a page a reply linked, opened in the browser,
+    /// goes by its address whatever the person calls it, also where the reply linked no article,
+    /// and a change to another chat's page, which the routing input's pages name, stays `direct`
+    /// with no change.
     #[test]
     fn every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own() {
         let cases = shipped();
@@ -1729,9 +1731,12 @@ mod tests {
             .expect("the routing section");
         let rules: &[(&str, &str, &[&str])] = &[
             (
-                "name the items, place or site this chat names (by name; a page a reply here linked, by address)",
+                "name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it)",
                 "browser",
-                &["news-then-open-the-article"],
+                &[
+                    "news-then-open-the-article",
+                    "news-two-links-then-open-the-article",
+                ],
             ),
             (
                 "- Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email;",
@@ -1758,6 +1763,7 @@ mod tests {
                     "news-then-page-searching",
                     "comparison-page-searching",
                     "comparison-page-watches-searching",
+                    "page-of-places-searching",
                 ],
             ),
             (
@@ -1791,7 +1797,7 @@ mod tests {
                 &["browser-named-then-page"],
             ),
             (
-                "So is research that ends in a page (a comparison, prices, a route), from the first message.",
+                "So is research that ends in a page (a comparison, prices, a route), unless it searches first.",
                 "browser_then_build",
                 &[
                     "comparison-page-watches",
@@ -1800,6 +1806,7 @@ mod tests {
                     "route-page-searching",
                     "news-then-page-searching-pages-browse-first",
                     "hotels-for-dates-nobody-named-page-searching",
+                    "page-of-places",
                 ],
             ),
             (
@@ -1851,7 +1858,7 @@ mod tests {
                 &["change-to-another-chats-page"],
             ),
             (
-                "when the site runs in this space (a preview card)",
+                "when the site runs here (a preview card)",
                 "direct",
                 &["site-runs-in-this-space"],
             ),
@@ -1914,10 +1921,10 @@ mod tests {
                 covered.insert(case.id);
             }
         }
-        // Each case that can search has a twin rule on the same kind of message without it: news
-        // and a comparison put on a page browse first unless Octo can search the web and
-        // research that ends in a page searches first. Two of them are word for word the same
-        // message, with one line of the routing input more.
+        // Each case that can search has a twin rule on the same kind of message without it: news,
+        // a comparison and a page of places put on a page browse first unless Octo can search the
+        // web and research that ends in a page searches first. Three of them are word for word the
+        // same message, with only the search lines of the routing input between them.
         for (searching, without) in [
             ("news-then-page-searching", "news-then-page"),
             ("comparison-page-searching", "comparison-page-watches"),
@@ -1929,6 +1936,7 @@ mod tests {
                 "news-then-page-searching",
                 "news-then-page-searching-pages-browse-first",
             ),
+            ("page-of-places-searching", "page-of-places"),
         ] {
             let (searching, without) = (case(&cases, searching), case(&cases, without));
             assert!(searching.research_pages_search_first, "{}", searching.id);
@@ -1947,6 +1955,7 @@ mod tests {
                 "policy-beside-an-order-number-searching",
                 "policy-beside-an-order-number",
             ),
+            ("page-of-places-searching", "page-of-places"),
         ] {
             assert_eq!(case(&cases, one).message, case(&cases, other).message);
         }
@@ -1999,6 +2008,23 @@ mod tests {
         assert!(article.answered_by(&read_answer(&answer, &article, &input)));
         answer["summary"] = json!("Open the Reuters article about Philips.");
         assert!(!article.answered_by(&read_answer(&answer, &article, &input)));
+        // So does one whose reply linked no article, only the company's newsroom its news came
+        // from and a share-price page, though the person calls it an article: the routing input
+        // holds both addresses, and a summary that names the page, not its address, fails. Told
+        // only "by address", such a summary named "the article linked in this chat", and its
+        // browser turn opened the company's home page (a local test, Nov 19), so the section
+        // says "whatever they call it".
+        let two_links = case(&cases, "news-two-links-then-open-the-article");
+        let newsroom = &two_links.expect.summary_names[0];
+        let input = routing_input(&two_links, workspace.path()).unwrap();
+        for address in [newsroom.as_str(), "https://finance.yahoo.com/quote/ERIC-B.ST/"] {
+            assert!(input.prompt.contains(address), "{address}: {}", input.prompt);
+        }
+        assert!(!two_links.history[1]["content"].as_str().unwrap().contains("article"));
+        answer["summary"] = json!(format!("Open {newsroom} and summarise today's story there."));
+        assert!(two_links.answered_by(&read_answer(&answer, &two_links, &input)));
+        answer["summary"] = json!("Open the Ericsson article linked in this chat in the browser.");
+        assert!(!two_links.answered_by(&read_answer(&answer, &two_links, &input)));
         // The cases from `news-today` on are exactly these, and none is about a subject an
         // earlier case is about.
         let first = cases

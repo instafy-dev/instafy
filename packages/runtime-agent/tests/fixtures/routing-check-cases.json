@@ -2851,6 +2851,54 @@
         "route": "browser_then_build"
       },
       "why": "Availability for dates where nobody named the places, put on a page, where Octo can search the web for this message but research that ends in a page doesn't search first: it is research that ends in a page, which goes to the browser first, and Octo then makes the page. A building turn that makes a page can't ask for the browser, so with no browser part first nothing would check the dates."
+    },
+    {
+      "id": "page-of-places-searching",
+      "message": "Make a page of good hotels in Tallinn's old town.",
+      "integratedSearch": true,
+      "researchPagesSearchFirst": true,
+      "expect": {
+        "route": "direct",
+        "workspaceFileChangeRequirement": [
+          "required"
+        ]
+      },
+      "why": "A page of places with no dates, where Octo can search the web for this message and research that ends in a page searches first: the hotels, where they are and what reviewers say are looked up, and no site needs using first, so the building turn searches and makes the page, with no browser part before it."
+    },
+    {
+      "id": "page-of-places",
+      "message": "Make a page of good hotels in Tallinn's old town.",
+      "expect": {
+        "route": "browser_then_build"
+      },
+      "why": "The same page of places where Octo can't search the web for this message: research that ends in a page goes to the browser first, then Octo makes the page."
+    },
+    {
+      "id": "news-two-links-then-open-the-article",
+      "history": [
+        {
+          "role": "user",
+          "content": "What happened with Ericsson today?",
+          "runId": "run-1",
+          "createdAt": "2026-11-17T09:01:00.000Z"
+        },
+        {
+          "role": "assistant",
+          "content": "I couldn't find a major new Ericsson announcement today. Ericsson's newsroom lists a capital markets day in Stockholm for November 17, while its latest press releases are from earlier in the month. Its shares were reported up 0.6% on the day. [Ericsson](https://www.ericsson.com/en/newsroom/latest-news) · [Yahoo Finance](https://finance.yahoo.com/quote/ERIC-B.ST/)",
+          "runId": "run-1",
+          "createdAt": "2026-11-17T09:02:00.000Z"
+        }
+      ],
+      "message": "Open that article in your browser.",
+      "integratedSearch": true,
+      "researchPagesSearchFirst": true,
+      "expect": {
+        "route": "browser",
+        "summaryNames": [
+          "https://www.ericsson.com/en/newsroom/latest-news"
+        ]
+      },
+      "why": "The message names Instafy's browser, and the page is one the reply here linked, though the reply linked no article: its news came from the company's newsroom, beside a share-price page. The routing summary names the newsroom by its address, whatever the person calls it, since the browser turn never reads the reply."
     }
   ]
 }

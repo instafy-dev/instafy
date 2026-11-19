@@ -2130,8 +2130,8 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "a bare \"keep going\" carries on what a page here left open, and a change that needs a web page browses first",
             ),
             (
-                "So is research that ends in a page (a comparison, prices, a route), from the first message.",
-                "research ending in a page goes to the browser from the first message",
+                "So is research that ends in a page (a comparison, prices, a route), unless it searches first.",
+                "research ending in a page goes to the browser first unless it searches first",
             ),
             (
                 "or that ends in a page when it searches first, stays `direct`",
@@ -2329,7 +2329,7 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
     ensure!(r1.routed, "L1 was not sent straight to the browser");
     ensure!(
         input_text(first_sampling_request(r1)).contains(
-            "and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find."
+            "and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find."
         ),
         "L1's routing call was never told what its summary names"
     );
