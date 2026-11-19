@@ -747,6 +747,7 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   | `navigate`, `open_tab` | Opening {host} | opened {host} / opened {n} pages on {host} / opened pages on {host} | content |
   | `snapshot` | Reading {host} | read a page on {host} / read {n} pages on {host} / read pages on {host} | content |
   | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
+  | `type` into the site's own search box, not sent yet (the reading it targets lists the field as a `search` field, the `searchbox` role, or a field in the page's search area) | Searching {host} | typed a search on {host} (Details only) | quiet |
   | `type`, `choose` (and a click that checks a box or a radio button) | Filling in a form on {host} | filled in a form on {host} (Details only) | quiet |
   | `submit`, `click`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
   | a step refused as the person's: `consent`, `sign_in`, `upload`, `reveal_secret`, `sensitive` | Accepting cookies on {host}, Signing in on {host}, Choosing a file on {host}, Showing a password or key on {host}, Entering private details on {host} | none: it never happens (Details: "Tried accepting cookies on {host}") | quiet |
@@ -844,14 +845,18 @@ activity line, to the person who started the run only, and the line says `Waitin
   |---|---|
   | allowed | `you allowed a search on visitlisboa.com` |
   | said no | `you said no to a search on visitlisboa.com` |
-  | no answer | `skipped a search on visitlisboa.com: no answer in time` |
+  | no answer | `skipped a search on visitlisboa.com: no answer from you` |
 
   The noun comes from the step's own `activity` (`step` and `approval`), so it reads the same
   after a reload: `a search`, `a form`, `a click`, `typing`, `choosing an option`, `a key press`,
   `opening {host}`, or
   the site itself (`the site` when the line already names it). The host is left out when the line
   already names it first: `Searched visitlisboa.com, read 2 pages · you allowed a search`.
-  Several answers read as the latest one counted: `you allowed 2 steps`. When no step carries an
+  Several answers read as the latest one counted: `you allowed 2 steps`. Only the step whose
+  prompt the person answered carries their answer: a no, or a prompt left to run out, ends the
+  browser for the turn, and the calls the turn makes after it are marked as ended at an earlier
+  call (`terminalConsent.endedEarlier`), fail, and carry none, so one Deny reads `you said no to
+  a search`, never `you said no to 3 steps`. When no step carries an
   answer (an older runtime), the prompts answered in this tab stand in, named by their
   operation.
 

@@ -19,7 +19,8 @@
  *          "Price unknown", then why ({"note": "the store blocks price checks"}).
  *   details: only facts the row does not already show.
  *   unchecked: ["what was not checked", …]
- *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "est": false}
+ *   fact: {"v": "$145", "src": "Example Store", "url": "https://…", "date": "2026-10-17", "viewer": "server fetch",
+ *          "est": false}   ("viewer": how it was read, the compare starter's; without one a value shows its page alone)
  * The item shape is the compare starter's, so the same items work there ("Compare these", only when asked).
  * Query: ?show=all&open=<slug>. Rows: id="row-<slug>", data-ref="<ref>".
  * SPDX-License-Identifier: AGPL-3.0-only */
@@ -120,7 +121,7 @@
     var facts = items.map(function (i) { return i.price; }).filter(Boolean);
     if (facts.length < 2) return null;
     var page = function (f) { var u = site.safeUrl(f.url); return u ? u.split("#")[0] : "src:" + f.src; };
-    var key = function (f) { return f && f.src && !f.est && site.valueText(f) ? [page(f), f.asof || f.date || "", f.list ? "list" : "", site.fromSearch(f) ? "search" : ""].join("|") : null; };
+    var key = function (f) { return f && f.src && !f.est && site.valueText(f) ? [page(f), f.asof || f.date || "", f.list ? "list" : "", site.fromSearch(f) ? "search" : site.readThere(f) ? "read" : ""].join("|") : null; };
     var k = key(facts[0]);
     return k && facts.every(function (f) { return key(f) === k; }) ? facts[0] : null;
   }

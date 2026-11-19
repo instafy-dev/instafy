@@ -871,6 +871,21 @@ fn a_page_from_what_octo_knows_says_so_and_its_rows_say_what_was_not_checked() {
     }
 }
 
+/// A page to share captioned a route nobody read "<planner> · checked <day>", typed into its own script (a local test,
+/// Nov 19). A caption comes from the starter's `site.trust` or `site.cite`, which says "checked" only for a fact that
+/// says how it was read (`viewer`), and shows any other fact's page alone.
+#[test]
+fn a_pages_captions_come_from_the_starter_never_typed() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub = flat(include_str!(
+        "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+    ));
+    assert!(hub.contains(
+        "`Estimate`, `Unknown`, each drawn by the starter's `site.trust` or `site.cite` from the fact's `\"viewer\"` (how it was read), never typed."
+    ));
+    assert!(hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+}
+
 /// A comparison told what it didn't find three times: under its title, in each cell and under
 /// "Still to confirm", where the build's own `unchecked` said it again (a local test, Nov 10). The
 /// compare starter names each row's missing values once, first in its footer, and the bound-sites

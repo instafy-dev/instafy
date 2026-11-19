@@ -5,7 +5,8 @@
  *   title, lede
  *   people?: ["Ana", "Ben"]    only when each person keeps their own ticks ("each of us packs")
  *   groups: [{id, title, items: [{ref: "item:charger", text, note?, fact?}]}]
- *   fact: {"v": "Sockets are type G", "src": "…", "url": "https://…", "date": "2026-10-17"}
+ *   fact: {"v": "Sockets are type G", "src": "…", "url": "https://…", "date": "2026-10-17", "viewer": "server fetch"}
+ *          ("viewer": how it was read; without one a fact shows its page alone)
  * A tick sends set_check {ref, done, who?}; the binder stores it and every page shows it. Without a binder,
  * ticks stay on this device. Checked items stay in place (muted, struck through). Query: ?who=<name>. A per-person
  * list shows no ticks until the viewer picks a name ("Whose list is this?" with one plain button per person, "I'm

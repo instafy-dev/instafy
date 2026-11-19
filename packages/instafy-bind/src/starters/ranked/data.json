@@ -13,20 +13,23 @@
           "v": "8.9 oz",
           "src": "Maker",
           "url": "https://example.com/option-a/specs",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         },
         {
           "v": "2-year warranty",
           "src": "Maker",
           "url": "https://example.com/option-a/warranty",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         }
       ],
       "price": {
         "v": "$145",
         "src": "Example Store",
         "url": "https://example.com/option-a",
-        "date": "2026-10-17"
+        "date": "2026-10-17",
+        "viewer": "server fetch"
       },
       "store": {
         "name": "Example Store",
@@ -40,7 +43,8 @@
             "v": "4.6 of 5",
             "src": "Example Reviews",
             "url": "https://example.com/reviews/option-a",
-            "date": "2026-10-16"
+            "date": "2026-10-16",
+            "viewer": "server fetch"
           }
         },
         {
@@ -49,7 +53,8 @@
             "v": "Black, white",
             "src": "Maker",
             "url": "https://example.com/option-a/specs",
-            "date": "2026-10-17"
+            "date": "2026-10-17",
+            "viewer": "server fetch"
           }
         }
       ],
@@ -76,14 +81,16 @@
           "v": "1-year warranty",
           "src": "Maker",
           "url": "https://example.com/option-b/warranty",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         }
       ],
       "price": {
         "v": "$139",
         "src": "Example Store",
         "url": "https://example.com/option-b",
-        "date": "2026-10-17"
+        "date": "2026-10-17",
+        "viewer": "server fetch"
       },
       "store": {
         "name": "Example Store",
@@ -97,7 +104,8 @@
             "v": "4.4 of 5",
             "src": "Example Reviews",
             "url": "https://example.com/reviews/option-b",
-            "date": "2026-10-16"
+            "date": "2026-10-16",
+            "viewer": "server fetch"
           }
         }
       ]
@@ -112,7 +120,8 @@
           "v": "9.8 oz",
           "src": "Maker",
           "url": "https://example.com/option-c/specs",
-          "date": "2026-10-17"
+          "date": "2026-10-17",
+          "viewer": "server fetch"
         }
       ],
       "price": {
@@ -130,7 +139,8 @@
             "v": "4.1 of 5",
             "src": "Example Reviews",
             "url": "https://example.com/reviews/option-c",
-            "date": "2026-10-16"
+            "date": "2026-10-16",
+            "viewer": "server fetch"
           }
         }
       ]
