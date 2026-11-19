@@ -7,7 +7,8 @@
 //! answer's line. A turn with a card left to post is not run again: it posts that card, and never
 //! the refused one.
 
-use super::*;
+// The proxy fixtures of `tests/proxy_integration.rs`, as the evidence retry's own tests use them.
+use crate::*;
 use std::sync::Mutex as StdMutex;
 
 const CHILD: &str = "INSTAFY_REFUSED_CARD_TEST_CHILD";
@@ -30,10 +31,10 @@ impl Case {
     fn test_name(self) -> &'static str {
         match self {
             Self::TheOnlyCard => {
-                "refused_card::a_turn_whose_only_card_is_refused_runs_once_more_and_posts_the_retrys_card_via_proxy"
+                "evidence_retry::refused_card::a_turn_whose_only_card_is_refused_runs_once_more_and_posts_the_retrys_card_via_proxy"
             }
             Self::ACardLeft => {
-                "refused_card::a_turn_with_a_card_left_posts_it_and_never_the_refused_one_via_proxy"
+                "evidence_retry::refused_card::a_turn_with_a_card_left_posts_it_and_never_the_refused_one_via_proxy"
             }
         }
     }

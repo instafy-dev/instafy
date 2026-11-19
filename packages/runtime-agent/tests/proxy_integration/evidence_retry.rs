@@ -344,3 +344,8 @@ async fn run_case(case: Case) -> Result<()> {
     stub_task.await??;
     Ok(())
 }
+
+/// The retry after a browser card refused for what its task says, whose line reads as this
+/// retry's does ("Working…").
+#[path = "refused_card.rs"]
+mod refused_card;
