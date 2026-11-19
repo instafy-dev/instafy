@@ -4,6 +4,7 @@ import path from "node:path";
 import kleur from "kleur";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
+import { withoutGitRepositoryEnv } from "./git-env.js";
 import { ensureRatholeBinary } from "./rathole.js";
 import {
   getInstafyProfileConfigPath,
@@ -374,7 +375,9 @@ const RUNTIME_CHILD_CREDENTIALS_TO_REMOVE = [
 ] as const;
 
 export function buildRuntimeChildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const child = { ...source };
+  // The agent, and every git its tools run, works in the space's workspace, not in the repository an
+  // inherited GIT_DIR or GIT_INDEX_FILE names (./git-env.ts), whose path a container could not reach anyway.
+  const child = withoutGitRepositoryEnv(source);
   for (const key of RUNTIME_CHILD_CREDENTIALS_TO_REMOVE) {
     delete child[key];
   }

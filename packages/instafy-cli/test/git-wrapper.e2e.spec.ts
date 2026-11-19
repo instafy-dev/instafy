@@ -94,6 +94,135 @@ describe("instafy git", () => {
   );
 
   it(
+    "stages and commits in .instafy/.git, not in the repository an inherited GIT_DIR and GIT_INDEX_FILE name",
+    async () => {
+      const named = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-git-named-")));
+      const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-git-inherited-"));
+      try {
+        // The fixtures are built and read with no inherited or user git settings.
+        const fixtureEnv = {
+          PATH: process.env.PATH,
+          HOME: named,
+          LANG: "C",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        };
+        const git = (cwd: string, ...args: string[]) => {
+          const result = spawnSync(
+            "git",
+            ["-c", "user.name=Named", "-c", "user.email=named@example.invalid", ...args],
+            { cwd, env: fixtureEnv, encoding: "utf8" },
+          );
+          if (result.status !== 0) {
+            throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+          }
+          return result.stdout.trim();
+        };
+        // A repository with a linked worktree, and what a commit hook in that worktree hands every
+        // command it starts: the worktree's GIT_DIR, an absolute path, and its GIT_INDEX_FILE.
+        const main = path.join(named, "main");
+        const linked = path.join(named, "linked");
+        fs.mkdirSync(main);
+        git(main, "init", "-q", "-b", "main");
+        fs.writeFileSync(path.join(main, "README.md"), "not a fixture\n");
+        git(main, "add", "README.md");
+        git(main, "commit", "-q", "-m", "named");
+        git(main, "worktree", "add", "-q", "-b", "linked", linked);
+        const namedGitDir = git(linked, "rev-parse", "--absolute-git-dir");
+        // Each read keeps its exit status and errors, so a repository left broken shows in the comparison.
+        const read = (...args: string[]) => {
+          const result = spawnSync("git", args, { cwd: linked, env: fixtureEnv, encoding: "utf8" });
+          return `${result.status}\n${result.stdout}${result.stderr}`;
+        };
+        const namedState = () => ({
+          config: fs.readFileSync(path.join(main, ".git", "config"), "utf8"),
+          index: read("ls-files", "--stage"),
+          refs: read("for-each-ref", "--format=%(refname) %(objectname)"),
+          objects: read("count-objects"),
+          status: read("status", "--porcelain", "--untracked-files=all"),
+        });
+        const before = namedState();
+
+        const canonicalGitDir = path.join(rootDir, ".instafy", ".git");
+        fs.mkdirSync(path.join(rootDir, ".instafy"));
+        git(rootDir, "--git-dir", canonicalGitDir, "--work-tree", rootDir, "init", "-q", "-b", "main");
+        fs.writeFileSync(path.join(rootDir, "hello.txt"), "hello\n");
+        const env = {
+          GIT_DIR: namedGitDir,
+          GIT_INDEX_FILE: path.join(namedGitDir, "index"),
+          GIT_AUTHOR_NAME: "Instafy Test",
+          GIT_AUTHOR_EMAIL: "test@example.invalid",
+          GIT_COMMITTER_NAME: "Instafy Test",
+          GIT_COMMITTER_EMAIL: "test@example.invalid",
+        };
+
+        const added = await execCli(["git", "add", "-A"], { cwd: rootDir, env });
+        expect(added.code, added.stderr).toBe(0);
+        const committed = await execCli(["git", "commit", "-q", "-m", "checkpoint"], { cwd: rootDir, env });
+        expect(committed.code, committed.stderr).toBe(0);
+
+        expect(namedState(), "instafy git changed the repository GIT_DIR names").toEqual(before);
+        expect(git(rootDir, "--git-dir", canonicalGitDir, "ls-tree", "-r", "--name-only", "HEAD")).toBe("hello.txt");
+      } finally {
+        fs.rmSync(rootDir, { recursive: true, force: true });
+        fs.rmSync(named, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
+
+  it(
+    "keeps the index git hands a hook in .instafy/.git itself, so the hook's add lands in that commit",
+    async () => {
+      const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-git-own-hook-"));
+      try {
+        initCanonicalRepo(rootDir);
+        const canonicalGitDir = path.join(rootDir, ".instafy", ".git");
+        const env = {
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_AUTHOR_NAME: "Instafy Test",
+          GIT_AUTHOR_EMAIL: "test@example.invalid",
+          GIT_COMMITTER_NAME: "Instafy Test",
+          GIT_COMMITTER_EMAIL: "test@example.invalid",
+        };
+        fs.writeFileSync(path.join(rootDir, "a.txt"), "one\n");
+        fs.writeFileSync(path.join(rootDir, "b.txt"), "one\n");
+        const added = await execCli(["git", "add", "-A"], { cwd: rootDir, env });
+        expect(added.code, added.stderr).toBe(0);
+        const first = await execCli(["git", "commit", "-q", "-m", "first"], { cwd: rootDir, env });
+        expect(first.code, first.stderr).toBe(0);
+
+        // During `commit -a` git runs this hook with GIT_DIR naming .instafy/.git and GIT_INDEX_FILE
+        // naming the index the commit is building, which is where the hook's add has to go.
+        const entry = path.join(new URL("../", import.meta.url).pathname, "bin", "instafy.js");
+        fs.mkdirSync(path.join(canonicalGitDir, "hooks"), { recursive: true });
+        fs.writeFileSync(
+          path.join(canonicalGitDir, "hooks", "pre-commit"),
+          `#!/bin/sh\nset -e\nprintf 'hook\\n' > b.txt\nexec node ${JSON.stringify(entry)} git add b.txt\n`,
+          { mode: 0o755 },
+        );
+        fs.writeFileSync(path.join(rootDir, "a.txt"), "two\n");
+        const committed = await execCli(["git", "commit", "-a", "-q", "-m", "second"], {
+          cwd: rootDir,
+          env,
+        });
+        expect(committed.code, committed.stderr).toBe(0);
+
+        const committedFile = (name: string) =>
+          spawnSync("git", ["--git-dir", canonicalGitDir, "show", `HEAD:${name}`], {
+            encoding: "utf8",
+          }).stdout;
+        expect(committedFile("a.txt")).toBe("two\n");
+        expect(committedFile("b.txt")).toBe("hook\n");
+      } finally {
+        fs.rmSync(rootDir, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
+
+  it(
     "repairs stale canonical origin remotes from runtime env",
     async () => {
       const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-git-remote-"));

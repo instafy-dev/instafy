@@ -393,6 +393,12 @@ instafy git commit -m "instafy: checkpoint"
 instafy git push origin HEAD:main
 ```
 
+It always works in `.instafy/.git` and the workspace around it. It ignores `GIT_DIR`, `GIT_INDEX_FILE` and
+the other variables git sets for another repository (it does keep `-c` settings), so a hook or a
+`git rebase --exec` command in another checkout can run it without touching that checkout. When they
+name the space's own `.instafy/.git`, as in a hook of that repository, they still apply. The runtime
+agent that `instafy runtime start` launches does not inherit those variables either.
+
 ## Runtime lifecycle
 
 ### `instafy runtime start`

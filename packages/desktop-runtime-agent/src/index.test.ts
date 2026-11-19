@@ -506,6 +506,45 @@ describe("desktop runtime identity and Personal Browser capabilities", () => {
     });
   });
 
+  it("drops the repository, index and object store an inherited git variable names", () => {
+    // What a commit hook in a linked worktree hands the commands it starts, the other variables
+    // that name another repository, and the `-c` settings git itself keeps for one.
+    const linked = "/elsewhere/.git/worktrees/linked";
+    const env: NodeJS.ProcessEnv = {
+      GIT_DIR: linked,
+      GIT_WORK_TREE: "/elsewhere/linked",
+      GIT_IMPLICIT_WORK_TREE: "0",
+      GIT_COMMON_DIR: "/elsewhere/.git",
+      GIT_INDEX_FILE: `${linked}/index.lock`,
+      GIT_OBJECT_DIRECTORY: "/elsewhere/.git/objects",
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: "/elsewhere/.git/objects",
+      GIT_CONFIG: "/elsewhere/.git/config",
+      GIT_GRAFT_FILE: "/elsewhere/.git/info/grafts",
+      GIT_NO_REPLACE_OBJECTS: "1",
+      GIT_REPLACE_REF_BASE: "refs/replace/",
+      GIT_SHALLOW_FILE: "/elsewhere/.git/shallow",
+      GIT_PREFIX: "sub/",
+      GIT_NAMESPACE: "other",
+      GIT_QUARANTINE_PATH: "/elsewhere/.git/objects/tmp_objdir-incoming-1",
+      GIT_INTERNAL_SUPER_PREFIX: "sub/",
+      GIT_CONFIG_PARAMETERS: "'core.quotepath'='false'",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.quotepath",
+      GIT_CONFIG_VALUE_0: "false",
+      GIT_TERMINAL_PROMPT: "0",
+    };
+
+    expect(applyProtectedDesktopRuntimeEnv(env, { projectId: PROJECT_ID })).toEqual({
+      GIT_CONFIG_PARAMETERS: "'core.quotepath'='false'",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.quotepath",
+      GIT_CONFIG_VALUE_0: "false",
+      GIT_TERMINAL_PROMPT: "0",
+      NO_PROXY: "localhost,127.0.0.1,::1",
+      no_proxy: "localhost,127.0.0.1,::1",
+    });
+  });
+
   it("keeps loopback traffic, and the Personal Browser bearer, off an inherited proxy", () => {
     const env: NodeJS.ProcessEnv = {
       HTTPS_PROXY: "http://proxy.corp.example:3128",
