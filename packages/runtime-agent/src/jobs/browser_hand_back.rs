@@ -6140,11 +6140,9 @@ mod tests {
             )),
             "{section}"
         );
-        assert!(
-            stopped_finding().contains(
-                "`no-page`: the page wasn't at the address Octo tried; `timed-out`: the page didn't answer in time"
-            )
-        );
+        assert!(stopped_finding().contains(
+            "`no-page`: the page wasn't at the address Octo tried; `unreachable`: the page couldn't be reached; `timed-out`: the page didn't answer in time"
+        ));
         assert!(
             !section.contains("reply that no page it read states"),
             "{section}"

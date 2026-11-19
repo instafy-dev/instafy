@@ -33600,8 +33600,26 @@ mod tests {
     /// pages" and no build, and a page request with search on made no page). It counts the pages
     /// it read, not the steps the browser answered. The failed open is not tried again: no pass
     /// runs. A building card's part, with no build after it, keeps its words.
-    #[tokio::test]
-    async fn a_part_whose_only_open_failed_still_gets_its_build() {
+    #[test]
+    fn a_part_whose_only_open_failed_still_gets_its_build() {
+        // The end of a browser turn's answer is a large future, as in production: it runs boxed,
+        // on a runtime-sized stack.
+        const STACK_SIZE: usize = 32 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(a_part_whose_only_open_failed_still_gets_its_build_on_a_large_stack())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn a_part_whose_only_open_failed_still_gets_its_build_on_a_large_stack() {
         let workspace = tempfile::tempdir().expect("workspace");
         let client = crate::codex::CodexClient::new(crate::codex::CodexConfig {
             workspace_dir: workspace.path().to_path_buf(),
@@ -33619,7 +33637,7 @@ mod tests {
             let final_json = &final_json;
             async move {
                 let mut summary = summary;
-                let ended = end_browser_turn_answer(
+                let ended = Box::pin(end_browser_turn_answer(
                     client,
                     &job,
                     BrowserTurnAnswer {
@@ -33640,7 +33658,7 @@ mod tests {
                     },
                     &mut summary,
                     &crate::task_usage::TaskUsage::default(),
-                )
+                ))
                 .await;
                 (ended, summary)
             }
