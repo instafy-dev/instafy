@@ -121,7 +121,9 @@ export type ClaudeCodeUnsupportedReason =
   | "empty"
   | "too_long"
   | "execution_mode"
-  | "write_scope";
+  | "write_scope"
+  | "instafy_feature"
+  | "delegated";
 
 /** What the sender reads for a turn Claude Code can't take, by its reason (11.4). */
 export const CLAUDE_CODE_UNSUPPORTED_SENTENCES: Readonly<Record<ClaudeCodeUnsupportedReason, string>> = Object.freeze({
@@ -137,6 +139,12 @@ export const CLAUDE_CODE_UNSUPPORTED_SENTENCES: Readonly<Record<ClaudeCodeUnsupp
   // held to its part of the files. Without a write it runs read-only.
   write_scope:
     "Claude Code can't be held to part of the space's files while other agents write, so it can't take this turn. Send it the message on its own.",
+  // A turn that needs one of Instafy's own tools: a space review, a repo
+  // import, a preview it asks for.
+  instafy_feature: "Claude Code can't do this: it needs one of Instafy's own tools.",
+  // A send an agent's job makes: an agent reads what teammates wrote, so its
+  // words could be theirs (11.5).
+  delegated: "Claude Code takes turns only from its own person, never from another agent's job.",
 });
 
 // A refusal code or reason the controller may add later: never its raw text,

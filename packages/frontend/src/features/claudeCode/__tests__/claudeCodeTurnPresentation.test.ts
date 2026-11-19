@@ -220,13 +220,28 @@ describe("Claude Code turn wording", () => {
     expect(unsupported("write_scope")).toBe(
       "Claude Code can't be held to part of the space's files while other agents write, so it can't take this turn. Send it the message on its own.",
     );
+    expect(unsupported("instafy_feature")).toBe("Claude Code can't do this: it needs one of Instafy's own tools.");
+    expect(unsupported("delegated")).toBe(
+      "Claude Code takes turns only from its own person, never from another agent's job.",
+    );
     // A reason this client does not know yet, or none, never shows the
     // controller's raw text.
     expect(unsupported("something_new")).toBe("Claude Code couldn't take this message.");
     expect(unsupported(null)).toBe("Claude Code couldn't take this message.");
     expect(refusal("claude_code_turn_unsupported")).toBe("Claude Code couldn't take this message.");
     expect(Object.keys(CLAUDE_CODE_UNSUPPORTED_SENTENCES).sort()).toEqual(
-      ["attachments", "browser", "command", "empty", "execution_mode", "team_plan", "too_long", "write_scope"],
+      [
+        "attachments",
+        "browser",
+        "command",
+        "delegated",
+        "empty",
+        "execution_mode",
+        "instafy_feature",
+        "team_plan",
+        "too_long",
+        "write_scope",
+      ],
     );
   });
 
