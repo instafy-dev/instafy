@@ -439,6 +439,63 @@ const BROWSER_CARD_CHECKS_SQL: &str = "select
    left join prompts prompt on prompt.id = job.prompt_id
   where job.id = $2 and job.conversation_id = $1";
 
+/// What a routed card answers (`answers` on its turn's stamp): a new message
+/// of the person's, or Studio's Continue under a Stop, which names the runs
+/// that Stop ended (`continuedRunIds`) and sends their request again.
+const CARD_ANSWERS_MESSAGE: &str = "message";
+const CARD_ANSWERS_CONTINUE: &str = "continue";
+
+/// When the request a Continue under a Stop sends again first went out, for
+/// conversation `$1` and the routing step's job `$2` of that Continue: the
+/// oldest job of the request. A Continue names the runs its Stop ended, a
+/// card's browser turn the card it carries on (`browserRequestOf`), a
+/// hand-back the card of the browser turn it continues (its record), and a Let
+/// Octo continue the paused run it goes on with (`browserContinuesRunId`):
+/// each leads to an earlier job of the same request, back to the routing step
+/// of the message the person sent. Null when the Continue names none.
+const REQUEST_SENT_AT_SQL: &str = r"with recursive request(id) as (
+         select $2::uuid
+       union
+         select earlier.id
+           from request
+           join agent_jobs later
+             on later.id = request.id and later.conversation_id = $1
+           join agent_jobs earlier
+             on earlier.conversation_id = $1
+            and (earlier.run_id::text in (
+                     select lower(btrim(continued.run))
+                       from jsonb_array_elements_text(
+                              case jsonb_typeof(later.payload #> '{metadata,continuedRunIds}')
+                                when 'array' then later.payload #> '{metadata,continuedRunIds}'
+                                else '[]'::jsonb
+                              end) as continued(run))
+                 or earlier.id::text = lower(coalesce(
+                      later.payload #>> '{metadata,browserHandBack,cardJobId}',
+                      substring(later.payload #>> '{metadata,browserRequestOf}'
+                                from '^\s*job:\s*([0-9A-Fa-f-]+)\s*$')))
+                 or (later.payload #> '{metadata,browserRequestOf}' is null
+                     and earlier.run_id::text
+                         = lower(btrim(later.payload #>> '{metadata,browserContinuesRunId}'))))
+     )
+     select min(job.created_at) as request_sent_at
+       from agent_jobs job
+      where job.conversation_id = $1
+        and job.id <> $2
+        and job.id in (select id from request)";
+
+/// Whether a message is Studio's Continue under a Stop: its job names the runs
+/// that Stop ended.
+fn continues_stopped_runs(job_payload: &JsonValue) -> bool {
+    job_payload
+        .pointer("/metadata/continuedRunIds")
+        .and_then(JsonValue::as_array)
+        .is_some_and(|runs| {
+            runs.iter()
+                .filter_map(JsonValue::as_str)
+                .any(|run| !run.trim().is_empty())
+        })
+}
+
 /// Checks a browser send's claim that it carries on Octo's card and returns
 /// the stamp to put on its job, or None for a send that goes out as the
 /// sender's own turn. The send must ask the card's task and nothing else (no
@@ -499,8 +556,28 @@ pub(crate) async fn verify_browser_card_turn(
     // task is their words: the browser turn is their own turn, charged as any
     // turn they send ([`system_turn_of`]), and still the card's turn for the
     // checks that read which turns Instafy started (one hop, the hand-back).
+    // What the card answers, read only to pick the browser thread the turn
+    // runs on (runtime-agent `leave_a_long_browser_thread_of_earlier_messages`):
+    // the routing step's job is the message's own, and a Continue says when
+    // its request first went out, so the runtime can tell whether the thread
+    // ran a turn of it.
     if card.get::<_, bool>("card_routed") {
         stamp["routed"] = json!(true);
+        if continues_stopped_runs(&card_payload) {
+            stamp["answers"] = json!(CARD_ANSWERS_CONTINUE);
+            let sent = transaction
+                .query_one(REQUEST_SENT_AT_SQL, &[conversation_id, &card_job_id])
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to read when a request was sent: {error}"))
+                })?
+                .get::<_, Option<DateTime<Utc>>>("request_sent_at");
+            if let Some(sent) = sent {
+                stamp["requestSentAt"] = json!(sent.to_rfc3339());
+            }
+        } else {
+            stamp["answers"] = json!(CARD_ANSWERS_MESSAGE);
+        }
     }
     Ok(Some(stamp))
 }
