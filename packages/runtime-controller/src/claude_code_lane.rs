@@ -286,7 +286,14 @@ fn check_turn_shape(request: &DispatchPromptNormalized, uses_browser: bool) -> R
             .as_object()
             .is_some_and(|map| keys.iter().any(|key| map.contains_key(*key)))
     };
-    if uses_browser || has_key(&["browserTransport", "browser_transport"]) {
+    if uses_browser
+        || has_key(&[
+            "browserTransport",
+            "browser_transport",
+            crate::browser_hand_back::HAND_BACK_KEY,
+            "browser_hand_back",
+        ])
+    {
         return Err(unsupported(
             "browser",
             "Claude Code can't use Instafy's browser. Ask an agent that uses another AI.",

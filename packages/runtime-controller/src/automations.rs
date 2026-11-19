@@ -306,9 +306,20 @@ fn normalize_schedule_kind(raw: &str) -> Result<String, (StatusCode, Json<ApiErr
 }
 
 /// An automation's prompt metadata, as create and update store it.
+/// The controller's mark on an automation an agent's job made
+/// ([`MADE_BY_AN_AGENTS_JOB_KEY`]): its prompt is that agent's words, which
+/// could be a teammate's, so it never runs on Claude Code
+/// (crate::claude_code_lane, docs/Local-Engine-Turns.md 11.5). Only the
+/// controller writes it: a person who saves the automation's metadata makes
+/// its words their own, and no client copy is kept.
+const MADE_BY_AN_AGENTS_JOB_KEY: &str = "madeByAnAgentsJob";
+
 fn normalize_metadata(raw: Option<JsonValue>) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
     match raw {
-        Some(JsonValue::Object(map)) => Ok(JsonValue::Object(map)),
+        Some(JsonValue::Object(mut map)) => {
+            map.remove(MADE_BY_AN_AGENTS_JOB_KEY);
+            Ok(JsonValue::Object(map))
+        }
         Some(_) => Err(bad_request("metadata must be a JSON object")),
         None => Ok(json!({})),
     }
@@ -759,6 +770,36 @@ async fn execute_automation_once(
     };
 
     let runtime_mode = record.runtime_mode.trim().to_ascii_lowercase();
+
+    // An automation an agent's job made never runs on Claude Code: its prompt
+    // is that agent's words (crate::claude_code_lane). Its owner saves it
+    // themselves to make them theirs.
+    if metadata
+        .get(MADE_BY_AN_AGENTS_JOB_KEY)
+        .is_some_and(|value| value == &JsonValue::Bool(true))
+        && crate::claude_code_lane::selects_a_claude_code_agent(
+            &*state.pool.get().await?,
+            record.user_id,
+            &metadata,
+        )
+        .await
+        .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?
+    {
+        finalize_automation_attempt(
+            state,
+            record,
+            now,
+            next_run_at,
+            status_override,
+            Some(AutomationLaunchFailure::minted(
+                "An agent made this automation, so it doesn't run on Claude Code. Open it and \
+                 save it yourself to run it there.",
+                CODE_CLAUDE_CODE_AGENT_MADE,
+            )),
+        )
+        .await?;
+        return Ok(());
+    }
 
     // A run whose every agent is a Claude Code agent needs no runtime of the
     // space's: it waits for its person's own computer, so no runtime is picked
@@ -1398,6 +1439,9 @@ pub(crate) const CODE_SELF_HOSTED_RUNTIME_OFFLINE: &str = "self_hosted_runtime_o
 pub(crate) const CODE_HOSTED_PROVIDER_UNSUPPORTED: &str = "hosted_provider_unsupported";
 pub(crate) const CODE_AUTOMATION_ACCESS_DENIED: &str = "automation_access_denied";
 pub(crate) const CODE_CONTROLLER_UNAVAILABLE: &str = "controller_unavailable";
+/// An automation an agent's job made, of a Claude Code agent's: it never runs
+/// on Claude Code ([`MADE_BY_AN_AGENTS_JOB_KEY`]).
+pub(crate) const CODE_CLAUDE_CODE_AGENT_MADE: &str = "claude_code_agent_made";
 
 /// The prose plus, where we know it, a machine-readable cause. Before this the
 /// choke point took `Option<String>`, which forced every call site to flatten a
@@ -1821,14 +1865,20 @@ async fn create_project_automation(
     let project = crate::load_project_record(&transaction, &project_id).await?;
     crate::ensure_project_write_access(&transaction, &project, &access_context, None).await?;
     // An agent's job never makes an automation of a Claude Code agent's, whose
-    // prompt would be its words (crate::claude_code_lane::not_from_an_agents_job).
-    // A job's token can change no automation's prompt or agents anyway, only
-    // its schedule or status.
-    if active_job.is_some()
-        && crate::claude_code_lane::selects_a_claude_code_agent(&transaction, user_id, &metadata)
+    // prompt would be its words (crate::claude_code_lane::not_from_an_agents_job),
+    // and one it makes is marked so that it never runs on Claude Code later,
+    // should its agent move there. A job's token can change no automation's
+    // prompt or agents, only its schedule or status.
+    let mut metadata = metadata;
+    if active_job.is_some() {
+        if crate::claude_code_lane::selects_a_claude_code_agent(&transaction, user_id, &metadata)
             .await?
-    {
-        return Err(crate::claude_code_lane::not_from_an_agents_job());
+        {
+            return Err(crate::claude_code_lane::not_from_an_agents_job());
+        }
+        if let Some(map) = metadata.as_object_mut() {
+            map.insert(MADE_BY_AN_AGENTS_JOB_KEY.to_string(), JsonValue::Bool(true));
+        }
     }
 
     let automation_id = Uuid::new_v4();

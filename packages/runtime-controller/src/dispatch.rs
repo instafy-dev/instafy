@@ -1588,6 +1588,8 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 has_unknown_active_lane = true;
             }
         }
+        // A teammate's entry that waits behind their own local-engine turn,
+        // itself waiting for their computer, holds up nobody else either.
         let reservation_rows = transaction
             .query(
                 "select request
@@ -1600,9 +1602,27 @@ pub(crate) async fn process_dispatch_prompt_timed(
                        and dispatched_at >= now() - interval '10 minutes'
                        and ($2::uuid is null or id <> $2)
                      )
-                     or ($2::uuid is null and status = 'queued')
+                     or (
+                       $2::uuid is null
+                       and status = 'queued'
+                       and not (
+                         user_id is distinct from $3
+                         and exists (
+                             select 1 from agent_jobs waiting
+                              where waiting.conversation_id = conversation_send_queue.conversation_id
+                                and waiting.engine is not null
+                                and waiting.status = 'queued'
+                                and waiting.lease_attempts = 0
+                                and (waiting.payload ->> 'user_id') = conversation_send_queue.user_id::text
+                         )
+                       )
+                     )
                    )",
-                &[&conversation.id, &request.dispatch_queue_entry_id],
+                &[
+                    &conversation.id,
+                    &request.dispatch_queue_entry_id,
+                    &context.user_id,
+                ],
             )
             .await
             .map_err(|error| {

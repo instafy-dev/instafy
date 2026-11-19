@@ -2322,6 +2322,144 @@ async fn a_waiting_lane_turn_keeps_no_teammates_agent_busy() -> anyhow::Result<(
     .await
 }
 
+/// A message that waits in the send queue behind its own person's waiting
+/// Claude Code turn waits with it, and holds up nobody else (11.7): a
+/// teammate's send to their own @claude is admitted at once, and the drain
+/// leaves the parked message queued until its person's turn is no longer
+/// waiting.
+#[tokio::test]
+async fn a_message_parked_behind_a_waiting_turn_holds_up_nobody_else() -> anyhow::Result<()> {
+    with_lane(
+        "lane-parked",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (chat, _waiting) = lane.lane_turn().await?;
+            let parked_send = with(
+                lane_send(lane_metadata(json!({}))),
+                json!({ "expectedLaneIdle": true }),
+            );
+            let (status, response) = lane.send(&lane.owner(), chat, &parked_send).await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            assert_eq!(response["status"], json!("queued"), "{response}");
+            let parked: Uuid = sql_one(
+                lane.pool(),
+                "select id from conversation_send_queue where conversation_id = $1",
+                &[&chat],
+            )
+            .await?;
+
+            let (status, response) = lane
+                .send(
+                    &lane.token(space.member),
+                    chat,
+                    &with(
+                        lane_send(lane_metadata(json!({}))),
+                        json!({ "expectedLaneIdle": true }),
+                    ),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let job = Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())
+                .map_err(|_| anyhow::anyhow!("the teammate's send was queued: {response}"))?;
+            assert_lane_job(
+                &lane.job(job).await?,
+                space.member,
+                lane.member_claude,
+                "the teammate's own turn",
+            );
+
+            crate::send_queue::recover_send_queue_batch(&lane.harness.state, None)
+                .await
+                .map_err(|(status, error)| anyhow::anyhow!("drain: {status} {}", error.message))?;
+            assert_eq!(
+                sql_one::<String>(
+                    lane.pool(),
+                    "select status from conversation_send_queue where id = $1",
+                    &[&parked],
+                )
+                .await?,
+                "queued",
+                "the parked message left the queue while its turn waited"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// An automation an agent's job made never runs on Claude Code, even once
+/// its agent moves there: its prompt is that agent's words (11.5). Its run is
+/// refused with a reason, and no lane turn starts.
+#[tokio::test]
+async fn an_automation_an_agents_job_made_never_runs_on_claude_code() -> anyhow::Result<()> {
+    with_lane(
+        "lane-agent-made",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let codex_chat = lane.chat().await?;
+            lane.admitted(codex_chat, &octo_send(space.runtime)).await?;
+            let leased = lane.harness.lease(space.runtime).await?;
+            let job_token = leased["controller_token"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("no job token: {leased}"))?
+                .to_string();
+            let (status, created) = lane
+                .harness
+                .call(
+                    "POST",
+                    format!("/projects/{}/automations", space.project_id),
+                    Some(&job_token),
+                    Some(json!({
+                        "name": "Made by an agent",
+                        "promptText": WORDS,
+                        "scheduleKind": "hourly",
+                        "intervalHours": 24,
+                        "timezone": "UTC",
+                        "runtimeMode": "auto",
+                        "metadata": { "agentSelection": { "active": ["helper"], "mentions": ["helper"] } },
+                    })),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "automation: {status} {created}");
+            let automation = Uuid::parse_str(created["id"].as_str().unwrap_or_default())?;
+            // Its agent moves to Claude Code.
+            sql(
+                lane.pool(),
+                "update user_agents set provider = 'claude-code', credential_id = null
+                  where id = $1",
+                &[&space.owner_agent],
+            )
+            .await?;
+            lane.run_automation(automation).await?;
+            let (last_error, thread): (Option<String>, Option<Uuid>) = {
+                let row = lane
+                    .pool()
+                    .get()
+                    .await?
+                    .query_one(
+                        "select last_error, conversation_id from automations where id = $1",
+                        &[&automation],
+                    )
+                    .await?;
+                (row.get(0), row.get(1))
+            };
+            assert!(
+                last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("An agent made this automation")),
+                "{last_error:?}"
+            );
+            if let Some(thread) = thread {
+                assert!(lane.jobs_in(thread).await?.is_empty(), "a turn started");
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
 /// A Claude Code agent's job holds no Instafy AI reserve (crate::credits):
 /// in a send to it and to an agent on Instafy AI, the other's failure finds
 /// nothing else holding the prompt's reserve, so it is given back.
