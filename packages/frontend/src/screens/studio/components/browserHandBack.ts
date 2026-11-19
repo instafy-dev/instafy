@@ -111,22 +111,24 @@ function promptMetadataString(metadata: unknown, keys: readonly string[]): strin
 }
 
 /**
- * The runtime's codes for a pause the person continues in the browser: their
- * fields, a cookie notice the browser couldn't decline, or a step only they
- * take (runtime-agent `browser_hand_back::PAUSE_CODES`, runtime-controller
- * `PAUSE_CODES`).
+ * The runtime's codes for a person's answer to a step's prompt: they said no,
+ * didn't answer in time, or the page changed after their yes (runtime-agent
+ * `shared_browser_activity::ANSWER_CODES`, runtime-controller `ANSWER_CODES`;
+ * the fixture pins them).
  */
-const PAUSE_CODES: ReadonlySet<string> = new Set([
-  "human_input_required",
-  "cookie_notice_required",
-  "human_step_required",
+export const BROWSER_ANSWER_CODES: ReadonlySet<string> = new Set([
+  "approval_denied",
+  "approval_timeout",
+  "approval_stale",
 ]);
 
 /**
  * The browser turn stopped on a step that is the person's: it asked for their
- * input on the page. The person goes on in the browser; nothing goes back to
- * the building turn. A prompt they said no to or left ended that step, not the
- * message: the turn's findings go back as any finished turn's do.
+ * input on the page, or its run ended on anything but their answer to a step's
+ * prompt (a pause on their fields, a cookie notice or a step only they take, a
+ * safety stop, a browser that went away). The person goes on in the browser;
+ * nothing goes back to the building turn. Their answer ended that step, not
+ * the message: the turn's findings go back as any finished turn's do.
  */
 export function browserTurnStoppedForPerson(messages: readonly ChatMessage[], jobId: string): boolean {
   return messages.some((message) => {
@@ -135,8 +137,8 @@ export function browserTurnStoppedForPerson(messages: readonly ChatMessage[], jo
     const details = extractMessageDetails(message.metadata);
     if (!details) return false;
     const consent = details.terminalConsent;
-    if (isRecord(consent) && consent.state === "blocked" && typeof consent.code === "string" &&
-        PAUSE_CODES.has(consent.code)) {
+    if (isRecord(consent) && consent.state === "blocked" &&
+        !(typeof consent.code === "string" && BROWSER_ANSWER_CODES.has(consent.code))) {
       return true;
     }
     return details.tool === "request_human_input" && details.status === "completed";

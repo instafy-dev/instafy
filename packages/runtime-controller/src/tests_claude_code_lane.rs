@@ -3526,6 +3526,7 @@ async fn only_its_own_ready_computer_leases_a_lane_turn_once() -> anyhow::Result
                 "skill_setup_openers",
                 crate::browser_hand_back::TURNS_SINCE_KEY,
                 crate::browser_hand_back::READS_NOTE_KEY,
+                crate::browser_hand_back::AFTER_A_PROMPT_KEY,
                 "space_pages",
                 "attachment_downloads",
             ] {

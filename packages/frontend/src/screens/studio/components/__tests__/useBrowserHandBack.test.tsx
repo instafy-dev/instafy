@@ -15,6 +15,7 @@ import {
 import type { RunStatus } from "../../../../types";
 import type { ChatMessage } from "../../types";
 import {
+  BROWSER_ANSWER_CODES,
   BROWSER_BUILD_REQUEST_NOTE_KEY,
   BROWSER_HAND_BACK_CLAIM_KEY,
   BROWSER_HAND_BACK_PROMPT,
@@ -191,6 +192,7 @@ describe("browser hand-back: when Studio sends one", () => {
       expect(browserTurnStoppedForPerson(messages, BROWSER_JOB)).toBe(false);
     }
     expect(fixtures.answerCodes).toEqual(["approval_denied", "approval_timeout", "approval_stale"]);
+    expect([...BROWSER_ANSWER_CODES]).toEqual(fixtures.answerCodes);
   });
 
   // A browser turn whose findings go back to a build posts no words of its

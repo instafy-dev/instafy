@@ -14,10 +14,11 @@
 //! - that job is a browser turn in this conversation that continued a card
 //!   (`browserRequestOf: "job:<id>"`), finished successfully, and finished
 //!   within [`HAND_BACK_WINDOW_MINUTES`], without stopping for a step of the
-//!   person's on the page (a pause they continue in the browser,
-//!   [`PAUSE_CODES`]). A prompt they said no to or left ended that step, not
-//!   the message: such a turn hands back what it read, with the step that
-//!   didn't run ([`STEP_NOT_DONE_RECORD_KEY`]);
+//!   person's (a manual step on the page, or a run that ended on anything but
+//!   their answer to a step's prompt: [`paused_for_person`]). Their answer (a
+//!   no, no answer in time, or a page that changed after their yes,
+//!   [`ANSWER_CODES`]) ended that step, not the message: such a turn hands back
+//!   what it read, with the step that didn't run ([`STEP_NOT_DONE_RECORD_KEY`]);
 //! - the card's own turn was the sender's, and not itself a hand-back: one
 //!   automatic hop only, so a later card stays a button for the person to press;
 //! - the card continues building something (`continueBuilding`, a page or a
@@ -184,15 +185,21 @@ pub(crate) const BUILD_REQUEST_RECORD_KEY: &str = "buildRequest";
 /// record then carries where that turn stopped and what it didn't find, from
 /// its Details note ([`stop_and_missing_lines`]).
 pub(crate) const CONTINUE_BUILDING_RECORD_KEY: &str = "continueBuilding";
-/// The terminal codes of a pause the person continues in the browser
-/// (runtime-agent `browser_hand_back::PAUSE_CODES`): `request_human_input` on
-/// their fields, a cookie notice the browser couldn't decline, or a step only
-/// they take. Only these hold the build back ([`paused_for_person`]).
-pub(crate) const PAUSE_CODES: [&str; 3] = [
-    "human_input_required",
-    "cookie_notice_required",
-    "human_step_required",
-];
+/// The terminal codes of a person's answer to a step's prompt: they said no,
+/// didn't answer in time, or the page changed after their yes (runtime-agent
+/// `shared_browser_activity::ANSWER_CODES`, Studio's `browserHandBack.ts`,
+/// `answerCodes` in browser_hand_back_fixtures.json). Such an answer ended that
+/// step, not the message: unlike every other end of a run, it holds no build
+/// back ([`paused_for_person`]).
+pub(crate) const ANSWER_CODES: [&str; 3] =
+    ["approval_denied", "approval_timeout", "approval_stale"];
+/// The payload key with which every lease says that this controller hands back
+/// a browser turn whose run a person's answer to a step's prompt ended
+/// ([`ANSWER_CODES`]). The runtime ends such a turn as any finished turn only
+/// then: an older controller refuses its hand-back as a pause, and a part that
+/// posted no words would leave the person's message with no answer at all
+/// (runtime-agent `browser_hand_back::AFTER_A_PROMPT_KEY`).
+pub(crate) const AFTER_A_PROMPT_KEY: &str = "browser_hand_back_after_a_prompt";
 /// The key of the step a prompt ended in a hand-back's record: its kind, its
 /// site and the person's answer (`denied`, `expired`) or a page that changed
 /// after their yes (`stale`), from the browser turn's own
@@ -1300,10 +1307,11 @@ pub(crate) async fn require_hand_back(
         ));
     }
 
-    // A browser turn that paused for the person (a sign-in, a form's fields,
-    // a cookie notice or a step only they take) did not finish the task: the
-    // person continues it in the browser, and nothing goes back to the
-    // building turn. A prompt they said no to or left ended that step only.
+    // A browser turn that stopped for the person (a sign-in, a form's fields,
+    // a cookie notice or a step only they take, or a run a safety stop or a
+    // closed browser ended) did not finish the task: the person continues it
+    // in the browser, and nothing goes back to the building turn. Their
+    // answer to a step's prompt ended that step only.
     let run_id = browser_job.get::<_, Option<Uuid>>("run_id");
     if paused_for_person(transaction, conversation_id, &browser_job_id, run_id).await? {
         return Err(hand_back_refused(
@@ -1992,31 +2000,37 @@ async fn finding_lines_note(
         })
 }
 
-/// Whether a browser turn ended on a pause the person continues in the
-/// browser: it asked for their input on the page (`request_human_input`), on
-/// their fields, a cookie notice the browser couldn't decline or a step only
-/// they take ([`PAUSE_CODES`], in the runtime's `browser/terminal-consent`
-/// artifact and the tool call that reported it). A prompt the person said no
-/// to or left, a page that changed after their yes, a browser that went away
-/// or a safety stop ended that step: the turn hands back what it read, and the
-/// building turn says the step didn't run. Held back for those too, a page
-/// message whose browser part had read the hours it needed got no build, for
-/// one planner step whose prompt ran out (a local test, Nov 19).
+/// Whether a browser turn stopped for a step of the person's: it asked for
+/// their input on the page (`request_human_input`), or its run ended on a code
+/// that is no answer of theirs to a step's prompt (a pause on their fields, a
+/// cookie notice or a step only they take, a safety stop, a browser that went
+/// away, or a code the runtime names none of), in the runtime's
+/// `browser/terminal-consent` artifact or the tool call that reported it.
+/// Their answer ([`ANSWER_CODES`]: a no, no answer in time, or a page that
+/// changed after their yes) ended that step, not the message: the turn hands
+/// back what it read, and the building turn says the step didn't run. Held
+/// back for those too, a page message whose browser part had read the hours it
+/// needed got no build, for one planner step whose prompt ran out (a local
+/// test, Nov 19). Every other end still holds it back: handed back, a part a
+/// safety stop ended posted nothing, and its build never said a step was
+/// stopped.
 async fn paused_for_person(
     transaction: &tokio_postgres::Transaction<'_>,
     conversation_id: &Uuid,
     browser_job_id: &Uuid,
     run_id: Option<Uuid>,
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {
-    let pauses: Vec<&str> = PAUSE_CODES.to_vec();
+    let answers: Vec<&str> = ANSWER_CODES.to_vec();
     transaction
         .query_one(
             "select exists (
-                 select 1 from agent_jobs job, unnest($4::text[]) code
+                 select 1 from agent_jobs job,
+                        jsonb_array_elements(case jsonb_typeof(job.artifacts)
+                                                 when 'array' then job.artifacts
+                                                 else '[]'::jsonb end) as listed(artifact)
                   where job.id = $1
-                    and job.artifacts @> jsonb_build_array(jsonb_build_object(
-                        'kind', 'browser/terminal-consent',
-                        'metadata', jsonb_build_object('code', code)))
+                    and artifact ->> 'kind' = 'browser/terminal-consent'
+                    and coalesce(artifact #>> '{metadata,code}', '') <> all($4::text[])
              ) or exists (
                  select 1 from conversation_messages
                   where conversation_id = $2
@@ -2029,10 +2043,11 @@ async fn paused_for_person(
                         (metadata #>> '{details,tool}' = 'request_human_input'
                          and metadata #>> '{details,status}' = 'completed')
                         or (metadata #>> '{details,terminalConsent,state}' = 'blocked'
-                            and metadata #>> '{details,terminalConsent,code}' = any($4::text[]))
+                            and coalesce(metadata #>> '{details,terminalConsent,code}', '')
+                                <> all($4::text[]))
                     )
              )",
-            &[browser_job_id, conversation_id, &run_id, &pauses],
+            &[browser_job_id, conversation_id, &run_id, &answers],
         )
         .await
         .map(|row| row.get::<_, bool>(0))
@@ -2090,9 +2105,11 @@ pub(crate) struct BrowserTurnsSince {
 
 /// The hand-back's keys on the lease of a conversation's job: the browser
 /// turns its building thread has not read yet ([`browser_turns_since`]),
-/// whether older ones were left out, and that this controller reads the note
-/// of a browser turn that posted no words as its reply ([`READS_NOTE_KEY`]).
-/// Every lease sets them, so no copy a client sent can survive.
+/// whether older ones were left out, that this controller reads the note of a
+/// browser turn that posted no words as its reply ([`READS_NOTE_KEY`]), and
+/// that it hands back a browser turn a person's answer to a step's prompt
+/// ended ([`AFTER_A_PROMPT_KEY`]). Every lease sets them, so no copy a client
+/// sent can survive.
 pub(crate) fn stamp_lease(
     payload: &mut serde_json::Map<String, JsonValue>,
     turns_since: BrowserTurnsSince,
@@ -2106,6 +2123,7 @@ pub(crate) fn stamp_lease(
         JsonValue::Bool(turns_since.earlier_left_out),
     );
     payload.insert(READS_NOTE_KEY.to_string(), JsonValue::Bool(true));
+    payload.insert(AFTER_A_PROMPT_KEY.to_string(), JsonValue::Bool(true));
 }
 
 /// The browser turns of a conversation since its building thread's last
@@ -2601,10 +2619,12 @@ mod tests {
             },
         );
         assert_eq!(payload[key.as_str()], json!(true), "{payload}");
+        assert_eq!(key, AFTER_A_PROMPT_KEY);
         assert_eq!(
             fixtures()["answerCodes"],
             json!(["approval_denied", "approval_timeout", "approval_stale"])
         );
+        assert_eq!(fixtures()["answerCodes"], json!(ANSWER_CODES));
     }
 
     #[test]
@@ -3660,11 +3680,13 @@ missing: weight
             step_not_done(&artifacts("approval_denied", "drag", "www.transit.example")),
             Some(json!({ "answer": "denied" }))
         );
-        for code in PAUSE_CODES
-            .iter()
-            .copied()
-            .chain(["approval_stale_or_replayed", "browser_unavailable"])
-        {
+        for code in [
+            "human_input_required",
+            "cookie_notice_required",
+            "human_step_required",
+            "approval_stale_or_replayed",
+            "browser_unavailable",
+        ] {
             assert_eq!(
                 step_not_done(&artifacts(code, "search", "transit.example")),
                 None

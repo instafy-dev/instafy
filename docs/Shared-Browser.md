@@ -1926,15 +1926,24 @@ earlier step, so the browser is done for this turn. End this turn now.",
 after you said yes, so I didn't do that step. Send a message and I'll ask again.", and every other terminal code reads one plain
 message. Each speaks
 only about the step that asked, because earlier steps of the same turn may
-already have opened pages or changed something, and only a pause the person
-continues in the browser (their fields, a cookie notice the browser couldn't
-decline, or a step only they take) replaces the turn's words. Any other end
-ended that step, not the message: the turn keeps its own words with the line
-under them and every finding line it wrote, and a turn whose findings go back
-to its build hands them back as any finished turn does; its build makes the
-change from what was read, writes "not checked" where only that step would
-give a value, and says in one line which step didn't run and that it can ask
-again, without trying it again or another way. The code, with the kind and
+already have opened pages or changed something. A person's answer to a step's
+prompt (a no, no answer in time, or `approval_stale`) ended that step, not the
+message, under a controller whose every lease says it hands such a turn back
+(`browser_hand_back_after_a_prompt`): the turn keeps its own words and every
+line it wrote, and the pages its steps opened, by address, when it wrote no
+finding line; a finding that says a page stopped it at the page of that step
+is left out, unless the browser told a step that very stop there, since the
+step never reached its page. A question's turn says the line under its words.
+A turn whose findings go back to its build hands them back as any finished
+turn does, without the line, and one that read no page hands its build the
+message; that build makes the change from what was read, writes "not checked"
+in place of what it didn't find where only that step would give a value, and
+says in one line which step didn't run and that it can ask again, without
+trying it again or getting its values another way. Every other end (a pause
+the person continues in the browser, a safety stop, the browser gone, and any
+end under an older controller, which would refuse the hand-back of a part that
+posted no words) replaces the turn's words with its line and holds the build
+back, as Studio and the controller judge it too. The code, with the kind and
 site of the step that ended the run, stays in the run's
 `browser/terminal-consent` artifact, which the controller reads for the
 build's `stepNotDone`. The tool result tells
@@ -3168,10 +3177,10 @@ unless the policy is `"covered"`.
   one line, one reply and the card ([Chat activity](Chat-Activity.md)). It does so only in the tab that sent both the
   card's prompt and the browser continuation, when nobody wrote after the
   browser turn, the turn succeeded within the last ten minutes and did not
-  pause for the person (`request_human_input` on their fields, a cookie notice
-  the browser couldn't decline, or a step only they take; a prompt they said
-  no to or left ended that step only), and no draft or manual browser step is
-  pending. The controller
+  stop for the person (`request_human_input`, or a run that ended on anything
+  but their answer to a step's prompt; a no, no answer in time or a page that
+  changed after their yes ended that step only), and no draft or manual
+  browser step is pending. The controller
   checks the same chain under the conversation's dispatch fence and stamps
   `browserHandBack` with what the browser turn was asked (at most 2,000
   characters), for a card the routing step posted the message's own words as
@@ -3502,15 +3511,16 @@ unless the policy is `"covered"`.
   declined by itself) but whose steps opened no page and whose wrap-up pass
   wrote no line: which look a turn took never decides whether the message is
   made. So does one whose steps answered but whose lines name no page read (an
-  open that failed, a site the browser couldn't reach, a prompt that ended its
-  first step): the count is of pages read, not steps answered, and its note
-  keeps where it stopped and what it didn't find, which the controller gives
-  the build with the message (`findings` of stops only, `missing`, and a
-  `stepNotDone` from its run's artifact), never its words. That build makes it
-  from the person's words, what the chat found and what its own tools find,
-  never tries a page that stopped the browser another way, and says what it
-  didn't find or why there is nothing to show; the failed open is not tried
-  again in the browser. One whose first attempt opened a page and that is run
+  open that failed, a site the browser couldn't reach, the person's answer to
+  the prompt of its first step): the count is of pages read, not steps
+  answered, and its note keeps where it stopped and what it didn't find, which
+  the controller gives the build with the message (`findings` of stops only,
+  `missing`, and a `stepNotDone` from its run's artifact), never its words,
+  quoted as page text with the same warning as every hand-back's findings.
+  That build makes it from the person's words, what the chat found and what
+  its own tools find, never tries a page that stopped the browser another way,
+  and says what it didn't find or why there is nothing to show; the failed
+  open is not tried again in the browser. One whose first attempt opened a page and that is run
   again ends with the pages of both attempts, whatever the retry did. Failed in
   its place, a note on a map, a Continue after a Stop and a fill-in each needed
   Try again, and the note's Try again opened two sites nobody named. The person's

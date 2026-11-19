@@ -14,7 +14,7 @@ use crate::browser_hand_back::{
     BUILD_REQUEST_NOTE_KEY, BUILD_REQUEST_RECORD_KEY, CONTINUE_BUILDING_RECORD_KEY,
     HAND_BACK_CLAIM_KEY, HAND_BACK_KEY, HAND_BACK_NOTHING_READ_CODE, HAND_BACK_NOT_BUILDING_CODE,
     HAND_BACK_PAUSED_CODE, HAND_BACK_PROMPT, HAND_BACK_SECOND_HOP_CODE, HAND_BACK_SUPERSEDED_CODE,
-    HAND_BACK_USED_CODE, LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT, PAUSE_CODES,
+    HAND_BACK_USED_CODE, LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT,
     STEP_NOT_DONE_RECORD_KEY,
 };
 
@@ -2230,7 +2230,11 @@ async fn a_prompt_that_ended_a_step_hands_back_what_the_turn_read() -> anyhow::R
             }
 
             // A pause the person continues in the browser still holds the build back.
-            for code in PAUSE_CODES {
+            for code in [
+                "human_input_required",
+                "cookie_notice_required",
+                "human_step_required",
+            ] {
                 let (_, paused_job) = chain.card_and_running_browser_turn().await?;
                 chain
                     .post_findings_note(&paused_job, &format!("{hours}\n{missing}"), 1, 1)

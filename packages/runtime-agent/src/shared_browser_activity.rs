@@ -127,6 +127,15 @@ fn approval_of_terminal_code(code: &str) -> Option<&'static str> {
     }
 }
 
+/// The terminal codes of a person's answer to a step's prompt, the ones
+/// [`approval_of_terminal_code`] names: they said no, didn't answer in time, or the page changed
+/// after their yes. Such an answer ends that step, not the message
+/// (`jobs::browser_hand_back::ends_only_its_step`), and the step stopped no page
+/// (`codex::BrowserTried::answered`). The controller and Studio know the same codes (`answerCodes`
+/// in runtime-controller `browser_hand_back_fixtures.json`).
+pub(crate) const ANSWER_CODES: [&str; 3] =
+    ["approval_denied", "approval_timeout", "approval_stale"];
+
 /// The facts of one Shared Browser tool call, or `None` for a tool that is not a browser step
 /// (a manual field handoff). `payload` is the controller's result (the call's structured
 /// content) once the call ended; `last_host` is the last host the turn's browser steps named,
@@ -537,6 +546,37 @@ pub(crate) fn pressed_link(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A person's answer to a prompt is one of the codes that name their answer, and only those:
+    /// a pause, a safety stop or a closed browser is none.
+    #[test]
+    fn the_answer_codes_are_the_codes_of_a_persons_answer() {
+        for code in [
+            "human_input_required",
+            "cookie_notice_required",
+            "human_step_required",
+            "approval_denied",
+            "approval_timeout",
+            "approval_stale",
+            "approval_stale_or_replayed",
+            "approval_authority_revoked",
+            "approval_storage_invalid",
+            "approval_protocol_invalid",
+            "approval_state_invalid",
+            "approval_state_full",
+            "browser_unavailable",
+        ] {
+            assert!(
+                crate::shared_browser::canonical_terminal_consent_failure_code(code).is_some(),
+                "{code}"
+            );
+            assert_eq!(
+                ANSWER_CODES.contains(&code),
+                approval_of_terminal_code(code).is_some(),
+                "{code}"
+            );
+        }
+    }
 
     /// A stop only the browser can say is read from its own words for a step, never from what
     /// a page says: a step that didn't answer in time, a site that didn't, a step whose time ran

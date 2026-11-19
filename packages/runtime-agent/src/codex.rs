@@ -974,6 +974,10 @@ pub struct BrowserTried {
     stepped: bool,
     /// Whether a step of another browser answered, which says its stops in words of its own.
     stops_not_known: bool,
+    /// The page of the step a person's answer to its prompt ended
+    /// (`shared_browser_activity::ANSWER_CODES`): the address an open asked for, else the link
+    /// a press pressed and the page its tab was on. That step stopped no page there.
+    answered: Vec<String>,
 }
 
 impl BrowserTried {
@@ -1026,7 +1030,24 @@ impl BrowserTried {
         }
         all.stepped |= other.stepped;
         all.stops_not_known |= other.stops_not_known;
+        all.keep_answered(other.answered.clone());
         all
+    }
+
+    /// The page of the step a person's answer to its prompt ended, as its addresses: none when no
+    /// answer ended a step. No finding of the turn says a page stopped it there
+    /// (`jobs::browser_hand_back::leave_out_addresses_never_opened`).
+    pub fn answered(&self) -> &[String] {
+        &self.answered
+    }
+
+    /// The addresses of the step a person's answer to its prompt ended ([`Self::answered`]).
+    pub(crate) fn keep_answered(&mut self, addresses: Vec<String>) {
+        for address in addresses {
+            if !self.answered.contains(&address) {
+                self.answered.push(address);
+            }
+        }
     }
 
     fn keep(&mut self, address: String) {
@@ -5625,6 +5646,26 @@ impl CodexEventStreamAdapter {
         }
     }
 
+    /// Keeps the page of a step a person's answer to its prompt ended (`BrowserTried::answered`):
+    /// the address an open asked for, else the link it pressed and the page its tab was on, before
+    /// a later step's answer moves that page on. The step never reached its page, so no finding
+    /// says a page stopped it there: after a Deny, a tip's part wrote `blocked` for the planner
+    /// page it had just read, and parts whose prompt ran out wrote `timed-out`, which the build
+    /// reads as the page's own stop (a local test, Nov 19).
+    fn keep_an_answered_step(&mut self, tool: &str, arguments: Option<&JsonValue>) {
+        use crate::shared_browser_activity::{PressedLink, pressed_link, step_tried_addresses};
+        let mut addresses = step_tried_addresses(tool, arguments, None);
+        if addresses.is_empty() {
+            if let PressedLink::Address(link) =
+                pressed_link(tool, arguments, self.browser_links.as_ref())
+            {
+                addresses.push(link);
+            }
+            addresses.extend(self.browser_page.clone());
+        }
+        self.browser_tried.keep_answered(addresses);
+    }
+
     /// Marks the facts of a step that types into a site's own search box of the reading the run
     /// was last given (`shared_browser_activity::types_into_a_search_box`), while it runs and
     /// once it ends: its line reads as the search it is.
@@ -6046,6 +6087,16 @@ impl CodexEventStreamAdapter {
                             &mut step,
                         );
                         item["browserStep"] = step;
+                    }
+                    // The page of the step a person's answer to its prompt ended: it stopped no
+                    // page there.
+                    if answered_code.is_some_and(|code| {
+                        crate::shared_browser_activity::ANSWER_CODES.contains(&code)
+                    }) {
+                        self.keep_an_answered_step(
+                            &tool_call.invocation.tool,
+                            tool_call.invocation.arguments.as_ref(),
+                        );
                     }
                     // A step the browser answered that took a tab to a page.
                     if tool_call.is_success()
@@ -13241,6 +13292,98 @@ required = true
                 assert_eq!(later[0]["item"]["terminalConsent"]["code"], code);
             }
         }
+    }
+
+    /// The page of the step a person's answer to its prompt ended is kept
+    /// (`BrowserTried::answered`), so no finding of the turn says a page stopped it there: the
+    /// page the run's tab was on for a step on a page, and the address an open asked for. A later
+    /// call asked the person nothing, and a pause is no answer: neither names one.
+    #[test]
+    fn the_page_of_a_step_an_answer_ended_is_kept() {
+        let end = |call: &str, tool: &str, arguments: JsonValue, structured: JsonValue| Event {
+            id: format!("evt_{call}"),
+            msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                call_id: call.to_string(),
+                invocation: McpInvocation {
+                    server: SHARED_BROWSER_MCP_SERVER_NAME.to_string(),
+                    tool: tool.to_string(),
+                    arguments: Some(arguments),
+                },
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                duration: Duration::from_millis(1),
+                result: Ok(CallToolResult {
+                    content: Vec::new(),
+                    structured_content: Some(structured),
+                    is_error: Some(false),
+                    meta: None,
+                }),
+                mcp_app_ui: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let signal = |code: &str| {
+            json!({
+                "terminalConsent": {
+                    "state": "blocked", "terminal": true, "retryable": false, "code": code,
+                },
+            })
+        };
+        let planner = "https://transit.example/planner";
+        let opened = || {
+            end(
+                "call_open",
+                "navigate",
+                json!({ "url": planner }),
+                json!({ "activity": { "step": "navigate", "url": planner } }),
+            )
+        };
+        let search = json!({ "index": 0, "key": "Enter", "snapshotId": "reading-1" });
+
+        // A search on the page the run's tab was on, which the person said no to.
+        let mut adapter = CodexEventStreamAdapter::default();
+        adapter.collect(&opened());
+        adapter.collect(&end(
+            "call_search",
+            "press",
+            search.clone(),
+            signal("approval_denied"),
+        ));
+        let mut later = signal("approval_denied");
+        later["terminalConsent"][crate::shared_browser::ENDED_EARLIER_KEY] = json!(true);
+        adapter.collect(&end(
+            "call_later",
+            "navigate",
+            json!({ "url": "https://museum.example/visit" }),
+            later,
+        ));
+        assert_eq!(adapter.browser_tried().answered(), [planner]);
+
+        // An open whose prompt ran out: the address it asked for.
+        let mut adapter = CodexEventStreamAdapter::default();
+        adapter.collect(&end(
+            "call_open",
+            "navigate",
+            json!({ "url": planner }),
+            signal("approval_timeout"),
+        ));
+        assert_eq!(adapter.browser_tried().answered(), [planner]);
+
+        // A pause on the person's step is no answer of theirs.
+        let mut adapter = CodexEventStreamAdapter::default();
+        adapter.collect(&opened());
+        adapter.collect(&end(
+            "call_pause",
+            "press",
+            search,
+            signal("human_step_required"),
+        ));
+        assert!(adapter.browser_tried().answered().is_empty());
     }
 
     /// A Shared Browser call that could not reach the browser at all keeps the
