@@ -39,7 +39,6 @@ export type ClaudeCodeFailureCode =
   | "stalled"
   | "crashed"
   | "unexpected_configuration"
-  | "project_config"
   | "unsafe_import"
   | "unsafe_link"
   | "preflight_failed"
@@ -73,8 +72,6 @@ export const CLAUDE_CODE_FAILURE_SENTENCES: Readonly<Record<ClaudeCodeFailureCod
   crashed: "Claude Code stopped unexpectedly, so this turn ended.",
   unexpected_configuration:
     "Claude Code started with settings Instafy didn't ask for, so Instafy stopped this turn.",
-  project_config:
-    "This space's folder on this computer holds Claude Code files, so Claude Code turns from Instafy can't run here. Move the files that Details names out of the folder, then send your message again.",
   unsafe_import:
     "A CLAUDE.md, CLAUDE.local.md or AGENTS.md file in this space's folder brings in files that aren't part of the space, so Claude Code turns from Instafy can't run here.",
   unsafe_link: "This space links to a file outside it, so Claude Code turns from Instafy can't run here.",

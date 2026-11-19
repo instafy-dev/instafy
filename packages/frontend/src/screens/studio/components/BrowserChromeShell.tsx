@@ -4,8 +4,8 @@ import { Button, IconButton } from "../../../components/Button";
 import { InlineNotice } from "../../../components/InlineNotice";
 import { Spinner } from "../../../components/Spinner";
 import { useToastClearanceRef } from "../../../status/toastClearance";
-import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_SOFT_BG_CLASS } from "../../../theme/darkSurfaces";
 import { BrowserStateBadge } from "./BrowserStateBadge";
+import { BROWSER_TOOLBAR_DIVIDER_CLASS, BROWSER_TOOLBAR_SURFACE_CLASS } from "./browserChromeStyles";
 
 /** `off` is neutral: Instafy's browser is not running. `unavailable` is for the Personal Browser and the site preview. */
 export type BrowserChromeState = "ready" | "starting" | "waiting" | "paused" | "off" | "unavailable";
@@ -165,7 +165,7 @@ export function BrowserChromeShell({
         ref={toolbarRef}
         aria-busy={busy || undefined}
         aria-label={label}
-        className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden border-b border-slate-200 bg-slate-50 px-2 max-[400px]:px-1 ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_SOFT_BG_CLASS} ${compact ? "min-h-12 py-1" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[540px]:py-1 max-[400px]:gap-0.5"}`}
+        className={`flex w-full min-w-0 flex-nowrap items-center gap-1 overflow-hidden px-2 max-[400px]:px-1 ${BROWSER_TOOLBAR_DIVIDER_CLASS} ${BROWSER_TOOLBAR_SURFACE_CLASS} ${compact ? "min-h-12 py-1" : "h-11 max-[540px]:h-auto max-[540px]:flex-wrap max-[540px]:py-1 max-[400px]:gap-0.5"}`}
         data-testid={testId}
         data-browser-session-safe-zone="true"
         role="toolbar"

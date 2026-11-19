@@ -185,16 +185,16 @@ pub enum FailureCode {
     Stalled,
     /// Claude Code stopped without a result, or printed what the lane cannot read (3.6).
     Crashed,
-    /// The `init` event shows a flag that did not take effect (3.6).
+    /// The `init` event shows a flag that did not take effect, or names the space's own Claude
+    /// Code configuration (3.6).
     UnexpectedConfiguration,
-    ProjectConfig,
     UnsafeImport,
     UnsafeLink,
     PreflightFailed,
 }
 
 impl FailureCode {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 15] = [
         Self::NotSignedIn,
         Self::PlanLimit,
         Self::BinaryMissing,
@@ -207,7 +207,6 @@ impl FailureCode {
         Self::Stalled,
         Self::Crashed,
         Self::UnexpectedConfiguration,
-        Self::ProjectConfig,
         Self::UnsafeImport,
         Self::UnsafeLink,
         Self::PreflightFailed,
@@ -227,7 +226,6 @@ impl FailureCode {
             Self::Stalled => "stalled",
             Self::Crashed => "crashed",
             Self::UnexpectedConfiguration => "unexpected_configuration",
-            Self::ProjectConfig => "project_config",
             Self::UnsafeImport => "unsafe_import",
             Self::UnsafeLink => "unsafe_link",
             Self::PreflightFailed => "preflight_failed",

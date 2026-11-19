@@ -625,10 +625,193 @@ fn check_init_in(init: &Value, folder: &Path, turn: InitTurn) -> Result<InitFact
             if servers.len() == 1 { "" } else { "s" }
         ));
     }
+    if let Some(loaded) = space_configuration_named(init, folder) {
+        return Err(loaded);
+    }
     Ok(InitFacts {
         session_id,
         model: bounded(model, 200),
     })
+}
+
+/// The space's own Claude Code configuration, read from what `init` says loaded (3.6, D6). The
+/// lane's flags keep it out of the turn, so an `init` that names it shows a flag that stopped
+/// working: the output style the space defines or selects, or every skill, agent and command the
+/// space defines at its root, when it defines at least two. One name alone proves nothing, since
+/// the person's own configuration can define the same name. The space's hooks run before `init`,
+/// so this stops the turn after them, not before.
+fn space_configuration_named(init: &Value, folder: &Path) -> Option<String> {
+    let space = SpaceConfiguration::read(folder);
+    if let Some(style) = init.get("output_style").and_then(Value::as_str)
+        && style != "default"
+        && space.styles.contains(style)
+    {
+        return Some(format!(
+            "Claude Code started with this space's own output style, {}, which Instafy keeps out.",
+            bounded(style, 80)
+        ));
+    }
+    if space.definitions.len() < 2 {
+        return None;
+    }
+    let listed: HashSet<&str> = ["skills", "agents", "slash_commands"]
+        .iter()
+        .filter_map(|key| init.get(*key).and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !space
+        .definitions
+        .iter()
+        .all(|name| listed.contains(name.as_str()))
+    {
+        return None;
+    }
+    let mut names: Vec<String> = space
+        .definitions
+        .iter()
+        .take(5)
+        .map(|name| bounded(name, 60))
+        .collect();
+    if space.definitions.len() > names.len() {
+        names.push(format!("{} more", space.definitions.len() - names.len()));
+    }
+    Some(format!(
+        "Claude Code started with this space's own skills, agents and commands ({}), which Instafy keeps out.",
+        names.join(", ")
+    ))
+}
+
+/// At most this many entries of each folder under the space's `.claude` are read for names.
+const SPACE_CONFIGURATION_ENTRIES: usize = 256;
+/// At most this many bytes of a file are read: a name sits in the frontmatter at its top.
+const SPACE_CONFIGURATION_HEAD: usize = 4096;
+/// A settings file larger than this is not read for its `outputStyle`.
+const SPACE_SETTINGS_BYTES: u64 = 1024 * 1024;
+
+/// What the space's root `.claude` folder defines, under the names Claude Code lists them by.
+#[derive(Debug, Default)]
+struct SpaceConfiguration {
+    /// The output styles it defines, and the `outputStyle` its settings select.
+    styles: BTreeSet<String>,
+    /// The skills, agents and commands it defines.
+    definitions: BTreeSet<String>,
+}
+
+impl SpaceConfiguration {
+    /// Reads the space's root `.claude` folder. What cannot be read names nothing, so it can
+    /// only make the check miss, never stop a turn.
+    fn read(folder: &Path) -> Self {
+        let claude = folder.join(".claude");
+        let mut space = Self::default();
+        for skill in folder_entries(&claude.join("skills")) {
+            let file = skill.join("SKILL.md");
+            if file.is_file() {
+                space
+                    .definitions
+                    .insert(frontmatter_name(&file).unwrap_or_else(|| file_name(&skill)));
+            }
+        }
+        for agent in markdown_files(&claude.join("agents")) {
+            space
+                .definitions
+                .insert(frontmatter_name(&agent).unwrap_or_else(|| file_stem(&agent)));
+        }
+        for command in markdown_files(&claude.join("commands")) {
+            space.definitions.insert(file_stem(&command));
+        }
+        for style in markdown_files(&claude.join("output-styles")) {
+            space
+                .styles
+                .insert(frontmatter_name(&style).unwrap_or_else(|| file_stem(&style)));
+        }
+        for settings in ["settings.json", "settings.local.json"] {
+            if let Some(style) = selected_output_style(&claude.join(settings)) {
+                space.styles.insert(style);
+            }
+        }
+        space.definitions.retain(|name| !name.is_empty());
+        space.styles.retain(|name| !name.is_empty());
+        space
+    }
+}
+
+/// The entries of `dir`, sorted, at most [`SPACE_CONFIGURATION_ENTRIES`].
+fn folder_entries(dir: &Path) -> Vec<PathBuf> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<PathBuf> = read
+        .filter_map(Result::ok)
+        .take(SPACE_CONFIGURATION_ENTRIES)
+        .map(|entry| entry.path())
+        .collect();
+    entries.sort();
+    entries
+}
+
+/// The `.md` files directly in `dir`.
+fn markdown_files(dir: &Path) -> Vec<PathBuf> {
+    folder_entries(dir)
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                && path.is_file()
+        })
+        .collect()
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn file_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The `name:` of a file's YAML frontmatter, read from its first bytes.
+fn frontmatter_name(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(SPACE_CONFIGURATION_HEAD);
+    std::fs::File::open(path)
+        .ok()?
+        .take(SPACE_CONFIGURATION_HEAD as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    let text = String::from_utf8_lossy(&head);
+    let mut lines = text.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    for line in lines {
+        let line = line.trim_end();
+        if line == "---" {
+            return None;
+        }
+        if let Some(value) = line.strip_prefix("name:") {
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+    }
+    None
+}
+
+/// The `outputStyle` a settings file selects.
+fn selected_output_style(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > SPACE_SETTINGS_BYTES {
+        return None;
+    }
+    let settings: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    settings
+        .get("outputStyle")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// A session id in the UUID form `--resume` takes.
@@ -2999,6 +3182,73 @@ mod tests {
             "permissionMode": "acceptEdits",
             "mcp_servers": [],
         })
+    }
+
+    #[test]
+    fn an_init_that_names_the_space_s_own_configuration_fails_the_launch_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = std::fs::canonicalize(temp.path()).unwrap();
+        let write = |path: &str, text: &str| {
+            let path = folder.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            ".claude/output-styles/terse.md",
+            "---\nname: team-terse\ndescription: d\n---\nBe brief.\n",
+        );
+        write(".claude/settings.json", r#"{"outputStyle": "team-terse"}"#);
+        write(
+            ".claude/skills/review/SKILL.md",
+            "---\nname: team-review\ndescription: d\n---\nbody\n",
+        );
+        write(
+            ".claude/agents/helper.md",
+            "---\nname: team-helper\ndescription: d\n---\nbody\n",
+        );
+        write(".claude/commands/ship.md", "Ship it.\n");
+        // The lane's flags kept it all out.
+        let mut kept_out = init(&folder);
+        kept_out["output_style"] = json!("default");
+        kept_out["skills"] = json!(["deep-research"]);
+        kept_out["agents"] = json!(["claude"]);
+        kept_out["slash_commands"] = json!(["deep-research", "review"]);
+        assert!(check_init(&kept_out, &folder).is_ok());
+        // The space's output style took effect.
+        let mut styled = kept_out.clone();
+        styled["output_style"] = json!("team-terse");
+        let error = check_init(&styled, &folder).unwrap_err();
+        assert!(error.contains("output style, team-terse"), "{error}");
+        assert!(check_later_init(&styled, &folder).is_err());
+        // Every skill, agent and command it defines loaded.
+        let mut loaded = kept_out.clone();
+        loaded["skills"] = json!(["deep-research", "team-review"]);
+        loaded["agents"] = json!(["claude", "team-helper"]);
+        loaded["slash_commands"] = json!(["deep-research", "team-review", "ship"]);
+        let error = check_init(&loaded, &folder).unwrap_err();
+        assert!(
+            error.contains("(ship, team-helper, team-review)"),
+            "{error}"
+        );
+        // One of them alone may be the person's own of the same name.
+        let mut one = kept_out.clone();
+        one["slash_commands"] = json!(["deep-research", "ship"]);
+        assert!(check_init(&one, &folder).is_ok());
+    }
+
+    #[test]
+    fn a_space_that_defines_one_name_is_never_read_as_loaded() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::create_dir_all(folder.join(".claude/commands")).unwrap();
+        std::fs::write(folder.join(".claude/commands/ship.md"), "Ship it.\n").unwrap();
+        let mut listed = init(&folder);
+        listed["slash_commands"] = json!(["ship"]);
+        assert!(check_init(&listed, &folder).is_ok());
+        // A space with no .claude folder names nothing.
+        std::fs::remove_dir_all(folder.join(".claude")).unwrap();
+        listed["output_style"] = json!("anything");
+        assert!(check_init(&listed, &folder).is_ok());
     }
 
     #[test]

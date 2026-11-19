@@ -1400,21 +1400,6 @@ fn a_refused_turn_starts_no_claude() {
         );
         std::fs::rename(space.folder.join("git-away"), space.folder.join(".git")).unwrap();
 
-        // The pre-flight: the person's own settings at the folder's root.
-        write(&space.folder, ".claude/settings.local.json", "{}");
-        let configured = space.job();
-        space.handle(configured.clone(), 0).await;
-        let completion = space.completion(configured.id);
-        assert_eq!(failure_code(&completion), Some("project_config"));
-        assert!(
-            completion["error_message"]
-                .as_str()
-                .unwrap()
-                .contains(".claude/settings.local.json"),
-            "{completion:#}"
-        );
-        std::fs::remove_dir_all(space.folder.join(".claude")).unwrap();
-
         // The per-turn probe decides: a `claude` that is too old now fails the turn.
         space.set("FAKE_CLAUDE_VERSION", "old");
         let outdated = space.job();
