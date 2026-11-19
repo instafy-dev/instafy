@@ -9,6 +9,13 @@ import {
 /** The engine a granted start names in its runtime token request (2.10). */
 export const CLAUDE_CODE_LOCAL_ENGINE = "claude-code";
 
+/**
+ * The version of the consent text a record was given for (11.13). A record
+ * without it, or for another version, counts as not given: nobody's agents
+ * run on Claude Code on words they did not see.
+ */
+export const CLAUDE_CODE_CONSENT_VERSION = 2;
+
 /** What Desktop grants runtime-agent, and strips from every start (4.3). */
 export const CLAUDE_CODE_LAUNCH_GRANT_ENV_KEYS = Object.freeze([
   "INSTAFY_CLAUDE_CODE_BIN",
@@ -31,6 +38,8 @@ export type ClaudeCodeConsentRecord = Readonly<{
   consentedAt: string;
   /** The OS account that consented; a record copied to another account is void. */
   osUser: string;
+  /** The consent text's version it was given for ({@link CLAUDE_CODE_CONSENT_VERSION}). */
+  consentVersion: number;
 }>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -45,8 +54,9 @@ export function parseClaudeCodeConsentRecord(value: unknown): ClaudeCodeConsentR
   if (!isRecord(value)) {
     return null;
   }
-  const { binaryPath, pathEntries, env, consentedAt, osUser } = value;
+  const { binaryPath, pathEntries, env, consentedAt, osUser, consentVersion } = value;
   if (
+    consentVersion !== CLAUDE_CODE_CONSENT_VERSION ||
     !isAbsoluteSingleLine(binaryPath) ||
     !Array.isArray(pathEntries) ||
     !pathEntries.every((entry) => isAbsoluteSingleLine(entry) && !entry.includes(":")) ||
@@ -76,6 +86,7 @@ export function parseClaudeCodeConsentRecord(value: unknown): ClaudeCodeConsentR
     env: Object.freeze(parsedEnv),
     consentedAt,
     osUser,
+    consentVersion: CLAUDE_CODE_CONSENT_VERSION,
   });
 }
 
@@ -107,9 +118,9 @@ export function claudeCodeConsentQuestion(email: string): string {
   return `Use Claude Code on this computer for ${email}?`;
 }
 
-/** The consent dialog's text (4.2). */
+/** The consent dialog's text (docs/Local-Engine-Turns.md 11.13). */
 export const CLAUDE_CODE_CONSENT_TEXT =
-  "When you choose Claude Code for a message in Instafy, Instafy Desktop starts the claude program on this computer, signed in the way you signed in to it yourself, to carry out that one message. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own Instafy account can start these turns, one at a time. Instafy gives Claude Code your message exactly as you wrote it and adds nothing. Everyone in the space can read the steps it takes and its reply. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.";
+  "Instafy Desktop will start the claude program on this computer, signed in the way you signed in to it yourself, for the turns of your agents whose AI you set to Claude Code: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, one at a time, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.";
 
 /** Added when another Instafy account on this OS account also consented (4.5). */
 export const CLAUDE_CODE_OTHER_ACCOUNT_TEXT =
