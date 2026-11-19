@@ -1712,14 +1712,15 @@ mod tests {
     /// in their routing input, and a second where research that ends in a page searches first:
     /// news put on a page, a comparison page and a page of places stay `direct` only with both,
     /// browsing first without them, a page that needs prices for dates or a route still browses
-    /// first, an order in the person's own account is still the browser's, and news answered in a
-    /// reply and a hotel for dates nobody named stay `direct`, while hotels for dates nobody named
-    /// put on a page browse first unless research that ends in a page searches first. A question
-    /// about a shop's policy beside an order number stays `direct`, with search or without, while
-    /// that order's own status is the browser's, a page a reply linked, opened in the browser,
-    /// goes by its address whatever the person calls it, also where the reply linked no article,
-    /// and a change to another chat's page, which the routing input's pages name, stays `direct`
-    /// with no change.
+    /// first with both, as a site must be used first (that rule's, not the one for research that
+    /// ends in a page), an order in the person's own account is still the browser's, and news
+    /// answered in a reply and a hotel for dates nobody named stay `direct`, while hotels for
+    /// dates nobody named put on a page browse first unless research that ends in a page searches
+    /// first. A question about a shop's policy beside an order number stays `direct`, with search
+    /// or without, while that order's own status is the browser's, a page a reply linked, opened
+    /// in the browser, goes by its address whatever the person calls it, also where the reply
+    /// linked no article, and a change to another chat's page, which the routing input's pages
+    /// name, stays `direct` with no change.
     #[test]
     fn every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own() {
         let cases = shipped();
@@ -1772,6 +1773,11 @@ mod tests {
                 &["order-status-beside-an-order-number"],
             ),
             (
+                "or a site must be used first (availability at a place named, a sign-in or their account, an order's own status or items, a form or planner)",
+                "browser_then_build",
+                &["hotels-for-dates-page-searching", "route-page-searching"],
+            ),
+            (
                 "the person names Instafy's browser (\"in your browser\")",
                 "browser",
                 &["open-a-site-in-the-browser"],
@@ -1802,8 +1808,6 @@ mod tests {
                 &[
                     "comparison-page-watches",
                     "news-then-page",
-                    "hotels-for-dates-page-searching",
-                    "route-page-searching",
                     "news-then-page-searching-pages-browse-first",
                     "hotels-for-dates-nobody-named-page-searching",
                     "page-of-places",
