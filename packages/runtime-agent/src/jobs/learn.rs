@@ -3411,7 +3411,7 @@ mod tests {
             sheet_text.contains("each value cites them (\"checked 17 Oct on fleetfeet.com ↗\"")
         );
         assert!(sheet_text.contains(
-            "`date` the day you read it and `viewer` how (`server fetch` for `instafy web read`, `shared browser`)"
+            "`date` the day you read it and `viewer` how (the reader that read it, such as `server fetch` or `shared browser`)"
         ));
         assert!(sheet_text.contains("and one without `viewer` shows its page alone"));
     }

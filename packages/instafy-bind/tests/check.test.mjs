@@ -654,7 +654,7 @@ test("check names each value that gives a day and not how it was read, and never
     const values = checkValues(dir);
     assert.deepEqual(values.problems, []);
     const note = values.notes.find((n) => n.includes('"viewer"'));
-    assert.equal(note, '4 value(s) give a day but not how they were read ("viewer"), so the page shows each one\'s page alone, never "checked" or "seen": Option A · price, Option A · review, Option B · weight and Option C · review. For each one read on its page, add the reader that read it: "viewer": "server fetch" (instafy web read), "shared browser" or "personal browser" (Instafy\'s browser), or a skill\'s own command. A value only a web search gave keeps "provider search".');
+    assert.equal(note, '4 value(s) give a day but not how they were read ("viewer"), so the page shows each one\'s page alone, never "checked" or "seen": Option A · price, Option A · review, Option B · weight and Option C · review. For each one read on its page, add the reader that read it: "viewer": "server fetch" (instafy web read), "shared browser" or "personal browser" (Instafy\'s browser), or a skill\'s own command. A value only a web search gave gets "provider search".');
     const out = run("check", dir, "--expect", "Option A, Option B, Option C");
     assert.equal(out.status, 0, out.stdout + out.stderr);
     assert.match(out.stdout, /^NOTE: 4 value\(s\) give a day but not how they were read \("viewer"\)/m);

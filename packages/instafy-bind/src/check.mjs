@@ -841,7 +841,7 @@ export function checkValues(dir) {
   const unsaid = unsaidReaders(data);
   if (unsaid.length) {
     const named = unsaid.length > 8 ? `${unsaid.slice(0, 8).join(", ")} and ${unsaid.length - 8} more` : listed(unsaid);
-    notes.push(`${unsaid.length} value(s) give a day but not how they were read ("viewer"), so the page shows each one's page alone, never "checked" or "seen": ${named}. For each one read on its page, add the reader that read it: "viewer": "server fetch" (instafy web read), "shared browser" or "personal browser" (Instafy's browser), or a skill's own command. A value only a web search gave keeps "provider search".`);
+    notes.push(`${unsaid.length} value(s) give a day but not how they were read ("viewer"), so the page shows each one's page alone, never "checked" or "seen": ${named}. For each one read on its page, add the reader that read it: "viewer": "server fetch" (instafy web read), "shared browser" or "personal browser" (Instafy's browser), or a skill's own command. A value only a web search gave gets "provider search".`);
   }
   if (!isOptionsData(data)) return { checked: false, problems, notes };
   const memory = fromMemory(data);

@@ -1508,8 +1508,8 @@ fn a_comparison_lists_every_candidate_and_reads_an_independent_source_when_the_o
 /// No search key never ends the task (28 Oct drive: the comparison asked for a key and the browser at once, tried a bare
 /// domain that did not answer three times and built nothing): the turn reads without a search (official sites from
 /// reference search, then guessed official domains), tries an address that does not answer
-/// once with `www.` added or removed, builds with what it read, and offers the key card at most once, never waiting for
-/// it. Stops are listed in plain words. A run with no web search of its own reads the ladder in the order it read
+/// once with `www.` added or removed, builds with what it read, and offers the key card only to a person who asks to set
+/// up search, never waiting for it. Stops are listed in plain words. A run with no web search of its own reads the ladder in the order it read
 /// before the AI's own web search came first: the pages it has, then open data and the space's own search key, and
 /// only then a guessed official domain.
 #[test]
