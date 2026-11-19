@@ -2118,8 +2118,8 @@ fn the_suite_runs_only_when_a_person_sets_the_variable() {
 #[test]
 fn the_report_passes_only_when_nothing_fails_or_is_unconfirmed() {
     let mut report = Report {
-        cli: "2.1.314".to_string(),
-        verified_through: "2.1.314".to_string(),
+        cli: "2.1.325".to_string(),
+        verified_through: "2.1.325".to_string(),
         plan_sign_in: true,
         help_lines: Vec::new(),
         findings: Vec::new(),
