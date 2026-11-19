@@ -733,6 +733,11 @@ const LEGACY_BROWSER_AUTOMATION_SHA256: &[&str] = &[
     // was said by what to do, where it sits only as a page read shows it, and the page's link,
     // never as not accessible.
     "e3f50c3e063c07481fb5a4b139287ef510fbb19eb0b3f8b894937b4ea1445e15", // v46
+    // From before research that ends in a page went to the browser first only where it doesn't
+    // search first, the routing step's `summary` named a page a reply here linked by its address
+    // whatever the person calls it, and a browser turn said "nothing found" or "covered" only
+    // when a step said so.
+    "1b498f26b8149ea803f2743b103da995051a4c772be2d7ab103bbac2bb5c8c46", // v47
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

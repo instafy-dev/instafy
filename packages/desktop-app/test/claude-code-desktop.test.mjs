@@ -404,8 +404,8 @@ async function consentAs(context, host) {
   return await context.invoke("enable", host);
 }
 
-// A consent record as Use for my messages writes it, for a test whose login
-// shells need not answer.
+// A consent record as Use Claude Code on this computer writes it, for a test
+// whose login shells need not answer.
 function writeConsentRecord(context, record) {
   registry
     .createDesktopExtensionConsentStore(context.consents, {
@@ -413,7 +413,12 @@ function writeConsentRecord(context, record) {
       controllerOrigin: CONTROLLER,
       userId: USER_A,
     })
-    .write({ consentedAt: NOW.toISOString(), osUser: "fixture-user", ...record });
+    .write({
+      consentedAt: NOW.toISOString(),
+      osUser: "fixture-user",
+      consentVersion: consent.CLAUDE_CODE_CONSENT_VERSION,
+      ...record,
+    });
 }
 
 // The consent dialog's whole text: the design's, then what it lists (4.2).
@@ -929,6 +934,7 @@ test("off macOS, status reports supported: false and no grant resolves", async (
     env: {},
     consentedAt: NOW.toISOString(),
     osUser: "fixture-user",
+    consentVersion: consent.CLAUDE_CODE_CONSENT_VERSION,
   });
   const dialogs = fakeDialogs();
   const host = hostFor({ consents, dialogs });
@@ -1089,7 +1095,7 @@ test("the consent dialog names the host context's account, never a user id in th
 test("the consent text is the design's, and the dialog adds 4.5's note for a second account", async () => {
   assert.equal(
     consent.CLAUDE_CODE_CONSENT_TEXT,
-    "When you choose Claude Code for a message in Instafy, Instafy Desktop starts the claude program on this computer, signed in the way you signed in to it yourself, to carry out that one message. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own Instafy account can start these turns, one at a time. Instafy gives Claude Code your message exactly as you wrote it and adds nothing. Everyone in the space can read the steps it takes and its reply. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.",
+    "Instafy Desktop will start the claude program on this computer, signed in the way you signed in to it yourself, for the turns of your agents whose AI you set to Claude Code: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, one at a time, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.",
   );
   assert.equal(
     consent.CLAUDE_CODE_OTHER_ACCOUNT_TEXT,
@@ -1210,8 +1216,16 @@ test("a record from another OS account or a malformed one grants nothing", async
     env: {},
     consentedAt: NOW.toISOString(),
     osUser: "someone-else",
+    consentVersion: consent.CLAUDE_CODE_CONSENT_VERSION,
   };
   store.write(record);
+  assert.equal(await context.grantFor(USER_A), null);
+  // A record given for version 1's words, or for no version, grants nothing:
+  // version 2 runs every turn of the person's Claude Code agents (11.13).
+  const { consentVersion: _version, ...unversioned } = record;
+  store.write({ ...unversioned, osUser: "fixture-user" });
+  assert.equal(await context.grantFor(USER_A), null);
+  store.write({ ...record, osUser: "fixture-user", consentVersion: 1 });
   assert.equal(await context.grantFor(USER_A), null);
   store.write({ ...record, osUser: "fixture-user", env: { ANTHROPIC_BASE_URL: "https://x" } });
   assert.equal(await context.grantFor(USER_A), null);
@@ -1349,7 +1363,7 @@ test("while the lane is on, Find and a refused Locate answer the path in use, wi
   assert.equal(dialogs.shown.length, asked);
   assert.equal(await binaryInUse(), claude);
 
-  // Use for my messages confirms what Find turned up, through the consent dialog.
+  // Use Claude Code on this computer confirms what Find turned up, through the consent dialog.
   context.useShell("foundOther");
   assert.deepEqual(await context.invoke("detect", host), { ...on, candidatePath: otherClaude });
   assert.deepEqual(await context.invoke("enable", host), { ...on, path: otherClaude });
@@ -1404,7 +1418,7 @@ test("while the lane is on, Find offers the program in use again with login-shel
   assert.deepEqual(await context.invoke("locate", host), stale);
   assert.equal((await grantedEnv()).NODE_EXTRA_CA_CERTS, caFile);
 
-  // Use for my messages confirms the new values through the consent dialog.
+  // Use Claude Code on this computer confirms the new values through the consent dialog.
   context.useShell("configOnly");
   assert.deepEqual(await context.invoke("detect", host), renewed);
   assert.deepEqual(await context.invoke("enable", host), on);
@@ -1417,7 +1431,7 @@ test("while the lane is on, Find offers the program in use again with login-shel
   assert.deepEqual(await context.invoke("status", host), on);
 
   // Once the recorded values pass, a Find of the same program with other
-  // values offers nothing, and Use for my messages confirms the record as it is.
+  // values offers nothing, and Use Claude Code on this computer confirms the record as it is.
   fs.writeFileSync(caFile, "fixture CA bundle\n");
   fs.chmodSync(caFile, 0o644);
   context.useShell("found");
@@ -1432,9 +1446,9 @@ test("while the lane is on, Find offers the program in use again with login-shel
   assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir });
 });
 
-test("while the lane is on, a Find whose login shell gave no answer offers no new values, and Use for my messages keeps the recorded ones", async () => {
+test("while the lane is on, a Find whose login shell gave no answer offers no new values, and Use Claude Code on this computer keeps the recorded ones", async () => {
   // Short, so the shell that hangs runs out quickly. No shell here has to
-  // answer: the record is written as Use for my messages writes it.
+  // answer: the record is written as Use Claude Code on this computer writes it.
   const context = setup({ detectTimeoutMs: 1_000 });
   const { fixture } = context;
   // Where the native installer puts claude, the first place Find looks when
@@ -1496,7 +1510,7 @@ test("while the lane is on, a Find whose login shell names no program, as for an
     JSON.parse((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_ENV_JSON);
 
   // Find can't follow an alias, so the person located the program. Locate
-  // read the login shell, and Use for my messages recorded its values.
+  // read the login shell, and Use Claude Code on this computer recorded its values.
   context.useShell("aliasValues");
   assert.deepEqual(await context.invoke("locate", host), { ...on, consented: false });
   assert.deepEqual(await context.invoke("enable", host), on);
@@ -1505,7 +1519,7 @@ test("while the lane is on, a Find whose login shell names no program, as for an
 
   // The CA file goes. A Find whose shell still names it, names a folder
   // Desktop can't use either, or gives no answer, found no other program and
-  // offers nothing, and Use for my messages asks about none of them.
+  // offers nothing, and Use Claude Code on this computer asks about none of them.
   fs.rmSync(caFile);
   const stale = {
     ...on,
@@ -1533,7 +1547,7 @@ test("while the lane is on, a Find whose login shell names no program, as for an
   assert.deepEqual(await context.invoke("locate", host), renewed);
   assert.equal((await grantedEnv()).NODE_EXTRA_CA_CERTS, caFile);
 
-  // Use for my messages confirms the program in use with that Find's PATH
+  // Use Claude Code on this computer confirms the program in use with that Find's PATH
   // and values, through the consent dialog, which lists the program and the
   // values as for any consent; the PATH entries go only into the record. The
   // find stays, and with the recorded values passing it shows only that it
@@ -1553,7 +1567,7 @@ test("while the lane is on, a Find whose login shell names no program, as for an
   assert.deepEqual(await context.invoke("status", host), confirmed);
 
   // While the recorded values pass, a Find of no program with other values
-  // that pass offers nothing, and Use for my messages confirms the record as it is.
+  // that pass offers nothing, and Use Claude Code on this computer confirms the record as it is.
   fs.writeFileSync(caFile, "fixture CA bundle\n");
   fs.chmodSync(caFile, 0o644);
   context.useShell("aliasValues");
@@ -1572,7 +1586,7 @@ test("while the lane is on, a Find whose login shell names no program shows a co
   const host = hostFor({ consents: context.consents, dialogs });
   const on = { supported: true, found: true, path: claude, consented: true };
   // Find can't follow the login shell's alias, so the person located the
-  // program, and Use for my messages recorded the values Locate read. Then
+  // program, and Use Claude Code on this computer recorded the values Locate read. Then
   // the CA file goes.
   context.useShell("aliasValues");
   await context.invoke("locate", host);
@@ -1589,7 +1603,7 @@ test("while the lane is on, a Find whose login shell names no program shows a co
   // The shell's alias names no program, so Find looks in the usual folders,
   // where an earlier install left a link whose target is gone. Find shows
   // that copy with its problem, though the shell's new values pass with the
-  // program in use, and Use for my messages asks nothing.
+  // program in use, and Use Claude Code on this computer asks nothing.
   const localBin = path.join(fixture.home, ".local", "bin");
   fs.mkdirSync(localBin, { recursive: true });
   fs.chmodSync(path.join(fixture.home, ".local"), 0o755);
@@ -1604,7 +1618,7 @@ test("while the lane is on, a Find whose login shell names no program shows a co
   assert.deepEqual(await context.grantFor(USER_A), grant);
 
   // A copy there that Desktop can use shows as another program with the new
-  // values, and Use for my messages switches to it.
+  // values, and Use Claude Code on this computer switches to it.
   fs.rmSync(localClaude);
   writeExecutable(localClaude, "#!/bin/sh\nexit 0\n");
   assert.deepEqual(await context.invoke("detect", host), { ...stale, candidatePath: localClaude });
@@ -1780,7 +1794,7 @@ test("confirming a moved CA file for the program in use replaces the runtime tha
   assert.equal((await harness.invoke("detect", host)).candidatePath, claude);
   assert.equal(harness.replaced.length, 1);
 
-  // Use for my messages grants it, so the runtime holding the old place is replaced.
+  // Use Claude Code on this computer grants it, so the runtime holding the old place is replaced.
   assert.deepEqual(await harness.invoke("enable", host), {
     supported: true,
     found: true,
