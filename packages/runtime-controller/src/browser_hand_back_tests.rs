@@ -2249,6 +2249,42 @@ async fn a_prompt_that_ended_a_step_hands_back_what_the_turn_read() -> anyhow::R
     .await
 }
 
+/// Only a person's answer to a step's prompt ends just that step: a browser turn a safety stop
+/// or a closed browser ended still holds the build back, as a pause does, by its artifact or by
+/// the step that reported it. Handed back, such a part posted nothing, and its build never said
+/// that a step was stopped.
+#[tokio::test]
+async fn a_safety_stop_or_a_closed_browser_still_holds_the_build_back() -> anyhow::Result<()> {
+    with_chain("browser-hand-back-safety-stop", |chain| {
+        Box::pin(async move {
+            let hours = r#"{"url": "https://museum.example/visit", "title": "Plan your visit", "facts": ["Open 10:00 to 18:00, Tuesday to Sunday."]}"#;
+            for code in [
+                "approval_stale_or_replayed",
+                "approval_authority_revoked",
+                "browser_unavailable",
+            ] {
+                let (_, browser_job) = chain.card_and_running_browser_turn().await?;
+                chain
+                    .post_findings_note(&browser_job, hours, 1, 1)
+                    .await?;
+                chain
+                    .finish_on_a_prompt(
+                        &browser_job,
+                        code,
+                        "Instafy's browser stopped this step to keep it safe, so it wasn't done.",
+                    )
+                    .await?;
+                let (status, body) =
+                    refused(chain.hand_back(&chain.owner, &browser_job, json!({})).await);
+                assert_eq!(status, StatusCode::CONFLICT, "{code}: {}", body.message);
+                assert_eq!(body.code.as_deref(), Some(HAND_BACK_PAUSED_CODE), "{code}");
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
 /// A message whose browser part, with its build after it, read no page goes to that build with
 /// where the part stopped and what it didn't find, from the part's Details note, and none of its
 /// words: a fill-in whose maker site couldn't be reached ended with no answer at all (a local

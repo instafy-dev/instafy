@@ -41,7 +41,7 @@ const fixtures = JSON.parse(readFileSync(
   resolve(repo, "packages/runtime-controller/src/browser_hand_back_fixtures.json"), "utf8",
 )) as {
   claimKey: string; recordKey: string; handBackPrompt: string; browserReply: string; postedReply: string;
-  findingLines: string[]; letOctoContinuePrompt: string; buildRequestNoteKey: string;
+  findingLines: string[]; letOctoContinuePrompt: string; buildRequestNoteKey: string; answerCodes: string[];
 };
 
 const CARD_JOB = "job-card";
@@ -164,6 +164,34 @@ describe("browser hand-back: when Studio sends one", () => {
       expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
     },
   );
+
+  // Only a person's answer to a step's prompt ends just that step: a turn a
+  // safety stop or a closed browser ended, or one whose code no runtime names,
+  // holds the build back as before. Handed back, such a part posted nothing,
+  // and its build never said that a step was stopped.
+  it.each(["approval_stale_or_replayed", "approval_authority_revoked", "browser_unavailable", undefined])(
+    "holds back a browser turn a safety stop, a closed browser or an unnamed code ended (%s)",
+    (code) => {
+      input.messages = [...input.messages.slice(0, -1), reply(BROWSER_JOB, "Tool call failed", now - 1_050, {
+        messageType: "mcp_tool_call",
+        details: { tool: "click", status: "failed", terminalConsent: code ? { state: "blocked", code } : { state: "blocked" } },
+      }), input.messages.at(-1)!];
+      expect(browserTurnStoppedForPerson(input.messages, BROWSER_JOB)).toBe(true);
+      expect(browserHandBackCandidate(input)).toBeNull();
+    },
+  );
+
+  it("knows a person's answer to a prompt by the codes the controller and runtime use", () => {
+    const base = input.messages;
+    for (const code of fixtures.answerCodes) {
+      const messages = [...base.slice(0, -1), reply(BROWSER_JOB, "Tool call failed", now - 1_050, {
+        messageType: "mcp_tool_call",
+        details: { tool: "press", status: "failed", terminalConsent: { state: "blocked", code } },
+      }), base.at(-1)!];
+      expect(browserTurnStoppedForPerson(messages, BROWSER_JOB)).toBe(false);
+    }
+    expect(fixtures.answerCodes).toEqual(["approval_denied", "approval_timeout", "approval_stale"]);
+  });
 
   // A browser turn whose findings go back to a build posts no words of its
   // own (runtime-agent `move_findings_into_details`): its reply is blank, and

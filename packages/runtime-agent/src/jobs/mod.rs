@@ -33594,6 +33594,81 @@ mod tests {
         assert!(unnamed["metadata"].get("step").is_none(), "{unnamed}");
     }
 
+    /// A run a safety stop or a closed browser ended still ends the turn as it always did: the
+    /// person reads the runtime's line in place of the turn's words, its note keeps the pages it
+    /// read, and no build follows. Only a person's answer to a step's prompt ends just that step.
+    /// Kept above that line, a turn's own "Done." read as a success beside a step that was
+    /// stopped, and handed back, the part posted nothing and its build never said so.
+    #[test]
+    fn a_safety_stop_or_a_closed_browser_still_ends_the_turn_with_its_line() {
+        let read = r#"{"url":"https://museum.example/visit","title":"Plan your visit","facts":["Open 10:00 to 18:00."]}"#;
+        let safe = "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again.";
+        for (code, line) in [
+            ("approval_stale_or_replayed", safe),
+            ("approval_authority_revoked", safe),
+            (
+                "browser_unavailable",
+                "Instafy's browser closed or stopped responding, so I stopped there. Open the browser again and send a message to continue.",
+            ),
+        ] {
+            let mut summary = format!("Done.\n{read}");
+            apply_terminal_shared_browser_summary(&mut summary, &mut None, Some(code), false);
+            assert_eq!(summary, format!("{line}\n\n{read}"), "{code}");
+            let mut execution = JobExecution {
+                summary,
+                suggested_replies: Vec::new(),
+                provider: "codex-embedded".to_string(),
+                artifacts: Vec::new(),
+                provider_conversation_state: None,
+                messages: vec![step_that_ended_the_run(
+                    code,
+                    json!({ "step": "click", "host": "museum.example" }),
+                )],
+                messages_streamed: false,
+                final_messages: Vec::new(),
+            };
+            browser_hand_back::move_findings_into_details(
+                &browser_then_build_job(),
+                &mut execution,
+            );
+            assert_eq!(execution.summary, line, "{code}");
+            assert_eq!(execution.final_messages.len(), 1, "{code}");
+            assert_eq!(execution.final_messages[0].content, read, "{code}");
+        }
+    }
+
+    /// Under a controller whose leases don't say that it hands back a turn a person's answer to a
+    /// prompt ended (`browser_hand_back_after_a_prompt`), such a turn ends as before: the person
+    /// reads the runtime's line, and its note keeps the pages it read. That controller refuses
+    /// its hand-back as a pause, so a part gone silent left the person's message with no answer.
+    #[test]
+    fn a_turn_an_answer_ended_under_an_older_controller_ends_as_before() {
+        let read = r#"{"url":"https://museum.example/visit","title":"Plan your visit","facts":["Open 10:00 to 18:00."]}"#;
+        let line = "Your OK didn't come in time, so I didn't do that step. Send a message when you're ready and I'll ask again.";
+        let mut job = browser_then_build_job();
+        job.payload
+            .as_object_mut()
+            .expect("payload")
+            .remove("browser_hand_back_after_a_prompt");
+        let mut execution = JobExecution {
+            summary: format!("{line}\n\n{read}"),
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: Vec::new(),
+            provider_conversation_state: None,
+            messages: vec![step_that_ended_the_run(
+                "approval_timeout",
+                json!({ "step": "search", "host": "transit.example" }),
+            )],
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        browser_hand_back::move_findings_into_details(&job, &mut execution);
+        assert_eq!(execution.summary, line);
+        assert_eq!(execution.final_messages.len(), 1);
+        assert_eq!(execution.final_messages[0].content, read);
+    }
+
     /// A part with its build after it whose only open failed read no page: it hands the person's
     /// message to that build, with where it stopped and what it didn't find, and posts no words
     /// (a local test, Nov 19: a fill-in whose maker site couldn't be reached ended with "Read 0

@@ -2581,6 +2581,32 @@ mod tests {
         assert_eq!(fixtures()["readsNoteKey"], READS_NOTE_KEY);
     }
 
+    /// Every lease says, by the name the runtime reads and over any copy a client sent, that
+    /// this controller hands back a browser turn whose run a person's answer to a step's prompt
+    /// ended (`answerCodes`). An older controller refuses that hand-back as a pause, so under one
+    /// the runtime ends such a turn as before: a part gone silent left the message unanswered.
+    #[test]
+    fn every_lease_says_this_controller_hands_back_a_turn_an_answer_ended() {
+        let key = fixtures()["afterAPromptKey"]
+            .as_str()
+            .expect("the key")
+            .to_string();
+        assert_eq!(key, "browser_hand_back_after_a_prompt");
+        let mut payload = json!({ "prompt_text": "Make a page.", key.clone(): false });
+        stamp_lease(
+            payload.as_object_mut().unwrap(),
+            BrowserTurnsSince {
+                turns: Vec::new(),
+                earlier_left_out: false,
+            },
+        );
+        assert_eq!(payload[key.as_str()], json!(true), "{payload}");
+        assert_eq!(
+            fixtures()["answerCodes"],
+            json!(["approval_denied", "approval_timeout", "approval_stale"])
+        );
+    }
+
     #[test]
     fn takes_every_client_copy_of_the_claim_and_the_record_out_of_the_metadata() {
         let browser_job = "00000000-0000-4000-8000-0000000000b2";
