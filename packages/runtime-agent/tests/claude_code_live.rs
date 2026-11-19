@@ -43,7 +43,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use runtime_agent::agent::ShutdownSignal;
 use runtime_agent::claude_code::command::{
-    McpConfigFile, lane_environment, turn_command, write_prompt,
+    McpConfigFile, StartAgain, lane_environment, turn_command, write_prompt,
 };
 use runtime_agent::claude_code::events::{AdapterStatus, EventAdapter, ExitFacts, check_init};
 use runtime_agent::claude_code::supervise::{
@@ -424,8 +424,13 @@ impl Live {
         let grant = self.lane.grant();
         let mcp_config = McpConfigFile::create(grant).expect("the turn's MCP configuration");
         let command = turn_command(grant, &self.ready, &mcp_config, mode, resume, folder);
-        let without_resume =
-            resume.map(|_| turn_command(grant, &self.ready, &mcp_config, mode, None, folder));
+        let start_again = resume.map(|_| StartAgain {
+            grant,
+            ready: &self.ready,
+            mcp_config: &mcp_config,
+            mode,
+            folder,
+        });
         let mut adapter = EventAdapter::for_turn(grant, folder, mode);
         let limits = TurnLimits::standard()
             .with_cleanup_latch(&CLEANUP_LATCH)
@@ -437,7 +442,7 @@ impl Live {
             command,
             TurnSpec {
                 prompt,
-                without_resume,
+                start_again,
                 stop: &stop,
                 shutdown: &shutdown,
             },

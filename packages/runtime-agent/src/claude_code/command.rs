@@ -17,6 +17,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{ChildStdin, Command};
 use uuid::Uuid;
 
+use super::events::LaneFailure;
+use super::job::not_ready_failure;
 use super::{CheckedLaunch, ExecutionMode, LaunchGrant, ReadyLane};
 
 /// The one value Instafy sets (3.4). Documented by Claude Code: it only stops claude.ai
@@ -166,6 +168,43 @@ pub fn turn_command(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     command
+}
+
+/// A turn's second start (11.9): when `claude`, started with `--resume`, reported its session
+/// missing before its first `init`, the same command without `--resume` starts the turn again,
+/// in a new session, but only once the grant's checks pass again, as before every spawn (3.2).
+pub struct StartAgain<'a> {
+    pub grant: &'a LaunchGrant,
+    /// The turn's probe, whose checked binary the first start ran.
+    pub ready: &'a ReadyLane,
+    pub mcp_config: &'a McpConfigFile,
+    pub mode: ExecutionMode,
+    pub folder: &'a Path,
+}
+
+impl StartAgain<'_> {
+    /// The second start's command, the first one's without `--resume`, once the grant's checks
+    /// pass again on the binary the turn's probe vetted. Otherwise why it may not start: the
+    /// checks' reason, as a turn's probe gives it, or a binary that changed since the probe, which
+    /// no probe vetted.
+    pub fn command(&self) -> Result<Command, LaneFailure> {
+        let checked = self.grant.check().map_err(not_ready_failure)?;
+        if checked.identity() != self.ready.launch().identity() {
+            return Err(LaneFailure {
+                code: None,
+                message: "Claude Code changed on this computer as this turn started, so it didn't start again in a new session.".to_string(),
+                resets_at: None,
+            });
+        }
+        Ok(turn_command(
+            self.grant,
+            self.ready,
+            self.mcp_config,
+            self.mode,
+            None,
+            self.folder,
+        ))
+    }
 }
 
 /// Writes the prompt, exactly the UTF-8 bytes of the person's recorded message, then closes

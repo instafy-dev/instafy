@@ -32,7 +32,7 @@
 //! shows it under the reply once the turn is done, whether Details is open or not.
 
 use super::*;
-use crate::claude_code::command::{McpConfigFile, turn_command};
+use crate::claude_code::command::{McpConfigFile, StartAgain, turn_command};
 use crate::claude_code::events::{EventAdapter, LaneFailure, PROVIDER, Redactor};
 use crate::claude_code::events::{redact_tokens, reply_note};
 use crate::claude_code::job::{
@@ -268,8 +268,13 @@ impl JobProcessor {
             )
         })?;
         let command = turn_command(lane.grant(), &ready, &mcp_config, mode, resume, &folder);
-        let without_resume =
-            resume.map(|_| turn_command(lane.grant(), &ready, &mcp_config, mode, None, &folder));
+        let start_again = resume.map(|_| StartAgain {
+            grant: lane.grant(),
+            ready: &ready,
+            mcp_config: &mcp_config,
+            mode,
+            folder: &folder,
+        });
         let mut adapter = EventAdapter::for_turn(lane.grant(), &folder, mode);
         let mut reply_draft = progress
             .as_ref()
@@ -304,7 +309,7 @@ impl JobProcessor {
                 command,
                 TurnSpec {
                     prompt: lane_job.prompt(),
-                    without_resume,
+                    start_again,
                     stop: &stop,
                     shutdown: &shutdown,
                 },

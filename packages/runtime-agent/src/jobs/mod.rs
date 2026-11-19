@@ -6694,6 +6694,7 @@ impl JobProcessor {
                 .as_deref()
                 .is_some_and(|url| !url.trim().is_empty()),
             read_only_job: metadata_requests_read_only_workspace(job.payload.get("metadata")),
+            local_engine_job: job.engine.is_some(),
             workspace_token,
             local_origin: self.local_origin_sync(),
             controller_base_url: &self.config.controller_base_url,
@@ -21183,7 +21184,10 @@ fn write_scope_value_from_metadata(metadata: Option<&JsonValue>) -> Option<&Json
         })
 }
 
-fn write_scope_mode_from_value(value: &JsonValue) -> Option<String> {
+/// The mode of a write scope, written either as the scope itself or as its `mode`, in lower case
+/// with `-` read as `_`. A local-engine turn reads its scope with it too
+/// (`claude_code::job`).
+pub(crate) fn write_scope_mode_from_value(value: &JsonValue) -> Option<String> {
     if let Some(raw) = value.as_str() {
         let normalized = normalize_write_scope_mode(raw);
         return (!normalized.is_empty()).then_some(normalized);

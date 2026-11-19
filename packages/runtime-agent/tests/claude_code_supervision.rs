@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use runtime_agent::agent::ShutdownSignal;
-use runtime_agent::claude_code::command::{McpConfigFile, turn_command};
+use runtime_agent::claude_code::command::{McpConfigFile, StartAgain, turn_command};
 use runtime_agent::claude_code::events::{
     AdapterStatus, EventAdapter, LaneFailure, OUTSIDE_THIS_SPACE,
 };
@@ -297,8 +297,13 @@ impl<'a> Run<'a> {
             resume,
             &space,
         );
-        let without_resume = resume
-            .map(|_| turn_command(grant, &machine.ready, &mcp_config, self.mode, None, &space));
+        let start_again = resume.map(|_| StartAgain {
+            grant,
+            ready: &machine.ready,
+            mcp_config: &mcp_config,
+            mode: self.mode,
+            folder: &space,
+        });
         let mut adapter = EventAdapter::for_turn(grant, &space, self.mode);
         let mut events = Vec::new();
         let mut sink = |event: &Value| events.push(event.clone());
@@ -307,7 +312,7 @@ impl<'a> Run<'a> {
             command,
             TurnSpec {
                 prompt: PROMPT,
-                without_resume,
+                start_again,
                 stop: &self.stop,
                 shutdown: &self.shutdown,
             },
@@ -1653,6 +1658,66 @@ async fn a_resume_miss_starts_claude_again_only_once_and_never_after_a_stop() {
     resumed.succeeded();
     assert!(!resumed.outcome.started_again);
     assert_eq!(print_calls_since(&machine, before).len(), 1);
+}
+
+/// A `claude` that printed anything after its miss's `result` may have run something: the turn
+/// fails as that `result` says, and no second `claude` starts (11.9).
+#[tokio::test]
+async fn a_miss_followed_by_more_output_starts_nothing_more() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let turn = Run::new(&machine, &LATCH)
+        .resuming(Uuid::new_v4(), "resume-miss-result-then-line")
+        .turn("success")
+        .await;
+    let failure = turn.failure();
+    assert_eq!(failure.code, None, "{failure:?}");
+    assert!(failure.message.starts_with("No conversation found"));
+    assert!(!turn.outcome.started_again);
+    assert_eq!(turn.outcome.ignored_lines, 1);
+    assert_eq!(machine.print_calls().len(), 1);
+}
+
+/// The grant's checks run again before the second start, as before every spawn (3.2): a folder
+/// of the granted `claude` that others can now change fails the turn as `binary_unsafe`, and a
+/// `claude` other than the one the turn's probe vetted fails it too. Neither starts a second
+/// `claude`.
+#[tokio::test]
+async fn the_grant_is_checked_again_before_the_second_start() {
+    use std::os::unix::fs::PermissionsExt;
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let bin = machine.root.join("bin");
+    let missing = Uuid::new_v4();
+
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let writable = Run::new(&machine, &LATCH)
+        .resuming(missing, "resume-miss-result")
+        .turn("success")
+        .await;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    writable.failed_with(FailureCode::BinaryUnsafe);
+    assert!(!writable.outcome.started_again);
+    assert_eq!(machine.print_calls().len(), 1);
+
+    // Claude Code replaced since the probe.
+    let wrapper = bin.join("claude");
+    let text = std::fs::read_to_string(&wrapper).unwrap();
+    std::fs::write(&wrapper, format!("{text}# replaced since the probe\n")).unwrap();
+    let replaced = Run::new(&machine, &LATCH)
+        .resuming(missing, "resume-miss-result")
+        .turn("success")
+        .await;
+    let failure = replaced.failure();
+    assert_eq!(failure.code, None, "{failure:?}");
+    assert!(
+        failure
+            .message
+            .starts_with("Claude Code changed on this computer"),
+        "{failure:?}"
+    );
+    assert!(!replaced.outcome.started_again);
+    assert_eq!(machine.print_calls().len(), 2);
 }
 
 /// A `plan_only` turn passes `--permission-mode plan` and nothing else changes in its argv, and

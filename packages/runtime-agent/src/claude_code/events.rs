@@ -1275,6 +1275,8 @@ pub struct ResultFacts {
     pub text: Option<String>,
     /// `errors`, redacted.
     pub errors: Vec<String>,
+    /// `num_turns` is absent, `null` or the integer 0: the `result` says no turn ran.
+    pub ran_no_turn: bool,
 }
 
 impl ResultFacts {
@@ -1296,11 +1298,16 @@ impl ResultFacts {
                     .collect()
             })
             .unwrap_or_default();
+        let ran_no_turn = match line.get("num_turns") {
+            None | Some(Value::Null) => true,
+            Some(turns) => turns.as_u64() == Some(0),
+        };
         Self {
             is_error,
             subtype,
             text: str_field(line, "result").map(|text| redactor.text(text)),
             errors,
+            ran_no_turn,
         }
     }
 }
@@ -2611,8 +2618,19 @@ impl EventAdapter {
     /// the runtime's own SIGTERM races the exit, which can then be 143, 0 or a kill after the
     /// grace. Without such a `result`, as from a version that says it on stderr only, the miss is
     /// read from the text, and only after an exit that is not 0.
+    ///
+    /// Only a `claude` that shows it ran nothing missed its session: at most one top-level
+    /// `result` was read, and it says no turn ran (`num_turns` absent or 0). The supervisor also
+    /// asks that `claude` printed nothing after it (`supervise`).
     pub fn missed_the_session(&self, exit: &ExitFacts<'_>) -> bool {
-        if !exit.resumed || self.init.is_some() {
+        if !exit.resumed || self.init.is_some() || self.results > 1 {
+            return false;
+        }
+        if self
+            .reply_result
+            .as_ref()
+            .is_some_and(|result| !result.ran_no_turn)
+        {
             return false;
         }
         self.reported_a_resume_miss()
@@ -5701,6 +5719,46 @@ mod tests {
         no_error["is_error"] = json!(false);
         no_error["subtype"] = json!("success");
         assert!(!missed(false, no_error));
+    }
+
+    /// A `claude` that shows it ran a turn missed nothing: a miss's `result` must say no turn ran
+    /// (`num_turns` absent, `null` or 0), and be the only `result` read.
+    #[test]
+    fn a_resume_miss_result_that_says_a_turn_ran_is_no_miss() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = std::fs::canonicalize(temp.path()).unwrap();
+        let missed = |num_turns: Option<Value>| {
+            let mut line = resume_miss_result();
+            match num_turns {
+                Some(turns) => line["num_turns"] = turns,
+                None => {
+                    line.as_object_mut().unwrap().remove("num_turns");
+                }
+            }
+            let mut adapter = EventAdapter::new(&folder, None);
+            adapter.feed(&line);
+            adapter.missed_the_session(&ExitFacts {
+                resumed: true,
+                ..exit(1)
+            })
+        };
+        assert!(missed(Some(json!(0))));
+        assert!(missed(None));
+        assert!(missed(Some(Value::Null)));
+        for ran in [json!(1), json!(3), json!("0"), json!(-1), json!(0.5)] {
+            assert!(!missed(Some(ran.clone())), "{ran}");
+        }
+        // On stderr alone, a `result` that says a turn ran is no miss either.
+        let mut ran = EventAdapter::new(&folder, None);
+        let mut line = resume_miss_result();
+        line["num_turns"] = json!(2);
+        line["errors"] = json!(["something else"]);
+        ran.feed(&line);
+        assert!(!ran.missed_the_session(&ExitFacts {
+            resumed: true,
+            stderr: "No conversation found with session ID: 5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50",
+            ..exit(1)
+        }));
     }
 
     /// After a resume miss, the adapter starts over for the second `claude` of the turn: the

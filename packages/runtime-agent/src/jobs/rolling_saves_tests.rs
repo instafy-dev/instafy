@@ -180,6 +180,7 @@ fn gate<'a>(controller: &'a Url, origin: LocalOriginSync) -> Gate<'a> {
         hosted_checkout: true,
         has_git_remote: true,
         read_only_job: false,
+        local_engine_job: false,
         workspace_token: Some("job-workspace-bearer".to_string()),
         local_origin: Some(origin),
         controller_base_url: controller,
@@ -660,7 +661,8 @@ async fn a_grant_for_another_origin_is_not_used() {
 }
 
 /// Only a write job on a hosted checkout with a canonical remote, an origin
-/// in this process and a workspace token takes rolling saves.
+/// in this process and a workspace token takes rolling saves; never a
+/// local-engine turn.
 #[test]
 fn desktop_folders_and_read_only_jobs_never_tick() {
     let controller = Url::parse("http://127.0.0.1:9").unwrap();
@@ -679,6 +681,11 @@ fn desktop_folders_and_read_only_jobs_never_tick() {
     let mut read_only = gate(&controller, origin.clone());
     read_only.read_only_job = true;
     assert!(RollingSaves::from_gate(read_only).is_none());
+
+    // A local-engine turn, whatever its mode or write scope, saves only at its end.
+    let mut local_engine = gate(&controller, origin.clone());
+    local_engine.local_engine_job = true;
+    assert!(RollingSaves::from_gate(local_engine).is_none());
 
     let mut no_remote = gate(&controller, origin.clone());
     no_remote.has_git_remote = false;

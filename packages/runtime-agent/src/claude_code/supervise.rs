@@ -29,9 +29,10 @@
 //! - **Every exit.** `terminate_and_confirm` runs whatever ended the turn. The outcome counts the
 //!   programs the turn left running that it stopped, for the status step that says so.
 //! - **A session that is not here.** When `claude`, started with `--resume`, reports the session
-//!   missing before its first `init`, it ran nothing: the turn starts `claude` once more, without
-//!   `--resume`, with the same prompt and everything else the same, and runs on that one, in a
-//!   new session (11.9). That second start is the only one a turn makes.
+//!   missing before its first `init`, and shows it ran nothing (a lone `result` that says no turn
+//!   ran, and nothing printed after it), the turn starts `claude` once more, without `--resume`,
+//!   with the same prompt and everything else the same, once the grant's checks pass again, and
+//!   runs on that one, in a new session (11.9). That second start is the only one a turn makes.
 //! - **Shutdown.** While the runtime's shutdown signal is set, the turn reports nothing.
 
 use std::collections::VecDeque;
@@ -50,7 +51,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use super::FailureCode;
-use super::command::write_prompt;
+use super::command::{StartAgain, write_prompt};
 use super::events::{AdapterStatus, EventAdapter, ExitFacts, FollowUpWaitEnd, LaneFailure};
 use crate::agent::ShutdownSignal;
 use crate::job_cancel::JobCancelSignal;
@@ -219,10 +220,11 @@ impl TurnLimits {
 pub struct TurnSpec<'a> {
     /// Exactly the words of the turn, as dispatch recorded them (3.5, 11.10).
     pub prompt: &'a str,
-    /// When the command passed `--resume`: the same command without it (11.9). Should the first
-    /// `claude` report its session missing before its first `init`, the turn starts this one
-    /// instead, once, and runs on it, in a new session. `None` for a turn that resumes nothing.
-    pub without_resume: Option<Command>,
+    /// When the command passed `--resume`: how the turn starts again without it (11.9). Should
+    /// the first `claude` report its session missing before its first `init`, having run
+    /// nothing, the turn starts this one instead, once, and runs on it, in a new session. `None`
+    /// for a turn that resumes nothing.
+    pub start_again: Option<StartAgain<'a>>,
     /// The job's cancel signal: a Stop (the heartbeat's 409, or a refused message post).
     pub stop: &'a JobCancelSignal,
     /// The runtime's shutdown signal.
@@ -693,11 +695,12 @@ impl FollowUpWait {
 /// ends it, the processes the tracker saw are stopped before this returns.
 ///
 /// When `command` passed `--resume` and `claude` reports the session missing before its first
-/// `init` ([`EventAdapter::missed_the_session`]), it ran nothing: the turn asks the controller
-/// whether it still holds its lease, as before any spawn (3.1, step 6), starts
-/// [`TurnSpec::without_resume`] with the same prompt, and runs on it, in a new session, with the
-/// adapter started over ([`EventAdapter::start_again`]). That second start is the only one a turn
-/// makes (11.9).
+/// `init` ([`EventAdapter::missed_the_session`]), with nothing printed after that, it ran
+/// nothing. The grant's checks then run again, as before every spawn (3.2): when they fail, the
+/// turn fails with their failure. Otherwise the turn asks the controller whether it still holds
+/// its lease, as before any spawn (3.1, step 6), starts [`TurnSpec::start_again`]'s command with
+/// the same prompt, and runs on it, in a new session, with the adapter started over
+/// ([`EventAdapter::start_again`]). That second start is the only one a turn makes (11.9).
 pub async fn supervise(
     command: Command,
     spec: TurnSpec<'_>,
@@ -707,7 +710,7 @@ pub async fn supervise(
 ) -> TurnOutcome {
     let TurnSpec {
         prompt,
-        without_resume,
+        start_again,
         stop,
         shutdown,
     } = spec;
@@ -719,18 +722,31 @@ pub async fn supervise(
     };
     let first = supervise_one(
         command,
-        start(without_resume.is_some()),
+        start(start_again.is_some()),
         limits,
         adapter,
         on_event,
     )
     .await;
-    let Some(again) = without_resume.filter(|_| first.missed_the_session) else {
+    let Some(again) = start_again.filter(|_| first.missed_the_session) else {
         return first;
     };
     info!(
         "Claude Code doesn't have the session this turn resumes on this computer; it starts again in a new session"
     );
+    let again = match again.command() {
+        Ok(command) => command,
+        Err(failure) => {
+            warn!(
+                code = ?failure.code,
+                "the grant's checks failed before Claude Code could start again; the turn ends"
+            );
+            return TurnOutcome {
+                end: TurnEnd::Failed(failure),
+                ..first
+            };
+        }
+    };
     adapter.start_again();
     // The last step before a spawn asks the controller: a Stop since the first start ends the
     // turn before the second one starts.
@@ -1020,7 +1036,8 @@ async fn supervise_one(
                         exited_ok,
                         stderr: &stderr,
                     };
-                    missed_the_session = adapter.missed_the_session(&facts);
+                    // It ran nothing: no line came after the `result` that ended its turn.
+                    missed_the_session = ignored == 0 && adapter.missed_the_session(&facts);
                     TurnEnd::Failed(adapter.classify_failure(&facts))
                 }
             }
@@ -1649,7 +1666,7 @@ mod tests {
             command,
             TurnSpec {
                 prompt: "Fix the test\n",
-                without_resume: None,
+                start_again: None,
                 stop: &stop,
                 shutdown: &shutdown,
             },
@@ -1700,7 +1717,7 @@ mod tests {
             command,
             TurnSpec {
                 prompt: "Fix the test\n",
-                without_resume: None,
+                start_again: None,
                 stop: &stop,
                 shutdown: &shutdown,
             },

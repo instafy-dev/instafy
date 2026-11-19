@@ -12,8 +12,9 @@
 //! a queued or resent one, an automation's run, a goal's wake-up, an evaluation (11.4). So the
 //! job carries no mark of who started it that the runtime reads. What Claude Code cannot take is
 //! still refused here, as a backstop for dispatch's refusals: a browser turn, a team plan's turn,
-//! attachments, a command, an empty or too long prompt, and a mode other than `apply` and
-//! `plan_only`.
+//! attachments, a command, an empty or too long prompt, a mode other than `apply` and
+//! `plan_only`, and a write scope other than `unscoped` and `read_only`. A turn whose mode is
+//! `plan_only`, or whose write scope is `read_only`, runs read-only, in Claude Code's plan mode.
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -58,6 +59,20 @@ const TOP_LEVEL_BROWSER_KEYS: [&str; 1] = ["browser_hand_back_reads_note"];
 
 /// The keys of a message's files and images.
 const ATTACHMENT_KEYS: [&str; 3] = ["attachments", "attachment_downloads", "attachmentDownloads"];
+
+/// Every place a job's write scope can be, as the job loop's readers look for it
+/// (`jobs::write_scope_value_from_metadata` and the job loop's own claim reader): the metadata's
+/// own, its agent's and its collaboration's, each in either spelling.
+const WRITE_SCOPE_PLACES: [&str; 8] = [
+    "/metadata/writeScope",
+    "/metadata/write_scope",
+    "/metadata/agent/writeScope",
+    "/metadata/agent/write_scope",
+    "/metadata/agentCollaboration/writeScope",
+    "/metadata/agentCollaboration/write_scope",
+    "/metadata/agent_collaboration/writeScope",
+    "/metadata/agent_collaboration/write_scope",
+];
 
 /// A failure with no code of 5.5's table: its own words, in Details.
 fn uncoded(message: impl Into<String>) -> LaneFailure {
@@ -158,7 +173,9 @@ impl<'a> LaneJob<'a> {
     ///   workspace token (verified later, in the turn);
     /// - the person: `payload.user_id` is the person who consented on this computer, the owner
     ///   of the agent whose turn it is (11.5);
-    /// - the mode: `metadata.execution_mode` is absent, `apply` or `plan_only`;
+    /// - the mode: `metadata.execution_mode` is absent, `apply` or `plan_only`, and the write
+    ///   scope is absent, `unscoped` or `read_only`; a `plan_only` or `read_only` turn runs
+    ///   read-only ([`ExecutionMode::PlanOnly`]);
     /// - what Claude Code cannot take (11.4): no browser turn, no team plan's turn, no
     ///   attachments;
     /// - the prompt: not empty, at most [`MAX_PROMPT_CHARS`], and no `/` command.
@@ -207,6 +224,11 @@ impl<'a> LaneJob<'a> {
             ));
         }
         let mode = execution_mode(payload)?;
+        let mode = if reads_only(payload)? {
+            ExecutionMode::PlanOnly
+        } else {
+            mode
+        };
 
         let metadata = payload.get("metadata").and_then(Value::as_object);
         let in_metadata = |keys: &[&str]| {
@@ -271,7 +293,8 @@ impl<'a> LaneJob<'a> {
         self.prompt
     }
 
-    /// Whether the turn applies its changes or only plans them (11.12).
+    /// Whether the turn applies its changes or only plans them (11.12): it plans them when its
+    /// mode is `plan_only` or its write scope is `read_only`.
     pub fn mode(&self) -> ExecutionMode {
         self.mode
     }
@@ -296,6 +319,34 @@ fn execution_mode(payload: &Value) -> Result<ExecutionMode, LaneFailure> {
             "Claude Code runs a turn only to apply its changes or to plan them, so this turn didn't start.",
         )),
     }
+}
+
+/// Whether the turn's write scope keeps it from changing the space's files (11.12): the
+/// controller writes `read_only` for each target of a multi-agent send without write intent, and
+/// such a turn runs in Claude Code's plan mode. Every place the job loop reads a scope from is
+/// read, each as the job loop reads its mode (`jobs::write_scope_mode_from_value`), and the
+/// strictest decides: none, or only `unscoped`, applies the turn's changes; a `read_only` one
+/// (`readonly` too) makes it read-only; any other scope, such as `owned`, `write`,
+/// `write_scoped` or `coordination_required`, or one whose mode cannot be read, refuses the
+/// turn, since nothing can hold Claude Code to part of the space's files.
+fn reads_only(payload: &Value) -> Result<bool, LaneFailure> {
+    let mut read_only = false;
+    for scope in WRITE_SCOPE_PLACES
+        .iter()
+        .filter_map(|place| payload.pointer(place))
+        .filter(|scope| !scope.is_null())
+    {
+        match crate::jobs::write_scope_mode_from_value(scope).as_deref() {
+            Some("unscoped") => {}
+            Some("read_only" | "readonly") => read_only = true,
+            _ => {
+                return Err(uncoded(
+                    "Claude Code can't be held to part of the space's files, so this turn didn't start.",
+                ));
+            }
+        }
+    }
+    Ok(read_only)
 }
 
 /// A list with an entry, or any other value but null.
@@ -537,6 +588,116 @@ mod tests {
             let failure = mode_of(other.clone(), "shared_write").expect_err("refused");
             assert_eq!(failure.code, None, "{other}");
             assert!(failure.message.contains("apply"), "{other}: {failure:?}");
+        }
+    }
+
+    /// The write scope (11.12): none, or `unscoped`, applies the turn's changes; `read_only`,
+    /// wherever the job loop reads a scope from and however it is spelled, runs the turn
+    /// read-only, as `plan_only` does; any other scope refuses it before anything runs.
+    #[test]
+    fn a_read_only_write_scope_plans_and_any_other_scope_but_unscoped_is_refused() {
+        let person = Uuid::new_v4();
+        let grant = grant(person);
+        let mode_with = |change: &dyn Fn(&mut Value)| {
+            let mut job = lane_job(person);
+            change(&mut job.payload["metadata"]);
+            LaneJob::of(&job, &grant).map(|lane_job| lane_job.mode())
+        };
+        let without_scopes = |metadata: &mut Value| {
+            metadata.as_object_mut().unwrap().remove("writeScope");
+            metadata["agent"]
+                .as_object_mut()
+                .unwrap()
+                .remove("writeScope");
+        };
+        // The recorded payload's scope is `unscoped`, in two places.
+        assert_eq!(mode_with(&|_| {}), Ok(ExecutionMode::Apply));
+        assert_eq!(mode_with(&without_scopes), Ok(ExecutionMode::Apply));
+        assert_eq!(
+            mode_with(&|metadata| metadata["writeScope"] = json!("unscoped")),
+            Ok(ExecutionMode::Apply)
+        );
+        assert_eq!(
+            mode_with(&|metadata| metadata["writeScope"] = Value::Null),
+            Ok(ExecutionMode::Apply)
+        );
+        for place in [
+            "writeScope",
+            "write_scope",
+            "agent.writeScope",
+            "agent.write_scope",
+            "agentCollaboration.writeScope",
+            "agent_collaboration.write_scope",
+        ] {
+            for spelling in [
+                json!({ "mode": "read_only", "ownedPaths": [] }),
+                json!({ "mode": "Read-Only" }),
+                json!({ "mode": "readonly" }),
+                json!("read_only"),
+            ] {
+                let read_only = |metadata: &mut Value| {
+                    without_scopes(metadata);
+                    let (container, key) = place.split_once('.').unwrap_or(("", place));
+                    if container.is_empty() {
+                        metadata[key] = spelling.clone();
+                    } else {
+                        metadata[container][key] = spelling.clone();
+                    }
+                };
+                assert_eq!(
+                    mode_with(&read_only),
+                    Ok(ExecutionMode::PlanOnly),
+                    "{place}: {spelling}"
+                );
+            }
+        }
+        // The strictest place decides: an unscoped scope hides no read-only one.
+        assert_eq!(
+            mode_with(&|metadata| {
+                metadata["agent"]["writeScope"] = json!({ "mode": "read_only" })
+            }),
+            Ok(ExecutionMode::PlanOnly)
+        );
+        // With the `plan_only` mode too, and never past a mode no lane turn runs in.
+        assert_eq!(
+            mode_with(&|metadata| {
+                metadata["writeScope"] = json!({ "mode": "read_only" });
+                metadata["execution_mode"] = json!("plan_only");
+            }),
+            Ok(ExecutionMode::PlanOnly)
+        );
+        let approval = mode_with(&|metadata| {
+            metadata["writeScope"] = json!({ "mode": "read_only" });
+            metadata["execution_mode"] = json!("approval_required");
+        });
+        assert!(approval.is_err());
+
+        for scope in [
+            json!({ "mode": "owned", "ownedPaths": ["src/app.ts"] }),
+            json!({ "mode": "write" }),
+            json!({ "mode": "write_scoped" }),
+            json!({ "mode": "coordination_required" }),
+            json!({ "mode": "a-later-mode" }),
+            json!({ "ownedPaths": ["src/app.ts"] }),
+            json!({}),
+            json!(true),
+        ] {
+            for place in ["writeScope", "agent"] {
+                let failure = mode_with(&|metadata| {
+                    if place == "agent" {
+                        metadata["agent"]["writeScope"] = scope.clone();
+                    } else {
+                        metadata[place] = scope.clone();
+                    }
+                })
+                .expect_err("refused");
+                assert_eq!(failure.code, None, "{scope}");
+                assert_eq!(
+                    failure.message,
+                    "Claude Code can't be held to part of the space's files, so this turn didn't start.",
+                    "{place}: {scope}"
+                );
+            }
         }
     }
 

@@ -987,7 +987,8 @@ fn a_session_resumes_whichever_computer_saved_it_and_a_miss_starts_a_new_one() {
 
 /// An automation's `plan_only` turn (11.12): the job loop runs it on the lane, `claude` runs in
 /// its plan mode, and the turn saves nothing, whatever changed in the folder, while its reply is
-/// delivered. An agent's turn that nobody typed runs as any other (11.4).
+/// delivered. An agent's turn that nobody typed runs as any other (11.4). A turn whose write
+/// scope is `read_only` runs the same way.
 #[test]
 fn a_plan_only_turn_runs_in_plan_mode_and_saves_nothing() {
     static LATCH: AtomicBool = AtomicBool::new(false);
@@ -1032,6 +1033,19 @@ fn a_plan_only_turn_runs_in_plan_mode_and_saves_nothing() {
             .unwrap();
         assert_eq!(argv[at + 1], "plan");
 
+        // A target of a multi-agent send without write intent: its write scope is `read_only`,
+        // and it runs read-only the same way, whatever its mode says.
+        let mut read_only = space.job();
+        let scope = json!({ "mode": "read_only", "ownedPaths": [], "readOnlyPaths": [] });
+        read_only.payload["metadata"]["writeScope"] = scope.clone();
+        read_only.payload["metadata"]["agent"]["writeScope"] = scope;
+        space.handle(read_only.clone(), 0).await;
+        let completion = space.completion(read_only.id);
+        assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
+        assert!(artifact(&completion, "origin/apply").is_none());
+        assert!(space.origin_requests.lock().is_empty(), "nothing was saved");
+        assert_eq!(space.print_calls()[1].0[at + 1], "plan");
+
         // A turn that applies its changes is the same turn but for the mode: it saves them.
         space.scenario("success");
         let applied = space.job();
@@ -1039,7 +1053,7 @@ fn a_plan_only_turn_runs_in_plan_mode_and_saves_nothing() {
         let completion = space.completion(applied.id);
         assert_eq!(completion["outcome"], "succeeded", "{completion:#}");
         assert!(artifact(&completion, "origin/apply").is_some());
-        let argv = &space.print_calls()[1].0;
+        let argv = &space.print_calls()[2].0;
         assert_eq!(argv[at + 1], "acceptEdits");
         assert!(!LATCH.load(Ordering::SeqCst));
     });
@@ -1534,6 +1548,12 @@ fn a_refused_turn_starts_no_claude() {
         team_plan.payload["metadata"]["multiAgentPlan"] = json!({ "role": "worker" });
         let mut attachments = space.job();
         attachments.payload["metadata"]["attachments"] = json!([{ "name": "photo.png" }]);
+        let mut owned = space.job();
+        owned.payload["metadata"]["writeScope"] =
+            json!({ "mode": "owned", "ownedPaths": ["src/app.ts"] });
+        let mut coordination = space.job();
+        coordination.payload["metadata"]["agent"]["writeScope"] =
+            json!({ "mode": "coordination_required" });
         let mut command = space.job();
         command.payload["prompt_text"] = json!("/terminal ls");
         for job in [
@@ -1544,6 +1564,8 @@ fn a_refused_turn_starts_no_claude() {
             &browser,
             &team_plan,
             &attachments,
+            &owned,
+            &coordination,
             &command,
         ] {
             space.handle(job.clone(), 60).await;
