@@ -466,11 +466,14 @@ fn hosted_runtime_is_live_in(project: &str) -> String {
 /// Queued work in the space `project` that a hosted machine there would pick
 /// up: unpinned, or pinned to one of the space's own hosted runtimes. Work
 /// pinned to a desktop or another machine is waiting for that machine, not
-/// for the limit.
+/// for the limit, and so is a local-engine turn (crate::claude_code_lane),
+/// which no hosted machine ever takes: unpinned, it waits for its person's
+/// own computer, however long, and no wait may fail it.
 fn waiting_job_predicate(alias: &str, project: &str) -> String {
     format!(
         "{alias}.project_id = {project}
          and {alias}.status = 'queued'
+         and {alias}.engine is null
          and (
            {alias}.target_runtime_id is null
            or exists (

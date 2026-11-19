@@ -765,8 +765,12 @@ async fn execute_automation_once(
     // or launched for it. While its last run still waits, a due run is
     // skipped rather than piled up behind it (crate::claude_code_lane,
     // docs/Local-Engine-Turns.md 11.7).
-    let runs_on_claude_code =
-        crate::dispatch::selects_only_claude_code_agents(state, record.user_id, &metadata).await?;
+    let runs_on_claude_code = crate::dispatch::selects_only_claude_code_agents(
+        &*state.pool.get().await?,
+        record.user_id,
+        &metadata,
+    )
+    .await?;
     if runs_on_claude_code {
         if let Some(conversation_id) = record.conversation_id {
             if crate::claude_code_lane::a_turn_waits_in(state, &conversation_id, &record.user_id)
@@ -1816,6 +1820,16 @@ async fn create_project_automation(
 
     let project = crate::load_project_record(&transaction, &project_id).await?;
     crate::ensure_project_write_access(&transaction, &project, &access_context, None).await?;
+    // An agent's job never makes an automation of a Claude Code agent's, whose
+    // prompt would be its words (crate::claude_code_lane::not_from_an_agents_job).
+    // A job's token can change no automation's prompt or agents anyway, only
+    // its schedule or status.
+    if active_job.is_some()
+        && crate::claude_code_lane::selects_a_claude_code_agent(&transaction, user_id, &metadata)
+            .await?
+    {
+        return Err(crate::claude_code_lane::not_from_an_agents_job());
+    }
 
     let automation_id = Uuid::new_v4();
     let conversation_id = if is_review {
@@ -2651,7 +2665,6 @@ async fn run_automation_now(
 
     let project = crate::load_project_record(&transaction, &record.project_id).await?;
     crate::ensure_project_write_access(&transaction, &project, &access_context, None).await?;
-
     if record.mode == MODE_SPACE_REVIEW {
         let pending: bool = transaction.query_one("select exists(select 1 from agent_jobs where conversation_id=$1 and status in ('queued','leased'))", &[&record.conversation_id]).await
             .map_err(|e| internal_error(format!("failed to check pending review: {e}")))?.get(0);

@@ -551,6 +551,12 @@ fn has_explicit_agent_mentions(metadata: &JsonValue) -> bool {
         .unwrap_or(false)
 }
 
+/// The handles a dispatch with `metadata` reaches, as it resolves them: its
+/// mentions, else its active agents, else @octo.
+pub(crate) fn agent_selection_handles(metadata: &JsonValue) -> Vec<String> {
+    extract_agent_selection_handles(metadata)
+}
+
 fn extract_agent_selection_handles(metadata: &JsonValue) -> Vec<String> {
     let selection = metadata
         .as_object()
@@ -599,15 +605,12 @@ fn extract_agent_selection_handles(metadata: &JsonValue) -> Vec<String> {
 /// resolves them, against that person's own saved agents. An automation asks
 /// before it picks a runtime, which such a run never needs (11.7).
 pub(crate) async fn selects_only_claude_code_agents(
-    state: &AppState,
+    client: &(impl tokio_postgres::GenericClient + Sync),
     user_id: Uuid,
     metadata: &JsonValue,
-) -> anyhow::Result<bool> {
+) -> Result<bool, tokio_postgres::Error> {
     let handles = extract_agent_selection_handles(metadata);
-    let row = state
-        .pool
-        .get()
-        .await?
+    let row = client
         .query_one(
             "select count(*) filter (where provider = $3 and credential_id is null),
                     count(*)
@@ -1518,17 +1521,48 @@ pub(crate) async fn process_dispatch_prompt_timed(
         return Ok(recorded_dispatch_response(conversation.id));
     }
 
+    // A send an agent's job makes with its token never starts a Claude Code
+    // turn (crate::claude_code_lane, 11.5): refused here, before the busy
+    // chat's check could turn it into a queue entry that drains as the
+    // person's own.
+    if request.delegating_job_id.is_some() && dispatch_requires_ai_access(&request.intent) {
+        if let Some(person) = context.user_id {
+            if crate::claude_code_lane::selects_a_claude_code_agent(
+                &transaction,
+                person,
+                &request.metadata,
+            )
+            .await?
+            {
+                return Err(crate::claude_code_lane::not_from_an_agents_job());
+            }
+        }
+    }
+
     // Idempotent retries must win before the optimistic lane comparison. A
     // retry of a successfully admitted message naturally finds its own active
     // job and must return that run, never enqueue a duplicate follow-up.
     if request.expected_lane_idle {
         let requested_handles = extract_agent_selection_handles(&request.metadata);
+        // A teammate's local-engine turn that still waits for their own
+        // computer, possibly for days, keeps nobody else's agent busy: its
+        // handle names their agent, not this person's
+        // (crate::claude_code_lane, docs/Local-Engine-Turns.md 11.7).
         let rows = transaction
             .query(
                 "select payload from agent_jobs
                  where conversation_id = $1
-                   and status in ('queued','leased')",
-                &[&conversation.id],
+                   and status in ('queued','leased')
+                   and not (
+                       engine is not null
+                       and status = 'queued'
+                       and lease_attempts = 0
+                       and (payload ->> 'user_id') is distinct from $2
+                   )",
+                &[
+                    &conversation.id,
+                    &context.user_id.map(|user_id| user_id.to_string()),
+                ],
             )
             .await
             .map_err(|error| {
@@ -1786,9 +1820,26 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 {
                     true
                 } else {
+                    // With managed AI off, an evaluation needs an AI of the
+                    // sender's own: their default connection, or agents that
+                    // all run on their own Claude Code (crate::claude_code_lane).
                     credentials::load_default_credential_id(&transaction, context.user_id)
                         .await?
                         .is_some()
+                        || match context.user_id {
+                            Some(user_id) => selects_only_claude_code_agents(
+                                &transaction,
+                                user_id,
+                                &request.metadata,
+                            )
+                            .await
+                            .map_err(|error| {
+                                internal_error(format!(
+                                    "failed to read the sender's Claude Code agents: {error}"
+                                ))
+                            })?,
+                            None => false,
+                        }
                 }
             } else {
                 false
@@ -1962,6 +2013,13 @@ pub(crate) async fn process_dispatch_prompt_timed(
             || metadata_uses_personal_browser(&request.metadata)
             || metadata_uses_shared_browser(&request.metadata);
         for target in agent_targets.iter().filter(|target| target.claude_code) {
+            // The words its job will get: its own part of a message to several
+            // agents, as `apply_agent_prompt_segment` gives it, or the whole.
+            let prompt_text = prompt_segments
+                .get(&target.handle)
+                .map(|segment| segment.trim())
+                .filter(|segment| !segment.is_empty())
+                .unwrap_or(request.prompt_text.as_str());
             crate::claude_code_lane::check_target(
                 &state.config,
                 context,
@@ -1969,6 +2027,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 crate::claude_code_lane::Target {
                     agent_id: target.agent_id,
                     uses_browser,
+                    prompt_text,
                 },
             )?;
         }

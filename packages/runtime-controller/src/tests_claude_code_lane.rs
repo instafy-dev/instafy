@@ -2144,7 +2144,9 @@ async fn whoever_started_it_a_turn_claude_code_can_take_is_admitted() -> anyhow:
                 )
                 .await?;
             is_lane_turn(lane.job(job).await?, "the service role for the person");
-            // A Codex job's own token, which acts as its person.
+            // A Codex job's own token, which acts as its person, never starts
+            // one: an agent's job reads what teammates wrote, so its words
+            // could be theirs (11.5).
             let codex_chat = lane.chat().await?;
             lane.admitted(codex_chat, &octo_send(space.runtime)).await?;
             let leased = lane.harness.lease(space.runtime).await?;
@@ -2152,10 +2154,40 @@ async fn whoever_started_it_a_turn_claude_code_can_take_is_admitted() -> anyhow:
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("no job token: {leased}"))?
                 .to_string();
-            let job = lane
-                .admitted_as(&job_token, codex_chat, &lane_send(lane_metadata(json!({}))))
+            lane.refused(
+                &job_token,
+                codex_chat,
+                lane_send(lane_metadata(json!({}))),
+                unsupported("delegated"),
+            )
+            .await?;
+            // Nor can it make an automation of a Claude Code agent's, whose
+            // prompt would be its words. (A job's token can change only an
+            // automation's schedule or status, whatever its agents.)
+            let before = lane.written().await?;
+            let (status, response) = lane
+                .harness
+                .call(
+                    "POST",
+                    format!("/projects/{}/automations", space.project_id),
+                    Some(&job_token),
+                    Some(json!({
+                        "name": "From a job",
+                        "promptText": WORDS,
+                        "scheduleKind": "hourly",
+                        "intervalHours": 24,
+                        "timezone": "UTC",
+                        "runtimeMode": "auto",
+                        "metadata": { "agentSelection": { "active": [CLAUDE], "mentions": [CLAUDE] } },
+                    })),
+                )
                 .await?;
-            is_lane_turn(lane.job(job).await?, "a Codex job's token");
+            assert_eq!(
+                (status, response["details"]["reason"].as_str()),
+                (StatusCode::UNPROCESSABLE_ENTITY, Some("delegated")),
+                "{response}"
+            );
+            assert_eq!(lane.written().await?, before, "a job's automation wrote something");
             // A send that starts its chat.
             let (status, response) = lane
                 .harness
@@ -2239,6 +2271,95 @@ async fn a_message_to_a_claude_code_agent_whose_turn_waits_is_queued_and_drained
                 lane.owner_claude,
                 "the drained message",
             );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A turn that waits for its person's computer keeps only that person's own
+/// agent busy in a shared chat: a teammate's send to their own @claude there
+/// is admitted at once, never queued behind it (11.7).
+#[tokio::test]
+async fn a_waiting_lane_turn_keeps_no_teammates_agent_busy() -> anyhow::Result<()> {
+    with_lane(
+        "lane-waiting-busy",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (chat, _waiting) = lane.lane_turn().await?;
+            let (status, response) = lane
+                .send(
+                    &lane.token(space.member),
+                    chat,
+                    &with(
+                        lane_send(lane_metadata(json!({}))),
+                        json!({ "expectedLaneIdle": true }),
+                    ),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            assert_eq!(
+                sql_one::<i64>(
+                    lane.pool(),
+                    "select count(*) from conversation_send_queue where conversation_id = $1",
+                    &[&chat],
+                )
+                .await?,
+                0,
+                "the teammate's send was queued: {response}"
+            );
+            let job = Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())?;
+            assert_lane_job(
+                &lane.job(job).await?,
+                space.member,
+                lane.member_claude,
+                "the teammate's own turn",
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A Claude Code agent's job holds no Instafy AI reserve (crate::credits):
+/// in a send to it and to an agent on Instafy AI, the other's failure finds
+/// nothing else holding the prompt's reserve, so it is given back.
+#[tokio::test]
+async fn a_lane_turn_never_holds_the_instafy_ai_reserve() -> anyhow::Result<()> {
+    with_lane(
+        "lane-reserve",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (chat, waiting) = lane.lane_turn().await?;
+            let prompt: Uuid = sql_one(
+                lane.pool(),
+                "select prompt_id from agent_jobs where id = $1",
+                &[&waiting],
+            )
+            .await?;
+            let sibling = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into agent_jobs (id, project_id, conversation_id, prompt_id, intent,
+                                         status, payload)
+                 values ($1, $2, $3, $4, 'feature', 'failed', '{}'::jsonb)",
+                &[&sibling, &space.project_id, &chat, &prompt],
+            )
+            .await?;
+            let mut connection = lane.pool().get().await?;
+            let transaction = connection.transaction().await?;
+            let held = crate::credits::other_instafy_ai_turns_hold_reserve(
+                &transaction,
+                &space.project_id,
+                &prompt,
+                &sibling,
+            )
+            .await
+            .map_err(|(status, Json(error))| anyhow::anyhow!("{status} {}", error.message))?;
+            transaction.rollback().await?;
+            assert!(!held, "the waiting lane turn held the Instafy AI reserve");
             Ok(())
         },
     )
@@ -5109,6 +5230,7 @@ fn a_target_passes_only_as_its_owners_own_turn_on_the_switch() {
             claude_code_lane::Target {
                 agent_id,
                 uses_browser,
+                prompt_text: &request.prompt_text,
             },
         )
         .err()

@@ -179,7 +179,10 @@ async fn ensure_idle(
     conversation_id: Uuid,
     source_job_id: Uuid,
 ) -> Result<(), Error> {
-    let row=tx.query_one("select exists(select 1 from agent_jobs where conversation_id=$1 and status in ('queued','leased')) or exists(select 1 from agent_user_input_requests where conversation_id=$1 and status in ('pending','answered')) or exists(select 1 from conversation_send_queue where conversation_id=$1 and (status='queued' or (status='dispatched' and dispatched_run_id is null and dispatched_at>=now()-interval '10 minutes'))) as busy", &[&conversation_id])
+    // A teammate's local-engine turn that still waits for their own computer,
+    // possibly for days, holds up no one else's goal (crate::claude_code_lane):
+    // only a waiting turn of the goal's own person does.
+    let row=tx.query_one("select exists(select 1 from agent_jobs j where j.conversation_id=$1 and j.status in ('queued','leased') and not (j.engine is not null and j.status='queued' and j.lease_attempts=0 and (j.payload->>'user_id') is distinct from (select s.payload->>'user_id' from agent_jobs s where s.id=$2))) or exists(select 1 from agent_user_input_requests where conversation_id=$1 and status in ('pending','answered')) or exists(select 1 from conversation_send_queue where conversation_id=$1 and (status='queued' or (status='dispatched' and dispatched_run_id is null and dispatched_at>=now()-interval '10 minutes'))) as busy", &[&conversation_id, &source_job_id])
         .await.map_err(|e| internal_error(format!("check goal conversation availability: {e}")))?;
     if row.get::<_, bool>("busy") {
         return Err(conflict("The conversation has work or user input waiting."));

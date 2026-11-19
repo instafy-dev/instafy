@@ -186,12 +186,15 @@ pub(crate) struct LaneAdmission;
 /// What dispatch knows of a target that is a Claude Code agent when
 /// [`check_target`] runs.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Target {
+pub(crate) struct Target<'a> {
     /// The agent's saved id; a target with none is never a Claude Code agent.
     pub(crate) agent_id: Option<Uuid>,
     /// The turn needs Instafy's browser: a strict browser target, or a
     /// Personal or Shared Browser request.
     pub(crate) uses_browser: bool,
+    /// The words this target's job gets: its own part of a message to several
+    /// agents (`dispatch::apply_agent_prompt_segment`), or the whole text.
+    pub(crate) prompt_text: &'a str,
 }
 
 fn refusal(status: StatusCode, code: &str, message: &str, details: JsonValue) -> Refusal {
@@ -250,7 +253,7 @@ pub(crate) fn check_target(
     config: &AppConfig,
     context: &RequestContext,
     request: &DispatchPromptNormalized,
-    target: Target,
+    target: Target<'_>,
 ) -> Result<(), Refusal> {
     // L2 first: without a person there is no owner for L1 to look up.
     let Some(owner) = context.user_id else {
@@ -270,7 +273,8 @@ pub(crate) fn check_target(
         return Err(not_allowed());
     }
     // L3.
-    check_turn_shape(request, target.uses_browser)
+    check_turn_shape(request, target.uses_browser)?;
+    check_prompt_text(target.prompt_text)
 }
 
 /// L3 (11.4): what a Claude Code agent's turn cannot ask for. Each refusal
@@ -323,7 +327,50 @@ fn check_turn_shape(request: &DispatchPromptNormalized, uses_browser: bool) -> R
             "Claude Code can't take a turn that waits for your approval.",
         ));
     }
-    check_prompt_text(&request.prompt_text)
+    Ok(())
+}
+
+/// The refusal of a Claude Code turn an agent's job would start: a send its
+/// job token makes, or an automation it makes (docs/Local-Engine-Turns.md
+/// 11.5). An agent's job reads what teammates
+/// wrote in a shared chat, so its words could be theirs, and a Claude Code
+/// turn runs only its own person's: their own messages, their own
+/// automations and goals, and what dispatch starts for those.
+pub(crate) fn not_from_an_agents_job() -> Refusal {
+    unsupported(
+        "delegated",
+        "Claude Code takes turns only from its own person, never from another agent's job.",
+    )
+}
+
+/// Whether any agent a dispatch with `metadata` reaches, for `person`, is a
+/// Claude Code agent: its handles as dispatch resolves them, against that
+/// person's own saved agents.
+pub(crate) async fn selects_a_claude_code_agent(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    person: Uuid,
+    metadata: &JsonValue,
+) -> Result<bool, Refusal> {
+    let handles = crate::dispatch::agent_selection_handles(metadata);
+    client
+        .query_one(
+            "select exists (
+                 select 1 from user_agents
+                  where user_id = $1
+                    and lower(handle) = any($2::text[])
+                    and deleted_at is null
+                    and provider = $3
+                    and credential_id is null
+             )",
+            &[&person, &handles, &PROVIDER],
+        )
+        .await
+        .map(|row| row.get::<_, bool>(0))
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to read the person's Claude Code agents: {error}"
+            ))
+        })
 }
 
 /// L3's refusal of a write scope a Claude Code agent's turn cannot be held
@@ -1156,16 +1203,6 @@ mod tests {
                 request(json!({ "metadata": { "spaceReview": {} } })),
                 false,
             ),
-            (
-                "command",
-                request(json!({ "promptText": "  /review" })),
-                false,
-            ),
-            (
-                "too_long",
-                request(json!({ "promptText": "a".repeat(CLAUDE_CODE_LANE_MAX_PROMPT_CHARS + 1) })),
-                false,
-            ),
         ];
         for (reason, request, uses_browser) in cases {
             let refusal = check_turn_shape(&request, uses_browser).expect_err(reason);
@@ -1191,6 +1228,45 @@ mod tests {
             code_and_reason(&check_turn_shape(&internal_review, false).expect_err("review")).2,
             "instafy_feature"
         );
+    }
+
+    /// L3 reads the words the target's job gets, its own part of a message
+    /// to several agents included, not only the whole message's text.
+    #[test]
+    fn a_targets_own_words_are_checked() {
+        let owner = Uuid::new_v4();
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "lane-target-words",
+        );
+        config.claude_code_lane =
+            crate::config::ClaudeCodeLaneUsers(crate::config::DeviceGrantUsers::Only(vec![owner]));
+        let context = RequestContext {
+            user_id: Some(owner),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        let request = request(json!({ "promptText": "hi" }));
+        fn target(prompt_text: &str) -> Target<'_> {
+            Target {
+                agent_id: Some(Uuid::new_v4()),
+                uses_browser: false,
+                prompt_text,
+            }
+        }
+        assert!(check_target(&config, &context, &request, target("fix the build")).is_ok());
+        for (words, reason) in [
+            ("/init".to_string(), "command"),
+            (
+                "a".repeat(CLAUDE_CODE_LANE_MAX_PROMPT_CHARS + 1),
+                "too_long",
+            ),
+        ] {
+            let refusal =
+                check_target(&config, &context, &request, target(&words)).expect_err(reason);
+            assert_eq!(code_and_reason(&refusal).2, reason);
+        }
     }
 
     #[test]
