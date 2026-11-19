@@ -1,0 +1,102 @@
+name: Claude Code lane canary
+
+# Runs the local-engine lane's live suite (docs/Local-Engine-Turns.md, section 8 and D6)
+# every day against the newest Claude Code release, on macOS, the lane's platform. It
+# signs claude in with Instafy's own API key through an apiKeyHelper in a throwaway
+# configuration folder, never a person's Claude plan, and never runs for a pull request.
+# A release that stops honouring the lane's flags fails this job within a day.
+#
+# It needs the ANTHROPIC_CANARY_API_KEY secret in the claude-code-canary environment.
+# Without it, the job warns and runs nothing.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-code-lane-canary
+  cancel-in-progress: false
+
+jobs:
+  live-suite:
+    name: Claude Code lane live suite on the newest release
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: claude-code-canary
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check for the canary key
+        env:
+          CANARY_KEY: ${{ secrets.ANTHROPIC_CANARY_API_KEY }}
+        run: |
+          if [ -z "$CANARY_KEY" ]; then
+            echo "::warning::The claude-code-canary environment has no ANTHROPIC_CANARY_API_KEY, so the canary ran nothing."
+            echo "CANARY_SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up stable Rust
+        if: env.CANARY_SKIP != '1'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          command -v protoc >/dev/null || brew install protobuf
+
+      - name: Restore cargo cache
+        if: env.CANARY_SKIP != '1'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            .cargo-target
+          key: claude-code-canary-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/*/Cargo.lock') }}
+
+      - name: Build the live suite
+        if: env.CANARY_SKIP != '1'
+        run: cargo test --locked --manifest-path packages/runtime-agent/Cargo.toml --test claude_code_live --no-run
+
+      - name: Install the newest Claude Code release
+        if: env.CANARY_SKIP != '1'
+        run: |
+          curl -fsSL https://claude.ai/install.sh -o "$RUNNER_TEMP/install-claude.sh"
+          bash "$RUNNER_TEMP/install-claude.sh" latest
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/claude" --version | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign claude in with the canary key
+        if: env.CANARY_SKIP != '1'
+        env:
+          CANARY_KEY: ${{ secrets.ANTHROPIC_CANARY_API_KEY }}
+        run: |
+          umask 077
+          config="$RUNNER_TEMP/claude-config"
+          mkdir -p "$config"
+          printf '%s' "$CANARY_KEY" > "$RUNNER_TEMP/canary-key"
+          printf '#!/bin/sh\ncat %s\n' "$RUNNER_TEMP/canary-key" > "$RUNNER_TEMP/canary-key-helper"
+          chmod 700 "$RUNNER_TEMP/canary-key-helper"
+          printf '{"apiKeyHelper": "%s"}\n' "$RUNNER_TEMP/canary-key-helper" > "$config/settings.json"
+          echo "CLAUDE_CONFIG_DIR=$config" >> "$GITHUB_ENV"
+
+      - name: Run the live suite
+        if: env.CANARY_SKIP != '1'
+        env:
+          INSTAFY_CLAUDE_CODE_LIVE: "1"
+          INSTAFY_CLAUDE_CODE_CANARY: "1"
+        run: |
+          export INSTAFY_CLAUDE_CODE_BIN="$HOME/.local/bin/claude"
+          cargo test --locked --manifest-path packages/runtime-agent/Cargo.toml --test claude_code_live -- --ignored --nocapture --test-threads=1
