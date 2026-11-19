@@ -2239,8 +2239,8 @@ step the person said yes to keeps to the control they were asked about. When
 an option of a field's suggestions is gone, nothing is clicked, and the step
 answers with the page as it is now and the field's suggestions as they read
 then: ""Central Station" was no longer in the list under "From" when the click
-came, so nothing was clicked. 2 suggestions under "From": "Harbour" (index 2),
-"Harbour (Metro)" (index 3). Click one.", or that the field shows none. A page
+came, so nothing was clicked. 2 suggestions under "From": "Harbour" (index 1),
+"Harbour (Metro)" (index 2). Click one.", or that the field shows none. A page
 that still reads as it did then, in the reading the step answers with too,
 says so in the step's `done`, and that this reading is the page as it is
 now: "The page still reads as it did before this step, 6 seconds after it:

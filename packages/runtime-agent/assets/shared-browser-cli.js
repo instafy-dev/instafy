@@ -4120,11 +4120,14 @@ async function clickControlItself(page, target, wait = {}, { keepFocus = false }
   return before;
 }
 
-// Whether the control a step holds is no longer in the page: the page took it
-// out, or drew it again, after the step found it. A page that cannot be asked
-// counts as one that still holds it.
-async function controlLeftThePage(target) {
-  const place = await controlPlace(target.locator);
+// Whether a step's click failed because its control was no longer in the
+// page when the browser came to act on it (the page took it out, or drew it
+// again, after the step found it): nothing was clicked then. Only a failure
+// that says so is asked about, and only for a moment: a click whose load the
+// site never answered waited out the step's time on that question.
+async function controlLeftThePage(target, error) {
+  if (!/Element is not attached to the DOM/u.test(String(error && error.message ? error.message : error))) return false;
+  const place = await within(FIELD_READ_MS, controlPlace(target.locator), null);
   return place !== null && place.connected === false;
 }
 
@@ -4159,7 +4162,11 @@ async function controlFoundAgain(page, body, target) {
 // The field whose own suggestions hold the control a step clicks
 // (suggestionFieldInPage), as a handle, or null.
 async function suggestionFieldOf(target) {
-  const handle = await (async () => target.locator.evaluateHandle(suggestionFieldInPage))().catch(() => null);
+  const handle = await within(
+    FIELD_READ_MS,
+    (async () => target.locator.evaluateHandle(suggestionFieldInPage))().catch(() => null),
+    null,
+  );
   const field = typeof handle?.asElement === "function" ? handle.asElement() : null;
   if (!field) await (async () => handle?.dispose())().catch(() => {});
   return field;
@@ -7265,7 +7272,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       // local test, Nov 19). A step nobody was asked about finds it again by
       // its reading's record and clicks once; one the person said yes to
       // keeps to the control they were asked about.
-      if (asksPerson || !(await controlLeftThePage(target))) throw error;
+      if (asksPerson || !(await controlLeftThePage(target, error))) throw error;
       const again = await controlFoundAgain(page, body, target);
       if (!again) {
         if (suggestionField) return await goneSuggestionResult(page, target, suggestionField, withholding);
@@ -7278,7 +7285,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       try {
         before = await clickControlItself(page, target, linkWait, keepFocus);
       } catch (retryError) {
-        if (suggestionField && (await controlLeftThePage(target))) {
+        if (suggestionField && (await controlLeftThePage(target, retryError))) {
           return await goneSuggestionResult(page, target, suggestionField, withholding);
         }
         throw retryError;
@@ -7423,10 +7430,13 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const typedOn = submitting ? null : { url: page.url(), documentId: await documentOf(page) };
     let listed = null;
     // The field keeps a mark of the step, so a step that sends the page's
-    // form names it first (sentFields), whatever its form sends of it.
-    const markTyped = () => target.locator
-      .evaluate(typedFieldMarkInPage, { kind: "typed-mark", key: TYPED_FIELD_KEY })
-      .catch(() => {});
+    // form names it first (sentFields), whatever its form sends of it. A
+    // page busy with a load the typing started is not waited on for it.
+    const markTyped = () => within(
+      FIELD_READ_MS,
+      target.locator.evaluate(typedFieldMarkInPage, { kind: "typed-mark", key: TYPED_FIELD_KEY }),
+      null,
+    ).catch(() => {});
     if (submitting) {
       await target.locator.fill(body.text);
       await markTyped();
