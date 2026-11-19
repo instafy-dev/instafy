@@ -2017,11 +2017,25 @@ mod tests {
         let two_links = case(&cases, "news-two-links-then-open-the-article");
         let newsroom = &two_links.expect.summary_names[0];
         let input = routing_input(&two_links, workspace.path()).unwrap();
-        for address in [newsroom.as_str(), "https://finance.yahoo.com/quote/ERIC-B.ST/"] {
-            assert!(input.prompt.contains(address), "{address}: {}", input.prompt);
+        for address in [
+            newsroom.as_str(),
+            "https://finance.yahoo.com/quote/ERIC-B.ST/",
+        ] {
+            assert!(
+                input.prompt.contains(address),
+                "{address}: {}",
+                input.prompt
+            );
         }
-        assert!(!two_links.history[1]["content"].as_str().unwrap().contains("article"));
-        answer["summary"] = json!(format!("Open {newsroom} and summarise today's story there."));
+        assert!(
+            !two_links.history[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("article")
+        );
+        answer["summary"] = json!(format!(
+            "Open {newsroom} and summarise today's story there."
+        ));
         assert!(two_links.answered_by(&read_answer(&answer, &two_links, &input)));
         answer["summary"] = json!("Open the Ericsson article linked in this chat in the browser.");
         assert!(!two_links.answered_by(&read_answer(&answer, &two_links, &input)));
