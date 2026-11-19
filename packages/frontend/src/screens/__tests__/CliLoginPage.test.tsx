@@ -38,7 +38,7 @@ vi.mock("../../lib/supabaseClient", () => ({
 
 const CALLBACK = "http://127.0.0.1:4000/callback";
 // `instafy login`'s state is 16 random bytes in hex, and its code is the first 8
-// characters as XXXX-XXXX. packages/instafy-cli/test/login-confirmation-code.spec.ts
+// characters as XXXX-XXXX. packages/instafy-cli/test/login-callback.e2e.spec.ts
 // checks the CLI against the same pair.
 const STATE = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
 const CODE = "0F1E-2D3C";

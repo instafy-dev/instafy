@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { fileURLToPath } from "node:url";
 import { unreachableLocalUrl } from "./loopback-servers.mjs";
+import { cliLoginConfirmationCode } from "../src/auth.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -100,5 +101,13 @@ describe("@instafy/cli login callback", () => {
     const configRaw = fs.readFileSync(configPath, "utf8");
     const parsed = JSON.parse(configRaw) as { accessToken?: string };
     expect(parsed.accessToken).toBe("test-token");
+  });
+});
+
+describe("@instafy/cli login confirmation code", () => {
+  // The Studio page shows the same code for the same state:
+  // packages/frontend/src/screens/__tests__/CliLoginPage.test.tsx checks this pair.
+  it("is the state's first 8 characters, uppercased, as XXXX-XXXX", () => {
+    expect(cliLoginConfirmationCode("0f1e2d3c4b5a69788796a5b4c3d2e1f0")).toBe("0F1E-2D3C");
   });
 });
