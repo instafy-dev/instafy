@@ -89,11 +89,28 @@
     "replyTruncated": false
   },
   "routedCardTurnLease": {
-    "_comment": "The browser turn of a card the routing step posted for the person's own message, as the controller leases it (browser_hand_back_tests.rs a_routed_cards_browser_turn_is_leased_with_what_its_card_answers). Its history is the controller's own query (agent.rs load_conversation_history_for_agent), which lists no card: the runtime posts every card as progress, which that query leaves out. So the stamp the controller puts on the turn's send (system_turns.rs verify_browser_card_turn) says what the card answers: the person's new `message`, or a `continue` under a Stop with `requestSentAt`, when the request it sends again first went out. The runtime picks the turn's browser thread from that stamp alone (runtime-agent jobs/mod.rs leave_a_long_browser_thread_of_earlier_messages). The card ids and the time are the test's own.",
+    "_comment": "The browser turn of a card the routing step posted for the person's own message, as the controller leases it (browser_hand_back_tests.rs a_routed_cards_browser_turn_is_leased_with_what_its_card_answers). Its history is the controller's own query (agent.rs load_conversation_history_for_agent), which lists no card: the runtime posts every card as progress, which that query leaves out. So the stamp the controller puts on the turn's send (system_turns.rs verify_browser_card_turn) says what the card answers: the person's new `message`, or a `continue` under a Stop with `requestSentAt`, when the request it sends again first went out. The runtime picks the turn's browser thread from that stamp alone (runtime-agent jobs/mod.rs leave_a_long_browser_thread_of_earlier_messages). Each history entry keeps what the runtime reads of it: its run (the person's message is on its routing step's) and lane, and of the browser turn's request, the browser and the stamp its send was given, which is what shows the replay that the routing step ran no building turn and which card a Try again carries on (runtime-agent jobs/conversation_context.rs repeated_person_messages). The card ids, the run names and the time are the test's own.",
     "message": "Compare the three newest laptops on their makers' pages, as a comparison page.",
     "history": [
-      { "role": "user", "content": "Compare the three newest laptops on their makers' pages, as a comparison page." },
-      { "role": "user", "content": "Compare the three newest laptops on their makers' pages, as a comparison page.", "lane": "browser" }
+      { "role": "user", "content": "Compare the three newest laptops on their makers' pages, as a comparison page.", "runId": "run-1" },
+      {
+        "role": "user",
+        "content": "Compare the three newest laptops on their makers' pages, as a comparison page.",
+        "runId": "run-2",
+        "lane": "browser",
+        "metadata": {
+          "prompt_metadata": {
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000c1",
+            "browserCardTurn": {
+              "version": 1,
+              "cardJobId": "00000000-0000-4000-8000-0000000000c1",
+              "routed": true,
+              "answers": "message"
+            }
+          }
+        }
+      }
     ],
     "stamp": {
       "version": 1,

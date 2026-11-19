@@ -793,8 +793,9 @@ const LONG_BROWSER_THREAD_INPUT_TOKENS: u64 = 60_000;
 /// (`conversation_context::parse_lane_history`). A shorter thread is cheap and holds what the
 /// chat's last browser turn just saw, so it is resumed. What the part's card answers comes from
 /// the controller's stamp on its send (`browser_hand_back::routed_card_message`), never from the
-/// lease's history, which lists no card: looked up there, the card was never found, and seven
-/// parts that resumed long threads cost 140 of a local test's 236 credits (Nov 19).
+/// lease's history, which lists no card: looked up there, the card was never found, and six
+/// parts that resumed a thread whose latest request was over this bound cost 113 of a local
+/// test's 236 credits (Nov 19).
 ///
 /// The turns of one message keep their thread: a second pass and the wrap-up run on their turn's
 /// own thread and never come here, and Let Octo continue and a building turn's card carry on a
@@ -28023,7 +28024,8 @@ mod tests {
     /// history lists no card, and the turn's stamp says what the card answers. A local test (Nov
     /// 17): a comparison's fill-in resumed a thread whose latest request was about 114k tokens,
     /// and its browser part cost 49 credits; looked up in that history, the card was never found,
-    /// and seven parts resumed long threads for 140 of 236 credits (Nov 19).
+    /// and six parts resumed threads whose latest request was over 60k for 113 of 236 credits
+    /// (Nov 19).
     #[test]
     fn a_messages_browser_part_leaves_a_long_browser_thread_of_earlier_messages() {
         use crate::codex::ThreadLastRequest;

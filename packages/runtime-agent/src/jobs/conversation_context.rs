@@ -3869,6 +3869,44 @@ mod tests {
         );
     }
 
+    /// The controller's own lease of a routed message's browser turn (`routedCardTurnLease`,
+    /// which its database test checks against its history query): the message on its routing
+    /// step's run, and the browser turn's request with the browser and the card's stamp its send
+    /// was given, and no card. That request alone shows the message's routing step ran no
+    /// building turn, and which card a Try again carries on: a Stop of the browser turn keeps
+    /// the building thread, and a Try again of the card reads as the person's message once.
+    #[test]
+    fn a_leased_routed_browser_turn_shows_its_message_ran_no_building_turn() {
+        let fixtures: JsonValue = serde_json::from_str(include_str!(
+            "../../../runtime-controller/src/browser_hand_back_fixtures.json"
+        ))
+        .expect("fixtures");
+        let leased = &fixtures["routedCardTurnLease"];
+        let words = leased["message"].as_str().expect("message");
+        let chat = leased["history"].as_array().expect("history");
+        let request = &chat[1];
+        let browser_run = request["runId"].as_str().expect("browser run");
+        let card = request["metadata"]["prompt_metadata"]["browserCardTurn"]["cardJobId"]
+            .as_str()
+            .expect("card");
+
+        let mut stopped = chat.clone();
+        let mut notice = stop_notice(browser_run, "2026-11-19T12:42:00Z");
+        notice["lane"] = json!("browser");
+        stopped.push(notice);
+        let stopped = json!(stopped);
+        assert!(!leaves(&stopped, ThreadLane::Building, None));
+        assert!(leaves(&stopped, ThreadLane::SharedBrowser, None));
+
+        let mut retried = chat.clone();
+        retried.push(json!({"role": "assistant", "content": "Octo didn't open a page in the browser, so this turn stopped.", "runId": browser_run, "lane": "browser"}));
+        retried.push(json!({"role": "user", "content": words, "runId": "run-3", "lane": "browser", "metadata": {"prompt_metadata": {
+            "browserTransport": "shared", "browserRequestOf": format!("job:{card}"),
+        }}}));
+        let routing = build_routing_conversation_context(Some(&json!(retried))).section_text;
+        assert_eq!(routing.matches(words).count(), 1, "{routing}");
+    }
+
     /// A Stop during the save keeps what the turn changed (a local test, Nov 6: the tip's edit
     /// stayed in app.js), and the stopped turn's report names its files. The next building turn
     /// starts a new thread from the replay, which leaves the tip out: its Stop's line says what

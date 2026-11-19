@@ -1909,8 +1909,13 @@ async fn a_routed_message_ends_with_its_card_and_its_browser_turn_is_the_cards(
 
 impl Chain {
     /// The browser turn Studio opens for the routed card `routed` posted for
-    /// `words`, with the stamp dispatch puts on it once its check passes
-    /// (`system_turns::verify_browser_card_turn`), and the browser.
+    /// `words`, with what its dispatch adds once the card's check passes
+    /// (`system_turns::verify_browser_card_turn`): the browser and the stamp,
+    /// on its job and in its recorded request's prompt metadata, which the
+    /// runtime reads in the history (runtime-agent
+    /// `conversation_context::repeated_person_messages`). Dispatching a
+    /// browser send here would need a browser, so it is sent as any message
+    /// and given both, as that dispatch records them.
     async fn checked_routed_browser_turn(
         &self,
         routed: &Uuid,
@@ -1953,6 +1958,18 @@ impl Chain {
             &[&browser, &PgJson(&stamp)],
         )
         .await?;
+        let browser_run = self.run_of(&browser).await?;
+        let recorded = sql(
+            &self.pool,
+            "update conversation_messages
+                set metadata = jsonb_set(
+                      jsonb_set(metadata, '{prompt_metadata,browserTransport}', '\"shared\"'::jsonb, true),
+                      '{prompt_metadata,browserCardTurn}', $3::jsonb, true)
+              where conversation_id = $1 and run_id = $2 and lower(role) = 'user'",
+            &[&self.conversation_id, &browser_run, &PgJson(&stamp)],
+        )
+        .await?;
+        anyhow::ensure!(recorded == 1, "the browser turn's request is recorded once");
         Ok((browser, stamp))
     }
 
@@ -1965,6 +1982,16 @@ impl Chain {
             .await?
             .get(0))
     }
+
+    async fn created_at(&self, job_id: &Uuid) -> anyhow::Result<chrono::DateTime<Utc>> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one("select created_at from agent_jobs where id = $1", &[job_id])
+            .await?
+            .get(0))
+    }
 }
 
 /// The browser turn of a card the routing step posted for the person's own
@@ -1974,10 +2001,13 @@ impl Chain {
 /// `routedCardTurnLease` in the fixtures is. The runtime posts the card as
 /// progress, so the controller's own history query lists no card, and a rule
 /// that looked the card up there never ran on a live stack (a local test, Nov
-/// 19: seven browser parts resumed long threads for 140 of 236 credits). The
-/// turn's stamp says what the card answers instead: the person's new message,
-/// or Studio's Continue under a Stop, with when the request it sends again
-/// first went out, through every earlier turn of that request.
+/// 19: six browser parts resumed threads whose latest request was over 60k
+/// tokens, for 113 of 236 credits). The turn's stamp says what the card
+/// answers instead: the person's new message, or Studio's Continue under a
+/// Stop, with when the request it sends again first went out, through every
+/// earlier turn of that request. The history lists the message on its routing
+/// step's run and the browser turn's request with that stamp, which is what
+/// shows the runtime's replay that the routing step ran no building turn.
 #[tokio::test]
 async fn a_routed_cards_browser_turn_is_leased_with_what_its_card_answers() -> anyhow::Result<()> {
     with_chain("routed-card-answers", |chain| {
@@ -2036,17 +2066,49 @@ async fn a_routed_cards_browser_turn_is_leased_with_what_its_card_answers() -> a
                     .all(|entry| entry["metadata"]["jobId"] != json!(routed.to_string())),
                 "{history:?}"
             );
+            // What the runtime reads of each entry: its words, its run (the
+            // fixture's names, the message's being its routing step's), its
+            // lane, and of what its request was sent with, the browser and
+            // the card's stamp.
+            let runs = [
+                (chain.run_of(&routed).await?.to_string(), "run-1"),
+                (chain.run_of(&browser).await?.to_string(), "run-2"),
+            ];
             let listed: Vec<serde_json::Value> = history
                 .iter()
                 .map(|entry| {
                     let mut listed = json!({ "role": entry["role"], "content": entry["content"] });
+                    if let Some(run) = entry["runId"].as_str() {
+                        let named = runs
+                            .iter()
+                            .find(|(id, _)| id == run)
+                            .map_or(run, |(_, name)| *name);
+                        listed["runId"] = json!(named);
+                    }
                     if let Some(lane) = entry.get("lane") {
                         listed["lane"] = lane.clone();
+                    }
+                    let sent = &entry["metadata"]["prompt_metadata"];
+                    let read: serde_json::Map<String, serde_json::Value> =
+                        ["browserTransport", "browserRequestOf", "browserCardTurn"]
+                            .into_iter()
+                            .filter_map(|key| Some((key.to_string(), sent.get(key)?.clone())))
+                            .collect();
+                    if !read.is_empty() {
+                        listed["metadata"] = json!({ "prompt_metadata": read });
                     }
                     listed
                 })
                 .collect();
-            assert_eq!(json!(listed), fixture["history"]);
+            let fixture_card = fixture["stamp"]["cardJobId"]
+                .as_str()
+                .context("fixture card")?;
+            let expected: serde_json::Value = serde_json::from_str(
+                &fixture["history"]
+                    .to_string()
+                    .replace(fixture_card, &routed.to_string()),
+            )?;
+            assert_eq!(json!(listed), expected);
 
             // The person stops the browser turn, and Studio's Continue sends
             // the message again, naming the run the Stop ended.
@@ -2063,16 +2125,7 @@ async fn a_routed_cards_browser_turn_is_leased_with_what_its_card_answers() -> a
                     }),
                 )
                 .await?;
-            let sent: chrono::DateTime<Utc> = chain
-                .pool
-                .get()
-                .await?
-                .query_one(
-                    "select created_at from agent_jobs where id = $1",
-                    &[&routed],
-                )
-                .await?
-                .get(0);
+            let sent = chain.created_at(&routed).await?;
             let (continued_browser, stamp) =
                 chain.checked_routed_browser_turn(&continued, words).await?;
             let mut expected = fixture["continueStamp"].clone();
@@ -2113,6 +2166,99 @@ async fn a_routed_cards_browser_turn_is_leased_with_what_its_card_answers() -> a
             let (_, stamp) = chain.checked_routed_browser_turn(&unknown, words).await?;
             assert_eq!(stamp["answers"], json!("continue"), "{stamp}");
             assert!(stamp.get("requestSentAt").is_none(), "{stamp}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A Continue under the Stop of a later turn of a request still says when the
+/// request first went out: of the build a routed message's browser turn
+/// handed its findings to, once that hand-back can't be sent again (Studio
+/// then sends the message again, naming the build's run), and of a Let Octo
+/// continue, which goes on with a message's paused browser turn
+/// (`browserContinuesRunId`). Each leads back, through the card that browser
+/// turn carried on, to the message the person sent.
+#[tokio::test]
+async fn a_continue_after_a_hand_back_or_a_let_octo_continue_says_when_its_request_went_out(
+) -> anyhow::Result<()> {
+    with_chain("routed-card-request-sent", |chain| {
+        Box::pin(async move {
+            let compare = "Compare the two newest e-readers on their makers' pages, then build a comparison page.";
+            let routed = chain.routed_message(compare, true).await?;
+            let (browser, _) = chain.checked_routed_browser_turn(&routed, compare).await?;
+            let reply = fixtures()["browserReply"]
+                .as_str()
+                .context("reply")?
+                .to_string();
+            chain.finish(&browser, Some(&reply), "succeeded").await?;
+            let response = chain
+                .hand_back(&chain.owner, &browser, json!({}))
+                .await
+                .map_err(|error| controller_error("hand-back", error))?;
+            let hand_back = chain.job_of(&response).await?;
+            chain.finish(&hand_back, Some(""), "failed").await?;
+            let continued = chain
+                .routed_message_sent_with(
+                    compare,
+                    true,
+                    json!({
+                        "writeIntent": true,
+                        "continuedStopMessageId": Uuid::new_v4().to_string(),
+                        "continuedRunIds": [chain.run_of(&hand_back).await?.to_string()],
+                    }),
+                )
+                .await?;
+            let (continued_browser, stamp) =
+                chain.checked_routed_browser_turn(&continued, compare).await?;
+            assert_eq!(stamp["answers"], json!("continue"), "{stamp}");
+            assert_eq!(
+                stamp["requestSentAt"],
+                json!(chain.created_at(&routed).await?.to_rfc3339()),
+                "{stamp}"
+            );
+            chain.finish(&continued_browser, Some(""), "failed").await?;
+
+            let hours = "Find the museum's opening hours on its own site.";
+            let routed = chain.routed_message(hours, false).await?;
+            let (paused, _) = chain.checked_routed_browser_turn(&routed, hours).await?;
+            chain
+                .finish(
+                    &paused,
+                    Some("Sign in on the museum's site in the browser, then choose Let Octo continue."),
+                    "succeeded",
+                )
+                .await?;
+            let paused_run = chain.run_of(&paused).await?;
+            let response = chain
+                .send(
+                    &chain.owner,
+                    LET_OCTO_CONTINUE_PROMPT,
+                    json!({ "browserContinuesRunId": paused_run.to_string() }),
+                )
+                .await
+                .map_err(|error| controller_error("Let Octo continue", error))?;
+            let resumed = chain.job_of(&response).await?;
+            chain.make_browser_turn(&resumed).await?;
+            chain.finish(&resumed, Some(""), "failed").await?;
+            let continued = chain
+                .routed_message_sent_with(
+                    hours,
+                    false,
+                    json!({
+                        "writeIntent": true,
+                        "continuedStopMessageId": Uuid::new_v4().to_string(),
+                        "continuedRunIds": [chain.run_of(&resumed).await?.to_string()],
+                    }),
+                )
+                .await?;
+            let (_, stamp) = chain.checked_routed_browser_turn(&continued, hours).await?;
+            assert_eq!(stamp["answers"], json!("continue"), "{stamp}");
+            assert_eq!(
+                stamp["requestSentAt"],
+                json!(chain.created_at(&routed).await?.to_rfc3339()),
+                "{stamp}"
+            );
             Ok(())
         })
     })
