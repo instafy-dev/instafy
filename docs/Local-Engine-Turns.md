@@ -1,9 +1,10 @@
 # Local-engine turns
 
-A local-engine turn is one @octo turn that a person sends from Instafy Desktop and that their own Claude Code, signed in on their own computer, carries out. This document calls the mechanism "the lane".
+A local-engine turn is an agent's turn that its owner's own Claude Code, signed in on their own computer, carries out. This document calls the mechanism "the lane". Version 1 ran one @octo message that a person chose Claude Code for in Instafy Desktop. Version 2, which the owner decided on 2026-11-19 and which section 11 designs, makes Claude Code an AI provider that any agent can use.
 
 ## For people and operators
 
+- **Version 2, decided on 2026-11-19 and being built (section 11).** In any agent's AI settings, @octo's included, a person can choose Claude Code. Every turn of that agent then runs on their own signed-in Claude Code, on their own computer: their messages to it, its automations, goal wake-ups, resends and evaluations. Such a turn waits while none of the person's computers runs the space with Claude Code ready, and nothing falls back to Instafy AI. A teammate's message never runs on someone else's Claude Code: it reaches only the teammate's own agents (11.5). The per-message choice below goes. Until each phase of 11.17 lands, the rest of this section, and sections 1-10, describe version 1 as built.
 - **The choice.** In Instafy Desktop on macOS, the only platform in v1 (D18), a person can pick **Claude Code for the next message** in the composer. Their own `claude`, signed in on their own computer the way they signed in to it themselves, carries out that one message in the space's folder; every other turn stays on Codex. Desktop asks each Instafy account on the computer once, in a native dialog, before it uses Claude Code (4.2). The reply stays Octo's, with the line "Ran on {Name}'s own Claude Code, on their computer" (5.7).
 - **Turning it on.** The controller's `CLAUDE_CODE_LANE_USER_IDS` lists the Instafy user ids the lane admits. It is empty by default, so no lane turn runs (2.11). Before any id goes into it, internal ones included, Instafy records that it has accepted Anthropic's Commercial Terms or has another agreement with Anthropic (7.3), and phase 8's other release gates are met (section 9).
 - **Traffic and credentials.** Only Claude Code's own traffic bypasses the Instafy proxy, under the sign-in the person made in Claude Code. That is a written exception to the proxy rule (7.1, 7.2). Instafy never reads, stores, refreshes, forwards or proxies that sign-in. The credential guard refuses Claude sign-in material in stored credentials and project secrets, and Anthropic API keys keep working (section 6, D23).
@@ -11,7 +12,7 @@ A local-engine turn is one @octo turn that a person sends from Instafy Desktop a
 - **What it cannot prevent** (1.2). Instafy cannot prove that the person typed the message rather than other software holding their session, which Claude account is signed in on the computer, or which client sent it. What a teammate wrote in the space's files can steer the person's Claude Code within the person's own settings: copy files kept only on that computer into the reply or the space, run the space's code through commands the person allowed, and write Claude Code's memory for the folder, which later sessions load. A process a turn starts can outlive it. D22 keeps Codex on the same computer from starting `claude`, but not by every indirect route. Claude Code's tools that reach past the turn, such as messages to the person's other sessions, are open before phase 8 (B.4).
 - **Failure codes.** A send the controller refuses gets a code and writes no message: `claude_code_turn_not_allowed`, `claude_code_turn_not_person`, `claude_code_turn_not_plain`, `claude_code_conversation_granted`, `claude_code_turn_active`, `claude_code_machine_busy`, `claude_code_runtime_not_ready` or `dispatch_lane_busy`. A turn that fails records one of `not_signed_in`, `plan_limit`, `binary_missing`, `binary_unsafe`, `unsupported_version`, `probe_failed`, `bare_default`, `session_unavailable`, `turn_timeout`, `stalled`, `crashed`, `unexpected_configuration`, `project_config`, `unsafe_import`, `unsafe_link` or `preflight_failed`. A turn a sweep or a stop ends records `start_by_passed`, `run_once_interrupted` or `claude_code_machine_stopped`. Section 5.5 gives the sentence each one shows.
 
-Status: built and dark. Phases 1-7 of section 9 are built, and everything they add lands dark: `CLAUDE_CODE_LANE_USER_IDS` is empty by default, so no lane turn runs until phase 8 turns it on. Of phase 8's release gates, the Codex command hook that closes the direct launches of `claude` D22's exec-policy rule misses is built too, and it is on for every Codex turn on a Unix runtime (D22, D-M). Phase 0's checks ran on 2026-11-16, on Claude Code 2.1.325, which became the floor on 2026-11-19 (B.4), and an agent drove them at the maintainer's request rather than the maintainer by hand. Appendix B records how they ran, each item's verdict, what they changed in this design and what stays open before phase 8. The live suite passed on 2.1.325 on 2026-11-19, also run by an agent at the maintainer's request, and Appendix C records it. Sections 1-10 are the design, updated with the decisions made while building it (D-A to D-M in section 10), the contracts the packages share and the corrections Phase 0 showed. Appendix A lists where the build chose details the design left open. The design was checked against branch `feat/claude-code-plugin` at 614d275c2, and line numbers refer to that commit; the build found the code they point at by name.
+Status: version 1 is built and dark, and version 2 (section 11) is designed and being built, dark too. Phases 1-7 of section 9 are built, and everything they add lands dark: `CLAUDE_CODE_LANE_USER_IDS` is empty by default, so no lane turn runs until phase 8 turns it on. Of phase 8's release gates, the Codex command hook that closes the direct launches of `claude` D22's exec-policy rule misses is built too, and it is on for every Codex turn on a Unix runtime (D22, D-M). Phase 0's checks ran on 2026-11-16, on Claude Code 2.1.325, which became the floor on 2026-11-19 (B.4), and an agent drove them at the maintainer's request rather than the maintainer by hand. Appendix B records how they ran, each item's verdict, what they changed in this design and what stays open before phase 8. The live suite passed on 2.1.325 on 2026-11-19, also run by an agent at the maintainer's request, and Appendix C records it. Sections 1-10 are the design, updated with the decisions made while building it (D-A to D-M in section 10), the contracts the packages share and the corrections Phase 0 showed. Appendix A lists where the build chose details the design left open. The design was checked against branch `feat/claude-code-plugin` at 614d275c2, and line numbers refer to that commit; the build found the code they point at by name.
 
 Release prerequisite: before any user id, internal ones included, goes into `CLAUDE_CODE_LANE_USER_IDS`, Instafy records that it has accepted Anthropic's Commercial Terms or has another agreement with Anthropic. See 2.11 and section 9, phase 8. Recorded on 2026-11-19: the maintainer confirmed that Instafy has accepted Anthropic's Commercial Terms. Phase 8's other release gates still apply.
 
@@ -97,7 +98,7 @@ Lane surfaces say "Runs on your own Claude plan, under Anthropic's current terms
 | The binary is never modified, and its sign-in methods are not restricted | Desktop and runtime only validate a path and run it (3.2, 4.1). `--bare` is never passed. Any authentication the person configured in Claude Code's own user settings still applies; a sign-in kept only in shell variables does not reach the turn (3.4). |
 | A teammate's files cannot make the person's Claude Code run their code or leak private files | Partly. The pre-flight keeps project settings, hooks, MCP servers and out-of-folder imports out, and lane saves leave out `.claude/` (3.8). A teammate's words in a file Claude Code reads can still steer it within what it allows: it can copy untracked files such as `.env` into a reply or a saved file, which needs no allow rule, and run repository code through the person's own allow rules and hooks (1.2, 3.9). |
 
-The rows above say where each limit holds. 1.2 lists the paths around limits 1-4 and 7 that remain, and how v1 treats them.
+The rows above say where each limit holds. 1.2 lists the paths around limits 1-4 and 7 that remain, and how v1 treats them. Version 2 rewrites the first three rows (11.16).
 
 ### 1.2 What the design cannot prove
 
@@ -124,7 +125,7 @@ The rows above say where each limit holds. 1.2 lists the paths around limits 1-4
   - Phase 0 and the live suite confirm what they do, on the versions they ran (sections 8 and 9). Phase 0 ran on 2.1.325, which has been the floor since 2026-11-19 (B.4). Any newer version also runs, unconfirmed: `verified: false` only adds a sentence to one failure message (2.10, 5.5).
   - Checks of the `init` event detect a flag that did not take effect, but they run after Claude Code has started. The pre-flight in 3.9 prevents that case by construction only for the project configuration it refuses. Project memory, such as the CLAUDE.md and `AGENTS.md` that Instafy seeds into every space (7.5), and untracked files below the folder's root are kept out only by the flags (3.9).
 
-Decided by the owner on 2026-11-13 (D9, D22, D29):
+Decided by the owner on 2026-11-13 (D9, D22, D29). On 2026-11-19 the owner replaced the decisions on D9 and D29 with version 2's (11.1), and 11.16 says what this section becomes; the decision on D22 stands:
 - v1 is for messages a person types.
 - A lane turn that an agent, an automation or a script starts is a later feature, not a v1 risk to sign off. It will be offered only when Claude Code is signed in with an API key or through a cloud provider (`planSignIn: false`, 2.10), because Anthropic's terms do not let a product route automated requests through a person's Claude plan.
 - v1 builds no per-send proof, so the claimed sends above that the person did not type still get through. The owner accepted that with this decision, in place of the written sign-off that earlier drafts asked for.
@@ -245,6 +246,8 @@ Notes:
 - `payload.user_id` comes only from the request context (RC/agent.rs:6267-6272).
 
 ### 2.2 The dispatch gate
+
+Version 2 replaces G1-G8 with the gates of 11.6 and the lease clause of 11.7.
 
 Every job-creating path goes through `process_dispatch_prompt_timed` (RC/dispatch.rs:1031). That covers HTTP sends, queue drains (RC/send_queue.rs:1395-1415), automations (RC/automations.rs:966-1019), goal wake-ups, hand-backs and plan workers.
 
@@ -422,6 +425,8 @@ In `agent_complete` (RC/agent.rs:3244), for a job whose `engine` is set:
 - **Queue.** The send-queue drain after completion (RC/agent.rs:4008) runs queued messages as ordinary turns. No queue entry can hold the claim (2.9).
 
 ### 2.7 Resume
+
+Version 2 resumes a session on any computer that holds it, and starts a new one in the same turn on a miss (11.9).
 
 **The lane loader.** `claude_code_lane::load_session(tx, project, conversation, sender, agent_id, runtime_id)` returns `proxy_metadata->'conversation'` of the latest job that has a lane-shaped state (jobs without one are skipped, as the Codex loader skips them, RC/dispatch.rs:5526-5527) and that:
 - has `engine = 'claude-code'`;
@@ -982,6 +987,8 @@ Desktop never opens anything under `~/.claude` and never touches the keychain.
 
 ### 4.2 Consent
 
+Version 2's consent text is in 11.13.
+
 `enable` shows a native `dialog.showMessageBox` from the main process. Studio's web content can ask for it through `instafy:desktopExtensionInvoke`, but it cannot answer or fake it. The dialog is for the host context's verified user (4.1) and names that account by its email, so the session read (DA/main.ts:195-199) also returns `user.email`. The text:
 
 > **Use Claude Code on this computer for {email}?** When you choose Claude Code for a message in Instafy, Instafy Desktop starts the `claude` program on this computer, signed in the way you signed in to it yourself, to carry out that one message. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own Instafy account can start these turns, one at a time. Instafy gives Claude Code your message exactly as you wrote it and adds nothing. Everyone in the space can read the steps it takes and its reply. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings: it may copy files kept only on this computer, such as `.env`, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.
@@ -1046,6 +1053,8 @@ The process chain is Electron → runtime-agent (in its own process group, DRA/i
 ## 5. Studio
 
 ### 5.1 The per-turn choice
+
+Version 2 removes the per-turn choice of 5.1 and 5.2 and makes Claude Code an agent's AI provider (11.3, 11.14).
 
 - **Feature slot.** `FrontendFeatureContributions` (FE/features/frontendFeatureModule.ts:50-63) gains a typed `turnEngines` slot. The lane lives in FE/features/claudeCode/ (new) and is listed in FE/features/publicFrontendFeatureManifest.ts and in the manifest the hosted Studio is built with, because a packaged Desktop shows the hosted Studio (DA/main.ts:171, 361-362) and that build can select its own manifest (packages/frontend/featureManifestSelector.ts:32-49). As built, both manifests list it (D-E). The hosted manifest's two release guard tests allow exactly that module: scripts/release/web/build-hosted-web.test.mjs pins the list with it, and scripts/release/web/workflow-guard.test.mjs, which forbids the string "claude" in the hosted release's files, leaves out the module's one import and its one entry in the list and nothing else. A packaged Desktop shows the row once a hosted Studio built from that manifest is deployed, which is phase 8's (section 9). The presentation and Your AI row slots (`presentation`, `YourAiRow`) sit on the contribution's type itself (`FrontendTurnEngineContribution`). The core composer renders the menu row, the token and the send gate from the contribution. The contribution also supplies everything else that is specific to Claude Code: the submit routing and its blocked cases (5.2), the Your AI row (5.3), the failure, refusal and steer sentences (5.5), the retry, queue and stash exclusions (5.6) and the speaker label (5.7). Where those sections name a core file, that file gains only a generic hook keyed on the engine id (`turnEngine` on a send, `aiAccessMode` on a message). It holds no Claude Code logic or wording of its own (AGENTS.md:12-13), just as the Desktop shell applies launch grants without knowing their product (4.3).
 - **Where it is offered.** Only inside Desktop (`window.instafyDesktop`), in v1 only on macOS (D18), and only for a viewer whose space status carries `claudeCodeLane` (2.10). The Your AI row (5.3) follows the same rule. It can be chosen only when this Desktop's own runtime for the space reports `claudeCode.ready` in its status entry; otherwise the row shows disabled, with a reason (5.3). That runtime is the one whose id Desktop's start call returned (DA/main.ts:3014-3018, 3163). The lane therefore runs on the computer the person is sitting at.
@@ -1620,8 +1629,8 @@ Phases 1 to 7 are built, and they land dark. Phase 0 is a maintainer's to run by
 
 ## 10. Remaining decisions, with proposed defaults
 
-- **D1. Which agent:** only the sender's own @octo.
-- **D2. History in the prompt:** none. Continuity comes only from Claude Code's own session.
+- **D1. Which agent:** only the sender's own @octo. (Replaced by D32 in version 2.)
+- **D2. History in the prompt:** none. Continuity comes only from Claude Code's own session. (Version 2 keeps no history and sends the turn's text as dispatch builds it, D42.)
 - **D3. Permission mode:** `acceptEdits` with permission prompts off.
   - Honouring the person's own `defaultMode` is rejected: Manual is useless here, and `bypassPermissions` is unsafe in a shared folder.
   - A per-turn read-only option (`plan` mode) can come later.
@@ -1634,19 +1643,19 @@ Phases 1 to 7 are built, and they land dark. Phase 0 is a maintainer's to run by
 - **D6. A space with its own Claude Code configuration:** refused in v1 by the pre-flight in 3.9, which looks for `.mcp.json` only at the folder's root, where Claude Code reads it. A deeper tracked `.mcp.json`, such as this repository's `claude-plugin/instafy/.mcp.json`, belongs to a plugin, not to the space's configuration. Refusing it would keep the lane out of Instafy's own repository. Relax this later to "allowed when the installed version is at most `CLAUDE_CODE_LANE_VERIFIED_THROUGH`", once the live suite has shown across releases that the lane's flags keep project settings, hooks, MCP servers, skills, agents and commands out.
 - **D7. MCP:** none. The lane passes a strict, empty MCP config plus `ENABLE_CLAUDEAI_MCP_SERVERS=false`. Instafy cannot pass the person's own MCP servers without reading their config.
 - **D8. Claude Code's own subagents (`Agent`, formerly `Task`):** allowed, inside the one supervised process tree. If the owner counts them as fan-out, pass `--disallowedTools Agent`, and move that one flag out of 3.3's never-passed list and its argv test. That restricts tools, not sign-in. The cross-session and account tools that 1.2 lists as open (`SendMessage`, `ListAgents`, `RemoteTrigger` and the rest) are the same kind of choice, with the same cost to the never-passed list.
-- **D9. The person's Instafy CLI session.**
+- **D9. The person's Instafy CLI session.** (Version 2 runs every turn of a Claude Code agent, whoever started it, so the gap below is no longer one: D32.)
   - Default: Claude Code's tools can reach it only as the person's own permission rules allow. Instafy gives the turn no instructions (3.5), so nothing asks Claude not to start turns or automations from it. The controller's fences refuse a second lane turn only while the first is queued or leased. After it ends, a process the turn left behind or set up (a helper that escaped it, D27, or a launchd or cron entry), or a teammate's script that the person's allow rules ran, can post a claimed message to the idle computer with the person's saved `instafy login` session, and the gate admits it as their own: a lane turn nobody typed. A signal the computer holds cannot tell that process from Instafy Desktop, since it runs on the same computer; D29 names the proof that would narrow this. Decided by the owner on 2026-11-13: v1 builds no such proof and accepts the gap, which 1.2 lists. A lane turn that something other than the person starts is a later feature, offered only for an API-key or cloud sign-in (1.2).
   - Alternative: put an `INSTAFY_CLAUDE_CODE_TURN` marker in the child's environment, which the CLI honours by refusing chat sends, turn starts and automation changes. This needs an `@instafy/cli` changeset, and it is defence in depth only, since a process can drop a variable.
 - **D10. Model:** the person's default. No picker.
 - **D11. Turn limits:** 45 minutes of wall-clock time (2700 s, configurable from 60 to 3000 s) and 15 minutes without an event. The cap keeps the end-of-turn save within the lifetime of the job's internal workspace token, which is minted once at lease and never renewed (3.6). A workspace-token renewal like the proxy-token renewal is the later way to allow longer turns.
-- **D12. Start window:** 60 s, the same as the device-grant window. Because a busy computer is refused at send (G7), the window covers only lease latency.
-- **D13. Concurrency:** one active lane turn per person, across all spaces. A busy computer is refused with 409, never queued.
+- **D12. Start window:** (replaced by D33 in version 2) 60 s, the same as the device-grant window. Because a busy computer is refused at send (G7), the window covers only lease latency.
+- **D13. Concurrency:** (version 2: one running turn per person, any number waiting, 11.18) one active lane turn per person, across all spaces. A busy computer is refused with 409, never queued.
 - **D14. Stop and steer:** any member with write access may stop; nobody may steer.
 - **D15. Resume:** same conversation, agent, person and runtime registration. Desktop never asks for an earlier runtime id, so the controller gives every runtime start a new one (RC/runtime/token.rs:442-451; DA/main.ts:3097-3107). Quitting Desktop, switching spaces or Instafy users, or turning the lane on or off therefore ends continuity, and the next lane turn starts a new session. A failed resume resets the session and runs nothing by itself. The lane never passes `--fork-session`, so `--resume` reuses the stored session id, and a resumed turn writes into that session. A stopped turn saves no state, so the next turn resumes the same session and continues from the stopped turn's partial work, as it would in the person's own terminal after an interrupt. A stopped first turn stores no id, so the next turn starts a new session (2.7).
 - **D16. Usage shown:** tokens only, in Details. No cost.
 - **D17. Attachments and `/` messages:** refused in v1.
 - **D18. Platforms:** macOS Desktop only in v1; Linux and Windows advertise no capability (3.2). Linux Desktop can follow once the live suite has run there. Windows later, since it needs a per-job tree kill and handling of `.cmd` launchers.
-- **D19. Where the choice is offered:** only in the Desktop composer. No sends from web or phone to the computer in v1. The controller cannot verify the client, so this is a UX limit.
+- **D19. Where the choice is offered:** (replaced by D35 in version 2) only in the Desktop composer. No sends from web or phone to the computer in v1. The controller cannot verify the client, so this is a UX limit.
 - **D20. Speaker:** decided by the owner on 2026-11-12: the reply stays @octo's, with the plain-text line "Ran on {Name}'s own Claude Code, on their computer" (5.7). Its sender reads "Ran on your own Claude Code, on your computer" (D-H). The alternative, a "Claude Code" speaker identity, risks suggesting that Anthropic built or partners with Instafy, which Anthropic's terms forbid (D28).
 - **D21. The `.claude/` exclusion:** lane saves only. No global publish rule, and no `.git/info/exclude` entry, which would also keep new `.claude/` files out of Codex turns.
 - **D22. Codex on Desktop running `claude`.**
@@ -1671,7 +1680,7 @@ Phases 1 to 7 are built, and they land dark. Phase 0 is a maintainer's to run by
 - **D26. Network and configuration environment:** `detect` also captures `CLAUDE_CONFIG_DIR`, `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and `NODE_EXTRA_CA_CERTS` from the person's login shell, shows them in the consent dialog, and grants them with the binary path. runtime-agent passes them only after validating `CLAUDE_CONFIG_DIR` and the CA file as it validates the binary (absolute; owned by the user or root; not group- or world-writable; not under the workspace root or the project folder), because `CLAUDE_CONFIG_DIR` decides which user settings and hooks load. As built, Desktop checks them the same way before it asks or grants, and names the variable it can't use (`shell_setting_unusable`, 4.1), since the runtime can only refuse the whole grant as `binary_unsafe`. Claude Code's user settings cannot set it, since they live inside it. A sign-in kept only in shell variables (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`) is still never passed: that is the price of limit 5, and 3.4's heading says so instead of saying it works. 3.4's never-passed list, its environment test, and the summary's and 7.1's 'sets no `ANTHROPIC_*` or `CLAUDE_*` variable' name `CLAUDE_CONFIG_DIR` as the one exception, carrying the person's own value.
 - **D27. Escaping processes:** no hardening in v1 beyond tracking every 50 ms, as the isolated worker polls (3.6). A possible later step is a random per-turn marker in the child's environment, plus a scan of the person's processes for it at turn end. It is not the default because the scan reads every same-user process's environment.
 - **D28. Brand:** plain-text statements that a turn runs Claude Code, with no logo. Anthropic's terms for products that run Claude Code forbid using the Claude Code name as part of an Instafy product or feature name, or in a way that suggests Anthropic built, endorses or partners with Instafy. So the README and public docs call the feature "local-engine turns" and say in plain text that such a turn runs Claude Code. Code and configuration identifiers that name the integrated tool (`claude_code_*`, `claudeCode`, `CLAUDE_CODE_LANE_*`, `engine = 'claude-code'`) stay unless the brand review says otherwise, since they name the tool inside code rather than an Instafy feature. The Phase 0 brand review checks every lane string, the speaker line (D20) included, against that rule before any of them lands. As built, the strings landed first, so phase 8 runs that review on every lane string before any user id goes into the switch.
-- **D29. Proof of a foreground send beyond the person's session:** decided by the owner on 2026-11-13: none in v1 (D9, D22). Anything stronger needs a signal that only that computer holds. One minted through its runtime's agent token would turn away sends from other computers only; a per-send proof minted by Desktop's main process would also narrow the routes on that computer. That is a follow-up.
+- **D29. Proof of a foreground send beyond the person's session:** decided by the owner on 2026-11-13: none in v1 (D9, D22). Version 2 no longer asks who typed a turn (D32), so no proof is needed. Anything stronger needs a signal that only that computer holds. One minted through its runtime's agent token would turn away sends from other computers only; a per-send proof minted by Desktop's main process would also narrow the routes on that computer. That is a follow-up.
 - **D30. Prompt delivery:** stdin. If Phase 0 shows that `-p` does not read the prompt from stdin, pass it as the final argv element after `--`, and accept that `ps` then shows it on this computer. Phase 0 item 4 showed that it does, on 2.1.325, so the fallback is not built.
 
 ### Decided while building
@@ -1701,6 +1710,210 @@ Also decided that day, while fixing what the review of the build found:
 - The lane's shared lists and one recorded lane job payload live in runtime-contracts, and every package tests against them (2.6, 8).
 - Studio words `claude_code_runtime_not_ready` by its reason (5.5).
 - Two behaviours are documented, not changed: teammates get a lane turn's streaming reply draft, as for any turn on `main` (5.7), and Desktop trusts Studio's session as the key of the local consent record (4.1).
+
+---
+
+## 11. Claude Code as an AI provider (version 2)
+
+Decided by the owner on 2026-11-19. This section is the design of version 2. Where it and sections 1-10 differ, it wins, and each phase of 11.17 rewrites the sections it changes as it lands. Until then, sections 1-10 describe version 1 as built and dark.
+
+### 11.1 The decisions
+
+Anthropic's support page on Claude plans in other tools (support.claude.com/en/articles/15036540, read on 2026-11-19) says that `claude -p`, the Agent SDK and third-party apps may draw from a plan's subscription limits. After reading it, the owner decided:
+
+1. **Scope.** All of a person's own agent turns may run on their own Claude Code: the messages they type, their automations, goal wake-ups, queued and automatic resends, hand-backs, plans and evaluations. A teammate's message never runs on someone else's Claude Code.
+2. **How it is chosen.** In the owner's words: "this is not octo but any ai agent we create we should be able to use the 'claude code' ai provider like any other provider". Claude Code is a provider in an agent's AI settings, not a per-message choice for @octo.
+3. **Computer off or asleep.** Due turns wait until the person's computer and runtime are back. Nothing falls back to Instafy AI.
+4. **Priority.** Setting it up must be "incredibly simple and smooth".
+
+Version 1's rule that the lane runs only messages a person typed (1.2, D9, D29) rested on a stricter reading of Anthropic's terms, and the support page replaces that reading.
+
+### 11.2 What still holds
+
+Anthropic's Claude Code legal and compliance page (code.claude.com/docs/en/legal-and-compliance, re-read on 2026-11-19) still applies, and Instafy's acceptance of the Commercial Terms is recorded (section 9, phase 8):
+- **The binary stays unmodified, and no sign-in method is restricted** (3.2, 3.3, 4.1).
+- **Instafy never reads, stores, refreshes, forwards or proxies a Claude sign-in.** The credential guard (section 6) and the lane's environment allowlist (3.4) stay as they are.
+- **No one's requests run on another person's Claude Code** (11.5).
+- **Nothing is resold or intermediated.** A lane turn costs no Instafy credits and holds no Instafy key (2.5, 2.6).
+
+AGENTS.md's security invariants hold, with the two lane sentences of 7.1 rewritten as 11.16 says. How one turn runs stays as sections 3.2-3.9 describe it: the exact command, the environment, supervision, the end of the turn, saves, the pre-flight and redaction, apart from what 11.9-11.12 change. Also unchanged: the Codex controls of D22 and D-M, the switch `CLAUDE_CODE_LANE_USER_IDS` (2.11), the capability attestation (2.10), Stop and the steer refusal (2.8), and phase 8's release gates, which stay the owner's.
+
+### 11.3 The choice: an agent's AI
+
+- **Where.** Every agent's AI setting, @octo's included, offers **Claude Code** beside Instafy AI and the person's own connections, in the agent editor of Your AI (SC/CredentialsSettingsCard.tsx). It is offered only to a person the switch covers, which the space's runtime status already says (`claudeCodeLane`, 2.10). The setting is the account's, so it can be changed from any client; the agent's turns run on the person's computer either way.
+- **Stored as** `user_agents.provider = 'claude-code'` with a null `credential_id`. `normalize_provider_id` (RC/ai_agents.rs) learns the value. Choosing a connection sets the provider from it, as today, and choosing Instafy AI clears both. Model and reasoning effort are not offered for a Claude Code agent and are ignored: Claude Code uses the person's own default model (D10).
+- **Who may set it.** Only the agent's owner, through their own session, while the switch covers them; otherwise 403 `claude_code_turn_not_allowed`. Neither the service role nor a job token can set it.
+- **The per-message choice is removed** (D35). Version 1's composer row "Claude Code for the next message", its token, the `turnEngine` claim and every guard that kept the claim out of queues, stashes and resends (2.1, 5.1, 5.2, 5.6) go. A person who wants Claude Code for some messages and not others makes a second agent that uses it, and mentions that agent.
+- **Setup stays in Desktop.** "Claude Code on this computer" in Your AI (5.3) still finds the program and asks for the consent of 11.13, with its action renamed **Use Claude Code on this computer**. An agent can be set to Claude Code before any computer is set up: its turns wait (11.7), and the waiting row says how to set it up (11.14).
+
+### 11.4 Which turns run on Claude Code
+
+Every turn the controller starts for an agent whose provider is Claude Code runs on Claude Code: a message to it, a mention of it, a message in a chat where it is the active agent, a queued message when the queue drains, a resend by hand or by Studio, a run of an automation that uses it (in the `apply` or the `plan_only` mode, 11.12), a goal's wake-up and an ambient evaluation in a group chat (11.7). The text Instafy wrote for a turn reaches Claude Code as it reaches any engine (11.10): an automation's prompt, a goal's next step, and the participation or "nothing to report" instruction that the controller puts in front of an evaluation's text.
+
+Some turns ask for what Claude Code cannot give. Dispatch refuses them with 422 `claude_code_turn_unsupported` and a `details.reason`, before anything is written, and never runs them on another engine:
+- `browser`: a Personal or Shared Browser turn, or any turn that needs Instafy's browser (a `browserTransport`, a strict browser target). A hand-back continues a browser turn, so none reaches a Claude Code agent.
+- `team_plan`: a team plan that names the agent as its lead or as a worker. A worker must keep to its write scope and report through Instafy's tools, and Instafy can hold Claude Code to neither (D40). A plan that names a Claude Code agent among its workers is refused when it is made, before any worker starts; dispatch's refusal of the lead's or a worker's turn is the backstop.
+- `attachments`: a message with attachments (D40).
+- `command`: text that starts with `/` once leading whitespace is removed, which Claude Code would read as its own command (3.9).
+- `empty` and `too_long`: no text, or more than `CLAUDE_CODE_LANE_MAX_PROMPT_CHARS` (2.2, G5).
+- `execution_mode`: a mode other than `apply` and `plan_only`, such as `approval_required`, which no runtime implements for the lane.
+
+A terminal command (`terminal_command`) is not an AI turn, and it runs as it does today. Instafy's own tools, such as web search through Instafy, previews, cards, questions to the person and Instafy's skills, are not offered to Claude Code. Its own tools and the person's own settings apply (3.3).
+
+### 11.5 Whose turn: the owner rule
+
+Agents are personal. `resolve_agent_targets` (RC/dispatch.rs) resolves every handle against the agents of the dispatch's person, and every path that starts turns dispatches as the person the turn belongs to:
+- a send, as its sender;
+- a queue drain, as the person who queued the message ("under the enqueuer's authority", RC/send_queue.rs);
+- an automation's run, as the automation's owner (RC/automations.rs);
+- a goal's wake-up, as the goal's owner (RC/conversation_goals/mod.rs).
+
+A teammate who mentions `@reviewer` reaches their own `@reviewer`, or Instafy AI wearing that handle when they have none, and never someone else's agent. So a teammate's message can start turns only of the teammate's own agents, and when one of those uses Claude Code, it runs on the teammate's own Claude Code, on their computer.
+
+This settles the open point of a shared agent in a team space: no agent exists that a teammate's message could run on someone else's Claude Code, so there is nothing to refuse or to move to Instafy AI. The gate and the lease still check it (11.6, 11.7): a lane job's person (`payload.user_id`) is its agent's owner and the dispatch's person, and only a runtime that person owns can lease it. A chat whose device grants name someone else keeps its own rule (`device_grants::starts_agent_turns`): another person's message there is recorded and starts nothing, on any engine.
+
+### 11.6 Admission
+
+`claude_code_lane::admit` runs in dispatch for each target whose agent's provider is `claude-code`, after the targets resolve and before anything is written. Its gates replace version 1's G1-G8:
+- **L1. The switch covers the agent's owner.** Otherwise 403 `claude_code_turn_not_allowed`.
+- **L2. The owner rule.** The agent's owner is the dispatch's person (`context.user_id`), as resolution guarantees, and the target has an agent id. A dispatch with no person never resolves a Claude Code agent.
+- **L3. A turn Claude Code can take** (11.4).
+
+Version 2 drops what version 1 checked for who sent the turn and where it runs: who typed the message, when, and from which session or client (G2, G3); that @octo is the one target (G4); the runtime named at send, its readiness and its idleness (G6, G7); one waiting turn per person (G8). It also drops the busy chat's refusal for the lane and every strip that kept the claim out of queues, resends, automations, goals and evaluations (2.9).
+
+An admitted target's job has `engine = 'claude-code'`, no credential, no device grants and no runtime pin: `target_runtime_id` and `queued_runtime_id` stay null, whatever runtime the send named and whatever the agent's runtime preference for the space says. Its payload is 2.5's, and its run, messages and reply carry 2.1's stamps. Other targets of the same dispatch run as they would without it. A Claude Code target never counts as Instafy AI (no reserve, daily count, platform job record or hosted-runtime refusal) and never takes a credential. The dispatch-wide changes that version 1 made for its one lane target (2.3) become changes for each Claude Code target.
+
+### 11.7 Waiting and leasing
+
+**Waiting.** A lane job waits, queued, until a runtime can lease it. Nothing fails it for waiting: lane jobs leave the 60 s start window and its sweep step (`start_by_passed`), and nothing expires them. Anyone with write access can stop a waiting turn, which cancels it (2.8).
+
+**The lease clause** replaces rules 1, 2 and 7 of 2.4. A runtime leases a lane job only when all of these hold:
+- the runtime is in the job's space;
+- it is private self-hosted, and its controller-attested owner is the job's `payload.user_id`;
+- its attested `claudeCode` capability has `version` 1 and `ready` true;
+- the person has no other lane job leased.
+
+Hosted runtimes never lease one. The rest of 2.4 stays: a lane job is never batched, and gets no envelope, metering bind, model-facing token or history.
+
+**One at a time per person.** A unique partial index on `(payload ->> 'user_id')` where `engine = 'claude-code' and status = 'leased'` replaces `agent_jobs_one_active_claude_code_turn_idx` (11.15). When two of the person's computers lease at once, the index refuses the second, which takes nothing that round. Any number of turns may wait.
+
+**A turn that started runs once.** A lane job is leased once (`lease_attempts = 1`). A turn that is interrupted, because its runtime stopped, crashed or slept past its lease, fails as `claude_code_machine_stopped` or `run_once_interrupted` (2.9, 3.6), and nothing runs it again by itself: its partial work is in the folder and in its Claude Code session. A runtime stop now fails only the lane job that runtime leased. Waiting ones have no pin and keep waiting.
+
+**Evaluations do not wait** (D38). An ambient evaluation asks the agent whether to join in now. When none of the person's runtimes in the space could lease it at dispatch, by the lease clause's runtime conditions and `runtime_not_dispatch_ready_detail`, its run is closed without a job, as `skip_managed_ai_ambient_participant` closes a managed participant's, with the reason `claude_code_computer_away`, and the agent sits that message out.
+
+**No source piles up turns** (D39). An automation whose last run still waits for a computer skips its due run, and records the skip as that attempt's outcome ("Its last run is still waiting for your computer."). A goal's wake-up needs the chat's agent idle (`expected_lane_idle`, RC/conversation_goals/mod.rs), so it never adds a turn behind one that waits. A message to an agent whose turn waits goes to the send queue, as for any busy agent, and drains when that turn ends.
+
+**The computer and the space.** Instafy Desktop runs one runtime, for one space, at a time (DA/main.ts). A waiting turn therefore runs once Desktop runs the turn's space on one of the person's computers where Claude Code is set up. Studio makes that one step (11.14).
+
+### 11.8 Several computers
+
+Any of the person's computers that runs the space with Claude Code ready may take the next waiting turn, and the first to lease it runs it (D34). One turn runs at a time for each person, across all of their computers. A session resumes on whichever computer holds it (11.9). Consent is given per computer and per Instafy account (4.2), so a computer the person never set up never runs one.
+
+### 11.9 Sessions
+
+Version 1 resumed a session only on the runtime registration that saved it (2.7), and every Desktop start registers anew (D15), so continuity ended whenever Desktop restarted. In version 2 the lane loader drops the runtime condition: it returns the latest lane session of the same conversation, agent and person. runtime-agent passes `--resume <sessionId>` whenever the id is a UUID. When `claude` reports the session missing before its first `init`, because the session is on another computer or the person removed it, the runtime starts `claude` once more in the same turn, without `--resume`, so a new session begins and the turn runs (D41). That second start is the only one a turn makes, and comes only after the first ran nothing. The failure code `session_unavailable` goes away. The saved state keeps its `runtimeId`, for Details.
+
+### 11.10 The prompt
+
+Claude Code receives `payload.prompt_text` on stdin, as dispatch builds it for any engine: the message, or for a message to several agents this agent's part of it; an automation's prompt; a goal wake-up's text. For an evaluation, the controller puts its participation instruction, or an automation's "nothing to report" instruction, in front of that text (RC/agent.rs `build_agent_evaluation_preamble`), which states the whole protocol without the skill file. The runtime adds nothing, as in 3.5. Messages others wrote in the chat are not included: Claude Code's own session carries the agent's earlier turns in the chat, and what teammates said to their own agents does not reach it. Giving a turn the chat's messages since its last turn is a follow-up (D42).
+
+### 11.11 Plan limits on unattended turns
+
+A turn that hits the plan's limit fails as `plan_limit`, with the reset time when Claude Code gives one (2.6, 5.5). Nothing runs it again by itself, and an automation's next scheduled run comes as usual. So that the person's other waiting turns wait for the reset instead of each starting and failing in turn (D37):
+- runtime-agent then reports its capability not ready, with a new reason, `plan_limit`, and the reset time as `resetsAt` (RFC 3339, at most 7 days ahead; one hour from now when Claude Code gave none), and registers again;
+- the lease clause leases no lane job to it meanwhile;
+- at the reset time it probes again, and reports ready.
+
+A Desktop restart forgets the hold. The next turn then fails at the limit, which sets the hold again. Registration attests `resetsAt` with the capability's other fields (2.10), and Studio words the person's waiting turns by it (11.14).
+
+### 11.12 Runtime agent
+
+- **`LaneJob::of`** (3.9) keeps the job shape (the engine, `lease_attempts == 1`, no envelope, controller token, grants or credential, and a workspace token that verifies), the person (`payload.user_id` equals the granted user) and the prompt rules, and adds 11.4's refusals of browser turns and attachments. It drops `input.kind == "person"` and the markers: unattended, automation, evaluation, plan, retry, goal continuation and `dispatchContent`.
+- **Execution mode.** `apply` runs as 3.3 says. `plan_only`, an automation's read-only mode, passes `--permission-mode plan` in place of `acceptEdits`, the launch check expects `plan`, and the turn saves nothing. Any other mode is refused.
+- **Resume** as 11.9 says, and **plan limits** as 11.11 says.
+
+### 11.13 Desktop
+
+The grant, its checks and the runtime's environment stay as they are (4.1-4.5). The consent dialog says what version 2 runs:
+
+> **Use Claude Code on this computer for {email}?** Instafy Desktop will start the `claude` program on this computer, signed in the way you signed in to it yourself, for the turns of your agents whose AI you set to Claude Code: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, one at a time, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as `.env`, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.
+>
+> Buttons: **Use Claude Code** / **Cancel**
+
+The consent record now keeps the version of the text it was given for (`consentVersion: 2`), and a record without it counts as not given, so no turn of version 2 runs on version 1's words. No one has agreed to version 1's text outside development, since the lane has never been on.
+
+### 11.14 Studio
+
+- **The agent editor** offers Claude Code (11.3), with the line "Runs on your own Claude Code, on your computer. Its turns wait while your computer is off." In Desktop on a computer where Claude Code is not set up, it adds the way to set it up: Your AI's "Claude Code on this computer".
+- **Waiting.** While a lane turn's job is queued, its row reads "Waiting for your computer…" for the agent's owner, "Waiting for {Name}'s computer…" for everyone else, and, while a plan limit holds (11.11), "Waiting for your Claude plan's limit to reset at {time}…". For the owner it adds what makes the turn run: in Desktop, "Start this space on this computer to run it." with the existing Start action, and anywhere else, "It runs when Instafy Desktop runs this space on your computer." Once the job is leased, the row reads "Starting Claude Code on …" as 5.7 says. Stop works as for any turn.
+- **Starting the space** (D44). In Desktop, on a computer where Claude Code is set up, when the person opens a space where a turn of theirs waits and Desktop runs no runtime, Studio starts the space on this computer by itself, as its Start action would. When Desktop runs another space, the waiting row offers Start, which asks before it replaces that runtime (4.4).
+- **Removed:** the composer's per-message choice and every guard that served it (5.1, 5.2), "Send again with Claude Code", and version 1's exclusions that kept a lane turn from being resent or retried (5.6). A lane failure offers Try again as any failure does, and the resend goes to the same agent, so to Claude Code again. Studio's automatic resend still passes over lane failures, since none of their codes clears by itself within seconds.
+- **Your AI's row** (5.3) keeps Find, Locate…, the consent and Turn off, and loses its per-message wording. Turning Claude Code off on a computer leaves the agents' choice as it is: their turns wait for a computer where it is on.
+- **Sentences** (5.5) for the refusals of 11.6 and the new not-ready reason. The sentences of removed codes go: `claude_code_turn_not_person`, `claude_code_turn_not_plain`, `claude_code_conversation_granted`, `claude_code_turn_active`, `claude_code_machine_busy`, `claude_code_runtime_not_ready`, `claude_code_turn_engine_unknown`, the lane's `dispatch_lane_busy`, `start_by_passed` and `session_unavailable`. The speaker line (5.7) stays, now on any agent's reply.
+
+### 11.15 Migrations
+
+Ordered and additive, as supabase/MIGRATIONS.md asks, each in a file of its own with its lightest lock:
+- create the unique index `agent_jobs_one_running_claude_code_turn_idx` on `public.agent_jobs ((payload ->> 'user_id'))` where `engine = 'claude-code' and status = 'leased'`;
+- then drop `agent_jobs_one_active_claude_code_turn_idx`.
+
+`agent_jobs_engine_check` (2.1) stays: a version 2 lane job still has no credential, grants or plan role, and dispatch always records `trigger_received_at`. `user_agents` needs no change, since `provider` has no CHECK.
+
+### 11.16 What 1.1, 1.2 and the rules become
+
+**1.1.**
+- "No turn whose text Instafy wrote" becomes **"Only the agent owner's own turns, on their own computer"**: the owner rule (11.5), L2, the lease clause's owner condition and the runtime's person check (3.9).
+- "One turn the person starts, in the foreground" becomes **"One turn at a time per person, each run once"**: the running index, the lease clause, lease once, and no automatic rerun of an interrupted turn (11.7).
+- "Claude Code works on the person's own request. No Instafy system prompt." keeps "no system prompt": no system-prompt flag, and nothing the runtime adds. It now names the text Instafy writes for a turn (11.10).
+
+**1.2.**
+- "Who typed the message" and "Which client sent it" go: version 2 asks neither, and there is no claim.
+- New, **unattended turns**: turns run while the person is away, so what 1.2 says a teammate's words in the space's files can do also happens in a turn nobody watches. The consent says so (11.13).
+- The rest stays: whose Claude login it is, a teammate's words in the folder, Codex on the same computer, processes that escape, Claude Code's reach beyond the turn, and unverified behaviour. D22 still keeps Codex from starting `claude` itself, with flags that would drop the lane's safeguards.
+- 11.1 replaces the owner's decisions of 2026-11-13 on D9 and D29. D22 stands.
+
+**AGENTS.md** (7.1), changed in the controller phase:
+- The proxy exception reads "a local-engine turn: a turn of an agent whose owner chose Claude Code as its AI, which runtime-agent on that owner's own computer carries out by starting their own signed-in, unmodified `claude`", and "sends it nothing but the turn's own text".
+- The security bullet's last sentence reads: "A local-engine turn runs only for its agent's owner, on a computer that owner runs and set up, never for anyone else: keep every dispatch path's Claude Code targets behind `claude_code_lane::admit` and the lease's owner clause."
+
+docs/Architecture.md's Local-Engine Turns section and the README's exception (7.2, 7.3) change the same way.
+
+### 11.17 Phases
+
+Each phase lands on its own and dark, since the switch stays empty, with its tests and the sections of this document it changes.
+1. **Design:** this section.
+2. **Controller:**
+   - the provider choice (11.3);
+   - per-target admission and its refusals (11.4-11.6);
+   - the lease clause, the running index's migrations, the sweeps and the stop (11.7);
+   - evaluations and automations (11.7);
+   - the session loader (11.9) and `resetsAt`'s attestation (11.11);
+   - removing the claim and its guards;
+   - runtime-contracts' lists, with each package's copy of them;
+   - AGENTS.md, docs/Architecture.md and README.md (11.16).
+3. **Runtime agent:** 11.9, 11.11 and 11.12.
+4. **Studio:** 11.3 and 11.14.
+5. **Desktop:** 11.13.
+
+Phase 8 (section 9) still turns it on, with its gates as they stand. Its live suite also runs a `plan_only` turn and a resume miss.
+
+### 11.18 Decisions
+
+- **D31. The provider.** Claude Code is an agent's AI provider (`user_agents.provider = 'claude-code'`), offered beside every other AI, @octo included (11.3).
+- **D32. Whose turns.** Every turn of a Claude Code agent, whatever started it, and only its owner's (11.4, 11.5). Replaces D1, D9 and D29.
+- **D33. Waiting.** A lane turn waits, with no start window and no expiry, for a runtime of its person's in its space with Claude Code ready (11.7). Replaces D12.
+- **D13, version 2. Concurrency.** One running Claude Code turn per person, and any number waiting (11.7).
+- **D34. Several computers.** Any one of them; the first to lease a turn runs it (11.8).
+- **D35. The per-message choice** is removed (11.3). Replaces D19.
+- **D36. Consent** names unattended turns, and the record keeps its text's version (11.13).
+- **D37. Plan limits** hold the person's waiting turns until the reset (11.11).
+- **D38. Evaluations** never wait (11.7).
+- **D39. Automations** skip a due run while their last run still waits (11.7).
+- **D40. Not yet: team plans and attachments.** They are refused with a reason (11.4). A worker needs its write scope enforced, which a filter on its save could do, and attachments need a copy that Claude Code can read.
+- **D41. Sessions** resume on any computer that holds them, and a miss starts a new session in the same turn (11.9). Changes D15.
+- **D42. The prompt** is the turn's text as dispatch builds it for any engine, with nothing added. Others' messages in the chat are a follow-up (11.10). Replaces D2.
+- **D43. Waiting shows** on the turn's row, worded by viewer, with what makes the turn run (11.14).
+- **D44. Desktop starts the space** by itself only while it runs no runtime, and otherwise offers Start (11.14).
 
 ---
 
