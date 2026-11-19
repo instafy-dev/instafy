@@ -881,7 +881,7 @@ fn a_pages_captions_come_from_the_starter_never_typed() {
         "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
     ));
     assert!(hub.contains(
-        "Each caption comes from the starter's `site.trust` or `site.cite`, never typed: a fact keeps how it was read (`\"viewer\"`, as `instafy-web-research` says), and one that doesn't say shows its page alone."
+        "`Estimate`, `Unknown`, each drawn by the starter's `site.trust` or `site.cite` from the fact's `\"viewer\"` (how it was read), never typed."
     ));
     assert!(hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
 }
