@@ -346,7 +346,7 @@ fn the_research_skill_says_how_to_choose_read_cross_check_and_cite() {
         "Honor a tool's policy refusal.",
         "1. Pages the person gave. 2. Sources an installed skill names for this need (a map's place search, an open API). 3. The AI's own web search, when this run has it (above). 4. `instafy web read` for a page whose address you have",
         "Then at most 2 guessed official domains, confirmed by reading the business name",
-        "Never put a guessed address in `request_browser`.",
+        "Name each page by its address (a page read, a search result or the official site of what the person named), never a guessed one, and what to do there.",
         "Inspect `instafy web budget --json`",
         "Parent, helpers and continued workers share the allowance",
         "Never crawl, paginate results or sweep listings.",

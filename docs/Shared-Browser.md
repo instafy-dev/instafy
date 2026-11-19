@@ -1447,16 +1447,24 @@ A card a turn writes names each page it opens by its address, one from a skill,
 the chat (the person's message, a page Octo read or a search result) or the
 official site of something the person named, and what to do there; the
 person's details, such as an order number or an e-mail address, never go into
-it. A card whose task names no page, or holds an e-mail address, is refused as
-the reply is read, and the runtime logs why: cards that named none sent the
-browser to find the pages itself, into a booking site's search and a shop's
-sign-in, where a search first would have found them (a local test, Nov 19). A
-turn whose only way on was such a card runs once more, told to search first,
-then hand over what it found or answer from it; a card that retry writes is
-checked the same way and not tried again. An address only Octo read, a search
-result's among them, still leaves the card a button until the person opens it
-("How Studio opens it"). A card the routing step posts carries the person's own
-words, whatever they name.
+it. A question's card (one without `continueBuilding`) whose task names no
+page is refused as the reply is read, and so is any card whose task holds an
+e-mail address (a package's version, such as `some-lib@5.4.2`, is none); the
+runtime logs why. Cards that named no page sent the browser to find the pages
+itself, into a booking site's search and a shop's sign-in, where a search first
+would have found them (a local test, Nov 19). A card that continues building is
+not refused for naming none: refused, its whole build ran again from the
+person's request. A turn whose card was refused, with no card left to post,
+runs once more, told to search first, then hand over what it found or answer
+from it, since its words were written for that card: a page it read, another
+card beside it and a skill setup's words don't keep it from running again
+(kept, an answer that had read a text-only results page said "I've opened a
+browser check of the official results", and nothing opened). A turn that
+changed files keeps its answer, which says what it made. A card that retry
+writes is checked the same way and not tried again. An address only Octo read,
+a search result's among them, still leaves the card a button until the person
+opens it ("How Studio opens it"). A card the routing step posts carries the
+person's own words, whatever they name.
 
 A message that names Instafy's browser, or whose work happens on a website
 (the person's own account on it too), goes to the browser from its first
@@ -2442,8 +2450,8 @@ observation: nothing is read from the page, no origin is approved, no action can
 target it, and the observation is not written to the action log, so it is not
 evidence of browser work. The agent's policy and the blank observation itself
 both tell it to call `navigate` first: with the address the task names, or, when
-the task names none (the person's own words on a card the routing step posted
-may name none), with the
+the task names none (the person's own words on a card the routing step posted,
+or a card that continues building, may name none), with the
 official site of what the task names, and `navigate` asks for the site's approval
 as usual. A task that names nothing to look up ends at once, with no page opened:
 no site is guessed for it. Such a turn fails as below, and as a failed turn that

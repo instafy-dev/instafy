@@ -11,15 +11,18 @@ const CARRIES_ON: &str = "\n\nWhat this carries on: ";
 const CARRIES_ON_MAX_CHARS: usize = 600;
 /// The longest task a card carries, in UTF-16 units as Studio counts them.
 const TASK_MAX_UTF16_UNITS: usize = 8_000;
-/// Why a card a turn wrote is refused when its task names no page it opens: no address, as Studio
-/// reads one ([`named_hosts`]). Such a card sent the browser to find the pages itself: "Find
-/// available hotels in <city>…" typed the city into a booking site's search, and a shop's return
-/// policy "for order <number> associated with <e-mail>" went to the shop's sign-in (a local test,
-/// Nov 19). The turn runs once more, told this (`jobs::refused_browser_card`).
+/// Why a question's card a turn wrote (one that doesn't continue building) is refused when its
+/// task names no page it opens: no address, as Studio reads one ([`named_hosts`]). Such a card
+/// sent the browser to find the pages itself: "Find available hotels in <city>…" typed the city
+/// into a booking site's search, and a shop's return policy "for order <number> associated with
+/// <e-mail>" went to the shop's sign-in (a local test, Nov 19). The turn runs once more, told
+/// this (`jobs::refused_browser_card`). A card that continues building says what to find for the
+/// build, and naming no page is no reason to refuse it: run once more, a map turn whose card
+/// named none would start its whole build again from the person's request.
 pub(super) const NAMES_NO_PAGE: &str = "names no page: search first, then hand over what it found";
 /// Why a card a turn wrote is refused when its task holds an e-mail address, as the search query
-/// rules find one (`search_query::holds_an_email_address`): the person's details never go into a
-/// card.
+/// rules find one in a domain that ends in a name (`search_query::holds_an_email_address`): the
+/// person's details never go into a card.
 pub(super) const HOLDS_AN_EMAIL_ADDRESS: &str =
     "holds an e-mail address: the person's details never go into a card";
 /// The reasons a card is refused for what its task says, rather than for how it is written.
@@ -66,9 +69,10 @@ pub(super) fn dropped_requests(reply: &Value) -> Vec<&'static str> {
 
 impl BrowserRequest {
     /// The card a reply's `request_browser` action asks for, or why none is posted: no task, a
-    /// task over 8,000 characters, an unknown browser location, a task that names no page it
-    /// opens ([`NAMES_NO_PAGE`]) or one that holds an e-mail address ([`HOLDS_AN_EMAIL_ADDRESS`]).
-    /// A card the routing step posts carries the person's own words ([`Self::routed`]).
+    /// task over 8,000 characters, an unknown browser location, a question's task that names no
+    /// page it opens ([`NAMES_NO_PAGE`]) or any task that holds an e-mail address
+    /// ([`HOLDS_AN_EMAIL_ADDRESS`]). A card the routing step posts carries the person's own words
+    /// ([`Self::routed`]).
     pub(super) fn parse(value: &serde_json::Map<String, Value>) -> Result<Self, &'static str> {
         let task = value
             .get("task")
@@ -88,14 +92,16 @@ impl BrowserRequest {
             Some(Value::String(location)) if location == "workspace" => "workspace",
             _ => return Err("unknown browserLocation"),
         };
-        let (pages, uncheckable) = named_hosts(task);
-        if pages.is_empty() && !uncheckable {
-            return Err(NAMES_NO_PAGE);
+        let continue_building = value.get("continueBuilding") == Some(&Value::Bool(true));
+        if !continue_building {
+            let (pages, uncheckable) = named_hosts(task);
+            if pages.is_empty() && !uncheckable {
+                return Err(NAMES_NO_PAGE);
+            }
         }
         if crate::search_query::holds_an_email_address(task) {
             return Err(HOLDS_AN_EMAIL_ADDRESS);
         }
-        let continue_building = value.get("continueBuilding") == Some(&Value::Bool(true));
         Ok(Self {
             task: task.to_owned(),
             location,
@@ -517,5 +523,62 @@ mod tests {
         assert!(NAMES_NO_PAGE.ends_with("search first, then hand over what it found"));
         // The card the routing step posts carries the person's own words, whatever they name.
         assert!(BrowserRequest::routed("Check the status of my last order.", false).is_some());
+    }
+
+    /// Only a question's card must name its pages: its reply is the answer, and a turn whose
+    /// card is refused runs once more. A card that continues building hands the browser what to
+    /// find for the build ("Find a first-visit three-day itinerary for the city… from public
+    /// sources." on a map turn), and refused, it ran the whole build again from the person's
+    /// request. No card holds an e-mail address, a building card's neither, nor one in an
+    /// address's query; a package's version ("some-lib@5.4.2"), in an address or in words, is
+    /// none.
+    #[test]
+    fn only_a_questions_card_must_name_its_pages_and_no_card_holds_an_email_address() {
+        let building = |task: &str| json!({ "task": task, "continueBuilding": true });
+        let question = |task: &str| json!({ "task": task });
+        let cases = [
+            (
+                building(
+                    "Find a first-visit three-day itinerary for the city and verify the key places from public sources.",
+                ),
+                Ok(()),
+            ),
+            (
+                building(
+                    "Read my last three orders on shop.example, signed in as ana@example.com.",
+                ),
+                Err(HOLDS_AN_EMAIL_ADDRESS),
+            ),
+            (
+                question("Open https://cdn.example/npm/some-lib@5.4.2/ and list its files."),
+                Ok(()),
+            ),
+            (
+                question(
+                    "Open https://registry.example/package/some-lib and check whether some-lib@18.3.1 is its latest version.",
+                ),
+                Ok(()),
+            ),
+            (
+                question(
+                    "Open https://shop.example/orders?email=ana@example.com and read the order's status.",
+                ),
+                Err(HOLDS_AN_EMAIL_ADDRESS),
+            ),
+            (
+                question(
+                    "Open https://shop.example/help and read what it says for ana.k@example.co.uk.",
+                ),
+                Err(HOLDS_AN_EMAIL_ADDRESS),
+            ),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(card, expected)| {
+                let parsed = BrowserRequest::parse(card.as_object().unwrap()).map(|_| ());
+                (parsed != *expected).then(|| format!("{card}: {parsed:?}, not {expected:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 }

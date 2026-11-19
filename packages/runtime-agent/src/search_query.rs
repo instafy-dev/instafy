@@ -200,10 +200,18 @@ fn looks_like_secret(query: &str) -> bool {
         })
 }
 
-/// Whether `text` holds an e-mail address, as the rules find one in a query: a browser card's task
-/// never carries one either (`jobs::browser_request`).
+/// Whether `text` holds an e-mail address, as the rules find one in a query, whose domain ends in a
+/// name of letters: a browser card's task never carries one (`jobs::browser_request`). A
+/// package's version ("some-lib@5.4.2"), in an address or in words, ends in a number and is none:
+/// read as an address, it refused a card for the person's details it never held.
 pub(crate) fn holds_an_email_address(text: &str) -> bool {
-    patterns().email.is_match(&collapse(text))
+    patterns().email.find_iter(&collapse(text)).any(|address| {
+        address
+            .as_str()
+            .rsplit('.')
+            .next()
+            .is_some_and(|last| last.chars().count() >= 2 && last.chars().all(char::is_alphabetic))
+    })
 }
 
 /// The query as the rules pass it: white space collapsed, and e-mail addresses, account numbers

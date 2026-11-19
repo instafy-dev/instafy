@@ -339,6 +339,8 @@ const LEGACY_INTEGRATION_ONBOARDING_SHA256: &[&str] = &[
     "bb266b7871d4effbe92e7deddd5ef34c801635bb9143c8325a3862c7ae74c88c", // v5
     // From before replies stopped carrying suggestion chips.
     "6152a8b553c990148d3dac4c7b14869fb9e8d582efa35105a865d091d2f08fff", // v6
+    // From before a browser card's task named the address it opens.
+    "b7bebd038b8745dda7e5972feea722b58a9bf4f37f2ee91ea0f925dd2ee5ed6f", // v7
 ];
 const BYOC_AI_CREDENTIALS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -820,6 +822,9 @@ const LEGACY_WEB_RESEARCH_SHA256: &[&str] = &[
     // search, a news question with no search read the subject's own news page, and a policy
     // question beside an order number, unnamed hotels and a price each had their own source.
     "4aeb4ed59b69b9d887c0ab7db7d91e90140a0ea2b3036bd3d893b1c498f99731", // v21
+    // From before a browser card named each page by its address (a page read, a search result or
+    // the official site of what the person named), not by what it is.
+    "96e46987722cb9bdd4c0dff2803bdcd32a2a04a0380b5888fd717e3104bc26b5", // v22
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its
 /// values and the reviews asked for, and what a value nobody found says. A topic of the browser,

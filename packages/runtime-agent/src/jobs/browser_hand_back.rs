@@ -564,9 +564,10 @@ const LABEL_MAX_WORDS: usize = 3;
 /// so one written after a reply's words was read as words, and the person read it: a browser
 /// turn ended "… home page is open in the browser. Finding: {"url":…}" on one line, the
 /// wrap-up pass wrote its lines again, and the reply kept that line (a local test, Nov 19). A
-/// short label right before the object ([`without_closing_label`]) and the backticks, brackets
-/// and punctuation around it go with it; the words around it stay where they were. An object
-/// inside another goes with that one, and one alone on its line stays as it is.
+/// short label right before the object ([`without_closing_label`]) and the backticks, brackets,
+/// parentheses and punctuation around it go with it ([`around_the_object`]); the words around it
+/// stay where they were. An object inside another goes with that one, and one alone on its line
+/// stays as it is.
 fn own_lines(text: &str) -> Cow<'_, str> {
     // Where each object for Octo that has no line of its own starts and ends.
     let mut lifted: Vec<(usize, usize)> = Vec::new();
@@ -598,7 +599,11 @@ fn own_lines(text: &str) -> Cow<'_, str> {
     let mut out = String::with_capacity(text.len() + 2 * lifted.len());
     let mut cursor = 0;
     for (start, end) in lifted {
-        out.push_str(without_closing_label(&text[cursor..start]));
+        let (words, after, mark) = around_the_object(&text[cursor..start], &text[end..]);
+        out.push_str(words);
+        if let Some(mark) = mark.filter(|_| ends_without_a_mark(words)) {
+            out.push(mark);
+        }
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
@@ -610,15 +615,49 @@ fn own_lines(text: &str) -> Cow<'_, str> {
             .collect::<Vec<_>>()
             .join(" ");
         out.push_str(&object);
-        cursor = text[end..]
-            .find(|c: char| !matches!(c, '`' | ']' | ',' | '.' | ';' | ' ' | '\t'))
-            .map_or(text.len(), |at| end + at);
-        if !text[cursor..].is_empty() && !text[cursor..].starts_with(['\n', '\r']) {
+        cursor = text.len() - after.len();
+        if !after.is_empty() && !after.starts_with(['\n', '\r']) {
             out.push('\n');
         }
     }
     out.push_str(&text[cursor..]);
     Cow::Owned(out)
+}
+
+/// The words before an object for Octo and what follows it, without what goes with it
+/// ([`own_lines`]): before it, a short label and an opening backtick or bracket
+/// ([`without_closing_label`]); after it, a closing backtick or bracket and the punctuation of
+/// the list or sentence it ended. A parenthesis around it goes too, when its closing one comes
+/// right after the object, and so does the mark that ends the sentence after that parenthesis,
+/// which the words before the object take instead: "… is open in the browser (Finding: {…})."
+/// left "(Finding:" and ")." in the reply, and now reads "… is open in the browser.". Returns
+/// those words, what is left after the object, and that mark.
+fn around_the_object<'a>(before: &'a str, after: &'a str) -> (&'a str, &'a str, Option<char>) {
+    fn closing(text: &str) -> &str {
+        text.trim_start_matches(['`', ']', ',', '.', ';', ' ', '\t'])
+    }
+    let (words, inside) = without_closing_label(before);
+    let rest = closing(after);
+    match inside.zip(rest.strip_prefix(')')) {
+        Some((words, after)) => {
+            let mark = after
+                .chars()
+                .next()
+                .filter(|c| matches!(c, '.' | '!' | '?' | '\u{2026}'));
+            (
+                words,
+                closing(&after[mark.map_or(0, char::len_utf8)..]),
+                mark,
+            )
+        }
+        None => (words, rest, None),
+    }
+}
+
+/// Whether words that end before an object for Octo end without the mark of a sentence or a list,
+/// so the mark after it is theirs ([`around_the_object`]).
+fn ends_without_a_mark(words: &str) -> bool {
+    !words.is_empty() && !words.ends_with(['.', '!', '?', '\u{2026}', ':', ';', ','])
 }
 
 /// [`own_lines`] in place.
@@ -632,29 +671,58 @@ fn put_on_own_lines(text: &mut String) {
 
 /// The words before an object for Octo without what goes with it ([`own_lines`]): white space,
 /// an opening backtick or bracket, and a label of at most [`LABEL_MAX_WORDS`] words that ends the
-/// last line with a colon after its last sentence ("Finding:", "- Findings:").
-fn without_closing_label(before: &str) -> &str {
+/// last line with a colon after its last sentence or a parenthesis left open ("Finding:",
+/// "- Findings:", "(source:"). When they then end in that parenthesis, also the words before it,
+/// for an object whose closing parenthesis comes right after it ([`around_the_object`]).
+fn without_closing_label(before: &str) -> (&str, Option<&str>) {
     let words = before.trim_end().trim_end_matches(['`', '[']).trim_end();
     let line_start = words.rfind('\n').map_or(0, |at| at + 1);
     let line = &words[line_start..];
+    let open_parenthesis = line.rfind('(').filter(|at| !line[*at..].contains(')'));
     let label_start = [". ", "! ", "? ", "\u{2026} "]
         .iter()
         .filter_map(|end| line.rfind(end).map(|at| at + end.len()))
+        .chain(open_parenthesis.map(|at| at + 1))
         .max()
         .unwrap_or(0);
     let label = line[label_start..]
         .trim_start_matches(['-', '*', '\u{2022}', ' '])
         .trim();
-    if label.ends_with(':') && label.split_whitespace().count() <= LABEL_MAX_WORDS {
+    let words = if label.ends_with(':') && label.split_whitespace().count() <= LABEL_MAX_WORDS {
         words[..line_start + label_start].trim_end()
     } else {
         words
+    };
+    let inside = words
+        .strip_suffix('(')
+        .map(|words| words.trim_end_matches(['`', '[']).trim_end());
+    (words, inside)
+}
+
+/// Where the `}` that closes the object `text` starts with is, counted by its braces alone, as
+/// its quote marks may be wrong. None when none closes it: the object was cut off.
+fn closing_brace(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, c) in text.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
     }
+    None
 }
 
 /// `words` without what is left of an object for Octo written so that no reader could read it
 /// (a quote mark left unescaped, an object cut off): on each line, from the `{` before a quoted
-/// `url` key to the line's end, with a short label before it ([`without_closing_label`]). A line
+/// `url` key to the `}` that closes it ([`closing_brace`]), or to the line's end when none does,
+/// with a short label and the marks around it ([`around_the_object`]). The words after it stay on
+/// its line: cut to the line's end, "The page {…} lists the opening hours" lost its hours. A line
 /// left with nothing goes.
 fn cut_unreadable_findings(words: &str) -> String {
     let unreadable_start = |line: &str| {
@@ -668,13 +736,32 @@ fn cut_unreadable_findings(words: &str) -> String {
             .min()?;
         line[..key].rfind('{')
     };
+    let cut = |line: &str| {
+        let mut kept = String::new();
+        let mut rest = line;
+        while let Some(brace) = unreadable_start(rest) {
+            let end = closing_brace(&rest[brace..]).map_or(rest.len(), |at| brace + at + 1);
+            let (before, after, mark) = around_the_object(&rest[..brace], &rest[end..]);
+            if !kept.is_empty() && !before.trim().is_empty() {
+                kept.push(' ');
+            }
+            kept.push_str(before);
+            if let Some(mark) = mark.filter(|_| ends_without_a_mark(&kept)) {
+                kept.push(mark);
+            }
+            rest = after;
+        }
+        if !kept.is_empty() && !rest.is_empty() {
+            kept.push(' ');
+        }
+        kept.push_str(rest);
+        (!kept.trim().is_empty()).then_some(kept)
+    };
     words
         .lines()
         .filter_map(|line| match unreadable_start(line) {
-            None => Some(line),
-            Some(brace) => {
-                Some(without_closing_label(&line[..brace])).filter(|kept| !kept.is_empty())
-            }
+            None => Some(line.to_string()),
+            Some(_) => cut(line),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1120,10 +1207,12 @@ pub(super) fn read_lines_of(answer: &str) -> Option<String> {
 }
 
 /// What an answer says to the person: its words, without its finding lines and the missing and
-/// unread lines Octo's later turns read ([`MISSING_LINE`], [`UNREAD_LINE`]). Empty when it has
-/// none. A turn that paused on a step only the person takes says with them which step it is.
+/// unread lines Octo's later turns read ([`MISSING_LINE`], [`UNREAD_LINE`]), wherever it wrote
+/// them ([`own_lines`]). Empty when it has none. A turn that paused on a step only the person
+/// takes says with them which step it is.
 pub(super) fn words_of(answer: &str) -> String {
-    let words = split_findings(answer).map_or_else(|| answer.to_string(), |(words, _)| words);
+    let answer = own_lines(answer);
+    let words = split_findings(&answer).map_or_else(|| answer.to_string(), |(words, _)| words);
     words
         .lines()
         .filter(|line| missing_line(line).is_none() && unread_line(line).is_none())
@@ -3952,6 +4041,85 @@ mod tests {
             turn.final_messages[0].content,
             "{\"url\":\"https://news.example/en\"}\n{\"missing\":[\"the article\"]}"
         );
+    }
+
+    /// A finding written in parentheses goes with them, and so does the label inside them:
+    /// "… is open in the browser (Finding: {…})." left "(Finding:" and ")." in the reply. The
+    /// words after an object no reader could read stay where they were: the wrap-up pass's lines
+    /// in its place cut "lists the opening hours" with the object before it. And a pause, which
+    /// keeps a turn's words as it wrote them, keeps no line for Octo written after them.
+    #[test]
+    fn a_finding_in_parentheses_or_before_more_words_leaves_only_the_words() {
+        let question = browser_job(json!({ "browserTransport": "shared" }));
+        let finding = r#"{"url":"https://news.example/en","title":"Home | News","facts":["The home page leads with the latest report."]}"#;
+        let mut wrong: Vec<String> = Vec::new();
+        for (answer, words) in [
+            (
+                format!("Its home page is open in the browser (Finding: {finding})."),
+                "Its home page is open in the browser.",
+            ),
+            (
+                format!("Its home page is open in the browser ({finding})"),
+                "Its home page is open in the browser",
+            ),
+            (
+                format!("I read the home page (source: `{finding}`) and it leads with the report."),
+                "I read the home page\nand it leads with the report.",
+            ),
+        ] {
+            let mut turn = execution(&answer);
+            move_findings_into_details(&question, &mut turn);
+            let note = turn
+                .final_messages
+                .first()
+                .and_then(|note| serde_json::from_str::<JsonValue>(&note.content).ok());
+            if turn.summary != words
+                || turn.final_messages.len() != 1
+                || note != serde_json::from_str::<JsonValue>(finding).ok()
+            {
+                wrong.push(format!("{answer:?} read {:?}", turn.summary));
+            }
+        }
+        // A parenthesis whose closing one doesn't come right after the object stays, and so does
+        // that closing one.
+        let answer = format!("Its home page ({finding}, read today) is open in the browser.");
+        let mut turn = execution(&answer);
+        move_findings_into_details(&question, &mut turn);
+        if turn.summary.matches('(').count() != turn.summary.matches(')').count()
+            || turn.summary.contains("{\"url\"")
+        {
+            wrong.push(format!("{answer:?} read {:?}", turn.summary));
+        }
+        let unreadable = r#"{"url": "https://news.example/en", "facts": ["It reads "Welcome""]}"#;
+        for (first, words) in [
+            (
+                format!("The page {unreadable} lists the opening hours, 10:00 to 18:00."),
+                "The page lists the opening hours, 10:00 to 18:00.",
+            ),
+            (
+                format!("Its home page is open in the browser (Finding: {unreadable})."),
+                "Its home page is open in the browser.",
+            ),
+        ] {
+            let mut summary = first.clone();
+            add_finding_lines_in_place_of_the_first(&mut summary, finding);
+            let mut turn = execution(&summary);
+            move_findings_into_details(&question, &mut turn);
+            if turn.summary != words
+                || turn
+                    .final_messages
+                    .first()
+                    .map(|note| note.content.as_str())
+                    != Some(finding)
+            {
+                wrong.push(format!("{first:?} read {:?}", turn.summary));
+            }
+        }
+        let pause = "Sign in on the page, then choose Let Octo continue. Missing: {\"missing\": [\"the order status\"]}";
+        if words_of(pause) != "Sign in on the page, then choose Let Octo continue." {
+            wrong.push(format!("{pause:?} read {:?}", words_of(pause)));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// A browser turn's missing line, the values it looked for and didn't find

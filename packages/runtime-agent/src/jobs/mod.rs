@@ -4984,29 +4984,33 @@ fn declined_a_turn_that_needs_an_answer(
         .then_some(CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer)
 }
 
-/// An answer whose only way on was a `request_browser` card refused for what its task says
-/// ([`browser_request::REFUSED_FOR_ITS_TASK`]: it named no page it opens, or it held an e-mail
-/// address), with no other action and no file, on a turn that may ask for the browser outside a
-/// skill setup (whose addresses come only from its skill). Its words were written for a card
-/// that no longer comes ("I'm checking hotel availability…"), so the turn runs once more, told
-/// why: it searches first, then hands over what it found or answers from it
-/// ([`codex_fallback_retry_prompt`]). A card that retry writes is checked the same way, and is
-/// not tried again.
+/// An answer that asked for the browser with a `request_browser` card refused for what its task
+/// says ([`browser_request::REFUSED_FOR_ITS_TASK`]: a question's card that named no page it
+/// opens, or a card that held an e-mail address), with no card left to post, on a turn that may
+/// ask for the browser. Its words were written for that card ("I'm checking hotel
+/// availability…"), so the turn runs once more, told why: it searches first, then hands over
+/// what it found or answers from it ([`codex_fallback_retry_prompt`]). What else the answer
+/// holds doesn't keep it: kept beside a page it read, a score question's "I've opened a browser
+/// check of the official results." stood with no card and no browser behind it (a local test,
+/// Nov 19), and a key's card or a skill setup's words say where the browser goes just the same.
+/// A turn that changed files (`changed_files`) keeps its answer, which says what it made: run
+/// again, a build starts over from the person's request. A card that retry writes is checked the
+/// same way, and is not tried again.
 fn refused_browser_card(
     job: &LeaseJob,
     reply: &JsonValue,
     outcome: &CodexOutcome,
+    changed_files: bool,
 ) -> Option<CodexFallbackSummaryKind> {
     let refused = browser_request::dropped_requests(reply)
         .iter()
         .any(|reason| browser_request::REFUSED_FOR_ITS_TASK.contains(reason));
-    (refused
-        && outcome.actions.is_empty()
-        && outcome.files.is_empty()
-        && outcome.read_files.is_empty()
-        && !browser_request_unsupported(job)
-        && !conversation_began_with_skill_setup(job))
-    .then_some(CodexFallbackSummaryKind::RefusedBrowserCard)
+    let card_left = outcome
+        .actions
+        .iter()
+        .any(|action| matches!(action, CodexAction::RequestBrowser(_)));
+    (refused && !card_left && !changed_files && !browser_request_unsupported(job))
+        .then_some(CodexFallbackSummaryKind::RefusedBrowserCard)
 }
 
 fn clean_decline_final_json(value: &JsonValue) -> bool {
@@ -9480,8 +9484,7 @@ impl JobProcessor {
         }
         let mut codex_fallback_summary_kind =
             classify_internal_codex_fallback_summary(&outcome.summary)
-                .or_else(|| declined_a_turn_that_needs_an_answer(job, &outcome.summary))
-                .or_else(|| refused_browser_card(job, &output.final_json, &outcome));
+                .or_else(|| declined_a_turn_that_needs_an_answer(job, &outcome.summary));
         if first_shared_browser_terminal_consent_failure.is_some() {
             // The lines it keeps name no address the browser refused it and no step opened,
             // and none its steps never tried.
@@ -9610,6 +9613,12 @@ impl JobProcessor {
         )
         .await?
             == 0;
+        // An answer whose card was refused for what its task says was written for that card: the
+        // turn runs once more, unless it changed files of its own ([`refused_browser_card`]).
+        if codex_fallback_summary_kind.is_none() {
+            codex_fallback_summary_kind =
+                refused_browser_card(job, &output.final_json, &outcome, !own_files_empty);
+        }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -15840,7 +15849,7 @@ fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> 
             "Your previous answer was only `NO_RESPONSE`. That word declines an ambient group turn that Instafy marks for a participation decision, and this turn is not one: the person is talking to you, so answer them. Do not answer `NO_RESPONSE`."
         }
         CodexFallbackSummaryKind::RefusedBrowserCard => {
-            "Your previous answer's `request_browser` card was refused: a card names each page it opens by its address, and never the person's details. Search first, then hand over what it found: answer from the pages you read, or end with one card naming each page it opens by its address, from this chat (the person's message, a page you read or a search result) or the official site of something the person named, and what to do there. Never put the person's details, such as an order number or an e-mail address, in a card."
+            "Your previous answer's `request_browser` card was refused: a card names each page it opens by its address, and never the person's details. For a page you have no address for, search first, then hand over what it found: answer from the pages you read, or end with one card naming each page it opens by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named, and what to do there. Never put the person's details, such as an order number or an e-mail address, in a card."
         }
     };
     let observation_requirement = match kind {
@@ -32094,18 +32103,19 @@ mod tests {
         }
     }
 
-    /// A turn whose only way on was a card refused for what its task says (it named no page it
-    /// opens, or held an e-mail address) runs once more, told why: it searches first, then hands
-    /// over what it found or answers from it. Its words were written for a card that no longer
-    /// comes ("I'll check the shop's return information for your order."). A turn with another
-    /// action or a file keeps its answer, and so does one that may not ask for the browser, or a
-    /// skill setup, whose addresses come only from its skill.
+    /// A turn whose card was refused for what its task says (a question's card named no page it
+    /// opens, or a card held an e-mail address) runs once more, told why: it searches first, then
+    /// hands over what it found or answers from it. Its words were written for a card that no
+    /// longer comes ("I'll check the shop's return information for your order."). A turn with a
+    /// card left to post keeps its answer, and so do a turn that changed files, whose answer says
+    /// what it made, one that may not ask for the browser, and one whose only card continues
+    /// building and names no page, which is no refusal.
     #[test]
-    fn a_turn_whose_only_card_is_refused_searches_first_and_hands_over_what_it_found() {
+    fn a_turn_whose_card_is_refused_searches_first_and_hands_over_what_it_found() {
         let ordinary = test_lease_job(Some("feature"), json!({}));
-        let kind = |job: &LeaseJob, raw: &JsonValue| {
+        let kind = |job: &LeaseJob, raw: &JsonValue, changed_files: bool| {
             let outcome = extract_codex_outcome(raw).expect("extract outcome");
-            refused_browser_card(job, raw, &outcome)
+            refused_browser_card(job, raw, &outcome, changed_files)
         };
         let card = |task: &str| json!({"type": "request_browser", "task": task});
         let answer = |task: &str| {
@@ -32119,31 +32129,30 @@ mod tests {
             "Check the shop's return policy for order 123-4567 associated with ana@example.com.",
         );
         let refused = Some(CodexFallbackSummaryKind::RefusedBrowserCard);
-        assert_eq!(kind(&ordinary, &no_page), refused);
+        assert_eq!(kind(&ordinary, &no_page, false), refused);
         assert_eq!(
             kind(
                 &ordinary,
                 &answer(
                     "Open https://shop.example/help/returns and check the policy for ana@example.com."
-                )
+                ),
+                false
             ),
             refused
         );
         // Hotel pages a search found, by their addresses: the card is posted.
-        assert_eq!(
-            kind(
-                &ordinary,
-                &answer(
-                    "Open https://www.harbour-hotel.example/rooms and https://old-town-inn.example/book, set 12 to 14 December and 2 adults, and read each room's price."
-                )
-            ),
-            None
+        let hotels = answer(
+            "Open https://www.harbour-hotel.example/rooms and https://old-town-inn.example/book, set 12 to 14 December and 2 adults, and read each room's price.",
         );
-        let mut with_location = no_page.clone();
-        with_location["actions"]
+        assert_eq!(kind(&ordinary, &hotels, false), None);
+        // A card naming its pages beside the refused one is posted, and the answer stands.
+        let mut a_card_left = no_page.clone();
+        a_card_left["actions"]
             .as_array_mut()
             .unwrap()
-            .push(json!({"type": "request_location", "precision": "approximate"}));
+            .push(hotels["actions"][0].clone());
+        assert_eq!(kind(&ordinary, &a_card_left, false), None);
+        // A turn that changed files keeps the answer that says what it made.
         let mut with_file = no_page.clone();
         with_file["files"] = json!([{
             "path": "notes.md",
@@ -32151,23 +32160,36 @@ mod tests {
             "change": {"type": "created"},
             "content": "Returns\n",
         }]);
-        for raw in [with_location, with_file] {
-            assert_eq!(kind(&ordinary, &raw), None, "{raw}");
-        }
-        for job in [
-            test_lease_job(
-                Some("feature"),
-                json!({"metadata": {"browserTransport": "shared"}}),
+        assert_eq!(kind(&ordinary, &with_file, true), None);
+        assert_eq!(kind(&ordinary, &no_page, true), None);
+        assert_eq!(
+            kind(
+                &test_lease_job(
+                    Some("feature"),
+                    json!({"metadata": {"browserTransport": "shared"}}),
+                ),
+                &no_page,
+                false
             ),
-            skill_setup_test_job(SKILL_SETUP_TEST_OPENER),
-        ] {
-            assert_eq!(kind(&job, &no_page), None);
-        }
+            None
+        );
+        let building = json!({
+            "summary": "I'm checking the key places in the browser, then I'll put them on the map.",
+            "files": [],
+            "actions": [{
+                "type": "request_browser",
+                "task": "Find a first-visit three-day itinerary for the city and verify the key places from public sources.",
+                "continueBuilding": true,
+            }],
+        });
+        assert_eq!(kind(&ordinary, &building, false), None);
+        assert_eq!(extract_codex_outcome(&building).unwrap().actions.len(), 1);
         // The retry is told why, and the person's line reads as a turn still at work.
         let refused = CodexFallbackSummaryKind::RefusedBrowserCard;
         let retry = codex_fallback_retry_prompt("Latest user request: the return policy", refused);
         for phrase in [
-            "Search first, then hand over what it found",
+            "For a page you have no address for, search first, then hand over what it found",
+            "by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named",
             "Never put the person's details, such as an order number or an e-mail address, in a card.",
         ] {
             assert!(retry.contains(phrase), "{phrase}");
@@ -32176,6 +32198,76 @@ mod tests {
             retry_status_activity(codex_fallback_retry_reason(refused)),
             activity_labels::evidence_retry_activity()
         );
+    }
+
+    /// A refused card leaves the words written for it with nothing behind them, whatever else
+    /// the answer holds. A score question's answer read the league's text-only page, said "I've
+    /// opened a browser check of the official results." and wrote a card naming no page: with
+    /// that card refused and no retry, the line promised a browser that never came, and the
+    /// person got no result (a local test, Nov 19). A page it read is no way on, and neither is
+    /// another card beside it (a key's: "Instafy's browser opens the provider's settings", or a
+    /// location's) nor a skill setup's words.
+    #[test]
+    fn a_refused_card_beside_a_page_read_another_card_or_a_setup_runs_the_turn_again() {
+        let ordinary = test_lease_job(Some("feature"), json!({}));
+        let kind = |job: &LeaseJob, raw: &JsonValue| {
+            let outcome = extract_codex_outcome(raw).expect("extract outcome");
+            refused_browser_card(job, raw, &outcome, false)
+        };
+        let refused = Some(CodexFallbackSummaryKind::RefusedBrowserCard);
+        let read_a_page = json!({
+            "summary": "I couldn't verify the result from the league's text-only score page. I've opened a browser check of the official results.",
+            "code": null,
+            "files": [{"change": "read", "path": "https://scores.example/2026-11-18", "content": null}],
+            "actions": [{
+                "type": "request_browser",
+                "task": "Check the official results for the team's game on November 18, 2026, and tell me who won and the final score.",
+                "browserLocation": "auto",
+                "continueBuilding": null,
+            }],
+        });
+        assert_eq!(
+            extract_codex_outcome(&read_a_page)
+                .unwrap()
+                .read_files
+                .len(),
+            1
+        );
+        let with_a_key = json!({
+            "summary": "The provider's key goes in the card on this message. Instafy's browser opens the provider's settings, where you sign in yourself.",
+            "files": [],
+            "actions": [
+                {"type": "request_secret", "name": "PROVIDER_API_KEY"},
+                {"type": "request_browser", "task": "Take me to the provider's developer settings and stop on the list of keys."},
+            ],
+        });
+        let setup = json!({
+            "summary": "Instafy's browser opens the provider's sign-in. Sign in there yourself, then choose Let Octo continue.",
+            "files": [],
+            "actions": [{"type": "request_browser", "task": "Open the provider's dashboard for ana@example.com and take me to its keys."}],
+        });
+        let with_location = json!({
+            "summary": "I'm checking the opening hours near you in the browser.",
+            "files": [],
+            "actions": [
+                {"type": "request_browser", "task": "Check which pharmacies near me are open now."},
+                {"type": "request_location", "precision": "approximate"},
+            ],
+        });
+        let setup_job = skill_setup_test_job(SKILL_SETUP_TEST_OPENER);
+        let wrong: Vec<String> = [
+            ("a page read", &ordinary, &read_a_page),
+            ("a key's card", &ordinary, &with_a_key),
+            ("a location's card", &ordinary, &with_location),
+            ("a skill setup", &setup_job, &setup),
+        ]
+        .into_iter()
+        .filter_map(|(case, job, raw)| {
+            let got = kind(job, raw);
+            (got != refused).then(|| format!("{case}: {got:?}"))
+        })
+        .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// The router weighs a word by how few skills use it, so "browser" and
