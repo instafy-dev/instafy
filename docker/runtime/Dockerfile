@@ -1,8 +1,9 @@
 ## Pin the Rust image to keep CI build caches warm (avoid nightly churn).
 ARG RUST_TOOLCHAIN=1.95.0
 ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082
-ARG GO_VERSION=1.26.10
-ARG GO_IMAGE=golang:${GO_VERSION}-bookworm@sha256:fe3da92a5cb2881e4aa75e625cb0b7c50571632fb4cf340cbe53e6ccdcffdd51
+# Go 1.26.11 or newer: 1.26.10's net/http has CVE-2026-97054, which the publishers' Trivy gate rejects.
+ARG GO_VERSION=1.26.11
+ARG GO_IMAGE=golang:${GO_VERSION}-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 ARG CLI_NODE_IMAGE=node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
 ARG PLAYWRIGHT_VERSION=1.61.1
