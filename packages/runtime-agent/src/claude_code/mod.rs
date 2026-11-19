@@ -1,5 +1,6 @@
-//! Local-engine turns: one @octo turn that the person's own Claude Code, signed in on their own
-//! computer, carries out (docs/Local-Engine-Turns.md). This module holds what the lane needs
+//! Local-engine turns: a turn of one of the person's agents whose AI is Claude Code, which the
+//! person's own Claude Code, signed in on their own computer, carries out
+//! (docs/Local-Engine-Turns.md, section 11 for version 2). This module holds what the lane needs
 //! before a turn starts:
 //!
 //! - the launch grant Desktop hands this process (`INSTAFY_CLAUDE_CODE_*`), read and removed at
@@ -7,7 +8,8 @@
 //! - the checks on the granted binary, configuration directory, CA file and PATH entries (3.2),
 //!   which run at capture and again before every spawn;
 //! - the probe of `claude --version`, `--help` and `auth status`, and the `claudeCode`
-//!   registration capability it gives (2.10, 3.2);
+//!   registration capability it gives (2.10, 3.2), which says not ready while the person's
+//!   Claude plan's usage limit holds the lane, until it resets (11.11);
 //! - the cleanup latch that stops leasing when a turn's processes cannot be confirmed gone (3.6).
 //!
 //! [`command`] builds the exact argv and environment of the `claude` process (3.3, 3.4),
@@ -102,6 +104,11 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROBE_OUTPUT_CAP: usize = 256 * 1024;
 /// How often a runtime whose capability says not ready probes again (3.2).
 pub const NOT_READY_REPROBE_INTERVAL: Duration = Duration::from_secs(60);
+/// How far ahead a plan limit holds the lane at most (11.11): a reset time Claude Code gives
+/// further ahead counts as this.
+pub const PLAN_LIMIT_HOLD_AT_MOST: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// How long a plan limit holds the lane when Claude Code gave no reset time (11.11).
+pub const PLAN_LIMIT_HOLD_WITHOUT_A_RESET_TIME: Duration = Duration::from_secs(60 * 60);
 
 /// The flags of the lane's command (3.3). A flag `--help` does not list is logged and never
 /// fails the probe: `--help` does not list every flag, and an unknown flag fails at startup.
@@ -132,16 +139,20 @@ pub enum NotReadyReason {
     UnsupportedVersion,
     /// `--help` says bare mode is the default in print mode.
     BareDefault,
+    /// A turn failed at the person's Claude plan's usage limit, which has not reset yet: a
+    /// [`PlanLimitHold`] (11.11). No probe gives it.
+    PlanLimit,
 }
 
 impl NotReadyReason {
     /// Every reason, in the order of the shared list.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::BinaryMissing,
         Self::BinaryUnsafe,
         Self::ProbeFailed,
         Self::UnsupportedVersion,
         Self::BareDefault,
+        Self::PlanLimit,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -151,6 +162,7 @@ impl NotReadyReason {
             Self::ProbeFailed => "probe_failed",
             Self::UnsupportedVersion => "unsupported_version",
             Self::BareDefault => "bare_default",
+            Self::PlanLimit => "plan_limit",
         }
     }
 }
@@ -170,15 +182,14 @@ impl fmt::Display for NotReadyReason {
 pub enum FailureCode {
     /// Claude Code is not signed in (an `assistant` message's `error` is `authentication_failed`).
     NotSignedIn,
-    /// The person's Claude plan reached its usage limit (a rejected `rate_limit_event`).
+    /// The person's Claude plan reached its usage limit (a rejected `rate_limit_event`), or a
+    /// [`PlanLimitHold`] kept the turn from starting (11.11).
     PlanLimit,
     BinaryMissing,
     BinaryUnsafe,
     UnsupportedVersion,
     ProbeFailed,
     BareDefault,
-    /// `--resume` named a session Claude Code no longer has (2.7).
-    SessionUnavailable,
     /// The turn ran past `INSTAFY_CLAUDE_CODE_TURN_TIMEOUT_SECONDS` (3.6).
     TurnTimeout,
     /// Claude Code printed nothing for 15 minutes (3.6).
@@ -194,7 +205,7 @@ pub enum FailureCode {
 }
 
 impl FailureCode {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 14] = [
         Self::NotSignedIn,
         Self::PlanLimit,
         Self::BinaryMissing,
@@ -202,7 +213,6 @@ impl FailureCode {
         Self::UnsupportedVersion,
         Self::ProbeFailed,
         Self::BareDefault,
-        Self::SessionUnavailable,
         Self::TurnTimeout,
         Self::Stalled,
         Self::Crashed,
@@ -221,7 +231,6 @@ impl FailureCode {
             Self::UnsupportedVersion => "unsupported_version",
             Self::ProbeFailed => "probe_failed",
             Self::BareDefault => "bare_default",
-            Self::SessionUnavailable => "session_unavailable",
             Self::TurnTimeout => "turn_timeout",
             Self::Stalled => "stalled",
             Self::Crashed => "crashed",
@@ -245,6 +254,7 @@ impl From<NotReadyReason> for FailureCode {
             NotReadyReason::ProbeFailed => Self::ProbeFailed,
             NotReadyReason::UnsupportedVersion => Self::UnsupportedVersion,
             NotReadyReason::BareDefault => Self::BareDefault,
+            NotReadyReason::PlanLimit => Self::PlanLimit,
         }
     }
 }
@@ -252,6 +262,49 @@ impl From<NotReadyReason> for FailureCode {
 impl fmt::Display for FailureCode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+/// What a lane turn may do, from its job's `metadata.execution_mode` (11.12): `apply`, which an
+/// absent mode is too, changes the space's files and saves them; `plan_only`, an automation's
+/// read-only mode, runs Claude Code in its plan mode and saves nothing. No other mode runs on the
+/// lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExecutionMode {
+    Apply,
+    PlanOnly,
+}
+
+impl ExecutionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::PlanOnly => "plan_only",
+        }
+    }
+
+    /// The mode `text` names, read as the job loop reads it: without the white space around it
+    /// and in any ASCII letter case.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        [Self::Apply, Self::PlanOnly]
+            .into_iter()
+            .find(|mode| text.eq_ignore_ascii_case(mode.as_str()))
+    }
+
+    /// The `--permission-mode` a turn passes, which every `init` it prints must report (3.3,
+    /// 3.6): `acceptEdits` to apply, Claude Code's own `plan` mode to plan only.
+    pub const fn permission_mode(self) -> &'static str {
+        match self {
+            Self::Apply => "acceptEdits",
+            Self::PlanOnly => "plan",
+        }
+    }
+
+    /// Whether the turn saves what it changed in the folder (3.8): a `plan_only` turn saves
+    /// nothing, and its reply is delivered all the same.
+    pub const fn saves(self) -> bool {
+        matches!(self, Self::Apply)
     }
 }
 
@@ -1120,6 +1173,8 @@ impl CheckedLaunch {
 pub enum Readiness {
     Ready(ReadyLane),
     NotReady(NotReadyReason),
+    /// A plan limit holds the lane (11.11): nothing was probed.
+    Held(PlanLimitHold),
 }
 
 impl Readiness {
@@ -1131,22 +1186,90 @@ impl Readiness {
         match self {
             Self::Ready(_) => None,
             Self::NotReady(reason) => Some(*reason),
+            Self::Held(_) => Some(NotReadyReason::PlanLimit),
         }
     }
 
     pub fn ready(&self) -> Option<&ReadyLane> {
         match self {
             Self::Ready(ready) => Some(ready),
-            Self::NotReady(_) => None,
+            Self::NotReady(_) | Self::Held(_) => None,
         }
     }
 
-    /// The `claudeCode` registration capability (2.10, 3.2).
+    /// The `claudeCode` registration capability (2.10, 3.2, 11.11).
     pub fn capability(&self) -> Value {
         match self {
             Self::Ready(ready) => ready.capability(),
             Self::NotReady(reason) => not_ready_capability(*reason),
+            Self::Held(hold) => hold.capability(),
         }
+    }
+}
+
+/// The person's Claude plan reached its usage limit, and the lane holds until the limit resets
+/// (11.11, D37): after a turn failed as `plan_limit`, the capability says not ready, with the
+/// reason `plan_limit` and the reset time, so the controller leases no lane job to this runtime
+/// and the person's other waiting turns wait for the reset instead of each starting and failing
+/// in turn. A turn leased all the same fails as `plan_limit` at its probe. The hold lives only in
+/// memory: a restart forgets it, and the next turn that reaches the limit sets it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanLimitHold {
+    resets_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl PlanLimitHold {
+    /// The hold of a turn that failed at the limit at `now`: until `resets_at`, in seconds since
+    /// the epoch as Claude Code's `rate_limit_event` gives it, at most [`PLAN_LIMIT_HOLD_AT_MOST`]
+    /// ahead, or [`PLAN_LIMIT_HOLD_WITHOUT_A_RESET_TIME`] ahead when it gave none. None when that
+    /// time has passed already: the limit reset, and nothing waits for it.
+    pub fn after(resets_at: Option<i64>, now: chrono::DateTime<chrono::Utc>) -> Option<Self> {
+        let seconds = |duration: Duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
+        let latest = now
+            .timestamp()
+            .saturating_add(seconds(PLAN_LIMIT_HOLD_AT_MOST));
+        let until = match resets_at {
+            Some(resets_at) => resets_at.min(latest),
+            None => now
+                .timestamp()
+                .saturating_add(seconds(PLAN_LIMIT_HOLD_WITHOUT_A_RESET_TIME)),
+        };
+        let resets_at = chrono::DateTime::from_timestamp(until, 0)?;
+        (resets_at > now).then_some(Self { resets_at })
+    }
+
+    /// When the limit resets, in whole seconds.
+    pub fn resets_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.resets_at
+    }
+
+    /// `resets_at` as the capability carries it: RFC 3339, in UTC, to the second.
+    pub fn resets_at_rfc3339(&self) -> String {
+        self.resets_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// Whether it still holds at `now`.
+    pub fn holds_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        now < self.resets_at
+    }
+
+    /// How long it holds from now on.
+    pub fn remaining(&self) -> Duration {
+        (self.resets_at - chrono::Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+    }
+
+    /// `{"version": 1, "ready": false, "reason": "plan_limit", "resetsAt": "<RFC 3339, UTC>"}`
+    /// (11.11).
+    pub fn capability(&self) -> Value {
+        json!({
+            "version": 1,
+            "ready": false,
+            "reason": NotReadyReason::PlanLimit.as_str(),
+            "resetsAt": self.resets_at_rfc3339(),
+        })
     }
 }
 
@@ -1214,17 +1337,22 @@ struct CachedHelp {
     facts: HelpFacts,
 }
 
-/// The lane of a captured grant: its probe, the `--help` reading it keeps, and the published
-/// `claudeCode` capability.
+/// The lane of a captured grant: its probe, the `--help` reading it keeps, the published
+/// `claudeCode` capability, and the plan limit that holds it, while one does.
 ///
 /// The capability is fixed for each registration. Registration reads [`Lane::capability`];
-/// a per-turn probe that changes it, and [`Lane::reprobe_while_not_ready`], publish the new
-/// value to [`Lane::subscribe`] for the registration loop to register again.
+/// a per-turn probe that changes it, a plan limit's hold and its end
+/// ([`Lane::hold_for_plan_limit`]), and [`Lane::reprobe_while_not_ready`] publish the new value
+/// to [`Lane::subscribe`] for the registration loop to register again.
 pub struct Lane {
     grant: LaunchGrant,
     probe_timeout: Duration,
     help: tokio::sync::Mutex<Option<CachedHelp>>,
     capability: watch::Sender<Option<Value>>,
+    /// The plan limit that holds the lane (11.11), until its reset time.
+    hold: parking_lot::Mutex<Option<PlanLimitHold>>,
+    /// Wakes the timed re-probe when a hold starts, so it probes again at the reset time.
+    hold_started: tokio::sync::Notify,
 }
 
 impl Lane {
@@ -1234,6 +1362,8 @@ impl Lane {
             probe_timeout: PROBE_TIMEOUT,
             help: tokio::sync::Mutex::new(None),
             capability: watch::channel(None).0,
+            hold: parking_lot::Mutex::new(None),
+            hold_started: tokio::sync::Notify::new(),
         }
     }
 
@@ -1251,7 +1381,8 @@ impl Lane {
     /// `--help` only when the version or the binary changed since it last ran, and
     /// `auth status`, each with the lane environment, stdin from null, a fresh empty runtime
     /// folder as working directory, [`PROBE_TIMEOUT`] and [`PROBE_OUTPUT_CAP`]. It never sends a
-    /// prompt. Probes run one at a time.
+    /// prompt. Probes run one at a time. While a plan limit holds the lane, it runs nothing and
+    /// says so ([`Readiness::Held`], 11.11): the limit, not `claude`, keeps turns from running.
     pub async fn probe(&self) -> Readiness {
         self.probe_by(None).await
     }
@@ -1259,6 +1390,9 @@ impl Lane {
     /// [`Self::probe`], with every command ending by `deadline` when there is one. A command the
     /// deadline cuts short fails the probe as `probe_failed`, `auth status` too.
     async fn probe_by(&self, deadline: Option<Instant>) -> Readiness {
+        if let Some(hold) = self.plan_limit_hold() {
+            return Readiness::Held(hold);
+        }
         let mut cached_help = self.help.lock().await;
         match self.probe_with(&mut cached_help, deadline).await {
             Ok(ready) => Readiness::Ready(ready),
@@ -1378,7 +1512,11 @@ impl Lane {
     }
 
     async fn probe_and_publish_by(&self, deadline: Option<Instant>) -> LaneProbe {
-        let readiness = self.probe_by(deadline).await;
+        let mut readiness = self.probe_by(deadline).await;
+        // A plan limit's hold that started while the probe ran says what the lane is (11.11).
+        if let Some(hold) = self.plan_limit_hold() {
+            readiness = Readiness::Held(hold);
+        }
         let capability_changed = self.publish(readiness.capability());
         if capability_changed {
             match &readiness {
@@ -1391,12 +1529,44 @@ impl Lane {
                 Readiness::NotReady(reason) => {
                     info!(reason = reason.as_str(), "Claude Code lane is not ready")
                 }
+                Readiness::Held(hold) => info!(
+                    resets_at = %hold.resets_at_rfc3339(),
+                    "Claude Code lane waits for the Claude plan's limit to reset"
+                ),
             }
         }
         LaneProbe {
             readiness,
             capability_changed,
         }
+    }
+
+    /// Holds the lane after a turn failed at the person's Claude plan's usage limit (11.11):
+    /// until `resets_at` (seconds since the epoch), or as [`PlanLimitHold::after`] says without
+    /// it. It publishes the hold's capability, so this runtime registers again saying it is not
+    /// ready, and wakes the timed re-probe, which probes again at the reset time. Returns the
+    /// hold, or None when the reset time has passed already.
+    pub fn hold_for_plan_limit(&self, resets_at: Option<i64>) -> Option<PlanLimitHold> {
+        let hold = PlanLimitHold::after(resets_at, chrono::Utc::now())?;
+        *self.hold.lock() = Some(hold);
+        if self.publish(hold.capability()) {
+            info!(
+                resets_at = %hold.resets_at_rfc3339(),
+                "Claude Code reached the person's Claude plan limit; this runtime takes no Claude Code turn until it resets"
+            );
+        }
+        self.hold_started.notify_one();
+        Some(hold)
+    }
+
+    /// The plan limit that holds the lane now, if one does. A hold whose reset time has passed
+    /// holds nothing: the next probe runs, and publishes what it finds.
+    pub fn plan_limit_hold(&self) -> Option<PlanLimitHold> {
+        let mut hold = self.hold.lock();
+        if hold.is_some_and(|held| !held.holds_at(chrono::Utc::now())) {
+            *hold = None;
+        }
+        *hold
     }
 
     fn publish(&self, capability: Value) -> bool {
@@ -1430,10 +1600,19 @@ impl Lane {
 
     /// While the published capability says not ready, probes again every `interval` and
     /// publishes a changed result: no lane turn, and so no per-turn probe, runs to notice that
-    /// the person fixed Claude Code (3.2). Runs until dropped.
+    /// the person fixed Claude Code (3.2). While a plan limit holds the lane, it probes nothing
+    /// until the reset time, and probes then, however soon that comes, so the lane reports ready
+    /// again, or what the probe finds, and registers again (11.11). A hold that starts while it
+    /// waits wakes it to wait for the reset instead. Runs until dropped.
     pub async fn reprobe_while_not_ready(&self, interval: Duration) {
         loop {
-            tokio::time::sleep(interval).await;
+            let wait = self
+                .plan_limit_hold()
+                .map_or(interval, |hold| hold.remaining().min(interval));
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = self.hold_started.notified() => continue,
+            }
             if !self.capability_says_ready() {
                 self.probe_and_publish().await;
             }
@@ -2212,6 +2391,63 @@ mod tests {
             })
         );
         assert!(!capability.to_string().contains('/'));
+    }
+
+    /// A plan limit holds the lane until the reset time Claude Code gave, at most a week ahead,
+    /// or an hour without one; a reset time that has passed holds nothing (11.11). Its capability
+    /// says not ready, as `plan_limit`, with the reset time in RFC 3339, UTC.
+    #[test]
+    fn a_plan_limit_holds_until_its_reset_time_and_at_most_a_week() {
+        let now = chrono::DateTime::from_timestamp(1_900_000_000, 0).unwrap();
+        let hold = PlanLimitHold::after(Some(1_900_000_600), now).expect("a hold");
+        assert_eq!(hold.resets_at().timestamp(), 1_900_000_600);
+        assert!(hold.holds_at(now));
+        assert!(!hold.holds_at(hold.resets_at()));
+        let at = |resets_at: Option<i64>| {
+            PlanLimitHold::after(resets_at, now).map(|hold| hold.resets_at().timestamp())
+        };
+        let week = 1_900_000_000 + 7 * 24 * 3_600;
+        assert_eq!(at(None), Some(1_900_003_600));
+        assert_eq!(at(Some(1_900_000_000 + 30 * 24 * 3_600)), Some(week));
+        assert_eq!(at(Some(i64::MAX)), Some(week));
+        assert_eq!(at(Some(week)), Some(week));
+        for passed in [1_900_000_000, 1_899_999_999, 0, -1, i64::MIN] {
+            assert_eq!(at(Some(passed)), None, "{passed}");
+        }
+        assert_eq!(
+            hold.capability(),
+            json!({
+                "version": 1,
+                "ready": false,
+                "reason": "plan_limit",
+                "resetsAt": "2030-03-17T17:56:40Z",
+            })
+        );
+        let held = Readiness::Held(hold);
+        assert_eq!(held.capability(), hold.capability());
+        assert_eq!(held.reason(), Some(NotReadyReason::PlanLimit));
+        assert!(!held.is_ready() && held.ready().is_none());
+        assert!(!hold.capability().to_string().contains('/'));
+    }
+
+    #[test]
+    fn a_turn_applies_or_only_plans_and_passes_the_permission_mode_of_its_mode() {
+        for (text, mode) in [
+            ("apply", ExecutionMode::Apply),
+            (" Apply ", ExecutionMode::Apply),
+            ("plan_only", ExecutionMode::PlanOnly),
+            ("PLAN_ONLY\n", ExecutionMode::PlanOnly),
+        ] {
+            assert_eq!(ExecutionMode::parse(text), Some(mode), "{text:?}");
+        }
+        for other in ["approval_required", "plan", "plan-only", "", "acceptEdits"] {
+            assert_eq!(ExecutionMode::parse(other), None, "{other:?}");
+        }
+        assert_eq!(ExecutionMode::Apply.permission_mode(), "acceptEdits");
+        assert_eq!(ExecutionMode::PlanOnly.permission_mode(), "plan");
+        assert!(ExecutionMode::Apply.saves());
+        assert!(!ExecutionMode::PlanOnly.saves());
+        assert_eq!(ExecutionMode::PlanOnly.as_str(), "plan_only");
     }
 
     #[test]

@@ -1850,6 +1850,64 @@ async fn a_desktop_is_the_live_runner_of_a_lane_turn_pinned_to_it() -> anyhow::R
     Ok(())
 }
 
+/// A local-engine turn that waits, unpinned, for its person's own computer
+/// (crate::claude_code_lane, docs/Local-Engine-Turns.md 11.7) is no work a
+/// hosted machine would pick up: no limit wait counts it, claims its space for
+/// it or fails it, however long it waits. An unpinned platform job beside it
+/// still is such work.
+#[tokio::test]
+async fn a_waiting_lane_turn_is_no_work_a_limit_wait_covers() -> anyhow::Result<()> {
+    if std::env::var("TEST_DATABASE_URL").is_err() {
+        eprintln!("skipping waiting lane turn limit wait test: TEST_DATABASE_URL not set");
+        return Ok(());
+    }
+    let (mut client, driver) = raw_client().await?;
+    let transaction = client.transaction().await?;
+    let project_id = Uuid::new_v4();
+    transaction
+        .execute(
+            "insert into projects (id, project_type, status) values ($1, 'customer', 'active')",
+            &[&project_id],
+        )
+        .await?;
+    let lane_turn = Uuid::new_v4();
+    let platform_job = Uuid::new_v4();
+    transaction
+        .execute(
+            "insert into agent_jobs (id, project_id, status, intent, payload, engine,
+                                     trigger_received_at, created_at)
+             values ($1, $2, 'queued', 'feature', jsonb_build_object('user_id', $3::text),
+                     'claude-code', now() - interval '3 days', now() - interval '3 days'),
+                    ($4, $2, 'queued', 'feature', jsonb_build_object('user_id', $3::text),
+                     null, now(), now())",
+            &[
+                &lane_turn,
+                &project_id,
+                &Uuid::new_v4().to_string(),
+                &platform_job,
+            ],
+        )
+        .await?;
+    let waiting_query = format!(
+        "select {} as waiting from agent_jobs j where j.id = $1",
+        waiting_job_predicate("j", "j.project_id")
+    );
+    let lane_waiting: bool = transaction
+        .query_one(&waiting_query, &[&lane_turn])
+        .await?
+        .get("waiting");
+    let platform_waiting: bool = transaction
+        .query_one(&waiting_query, &[&platform_job])
+        .await?
+        .get("waiting");
+    transaction.rollback().await?;
+    drop(client);
+    let _ = driver.await;
+    assert!(!lane_waiting, "a waiting lane turn is no hosted work");
+    assert!(platform_waiting, "an unpinned platform job still is");
+    Ok(())
+}
+
 /// A desktop (or any machine) that is up does not end a wait for work it
 /// would never run: a job pinned to the space's hosted runtime, unpinned work
 /// of another user, or its owner's platform AI job (no credential), which

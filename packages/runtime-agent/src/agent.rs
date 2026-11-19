@@ -1712,7 +1712,14 @@ impl RuntimeAgent {
             ));
         }
 
-        let mode = execution_mode(&job);
+        // A local-engine turn runs in either of its lane's modes, `apply` or `plan_only`, which
+        // `refuse_unless_runnable` checked above: the turn reads its mode itself and runs Claude
+        // Code in it (docs/Local-Engine-Turns.md 11.12). Every other job runs only to apply.
+        let mode = if local_engine {
+            ExecutionMode::Apply
+        } else {
+            execution_mode(&job)
+        };
         let (mut job_input_task, mut active_turn_input): (
             Option<JobInputTask>,
             Option<ActiveTurnInputReceiver>,

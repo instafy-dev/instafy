@@ -374,10 +374,6 @@ async fn prepare_queue_message(
     // queued, and only the checked copy is stored: the drain re-checks it
     // without counting it again.
     let mut message_value = message_value;
-    // A turn on its person's own Claude Code runs only from a message they
-    // send now, never from the queue (crate::claude_code_lane): a busy chat
-    // refuses it rather than queue it.
-    crate::claude_code_lane::refuse_claim_outside_a_send(message_value.get("metadata"), "queued")?;
     // A hand-back from a browser turn resumes an idle lane or is refused; it
     // never waits in the queue (crate::browser_hand_back).
     if let Some(metadata) = message_value.get_mut("metadata") {
@@ -1773,8 +1769,11 @@ async fn claim_next_send_queue_entry_with_reclaim_after(
             internal_error(format!("failed to reclaim stranded dispatches: {error}"))
         })?;
 
-    let (mut lane_blocked, mut has_untargeted_active) =
-        load_active_agent_handles(&transaction, conversation_id).await?;
+    let ActiveAgentHandles {
+        handles: mut lane_blocked,
+        has_untargeted: mut has_untargeted_active,
+        waiting_for_a_computer,
+    } = load_active_agent_handles(&transaction, conversation_id).await?;
     let reservations = transaction
         .query(
             "select request, dispatched_at
@@ -1820,6 +1819,22 @@ async fn claim_next_send_queue_entry_with_reclaim_after(
         for row in &entries {
             let request = row.get::<_, PgJson<JsonValue>>("request").0;
             let targets = canonical_target_handles_from_value(&request).unwrap_or_default();
+            // An entry behind its own person's local-engine turn that still
+            // waits for their computer waits with it, and holds up nobody
+            // else's entries (crate::claude_code_lane). One with no target
+            // goes to @octo.
+            if let Some(person) = row.get::<_, Option<Uuid>>("user_id") {
+                let parked = if targets.is_empty() {
+                    waiting_for_a_computer.contains(&(person, "octo".to_string()))
+                } else {
+                    targets
+                        .iter()
+                        .any(|handle| waiting_for_a_computer.contains(&(person, handle.clone())))
+                };
+                if parked {
+                    continue;
+                }
+            }
             let eligible = if targets.is_empty() {
                 lane_blocked.is_empty()
             } else {
@@ -1943,19 +1958,34 @@ fn active_agent_handle_from_job_payload(payload: &JsonValue) -> Option<String> {
         .and_then(normalize_agent_handle)
 }
 
-/// Active per-job agent handles for a conversation, plus whether any active
-/// job lacks its authoritative `metadata.agent.handle` (which conservatively
-/// blocks the whole queue).
+/// What keeps a conversation's agents busy for its queue's drain.
+struct ActiveAgentHandles {
+    /// The handles of the conversation's active jobs.
+    handles: HashSet<String>,
+    /// Whether an active job lacks its authoritative `metadata.agent.handle`,
+    /// which conservatively blocks the whole queue.
+    has_untargeted: bool,
+    /// The person and handle of each local-engine turn that still waits for
+    /// its person's own computer (crate::claude_code_lane), possibly for
+    /// days. Such a turn keeps only its own person's agent busy: it is not in
+    /// `handles`, and only that person's entries wait behind it.
+    waiting_for_a_computer: HashSet<(Uuid, String)>,
+}
+
+/// The conversation's active jobs, as its queue's drain reads them.
 async fn load_active_agent_handles<C>(
     connection: &C,
     conversation_id: Uuid,
-) -> Result<(HashSet<String>, bool), (StatusCode, Json<ApiError>)>
+) -> Result<ActiveAgentHandles, (StatusCode, Json<ApiError>)>
 where
     C: tokio_postgres::GenericClient + Send,
 {
     let rows = connection
         .query(
-            "select payload from agent_jobs
+            "select payload,
+                    engine is not null and status = 'queued' and lease_attempts = 0
+                      as waits_for_a_computer
+             from agent_jobs
              where conversation_id = $1
                and status in ('queued','leased')",
             &[&conversation_id],
@@ -1963,17 +1993,31 @@ where
         .await
         .map_err(|error| internal_error(format!("failed to load active jobs: {error}")))?;
 
-    let mut handles = HashSet::new();
-    let mut has_untargeted = false;
+    let mut active = ActiveAgentHandles {
+        handles: HashSet::new(),
+        has_untargeted: false,
+        waiting_for_a_computer: HashSet::new(),
+    };
     for row in rows {
         let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
-        if let Some(handle) = active_agent_handle_from_job_payload(&payload) {
-            handles.insert(handle);
+        let handle = active_agent_handle_from_job_payload(&payload);
+        let person = payload
+            .get("user_id")
+            .and_then(JsonValue::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        if row.get::<_, bool>("waits_for_a_computer") {
+            if let (Some(person), Some(handle)) = (person, handle.clone()) {
+                active.waiting_for_a_computer.insert((person, handle));
+                continue;
+            }
+        }
+        if let Some(handle) = handle {
+            active.handles.insert(handle);
         } else {
-            has_untargeted = true;
+            active.has_untargeted = true;
         }
     }
-    Ok((handles, has_untargeted))
+    Ok(active)
 }
 
 #[cfg(test)]

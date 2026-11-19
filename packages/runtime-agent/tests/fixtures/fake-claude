@@ -14,15 +14,23 @@
 #   FAKE_CLAUDE_PROBE_DELAY seconds each of those three answers waits first (default: none)
 #   FAKE_CLAUDE_SCENARIO    the `--print` run: scenarios/<name>.jsonl (default: record-only,
 #                           which only records the call)
-#   FAKE_CLAUDE_SESSION     the session id a scenario prints for @SESSION@ (default: a fixed UUID)
+#   FAKE_CLAUDE_RESUME_SCENARIO
+#                           the `--print` run of a call with `--resume` (default: the one above),
+#                           such as a resume miss, where the turn's second start, without
+#                           `--resume`, runs FAKE_CLAUDE_SCENARIO
+#   FAKE_CLAUDE_SESSION     the session id a scenario prints for @SESSION@ (default: a fixed UUID);
+#                           a call with `--resume <id>` prints that id instead, as Claude Code
+#                           keeps a resumed session's id
+#   FAKE_CLAUDE_RESETS_AT   the seconds since the epoch a scenario prints for @RESETS_AT@
+#                           (default: an hour from now)
 #
 # A fixture <name>.<ext> may have a <name>.exit beside it, holding the exit status (default 0).
 # Two names are behaviours instead of files, for any of the three answers: `hang` sleeps past
 # every probe limit, and `flood` prints more than the probe's output cap.
 #
 # A `--print` scenario prints its lines as they are, once @CWD@ (the working folder, as
-# `pwd -P` prints it), @HOME@ and @SESSION@ are filled in. A line that starts with `#!` is a
-# step instead:
+# `pwd -P` prints it), @HOME@, @SESSION@ and @RESETS_AT@ are filled in. A line that starts with
+# `#!` is a step instead:
 #   #!sleep S                 pause for S seconds
 #   #!stderr TEXT             print TEXT on stderr
 #   #!write PATH TEXT         write TEXT and a newline to PATH, below the working folder
@@ -135,7 +143,8 @@ expand() {
   case "$1" in
     *@*)
       printf '%s\n' "$1" | /usr/bin/sed \
-        -e "s|@CWD@|$cwd_sed|g" -e "s|@HOME@|$home_sed|g" -e "s|@SESSION@|$session_sed|g"
+        -e "s|@CWD@|$cwd_sed|g" -e "s|@HOME@|$home_sed|g" -e "s|@SESSION@|$session_sed|g" \
+        -e "s|@RESETS_AT@|$resets_at_sed|g"
       ;;
     *) printf '%s\n' "$1" ;;
   esac
@@ -212,7 +221,8 @@ run_print_scenario() {
   [ -f "$file" ] || fail "no --print scenario named $1"
   cwd_sed=$(sed_escape "$(pwd -P)")
   home_sed=$(sed_escape "${HOME:-}")
-  session_sed=$(sed_escape "${FAKE_CLAUDE_SESSION:-5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50}")
+  session_sed=$(sed_escape "${resumed_session:-${FAKE_CLAUDE_SESSION:-5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50}}")
+  resets_at_sed=$(sed_escape "${FAKE_CLAUDE_RESETS_AT:-$(($(/bin/date +%s) + 3600))}")
   trap on_term TERM
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -242,7 +252,17 @@ case "${1:-}" in
   --print)
     # Like `claude -p`, read the prompt to its end first (recording read it already).
     [ -n "${FAKE_CLAUDE_RECORD_DIR:-}" ] || /bin/cat >/dev/null
-    run_print_scenario "${FAKE_CLAUDE_SCENARIO:-record-only}"
+    resumed_session=''
+    previous=''
+    for arg in "$@"; do
+      [ "$previous" = --resume ] && resumed_session=$arg
+      previous=$arg
+    done
+    scenario="${FAKE_CLAUDE_SCENARIO:-record-only}"
+    if [ -n "$resumed_session" ] && [ -n "${FAKE_CLAUDE_RESUME_SCENARIO:-}" ]; then
+      scenario=$FAKE_CLAUDE_RESUME_SCENARIO
+    fi
+    run_print_scenario "$scenario"
     ;;
   *)
     fail "unexpected arguments"

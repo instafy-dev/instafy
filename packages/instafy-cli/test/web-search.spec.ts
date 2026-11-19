@@ -583,7 +583,10 @@ describe("the person's own key (secret-request card)", () => {
     expect(report).toMatchObject({ status: "ok", provider: { id: "brave-own-key" } });
   });
 
-  it("without a key answers no_provider, with the card for BRAVE_SEARCH_API_KEY once per space", async () => {
+  // A news question with no key got a card asking for a search key and no news (a local test, Nov 19). The card is
+  // only for a person who asks to set up search: the answer carries it each time and says so, and nothing records that
+  // it was offered, so a later turn where the person asks for it still has it.
+  it("without a key answers no_provider, with the card for BRAVE_SEARCH_API_KEY only for a person who asks to set up search", async () => {
     const out: string[] = [];
     const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
     const { requests, transport } = recorder(() => ({ status: 200, body: {} }));
@@ -591,30 +594,28 @@ describe("the person's own key (secret-request card)", () => {
     expect(code).toBe(WEB_SEARCH_EXIT_NONE);
     const first = JSON.parse(out.pop()!) as WebSearchReport;
     expect(first.status).toBe("no_provider");
-    expect(first.offer).toEqual({
+    const card = {
       type: "request_secret",
       name: "BRAVE_SEARCH_API_KEY",
       description:
         "Brave Search API key for Octo's web searches. Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner.",
       agentHandles: ["octo"],
-    });
-    // No key never ends the task: the open routes first, a page with what was read, the card at most once and optional.
-    expect(first.tell).toBe(
+    };
+    expect(first.offer).toEqual(card);
+    // No key never ends the task: the open routes first, a page with what was read, and the card only when asked for.
+    const tell =
       "This space has no search key. Go on without it: find official sites with `instafy web search \"<name>\" --chain reference-search` (no key) and read them, " +
-        "and for reviews a reviewer's home page and the pages it links, with `instafy web read`. Then answer or build the page with what you read, each missing fact " +
-        "marked unknown with why. The person may send more pages with Send page to Octo. The card in `offer` (a `request_secret` action) may go in " +
-        "your reply once, as a way to find more next time; never ask for the key in chat, and never wait for it.",
-    );
-    // A later turn in the same space: no card again, the person searches.
+      "and for reviews a reviewer's home page and the pages it links, with `instafy web read`. Then answer or build the page with what you read, each missing fact " +
+      "marked unknown with why. The person may send more pages with Send page to Octo. The card in `offer` (a `request_secret` action) is only for a person " +
+      "who asks to set up search; never ask for the key in chat, and never wait for it.";
+    expect(first.tell).toBe(tell);
+    // A later turn in the same space: the same card and words, for the turn where the person asks for it.
     await runWebSearchCli(["noodles"], { json: true }, io, transportDeps(turnEnv(caseNo + 1), transport));
     const later = JSON.parse(out.pop()!) as WebSearchReport;
     expect(later.status).toBe("no_provider");
-    expect(later.offer).toBeUndefined();
-    expect(later.tell).toMatch(/^This space has no search key, and the key card was already offered: never ask for it again\. Go on without it: find official sites with `instafy web search "<name>" --chain reference-search` \(no key\)/);
-    expect(later.tell).not.toMatch(/Ask the person to search/);
-    // Another space gets its own offer.
-    await runWebSearchCli(["noodles"], { json: true }, io, transportDeps(turnEnv(caseNo + 2, { INSTAFY_PROJECT_ID: "project-2" }), transport));
-    expect((JSON.parse(out.pop()!) as WebSearchReport).offer?.name).toBe("BRAVE_SEARCH_API_KEY");
+    expect(later.offer).toEqual(card);
+    expect(later.tell).toBe(tell);
+    expect(later.tell).not.toMatch(/already offered|Ask the person to search/);
     expect(requests).toHaveLength(0);
   });
 

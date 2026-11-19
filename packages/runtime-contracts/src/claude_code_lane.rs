@@ -12,20 +12,23 @@
 /// Why a runtime's Claude Code cannot take a turn: the `reason` of a not-ready `claudeCode`
 /// capability (3.2, 2.10). The controller keeps only these, and Studio has a sentence for each.
 /// A turn whose own probe finds one fails with it as its code, so each is also one of
-/// [`RUNTIME_FAILURE_CODES`].
-pub const NOT_READY_REASONS: [&str; 5] = [
+/// [`RUNTIME_FAILURE_CODES`]. `plan_limit` is no probe's: a turn failed at the Claude plan's
+/// usage limit, and the runtime holds its lane until the limit resets, its capability carrying
+/// the reset time as `resetsAt` (11.11).
+pub const NOT_READY_REASONS: [&str; 6] = [
     "binary_missing",
     "binary_unsafe",
     "probe_failed",
     "unsupported_version",
     "bare_default",
+    "plan_limit",
 ];
 
 /// The codes of a lane turn's `claude-code/failure` artifact that the controller copies onto
 /// its failure message as `claudeCodeFailure` (2.6): the rows of 5.5's table above
 /// `claude_code_turn_not_allowed`, in its order. The controller leaves any other code off, and
 /// Studio words such a failure as one with no code.
-pub const RUNTIME_FAILURE_CODES: [&str; 15] = [
+pub const RUNTIME_FAILURE_CODES: [&str; 14] = [
     "not_signed_in",
     "plan_limit",
     "binary_missing",
@@ -33,7 +36,6 @@ pub const RUNTIME_FAILURE_CODES: [&str; 15] = [
     "unsupported_version",
     "probe_failed",
     "bare_default",
-    "session_unavailable",
     "turn_timeout",
     "stalled",
     "crashed",
@@ -120,7 +122,6 @@ mod tests {
             ("/prompt_id", "<prompt_id>"),
             ("/run_id", "<run_id>"),
             ("/metadata/agent/id", "<agent_id>"),
-            ("/metadata/runtimePreference/runtimeId", "<runtime_id>"),
         ] {
             assert_eq!(
                 payload.pointer(pointer).and_then(Value::as_str),
@@ -128,5 +129,9 @@ mod tests {
                 "{pointer}"
             );
         }
+        // A send whose every target is a Claude Code agent names no runtime:
+        // its job waits for its person's own computer
+        // (docs/Local-Engine-Turns.md 11.7).
+        assert_eq!(payload.pointer("/metadata/runtimePreference"), None);
     }
 }

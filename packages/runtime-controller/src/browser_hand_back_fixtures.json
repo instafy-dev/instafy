@@ -8,6 +8,8 @@
   "buildRequestRecordKey": "buildRequest",
   "continueBuildingRecordKey": "continueBuilding",
   "readsNoteKey": "browser_hand_back_reads_note",
+  "afterAPromptKey": "browser_hand_back_after_a_prompt",
+  "answerCodes": ["approval_denied", "approval_timeout", "approval_stale"],
   "letOctoContinuePrompt": "Continue the previous browser task on this same page. I may have used the browser while I had control. Take a fresh snapshot before acting; do not reuse old target indices or request, reveal, or repeat any values I may have entered.",
   "browserRequest": "Read the coastal line timetable, the harbour ferry's Monday sailings and the ticket page.",
   "stopReasons": [
@@ -20,6 +22,7 @@
     "secret",
     "link-only",
     "no-page",
+    "unreachable",
     "timed-out",
     "covered"
   ],

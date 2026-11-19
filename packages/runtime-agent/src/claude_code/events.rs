@@ -7,7 +7,8 @@
 //! the top-level `init`s and `result`s and the background tasks the end-of-turn rule reads
 //! (3.6), the latest top-level `result` that can be the reply (the reply and success), the usage
 //! and the permission denials of all the turn's top-level `result`s, what classifies a failure
-//! (2.6), and a bounded run log.
+//! (2.6) or says that `--resume` named a session Claude Code does not have (11.9), and a bounded
+//! run log.
 //!
 //! | Claude Code stream-json | Synthesized event |
 //! |---|---|
@@ -45,7 +46,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::job::ENGINE;
-use super::{FailureCode, LaunchGrant};
+use super::{ExecutionMode, FailureCode, LaunchGrant};
 use crate::jobs::JobMessage;
 
 /// The tool server a lane turn's tool steps name (`mcp_tool_call`, 3.7). Those steps also carry
@@ -125,7 +126,7 @@ const PLAN_LIMIT_PHRASES: [&str; 4] = [
     "-hour limit reached",
     "weekly limit reached",
 ];
-/// The missing-session error of `--resume`, which Phase 0 item 7 records (2.7).
+/// The missing-session error of `--resume`, which Phase 0 item 7 records (2.7, 11.9).
 const RESUME_MISS_PHRASES: [&str; 1] = ["no conversation found with session id"];
 /// What a tool result says when Claude Code declined a step that needs the person's OK (3.7).
 const DENIAL_PHRASES: [&str; 3] = [
@@ -537,10 +538,11 @@ pub struct InitFacts {
 
 /// The launch checks of 3.6 on a `system/init` event. Claude Code documents `session_id`, `cwd`,
 /// `model`, `permissionMode` and `mcp_servers` as always present, so a missing one fails like a
-/// mismatch: the session id is a UUID, `cwd` is the folder, the mode is `acceptEdits` and no MCP
-/// server loaded. The error says which, in plain words.
-pub fn check_init(init: &Value, folder: &Path) -> Result<InitFacts, String> {
-    check_init_in(init, folder, InitTurn::First)
+/// mismatch: the session id is a UUID, `cwd` is the folder, the permission mode is the one the
+/// turn's `mode` passed (`acceptEdits` to apply, `plan` to plan only, 11.12) and no MCP server
+/// loaded. The error says which, in plain words.
+pub fn check_init(init: &Value, folder: &Path, mode: ExecutionMode) -> Result<InitFacts, String> {
+    check_init_in(init, folder, mode, InitTurn::First)
 }
 
 /// The launch checks of 3.6 on a later top-level `system/init` of the same `claude`: a follow-up
@@ -551,8 +553,12 @@ pub fn check_init(init: &Value, folder: &Path) -> Result<InitFacts, String> {
 /// and `original_cwd`, when present and not `null`, must also canonicalize to the folder itself.
 /// A `cwd` that no longer exists, such as a folder deleted after a `cd` into it, is read by its
 /// longest ancestor that does: that ancestor canonicalized, and the plain names after it joined.
-pub fn check_later_init(init: &Value, folder: &Path) -> Result<InitFacts, String> {
-    check_init_in(init, folder, InitTurn::Later)
+pub fn check_later_init(
+    init: &Value,
+    folder: &Path,
+    mode: ExecutionMode,
+) -> Result<InitFacts, String> {
+    check_init_in(init, folder, mode, InitTurn::Later)
 }
 
 /// Which of a `claude` process's top-level `init`s the launch checks read.
@@ -564,7 +570,12 @@ enum InitTurn {
     Later,
 }
 
-fn check_init_in(init: &Value, folder: &Path, turn: InitTurn) -> Result<InitFacts, String> {
+fn check_init_in(
+    init: &Value,
+    folder: &Path,
+    mode: ExecutionMode,
+    turn: InitTurn,
+) -> Result<InitFacts, String> {
     let field = |name: &str| {
         init.get(name)
             .filter(|value| !value.is_null())
@@ -606,13 +617,14 @@ fn check_init_in(init: &Value, folder: &Path, turn: InitTurn) -> Result<InitFact
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .ok_or_else(|| "Claude Code reported no model.".to_string())?;
-    let mode = field("permissionMode")?
+    let permission_mode = field("permissionMode")?
         .as_str()
         .ok_or_else(|| "Claude Code reported no permission mode.".to_string())?;
-    if mode != "acceptEdits" {
+    if permission_mode != mode.permission_mode() {
         return Err(format!(
-            "Claude Code started with permission mode {}, not acceptEdits.",
-            bounded(mode, 40)
+            "Claude Code started with permission mode {}, not {}.",
+            bounded(permission_mode, 40),
+            mode.permission_mode()
         ));
     }
     let servers = field("mcp_servers")?
@@ -1263,6 +1275,8 @@ pub struct ResultFacts {
     pub text: Option<String>,
     /// `errors`, redacted.
     pub errors: Vec<String>,
+    /// `num_turns` is absent, `null` or the integer 0: the `result` says no turn ran.
+    pub ran_no_turn: bool,
 }
 
 impl ResultFacts {
@@ -1284,11 +1298,16 @@ impl ResultFacts {
                     .collect()
             })
             .unwrap_or_default();
+        let ran_no_turn = match line.get("num_turns") {
+            None | Some(Value::Null) => true,
+            Some(turns) => turns.as_u64() == Some(0),
+        };
         Self {
             is_error,
             subtype,
             text: str_field(line, "result").map(|text| redactor.text(text)),
             errors,
+            ran_no_turn,
         }
     }
 }
@@ -1446,7 +1465,7 @@ impl LaneFailure {
 /// How `claude` ended, as the supervisor saw it, for [`EventAdapter::classify_failure`].
 #[derive(Clone, Copy, Debug)]
 pub struct ExitFacts<'a> {
-    /// `--resume` was passed.
+    /// `--resume` was passed: a missing-session error before `init` is a resume miss (11.9).
     pub resumed: bool,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
@@ -1537,6 +1556,8 @@ struct MessageBlocks {
 pub struct EventAdapter {
     redactor: Redactor,
     folder: PathBuf,
+    /// The turn's mode, whose permission mode every `init` must report (3.6, 11.12).
+    mode: ExecutionMode,
     status: AdapterStatus,
     init: Option<InitFacts>,
     tasks: BackgroundTasks,
@@ -1579,11 +1600,21 @@ pub struct EventAdapter {
 }
 
 impl EventAdapter {
-    /// The adapter of a turn in `folder`, whose steps show `home` as `~`.
+    /// The adapter of a turn in `folder` that applies its changes, whose steps show `home` as
+    /// `~`.
     pub fn new(folder: &Path, home: Option<&Path>) -> Self {
+        Self::with_redactor(
+            Redactor::new(folder, home),
+            folder.to_path_buf(),
+            ExecutionMode::Apply,
+        )
+    }
+
+    fn with_redactor(redactor: Redactor, folder: PathBuf, mode: ExecutionMode) -> Self {
         Self {
-            redactor: Redactor::new(folder, home),
-            folder: folder.to_path_buf(),
+            redactor,
+            folder,
+            mode,
             status: AdapterStatus::Running,
             init: None,
             tasks: BackgroundTasks::default(),
@@ -1611,9 +1642,29 @@ impl EventAdapter {
         }
     }
 
-    /// The adapter of a turn of `grant`'s person in `folder`: the launch `HOME` shows as `~`.
-    pub fn for_turn(grant: &LaunchGrant, folder: &Path) -> Self {
-        Self::new(folder, grant.snapshot().home())
+    /// The adapter of a turn of `grant`'s person in `folder`, in `mode`: the launch `HOME` shows
+    /// as `~`.
+    pub fn for_turn(grant: &LaunchGrant, folder: &Path, mode: ExecutionMode) -> Self {
+        Self::new(folder, grant.snapshot().home()).in_mode(mode)
+    }
+
+    /// This adapter, for a turn in `mode`: its `init`s must report that mode's permission mode.
+    pub fn in_mode(mut self, mode: ExecutionMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Starts over for a second `claude` of the same turn, which the runtime starts without
+    /// `--resume` after the first reported its session missing before any `init` (11.9): what
+    /// the first one printed counts for nothing, but its lines stay in the run log, followed by
+    /// a line that says the turn started again in a new session.
+    pub fn start_again(&mut self) {
+        let mut fresh = Self::with_redactor(self.redactor.clone(), self.folder.clone(), self.mode);
+        fresh.run_log = std::mem::take(&mut self.run_log);
+        fresh
+            .run_log
+            .push(json!({ "type": "instafy.started_without_the_missing_session" }));
+        *self = fresh;
     }
 
     pub fn redactor(&self) -> &Redactor {
@@ -1795,9 +1846,9 @@ impl EventAdapter {
                 // `cd` may have moved inside the folder, is checked by the folder it started in
                 // (3.6).
                 let checked = if self.inits == 0 {
-                    check_init(line, &self.folder)
+                    check_init(line, &self.folder, self.mode)
                 } else {
-                    check_later_init(line, &self.folder)
+                    check_later_init(line, &self.folder, self.mode)
                 };
                 match checked {
                     Ok(facts) => {
@@ -2494,12 +2545,6 @@ impl EventAdapter {
         }))
     }
 
-    /// The reset shape a `session_unavailable` failure saves (2.7): the person's next lane
-    /// message starts a new session.
-    pub fn reset_conversation_state() -> Value {
-        json!({ "provider": PROVIDER, "version": 1, "reset": true })
-    }
-
     /// Why the turn failed (2.6): from Claude Code's structured fields first, then from its text
     /// only as a fallback.
     pub fn classify_failure(&self, exit: &ExitFacts<'_>) -> LaneFailure {
@@ -2518,12 +2563,6 @@ impl EventAdapter {
             (Some(FailureCode::PlanLimit), rejection.resets_at)
         } else if self.auth_failed {
             (Some(FailureCode::NotSignedIn), None)
-        } else if exit.resumed
-            && self.init.is_none()
-            && (self.reported_a_resume_miss()
-                || (exit.exit_code.is_some_and(|code| code != 0) && mentions(&RESUME_MISS_PHRASES)))
-        {
-            (Some(FailureCode::SessionUnavailable), None)
         } else if mentions(&SIGN_IN_PHRASES) {
             (Some(FailureCode::NotSignedIn), None)
         } else if mentions(&PLAN_LIMIT_PHRASES) {
@@ -2571,12 +2610,41 @@ impl EventAdapter {
         }
     }
 
+    /// Whether `claude`, started with `--resume`, reported the session missing before its first
+    /// `init` (2.7, 11.9): it ran nothing, and the runtime starts it once more in the same turn,
+    /// without `--resume`, in a new session. That is an error `result` before any `init` whose
+    /// structured `errors` name the missing session, as Claude Code 2.1.325 prints it on stdout
+    /// before it exits 1 (Phase 0, item 7), whatever the exit: that `result` ends the turn, so
+    /// the runtime's own SIGTERM races the exit, which can then be 143, 0 or a kill after the
+    /// grace. Without such a `result`, as from a version that says it on stderr only, the miss is
+    /// read from the text, and only after an exit that is not 0.
+    ///
+    /// Only a `claude` that shows it ran nothing missed its session: at most one top-level
+    /// `result` was read, and it says no turn ran (`num_turns` absent or 0). The supervisor also
+    /// asks that `claude` printed nothing after it (`supervise`).
+    pub fn missed_the_session(&self, exit: &ExitFacts<'_>) -> bool {
+        if !exit.resumed || self.init.is_some() || self.results > 1 {
+            return false;
+        }
+        if self
+            .reply_result
+            .as_ref()
+            .is_some_and(|result| !result.ran_no_turn)
+        {
+            return false;
+        }
+        self.reported_a_resume_miss()
+            || (exit.exit_code.is_some_and(|code| code != 0)
+                && self.failure_texts(exit.stderr).iter().any(|text| {
+                    let text = text.to_lowercase();
+                    RESUME_MISS_PHRASES
+                        .iter()
+                        .any(|phrase| text.contains(phrase))
+                }))
+    }
+
     /// Whether an error `result` before any `init` said in its structured `errors` that the
-    /// session `--resume` named does not exist (2.7). Claude Code 2.1.325 prints it on stdout,
-    /// then exits 1 (Phase 0, item 7). That `result` ends the turn, so the runtime's own SIGTERM
-    /// races the exit, which can then be 143, 0 or a kill after the grace: the status does not
-    /// decide it. Without such a `result`, as from a version that says it on stderr only, the
-    /// miss is read from text, and only after an exit that is not 0.
+    /// session `--resume` named does not exist ([`Self::missed_the_session`]).
     fn reported_a_resume_miss(&self) -> bool {
         self.init.is_none()
             && self.reply_result.as_ref().is_some_and(|result| {
@@ -3213,19 +3281,19 @@ mod tests {
         kept_out["skills"] = json!(["deep-research"]);
         kept_out["agents"] = json!(["claude"]);
         kept_out["slash_commands"] = json!(["deep-research", "review"]);
-        assert!(check_init(&kept_out, &folder).is_ok());
+        assert!(check_init(&kept_out, &folder, ExecutionMode::Apply).is_ok());
         // The space's output style took effect.
         let mut styled = kept_out.clone();
         styled["output_style"] = json!("team-terse");
-        let error = check_init(&styled, &folder).unwrap_err();
+        let error = check_init(&styled, &folder, ExecutionMode::Apply).unwrap_err();
         assert!(error.contains("output style, team-terse"), "{error}");
-        assert!(check_later_init(&styled, &folder).is_err());
+        assert!(check_later_init(&styled, &folder, ExecutionMode::Apply).is_err());
         // Every skill, agent and command it defines loaded.
         let mut loaded = kept_out.clone();
         loaded["skills"] = json!(["deep-research", "team-review"]);
         loaded["agents"] = json!(["claude", "team-helper"]);
         loaded["slash_commands"] = json!(["deep-research", "team-review", "ship"]);
-        let error = check_init(&loaded, &folder).unwrap_err();
+        let error = check_init(&loaded, &folder, ExecutionMode::Apply).unwrap_err();
         assert!(
             error.contains("(ship, team-helper, team-review)"),
             "{error}"
@@ -3233,7 +3301,7 @@ mod tests {
         // One of them alone may be the person's own of the same name.
         let mut one = kept_out.clone();
         one["slash_commands"] = json!(["deep-research", "ship"]);
-        assert!(check_init(&one, &folder).is_ok());
+        assert!(check_init(&one, &folder, ExecutionMode::Apply).is_ok());
     }
 
     #[test]
@@ -3244,11 +3312,11 @@ mod tests {
         std::fs::write(folder.join(".claude/commands/ship.md"), "Ship it.\n").unwrap();
         let mut listed = init(&folder);
         listed["slash_commands"] = json!(["ship"]);
-        assert!(check_init(&listed, &folder).is_ok());
+        assert!(check_init(&listed, &folder, ExecutionMode::Apply).is_ok());
         // A space with no .claude folder names nothing.
         std::fs::remove_dir_all(folder.join(".claude")).unwrap();
         listed["output_style"] = json!("anything");
-        assert!(check_init(&listed, &folder).is_ok());
+        assert!(check_init(&listed, &folder, ExecutionMode::Apply).is_ok());
     }
 
     #[test]
@@ -3256,7 +3324,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let folder = std::fs::canonicalize(temp.path()).unwrap();
         let good = init(&folder);
-        let facts = check_init(&good, &folder).unwrap();
+        let facts = check_init(&good, &folder, ExecutionMode::Apply).unwrap();
         assert_eq!(
             facts.session_id.to_string(),
             "5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50"
@@ -3271,7 +3339,7 @@ mod tests {
             std::os::unix::fs::symlink(folder.join("real"), &link).unwrap();
             let mut through_link = good.clone();
             through_link["cwd"] = json!(link);
-            assert!(check_init(&through_link, &folder.join("real")).is_ok());
+            assert!(check_init(&through_link, &folder.join("real"), ExecutionMode::Apply).is_ok());
         }
 
         let mut cases: Vec<(&str, Value)> = Vec::new();
@@ -3308,8 +3376,60 @@ mod tests {
             cases.push((field, changed));
         }
         for (field, case) in cases {
-            assert!(check_init(&case, &folder).is_err(), "{field}: {case}");
+            assert!(
+                check_init(&case, &folder, ExecutionMode::Apply).is_err(),
+                "{field}: {case}"
+            );
         }
+    }
+
+    /// The permission mode every `init` must report is the turn's own (3.6, 11.12): `acceptEdits`
+    /// for a turn that applies its changes, Claude Code's `plan` for a `plan_only` turn. Either
+    /// one fails the other's turn, a later turn's `init` too.
+    #[test]
+    fn the_launch_checks_expect_the_permission_mode_of_the_turns_own_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = std::fs::canonicalize(temp.path()).unwrap();
+        let applies = init(&folder);
+        let mut plans = init(&folder);
+        plans["permissionMode"] = json!("plan");
+        assert!(check_init(&applies, &folder, ExecutionMode::Apply).is_ok());
+        assert!(check_init(&plans, &folder, ExecutionMode::PlanOnly).is_ok());
+        assert!(check_later_init(&plans, &folder, ExecutionMode::PlanOnly).is_ok());
+        assert_eq!(
+            check_init(&applies, &folder, ExecutionMode::PlanOnly).unwrap_err(),
+            "Claude Code started with permission mode acceptEdits, not plan."
+        );
+        assert_eq!(
+            check_init(&plans, &folder, ExecutionMode::Apply).unwrap_err(),
+            "Claude Code started with permission mode plan, not acceptEdits."
+        );
+        assert!(check_later_init(&applies, &folder, ExecutionMode::PlanOnly).is_err());
+        for other in ["bypassPermissions", "dontAsk", "auto", "default", "Plan"] {
+            let mut case = init(&folder);
+            case["permissionMode"] = json!(other);
+            for mode in [ExecutionMode::Apply, ExecutionMode::PlanOnly] {
+                assert!(
+                    check_init(&case, &folder, mode).is_err(),
+                    "{other} {mode:?}"
+                );
+            }
+        }
+
+        // The adapter of a turn checks every `init` it reads by the turn's mode.
+        let mut planning = EventAdapter::new(&folder, None).in_mode(ExecutionMode::PlanOnly);
+        planning.feed(&plans);
+        assert!(planning.init().is_some());
+        planning.feed(&result("Here is the plan.", false));
+        assert!(planning.succeeded());
+        let mut mismatched = EventAdapter::new(&folder, None).in_mode(ExecutionMode::PlanOnly);
+        mismatched.feed(&applies);
+        assert!(
+            matches!(mismatched.status(), AdapterStatus::Unexpected(why) if why.ends_with("not plan."))
+        );
+        let mut applying = EventAdapter::new(&folder, None);
+        applying.feed(&plans);
+        assert!(matches!(applying.status(), AdapterStatus::Unexpected(_)));
     }
 
     /// A later turn's `init` (a follow-up's or a peer message's) reports the shell's folder as
@@ -3336,16 +3456,21 @@ mod tests {
             line
         };
         let moved = later(json!(inside), Some(json!(folder)));
-        assert!(check_later_init(&moved, &folder).is_ok());
+        assert!(check_later_init(&moved, &folder, ExecutionMode::Apply).is_ok());
         assert!(
-            check_init(&moved, &folder).is_err(),
+            check_init(&moved, &folder, ExecutionMode::Apply).is_err(),
             "the launch's own init reports the folder itself"
         );
         // With `original_cwd` the folder, the shell's folder must still be in the folder or
         // inside it: `original_cwd` alone never decides.
         for cwd in [json!(folder), json!(inside)] {
             assert!(
-                check_later_init(&later(cwd.clone(), Some(json!(folder))), &folder).is_ok(),
+                check_later_init(
+                    &later(cwd.clone(), Some(json!(folder))),
+                    &folder,
+                    ExecutionMode::Apply
+                )
+                .is_ok(),
                 "{cwd}"
             );
         }
@@ -3357,7 +3482,7 @@ mod tests {
         ] {
             let case = later(cwd.clone(), Some(json!(folder)));
             assert!(
-                matches!(check_later_init(&case, &folder), Err(why) if why.contains("later turn")),
+                matches!(check_later_init(&case, &folder, ExecutionMode::Apply), Err(why) if why.contains("later turn")),
                 "{cwd}"
             );
         }
@@ -3370,12 +3495,24 @@ mod tests {
             json!(3),
         ] {
             let case = later(json!(folder), Some(original.clone()));
-            assert!(check_later_init(&case, &folder).is_err(), "{original}");
+            assert!(
+                check_later_init(&case, &folder, ExecutionMode::Apply).is_err(),
+                "{original}"
+            );
         }
         // Without it, a `cwd` in the folder or inside it; never one outside it, nor one that
         // only leads out of it.
-        assert!(check_later_init(&later(json!(inside), None), &folder).is_ok());
-        assert!(check_later_init(&later(json!(folder), Some(Value::Null)), &folder).is_ok());
+        assert!(
+            check_later_init(&later(json!(inside), None), &folder, ExecutionMode::Apply).is_ok()
+        );
+        assert!(
+            check_later_init(
+                &later(json!(folder), Some(Value::Null)),
+                &folder,
+                ExecutionMode::Apply
+            )
+            .is_ok()
+        );
         let mut outside = vec![
             json!(sibling),
             json!(root),
@@ -3393,7 +3530,7 @@ mod tests {
         }
         for cwd in outside {
             assert!(
-                check_later_init(&later(cwd.clone(), None), &folder).is_err(),
+                check_later_init(&later(cwd.clone(), None), &folder, ExecutionMode::Apply).is_err(),
                 "{cwd}"
             );
         }
@@ -3411,7 +3548,10 @@ mod tests {
         ] {
             let mut case = moved.clone();
             case[field] = value;
-            assert!(check_later_init(&case, &folder).is_err(), "{field}: {case}");
+            assert!(
+                check_later_init(&case, &folder, ExecutionMode::Apply).is_err(),
+                "{field}: {case}"
+            );
         }
     }
 
@@ -3444,7 +3584,7 @@ mod tests {
             folder.join("gone"),
         ] {
             assert!(
-                check_later_init(&later(&cwd), &folder).is_ok(),
+                check_later_init(&later(&cwd), &folder, ExecutionMode::Apply).is_ok(),
                 "{}",
                 cwd.display()
             );
@@ -3466,7 +3606,7 @@ mod tests {
         }
         for cwd in outside {
             assert_eq!(
-                check_later_init(&later(&cwd), &folder).unwrap_err(),
+                check_later_init(&later(&cwd), &folder, ExecutionMode::Apply).unwrap_err(),
                 "Claude Code started a later turn in another folder than this space's.",
                 "{}",
                 cwd.display()
@@ -3474,8 +3614,8 @@ mod tests {
         }
         let mut started_there = later(&deleted);
         started_there["original_cwd"] = json!(deleted);
-        assert!(check_later_init(&started_there, &folder).is_err());
-        assert!(check_init(&later(&deleted), &folder).is_err());
+        assert!(check_later_init(&started_there, &folder, ExecutionMode::Apply).is_err());
+        assert!(check_init(&later(&deleted), &folder, ExecutionMode::Apply).is_err());
     }
 
     /// Through the adapter: a turn whose shell moved inside the folder before a background
@@ -4122,10 +4262,6 @@ mod tests {
                 "sessionId": "5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50",
                 "runtimeId": runtime.to_string(),
             }))
-        );
-        assert_eq!(
-            EventAdapter::reset_conversation_state(),
-            json!({"provider": "claude-code", "version": 1, "reset": true})
         );
     }
 
@@ -5446,8 +5582,12 @@ mod tests {
         assert!(killed.message.contains("signal 9"));
     }
 
+    /// A resume miss is read only after `--resume`, and only before any `init`: the runtime then
+    /// starts `claude` once more without it (11.9). On stderr alone, as a version that says it
+    /// only there would, it needs an exit that is not 0. Read as a failure, the same exit has no
+    /// code of its own: `session_unavailable` is gone.
     #[test]
-    fn a_resume_miss_before_init_is_session_unavailable_only_after_a_resume() {
+    fn a_resume_miss_before_init_is_read_only_after_a_resume() {
         let temp = tempfile::tempdir().unwrap();
         let folder = std::fs::canonicalize(temp.path()).unwrap();
         let adapter = EventAdapter::new(&folder, None);
@@ -5457,35 +5597,40 @@ mod tests {
             stderr,
             ..exit(1)
         };
-        assert_eq!(
-            adapter.classify_failure(&missed).code,
-            Some(FailureCode::SessionUnavailable)
-        );
-        assert!(
-            adapter
-                .classify_failure(&missed)
-                .message
-                .starts_with("No conversation found")
-        );
-        let fresh = ExitFacts {
-            resumed: false,
-            stderr,
-            ..exit(1)
-        };
-        assert_eq!(
-            adapter.classify_failure(&fresh).code,
-            Some(FailureCode::Crashed)
-        );
-        // Another startup exit after a resume keeps its own code.
+        assert!(adapter.missed_the_session(&missed));
+        let failure = adapter.classify_failure(&missed);
+        assert_eq!(failure.code, Some(FailureCode::Crashed));
+        assert!(failure.message.starts_with("No conversation found"));
+        // Without `--resume`, or after an exit 0, it is no miss.
+        for exit in [
+            ExitFacts {
+                resumed: false,
+                stderr,
+                ..exit(1)
+            },
+            ExitFacts {
+                resumed: true,
+                stderr,
+                ..exit(0)
+            },
+        ] {
+            assert!(!adapter.missed_the_session(&exit), "{exit:?}");
+        }
+        // Another startup exit after a resume is no miss, and keeps its own code.
         let other = ExitFacts {
             resumed: true,
             stderr: "managed MCP configuration refuses --mcp-config",
             ..exit(1)
         };
+        assert!(!adapter.missed_the_session(&other));
         assert_eq!(
             adapter.classify_failure(&other).code,
             Some(FailureCode::Crashed)
         );
+        // Once an `init` passed its checks, the session ran: nothing is a miss.
+        let mut started = EventAdapter::new(&folder, None);
+        started.feed(&init(&folder));
+        assert!(!started.missed_the_session(&missed));
         // A run that reported a result but never its settings.
         let mut no_init = EventAdapter::new(&folder, None);
         no_init.feed(&result("Done.", false));
@@ -5519,9 +5664,9 @@ mod tests {
 
     /// That `result` ends the turn, so the runtime's own SIGTERM races `claude`'s exit 1: the exit
     /// can be 1, 143, 0 or a kill after the grace. After `--resume`, the structured `errors` say
-    /// it is `session_unavailable` whatever the exit.
+    /// it is a resume miss whatever the exit.
     #[test]
-    fn a_resume_miss_result_before_init_is_session_unavailable_whatever_the_exit() {
+    fn a_resume_miss_result_before_init_is_a_miss_whatever_the_exit() {
         let temp = tempfile::tempdir().unwrap();
         let folder = std::fs::canonicalize(temp.path()).unwrap();
         let mut adapter = EventAdapter::new(&folder, None);
@@ -5541,46 +5686,128 @@ mod tests {
                 exited_ok: matches!(exit_code, Some(0 | 143)),
                 stderr: "",
             };
-            let failure = adapter.classify_failure(&missed);
-            assert_eq!(
-                failure.code,
-                Some(FailureCode::SessionUnavailable),
-                "{exit_code:?} {signal:?}: {failure:?}"
-            );
             assert!(
-                failure.message.starts_with("No conversation found"),
-                "{failure:?}"
+                adapter.missed_the_session(&missed),
+                "{exit_code:?} {signal:?}"
             );
         }
-        // Without `--resume`, the same line is 5.5's "anything else", with its own words.
+        // Without `--resume`, the same line is no miss: 5.5's "anything else", with its own
+        // words.
+        assert!(!adapter.missed_the_session(&exit(1)));
         let fresh = adapter.classify_failure(&exit(1));
         assert_eq!(fresh.code, None);
         assert!(fresh.message.starts_with("No conversation found"));
-        // Another error before `init` after a resume keeps its own code, and so does the phrase
-        // in a `result` after `init` or in one that is no error.
-        let classify = |init_first: bool, line: Value| {
+        // Another error before `init` after a resume is no miss, nor is the phrase in a `result`
+        // after `init` or in one that is no error.
+        let missed = |init_first: bool, line: Value| {
             let mut adapter = EventAdapter::new(&folder, None);
             if init_first {
                 adapter.feed(&init(&folder));
             }
             adapter.feed(&line);
-            adapter
-                .classify_failure(&ExitFacts {
-                    resumed: true,
-                    ..exit(0)
-                })
-                .code
+            adapter.missed_the_session(&ExitFacts {
+                resumed: true,
+                ..exit(0)
+            })
         };
+        assert!(missed(false, resume_miss_result()));
         let mut other = resume_miss_result();
         other["errors"] = json!(["managed MCP configuration refuses --mcp-config"]);
-        assert_eq!(classify(false, other), None);
-        assert_eq!(classify(true, resume_miss_result()), None);
+        assert!(!missed(false, other));
+        assert!(!missed(true, resume_miss_result()));
         let mut no_error = resume_miss_result();
         no_error["is_error"] = json!(false);
         no_error["subtype"] = json!("success");
-        assert_ne!(
-            classify(false, no_error),
-            Some(FailureCode::SessionUnavailable)
+        assert!(!missed(false, no_error));
+    }
+
+    /// A `claude` that shows it ran a turn missed nothing: a miss's `result` must say no turn ran
+    /// (`num_turns` absent, `null` or 0), and be the only `result` read.
+    #[test]
+    fn a_resume_miss_result_that_says_a_turn_ran_is_no_miss() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = std::fs::canonicalize(temp.path()).unwrap();
+        let missed = |num_turns: Option<Value>| {
+            let mut line = resume_miss_result();
+            match num_turns {
+                Some(turns) => line["num_turns"] = turns,
+                None => {
+                    line.as_object_mut().unwrap().remove("num_turns");
+                }
+            }
+            let mut adapter = EventAdapter::new(&folder, None);
+            adapter.feed(&line);
+            adapter.missed_the_session(&ExitFacts {
+                resumed: true,
+                ..exit(1)
+            })
+        };
+        assert!(missed(Some(json!(0))));
+        assert!(missed(None));
+        assert!(missed(Some(Value::Null)));
+        for ran in [json!(1), json!(3), json!("0"), json!(-1), json!(0.5)] {
+            assert!(!missed(Some(ran.clone())), "{ran}");
+        }
+        // On stderr alone, a `result` that says a turn ran is no miss either.
+        let mut ran = EventAdapter::new(&folder, None);
+        let mut line = resume_miss_result();
+        line["num_turns"] = json!(2);
+        line["errors"] = json!(["something else"]);
+        ran.feed(&line);
+        assert!(!ran.missed_the_session(&ExitFacts {
+            resumed: true,
+            stderr: "No conversation found with session ID: 5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50",
+            ..exit(1)
+        }));
+    }
+
+    /// After a resume miss, the adapter starts over for the second `claude` of the turn: the
+    /// miss's `result` counts for nothing, so the new session's own turn ends and replies as any
+    /// turn does, in the turn's mode. The run log keeps the miss, then says the turn started
+    /// again (11.9).
+    #[test]
+    fn after_a_resume_miss_the_adapter_starts_over_and_keeps_the_miss_in_its_run_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = std::fs::canonicalize(temp.path()).unwrap();
+        let mut adapter = EventAdapter::new(&folder, None).in_mode(ExecutionMode::PlanOnly);
+        adapter.feed(&resume_miss_result());
+        assert_eq!(adapter.status(), &AdapterStatus::EndOfTurn);
+        adapter.start_again();
+        assert_eq!(adapter.status(), &AdapterStatus::Running);
+        assert_eq!((adapter.inits(), adapter.results()), (0, 0));
+        assert!(adapter.reply_result().is_none());
+        let mut plans = init(&folder);
+        plans["permissionMode"] = json!("plan");
+        plans["session_id"] = json!("0d9c8b7a-6f5e-4d3c-8b2a-19f8e7d6c5b4");
+        adapter.feed(&plans);
+        adapter.feed(&result("Here is the plan.", false));
+        assert_eq!(adapter.status(), &AdapterStatus::EndOfTurn);
+        assert!(adapter.succeeded());
+        assert_eq!(adapter.reply(), Some("Here is the plan."));
+        let runtime = Uuid::new_v4();
+        assert_eq!(
+            adapter.conversation_state(runtime).unwrap()["sessionId"],
+            "0d9c8b7a-6f5e-4d3c-8b2a-19f8e7d6c5b4"
+        );
+        let log: Vec<String> = adapter
+            .run_log()
+            .events()
+            .iter()
+            .map(|event| event["type"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            log,
+            [
+                "result",
+                "instafy.started_without_the_missing_session",
+                "system",
+                "result"
+            ]
+        );
+        // The usage counts only the new session's turn.
+        assert_eq!(
+            adapter.usage_artifact().unwrap()["usage"]["output_tokens"],
+            4
         );
     }
 

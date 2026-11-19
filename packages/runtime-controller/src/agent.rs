@@ -1484,9 +1484,12 @@ struct LeasingRuntime {
 ///   device grants, or a local-engine turn) and can no longer start
 ///   (`device_grants::run_once_job_cannot_start`), and of those only one that
 ///   targets this runtime, targets none, or carries runtime routing metadata
-///   (a spread job may run on a runtime it does not target). This read counts
-///   every such job, whatever the lease query's other filters would say about
-///   it.
+///   (a spread job may run on a runtime it does not target). A local-engine
+///   turn counts only for a runtime its person owns with Claude Code ready, as
+///   the lease clause reads them, since it waits unpinned for its person's
+///   computer, possibly for days, and must not keep every other runtime of the
+///   space from this read meanwhile. This read counts every other such job,
+///   whatever the lease query's other filters would say about it.
 ///
 /// Anything else, a failed check or a failed read included, takes the leasing
 /// transaction. Every lease and every refusal therefore still happens under
@@ -1527,6 +1530,14 @@ async fn idle_lease_poll_finds_no_work(
                               or aj.target_runtime_id = r.id
                               or aj.payload #> '{metadata,runtimeRouting}' is not null
                               or aj.payload #> '{metadata,runtime_routing}' is not null
+                          )
+                          and (
+                              aj.engine is null
+                              or (
+                                  r.capabilities #>> '{_instafySelfHostedAccess,ownerUserId}'
+                                      = aj.payload #>> '{user_id}'
+                                  and r.capabilities #> '{claudeCode,ready}' = 'true'::jsonb
+                              )
                           )
                     ) as has_queued_work
              from runtimes r
@@ -4966,7 +4977,7 @@ pub(crate) async fn enqueue_agent_job_record(
     let status = "queued";
     let trigger = request.trigger.as_ref();
     // What runs the job's turn when it is not the runtime's embedded engine:
-    // only an admitted lane turn's, from dispatch's admission
+    // only a Claude Code agent's, from dispatch's own target
     // (crate::claude_code_lane), never from a request body.
     let engine = request
         .claude_code_lane
@@ -5018,16 +5029,7 @@ pub(crate) async fn enqueue_agent_job_record(
             ],
         )
         .await
-        .map_err(|error| {
-            // Two lane turns of one person admitted at once: the second insert
-            // waits for the first and fails on the one-active-turn index. By
-            // the time dispatch sees the error its SQLSTATE is gone, so it is
-            // answered here as the gate's own G8 refusal.
-            if crate::claude_code_lane::is_second_active_turn(&error) {
-                return crate::claude_code_lane::turn_active(false);
-            }
-            internal_error(format!("failed to enqueue agent job: {error}"))
-        })?;
+        .map_err(|error| internal_error(format!("failed to enqueue agent job: {error}")))?;
 
     let job_id = row.map(|record| record.get::<_, Uuid>("id"));
     if let Some(job_id) = job_id {
@@ -5122,8 +5124,8 @@ pub(crate) async fn lease_next_agent_job(
                   -- A job holding device grants is leased once, only within
                   -- its minute to start, and only by a runtime that says it
                   -- runs such a job as a granted turn (`device_grants.rs`).
-                  -- A local-engine turn is leased once too, within the same
-                  -- minute (`claude_code_lane.rs`).
+                  -- A local-engine turn is leased once too, whenever its
+                  -- person's computer takes it (`claude_code_lane.rs`).
                   and not ", crate::device_grants::run_once_job_cannot_start!("$14"), "
                   and (
                         aj.grant_ids is null
@@ -5133,17 +5135,18 @@ pub(crate) async fn lease_next_agent_job(
                                and granted_runtime.capabilities -> 'grantedTurns' = 'true'::jsonb
                         )
                   )
-                  -- A local-engine turn runs only on the runtime it was
-                  -- admitted on: its exact pin, a private runtime the
-                  -- controller attested as its person's own, with the
-                  -- `claudeCode` capability registration attested as ready.
-                  -- A hosted runtime has no owner filter below, so this is
-                  -- what keeps it out.
+                  -- A local-engine turn runs only on a runtime of its person's
+                  -- own in its space: a private runtime the controller
+                  -- attested as theirs, with the `claudeCode` capability
+                  -- registration attested as ready. It waits, queued, until
+                  -- one is, and while another turn of theirs runs: one runs
+                  -- at a time for each person (`claude_code_lane.rs`,
+                  -- docs/Local-Engine-Turns.md 11.7). A hosted runtime has no
+                  -- owner filter below, so this is what keeps it out.
                   and (
                         aj.engine is null
                         or (
-                            aj.target_runtime_id = $2
-                            and exists (
+                            exists (
                                 select 1 from runtimes lane_runtime
                                  where lane_runtime.id = $2
                                    and lane_runtime.project_id = $1
@@ -5152,6 +5155,13 @@ pub(crate) async fn lease_next_agent_job(
                                        = aj.payload #>> '{user_id}'
                                    and lane_runtime.capabilities #> '{claudeCode,version}' = '1'::jsonb
                                    and lane_runtime.capabilities #> '{claudeCode,ready}' = 'true'::jsonb
+                            )
+                            and not exists (
+                                select 1 from agent_jobs running_lane_turn
+                                 where running_lane_turn.engine = 'claude-code'
+                                   and running_lane_turn.status = 'leased'
+                                   and (running_lane_turn.payload ->> 'user_id')
+                                       = (aj.payload ->> 'user_id')
                             )
                         )
                   )
@@ -5209,6 +5219,10 @@ pub(crate) async fn lease_next_agent_job(
                 where true
                   and (
                         target_runtime_id = $2
+                        -- A waiting local-engine turn has no pin, and the
+                        -- clause above already holds it to its person's own
+                        -- runtime, whatever this runtime takes otherwise.
+                        or (engine is not null and target_runtime_id is null)
                         or (
                             browser_transport not in ('desktop-personal', 'shared')
                             and
@@ -5369,15 +5383,8 @@ pub(crate) async fn lease_next_agent_job(
                               )
                         )
                       )
-                -- A local-engine turn first, whatever its priority and age:
-                -- its admission found its computer idle, and a job another
-                -- dispatch queued for that computer as it was admitted must
-                -- not use up the turn's minute to start
-                -- (`claude_code_lane::admit`, G7). Only its own computer
-                -- leases it, so no other runtime's order changes.
                 order by
                   case when target_runtime_id = $2 then 0 else 1 end,
-                  (engine is not null) desc,
                   priority asc,
                   created_at asc
                 limit 1
@@ -5422,7 +5429,18 @@ pub(crate) async fn lease_next_agent_job(
             ],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to lease job: {error:?}")))?;
+        .map_err(|error| {
+            // Two of a person's computers leased their waiting local-engine
+            // turns at once, and the one-running-turn index refused the
+            // second (crate::claude_code_lane). The lease's transaction is
+            // spent, so this poll fails and the runtime polls again.
+            if crate::claude_code_lane::is_second_running_turn(&error) {
+                return internal_error(
+                    "another Claude Code turn of this person's started meanwhile",
+                );
+            }
+            internal_error(format!("failed to lease job: {error:?}"))
+        })?;
 
     let Some(row) = row else {
         return Ok(None);
@@ -6514,15 +6532,10 @@ pub(crate) fn build_agent_job_payload(
     provider_conversation_state: Option<&JsonValue>,
 ) -> Result<JsonValue, (StatusCode, Json<ApiError>)> {
     // A turn its person's own Claude Code runs (crate::claude_code_lane)
-    // carries their recorded message alone, no client metadata but the keys
-    // the lane allows, and no bootstrap. The gate never admits an evaluation,
-    // so a lane payload that would carry its marker is a bug, not a turn.
+    // carries the turn's text as for any engine, an evaluation's instruction
+    // included, no client metadata but the keys the lane allows, and no
+    // bootstrap.
     let lane = request.claude_code_lane.is_some();
-    if lane && crate::group_participation::metadata_marks_agent_evaluation(&request.metadata) {
-        return Err(internal_error(
-            "a Claude Code turn cannot carry an agent evaluation",
-        ));
-    }
     let mut map = JsonMap::new();
     let bootstrap = request
         .metadata
@@ -6566,10 +6579,10 @@ pub(crate) fn build_agent_job_payload(
         "intent".to_string(),
         JsonValue::String(request.intent.clone()),
     );
-    // A lane turn names the lane's one workspace mode, never one a client's
-    // metadata chose.
+    // A lane turn names the lane's workspace mode for its execution mode,
+    // never one a client's metadata chose.
     let workspace_mode = if lane {
-        crate::claude_code_lane::WORKSPACE_MODE
+        crate::claude_code_lane::workspace_mode(&request.execution_mode)
     } else {
         request.workspace_mode.as_str()
     };
@@ -6600,7 +6613,10 @@ pub(crate) fn build_agent_job_payload(
     if lane {
         map.insert(
             "metadata".to_string(),
-            JsonValue::Object(crate::claude_code_lane::payload_metadata(&request.metadata)),
+            JsonValue::Object(crate::claude_code_lane::payload_metadata(
+                &request.metadata,
+                &request.execution_mode,
+            )),
         );
     } else if let Some(metadata) = request.metadata.as_object() {
         map.insert("metadata".to_string(), JsonValue::Object(metadata.clone()));

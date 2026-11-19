@@ -1851,7 +1851,7 @@ describe("answered browser prompts", () => {
     expect(summarize([opened, refusedSearch]).summary).toBe("Opened carris.pt · you said no to a search on visitlisboa.com");
     const expired = browserStep(BROWSER_BROWSE, { host: "visitlisboa.com", step: "click", approval: "expired" }, "failed");
     expect(summarize([opened, expired]).summary).toBe(
-      "Opened carris.pt · skipped a click on visitlisboa.com: no answer in time",
+      "Opened carris.pt · skipped a click on visitlisboa.com: no answer from you",
     );
     const site = browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot", approval: "once" });
     expect(summarize([opened, site]).summary).toBe("Opened 2 pages on carris.pt · you allowed the site");
@@ -1860,15 +1860,15 @@ describe("answered browser prompts", () => {
   });
 
   // A local test, Nov 8: an open whose prompt ran out read "Opened httpbin.org
-  // · skipped opening httpbin.org: no answer in time": the browser said so as
+  // · skipped opening httpbin.org: no answer from you": the browser said so as
   // its answer, so the step ended without an error.
   it("never count a step the person said no to, or left, also when it ended without an error", () => {
     const unanswered = browserStep(BROWSER_OPEN, { host: "httpbin.org", step: "navigate", approval: "expired" });
-    expect(summarize([unanswered]).summary).toBe("Skipped opening httpbin.org: no answer in time");
+    expect(summarize([unanswered]).summary).toBe("Skipped opening httpbin.org: no answer from you");
     const refused = browserStep(BROWSER_OPEN, { host: "httpbin.org", step: "navigate", approval: "denied" });
     expect(summarize([refused]).summary).toBe("You said no to opening httpbin.org");
     const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
-    expect(summarize([opened, unanswered]).summary).toBe("Opened carris.pt · skipped opening httpbin.org: no answer in time");
+    expect(summarize([opened, unanswered]).summary).toBe("Opened carris.pt · skipped opening httpbin.org: no answer from you");
     // Allowed, it counts as any open does.
     const allowed = browserStep(BROWSER_OPEN, { host: "httpbin.org", pageKey: PAGE_B, step: "navigate", approval: "once" });
     expect(summarize([allowed]).summary).toBe("Opened httpbin.org · you allowed opening httpbin.org");
@@ -1882,7 +1882,7 @@ describe("answered browser prompts", () => {
     expect(summarize([opened, google]).summary).toBe("Opened carris.pt · you said no to opening google.com");
     const unanswered = browserStep(BROWSER_SEARCH, { host: "visitlisboa.com", step: "search", approval: "expired" }, "failed");
     expect(summarize([opened, unanswered]).summary).toBe(
-      "Opened carris.pt · skipped a search on visitlisboa.com: no answer in time",
+      "Opened carris.pt · skipped a search on visitlisboa.com: no answer from you",
     );
     // A page that failed to load was not read either.
     const failedRead = browserStep(BROWSER_READ, { host: "carris.pt", pageKey: PAGE_B, step: "snapshot" }, "failed");

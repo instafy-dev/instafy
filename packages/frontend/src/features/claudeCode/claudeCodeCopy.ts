@@ -36,6 +36,7 @@ export const CLAUDE_CODE_COPY = {
       "This version of Claude Code can't take turns from Instafy. Update Claude Code.",
     bare_default:
       "This version of Claude Code no longer lets other apps use your sign-in for a turn, so Instafy can't use it yet.",
+    plan_limit: "Your Claude plan's usage limit was reached. Claude Code takes turns again once it resets.",
   } satisfies Record<ControllerRuntimeClaudeCodeNotReadyReason, string>,
 
   sendNotYours: "Claude Code takes only a message you send yourself.",
@@ -89,6 +90,7 @@ export const CLAUDE_CODE_COPY = {
       unsupported_version: "This version of Claude Code can't take turns from Instafy. Update Claude Code.",
       bare_default:
         "This version of Claude Code no longer lets other apps use your sign-in for a turn, so Instafy can't use it yet.",
+      plan_limit: "Your Claude plan's usage limit was reached. Claude Code takes turns again once it resets.",
     } satisfies Record<ControllerRuntimeClaudeCodeNotReadyReason, string>,
     problems: {
       not_found: "Instafy Desktop didn't find Claude Code. Install it, or Locate the claude program.",

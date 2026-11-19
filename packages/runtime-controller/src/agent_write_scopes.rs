@@ -97,6 +97,16 @@ impl AgentWriteScopeAssignment {
         self
     }
 
+    /// Whether a turn with this scope may write anywhere in the space or
+    /// nowhere: the only scopes a Claude Code agent's turn can be held to
+    /// (crate::claude_code_lane), which runs read-only for the second.
+    pub(crate) fn is_unscoped_or_read_only(&self) -> bool {
+        matches!(
+            self.mode,
+            AgentWriteScopeMode::Unscoped | AgentWriteScopeMode::ReadOnly
+        )
+    }
+
     pub(crate) fn is_coordination_required(&self) -> bool {
         self.mode == AgentWriteScopeMode::CoordinationRequired
     }

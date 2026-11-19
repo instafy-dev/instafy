@@ -48,13 +48,15 @@ pub(crate) const GRANT_SCOPE: &str = "device_grant.call";
 /// A granted turn starts within this long of its message, a queued one's
 /// time in the queue included (`agent_jobs.trigger_received_at`), or not at
 /// all. A local-engine turn (`agent_jobs.engine`, crate::claude_code_lane)
-/// has the same window.
+/// has no such window: it waits for its person's computer.
 pub(crate) const GRANTED_TURN_START_WITHIN_SECONDS: i32 = 60;
 /// Whether a queued `agent_jobs` row runs only once and will never be leased:
 /// it holds device grants or runs on its person's own engine
 /// (`engine`, crate::claude_code_lane), and a lease of it ended (such a turn
-/// runs once), or its [`GRANTED_TURN_START_WITHIN_SECONDS`], bound at the
-/// placeholder `$seconds` names, passed. A SQL condition over the job's own
+/// runs once), or it holds device grants and its
+/// [`GRANTED_TURN_START_WITHIN_SECONDS`], bound at the placeholder
+/// `$seconds` names, passed. A local-engine turn that never started waits for
+/// its person's computer, however long. A SQL condition over the job's own
 /// columns: the lease and the idle poll leave such a job out, and the idle
 /// sweep fails it.
 macro_rules! run_once_job_cannot_start {
@@ -62,9 +64,10 @@ macro_rules! run_once_job_cannot_start {
         concat!(
             "((grant_ids is not null or engine is not null)
               and (lease_attempts > 0
-                   or trigger_received_at + ",
+                   or (grant_ids is not null
+                       and trigger_received_at + ",
             $seconds,
-            "::int * interval '1 second' <= statement_timestamp()))"
+            "::int * interval '1 second' <= statement_timestamp())))"
         )
     };
 }

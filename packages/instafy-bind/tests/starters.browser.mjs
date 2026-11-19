@@ -254,7 +254,7 @@ try {
     data.items[0].store = { name: "Example Store", url: `${STORE}/slow-a`, readable: true };        // checks live (slowly)
     data.items[1].store = { name: "Example Store", url: `${STORE}/slow-b`, readable: true };        // has an old record (checks slowly)
     data.items.push({ ref: "option:option-d", name: "Option D", why: "Not checked yet", facts: {}, store: { name: "Shop D", url: "https://example.com/d", readable: true } });
-    data.items.push({ ref: "option:option-e", name: "Option E", why: "Its store link is broken", facts: { price: { v: "$150", src: "Example Store", url: "https://example.com/e", date: "2026-10-17" } }, store: { name: "Shop E", url: "not a web address", readable: true } });
+    data.items.push({ ref: "option:option-e", name: "Option E", why: "Its store link is broken", facts: { price: { v: "$150", src: "Example Store", url: "https://example.com/e", date: "2026-10-17", viewer: "server fetch" } }, store: { name: "Shop E", url: "not a web address", readable: true } });
     const old = new Date(Date.now() - 3 * 86400_000).toISOString();
     fs.mkdirSync(path.join(dir, "data/records"), { recursive: true });
     fs.writeFileSync(path.join(dir, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
@@ -398,9 +398,9 @@ try {
       data.columns.push({ key: "approach", label: "Stability approach", type: "text" }, { key: "drop", label: "Heel drop", type: "text" });
       for (const item of data.items) {
         item.badge = "Previous generation (Arahi 8 current)";
-        item.facts.approach = { v: long, src: "Runner's World", url: "https://example.com/review", date: "2026-10-19" };
-        item.facts.weight = { v: "9.9 oz men's / 8.1 oz women's", src: "Running Shoes Guru", url: "https://example.com/specs", date: "2026-10-19" };
-        item.facts.drop = { v: "12 mm", src: "Running Shoes Guru", url: "https://example.com/specs", date: "2026-10-19" };
+        item.facts.approach = { v: long, src: "Runner's World", url: "https://example.com/review", date: "2026-10-19", viewer: "server fetch" };
+        item.facts.weight = { v: "9.9 oz men's / 8.1 oz women's", src: "Running Shoes Guru", url: "https://example.com/specs", date: "2026-10-19", viewer: "server fetch" };
+        item.facts.drop = { v: "12 mm", src: "Running Shoes Guru", url: "https://example.com/specs", date: "2026-10-19", viewer: "server fetch" };
       }
       return data;
     }));
@@ -422,7 +422,7 @@ try {
   // ---------- 2d. compare without "Sort by": the authored order holds through a check; fresh prices end the button ----------
   {
     const dir = makeSite("compare-order", "compare", (data) => {
-      data.items[0].facts.price = { v: "$200", src: "Example Store", url: "https://example.com/option-a", date: "2026-10-17" };
+      data.items[0].facts.price = { v: "$200", src: "Example Store", url: "https://example.com/option-a", date: "2026-10-17", viewer: "server fetch" };
       data.items[0].store = { name: "Example Store", url: `${STORE}/a`, readable: true };
       data.items[1].store = { name: "Example Store", url: `${STORE}/b`, readable: true };
       data.items[2].store = undefined;
@@ -451,8 +451,8 @@ try {
   // ---------- 2e. compare with Sort by: a price that may have changed never sorts first ----------
   {
     const dir = makeSite("compare-stale", "compare", (data, d) => {
-      data.items.push({ ref: "option:option-d", name: "Option D", why: "Fresh", facts: { price: { v: "$150", src: "Shop", url: "https://example.com/d", date: "2026-10-17" } } });
-      data.items.push({ ref: "option:option-e", name: "Option E", why: "Fresh", facts: { price: { v: "$170", src: "Shop", url: "https://example.com/e", date: "2026-10-17" } } });
+      data.items.push({ ref: "option:option-d", name: "Option D", why: "Fresh", facts: { price: { v: "$150", src: "Shop", url: "https://example.com/d", date: "2026-10-17", viewer: "server fetch" } } });
+      data.items.push({ ref: "option:option-e", name: "Option E", why: "Fresh", facts: { price: { v: "$170", src: "Shop", url: "https://example.com/e", date: "2026-10-17", viewer: "server fetch" } } });
       // option-b's $99 is an old live check: cheapest, but it may have changed
       fs.mkdirSync(path.join(d, "data/records"), { recursive: true });
       fs.writeFileSync(path.join(d, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
@@ -473,7 +473,7 @@ try {
   {
     const dir = makeSite("ranked-shared", "ranked", (data) => {
       data.items.forEach((item, i) => {
-        item.price = { v: `$${100 + i * 10}`, src: "Review Site", url: "https://reviews.example.net/best", date: "2026-10-17", asof: "2026-08-05", list: true };
+        item.price = { v: `$${100 + i * 10}`, src: "Review Site", url: "https://reviews.example.net/best", date: "2026-10-17", asof: "2026-08-05", list: true, viewer: "server fetch" };
         item.sources = [{ name: "Review Site review", url: `https://reviews.example.net/item-${i}` }];
       });
       data.items[0].name = "A rather long product name that wraps";
@@ -503,7 +503,7 @@ try {
   {
     // a row whose own values all come from one other page: the cells show the values, one line cites the page
     const rows = await staticServer(makeSite("compare-row-source", "compare", (d) => {
-      const lab = { src: "Lab Test", url: "https://lab.example.net/option-c", date: "2026-10-15" };
+      const lab = { src: "Lab Test", url: "https://lab.example.net/option-c", date: "2026-10-15", viewer: "server fetch" };
       d.items[2].facts.weight = { ...lab, v: "9.9 oz" };
       d.items[2].facts.rating = { ...lab, v: "4.1 of 5" };
       d.items[2].facts.warranty = { ...lab, v: "1 year" };
@@ -540,7 +540,7 @@ try {
 
     // every store refuses checks and one line names the list prices: that line says where today's price is, no box
     const blocked = await staticServer(makeSite("ranked-list-blocked", "ranked", (d) => ({ ...d, items: d.items.map((item, i) => ({ ...item,
-      price: { v: `$${100 + i * 10}`, src: "Review Site", url: "https://reviews.example.net/best", date: "2026-10-17", asof: "2026-08-05", list: true },
+      price: { v: `$${100 + i * 10}`, src: "Review Site", url: "https://reviews.example.net/best", date: "2026-10-17", asof: "2026-08-05", list: true, viewer: "server fetch" },
       store: { name: "Shop", url: `https://example.com/${i}`, readable: false } })) })));
     const bp = await open(`${blocked}/`);
     eq(await bp.locator(".notice").count(), 0, "no notice about checks nobody was offered");
@@ -566,7 +566,7 @@ try {
 
     // a checklist fact without a link reads like a note inside the row (one rhythm); one with a link sits under it
     const facts = await staticServer(makeSite("checklist-facts", "checklist", (d) => {
-      d.groups[0].items[0].fact = { v: "Sockets are type G", src: "Wikipedia", url: "https://en.wikipedia.org/wiki/AC_power_plugs_and_sockets", date: "2026-10-17" };
+      d.groups[0].items[0].fact = { v: "Sockets are type G", src: "Wikipedia", url: "https://en.wikipedia.org/wiki/AC_power_plugs_and_sockets", date: "2026-10-17", viewer: "server fetch" };
       return d;
     }));
     const cp = await open(`${facts}/`, { width: 1280, height: 800 });
@@ -587,9 +587,9 @@ try {
     const dir = makeSite("compare-limit", "compare", (d, siteDir) => {
       d.filter = { key: "price", max: 600, label: "€600 or less", rest: "over €600" };
       d.items = [
-        { ref: "option:read", name: "Read Model", why: "Its price was read", facts: { price: { v: "€549", src: "Shop One", url: "https://shop-one.example/read", date: "2026-10-27" }, weight: { v: "3.1 kg", src: "Maker", url: "https://maker.example/read", date: "2026-10-27" } } },
-        { ref: "option:over", name: "Over Model", why: "Over the limit", facts: { price: { v: "€699", src: "Shop One", url: "https://shop-one.example/over", date: "2026-10-27" } } },
-        { ref: "option:none", name: "Silent Model", why: "No price on its page", facts: { price: { src: "Maker", url: "https://maker.example/silent", date: "2026-10-27" }, weight: { v: "—", src: "Maker", url: "https://maker.example/silent", date: "2026-10-27" } } },
+        { ref: "option:read", name: "Read Model", why: "Its price was read", facts: { price: { v: "€549", src: "Shop One", url: "https://shop-one.example/read", date: "2026-10-27", viewer: "server fetch" }, weight: { v: "3.1 kg", src: "Maker", url: "https://maker.example/read", date: "2026-10-27", viewer: "server fetch" } } },
+        { ref: "option:over", name: "Over Model", why: "Over the limit", facts: { price: { v: "€699", src: "Shop One", url: "https://shop-one.example/over", date: "2026-10-27", viewer: "server fetch" } } },
+        { ref: "option:none", name: "Silent Model", why: "No price on its page", facts: { price: { src: "Maker", url: "https://maker.example/silent", date: "2026-10-27", viewer: "server fetch" }, weight: { v: "—", src: "Maker", url: "https://maker.example/silent", date: "2026-10-27", viewer: "server fetch" } } },
         { ref: "option:blocked", name: "Blocked Model", why: "Its shop blocks checks", facts: { price: { note: "shop-two.example blocks automated price checks" } }, store: { name: "Shop Two", url: "https://shop-two.example/blocked", readable: false } },
         { ref: "option:nosrc", name: "Unsourced Model", why: "A remembered price", facts: { price: { v: "€399" } } },
       ];
@@ -641,7 +641,7 @@ try {
   // A comparison with 4 of 15 values found listed every column on every phone row with "Unknown" ("Unknown · Two
   // independent reviews not checked"), and two narrow columns cut values and their sources over lines. ----------
   {
-    const maker = (v, page) => ({ v, src: "Maker", url: `https://maker.example/${page}`, date: "2026-10-27" });
+    const maker = (v, page) => ({ v, src: "Maker", url: `https://maker.example/${page}`, date: "2026-10-27", viewer: "server fetch" });
     const gaps = (d) => ({
       ...d, title: "Three laptops", lede: "The maker's site gives each CPU; battery, weight, price and reviews are not checked.", sort: [], filter: undefined,
       columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "weight", label: "Weight", type: "text" },
@@ -659,8 +659,8 @@ try {
     const site = await staticServer(makeSite("compare-gaps", "compare", gaps));
     // short values whose column cites one page under the list (no source line in the cells) keep two columns
     const short = await staticServer(makeSite("compare-short", "compare", (d) => ({ ...d, sort: [], items: d.items.map((i) => ({ ...i, store: undefined, facts: {
-      weight: { v: i.ref.slice(-1) === "a" ? "8.9 oz" : "9.1 oz", src: "Maker", url: "https://example.com/specs", date: "2026-10-17" },
-      rating: { v: "4.5 of 5", src: "Reviews", url: "https://example.com/reviews", date: "2026-10-16" } } })) })));
+      weight: { v: i.ref.slice(-1) === "a" ? "8.9 oz" : "9.1 oz", src: "Maker", url: "https://example.com/specs", date: "2026-10-17", viewer: "server fetch" },
+      rating: { v: "4.5 of 5", src: "Reviews", url: "https://example.com/reviews", date: "2026-10-16", viewer: "server fetch" } } })) })));
     const missing = [
       "Maker Laptop Pro: Weight, Price, Two independent reviews",
       "Maker Laptop Air and Maker Laptop Max: Battery, Weight, Price, Two independent reviews",
@@ -760,8 +760,8 @@ try {
       items: Array.from({ length: 8 }, (_, i) => ({ ref: `laptop:l${i}`, name: `Laptop ${i}`, why: "Listed by the maker",
         sources: i === 5 ? [{ name: "Maker", url: "https://maker.example/l5" }] : undefined,
         // the row chat selects opens its Details, whose own facts take one column too
-        more: i === 6 ? ["Colours", "Keyboard", "Webcam", "Charger"].map((label, j) => ({ label, fact: { v: `${label} detail`, src: "Maker", url: `https://maker${j}6.example/l6/more`, date: "2026-10-27" } })) : undefined,
-        facts: Object.fromEntries(cols.map((k, j) => [k, { v: `${k} value ${i}`, src: "Maker", url: `https://maker${j}${i}.example/l${i}/${k}`, date: "2026-10-27" }])) })) });
+        more: i === 6 ? ["Colours", "Keyboard", "Webcam", "Charger"].map((label, j) => ({ label, fact: { v: `${label} detail`, src: "Maker", url: `https://maker${j}6.example/l6/more`, date: "2026-10-27", viewer: "server fetch" } })) : undefined,
+        facts: Object.fromEntries(cols.map((k, j) => [k, { v: `${k} value ${i}`, src: "Maker", url: `https://maker${j}${i}.example/l${i}/${k}`, date: "2026-10-27", viewer: "server fetch" }])) })) });
     const binder = await serve(makeSite("compare-place", "compare", eight));
     const view = (page) => page.evaluate(() => {
       const row = [...document.querySelectorAll("ol.list.cards > li[data-ref]")].find((r) => r.getBoundingClientRect().bottom > 0);
@@ -838,7 +838,7 @@ try {
 
     // short source lines and a check's reason stay inside their cell: a fact's grid takes one column, the sorted value
     // wraps them; so does a store link alone in a fact's caption, drawn on touch as one box over two lines
-    const specs = (v) => ({ v, src: "Specs", url: "https://specs.example/all", date: "2026-10-27" });
+    const specs = (v) => ({ v, src: "Specs", url: "https://specs.example/all", date: "2026-10-27", viewer: "server fetch" });
     const inside = makeSite("compare-inside", "compare", (d, dir) => {
       fs.mkdirSync(path.join(dir, "data/records"), { recursive: true });
       fs.writeFileSync(path.join(dir, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
@@ -848,9 +848,9 @@ try {
         columns: [{ key: "price", label: "Price", type: "price" }, { key: "cpu", label: "CPU", type: "text" }, { key: "weight", label: "Weight", type: "text" }, { key: "screen", label: "Screen", type: "text" }],
         items: [
           { ref: "option:a", name: "Asus Laptop", why: "The maker's page gives no weight", store: { name: "Shop", url: "https://shop.example/a", readable: false },
-            facts: { price: { v: "$999", src: "Shop", url: "https://shop.example/a", date: "2026-10-27" }, cpu: specs("Chip 7"), screen: specs("14 in"), weight: { src: "Asus", url: "https://www.asus.com/laptop/specs", date: "2026-10-27" } } },
+            facts: { price: { v: "$999", src: "Shop", url: "https://shop.example/a", date: "2026-10-27", viewer: "server fetch" }, cpu: specs("Chip 7"), screen: specs("14 in"), weight: { src: "Asus", url: "https://www.asus.com/laptop/specs", date: "2026-10-27", viewer: "server fetch" } } },
           { ref: "option:b", name: "Target Laptop", why: "Its store page gives no price",
-            facts: { price: { src: "Target", url: "https://www.target.com/p/b", date: "2026-10-27" }, cpu: specs("Chip 5"), screen: specs("13 in"), weight: specs("1.2 kg") } },
+            facts: { price: { src: "Target", url: "https://www.target.com/p/b", date: "2026-10-27", viewer: "server fetch" }, cpu: specs("Chip 5"), screen: specs("13 in"), weight: specs("1.2 kg") } },
           { ref: "option:c", name: "Amazon Laptop", why: "Its store could not be read", store: { name: "Amazon", url: "https://www.amazon.com/c", readable: true },
             facts: { cpu: specs("Chip 3"), screen: specs("15 in"), weight: specs("1.4 kg") } },
         ] };
@@ -859,7 +859,7 @@ try {
     const outlet = await staticServer(makeSite("compare-outlet", "compare", (d) => ({ ...d, sort: [], filter: undefined,
       columns: [{ key: "suction", label: "Suction", type: "text" }, { key: "price", label: "Price", type: "price" }],
       items: ["a", "b"].map((r) => ({ ref: `option:${r}`, name: `Vacuum ${r.toUpperCase()}`, why: "Listed by the maker", store: { name: "Example Home Appliance Outlet", url: `https://outlet.example/${r}`, readable: false },
-        facts: { suction: { v: "6000 Pa", src: "Maker", url: "https://maker.example/specs", date: "2026-10-27" }, price: { note: "Not checked" } } })) })));
+        facts: { suction: { v: "6000 Pa", src: "Maker", url: "https://maker.example/specs", date: "2026-10-27", viewer: "server fetch" }, price: { note: "Not checked" } } })) })));
     for (const width of [320, 375, 414]) {
       for (const url of [`${insideAt}/`, `${outlet}/`]) {
         const page = await open(url, { width, height: 812, touch: true });
@@ -878,7 +878,7 @@ try {
   // to confirm"). ----------
   {
     const day = "2026-11-08";
-    const fact = (v, src, url) => ({ v, src, url, date: day });
+    const fact = (v, src, url) => ({ v, src, url, date: day, viewer: "server fetch" });
     const laptops = (d) => ({
       ...d, title: "Three laptops compared", lede: "The Laptop 12 starts lowest and is lightest; the 16 has the largest battery.", sort: [], filter: undefined,
       columns: [{ key: "cpu", label: "CPU", type: "text" }, { key: "battery", label: "Battery", type: "text" }, { key: "reviews", label: "Independent reviews", type: "text" },
@@ -952,7 +952,7 @@ try {
   // them; a "lede" in data.json is not drawn, and a page that still has one loads as any other. ----------
   {
     const day = "2026-11-09";
-    const at = (v, url) => ({ v, src: "Maker", url: `https://maker.example/${url}`, date: day });
+    const at = (v, url) => ({ v, src: "Maker", url: `https://maker.example/${url}`, date: day, viewer: "server fetch" });
     const laptops = (d) => ({
       ...d, title: "Three latest laptops", filter: undefined, unchecked: [],
       lede: "Maker's featured laptops include the 13 Pro, 12 and 16; two independent reviews per model were not found in the pages read.",
@@ -1196,7 +1196,7 @@ try {
     // a caption too long for its cell breaks before a " · ", never inside "Not found" ("Not" / "found · …"):
     // a short part keeps its dot with it, so the break must come before the dot. A price a store can still open stays
     // on its row, so its "Not found" caption is in its cell.
-    const longSrc = await staticServer(makeSite("long-source", "compare", (d) => ({ ...d, items: d.items.map((i) => i.ref !== "option:option-b" ? i : { ...i, facts: { ...i.facts, price: { src: "Maker's product spec sheet", url: "https://example.com/option-b/specs", date: "2026-10-17" } } }) })));
+    const longSrc = await staticServer(makeSite("long-source", "compare", (d) => ({ ...d, items: d.items.map((i) => i.ref !== "option:option-b" ? i : { ...i, facts: { ...i.facts, price: { src: "Maker's product spec sheet", url: "https://example.com/option-b/specs", date: "2026-10-17", viewer: "server fetch" } } }) })));
     const ls = await open(`${longSrc}/`, { width: 1024, height: 800 });
     const lines = await ls.evaluate(() => {
       const part = [...document.querySelectorAll("#row-option-b .trust .part")].find((p) => p.textContent === "Not found");

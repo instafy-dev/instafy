@@ -12796,6 +12796,12 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
             body["jobs"][0]["payload"]["browser_hand_back_reads_note"] == json!(true),
             "{body}"
         );
+        // And that it hands back a browser turn a person's answer to a step's
+        // prompt ended, so such a turn may end as any finished turn.
+        anyhow::ensure!(
+            body["jobs"][0]["payload"]["browser_hand_back_after_a_prompt"] == json!(true),
+            "{body}"
+        );
         let row = pool
             .get()
             .await?

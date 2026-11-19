@@ -6,7 +6,7 @@
       "id": "prepare",
       "title": "Prepare",
       "items": [
-        { "ref": "item:book-room", "text": "Book the room", "fact": { "v": "Holds 40 people", "src": "Venue page", "url": "https://example.com/venue", "date": "2026-10-17" } },
+        { "ref": "item:book-room", "text": "Book the room", "fact": { "v": "Holds 40 people", "src": "Venue page", "url": "https://example.com/venue", "date": "2026-10-17", "viewer": "server fetch" } },
         { "ref": "item:invitations", "text": "Send the invitations" },
         { "ref": "item:name-tags", "text": "Print name tags" },
         { "ref": "item:parking", "text": "Tell guests where to park", "fact": { "note": "parking near the venue" } }

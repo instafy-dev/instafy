@@ -118,7 +118,9 @@ test("the example data is neutral and in the one fact shape; bound.json files ar
   for (const item of compare.items) {
     assert.match(item.ref, /^[a-z][a-z0-9-]{0,23}:[a-z0-9-]{1,50}$/);
     for (const fact of Object.values(item.facts)) {
-      for (const key of Object.keys(fact)) assert.ok(["v", "n", "src", "url", "date", "est", "note"].includes(key), `fact key ${key}`);
+      for (const key of Object.keys(fact)) assert.ok(["v", "n", "src", "url", "date", "viewer", "est", "note"].includes(key), `fact key ${key}`);
+      // a value read on its page says how it was read, so the page says "checked" on it
+      if (fact.src && fact.date) assert.equal(fact.viewer, "server fetch", `${item.ref}: how it was read`);
     }
   }
   for (const name of ["compare", "ranked", "checklist"]) {

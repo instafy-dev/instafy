@@ -17,7 +17,8 @@
 //! first `claude` on `PATH`, through the same checks, probe, command and environment as a lane
 //! turn (3.2-3.4), and grants it this shell's `CLAUDE_CONFIG_DIR`, `HTTPS_PROXY`, `HTTP_PROXY`,
 //! `NO_PROXY` and `NODE_EXTRA_CA_CERTS`, as Desktop grants the login shell's (D26). It sends about
-//! ten short prompts, each a real request on the person's own account. It writes only in a
+//! a dozen short prompts, each a real request on the person's own account, a `plan_only` turn and
+//! a resume of a session this computer does not have among them (11.17). It writes only in a
 //! temporary folder, apart from one file in the home folder for item 12's `@~/` import, which it
 //! removes. It reads none of Claude Code's own files.
 //!
@@ -42,14 +43,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use runtime_agent::agent::ShutdownSignal;
 use runtime_agent::claude_code::command::{
-    McpConfigFile, lane_environment, turn_command, write_prompt,
+    McpConfigFile, StartAgain, lane_environment, turn_command, write_prompt,
 };
 use runtime_agent::claude_code::events::{AdapterStatus, EventAdapter, ExitFacts, check_init};
 use runtime_agent::claude_code::supervise::{
-    FOLLOW_UP_GRACE, FollowUpWait, TurnEnd, TurnLimits, TurnSpec, supervise,
+    FOLLOW_UP_GRACE, FollowUpWait, TurnEnd, TurnLimits, TurnOutcome, TurnSpec, supervise,
 };
 use runtime_agent::claude_code::{
-    BIN_ENV, Confinement, FailureCode, GRANTED_ENV_KEYS, HelpFacts, Lane, LaunchEnvSnapshot,
+    BIN_ENV, Confinement, ExecutionMode, GRANTED_ENV_KEYS, HelpFacts, Lane, LaunchEnvSnapshot,
     LaunchGrant, RawLaunchGrant, ReadyLane, Trust, verified_through,
 };
 use runtime_agent::job_cancel::JobCancelSignal;
@@ -405,30 +406,43 @@ impl Live {
         self.background_turn(&mut report).await;
         self.signal_turns(&mut report).await;
         self.resume_miss(&mut report).await;
+        self.plan_only_turn(&mut report).await;
         self.bash_process_group(&mut report).await;
         report
     }
 
-    /// Item 1, end to end: a turn through the lane's own supervision, with the exact command.
-    async fn lane_turn(&self, report: &mut Report) {
-        let folder = self.space("lane");
-        let nonce = nonce("LANE");
+    /// A turn through the lane's own supervision, with the exact command of `mode`: resuming
+    /// `resume` when there is one, and starting again without `--resume` when this computer does
+    /// not have it, as a lane turn does (11.9).
+    async fn supervised_turn(
+        &self,
+        folder: &Path,
+        prompt: &str,
+        mode: ExecutionMode,
+        resume: Option<Uuid>,
+    ) -> (TurnOutcome, EventAdapter) {
         let grant = self.lane.grant();
         let mcp_config = McpConfigFile::create(grant).expect("the turn's MCP configuration");
-        let command = turn_command(grant, &self.ready, &mcp_config, None, &folder);
-        let mut adapter = EventAdapter::for_turn(grant, &folder);
+        let command = turn_command(grant, &self.ready, &mcp_config, mode, resume, folder);
+        let start_again = resume.map(|_| StartAgain {
+            grant,
+            ready: &self.ready,
+            mcp_config: &mcp_config,
+            mode,
+            folder,
+        });
+        let mut adapter = EventAdapter::for_turn(grant, folder, mode);
         let limits = TurnLimits::standard()
             .with_cleanup_latch(&CLEANUP_LATCH)
             .with_wall_clock(TURN_LIMIT);
         let stop = JobCancelSignal::new();
         let shutdown = ShutdownSignal::new();
-        let prompt = format!("Reply with exactly this text and nothing else: {nonce}\n");
         let mut sink = |_: &Value| {};
         let outcome = supervise(
             command,
             TurnSpec {
-                prompt: &prompt,
-                resumed: false,
+                prompt,
+                start_again,
                 stop: &stop,
                 shutdown: &shutdown,
             },
@@ -437,19 +451,21 @@ impl Live {
             &mut sink,
         )
         .await;
+        (outcome, adapter)
+    }
+
+    /// Item 1, end to end: a turn through the lane's own supervision, with the exact command.
+    async fn lane_turn(&self, report: &mut Report) {
+        let folder = self.space("lane");
+        let nonce = nonce("LANE");
+        let prompt = format!("Reply with exactly this text and nothing else: {nonce}\n");
+        let (outcome, adapter) = self
+            .supervised_turn(&folder, &prompt, ExecutionMode::Apply, None)
+            .await;
         let replied = adapter.reply().is_some_and(|reply| reply.contains(&nonce));
         let detail = format!(
             "{}; exit: {}; processes confirmed gone: {}; the reply {} the prompt's text",
-            match &outcome.end {
-                TurnEnd::Succeeded => "succeeded".to_string(),
-                TurnEnd::Failed(failure) => format!(
-                    "failed ({}): {}",
-                    failure.code.map(|code| code.as_str()).unwrap_or("other"),
-                    failure.message
-                ),
-                TurnEnd::Stopped => "stopped".to_string(),
-                TurnEnd::Shutdown => "shut down".to_string(),
-            },
+            describe_end(&outcome.end),
             describe_exit(outcome.exit_status),
             outcome.cleanup_confirmed,
             if replied {
@@ -483,7 +499,8 @@ impl Live {
         let after = folder_state(&folder);
 
         let init = turn.init_line();
-        let started = init.is_some_and(|init| check_init(init, &folder).is_ok());
+        let started =
+            init.is_some_and(|init| check_init(init, &folder, ExecutionMode::Apply).is_ok());
         report.add(
             "item 1",
             "every flag of 3.3 is accepted: the turn starts and reports its settings",
@@ -512,7 +529,8 @@ impl Live {
             ),
         );
         let init_check = match init {
-            Some(init) => check_init(init, &folder).map(|facts| format!("model {}", facts.model)),
+            Some(init) => check_init(init, &folder, ExecutionMode::Apply)
+                .map(|facts| format!("model {}", facts.model)),
             None => Err("no system/init event".to_string()),
         };
         report.add(
@@ -1058,42 +1076,120 @@ impl Live {
     }
 
     /// Item 7: `--resume` with a session that does not exist exits non-zero before `init`, with
-    /// an error the lane classifies as `session_unavailable` (2.7).
+    /// an error the lane reads as a resume miss (2.7). And through the lane's own supervision, a
+    /// turn that resumes such a session starts `claude` again without `--resume` and runs in a
+    /// new session (11.9).
     async fn resume_miss(&self, report: &mut Report) {
         let folder = self.space("resume");
+        let missing = Uuid::new_v4();
         let turn = self
             .turn(
                 &folder,
                 "Reply with the single word OK.\n",
-                Some(Uuid::new_v4()),
+                Some(missing),
                 StopPlan::AtEndOfTurn,
             )
             .await;
-        let failure = turn.adapter.classify_failure(&ExitFacts {
+        let exit = ExitFacts {
             resumed: true,
             exit_code: turn.exit.and_then(|status| status.code()),
             signal: turn.exit.and_then(|status| status.signal()),
             exited_ok: false,
             stderr: &turn.stderr,
-        });
+        };
+        let missed = turn.adapter.missed_the_session(&exit);
+        let failure = turn.adapter.classify_failure(&exit);
         let nonzero = turn
             .exit
             .is_some_and(|status| status.code().is_some_and(|code| code != 0));
         let before_init = turn.init_line().is_none();
-        let classified = failure.code == Some(FailureCode::SessionUnavailable);
         report.add(
             "item 7",
-            "--resume with a missing session exits non-zero before init, as session_unavailable",
-            if nonzero && before_init && classified {
+            "--resume with a missing session exits non-zero before init, as a resume miss",
+            if nonzero && before_init && missed {
                 Verdict::Holds
             } else {
                 Verdict::Fails
             },
             format!(
-                "{}; before init: {before_init}; classified as {}; text: {}",
+                "{}; before init: {before_init}; read as a resume miss: {missed}; text: {}",
                 describe_exit(turn.exit),
-                failure.code.map(|code| code.as_str()).unwrap_or("other"),
                 first_line(&failure.message)
+            ),
+        );
+
+        let folder = self.space("resume-again");
+        let nonce = nonce("AGAIN");
+        let prompt = format!("Reply with exactly this text and nothing else: {nonce}\n");
+        let (outcome, adapter) = self
+            .supervised_turn(&folder, &prompt, ExecutionMode::Apply, Some(missing))
+            .await;
+        let replied = adapter.reply().is_some_and(|reply| reply.contains(&nonce));
+        let new_session = adapter
+            .init()
+            .is_some_and(|init| init.session_id != missing);
+        let holds = matches!(outcome.end, TurnEnd::Succeeded)
+            && outcome.started_again
+            && new_session
+            && outcome.cleanup_confirmed;
+        report.add(
+            "resume miss",
+            "a lane turn that resumes a session this computer does not have starts claude again without --resume, and runs in a new session (11.9)",
+            if holds {
+                Verdict::Holds
+            } else {
+                Verdict::Fails
+            },
+            format!(
+                "{}; started again: {}; a new session: {new_session}; the reply {} the prompt's text; exit: {}",
+                describe_end(&outcome.end),
+                outcome.started_again,
+                if replied {
+                    "repeats"
+                } else {
+                    "does not repeat"
+                },
+                describe_exit(outcome.exit_status),
+            ),
+        );
+    }
+
+    /// A `plan_only` turn (11.12) through the lane's own supervision: `--permission-mode plan`
+    /// is accepted, every `init` reports `plan`, and the turn ends with a reply, having written
+    /// nothing in the folder although its words ask for a file.
+    async fn plan_only_turn(&self, report: &mut Report) {
+        let folder = self.space("plan-only");
+        let before = folder_state(&folder);
+        let prompt = "Create the file plan-only.txt in the current folder containing the single \
+                      word PLAN, then reply DONE.\n";
+        let (outcome, adapter) = self
+            .supervised_turn(&folder, prompt, ExecutionMode::PlanOnly, None)
+            .await;
+        let after = folder_state(&folder);
+        let changes = folder_changes(&before, &after);
+        let holds = matches!(outcome.end, TurnEnd::Succeeded)
+            && adapter.init().is_some()
+            && changes.is_empty()
+            && outcome.cleanup_confirmed;
+        report.add(
+            "plan_only",
+            "a plan_only turn runs in Claude Code's plan mode, reports it in init, replies, and changes nothing in the folder",
+            if holds {
+                Verdict::Holds
+            } else {
+                Verdict::Fails
+            },
+            format!(
+                "{}; init passed the plan-mode check: {}; changed in the folder: {}; reply: {}; exit: {}",
+                describe_end(&outcome.end),
+                adapter.init().is_some(),
+                if changes.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    changes.join(", ")
+                },
+                first_line(adapter.reply().unwrap_or_default()),
+                describe_exit(outcome.exit_status),
             ),
         );
     }
@@ -1155,9 +1251,16 @@ impl Live {
     ) -> LiveTurn {
         let grant = self.lane.grant();
         let mcp_config = McpConfigFile::create(grant).expect("the turn's MCP configuration");
-        let mut child = turn_command(grant, &self.ready, &mcp_config, resume, folder)
-            .spawn()
-            .expect("claude starts");
+        let mut child = turn_command(
+            grant,
+            &self.ready,
+            &mcp_config,
+            ExecutionMode::Apply,
+            resume,
+            folder,
+        )
+        .spawn()
+        .expect("claude starts");
         let pid = child.id().expect("claude's pid") as i32;
         // SAFETY: plain queries of a process this suite started.
         let root = ProcessIds {
@@ -1183,7 +1286,7 @@ impl Live {
         let mut turn = LiveTurn {
             lines: Vec::new(),
             unparsed: Vec::new(),
-            adapter: EventAdapter::for_turn(grant, folder),
+            adapter: EventAdapter::for_turn(grant, folder, ExecutionMode::Apply),
             events: Vec::new(),
             exit: None,
             stderr: String::new(),
@@ -1515,6 +1618,19 @@ fn signal_name(signal: i32) -> &'static str {
         libc::SIGINT => "SIGINT",
         libc::SIGKILL => "SIGKILL",
         _ => "a signal",
+    }
+}
+
+fn describe_end(end: &TurnEnd) -> String {
+    match end {
+        TurnEnd::Succeeded => "succeeded".to_string(),
+        TurnEnd::Failed(failure) => format!(
+            "failed ({}): {}",
+            failure.code.map(|code| code.as_str()).unwrap_or("other"),
+            failure.message
+        ),
+        TurnEnd::Stopped => "stopped".to_string(),
+        TurnEnd::Shutdown => "shut down".to_string(),
     }
 }
 

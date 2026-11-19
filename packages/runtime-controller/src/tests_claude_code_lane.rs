@@ -1,12 +1,16 @@
 #![cfg(test)]
 
-// Local-engine turns on the migrated database (docs/Local-Engine-Turns.md
-// 2.1-2.3, 2.5, 2.9 and section 8): dispatch admits a claimed send as one turn
-// its person's own Claude Code runs on their own computer, and refuses every
-// other claimed send before it writes a prompt, run, message or job or burns a
-// credit. The space and harness are `tests_provider_space.rs`'s, seeded here
-// with lane-ready computers. Requires `TEST_DATABASE_URL` like the tests in
-// `tests.rs`.
+// Local-engine turns on the migrated database, version 2
+// (docs/Local-Engine-Turns.md section 11): Claude Code is an AI any agent can
+// use. A Claude Code agent is its owner's `user_agents` row with the provider
+// `claude-code` and no connection, and every turn its owner's dispatches give
+// it, whoever or whatever started them, is checked before anything is
+// written (`claude_code_lane::check_target`). An admitted turn's job waits,
+// unpinned, until one of its person's own computers in the space with Claude
+// Code ready leases it, one at a time for each person. The space and harness
+// are `tests_provider_space.rs`'s, seeded here with a Claude Code agent,
+// `@claude`, for the owner and the member, and with their lane-ready
+// computers. Requires `TEST_DATABASE_URL` like the tests in `tests.rs`.
 
 use axum::http::StatusCode;
 use axum::Json;
@@ -33,39 +37,27 @@ use crate::{ApiError, AppState};
 
 /// The words of every lane send here.
 const WORDS: &str = "Fix the failing build in packages/app, then run its tests.";
+/// The handle of the owner's and the member's own Claude Code agent.
+const CLAUDE: &str = "claude";
 const DEVICE_PROVIDER: &str = "device:lane-test";
 const DEVICE: &str = "lane-device-1";
 
 type Expected = (StatusCode, &'static str, &'static str);
 
-fn not_allowed(reason: &'static str) -> Expected {
+/// L1's refusal: the switch does not cover the agent's owner.
+fn not_allowed() -> Expected {
     (
         StatusCode::FORBIDDEN,
         claude_code_lane::TURN_NOT_ALLOWED,
-        reason,
+        "not_allowed",
     )
 }
 
-fn not_person(reason: &'static str) -> Expected {
-    (
-        StatusCode::FORBIDDEN,
-        claude_code_lane::TURN_NOT_PERSON,
-        reason,
-    )
-}
-
-fn not_plain(reason: &'static str) -> Expected {
+/// L2's and L3's refusal of a turn Claude Code cannot take, with its reason.
+fn unsupported(reason: &'static str) -> Expected {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
-        claude_code_lane::TURN_NOT_PLAIN,
-        reason,
-    )
-}
-
-fn not_ready(reason: &'static str) -> Expected {
-    (
-        StatusCode::CONFLICT,
-        claude_code_lane::RUNTIME_NOT_READY,
+        claude_code_lane::TURN_UNSUPPORTED,
         reason,
     )
 }
@@ -88,13 +80,13 @@ fn without(mut value: JsonValue, keys: &[&str]) -> JsonValue {
     value
 }
 
-/// A claimed send's metadata as Studio sends it, with `extra` over it.
-fn lane_metadata(extra: JsonValue) -> JsonValue {
+/// A send's metadata as Studio sends it to the sender's own agents
+/// `handles`, each mentioned, with `extra` over it.
+fn metadata_for(handles: &[&str], extra: JsonValue) -> JsonValue {
     with(
         json!({
             "clientMessageId": Uuid::new_v4().to_string(),
-            "turnEngine": "claude-code",
-            "agentSelection": { "active": ["octo"], "mentions": ["octo"] },
+            "agentSelection": { "active": handles, "mentions": handles },
             "input": { "kind": "person" },
             "writeIntent": true,
         }),
@@ -102,13 +94,28 @@ fn lane_metadata(extra: JsonValue) -> JsonValue {
     )
 }
 
-/// A claimed send of [`WORDS`] to `runtime`, with `metadata`.
-fn lane_send(runtime: Uuid, metadata: JsonValue) -> JsonValue {
+/// A send's metadata to the sender's own @claude, a Claude Code agent.
+fn lane_metadata(extra: JsonValue) -> JsonValue {
+    metadata_for(&[CLAUDE], extra)
+}
+
+/// A send of [`WORDS`] with `metadata`.
+fn lane_send(metadata: JsonValue) -> JsonValue {
     json!({
         "promptText": WORDS,
         "intent": "feature",
-        "runtimeId": runtime.to_string(),
         "metadata": metadata,
+    })
+}
+
+/// An ordinary send to the sender's own @octo, which uses their default
+/// connection, on `runtime`.
+fn octo_send(runtime: Uuid) -> JsonValue {
+    json!({
+        "promptText": "Read the logs.",
+        "intent": "feature",
+        "runtimeId": runtime.to_string(),
+        "metadata": metadata_for(&["octo"], json!({})),
     })
 }
 
@@ -130,11 +137,9 @@ fn lane_ready() -> JsonValue {
     json!({ "claudeCode": { "version": 1, "ready": true } })
 }
 
-type Adjustment = Box<dyn FnOnce(&mut DispatchPromptNormalized)>;
-
-/// What an internal caller sets on a request beyond what the routes set.
-fn adjustment(adjust: impl FnOnce(&mut DispatchPromptNormalized) + 'static) -> Adjustment {
-    Box::new(adjust)
+/// The capability of a computer whose Claude Code is not ready.
+fn lane_not_ready() -> JsonValue {
+    json!({ "claudeCode": { "version": 1, "ready": false } })
 }
 
 fn person_context(user: Uuid) -> RequestContext {
@@ -155,6 +160,7 @@ struct Written {
     platform_jobs: i64,
     ledger: i64,
     queued: i64,
+    runtimes: i64,
 }
 
 /// One `agent_jobs` row as a test reads it.
@@ -175,8 +181,9 @@ struct Job {
 }
 
 /// A space whose owner and member are on the lane list and whose guest is not
-/// (`tests_provider_space.rs`'s `Space`), each with a default AI connection,
-/// and the computers lane turns run on.
+/// (`tests_provider_space.rs`'s `Space`), each with a default AI connection;
+/// the owner's and the member's own @claude, which uses Claude Code; and the
+/// computers their lane turns run on.
 struct Lane {
     harness: Harness,
     /// The owner's own lane-ready computers.
@@ -184,9 +191,11 @@ struct Lane {
     second_desktop: Uuid,
     /// The member's own lane-ready computer.
     member_desktop: Uuid,
+    /// The owner's and the member's own @claude.
+    owner_claude: Uuid,
+    member_claude: Uuid,
     /// The owner's default AI connection.
     owner_credential: Uuid,
-    other_project_runtime: Uuid,
     service_user: Uuid,
 }
 
@@ -213,7 +222,6 @@ where
         runtime: Uuid::new_v4(),
         other_machine: Uuid::new_v4(),
     };
-    let other_project = Uuid::new_v4();
     let service_user = Uuid::new_v4();
     let mut config = build_app_config(test_origin_private_key(), test_origin_public_key(), label);
     config.claude_code_lane =
@@ -233,7 +241,7 @@ where
     let users = vec![space.owner, space.member, space.guest];
     let fixture = SharedDbFixture {
         organizations: vec![space.org_id],
-        projects: vec![space.project_id, other_project],
+        projects: vec![space.project_id],
     };
     let state = build_test_state(pool.clone(), config);
     let app = Router::new()
@@ -242,6 +250,7 @@ where
         .merge(crate::send_queue::router())
         .merge(crate::send_intents::router())
         .merge(crate::agent::router())
+        .merge(crate::ai_agents::router())
         .merge(crate::automations::router())
         .merge(crate::device_grants::router())
         .merge(crate::secrets::router())
@@ -253,16 +262,7 @@ where
     // goes on with a panic; the people go after it.
     let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
         with_shared_db_fixture(fixture, async move {
-            let lane = Lane::seed(
-                body_pool,
-                state,
-                app,
-                space,
-                other_project,
-                service_user,
-                &label,
-            )
-            .await?;
+            let lane = Lane::seed(body_pool, state, app, space, service_user, &label).await?;
             body(lane).await
         }),
     ))
@@ -292,7 +292,6 @@ impl Lane {
         state: AppState,
         app: Router,
         space: Space,
-        other_project: Uuid,
         service_user: Uuid,
         label: &str,
     ) -> anyhow::Result<Self> {
@@ -313,15 +312,13 @@ impl Lane {
                 &[&space.org_id, &space.owner, &space.member],
             )
             .await?;
-        for project in [space.project_id, other_project] {
-            connection
-                .execute(
-                    "insert into projects (id, org_id, name, owner_user_id, project_type, status)
-                     values ($1, $2, $3, $4, 'customer', 'active')",
-                    &[&project, &space.org_id, &label, &space.owner],
-                )
-                .await?;
-        }
+        connection
+            .execute(
+                "insert into projects (id, org_id, name, owner_user_id, project_type, status)
+                 values ($1, $2, $3, $4, 'customer', 'active')",
+                &[&space.project_id, &space.org_id, &label, &space.owner],
+            )
+            .await?;
         connection
             .execute(
                 "insert into project_memberships (project_id, user_id, role)
@@ -365,6 +362,23 @@ impl Lane {
                 owner_credential = Some(credential_id);
             }
         }
+        // The owner's and the member's own @claude: Claude Code as its AI, so
+        // no connection.
+        let mut claude_agents = Vec::new();
+        for user in [space.owner, space.member] {
+            let agent = Uuid::new_v4();
+            connection
+                .execute(
+                    "insert into user_agents (
+                         id, user_id, credential_id, provider, handle, display_name,
+                         description, avatar_seed
+                     ) values ($1, $2, null, $3, $4, 'Claude', 'Works on my computer',
+                         'hatchling:4')",
+                    &[&agent, &user, &claude_code_lane::PROVIDER, &CLAUDE],
+                )
+                .await?;
+            claude_agents.push(agent);
+        }
         for conversation in [space.log, space.other_chat] {
             connection
                 .execute(
@@ -398,17 +412,12 @@ impl Lane {
             .await?;
         }
         let mut lane_runtimes = Vec::new();
-        for (project, owner) in [
-            (space.project_id, space.owner),
-            (space.project_id, space.owner),
-            (space.project_id, space.member),
-            (other_project, space.owner),
-        ] {
+        for owner in [space.owner, space.owner, space.member] {
             let id = Uuid::new_v4();
             insert_runtime(
                 &pool,
                 id,
-                project,
+                space.project_id,
                 "self-hosted",
                 capabilities(Some(owner), lane_ready()),
                 "ready",
@@ -427,8 +436,9 @@ impl Lane {
             desktop: lane_runtimes[0],
             second_desktop: lane_runtimes[1],
             member_desktop: lane_runtimes[2],
+            owner_claude: claude_agents[0],
+            member_claude: claude_agents[1],
             owner_credential: owner_credential.expect("owner credential"),
-            other_project_runtime: lane_runtimes[3],
             service_user,
         })
     }
@@ -512,7 +522,8 @@ impl Lane {
                         (select count(*) from agent_jobs where project_id = $1),
                         (select count(*) from ai_usage_jobs where project_id = $1),
                         (select count(*) from org_credit_ledger where org_id = $2),
-                        (select count(*) from conversation_send_queue where project_id = $1)",
+                        (select count(*) from conversation_send_queue where project_id = $1),
+                        (select count(*) from runtimes where project_id = $1)",
                 &[&self.space().project_id, &self.space().org_id],
             )
             .await?;
@@ -524,38 +535,8 @@ impl Lane {
             platform_jobs: row.get(4),
             ledger: row.get(5),
             queued: row.get(6),
+            runtimes: row.get(7),
         })
-    }
-
-    /// `token`'s holder posts `body` to `path`: refused as `expected`, with
-    /// nothing written.
-    async fn refused_at(
-        &self,
-        token: &str,
-        path: String,
-        body: JsonValue,
-        expected: Expected,
-    ) -> anyhow::Result<JsonValue> {
-        let before = self.written().await?;
-        let (status, response) = self
-            .harness
-            .call("POST", path.clone(), Some(token), Some(body.clone()))
-            .await?;
-        assert_eq!(
-            (
-                status,
-                response["code"].as_str(),
-                response["details"]["reason"].as_str()
-            ),
-            (expected.0, Some(expected.1), Some(expected.2)),
-            "{path} {body}: {response}"
-        );
-        assert_eq!(
-            self.written().await?,
-            before,
-            "{path} {body} wrote something"
-        );
-        Ok(response)
     }
 
     /// `token`'s holder sends `body` to `conversation`: refused as `expected`,
@@ -567,13 +548,19 @@ impl Lane {
         body: JsonValue,
         expected: Expected,
     ) -> anyhow::Result<JsonValue> {
-        self.refused_at(
-            token,
-            format!("/conversations/{conversation}/messages"),
-            body,
-            expected,
-        )
-        .await
+        let before = self.written().await?;
+        let (status, response) = self.send(token, conversation, &body).await?;
+        assert_eq!(
+            (
+                status,
+                response["code"].as_str(),
+                response["details"]["reason"].as_str()
+            ),
+            (expected.0, Some(expected.1), Some(expected.2)),
+            "{body}: {response}"
+        );
+        assert_eq!(self.written().await?, before, "{body} wrote something");
+        Ok(response)
     }
 
     /// The request `context`'s send of `body` to `conversation` makes inside
@@ -603,44 +590,42 @@ impl Lane {
     }
 
     /// An internal caller's dispatch of `body` to `conversation` as
-    /// `context`, `adjust`ed: refused as `expected`, with nothing written.
-    async fn refused_directly(
+    /// `context`, `adjust`ed: its job.
+    async fn dispatched_directly(
         &self,
         context: RequestContext,
         conversation: Uuid,
         body: JsonValue,
         adjust: impl FnOnce(&mut DispatchPromptNormalized),
-        expected: Expected,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Uuid> {
         let request = self.request(&context, conversation, body, adjust)?;
-        let before = self.written().await?;
-        let (status, Json(error)) =
+        let response =
             crate::dispatch::process_dispatch_prompt(&self.harness.state, &context, request)
                 .await
-                .err()
-                .ok_or_else(|| anyhow::anyhow!("dispatched {expected:?}"))?;
-        assert_eq!(
-            (status, error.code.as_deref(), reason_of(&error)),
-            (expected.0, Some(expected.1), Some(expected.2)),
-            "{}",
-            error.message
-        );
-        assert_eq!(
-            self.written().await?,
-            before,
-            "{expected:?} wrote something"
-        );
-        Ok(())
+                .map_err(|(status, error)| {
+                    anyhow::anyhow!("dispatch: {status} {}", error.message)
+                })?;
+        response
+            .job_id
+            .ok_or_else(|| anyhow::anyhow!("dispatch queued no job"))
     }
 
-    /// The owner's claimed `body` to `conversation`: admitted, and its job.
-    async fn admitted(&self, conversation: Uuid, body: &JsonValue) -> anyhow::Result<Uuid> {
-        let (status, response) = self.send(&self.owner(), conversation, body).await?;
+    /// `token`'s holder sends `body` to `conversation`: admitted, and its job.
+    async fn admitted_as(
+        &self,
+        token: &str,
+        conversation: Uuid,
+        body: &JsonValue,
+    ) -> anyhow::Result<Uuid> {
+        let (status, response) = self.send(token, conversation, body).await?;
         anyhow::ensure!(status == StatusCode::OK, "send: {status} {response}");
-        Ok(
-            Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())
-                .map_err(|_| anyhow::anyhow!("send queued no job: {response}"))?,
-        )
+        Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())
+            .map_err(|_| anyhow::anyhow!("send queued no job: {response}"))
+    }
+
+    /// The owner sends `body` to `conversation`: admitted, and its job.
+    async fn admitted(&self, conversation: Uuid, body: &JsonValue) -> anyhow::Result<Uuid> {
+        self.admitted_as(&self.owner(), conversation, body).await
     }
 
     async fn job(&self, id: Uuid) -> anyhow::Result<Job> {
@@ -672,6 +657,74 @@ impl Lane {
         })
     }
 
+    /// The jobs of `conversation`, oldest first.
+    async fn jobs_in(&self, conversation: Uuid) -> anyhow::Result<Vec<Uuid>> {
+        Ok(self
+            .pool()
+            .get()
+            .await?
+            .query(
+                "select id from agent_jobs where conversation_id = $1
+                  order by created_at, id",
+                &[&conversation],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect())
+    }
+
+    /// The jobs a send answered with `response` started: the lane ones, and
+    /// the others.
+    async fn jobs_of(&self, response: &JsonValue) -> anyhow::Result<(Vec<Job>, Vec<Job>)> {
+        let ids = match response["jobIds"].as_array() {
+            Some(ids) => ids.clone(),
+            None => vec![response["jobId"].clone()],
+        };
+        let mut jobs = Vec::new();
+        for id in ids {
+            let id = Uuid::parse_str(id.as_str().unwrap_or_default())
+                .map_err(|_| anyhow::anyhow!("send queued no job: {response}"))?;
+            jobs.push(self.job(id).await?);
+        }
+        Ok(jobs.into_iter().partition(|job| job.engine.is_some()))
+    }
+
+    /// `user`'s own agent with `handle`.
+    async fn agent_of(&self, user: Uuid, handle: &str) -> anyhow::Result<Uuid> {
+        sql_one(
+            self.pool(),
+            "select id from user_agents
+              where user_id = $1 and lower(handle) = $2 and deleted_at is null",
+            &[&user, &handle],
+        )
+        .await
+    }
+
+    /// `agent`'s AI as stored: its provider and its connection.
+    async fn ai_of(&self, agent: Uuid) -> anyhow::Result<(String, Option<Uuid>)> {
+        let row = self
+            .pool()
+            .get()
+            .await?
+            .query_one(
+                "select provider, credential_id from user_agents where id = $1",
+                &[&agent],
+            )
+            .await?;
+        Ok((row.get(0), row.get(1)))
+    }
+
+    /// How many agents `user` has.
+    async fn agents_of(&self, user: Uuid) -> anyhow::Result<i64> {
+        sql_one(
+            self.pool(),
+            "select count(*) from user_agents where user_id = $1 and deleted_at is null",
+            &[&user],
+        )
+        .await
+    }
+
     /// Ends every queued or leased job of the space, as their completions
     /// would.
     async fn end_jobs(&self) -> anyhow::Result<()> {
@@ -685,31 +738,28 @@ impl Lane {
         Ok(())
     }
 
-    /// A job that keeps `runtime` busy: queued for it, or leased by it.
-    async fn busy_job(&self, runtime: Uuid, leased: bool) -> anyhow::Result<Uuid> {
+    /// Ends `job`, as its completion would.
+    async fn end_job(&self, job: Uuid) -> anyhow::Result<()> {
+        sql(
+            self.pool(),
+            "update agent_jobs set status = 'completed', completed_at = now() where id = $1",
+            &[&job],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// An ordinary job queued in a chat of its own, as a parent for a row the
+    /// engine CHECK refuses.
+    async fn queued_job(&self) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
         let conversation = self.chat().await?;
         sql(
             self.pool(),
-            "insert into agent_jobs (
-                 id, project_id, conversation_id, intent, status, payload,
-                 target_runtime_id, leased_by_runtime_id, leased_at, lease_expires_at
-             ) values (
-                 $1, $2, $3, 'feature', $4,
-                 '{\"metadata\":{\"agent\":{\"handle\":\"helper\"}}}'::jsonb,
-                 case when $5 then null else $6::uuid end,
-                 case when $5 then $6::uuid else null end,
-                 case when $5 then now() else null end,
-                 case when $5 then now() + interval '2 minutes' else null end
-             )",
-            &[
-                &id,
-                &self.space().project_id,
-                &conversation,
-                &if leased { "leased" } else { "queued" },
-                &leased,
-                &runtime,
-            ],
+            "insert into agent_jobs (id, project_id, conversation_id, intent, status, payload)
+             values ($1, $2, $3, 'feature', 'queued',
+                     '{\"metadata\":{\"agent\":{\"handle\":\"helper\"}}}'::jsonb)",
+            &[&id, &self.space().project_id, &conversation],
         )
         .await?;
         Ok(id)
@@ -721,12 +771,12 @@ impl Lane {
             .unwrap_or(JsonValue::Null))
     }
 
-    /// A claimed send of the owner's to `runtime` in a new chat, admitted:
-    /// the chat and the job.
-    async fn lane_turn(&self, runtime: Uuid) -> anyhow::Result<(Uuid, Uuid)> {
+    /// The owner's send to their own @claude in a new chat: the chat, and the
+    /// turn's job, which waits for one of the owner's computers.
+    async fn lane_turn(&self) -> anyhow::Result<(Uuid, Uuid)> {
         let chat = self.chat().await?;
         let job = self
-            .admitted(chat, &lane_send(runtime, lane_metadata(json!({}))))
+            .admitted(chat, &lane_send(lane_metadata(json!({}))))
             .await?;
         Ok((chat, job))
     }
@@ -785,11 +835,26 @@ impl Lane {
         Ok(())
     }
 
-    async fn pin(&self, job: Uuid, runtime: Uuid) -> anyhow::Result<()> {
+    /// Pins `job` to `runtime`, or unpins it.
+    async fn pin(&self, job: Uuid, runtime: Option<Uuid>) -> anyhow::Result<()> {
         sql(
             self.pool(),
             "update agent_jobs set target_runtime_id = $2 where id = $1",
             &[&job, &runtime],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Puts `job` back in the queue after a lease of it, as the idle release
+    /// puts back an expired lease.
+    async fn put_back(&self, job: Uuid) -> anyhow::Result<()> {
+        sql(
+            self.pool(),
+            "update agent_jobs set status = 'queued', leased_by_runtime_id = null,
+                    leased_at = null, lease_expires_at = null
+              where id = $1",
+            &[&job],
         )
         .await?;
         Ok(())
@@ -1094,6 +1159,68 @@ impl Lane {
         }
         Ok(())
     }
+
+    /// The owner's daily automation of [`WORDS`] for their own @claude, with
+    /// `extra` over its body: its id and its thread.
+    async fn automation(&self, extra: JsonValue) -> anyhow::Result<(Uuid, Uuid)> {
+        let (status, created) = self
+            .harness
+            .call(
+                "POST",
+                format!("/projects/{}/automations", self.space().project_id),
+                Some(&self.owner()),
+                Some(with(
+                    json!({
+                        "name": "Nightly build check",
+                        "promptText": WORDS,
+                        "scheduleKind": "hourly",
+                        "intervalHours": 24,
+                        "timezone": "UTC",
+                        "runtimeMode": "auto",
+                        "metadata": { "agentSelection": { "active": [CLAUDE], "mentions": [CLAUDE] } },
+                    }),
+                    extra,
+                )),
+            )
+            .await?;
+        anyhow::ensure!(status == StatusCode::OK, "automation: {status} {created}");
+        Ok((
+            Uuid::parse_str(created["id"].as_str().unwrap_or_default())?,
+            Uuid::parse_str(created["conversationId"].as_str().unwrap_or_default())?,
+        ))
+    }
+
+    /// The owner runs `automation` now: when its attempt, which runs in the
+    /// background, last ran it, once that attempt is over.
+    async fn run_automation(&self, automation: Uuid) -> anyhow::Result<DateTime<Utc>> {
+        let (status, body) = self
+            .harness
+            .call(
+                "POST",
+                format!("/automations/{automation}/run"),
+                Some(&self.owner()),
+                None,
+            )
+            .await?;
+        anyhow::ensure!(status == StatusCode::OK, "run now: {status} {body}");
+        // Run now holds the automation until its attempt is over.
+        eventually("the automation's attempt to be over", || async {
+            let row = self
+                .pool()
+                .get()
+                .await?
+                .query_one(
+                    "select locked_until is null, last_run_at from automations where id = $1",
+                    &[&automation],
+                )
+                .await?;
+            Ok(row
+                .get::<_, bool>(0)
+                .then(|| row.get::<_, Option<DateTime<Utc>>>(1))
+                .flatten())
+        })
+        .await
+    }
 }
 
 /// What has been published for a lane turn a runtime stop failed, in order:
@@ -1188,6 +1315,29 @@ fn assert_lane_stamps(metadata: &JsonValue, what: &str) {
     );
 }
 
+/// `job` is a turn of `person`'s own `agent`, a Claude Code agent, that waits
+/// for one of their computers: it runs on their own Claude Code, stamped so,
+/// with no connection, device grant or runtime pin.
+fn assert_lane_job(job: &Job, person: Uuid, agent: Uuid, what: &str) {
+    assert_eq!(
+        job.engine.as_deref(),
+        Some(claude_code_lane::ENGINE),
+        "{what}"
+    );
+    assert_eq!(job.credential_id, None, "{what}");
+    assert_eq!(job.grant_ids, None, "{what}");
+    assert_eq!(job.target_runtime_id, None, "{what}");
+    assert_eq!(job.status, "queued", "{what}");
+    assert_eq!(job.payload["user_id"], json!(person.to_string()), "{what}");
+    assert_eq!(
+        job.payload["metadata"]["agent"]["id"],
+        json!(agent.to_string()),
+        "{what}: {}",
+        job.payload
+    );
+    assert_lane_stamps(&job.payload["metadata"], what);
+}
+
 /// `value`, anywhere in it, has none of `keys`.
 fn assert_never_holds(value: &JsonValue, keys: &[&str], what: &str) {
     let text = value.to_string();
@@ -1199,17 +1349,35 @@ fn assert_never_holds(value: &JsonValue, keys: &[&str], what: &str) {
     }
 }
 
-/// One admitted turn: the job runs on its sender's own computer, with the
-/// controller's stamps, no credential though the sender has a default one, no
-/// conversation runtime preference and no platform record. Its payload
-/// carries the recorded words alone and only the metadata the lane allows.
+/// A Claude Code agent's turn (docs/Local-Engine-Turns.md 11.6): its job runs
+/// on its person's own Claude Code, with the controller's stamps, no
+/// connection though its person has a default one, and no runtime pin,
+/// whatever runtime the send named or the agent's own setting for the space
+/// says. It waits, queued, for one of its person's computers: no runtime is
+/// ensured or alerted for it, and the chat never prefers one. It has no
+/// platform record and burns no credit, and its payload carries the
+/// message's words and only the metadata the lane allows. The same send to
+/// the person's @octo, which uses their connection, is an ordinary turn.
 #[tokio::test]
-async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Result<()> {
+async fn a_claude_code_agents_turn_waits_for_its_persons_own_computer() -> anyhow::Result<()> {
     with_lane(
         "lane-admitted",
         |_, _| {},
         |lane| async move {
             let space = lane.space();
+            // The agent's own runtime for the space, which its turn never uses.
+            sql(
+                lane.pool(),
+                "insert into user_agent_project_settings (user_id, project_id, agent_id, runtime_id)
+                 values ($1, $2, $3, $4)",
+                &[
+                    &space.owner,
+                    &space.project_id,
+                    &lane.owner_claude,
+                    &space.runtime,
+                ],
+            )
+            .await?;
             let chat = lane.chat().await?;
             let before = lane.written().await?;
             let someone_else = Uuid::new_v4().to_string();
@@ -1220,25 +1388,21 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
                 "workerInputRouting": { "requestIds": [Uuid::new_v4().to_string()] },
                 "claudeCode": { "version": 9 },
                 "claudeCodeFailure": "plan_limit",
+                "claudeCodeSkipped": { "reason": "computer_away" },
             });
-            // A workspace mode of the client's choosing, which no gate reads.
-            let body = lane_send(
-                lane.desktop,
-                lane_metadata(with(
+            // A computer and a workspace mode of the client's choosing, which
+            // the turn takes neither of.
+            let body = with(
+                lane_send(lane_metadata(with(
                     client_extras.clone(),
                     json!({ "workspaceMode": "shared_read" }),
-                )),
+                ))),
+                json!({ "runtimeId": lane.desktop.to_string() }),
             );
             let job_id = lane.admitted(chat, &body).await?;
 
             let job = lane.job(job_id).await?;
-            assert_eq!(job.engine.as_deref(), Some(claude_code_lane::ENGINE));
-            assert_eq!(
-                job.credential_id, None,
-                "a BYOC sender's connection is cleared"
-            );
-            assert_eq!(job.grant_ids, None);
-            assert_eq!(job.target_runtime_id, Some(lane.desktop));
+            assert_lane_job(&job, space.owner, lane.owner_claude, "the turn");
             assert!(job.trigger_received_at.is_some());
             assert_eq!(
                 (
@@ -1248,10 +1412,9 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
                 ),
                 (None, None, None)
             );
-            assert_eq!((job.status.as_str(), job.lease_attempts), ("queued", 0));
+            assert_eq!(job.lease_attempts, 0);
 
             let payload = &job.payload;
-            assert_eq!(payload["user_id"], json!(space.owner.to_string()));
             assert_eq!(
                 payload["prompt_text"],
                 json!(WORDS),
@@ -1259,7 +1422,7 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
             );
             // The payload's keys are exactly these: no bootstrap, plan seed,
             // tool limits, repo or anything else, and runtime-agent reads its
-            // `executionMode` as the lane's one workspace mode, whatever the
+            // `executionMode` as the turn's workspace mode, whatever the
             // client asked for.
             let mut top_level = payload
                 .as_object()
@@ -1293,6 +1456,8 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
             assert_eq!(payload["executionMode"], json!("shared_write"));
             assert_eq!(payload["intent"], json!("feature"));
             assert_eq!(payload["writeIntent"], json!(true));
+            // No `runtimePreference`: a send whose every agent uses Claude
+            // Code names no runtime of the space's.
             let metadata = payload["metadata"].as_object().expect("payload metadata");
             let mut keys = metadata.keys().map(String::as_str).collect::<Vec<_>>();
             keys.sort_unstable();
@@ -1305,43 +1470,41 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
                     "conversationVisibility",
                     "input",
                     "managedAiUsed",
-                    "runtimePreference",
                     "writeIntent",
                     "writeScope",
                 ],
                 "{payload}"
             );
-            assert_lane_stamps(&payload["metadata"], "payload");
-            assert_eq!(metadata["agent"]["handle"], json!("octo"));
+            assert_eq!(metadata["agent"]["handle"], json!(CLAUDE));
             assert_eq!(metadata["writeScope"]["mode"], json!("unscoped"));
             assert_eq!(metadata["input"], json!({ "kind": "person" }));
             assert_eq!(metadata["writeIntent"], json!(true));
-            assert_eq!(
-                metadata["runtimePreference"]["runtimeId"],
-                json!(lane.desktop.to_string())
-            );
 
             let run_id = job.run_id.expect("run");
             let run = lane
                 .metadata_of("select metadata from runs where id = $1", run_id)
                 .await?;
             assert_lane_stamps(&run, "run");
+            assert!(run.get("runtimeAlert").is_none(), "no runtime alert: {run}");
             let prompt = lane
                 .metadata_of(
                     "select p.metadata from prompts p join runs r on r.prompt_id = p.id
-                  where r.id = $1",
+                      where r.id = $1",
                     run_id,
                 )
                 .await?;
             assert_lane_stamps(&prompt, "prompt");
             let message = lane
-            .metadata_of(
-                "select metadata from conversation_messages where run_id = $1 and role = 'user'",
-                run_id,
-            )
-            .await?;
+                .metadata_of(
+                    "select metadata from conversation_messages
+                      where run_id = $1 and role = 'user'",
+                    run_id,
+                )
+                .await?;
             assert_lane_stamps(&message, "message");
-            assert_eq!(message["trigger"], json!("person"));
+            // No trigger kind: device grants, the one feature that reads it,
+            // are off for the person, whom only the lane's switch covers.
+            assert!(message.get("trigger").is_none(), "{message}");
             let content: String = sql_one(
                 lane.pool(),
                 "select content from conversation_messages where run_id = $1 and role = 'user'",
@@ -1357,11 +1520,15 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
             ] {
                 assert_never_holds(
                     value,
-                    &["turnEngine", "claudeCodeFailure", "workerInputRouting"],
+                    &[
+                        "claudeCodeFailure",
+                        "claudeCodeSkipped",
+                        "workerInputRouting",
+                    ],
                     what,
                 );
             }
-            // The computer never becomes the chat's runtime preference.
+            // The chat never comes to prefer a runtime for it.
             let conversation = lane
                 .metadata_of("select metadata from conversations where id = $1", chat)
                 .await?;
@@ -1369,32 +1536,29 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
                 conversation.get("runtimePreference").is_none(),
                 "{conversation}"
             );
-            let after = lane.written().await?;
+            // One prompt, run, message and job; no runtime, platform record or
+            // credit.
             assert_eq!(
-                after.platform_jobs, before.platform_jobs,
-                "no ai_usage_jobs row"
-            );
-            assert_eq!(after.ledger, before.ledger, "no credit burned");
-            assert_eq!(
-                (after.prompts, after.runs, after.messages, after.jobs),
-                (
-                    before.prompts + 1,
-                    before.runs + 1,
-                    before.messages + 1,
-                    before.jobs + 1
-                )
+                lane.written().await?,
+                Written {
+                    prompts: before.prompts + 1,
+                    runs: before.runs + 1,
+                    messages: before.messages + 1,
+                    jobs: before.jobs + 1,
+                    ..before
+                }
             );
 
-            // The same send without the claim is an ordinary turn of the
-            // sender's own connection, words and client metadata included.
+            // The same send to the person's @octo is an ordinary turn of their
+            // own connection, on the computer it names, words and client
+            // metadata included.
             let codex_chat = lane.chat().await?;
-            let mut unclaimed = body.clone();
-            unclaimed["metadata"] = without(lane_metadata(client_extras), &["turnEngine"]);
-            let codex = lane
-                .job(lane.admitted(codex_chat, &unclaimed).await?)
-                .await?;
+            let mut octo = body.clone();
+            octo["metadata"] = metadata_for(&["octo"], client_extras);
+            let codex = lane.job(lane.admitted(codex_chat, &octo).await?).await?;
             assert_eq!(codex.engine, None);
             assert_eq!(codex.credential_id, Some(lane.owner_credential));
+            assert_eq!(codex.target_runtime_id, Some(lane.desktop));
             assert_eq!(
                 codex.payload["prompt_text"],
                 json!("Delete the repository.")
@@ -1404,7 +1568,7 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
             assert!(codex.payload.get("bootstrap").is_some());
             assert_never_holds(
                 &codex.payload,
-                &["claudeCode", "claudeCodeFailure"],
+                &["claudeCode", "claudeCodeFailure", "claudeCodeSkipped"],
                 "codex",
             );
             Ok(())
@@ -1413,1859 +1577,13 @@ async fn a_claimed_send_is_one_turn_on_its_persons_own_computer() -> anyhow::Res
     .await
 }
 
-/// Stage 1 (G1-G3): only the person's own session's message, sent now, with
-/// no mark of anything Instafy wrote, queued, resent or delegated. Each
-/// refusal writes nothing.
+/// A lane job's payload, as dispatch builds it for the sender's own @octo set
+/// to Claude Code, is the one runtime-contracts records
+/// (claude_code_lane_fixtures.json), its ids aside. runtime-agent's lane tests
+/// run that same payload through `LaneJob::of`, so a payload key the
+/// controller renames, adds or drops fails here instead of every lane turn.
 #[tokio::test]
-async fn stage_one_refuses_what_its_person_did_not_send_now() -> anyhow::Result<()> {
-    with_lane(
-        "lane-stage-one",
-        |_, _| {},
-        |lane| async move {
-            let space = lane.space();
-            let chat = lane.chat().await?;
-            let owner = lane.owner();
-            let send = |metadata: JsonValue| lane_send(lane.desktop, metadata);
-            let plain = || send(lane_metadata(json!({})));
-
-            // G1: a sender the list leaves out, and the service role's route,
-            // which names no person.
-            lane.refused(
-                &lane.token(space.guest),
-                chat,
-                plain(),
-                not_allowed("not_allowed"),
-            )
-            .await?;
-            lane.refused(SERVICE_ROLE, chat, plain(), not_allowed("not_allowed"))
-                .await?;
-
-            // G2: the service role acting as the person, inside dispatch.
-            let service = RequestContext {
-                user_id: Some(space.owner),
-                is_service_role: true,
-                scoped_claims: None,
-            };
-            lane.refused_directly(service, chat, plain(), |_| {}, not_person("service_role"))
-                .await?;
-            // A job's own token, which acts as its person there.
-            let codex_chat = lane.chat().await?;
-            let codex_send = json!({
-                "promptText": "Read the logs.",
-                "intent": "feature",
-                "runtimeId": space.runtime.to_string(),
-                "metadata": without(lane_metadata(json!({})), &["turnEngine"]),
-            });
-            lane.admitted(codex_chat, &codex_send).await?;
-            let leased = lane.harness.lease(space.runtime).await?;
-            let job_token = leased["controller_token"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("no job token: {leased}"))?
-                .to_string();
-            lane.refused(
-                &job_token,
-                codex_chat,
-                plain(),
-                not_person("not_own_session"),
-            )
-            .await?;
-            // The internal callers that send in the person's name: an automation,
-            // a goal wake-up and a team's plan, which have no trigger.
-            let person = person_context(space.owner);
-            lane.refused_directly(
-                person.clone(),
-                chat,
-                plain(),
-                |request| {
-                    request.trigger = None;
-                    request.allow_silent_automation_decline = true;
-                },
-                not_person("not_own_session"),
-            )
-            .await?;
-            lane.refused_directly(
-                person.clone(),
-                chat,
-                plain(),
-                |request| {
-                    request.trigger = None;
-                    request.goal_wakeup = Some((Uuid::new_v4(), Uuid::new_v4()));
-                },
-                not_person("not_own_session"),
-            )
-            .await?;
-            lane.refused_directly(
-                person.clone(),
-                chat,
-                plain(),
-                |request| request.delegating_job_id = Some(Uuid::new_v4()),
-                not_person("delegated"),
-            )
-            .await?;
-            // Each of their marks refuses on its own, even with the person's own
-            // trigger.
-            for (reason, adjust) in [
-                (
-                    "queued",
-                    adjustment(|request| request.dispatch_queue_entry_id = Some(Uuid::new_v4())),
-                ),
-                (
-                    "goal_wakeup",
-                    adjustment(|request| {
-                        request.goal_wakeup = Some((Uuid::new_v4(), Uuid::new_v4()))
-                    }),
-                ),
-                (
-                    "goal_parent_job",
-                    adjustment(|request| request.goal_parent_job_id = Some(Uuid::new_v4())),
-                ),
-                (
-                    "automation",
-                    adjustment(|request| request.allow_silent_automation_decline = true),
-                ),
-                (
-                    "internal_review",
-                    adjustment(|request| request.allow_internal_review = true),
-                ),
-                (
-                    "received_earlier",
-                    adjustment(|request| {
-                        request.trigger = request.trigger.take().map(|trigger| {
-                            trigger.received_at(Utc::now() - chrono::Duration::seconds(5))
-                        })
-                    }),
-                ),
-            ] {
-                lane.refused_directly(person.clone(), chat, plain(), adjust, not_person(reason))
-                    .await?;
-            }
-
-            // A send with no input, or a device's.
-            lane.refused(
-                &owner,
-                chat,
-                send(without(lane_metadata(json!({})), &["input"])),
-                not_person("not_typed"),
-            )
-            .await?;
-            lane.refused(
-                &owner,
-                chat,
-                send(lane_metadata(json!({
-                    "input": { "kind": "device", "deviceId": "speaker-1" }
-                }))),
-                not_person("not_typed"),
-            )
-            .await?;
-
-            // G3: the claims dispatch takes, and every mark of Instafy's.
-            for (extra, reason) in [
-                (
-                    json!({ "siteIntent": { "previewId": Uuid::new_v4().to_string() } }),
-                    "site_intent",
-                ),
-                (
-                    json!({ "continuesFromBrowserJob": Uuid::new_v4().to_string() }),
-                    "hand_back",
-                ),
-                (
-                    json!({
-                        "retryAutomatic": true,
-                        "retryOfMessageId": Uuid::new_v4().to_string(),
-                    }),
-                    "automatic_retry",
-                ),
-                (
-                    json!({ "retryOfMessageId": Uuid::new_v4().to_string() }),
-                    "resend",
-                ),
-                (json!({ "retryAutomatic": false }), "resend"),
-                (
-                    json!({ "goalContinuation": { "turn": 2 } }),
-                    "goal_continuation",
-                ),
-                (
-                    json!({ "goal_continuation": { "source": "manual_resume" } }),
-                    "goal_continuation",
-                ),
-                (
-                    json!({ "dispatchContent": "Continue this browser task." }),
-                    "dispatch_content",
-                ),
-                (json!({ "dispatch_content": null }), "dispatch_content"),
-                (
-                    json!({ "displayContent": "Octo opened a browser" }),
-                    "display_content",
-                ),
-                (json!({ "display_content": "x" }), "display_content"),
-                (json!({ "composerMessage": "x" }), "display_content"),
-                (json!({ "composer_message": "x" }), "display_content"),
-                (json!({ "browserTransport": "shared" }), "special_dispatch"),
-                (
-                    json!({ "browser_transport": "desktop-personal" }),
-                    "special_dispatch",
-                ),
-                (json!({ "agentThread": { "id": "t" } }), "special_dispatch"),
-                (json!({ "agent_thread": true }), "special_dispatch"),
-                (json!({ "automation": { "id": "a" } }), "special_dispatch"),
-                (json!({ "command": { "type": "goal" } }), "special_dispatch"),
-                (json!({ "linkedThreadId": "t" }), "special_dispatch"),
-                (json!({ "linked_thread_id": "t" }), "special_dispatch"),
-                (
-                    json!({ "controllerDispatch": { "suppressUserMessage": false } }),
-                    "controller_dispatch",
-                ),
-                (
-                    json!({ "controller_dispatch": true }),
-                    "controller_dispatch",
-                ),
-                (
-                    json!({ "spaceReview": { "enforcedBy": "runtime-controller" } }),
-                    "space_review",
-                ),
-                (json!({ "space_review": {} }), "space_review"),
-                (
-                    json!({ "browserRequestOf": format!("job:{}", Uuid::new_v4()) }),
-                    "browser_card",
-                ),
-            ] {
-                lane.refused(&owner, chat, send(lane_metadata(extra)), not_person(reason))
-                    .await?;
-            }
-            // A thread kind on the request.
-            lane.refused(
-                &owner,
-                chat,
-                with(plain(), json!({ "threadKind": "agent" })),
-                not_person("thread_kind"),
-            )
-            .await?;
-
-            // The queue's own sends of a claimed entry, which only an older
-            // controller could have stored: Send now, and a drain.
-            let queued = lane.written().await?;
-            for _ in 0..2 {
-                sql(
-                    lane.pool(),
-                    "insert into conversation_send_queue (
-                     project_id, conversation_id, user_id, status, target_agent_handles, request
-                 ) values ($1, $2, $3, 'queued', array['octo'], $4)",
-                    &[&space.project_id, &chat, &space.owner, &PgJson(plain())],
-                )
-                .await?;
-            }
-            let entries: Vec<Uuid> = lane
-                .pool()
-                .get()
-                .await?
-                .query(
-                    "select id from conversation_send_queue where conversation_id = $1
-                  order by queue_position",
-                    &[&chat],
-                )
-                .await?
-                .iter()
-                .map(|row| row.get(0))
-                .collect();
-            let with_entries = lane.written().await?;
-            assert_eq!(with_entries.queued, queued.queued + 2);
-            lane.refused_at(
-                &owner,
-                format!("/conversations/{chat}/send-queue/{}/dispatch", entries[0]),
-                json!({}),
-                not_person("queued"),
-            )
-            .await?;
-            crate::send_queue::spawn_send_queue_drain(lane.harness.state.clone(), chat);
-            eventually("the drain to refuse the claimed entry", || async {
-                let status: String = sql_one(
-                    lane.pool(),
-                    "select status from conversation_send_queue where id = $1",
-                    &[&entries[1]],
-                )
-                .await?;
-                Ok((status == "failed").then_some(()))
-            })
-            .await?;
-            assert_eq!(lane.written().await?, with_entries);
-            let errors: Vec<String> = lane
-                .pool()
-                .get()
-                .await?
-                .query(
-                    "select coalesce(error_message, '') from conversation_send_queue
-                  where conversation_id = $1 order by queue_position",
-                    &[&chat],
-                )
-                .await?
-                .iter()
-                .map(|row| row.get(0))
-                .collect();
-            assert_eq!(errors.len(), 2);
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// Stage 2, G4 and G5: one plain turn to the sender's own @octo, of a plain
-/// shape. Each refusal writes nothing.
-#[tokio::test]
-async fn stage_two_refuses_anything_but_one_plain_turn_to_octo() -> anyhow::Result<()> {
-    with_lane("lane-plain", |_, _| {}, |lane| async move {
-        let space = lane.space();
-        let chat = lane.chat().await?;
-        let owner = lane.owner();
-        let send = |metadata: JsonValue| lane_send(lane.desktop, metadata);
-        let plain = || send(lane_metadata(json!({})));
-
-        // G4.
-        for (extra, reason) in [
-            (
-                json!({ "agentSelection": { "active": ["octo", "helper"], "mentions": ["octo", "helper"] } }),
-                "targets",
-            ),
-            (
-                json!({ "agentSelection": { "active": ["helper"], "mentions": ["helper"] } }),
-                "not_octo",
-            ),
-            (
-                json!({ "runtimeRouting": { "strategy": "spread" } }),
-                "not_plain_turn",
-            ),
-        ] {
-            lane.refused(&owner, chat, send(lane_metadata(extra)), not_plain(reason))
-                .await?;
-        }
-        lane.refused(
-            &owner,
-            chat,
-            with(plain(), json!({ "planSeed": { "steps": ["one"] } })),
-            not_plain("not_plain_turn"),
-        )
-        .await?;
-        // A message recorded earlier under the same client message id.
-        let client_message_id = Uuid::new_v4().to_string();
-        let (status, recorded) = lane
-            .harness
-            .call(
-                "POST",
-                format!("/conversations/{chat}/messages/record"),
-                Some(&owner),
-                Some(json!({
-                    "content": WORDS,
-                    "clientMessageId": client_message_id,
-                    "metadata": { "input": { "kind": "person" } },
-                })),
-            )
-            .await?;
-        anyhow::ensure!(status == StatusCode::OK, "record: {status} {recorded}");
-        lane.refused(
-            &owner,
-            chat,
-            send(lane_metadata(json!({ "clientMessageId": client_message_id }))),
-            not_plain("recorded_earlier"),
-        )
-        .await?;
-
-        // G5.
-        lane.refused(
-            &owner,
-            chat,
-            with(plain(), json!({ "intent": "terminal_command" })),
-            not_plain("intent"),
-        )
-        .await?;
-        for mode in ["plan_only", "approval_required"] {
-            lane.refused(
-                &owner,
-                chat,
-                send(lane_metadata(json!({ "execution_mode": mode }))),
-                not_plain("execution_mode"),
-            )
-            .await?;
-        }
-        for (extra, reason) in [
-            (json!({ "toolLimits": { "maxSteps": 3 } }), "tool_limits"),
-            (json!({ "repo": { "owner": "o", "name": "n" } }), "repo"),
-            (json!({ "ui": { "requestedPreview": true } }), "requested_preview"),
-            (json!({ "ui": { "requestedPreview": false } }), "requested_preview"),
-            (json!({ "promptText": "/review the diff" }), "command"),
-            (json!({ "promptText": "  \n /compact" }), "command"),
-            (
-                json!({ "promptText": "a".repeat(crate::config::CLAUDE_CODE_LANE_MAX_PROMPT_CHARS + 1) }),
-                "too_long",
-            ),
-        ] {
-            lane.refused(&owner, chat, with(plain(), extra), not_plain(reason))
-                .await?;
-        }
-        // A conversation that is a thread.
-        let thread = Uuid::new_v4();
-        sql(
-            lane.pool(),
-            "insert into conversations (
-                 id, project_id, created_by, metadata, visibility, parent_conversation_id,
-                 root_conversation_id, thread_kind
-             ) values ($1, $2, $3, '{}'::jsonb, 'public', $4, $4, 'agent')",
-            &[&thread, &space.project_id, &space.owner, &chat],
-        )
-        .await?;
-        lane.refused(&owner, thread, plain(), not_plain("thread_kind"))
-            .await?;
-        for (extra, reason) in [
-            (
-                json!({ "attachments": [{ "kind": "image", "storagePath": "chat/a.png" }] }),
-                "attachments",
-            ),
-            (json!({ "writeIntent": false }), "write_intent"),
-            (
-                json!({ "writeScope": { "mode": "read_only", "ownedPaths": [] } }),
-                "write_scope",
-            ),
-            (json!({ "write_scope": null }), "write_scope"),
-            (json!({ "writeScopes": { "octo": ["src/"] } }), "write_scope"),
-            (json!({ "write_scopes": null }), "write_scope"),
-            (json!({ "agentWriteScopes": {} }), "write_scope"),
-            (json!({ "agent_write_scopes": null }), "write_scope"),
-            (
-                json!({ "agentSelection": {
-                    "active": ["octo"], "mentions": ["octo"], "writeScopes": null
-                } }),
-                "write_scope",
-            ),
-            (
-                json!({ "agentSelection": {
-                    "active": ["octo"], "mentions": ["octo"], "write_scopes": { "octo": [] }
-                } }),
-                "write_scope",
-            ),
-        ] {
-            lane.refused(&owner, chat, send(lane_metadata(extra)), not_plain(reason))
-                .await?;
-        }
-        // The longest message is a turn.
-        let longest = with(
-            plain(),
-            json!({ "promptText": "é".repeat(crate::config::CLAUDE_CODE_LANE_MAX_PROMPT_CHARS) }),
-        );
-        lane.admitted(chat, &longest).await?;
-        Ok(())
-    })
-    .await
-}
-
-/// Stage 2, G6 and G7: only the runtime the send names, when it is the
-/// sender's own private computer in this space, ready, without a Personal
-/// Browser, with the attested capability, and idle. Each refusal writes
-/// nothing.
-#[tokio::test]
-async fn stage_two_refuses_any_computer_but_the_senders_own_ready_idle_one() -> anyhow::Result<()> {
-    with_lane(
-        "lane-computer",
-        |_, _| {},
-        |lane| async move {
-            let space = lane.space();
-            let chat = lane.chat().await?;
-            let owner = lane.owner();
-            let on = |runtime: Uuid| lane_send(runtime, lane_metadata(json!({})));
-
-            // No runtime named, though the chat prefers the owner's computer.
-            sql(
-                lane.pool(),
-                "update conversations set metadata = $2 where id = $1",
-                &[
-                    &chat,
-                    &PgJson(json!({ "runtimePreference": {
-                    "runtimeId": lane.desktop.to_string(),
-                    "source": "conversation",
-                    "updatedAt": Utc::now().to_rfc3339(),
-                } })),
-                ],
-            )
-            .await?;
-            lane.refused(
-                &owner,
-                chat,
-                without(on(lane.desktop), &["runtimeId"]),
-                not_ready("no_runtime"),
-            )
-            .await?;
-            // A runtime in another space, and one that does not exist.
-            lane.refused(
-                &owner,
-                chat,
-                on(lane.other_project_runtime),
-                not_ready("runtime_missing"),
-            )
-            .await?;
-            lane.refused(
-                &owner,
-                chat,
-                on(Uuid::new_v4()),
-                not_ready("runtime_missing"),
-            )
-            .await?;
-            // A teammate's computer.
-            lane.refused(
-                &owner,
-                chat,
-                on(lane.member_desktop),
-                not_ready("not_owner"),
-            )
-            .await?;
-            // A hosted runtime that reports the capability.
-            let hosted = lane
-                .computer(
-                    "instafy-cloud",
-                    capabilities(None, lane_ready()),
-                    "ready",
-                    600,
-                )
-                .await?;
-            lane.refused(&owner, chat, on(hosted), not_ready("not_private"))
-                .await?;
-            // A service-owned one.
-            let service_owned = lane
-                .computer(
-                    "self-hosted",
-                    capabilities(Some(lane.service_user), lane_ready()),
-                    "ready",
-                    600,
-                )
-                .await?;
-            lane.refused(&owner, chat, on(service_owned), not_ready("not_owner"))
-                .await?;
-            // A Personal Browser computer of the owner's.
-            let personal_browser = lane
-                .computer(
-                    "self-hosted",
-                    capabilities(
-                        Some(space.owner),
-                        with(
-                            lane_ready(),
-                            json!({ "personalBrowser": {
-                            "enabled": true,
-                            "ownerUserId": space.owner.to_string(),
-                        } }),
-                        ),
-                    ),
-                    "ready",
-                    600,
-                )
-                .await?;
-            lane.refused(
-                &owner,
-                chat,
-                on(personal_browser),
-                not_ready("personal_browser"),
-            )
-            .await?;
-            // Not dispatch-ready: silent, stopped, or without an agent.
-            for (status, seen, extra) in [
-                ("ready", -600, json!({})),
-                ("stopped", 600, json!({})),
-                ("ready", 600, json!({ "agent": false })),
-            ] {
-                let computer = lane
-                    .computer(
-                        "self-hosted",
-                        capabilities(Some(space.owner), with(lane_ready(), extra)),
-                        status,
-                        seen,
-                    )
-                    .await?;
-                lane.refused(&owner, chat, on(computer), not_ready("not_dispatch_ready"))
-                    .await?;
-            }
-            // A missing or unattested capability, or one that is not ready.
-            for (capability, reason) in [
-                (json!({}), "capability_missing"),
-                (
-                    json!({ "claudeCode": { "ready": true } }),
-                    "capability_missing",
-                ),
-                (
-                    json!({ "claudeCode": { "version": 2, "ready": true } }),
-                    "capability_missing",
-                ),
-                (
-                    json!({ "claudeCode": { "version": "1", "ready": true } }),
-                    "capability_missing",
-                ),
-                (
-                    json!({ "claudeCode": { "version": 1, "ready": false } }),
-                    "capability_not_ready",
-                ),
-                (
-                    json!({ "claudeCode": { "version": 1, "ready": "true" } }),
-                    "capability_not_ready",
-                ),
-            ] {
-                let computer = lane
-                    .computer(
-                        "self-hosted",
-                        capabilities(Some(space.owner), capability),
-                        "ready",
-                        600,
-                    )
-                    .await?;
-                lane.refused(&owner, chat, on(computer), not_ready(reason))
-                    .await?;
-            }
-
-            // G7: a job queued for the computer, or leased by it.
-            for leased in [false, true] {
-                let busy = lane.busy_job(lane.desktop, leased).await?;
-                lane.refused(
-                    &owner,
-                    chat,
-                    on(lane.desktop),
-                    (
-                        StatusCode::CONFLICT,
-                        claude_code_lane::MACHINE_BUSY,
-                        "machine_busy",
-                    ),
-                )
-                .await?;
-                sql(
-                    lane.pool(),
-                    "delete from agent_jobs where id = $1",
-                    &[&busy],
-                )
-                .await?;
-            }
-            // The owner's own idle computer takes the turn.
-            lane.admitted(chat, &on(lane.desktop)).await?;
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// G8 and the one-active-turn index: one lane turn per person, across their
-/// computers and chats, while it runs or may still start. A queued turn whose
-/// start window passed still blocks until the sweep ends it, with a refusal
-/// that says so; one whose lease ended blocks neither the gate nor the index.
-#[tokio::test]
-async fn one_lane_turn_per_person() -> anyhow::Result<()> {
-    with_lane(
-        "lane-one-turn",
-        |_, _| {},
-        |lane| async move {
-            let first_chat = lane.chat().await?;
-            let second_chat = lane.chat().await?;
-            let owner = lane.owner();
-            let first = lane
-                .admitted(
-                    first_chat,
-                    &lane_send(lane.desktop, lane_metadata(json!({}))),
-                )
-                .await?;
-            let second = lane_send(lane.second_desktop, lane_metadata(json!({})));
-            let response = lane
-                .refused(
-                    &owner,
-                    second_chat,
-                    second.clone(),
-                    (
-                        StatusCode::CONFLICT,
-                        claude_code_lane::TURN_ACTIVE,
-                        "turn_active",
-                    ),
-                )
-                .await?;
-            assert!(response["message"]
-                .as_str()
-                .is_some_and(|text| !text.is_empty()));
-            // Leased, it still blocks.
-            sql(
-                lane.pool(),
-                "update agent_jobs set status = 'leased', lease_attempts = 1,
-                    leased_by_runtime_id = target_runtime_id, leased_at = now(),
-                    lease_expires_at = now() + interval '2 minutes'
-              where id = $1",
-                &[&first],
-            )
-            .await?;
-            lane.refused(
-                &owner,
-                second_chat,
-                second.clone(),
-                (
-                    StatusCode::CONFLICT,
-                    claude_code_lane::TURN_ACTIVE,
-                    "turn_active",
-                ),
-            )
-            .await?;
-            // Queued and never leased, past its start window.
-            sql(
-                lane.pool(),
-                "update agent_jobs set status = 'queued', lease_attempts = 0,
-                    leased_by_runtime_id = null, leased_at = null, lease_expires_at = null,
-                    trigger_received_at = now() - interval '2 minutes'
-              where id = $1",
-                &[&first],
-            )
-            .await?;
-            lane.refused(
-                &owner,
-                second_chat,
-                second.clone(),
-                (
-                    StatusCode::CONFLICT,
-                    claude_code_lane::TURN_ACTIVE,
-                    claude_code_lane::START_WINDOW_PASSED,
-                ),
-            )
-            .await?;
-            // The index agrees: a second active lane row of the person's fails.
-            let duplicate = sql(
-                lane.pool(),
-                "insert into agent_jobs (project_id, conversation_id, intent, status, payload,
-                                     engine, trigger_received_at)
-             select project_id, conversation_id, intent, 'queued', payload, engine, now()
-               from agent_jobs where id = $1",
-                &[&first],
-            )
-            .await
-            .expect_err("a second active lane turn");
-            let duplicate = duplicate
-                .downcast_ref::<tokio_postgres::Error>()
-                .expect("database error");
-            assert!(
-                claude_code_lane::is_second_active_turn(duplicate),
-                "{duplicate}"
-            );
-            // Once a lease of it ended, it can never start again: neither the
-            // gate nor the index counts it.
-            sql(
-                lane.pool(),
-                "update agent_jobs set lease_attempts = 1 where id = $1",
-                &[&first],
-            )
-            .await?;
-            let next = lane.admitted(second_chat, &second).await?;
-            assert_eq!(
-                lane.job(next).await?.engine.as_deref(),
-                Some(claude_code_lane::ENGINE)
-            );
-            // Another person's turn never counts against the owner's, and the
-            // owner's never against theirs.
-            let member_chat = lane.chat().await?;
-            let (status, response) = lane
-                .send(
-                    &lane.token(lane.space().member),
-                    member_chat,
-                    &lane_send(lane.member_desktop, lane_metadata(json!({}))),
-                )
-                .await?;
-            anyhow::ensure!(status == StatusCode::OK, "member: {status} {response}");
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// Two of a person's sends admitted at once, on two computers in two chats:
-/// one turn starts and the other is refused as G8 refuses it, whichever way
-/// their transactions interleave.
-#[tokio::test]
-async fn two_concurrent_admissions_start_one_turn() -> anyhow::Result<()> {
-    with_lane(
-        "lane-concurrent",
-        |_, _| {},
-        |lane| async move {
-            let (first_chat, second_chat) = (lane.chat().await?, lane.chat().await?);
-            let owner = lane.owner();
-            let before = lane.written().await?;
-            let first = lane_send(lane.desktop, lane_metadata(json!({})));
-            let second = lane_send(lane.second_desktop, lane_metadata(json!({})));
-            let (a, b) = tokio::join!(
-                lane.send(&owner, first_chat, &first),
-                lane.send(&owner, second_chat, &second),
-            );
-            let (a, b) = (a?, b?);
-            let mut statuses = [a.0, b.0];
-            statuses.sort();
-            assert_eq!(
-                statuses,
-                [StatusCode::OK, StatusCode::CONFLICT],
-                "{a:?} {b:?}"
-            );
-            let refused = if a.0 == StatusCode::CONFLICT {
-                &a.1
-            } else {
-                &b.1
-            };
-            assert_eq!(
-                refused["code"],
-                json!(claude_code_lane::TURN_ACTIVE),
-                "{refused}"
-            );
-            let after = lane.written().await?;
-            assert_eq!(after.jobs, before.jobs + 1);
-            assert_eq!(after.messages, before.messages + 1);
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// The index settles two admissions that both passed G8: the second insert
-/// waits for the first transaction, then fails with 23505, which
-/// `enqueue_agent_job_record` answers as G8's own 409.
-#[tokio::test]
-async fn the_index_refuses_a_second_concurrent_insert_as_g8() -> anyhow::Result<()> {
-    with_lane(
-        "lane-index",
-        |_, _| {},
-        |lane| async move {
-            let (first_chat, second_chat) = (lane.chat().await?, lane.chat().await?);
-            let space = lane.space();
-            let owner = person_context(space.owner);
-            let lane_request = |chat: Uuid, runtime: Uuid| {
-                lane.request(
-                    &owner,
-                    chat,
-                    lane_send(runtime, without(lane_metadata(json!({})), &["turnEngine"])),
-                    |request| {
-                        request.claude_code_lane = Some(claude_code_lane::LaneAdmission {
-                            runtime_id: runtime,
-                        });
-                    },
-                )
-            };
-            let first_request = lane_request(first_chat, lane.desktop)?;
-            let second_request = lane_request(second_chat, lane.second_desktop)?;
-
-            let mut first_connection = lane.pool().get().await?;
-            let first = first_connection.transaction().await?;
-            let project = crate::load_project_record(&first, &space.project_id)
-                .await
-                .map_err(|(status, error)| anyhow::anyhow!("{status} {}", error.message))?;
-            let (first_run, first_prompt) =
-                insert_prompt_and_run(&first, &first_request, &owner).await?;
-            let first_job = crate::agent::enqueue_agent_job_record(
-                &first,
-                &project,
-                &owner,
-                &first_request,
-                &first_run,
-                &first_prompt,
-                Some(lane.desktop),
-                None,
-                None,
-                None,
-            )
-            .await
-            .map_err(|(status, error)| anyhow::anyhow!("{status} {}", error.message))?;
-            assert!(first_job.is_some());
-
-            let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel::<i32>();
-            let second_pool = lane.pool().clone();
-            let second_project = project.clone();
-            let second_owner = owner.clone();
-            let second_runtime = lane.second_desktop;
-            let second_insert = tokio::spawn(async move {
-                let mut connection = second_pool.get().await?;
-                let second = connection.transaction().await?;
-                let pid: i32 = second
-                    .query_one("select pg_backend_pid()", &[])
-                    .await?
-                    .get(0);
-                let _ = pid_sender.send(pid);
-                let (run, prompt) =
-                    insert_prompt_and_run(&second, &second_request, &second_owner).await?;
-                let outcome = crate::agent::enqueue_agent_job_record(
-                    &second,
-                    &second_project,
-                    &second_owner,
-                    &second_request,
-                    &run,
-                    &prompt,
-                    Some(second_runtime),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-                anyhow::Ok(
-                    outcome
-                        .map(|_| ())
-                        .map_err(|(status, Json(error))| (status, error)),
-                )
-            });
-            let pid = pid_receiver.await?;
-            eventually("the second insert to wait for the first", || async {
-                let waiting: Option<String> = sql_one(
-                    lane.pool(),
-                    "select wait_event_type from pg_stat_activity where pid = $1",
-                    &[&pid],
-                )
-                .await?;
-                Ok((waiting.as_deref() == Some("Lock")).then_some(()))
-            })
-            .await?;
-            first.commit().await?;
-            let (status, error) = second_insert
-                .await??
-                .err()
-                .ok_or_else(|| anyhow::anyhow!("the second insert was admitted"))?;
-            assert_eq!(
-                (status, error.code.as_deref(), reason_of(&error)),
-                (
-                    StatusCode::CONFLICT,
-                    Some(claude_code_lane::TURN_ACTIVE),
-                    Some("turn_active")
-                ),
-                "{}",
-                error.message
-            );
-            let active: i64 = sql_one(
-                lane.pool(),
-                "select count(*) from agent_jobs where engine = 'claude-code'
-                and payload ->> 'user_id' = $1",
-                &[&space.owner.to_string()],
-            )
-            .await?;
-            assert_eq!(active, 1);
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// A prompt and a run for `request`, as dispatch inserts them before its job.
-async fn insert_prompt_and_run(
-    transaction: &tokio_postgres::Transaction<'_>,
-    request: &DispatchPromptNormalized,
-    context: &RequestContext,
-) -> anyhow::Result<(Uuid, Uuid)> {
-    let (run, prompt) = (Uuid::new_v4(), Uuid::new_v4());
-    transaction
-        .execute(
-            "insert into prompts (id, project_id, conversation_id, user_id, intent, prompt_text,
-                                  metadata)
-             values ($1, $2, $3, $4, 'feature', $5, '{}'::jsonb)",
-            &[
-                &prompt,
-                &request.project_id,
-                &request.conversation_id,
-                &context.user_id,
-                &request.prompt_text,
-            ],
-        )
-        .await?;
-    transaction
-        .execute(
-            "insert into runs (id, project_id, conversation_id, prompt_id, run_type, status,
-                               progress, progress_stage, metadata)
-             values ($1, $2, $3, $4, 'prompt', 'queued', 0, 'agent:queued', '{}'::jsonb)",
-            &[&run, &request.project_id, &request.conversation_id, &prompt],
-        )
-        .await?;
-    Ok((run, prompt))
-}
-
-/// A claimed send never starts a conversation: the routes that create one
-/// are refused in Stage 1, and a `POST /dispatch-prompt` that names a new
-/// conversation id in Stage 2, whose conversation insert rolls back.
-#[tokio::test]
-async fn a_new_conversation_is_refused_and_rolled_back() -> anyhow::Result<()> {
-    with_lane(
-        "lane-new-chat",
-        |_, _| {},
-        |lane| async move {
-            let space = lane.space();
-            let owner = lane.owner();
-            let body = lane_send(lane.desktop, lane_metadata(json!({})));
-            lane.refused_at(
-                &owner,
-                format!("/projects/{}/conversations", space.project_id),
-                body.clone(),
-                not_person("new_conversation"),
-            )
-            .await?;
-            let dispatch = with(
-                body.clone(),
-                json!({ "projectId": space.project_id.to_string() }),
-            );
-            lane.refused_at(
-                &owner,
-                "/dispatch-prompt".to_string(),
-                dispatch.clone(),
-                not_person("new_conversation"),
-            )
-            .await?;
-            let named = Uuid::new_v4();
-            lane.refused_at(
-                &owner,
-                "/dispatch-prompt".to_string(),
-                with(
-                    dispatch.clone(),
-                    json!({ "conversationId": named.to_string() }),
-                ),
-                not_person("new_conversation"),
-            )
-            .await?;
-            let kept: i64 = sql_one(
-                lane.pool(),
-                "select (select count(*) from conversations where id = $1)
-                  + (select count(*) from conversation_participants where conversation_id = $1)",
-                &[&named],
-            )
-            .await?;
-            assert_eq!(kept, 0, "the conversation insert rolled back");
-            // The same route to a conversation that exists takes the turn.
-            let chat = lane.chat().await?;
-            let (status, response) = lane
-                .harness
-                .call(
-                    "POST",
-                    "/dispatch-prompt",
-                    Some(&owner),
-                    Some(with(
-                        dispatch,
-                        json!({ "conversationId": chat.to_string() }),
-                    )),
-                )
-                .await?;
-            anyhow::ensure!(status == StatusCode::OK, "dispatch: {status} {response}");
-            let job = Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())?;
-            assert_eq!(
-                lane.job(job).await?.engine.as_deref(),
-                Some(claude_code_lane::ENGINE)
-            );
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// In a chat whose device grants name someone else, a claimed send is
-/// refused before it is recorded, where an ordinary one would be recorded and
-/// start nothing. The grant's own person's lane turn there holds no grant.
-#[tokio::test]
-async fn a_granted_chat_refuses_someone_elses_claim_before_recording_it() -> anyhow::Result<()> {
-    with_lane(
-        "lane-granted-chat",
-        |config, space| config.device_grants = DeviceGrantUsers::Only(vec![space.member]),
-        |lane| async move {
-            let space = lane.space();
-            let chat = lane.chat().await?;
-            let member_octo = {
-                let mut connection = lane.pool().get().await?;
-                let transaction = connection.transaction().await?;
-                let profile = crate::ai_agents::load_or_create_octo_agent_profile(
-                    &transaction,
-                    &space.member,
-                )
-                .await
-                .map_err(|(status, error)| anyhow::anyhow!("{status} {}", error.message))?;
-                transaction.commit().await?;
-                profile.id
-            };
-            sql(
-                lane.pool(),
-                "insert into project_provider_devices (
-                     project_id, provider_id, provider_family_id, device_id, owner_user_id
-                 ) values ($1, $2, $2, $3, $4)",
-                &[&space.project_id, &DEVICE_PROVIDER, &DEVICE, &space.member],
-            )
-            .await?;
-            let grant = Uuid::new_v4();
-            sql(
-                lane.pool(),
-                "insert into agent_device_grants (
-                     id, project_id, user_id, agent_id, provider_id, device_id, tool_ids,
-                     conversation_id, not_before
-                 ) values ($1, $2, $3, $4, $5, $6, $7, $8, now() - interval '1 hour')",
-                &[
-                    &grant,
-                    &space.project_id,
-                    &space.member,
-                    &member_octo,
-                    &DEVICE_PROVIDER,
-                    &DEVICE,
-                    &vec!["device.state.read".to_string()],
-                    &chat,
-                ],
-            )
-            .await?;
-
-            lane.refused(
-                &lane.owner(),
-                chat,
-                lane_send(lane.desktop, lane_metadata(json!({}))),
-                (
-                    StatusCode::CONFLICT,
-                    claude_code_lane::CONVERSATION_GRANTED,
-                    "conversation_granted",
-                ),
-            )
-            .await?;
-            // The same send without the claim is recorded and starts nothing.
-            let before = lane.written().await?;
-            let (status, response) = lane
-                .send(
-                    &lane.owner(),
-                    chat,
-                    &lane_send(
-                        lane.desktop,
-                        without(lane_metadata(json!({})), &["turnEngine"]),
-                    ),
-                )
-                .await?;
-            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
-            assert_eq!(response["status"], json!("recorded"));
-            assert_eq!(lane.written().await?.messages, before.messages + 1);
-
-            // The grant's own person: a lane turn, holding no grant.
-            let member = lane.token(space.member);
-            let (status, response) = lane
-                .send(
-                    &member,
-                    chat,
-                    &lane_send(lane.member_desktop, lane_metadata(json!({}))),
-                )
-                .await?;
-            anyhow::ensure!(status == StatusCode::OK, "member: {status} {response}");
-            let job = lane
-                .job(Uuid::parse_str(
-                    response["jobId"].as_str().unwrap_or_default(),
-                )?)
-                .await?;
-            assert_eq!(job.engine.as_deref(), Some(claude_code_lane::ENGINE));
-            assert_eq!(job.grant_ids, None);
-            // Their ordinary turn there holds it, as before.
-            lane.end_jobs().await?;
-            let (status, response) = lane
-                .send(
-                    &member,
-                    chat,
-                    &lane_send(
-                        lane.member_desktop,
-                        without(lane_metadata(json!({})), &["turnEngine"]),
-                    ),
-                )
-                .await?;
-            anyhow::ensure!(
-                status == StatusCode::OK,
-                "member codex: {status} {response}"
-            );
-            let job = lane
-                .job(Uuid::parse_str(
-                    response["jobId"].as_str().unwrap_or_default(),
-                )?)
-                .await?;
-            assert_eq!(job.engine, None);
-            assert_eq!(job.grant_ids, Some(vec![grant]));
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// A claimed send to a chat whose @octo is busy gets the busy chat's own 409,
-/// whether or not it asked for the idle check, and is never queued instead.
-#[tokio::test]
-async fn a_busy_chat_refuses_a_claim_and_never_queues_it() -> anyhow::Result<()> {
-    with_lane(
-        "lane-busy-chat",
-        |_, _| {},
-        |lane| async move {
-            let chat = lane.chat().await?;
-            let owner = lane.owner();
-            // An ordinary turn of @octo's, on another computer.
-            lane.admitted(
-                chat,
-                &json!({
-                    "promptText": "Read the logs.",
-                    "intent": "feature",
-                    "runtimeId": lane.space().runtime.to_string(),
-                    "metadata": without(lane_metadata(json!({})), &["turnEngine"]),
-                }),
-            )
-            .await?;
-            for expected_idle in [true, false] {
-                let before = lane.written().await?;
-                let body = with(
-                    lane_send(lane.desktop, lane_metadata(json!({}))),
-                    json!({ "expectedLaneIdle": expected_idle }),
-                );
-                let (status, response) = lane.send(&owner, chat, &body).await?;
-                assert_eq!(status, StatusCode::CONFLICT, "{response}");
-                assert_eq!(response["code"], json!("dispatch_lane_busy"), "{response}");
-                assert_eq!(lane.written().await?, before, "nothing written or queued");
-            }
-            // An ordinary send there is still queued.
-            let before = lane.written().await?;
-            let (status, response) = lane
-                .send(
-                    &owner,
-                    chat,
-                    &json!({
-                        "promptText": "And the next thing.",
-                        "intent": "feature",
-                        "expectedLaneIdle": true,
-                        "metadata": without(lane_metadata(json!({})), &["turnEngine"]),
-                    }),
-                )
-                .await?;
-            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
-            assert_eq!(response["status"], json!("queued"));
-            assert_eq!(lane.written().await?.queued, before.queued + 1);
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// Intake: the claim is taken from every caller, the service role included,
-/// and only `claude-code` claims the lane; anything else is a 400 that writes
-/// nothing. Both spellings are the claim.
-#[tokio::test]
-async fn the_claim_is_taken_from_every_caller() -> anyhow::Result<()> {
-    with_lane(
-        "lane-intake",
-        |_, _| {},
-        |lane| async move {
-            let chat = lane.chat().await?;
-            let owner = lane.owner();
-            let unknown = (
-                StatusCode::BAD_REQUEST,
-                claude_code_lane::TURN_ENGINE_UNKNOWN,
-                "unknown_engine",
-            );
-            for (token, value) in [
-                (owner.as_str(), json!("codex")),
-                (owner.as_str(), json!(null)),
-                (owner.as_str(), json!("CLAUDE-CODE")),
-                (SERVICE_ROLE, json!("codex")),
-            ] {
-                lane.refused(
-                    token,
-                    chat,
-                    lane_send(lane.desktop, lane_metadata(json!({ "turnEngine": value }))),
-                    unknown,
-                )
-                .await?;
-            }
-            // The other spelling claims the lane too.
-            lane.refused(
-                &lane.token(lane.space().guest),
-                chat,
-                lane_send(
-                    lane.desktop,
-                    without(
-                        lane_metadata(json!({ "turn_engine": "claude-code" })),
-                        &["turnEngine"],
-                    ),
-                ),
-                not_allowed("not_allowed"),
-            )
-            .await?;
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// The claim never rides a queue entry or an automation: the queue refuses
-/// one to enqueue or to restore an edit, and automations refuse one in their
-/// prompt metadata on create and update. Dispatch refuses an automation's run
-/// that carries one from before, which has no trigger.
-#[tokio::test]
-async fn a_claim_never_rides_a_queue_entry_or_an_automation() -> anyhow::Result<()> {
-    with_lane(
-        "lane-queue-automation",
-        |_, _| {},
-        |lane| async move {
-            let space = lane.space();
-            let chat = lane.chat().await?;
-            let owner = lane.owner();
-            let claimed = lane_send(lane.desktop, lane_metadata(json!({})));
-            lane.refused_at(
-                &owner,
-                format!("/conversations/{chat}/send-queue"),
-                json!({ "message": claimed, "clientSendId": Uuid::new_v4().to_string() }),
-                not_person("queued"),
-            )
-            .await?;
-            lane.refused_at(
-                &owner,
-                format!(
-                    "/conversations/{chat}/send-queue/{}/restore",
-                    Uuid::new_v4()
-                ),
-                json!({
-                    "expectedUpdatedAt": Utc::now().to_rfc3339(),
-                    "message": claimed,
-                    "targetAgentHandles": ["octo"],
-                }),
-                not_person("queued"),
-            )
-            .await?;
-
-            let automation = json!({
-                "name": "Nightly build check",
-                "scheduleKind": "hourly",
-                "promptText": WORDS,
-                "status": "paused",
-            });
-            lane.refused_at(
-                &owner,
-                format!("/projects/{}/automations", space.project_id),
-                with(
-                    automation.clone(),
-                    json!({ "metadata": { "turnEngine": "claude-code" } }),
-                ),
-                not_person("automation"),
-            )
-            .await?;
-            let (status, created) = lane
-                .harness
-                .call(
-                    "POST",
-                    format!("/projects/{}/automations", space.project_id),
-                    Some(&owner),
-                    Some(automation),
-                )
-                .await?;
-            anyhow::ensure!(status == StatusCode::OK, "create: {status} {created}");
-            let automation_id = created["id"].as_str().unwrap_or_default().to_string();
-            let (status, updated) = lane
-                .harness
-                .call(
-                    "PATCH",
-                    format!("/automations/{automation_id}"),
-                    Some(&owner),
-                    Some(json!({ "metadata": { "turn_engine": "claude-code" } })),
-                )
-                .await?;
-            assert_eq!(
-                (
-                    status,
-                    updated["code"].as_str(),
-                    updated["details"]["reason"].as_str()
-                ),
-                (
-                    StatusCode::FORBIDDEN,
-                    Some(claude_code_lane::TURN_NOT_PERSON),
-                    Some("automation")
-                ),
-                "{updated}"
-            );
-            let stored = lane
-                .metadata_of(
-                    "select metadata from automations where id = $1",
-                    Uuid::parse_str(&automation_id)?,
-                )
-                .await?;
-            assert_never_holds(&stored, &["turnEngine", "turn_engine"], "automation");
-            // An automation's run, as automations dispatch it.
-            lane.refused_directly(
-                person_context(space.owner),
-                chat,
-                claimed,
-                |request| {
-                    request.trigger = None;
-                    request.thread_kind = Some("automation".to_string());
-                    request.allow_silent_automation_decline = true;
-                },
-                not_person("not_own_session"),
-            )
-            .await?;
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// A client's copy of the controller's lane stamps never persists: dispatch
-/// drops it from an ordinary send, and recording a message drops it and the
-/// claim, for the service role too.
-#[tokio::test]
-async fn a_clients_lane_stamps_never_persist() -> anyhow::Result<()> {
-    with_lane(
-        "lane-stamps",
-        |_, _| {},
-        |lane| async move {
-            let chat = lane.chat().await?;
-            let owner = lane.owner();
-            let forged = json!({
-                "claudeCode": { "version": 1 },
-                "claude_code": { "version": 1 },
-                "claudeCodeFailure": "plan_limit",
-                "prompt_metadata": { "claudeCode": { "version": 1 }, "turnEngine": "claude-code" },
-            });
-            let job = lane
-                .admitted(
-                    chat,
-                    &lane_send(
-                        lane.desktop,
-                        without(lane_metadata(forged.clone()), &["turnEngine"]),
-                    ),
-                )
-                .await?;
-            let job = lane.job(job).await?;
-            assert_eq!(job.engine, None);
-            assert_eq!(job.payload["metadata"]["aiAccessMode"], json!("byoc"));
-            let run_id = job.run_id.expect("run");
-            let message = lane
-            .metadata_of(
-                "select metadata from conversation_messages where run_id = $1 and role = 'user'",
-                run_id,
-            )
-            .await?;
-            let run = lane
-                .metadata_of("select metadata from runs where id = $1", run_id)
-                .await?;
-            for (what, value) in [
-                ("payload", &job.payload),
-                ("message", &message),
-                ("run", &run),
-            ] {
-                assert_never_holds(
-                    value,
-                    &[
-                        "claudeCode",
-                        "claude_code",
-                        "claudeCodeFailure",
-                        "turnEngine",
-                    ],
-                    what,
-                );
-            }
-
-            for token in [owner.as_str(), SERVICE_ROLE] {
-                let (status, recorded) = lane
-                    .harness
-                    .call(
-                        "POST",
-                        format!("/conversations/{chat}/messages/record"),
-                        Some(token),
-                        Some(json!({
-                            "content": "A note.",
-                            "metadata": with(forged.clone(), json!({
-                                "turnEngine": "claude-code",
-                                "turn_engine": "claude-code",
-                                "details": { "claudeCodeFailure": "not_signed_in" },
-                                "keep": true,
-                            })),
-                        })),
-                    )
-                    .await?;
-                anyhow::ensure!(status == StatusCode::OK, "record: {status} {recorded}");
-                assert_eq!(recorded["metadata"]["keep"], json!(true), "{recorded}");
-                let id = Uuid::parse_str(recorded["id"].as_str().unwrap_or_default())?;
-                let stored = lane
-                    .metadata_of(
-                        "select metadata from conversation_messages where id = $1",
-                        id,
-                    )
-                    .await?;
-                assert_never_holds(
-                    &stored,
-                    &[
-                        "claudeCode",
-                        "claude_code",
-                        "claudeCodeFailure",
-                        "turnEngine",
-                        "turn_engine",
-                    ],
-                    token,
-                );
-            }
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// A claimed send in a group chat is never turned into an evaluation and
-/// gets no preamble, where the same send without the claim is one.
-#[tokio::test]
-async fn a_claimed_group_send_is_never_an_evaluation() -> anyhow::Result<()> {
-    with_lane(
-        "lane-group-chat",
-        |_, _| {},
-        |lane| async move {
-            let ambient = json!({ "agentSelection": { "active": ["octo"], "mentions": [] } });
-            let codex_chat = lane.chat().await?;
-            let codex = lane
-                .admitted(
-                    codex_chat,
-                    &json!({
-                        "promptText": WORDS,
-                        "intent": "feature",
-                        "runtimeId": lane.space().runtime.to_string(),
-                        "metadata": without(lane_metadata(ambient.clone()), &["turnEngine"]),
-                    }),
-                )
-                .await?;
-            let codex = lane.job(codex).await?;
-            assert!(
-                crate::group_participation::job_payload_marks_agent_evaluation(&codex.payload),
-                "the chat is a group chat: {}",
-                codex.payload
-            );
-            assert_ne!(codex.payload["prompt_text"], json!(WORDS));
-
-            let chat = lane.chat().await?;
-            let job = lane
-                .admitted(chat, &lane_send(lane.desktop, lane_metadata(ambient)))
-                .await?;
-            let job = lane.job(job).await?;
-            assert_eq!(job.engine.as_deref(), Some(claude_code_lane::ENGINE));
-            assert!(!crate::group_participation::job_payload_marks_agent_evaluation(&job.payload));
-            assert_eq!(job.payload["prompt_text"], json!(WORDS));
-            let message = lane
-            .metadata_of(
-                "select metadata from conversation_messages where run_id = $1 and role = 'user'",
-                job.run_id.expect("run"),
-            )
-            .await?;
-            assert_never_holds(
-                &message,
-                &["groupParticipation", "groupAiParticipants"],
-                "message",
-            );
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// JobTrigger: a person on the lane list gets a kind for their own typed
-/// message, a resend gets none, and someone off the list none. Device grants
-/// stay off for someone only on the lane list.
-#[tokio::test]
-async fn lane_users_get_a_kind_and_never_device_grants() -> anyhow::Result<()> {
-    with_lane("lane-trigger", |_, _| {}, |lane| async move {
-        let space = lane.space();
-        let typed = |extra: JsonValue| {
-            json!({
-                "promptText": "@helper look at the door",
-                "intent": "feature",
-                "metadata": with(json!({
-                    "clientMessageId": Uuid::new_v4().to_string(),
-                    "agentSelection": { "active": [], "mentions": ["helper"] },
-                    "input": { "kind": "person" },
-                }), extra),
-            })
-        };
-        let lane = &lane;
-        let kind_of = |job: Uuid| async move {
-            let job = lane.job(job).await?;
-            let message = lane
-                .metadata_of(
-                    "select metadata from conversation_messages where run_id = $1 and role = 'user'",
-                    job.run_id.expect("run"),
-                )
-                .await?;
-            anyhow::Ok((message.get("trigger").cloned(), job))
-        };
-        let (kind, job) = kind_of(lane.admitted(space.log, &typed(json!({}))).await?).await?;
-        assert_eq!(kind, Some(json!("person")));
-        assert_eq!(job.grant_ids, None);
-        lane.end_jobs().await?;
-        let resent = typed(json!({ "retryOfMessageId": Uuid::new_v4().to_string() }));
-        let (kind, _) = kind_of(lane.admitted(space.log, &resent).await?).await?;
-        assert_eq!(kind, None);
-        lane.end_jobs().await?;
-        let (status, response) = lane
-            .send(&lane.token(space.guest), space.log, &typed(json!({})))
-            .await?;
-        anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
-        let guest_job = Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())?;
-        let (kind, _) = kind_of(guest_job).await?;
-        assert_eq!(kind, None);
-        lane.end_jobs().await?;
-
-        // Device grants are still off for the owner: the routes answer 404,
-        // and a grant left in the conversation gives their turn nothing.
-        let (status, _) = lane
-            .harness
-            .call(
-                "GET",
-                format!("/projects/{}/device-grants", space.project_id),
-                Some(&lane.owner()),
-                None,
-            )
-            .await?;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        sql(
-            lane.pool(),
-            "insert into project_provider_devices (
-                 project_id, provider_id, provider_family_id, device_id, owner_user_id
-             ) values ($1, $2, $2, $3, $4)",
-            &[&space.project_id, &DEVICE_PROVIDER, &DEVICE, &space.owner],
-        )
-        .await?;
-        sql(
-            lane.pool(),
-            "insert into agent_device_grants (
-                 id, project_id, user_id, agent_id, provider_id, device_id, tool_ids,
-                 conversation_id, not_before
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, now() - interval '1 hour')",
-            &[
-                &Uuid::new_v4(),
-                &space.project_id,
-                &space.owner,
-                &space.owner_agent,
-                &DEVICE_PROVIDER,
-                &DEVICE,
-                &vec!["device.state.read".to_string()],
-                &space.log,
-            ],
-        )
-        .await?;
-        let (kind, job) = kind_of(lane.admitted(space.log, &typed(json!({}))).await?).await?;
-        assert_eq!(kind, Some(json!("person")));
-        assert_eq!(job.grant_ids, None);
-        Ok(())
-    })
-    .await
-}
-
-/// The CHECK on `agent_jobs.engine` rejects every lane row it forbids: one
-/// with a credential, grants, a parent, a plan group or a role, one with no
-/// receive time, and an engine that is not `claude-code`.
-#[tokio::test]
-async fn the_engine_check_rejects_every_forbidden_lane_row() -> anyhow::Result<()> {
-    with_lane(
-        "lane-check",
-        |_, _| {},
-        |lane| async move {
-            let space = lane.space();
-            let chat = lane.chat().await?;
-            let parent = lane.busy_job(lane.space().other_machine, false).await?;
-            let insert = |extra_columns: &'static str, extra_values: &'static str| {
-                format!(
-                    "insert into agent_jobs (project_id, conversation_id, intent, status, payload,
-                                         engine, trigger_received_at{extra_columns})
-                 values ($1, $2, 'feature', 'completed', '{{}}'::jsonb, $3, now(){extra_values})"
-                )
-            };
-            let credential = lane.owner_credential;
-            let cases: Vec<(
-                String,
-                Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>,
-            )> = vec![
-                (
-                    insert(", credential_id", ", $4"),
-                    vec![Box::new(credential)],
-                ),
-                (
-                    insert(", grant_ids", ", $4"),
-                    vec![Box::new(vec![Uuid::new_v4()])],
-                ),
-                (insert(", parent_job_id", ", $4"), vec![Box::new(parent)]),
-                (
-                    insert(", plan_group_id", ", $4"),
-                    vec![Box::new(Uuid::new_v4())],
-                ),
-                (
-                    insert(", agent_role", ", $4"),
-                    vec![Box::new("worker".to_string())],
-                ),
-            ];
-            for (statement, extra) in &cases {
-                let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                    vec![&space.project_id, &chat, &claude_code_lane::ENGINE];
-                for value in extra {
-                    params.push(value.as_ref());
-                }
-                let error = lane
-                    .pool()
-                    .get()
-                    .await?
-                    .execute(statement.as_str(), &params)
-                    .await
-                    .expect_err(statement);
-                assert_check_violation(&error, statement);
-            }
-            let no_receive_time = "insert into agent_jobs (project_id, conversation_id, intent,
-                                                        status, payload, engine,
-                                                        trigger_received_at)
-                               values ($1, $2, 'feature', 'completed', '{}'::jsonb, $3, null)";
-            let error = lane
-                .pool()
-                .get()
-                .await?
-                .execute(
-                    no_receive_time,
-                    &[&space.project_id, &chat, &claude_code_lane::ENGINE],
-                )
-                .await
-                .expect_err("no receive time");
-            assert_check_violation(&error, "no receive time");
-            let error = lane
-                .pool()
-                .get()
-                .await?
-                .execute(
-                    insert("", "").as_str(),
-                    &[&space.project_id, &chat, &"codex"],
-                )
-                .await
-                .expect_err("another engine");
-            assert_check_violation(&error, "another engine");
-            // The one shape it allows.
-            lane.pool()
-                .get()
-                .await?
-                .execute(
-                    insert("", "").as_str(),
-                    &[&space.project_id, &chat, &claude_code_lane::ENGINE],
-                )
-                .await?;
-            Ok(())
-        },
-    )
-    .await
-}
-
-fn assert_check_violation(error: &tokio_postgres::Error, what: &str) {
-    assert_eq!(
-        error.code(),
-        Some(&tokio_postgres::error::SqlState::CHECK_VIOLATION),
-        "{what}: {error}"
-    );
-    assert_eq!(
-        error.as_db_error().and_then(|error| error.constraint()),
-        Some("agent_jobs_engine_check"),
-        "{what}: {error}"
-    );
-}
-
-/// The builders of a lane job's payload and of its reply: the reply is
-/// stamped as a lane turn's, and a lane payload never carries an evaluation.
-#[test]
-fn the_payload_and_reply_builders_keep_a_lane_turn_its_own() {
-    let reply = json!({ "source": "agent", "outcome": "completed" });
-    let stamped = crate::agent::stamp_ai_access_mode_from_job_payload(
-        reply.clone(),
-        &json!({ "metadata": {
-            "aiAccessMode": "claude-code",
-            "managedAiUsed": false,
-            "claudeCode": { "version": 1 },
-        } }),
-    );
-    assert_eq!(stamped["source"], json!("agent"));
-    assert_lane_stamps(&stamped, "reply");
-    let byoc = crate::agent::stamp_ai_access_mode_from_job_payload(
-        reply.clone(),
-        &json!({ "metadata": { "aiAccessMode": "byoc" } }),
-    );
-    assert_eq!(byoc["aiAccessMode"], json!("byoc"));
-    assert!(byoc.get("claudeCode").is_none());
-
-    let user = Uuid::new_v4();
-    let project = crate::ProjectRecord {
-        id: Uuid::new_v4(),
-        org_id: None,
-        name: None,
-        sandbox_session_id: None,
-        project_type: None,
-        owner_user_id: Some(user),
-        _status: None,
-    };
-    let context = person_context(user);
-    let mut request = crate::dispatch::normalize_dispatch_request(
-        serde_json::from_value(json!({
-            "projectId": project.id.to_string(),
-            "conversationId": Uuid::new_v4().to_string(),
-            "promptText": WORDS,
-            "metadata": { "input": { "kind": "person" }, "writeIntent": true },
-        }))
-        .expect("request"),
-    )
-    .expect("normalized");
-    crate::group_participation::inject_skill_mode_agent_evaluation_metadata(&mut request.metadata);
-    let (run, prompt) = (Uuid::new_v4(), Uuid::new_v4());
-    let evaluation =
-        crate::agent::build_agent_job_payload(&project, &context, &request, &run, &prompt, None)
-            .expect("an evaluation payload");
-    assert_ne!(evaluation["prompt_text"], json!(WORDS), "the preamble");
-    request.claude_code_lane = Some(claude_code_lane::LaneAdmission {
-        runtime_id: Uuid::new_v4(),
-    });
-    let (status, _) =
-        crate::agent::build_agent_job_payload(&project, &context, &request, &run, &prompt, None)
-            .expect_err("a lane evaluation");
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-}
-
-/// A lane job's payload names the lane's one workspace mode as its
-/// `executionMode`, which runtime-agent reads, whatever workspace mode the
-/// client's metadata asked for under any of the keys dispatch reads it by.
-/// Any other job keeps the mode dispatch resolved from it.
-#[test]
-fn a_lane_payload_names_one_workspace_mode_whatever_the_client_asks() {
-    let user = Uuid::new_v4();
-    let project = crate::ProjectRecord {
-        id: Uuid::new_v4(),
-        org_id: None,
-        name: None,
-        sandbox_session_id: None,
-        project_type: None,
-        owner_user_id: Some(user),
-        _status: None,
-    };
-    let context = person_context(user);
-    let (run, prompt) = (Uuid::new_v4(), Uuid::new_v4());
-    for (key, mode) in [
-        ("workspaceMode", "shared_read"),
-        ("workspaceMode", "isolated_write"),
-        ("executionMode", "isolated_write"),
-        ("workspace_mode", "shared_read"),
-        ("workspaceMode", "shared_write"),
-    ] {
-        let mut metadata = json!({ "input": { "kind": "person" }, "writeIntent": true });
-        metadata[key] = json!(mode);
-        let mut request = crate::dispatch::normalize_dispatch_request(
-            serde_json::from_value(json!({
-                "projectId": project.id.to_string(),
-                "conversationId": Uuid::new_v4().to_string(),
-                "promptText": WORDS,
-                "metadata": metadata,
-            }))
-            .expect("request"),
-        )
-        .expect("normalized");
-        assert_eq!(request.workspace_mode, mode, "{key}");
-        let codex = crate::agent::build_agent_job_payload(
-            &project, &context, &request, &run, &prompt, None,
-        )
-        .expect("a payload");
-        assert_eq!(codex["executionMode"], json!(mode), "{key}");
-        request.claude_code_lane = Some(claude_code_lane::LaneAdmission {
-            runtime_id: Uuid::new_v4(),
-        });
-        let lane = crate::agent::build_agent_job_payload(
-            &project, &context, &request, &run, &prompt, None,
-        )
-        .expect("a lane payload");
-        assert_eq!(
-            lane["executionMode"],
-            json!("shared_write"),
-            "{key}: {mode}"
-        );
-        assert_never_holds(&lane["metadata"], &["workspaceMode", "executionMode"], key);
-    }
-}
-
-/// A lane job's payload, as dispatch builds it for an admitted turn, is the
-/// one runtime-contracts records (claude_code_lane_fixtures.json), its ids
-/// aside. runtime-agent's lane tests run that same payload through
-/// `LaneJob::of`, so a payload key the controller renames, adds or drops
-/// fails here instead of every lane turn.
-#[test]
-fn a_lane_job_payload_is_the_one_runtime_contracts_records() {
+async fn a_lane_job_payload_is_the_one_runtime_contracts_records() -> anyhow::Result<()> {
     /// `value` with each id of `ids` replaced by its placeholder.
     fn with_placeholders(value: &mut JsonValue, ids: &[(Uuid, &str)]) {
         match value {
@@ -3288,141 +1606,1184 @@ fn a_lane_job_payload_is_the_one_runtime_contracts_records() {
         }
     }
 
-    let fixtures: JsonValue = serde_json::from_str(include_str!(
-        "../../runtime-contracts/src/claude_code_lane_fixtures.json"
-    ))
-    .expect("the lane fixtures are JSON");
-    let recorded = &fixtures["laneJobPayload"];
-    let user = Uuid::new_v4();
-    let project = crate::ProjectRecord {
-        id: Uuid::new_v4(),
-        org_id: None,
-        name: None,
-        sandbox_session_id: None,
-        project_type: None,
-        owner_user_id: Some(user),
-        _status: None,
-    };
-    let (conversation, prompt, run, agent, runtime) = (
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-    );
-    // The send Studio makes, as the route hands it to dispatch.
-    let mut request = crate::dispatch::normalize_dispatch_request(
-        serde_json::from_value(json!({
-            "projectId": project.id.to_string(),
-            "conversationId": conversation.to_string(),
-            "sessionId": null,
-            "promptText": recorded["prompt_text"],
-            "intent": "feature",
-            "metadata": lane_metadata(json!({})),
-            "runtimeId": runtime.to_string(),
-            "preferRuntime": false,
-        }))
-        .expect("request"),
+    with_lane(
+        "lane-recorded-payload",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let octo = lane.agent_of(space.owner, "octo").await?;
+            let (status, chosen) = lane
+                .harness
+                .call(
+                    "PATCH",
+                    format!("/me/agents/{octo}"),
+                    Some(&lane.owner()),
+                    Some(json!({ "provider": "claude-code" })),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "Claude Code: {status} {chosen}");
+            let fixtures: JsonValue = serde_json::from_str(include_str!(
+                "../../runtime-contracts/src/claude_code_lane_fixtures.json"
+            ))?;
+            let recorded = &fixtures["laneJobPayload"];
+            // The send Studio makes to @octo, the first in its chat.
+            let chat = lane.chat().await?;
+            let job = lane
+                .job(
+                    lane.admitted(
+                        chat,
+                        &json!({
+                            "promptText": recorded["prompt_text"],
+                            "intent": "feature",
+                            "metadata": metadata_for(&["octo"], json!({})),
+                        }),
+                    )
+                    .await?,
+                )
+                .await?;
+            assert_lane_job(&job, space.owner, octo, "@octo's turn");
+            let prompt = Uuid::parse_str(job.payload["prompt_id"].as_str().unwrap_or_default())?;
+            let mut payload = job.payload.clone();
+            with_placeholders(
+                &mut payload,
+                &[
+                    (space.project_id, "<project_id>"),
+                    (space.owner, "<user_id>"),
+                    (chat, "<conversation_id>"),
+                    (prompt, "<prompt_id>"),
+                    (job.run_id.expect("run"), "<run_id>"),
+                    (octo, "<agent_id>"),
+                ],
+            );
+            assert_eq!(&payload, recorded);
+            Ok(())
+        },
     )
-    .expect("normalized");
-    assert_eq!(request.runtime_source.as_deref(), Some("conversation"));
-    // Stage 1 takes the claim; Stage 2 admits the turn on its computer and
-    // stamps it.
-    assert!(claude_code_lane::take_claim(&mut request.metadata).expect("the claim"));
-    claude_code_lane::stamp(request.metadata.as_object_mut().expect("metadata"));
-    request.claude_code_lane = Some(claude_code_lane::LaneAdmission {
-        runtime_id: runtime,
-    });
-    // What dispatch then adds for the computer, the sender's own @octo and the
-    // chat (its `merge_runtime_preference` and `inject_agent_target_metadata`
-    // are its own), and the turn's write scope.
-    let metadata = request.metadata.as_object_mut().expect("metadata");
-    metadata.insert(
-        "runtimePreference".to_string(),
-        json!({
-            "runtimeId": runtime.to_string(),
-            "source": "conversation",
-            "updatedAt": "2026-11-13T16:41:07.512345+00:00",
-        }),
-    );
-    metadata.insert(
-        "agent".to_string(),
-        json!({
-            "handle": "octo",
-            "id": agent.to_string(),
-            "displayName": "Octo",
-            "avatarSeed": "octo",
-        }),
-    );
-    metadata.insert(
-        crate::dispatch::CONVERSATION_VISIBILITY_KEY.to_string(),
-        json!("public"),
-    );
-    let octo = ["octo".to_string()];
-    let scopes = crate::agent_write_scopes::build_agent_write_scope_plan(
-        &request.metadata,
-        &request.prompt_text,
-        &octo,
-        &Default::default(),
-    );
-    crate::agent_write_scopes::apply_agent_write_scope_metadata(
-        &mut request.metadata,
-        scopes.get("octo"),
-    );
-
-    let mut payload = crate::agent::build_agent_job_payload(
-        &project,
-        &person_context(user),
-        &request,
-        &run,
-        &prompt,
-        None,
-    )
-    .expect("a lane payload");
-    with_placeholders(
-        &mut payload,
-        &[
-            (project.id, "<project_id>"),
-            (user, "<user_id>"),
-            (conversation, "<conversation_id>"),
-            (prompt, "<prompt_id>"),
-            (run, "<run_id>"),
-            (agent, "<agent_id>"),
-            (runtime, "<runtime_id>"),
-        ],
-    );
-    assert_eq!(&payload, recorded);
+    .await
 }
 
-/// A lane session's conversation state, as the runtime saves it.
-fn lane_session(runtime: Uuid, session: Uuid) -> JsonValue {
-    json!({
-        "provider": "claude-code",
-        "version": 1,
-        "sessionId": session.to_string(),
-        "runtimeId": runtime.to_string(),
-    })
-}
-
-/// Lease (docs/Local-Engine-Turns.md 2.4): only the computer a lane turn was
-/// admitted on leases it, while it attests the turn's person as its owner
-/// and a ready `claudeCode`: never a hosted runtime that reports the
-/// capability, even pinned to it, the person's other computer, a teammate's
-/// or a Personal Browser runtime. The lease adds no envelope, metering bind,
-/// job token, history or extras, and keeps the internal workspace token. A
-/// lane turn is leased once, and never after its minute to start.
+/// An agent's AI (docs/Local-Engine-Turns.md 11.3): its owner makes any agent
+/// of theirs, @octo included, a Claude Code agent from their own session, new
+/// or saved, which drops its connection, and its turns are then lane turns.
+/// Clearing its connection moves it back to Instafy AI, @octo to its own, and
+/// choosing a connection makes it that connection's. The choice is refused,
+/// leaving every agent as it was, with a connection in the same body, to
+/// someone the switch leaves out, and to the service role and a job's token,
+/// neither of which is the person's own session.
 #[tokio::test]
-async fn only_its_own_ready_computer_leases_a_lane_turn_once() -> anyhow::Result<()> {
+async fn any_agent_of_a_person_the_switch_covers_can_use_claude_code() -> anyhow::Result<()> {
+    with_lane(
+        "lane-agent-ai",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let owner = lane.owner();
+            let claude_code = || -> (String, Option<Uuid>) { ("claude-code".to_string(), None) };
+            // A Codex job's token, which acts as its person there.
+            let codex_chat = lane.chat().await?;
+            lane.admitted(codex_chat, &octo_send(space.runtime)).await?;
+            let leased = lane.harness.lease(space.runtime).await?;
+            let job_token = leased["controller_token"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("no job token: {leased}"))?
+                .to_string();
+
+            // A new agent that uses Claude Code.
+            let (status, created) = lane
+                .harness
+                .call(
+                    "POST",
+                    "/me/agents",
+                    Some(&owner),
+                    Some(json!({
+                        "provider": "claude-code",
+                        "handle": "reviewer",
+                        "displayName": "Reviewer",
+                    })),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{created}");
+            assert_eq!(created["provider"], json!("claude-code"), "{created}");
+            assert_eq!(created["credentialId"], JsonValue::Null, "{created}");
+            let reviewer = Uuid::parse_str(created["id"].as_str().unwrap_or_default())?;
+            assert_eq!(lane.ai_of(reviewer).await?, claude_code());
+            // Its turns are lane turns.
+            let job = lane
+                .admitted(
+                    lane.chat().await?,
+                    &lane_send(metadata_for(&["reviewer"], json!({}))),
+                )
+                .await?;
+            assert_lane_job(
+                &lane.job(job).await?,
+                space.owner,
+                reviewer,
+                "the new agent's turn",
+            );
+
+            let choose = |agent: Uuid, body: JsonValue| {
+                let lane = &lane;
+                let owner = owner.clone();
+                async move {
+                    let (status, chosen) = lane
+                        .harness
+                        .call(
+                            "PATCH",
+                            format!("/me/agents/{agent}"),
+                            Some(&owner),
+                            Some(body.clone()),
+                        )
+                        .await?;
+                    anyhow::ensure!(status == StatusCode::OK, "{body}: {status} {chosen}");
+                    anyhow::Ok(chosen)
+                }
+            };
+            // A saved agent with a connection drops it.
+            let helper = space.owner_agent;
+            let chosen = choose(helper, json!({ "provider": "claude-code" })).await?;
+            assert_eq!(chosen["provider"], json!("claude-code"), "{chosen}");
+            assert_eq!(chosen["credentialId"], JsonValue::Null, "{chosen}");
+            assert_eq!(lane.ai_of(helper).await?, claude_code());
+            // Clearing its connection, which it no longer has, moves it to
+            // Instafy AI...
+            let chosen = choose(helper, json!({ "credentialId": null })).await?;
+            assert_eq!(chosen["provider"], json!("openai"), "{chosen}");
+            assert_eq!(lane.ai_of(helper).await?, ("openai".to_string(), None));
+            // ...and @octo to its own.
+            let octo = lane.agent_of(space.owner, "octo").await?;
+            choose(octo, json!({ "provider": "claude-code" })).await?;
+            assert_eq!(lane.ai_of(octo).await?, claude_code());
+            let chosen = choose(octo, json!({ "credentialId": null })).await?;
+            assert_eq!(chosen["provider"], json!("assistant"), "{chosen}");
+            assert_eq!(lane.ai_of(octo).await?, ("assistant".to_string(), None));
+            // A connection makes it that connection's, and Claude Code again
+            // drops it.
+            let chosen = choose(
+                reviewer,
+                json!({ "credentialId": lane.owner_credential.to_string() }),
+            )
+            .await?;
+            assert_eq!(chosen["provider"], json!("openai"), "{chosen}");
+            assert_eq!(
+                lane.ai_of(reviewer).await?,
+                ("openai".to_string(), Some(lane.owner_credential))
+            );
+            choose(reviewer, json!({ "provider": "claude-code" })).await?;
+            assert_eq!(lane.ai_of(reviewer).await?, claude_code());
+
+            // Refused: a connection in the same body, even none; the service
+            // role; and a job's token.
+            let owner_agents = lane.agents_of(space.owner).await?;
+            let credential = lane.owner_credential.to_string();
+            for (token, method, path, body, refusal) in [
+                (
+                    owner.as_str(),
+                    "POST",
+                    "/me/agents".to_string(),
+                    json!({ "provider": "claude-code", "handle": "second", "credentialId": credential }),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    owner.as_str(),
+                    "PATCH",
+                    format!("/me/agents/{helper}"),
+                    json!({ "provider": "claude-code", "credentialId": credential }),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    owner.as_str(),
+                    "PATCH",
+                    format!("/me/agents/{helper}"),
+                    json!({ "provider": "claude-code", "credentialId": null }),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (
+                    SERVICE_ROLE,
+                    "POST",
+                    "/me/agents".to_string(),
+                    json!({ "provider": "claude-code", "handle": "second" }),
+                    StatusCode::UNAUTHORIZED,
+                ),
+                (
+                    SERVICE_ROLE,
+                    "PATCH",
+                    format!("/me/agents/{helper}"),
+                    json!({ "provider": "claude-code" }),
+                    StatusCode::UNAUTHORIZED,
+                ),
+                (
+                    job_token.as_str(),
+                    "POST",
+                    "/me/agents".to_string(),
+                    json!({ "provider": "claude-code", "handle": "second" }),
+                    StatusCode::UNAUTHORIZED,
+                ),
+                (
+                    job_token.as_str(),
+                    "PATCH",
+                    format!("/me/agents/{helper}"),
+                    json!({ "provider": "claude-code" }),
+                    StatusCode::UNAUTHORIZED,
+                ),
+            ] {
+                let (status, response) = lane
+                    .harness
+                    .call(method, path.clone(), Some(token), Some(body.clone()))
+                    .await?;
+                assert_eq!(status, refusal, "{method} {path} {body}: {response}");
+            }
+            assert_eq!(lane.agents_of(space.owner).await?, owner_agents);
+            assert_eq!(lane.ai_of(helper).await?, ("openai".to_string(), None));
+            assert_eq!(lane.ai_of(reviewer).await?, claude_code());
+
+            // Refused to someone the switch leaves out, new or saved.
+            let guest = lane.token(space.guest);
+            let guest_helper = lane.agent_of(space.guest, "helper").await?;
+            let guest_ai = lane.ai_of(guest_helper).await?;
+            let guest_agents = lane.agents_of(space.guest).await?;
+            for (method, path, body) in [
+                (
+                    "POST",
+                    "/me/agents".to_string(),
+                    json!({ "provider": "claude-code", "handle": CLAUDE }),
+                ),
+                (
+                    "PATCH",
+                    format!("/me/agents/{guest_helper}"),
+                    json!({ "provider": "claude-code" }),
+                ),
+            ] {
+                let (status, response) = lane
+                    .harness
+                    .call(method, path.clone(), Some(&guest), Some(body))
+                    .await?;
+                assert_eq!(
+                    (status, response["code"].as_str()),
+                    (
+                        StatusCode::FORBIDDEN,
+                        Some(claude_code_lane::TURN_NOT_ALLOWED)
+                    ),
+                    "{method} {path}: {response}"
+                );
+            }
+            assert_eq!(lane.ai_of(guest_helper).await?, guest_ai);
+            assert_eq!(lane.agents_of(space.guest).await?, guest_agents);
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// What a Claude Code agent cannot take (docs/Local-Engine-Turns.md 11.4,
+/// 11.6) is refused with its reason before a prompt, run, message, job or
+/// ledger row is written, and never runs on another engine: a team plan,
+/// attachments, one of Instafy's own features, an execution mode that waits
+/// for an approval, a `/` command and too long a message. While the switch
+/// does not cover its owner, it takes no turn at all. A send to it and to
+/// another agent is refused whole. The longest message is a turn, and a
+/// terminal command, which is no AI turn, runs as it does for any agent.
+#[tokio::test]
+async fn a_turn_claude_code_cannot_take_is_refused_before_anything_is_written() -> anyhow::Result<()>
+{
+    with_lane(
+        "lane-refused",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let owner = lane.owner();
+            let chat = lane.chat().await?;
+            let plain = || lane_send(lane_metadata(json!({})));
+            for (body, reason) in [
+                (
+                    with(plain(), json!({ "planSeed": { "steps": ["one"] } })),
+                    "team_plan",
+                ),
+                (
+                    lane_send(lane_metadata(json!({
+                        "attachments": [{ "kind": "image", "storagePath": "chat/a.png" }],
+                    }))),
+                    "attachments",
+                ),
+                (
+                    with(plain(), json!({ "toolLimits": { "maxSteps": 3 } })),
+                    "instafy_feature",
+                ),
+                (
+                    with(plain(), json!({ "repo": { "owner": "o", "name": "n" } })),
+                    "instafy_feature",
+                ),
+                (
+                    with(plain(), json!({ "ui": { "requestedPreview": true } })),
+                    "instafy_feature",
+                ),
+                (
+                    lane_send(lane_metadata(json!({ "execution_mode": "approval_required" }))),
+                    "execution_mode",
+                ),
+                (
+                    with(plain(), json!({ "promptText": "/review the diff" })),
+                    "command",
+                ),
+                (
+                    with(plain(), json!({ "promptText": "  \n /compact" })),
+                    "command",
+                ),
+                (
+                    with(
+                        plain(),
+                        json!({ "promptText": "a".repeat(crate::config::CLAUDE_CODE_LANE_MAX_PROMPT_CHARS + 1) }),
+                    ),
+                    "too_long",
+                ),
+            ] {
+                lane.refused(&owner, chat, body, unsupported(reason))
+                    .await?;
+            }
+            // Sent to it and to another agent, the whole send is refused.
+            lane.refused(
+                &owner,
+                chat,
+                with(
+                    lane_send(metadata_for(&[CLAUDE, "helper"], json!({}))),
+                    json!({ "toolLimits": { "maxSteps": 3 } }),
+                ),
+                unsupported("instafy_feature"),
+            )
+            .await?;
+            // A Claude Code agent whose owner the switch does not cover.
+            sql(
+                lane.pool(),
+                "insert into user_agents (user_id, credential_id, provider, handle, avatar_seed)
+                 values ($1, null, $2, $3, 'hatchling:5')",
+                &[&space.guest, &claude_code_lane::PROVIDER, &CLAUDE],
+            )
+            .await?;
+            lane.refused(&lane.token(space.guest), chat, plain(), not_allowed())
+                .await?;
+
+            // The longest message is a turn.
+            let longest = with(
+                plain(),
+                json!({ "promptText": "é".repeat(crate::config::CLAUDE_CODE_LANE_MAX_PROMPT_CHARS) }),
+            );
+            let job = lane.job(lane.admitted(chat, &longest).await?).await?;
+            assert_lane_job(&job, space.owner, lane.owner_claude, "the longest message");
+            // A terminal command is no AI turn: it runs as it would for any
+            // agent, on the runtime it names.
+            let command = lane
+                .job(
+                    lane.admitted(
+                        chat,
+                        &with(
+                            plain(),
+                            json!({
+                                "intent": "terminal_command",
+                                "promptText": "npm test",
+                                "runtimeId": space.runtime.to_string(),
+                            }),
+                        ),
+                    )
+                    .await?,
+                )
+                .await?;
+            assert_eq!(command.engine, None);
+            assert_eq!(command.target_runtime_id, Some(space.runtime));
+            assert_never_holds(&command.payload, &["claudeCode"], "a terminal command");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A Claude Code agent's turn can be held to the whole space or to none of
+/// it, which its runtime runs read-only (docs/Local-Engine-Turns.md 11.4,
+/// 11.12). A turn whose planned write scope would own part of the space, or
+/// coordinate its writes with other agents writing at once, is refused with
+/// the reason `write_scope` before anything is written: a send with write
+/// intent to it and another agent, owned paths given for it beside another
+/// agent or alone, and an explicit scope that is no scope. A read-only scope,
+/// given or planned for a send to several agents without write intent, is a
+/// turn, and so is the whole space beside an agent that only reads; the
+/// payload names the scope.
+#[tokio::test]
+async fn a_claude_code_turn_held_to_part_of_the_space_is_refused_before_anything_is_written(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-write-scope",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let owner = lane.owner();
+            let chat = lane.chat().await?;
+            let both = |extra: JsonValue| lane_send(metadata_for(&[CLAUDE, "helper"], extra));
+            let both_with_scopes = |scopes: JsonValue| {
+                both(json!({
+                    "agentSelection": {
+                        "active": [CLAUDE, "helper"],
+                        "mentions": [CLAUDE, "helper"],
+                        "writeScopes": scopes,
+                    },
+                }))
+            };
+            for body in [
+                both(json!({})),
+                both_with_scopes(json!({ "claude": ["src/"], "helper": ["docs/"] })),
+                lane_send(lane_metadata(
+                    json!({ "writeScope": { "ownedPaths": ["src/"] } }),
+                )),
+                lane_send(lane_metadata(
+                    json!({ "writeScopes": { "claude": "../escape" } }),
+                )),
+            ] {
+                lane.refused(&owner, chat, body, unsupported("write_scope"))
+                    .await?;
+            }
+
+            for (what, body, scope) in [
+                (
+                    "an explicit read-only scope",
+                    lane_send(lane_metadata(
+                        json!({ "writeScope": { "mode": "read_only" } }),
+                    )),
+                    "read_only",
+                ),
+                (
+                    "two agents without write intent",
+                    both(json!({ "writeIntent": false })),
+                    "read_only",
+                ),
+                (
+                    "beside an agent that only reads",
+                    both_with_scopes(json!({ "helper": "read_only" })),
+                    "unscoped",
+                ),
+            ] {
+                let (status, response) = lane.send(&owner, chat, &body).await?;
+                anyhow::ensure!(status == StatusCode::OK, "{what}: {status} {response}");
+                let (lane_jobs, _) = lane.jobs_of(&response).await?;
+                assert_eq!(lane_jobs.len(), 1, "{what}: {response}");
+                let job = &lane_jobs[0];
+                assert_lane_job(job, space.owner, lane.owner_claude, what);
+                assert_eq!(
+                    job.payload["metadata"]["writeScope"]["mode"],
+                    json!(scope),
+                    "{what}: {}",
+                    job.payload
+                );
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Whoever or whatever started it no longer matters
+/// (docs/Local-Engine-Turns.md 11.4, 11.6): a resend, by hand or by Studio, a
+/// message with no input or a device's, a goal's next step, the service role
+/// acting for the person, a Codex job's own token and a send that starts its
+/// chat each become a turn of the person's own Claude Code agent, as the
+/// message they type does.
+#[tokio::test]
+async fn whoever_started_it_a_turn_claude_code_can_take_is_admitted() -> anyhow::Result<()> {
+    with_lane(
+        "lane-whoever",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let chat = lane.chat().await?;
+            let is_lane_turn = |job: Job, what: &str| {
+                assert_lane_job(&job, space.owner, lane.owner_claude, what);
+            };
+            for (what, metadata) in [
+                (
+                    "a resend",
+                    lane_metadata(json!({ "retryOfMessageId": Uuid::new_v4().to_string() })),
+                ),
+                (
+                    "Studio's automatic resend",
+                    lane_metadata(json!({
+                        "retryAutomatic": true,
+                        "retryOfMessageId": Uuid::new_v4().to_string(),
+                    })),
+                ),
+                ("no input", without(lane_metadata(json!({})), &["input"])),
+                (
+                    "a device's input",
+                    lane_metadata(
+                        json!({ "input": { "kind": "device", "deviceId": "speaker-1" } }),
+                    ),
+                ),
+            ] {
+                let job = lane.admitted(chat, &lane_send(metadata)).await?;
+                is_lane_turn(lane.job(job).await?, what);
+            }
+            // A goal's next step, which its wake-up sends in its person's name
+            // with no trigger.
+            let job = lane
+                .dispatched_directly(
+                    person_context(space.owner),
+                    chat,
+                    lane_send(lane_metadata(json!({
+                        "goalContinuation": { "turn": 2, "source": "controller" },
+                    }))),
+                    |request| request.trigger = None,
+                )
+                .await?;
+            is_lane_turn(lane.job(job).await?, "a goal's next step");
+            // The service role acting for the person.
+            let job = lane
+                .dispatched_directly(
+                    RequestContext {
+                        user_id: Some(space.owner),
+                        is_service_role: true,
+                        scoped_claims: None,
+                    },
+                    chat,
+                    lane_send(lane_metadata(json!({}))),
+                    |_| {},
+                )
+                .await?;
+            is_lane_turn(lane.job(job).await?, "the service role for the person");
+            // A Codex job's own token, which acts as its person, never starts
+            // one: an agent's job reads what teammates wrote, so its words
+            // could be theirs (11.5).
+            let codex_chat = lane.chat().await?;
+            lane.admitted(codex_chat, &octo_send(space.runtime)).await?;
+            let leased = lane.harness.lease(space.runtime).await?;
+            let job_token = leased["controller_token"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("no job token: {leased}"))?
+                .to_string();
+            lane.refused(
+                &job_token,
+                codex_chat,
+                lane_send(lane_metadata(json!({}))),
+                unsupported("delegated"),
+            )
+            .await?;
+            // Nor can it make an automation of a Claude Code agent's, whose
+            // prompt would be its words. (A job's token can change only an
+            // automation's schedule or status, whatever its agents.)
+            let before = lane.written().await?;
+            let (status, response) = lane
+                .harness
+                .call(
+                    "POST",
+                    format!("/projects/{}/automations", space.project_id),
+                    Some(&job_token),
+                    Some(json!({
+                        "name": "From a job",
+                        "promptText": WORDS,
+                        "scheduleKind": "hourly",
+                        "intervalHours": 24,
+                        "timezone": "UTC",
+                        "runtimeMode": "auto",
+                        "metadata": { "agentSelection": { "active": [CLAUDE], "mentions": [CLAUDE] } },
+                    })),
+                )
+                .await?;
+            assert_eq!(
+                (status, response["details"]["reason"].as_str()),
+                (StatusCode::UNPROCESSABLE_ENTITY, Some("delegated")),
+                "{response}"
+            );
+            assert_eq!(lane.written().await?, before, "a job's automation wrote something");
+            // A send that starts its chat.
+            let (status, response) = lane
+                .harness
+                .call(
+                    "POST",
+                    "/dispatch-prompt",
+                    Some(&lane.owner()),
+                    Some(with(
+                        lane_send(lane_metadata(json!({}))),
+                        json!({ "projectId": space.project_id.to_string() }),
+                    )),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "dispatch: {status} {response}");
+            let job = Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())?;
+            is_lane_turn(lane.job(job).await?, "a send that starts its chat");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A message to a Claude Code agent whose turn waits goes to the send queue,
+/// as for any busy agent (docs/Local-Engine-Turns.md 11.7), and once that
+/// turn ends the drain sends it as its person's, to the same agent: a turn
+/// that waits for their computer in its turn.
+#[tokio::test]
+async fn a_message_to_a_claude_code_agent_whose_turn_waits_is_queued_and_drained_after_it(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-queue",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (chat, waiting) = lane.lane_turn().await?;
+            let before = lane.written().await?;
+            let (status, response) = lane
+                .send(
+                    &lane.owner(),
+                    chat,
+                    &with(
+                        lane_send(lane_metadata(json!({}))),
+                        json!({ "expectedLaneIdle": true }),
+                    ),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            assert_eq!(response["status"], json!("queued"), "{response}");
+            let after = lane.written().await?;
+            assert_eq!((after.queued, after.jobs), (before.queued + 1, before.jobs));
+            let entry: Uuid = sql_one(
+                lane.pool(),
+                "select id from conversation_send_queue where conversation_id = $1",
+                &[&chat],
+            )
+            .await?;
+
+            // The waiting turn ends, and the drain sends the queued message.
+            lane.end_job(waiting).await?;
+            crate::send_queue::recover_send_queue_batch(&lane.harness.state, None)
+                .await
+                .map_err(|(status, error)| anyhow::anyhow!("drain: {status} {}", error.message))?;
+            let run = eventually("the queued message to start a run", || async {
+                sql_one::<Option<Uuid>>(
+                    lane.pool(),
+                    "select dispatched_run_id from conversation_send_queue where id = $1",
+                    &[&entry],
+                )
+                .await
+            })
+            .await?;
+            let drained: Uuid = sql_one(
+                lane.pool(),
+                "select id from agent_jobs where run_id = $1",
+                &[&run],
+            )
+            .await?;
+            assert_lane_job(
+                &lane.job(drained).await?,
+                space.owner,
+                lane.owner_claude,
+                "the drained message",
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A turn that waits for its person's computer keeps only that person's own
+/// agent busy in a shared chat: a teammate's send to their own @claude there
+/// is admitted at once, never queued behind it (11.7).
+#[tokio::test]
+async fn a_waiting_lane_turn_keeps_no_teammates_agent_busy() -> anyhow::Result<()> {
+    with_lane(
+        "lane-waiting-busy",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (chat, _waiting) = lane.lane_turn().await?;
+            let (status, response) = lane
+                .send(
+                    &lane.token(space.member),
+                    chat,
+                    &with(
+                        lane_send(lane_metadata(json!({}))),
+                        json!({ "expectedLaneIdle": true }),
+                    ),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            assert_eq!(
+                sql_one::<i64>(
+                    lane.pool(),
+                    "select count(*) from conversation_send_queue where conversation_id = $1",
+                    &[&chat],
+                )
+                .await?,
+                0,
+                "the teammate's send was queued: {response}"
+            );
+            let job = Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())?;
+            assert_lane_job(
+                &lane.job(job).await?,
+                space.member,
+                lane.member_claude,
+                "the teammate's own turn",
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A message that waits in the send queue behind its own person's waiting
+/// Claude Code turn waits with it, and holds up nobody else (11.7): a
+/// teammate's send to their own @claude is admitted at once, and the drain
+/// leaves the parked message queued until its person's turn is no longer
+/// waiting.
+#[tokio::test]
+async fn a_message_parked_behind_a_waiting_turn_holds_up_nobody_else() -> anyhow::Result<()> {
+    with_lane(
+        "lane-parked",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (chat, _waiting) = lane.lane_turn().await?;
+            let parked_send = with(
+                lane_send(lane_metadata(json!({}))),
+                json!({ "expectedLaneIdle": true }),
+            );
+            let (status, response) = lane.send(&lane.owner(), chat, &parked_send).await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            assert_eq!(response["status"], json!("queued"), "{response}");
+            let parked: Uuid = sql_one(
+                lane.pool(),
+                "select id from conversation_send_queue where conversation_id = $1",
+                &[&chat],
+            )
+            .await?;
+
+            let (status, response) = lane
+                .send(
+                    &lane.token(space.member),
+                    chat,
+                    &with(
+                        lane_send(lane_metadata(json!({}))),
+                        json!({ "expectedLaneIdle": true }),
+                    ),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let job = Uuid::parse_str(response["jobId"].as_str().unwrap_or_default())
+                .map_err(|_| anyhow::anyhow!("the teammate's send was queued: {response}"))?;
+            assert_lane_job(
+                &lane.job(job).await?,
+                space.member,
+                lane.member_claude,
+                "the teammate's own turn",
+            );
+
+            crate::send_queue::recover_send_queue_batch(&lane.harness.state, None)
+                .await
+                .map_err(|(status, error)| anyhow::anyhow!("drain: {status} {}", error.message))?;
+            assert_eq!(
+                sql_one::<String>(
+                    lane.pool(),
+                    "select status from conversation_send_queue where id = $1",
+                    &[&parked],
+                )
+                .await?,
+                "queued",
+                "the parked message left the queue while its turn waited"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// An automation an agent's job made never runs on Claude Code, even once
+/// its agent moves there: its prompt is that agent's words (11.5). Its run is
+/// refused with a reason, and no lane turn starts.
+#[tokio::test]
+async fn an_automation_an_agents_job_made_never_runs_on_claude_code() -> anyhow::Result<()> {
+    with_lane(
+        "lane-agent-made",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let codex_chat = lane.chat().await?;
+            lane.admitted(codex_chat, &octo_send(space.runtime)).await?;
+            let leased = lane.harness.lease(space.runtime).await?;
+            let job_token = leased["controller_token"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("no job token: {leased}"))?
+                .to_string();
+            let (status, created) = lane
+                .harness
+                .call(
+                    "POST",
+                    format!("/projects/{}/automations", space.project_id),
+                    Some(&job_token),
+                    Some(json!({
+                        "name": "Made by an agent",
+                        "promptText": WORDS,
+                        "scheduleKind": "hourly",
+                        "intervalHours": 24,
+                        "timezone": "UTC",
+                        "runtimeMode": "auto",
+                        "metadata": { "agentSelection": { "active": ["helper"], "mentions": ["helper"] } },
+                    })),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "automation: {status} {created}");
+            let automation = Uuid::parse_str(created["id"].as_str().unwrap_or_default())?;
+            // Its agent moves to Claude Code.
+            sql(
+                lane.pool(),
+                "update user_agents set provider = 'claude-code', credential_id = null
+                  where id = $1",
+                &[&space.owner_agent],
+            )
+            .await?;
+            lane.run_automation(automation).await?;
+            let (last_error, thread): (Option<String>, Option<Uuid>) = {
+                let row = lane
+                    .pool()
+                    .get()
+                    .await?
+                    .query_one(
+                        "select last_error, conversation_id from automations where id = $1",
+                        &[&automation],
+                    )
+                    .await?;
+                (row.get(0), row.get(1))
+            };
+            assert!(
+                last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("An agent made this automation")),
+                "{last_error:?}"
+            );
+            if let Some(thread) = thread {
+                assert!(lane.jobs_in(thread).await?.is_empty(), "a turn started");
+            }
+            // Its owner saves it, as Studio's editor does, with no metadata:
+            // its words are theirs now, and it runs on Claude Code.
+            let (status, response) = lane
+                .harness
+                .call(
+                    "PATCH",
+                    format!("/automations/{automation}"),
+                    Some(&lane.owner()),
+                    Some(json!({ "name": "Made by an agent, saved by its owner" })),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "save: {status} {response}");
+            assert_eq!(
+                sql_one::<Option<JsonValue>>(
+                    lane.pool(),
+                    "select metadata -> 'madeByAnAgentsJob' from automations where id = $1",
+                    &[&automation],
+                )
+                .await?,
+                None
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A Claude Code agent's job holds no Instafy AI reserve (crate::credits):
+/// in a send to it and to an agent on Instafy AI, the other's failure finds
+/// nothing else holding the prompt's reserve, so it is given back.
+#[tokio::test]
+async fn a_lane_turn_never_holds_the_instafy_ai_reserve() -> anyhow::Result<()> {
+    with_lane(
+        "lane-reserve",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (chat, waiting) = lane.lane_turn().await?;
+            let prompt: Uuid = sql_one(
+                lane.pool(),
+                "select prompt_id from agent_jobs where id = $1",
+                &[&waiting],
+            )
+            .await?;
+            let sibling = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into agent_jobs (id, project_id, conversation_id, prompt_id, intent,
+                                         status, payload)
+                 values ($1, $2, $3, $4, 'feature', 'failed', '{}'::jsonb)",
+                &[&sibling, &space.project_id, &chat, &prompt],
+            )
+            .await?;
+            let mut connection = lane.pool().get().await?;
+            let transaction = connection.transaction().await?;
+            let held = crate::credits::other_instafy_ai_turns_hold_reserve(
+                &transaction,
+                &space.project_id,
+                &prompt,
+                &sibling,
+            )
+            .await
+            .map_err(|(status, Json(error))| anyhow::anyhow!("{status} {}", error.message))?;
+            transaction.rollback().await?;
+            assert!(!held, "the waiting lane turn held the Instafy AI reserve");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A teammate's mention of @claude reaches the teammate's own @claude
+/// (docs/Local-Engine-Turns.md 11.5): their turn, on their own Claude Code,
+/// which only their own computer leases. Two people's turns wait and run
+/// apart: the owner's runs on the owner's computer while the member's does.
+#[tokio::test]
+async fn a_teammates_mention_reaches_only_their_own_claude_code_agent() -> anyhow::Result<()> {
+    with_lane(
+        "lane-teammate",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            // In the owner's chat, the member mentions @claude.
+            let chat = lane.chat().await?;
+            let member_turn = lane
+                .admitted_as(
+                    &lane.token(space.member),
+                    chat,
+                    &lane_send(lane_metadata(json!({}))),
+                )
+                .await?;
+            assert_lane_job(
+                &lane.job(member_turn).await?,
+                space.member,
+                lane.member_claude,
+                "the member's turn",
+            );
+            for computer in [lane.desktop, lane.second_desktop] {
+                lane.leases_nothing(computer, "the owner's computer")
+                    .await?;
+            }
+            lane.lease_one(lane.member_desktop, member_turn).await?;
+            // The owner's own turn there runs on the owner's computer
+            // meanwhile.
+            let owner_turn = lane
+                .admitted(chat, &lane_send(lane_metadata(json!({}))))
+                .await?;
+            assert_lane_job(
+                &lane.job(owner_turn).await?,
+                space.owner,
+                lane.owner_claude,
+                "the owner's turn",
+            );
+            lane.leases_nothing(lane.member_desktop, "the member's computer")
+                .await?;
+            lane.lease_one(lane.desktop, owner_turn).await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A send to a Claude Code agent and to an agent with a connection, without
+/// write intent, makes two jobs (docs/Local-Engine-Turns.md 11.6), each
+/// read-only: the lane one, with this agent's part of the message, no
+/// connection and no runtime pin, and the other as it would be without it,
+/// on its connection and the runtime the send named. Each run says its own
+/// AI, and the person's message and prompt, which are not every target's,
+/// carry no lane stamp.
+#[tokio::test]
+async fn a_send_to_a_claude_code_agent_and_another_runs_each_on_its_own_ai() -> anyhow::Result<()> {
+    with_lane(
+        "lane-mixed",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let chat = lane.chat().await?;
+            let before = lane.written().await?;
+            let (status, response) = lane
+                .send(
+                    &lane.owner(),
+                    chat,
+                    &json!({
+                        "promptText": WORDS,
+                        "intent": "feature",
+                        "runtimeId": space.runtime.to_string(),
+                        "metadata": metadata_for(&[CLAUDE, "helper"], json!({
+                            "writeIntent": false,
+                            "agentPromptSegments": {
+                                "claude": "Fix the build.",
+                                "helper": "Review the docs.",
+                            },
+                        })),
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let (lane_jobs, other_jobs) = lane.jobs_of(&response).await?;
+            assert_eq!((lane_jobs.len(), other_jobs.len()), (1, 1), "{response}");
+            let (claude, helper) = (&lane_jobs[0], &other_jobs[0]);
+            assert_lane_job(claude, space.owner, lane.owner_claude, "@claude's job");
+            assert_eq!(claude.payload["prompt_text"], json!("Fix the build."));
+            for job in [claude, helper] {
+                assert_eq!(job.payload["writeIntent"], json!(false), "{}", job.payload);
+                assert_eq!(
+                    job.payload["metadata"]["writeScope"]["mode"],
+                    json!("read_only"),
+                    "{}",
+                    job.payload
+                );
+            }
+            assert_eq!(helper.engine, None);
+            assert_eq!(helper.credential_id, Some(lane.owner_credential));
+            assert_eq!(helper.target_runtime_id, Some(space.runtime));
+            assert_eq!(helper.payload["prompt_text"], json!("Review the docs."));
+            assert_eq!(helper.payload["metadata"]["aiAccessMode"], json!("byoc"));
+            assert_never_holds(&helper.payload, &["claudeCode"], "@helper's job");
+
+            let run_of = |job: &Job| job.run_id.expect("run");
+            let claude_run = lane
+                .metadata_of("select metadata from runs where id = $1", run_of(claude))
+                .await?;
+            assert_lane_stamps(&claude_run, "@claude's run");
+            let helper_run = lane
+                .metadata_of("select metadata from runs where id = $1", run_of(helper))
+                .await?;
+            assert_eq!(helper_run["aiAccessMode"], json!("byoc"), "{helper_run}");
+            assert!(helper_run.get("claudeCode").is_none(), "{helper_run}");
+            for (what, query) in [
+                (
+                    "the message",
+                    "select m.metadata from conversation_messages m
+                      join runs r on r.prompt_id = (select prompt_id from runs where id = $1)
+                     where m.run_id = r.id and m.role = 'user' limit 1",
+                ),
+                (
+                    "the prompt",
+                    "select p.metadata from prompts p join runs r on r.prompt_id = p.id
+                      where r.id = $1",
+                ),
+            ] {
+                let metadata = lane.metadata_of(query, run_of(claude)).await?;
+                assert!(metadata.get("claudeCode").is_none(), "{what}: {metadata}");
+            }
+            assert_eq!(
+                lane.written().await?,
+                Written {
+                    prompts: before.prompts + 1,
+                    runs: before.runs + 2,
+                    messages: before.messages + 1,
+                    jobs: before.jobs + 2,
+                    ..before
+                }
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// An ambient evaluation asks an agent whether to join in now, so it never
+/// waits (docs/Local-Engine-Turns.md 11.7): in a group chat, an un-addressed
+/// message to a Claude Code agent none of whose person's computers in the
+/// space could take it closes its run as canceled, marked
+/// `claudeCodeSkipped: {"reason": "computer_away"}`, with no job. With one of
+/// them ready, it is a lane turn that carries the evaluation's instruction in
+/// front of the message, and its marker.
+#[tokio::test]
+async fn an_ambient_evaluation_sits_out_while_no_computer_of_its_persons_is_ready(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-evaluation",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let ambient = || {
+                lane_send(lane_metadata(json!({
+                    "agentSelection": { "active": [CLAUDE], "mentions": [] },
+                })))
+            };
+            // The owner's computers are up, without Claude Code ready; the
+            // member's is ready.
+            for computer in [lane.desktop, lane.second_desktop] {
+                lane.set_capabilities(computer, capabilities(Some(space.owner), lane_not_ready()))
+                    .await?;
+            }
+            let chat = lane.chat().await?;
+            let before = lane.written().await?;
+            let (status, response) = lane.send(&lane.owner(), chat, &ambient()).await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let run = Uuid::parse_str(response["runId"].as_str().unwrap_or_default())
+                .map_err(|_| anyhow::anyhow!("no run: {response}"))?;
+            assert_eq!(lane.run_status(run).await?, "canceled");
+            let run_metadata = lane
+                .metadata_of("select metadata from runs where id = $1", run)
+                .await?;
+            assert_eq!(
+                run_metadata[claude_code_lane::SKIPPED_KEY],
+                json!({ "reason": "computer_away" }),
+                "{run_metadata}"
+            );
+            assert_lane_stamps(&run_metadata, "the skipped run");
+            assert_eq!(
+                lane.written().await?,
+                Written {
+                    prompts: before.prompts + 1,
+                    runs: before.runs + 1,
+                    messages: before.messages + 1,
+                    ..before
+                },
+                "the message and a closed run, and no job"
+            );
+
+            // With one of the owner's computers ready, it is a lane turn.
+            lane.set_capabilities(lane.desktop, capabilities(Some(space.owner), lane_ready()))
+                .await?;
+            let chat = lane.chat().await?;
+            let job = lane.job(lane.admitted(chat, &ambient()).await?).await?;
+            assert_lane_job(&job, space.owner, lane.owner_claude, "the evaluation");
+            assert!(
+                crate::group_participation::job_payload_marks_agent_evaluation(&job.payload),
+                "{}",
+                job.payload
+            );
+            let prompt = job.payload["prompt_text"].as_str().unwrap_or_default();
+            assert!(
+                prompt != WORDS && prompt.ends_with(&format!("\n\n{WORDS}")),
+                "the instruction in front of the message: {prompt}"
+            );
+            let content: String = sql_one(
+                lane.pool(),
+                "select content from conversation_messages where run_id = $1 and role = 'user'",
+                &[&job.run_id.expect("run")],
+            )
+            .await?;
+            assert_eq!(content, WORDS, "the message keeps its own words");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Lease (docs/Local-Engine-Turns.md 11.7): a waiting lane turn is leased
+/// only by a computer in its space that is private self-hosted, attested as
+/// its person's own, with a ready `claudeCode` of version 1: never a hosted
+/// runtime that reports the capability, even pinned to it, a teammate's or a
+/// service-owned computer, a Personal Browser runtime, or the person's own
+/// computer without the capability. The lease adds no envelope, metering
+/// bind, job token, history or extras, keeps the internal workspace token,
+/// and is the turn's only one.
+#[tokio::test]
+async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> anyhow::Result<()> {
     with_lane(
         "lane-lease",
         |_, _| {},
         |lane| async move {
             let space = lane.space();
-            let (_, job) = lane.lane_turn(lane.desktop).await?;
+            let (_, job) = lane.lane_turn().await?;
             let hosted = lane
                 .computer(
                     "instafy-cloud",
                     capabilities(None, lane_ready()),
+                    "ready",
+                    600,
+                )
+                .await?;
+            let service_owned = lane
+                .computer(
+                    "self-hosted",
+                    capabilities(Some(lane.service_user), lane_ready()),
                     "ready",
                     600,
                 )
@@ -3446,29 +2807,26 @@ async fn only_its_own_ready_computer_leases_a_lane_turn_once() -> anyhow::Result
                 .await?;
             for runtime in [
                 hosted,
-                lane.second_desktop,
+                service_owned,
                 lane.member_desktop,
                 personal_browser,
                 space.runtime,
             ] {
                 lane.leases_nothing(runtime, "another computer").await?;
             }
-            // Pinned to any of them, none leases it either. A hosted runtime
-            // has no owner filter: the lease's own clause keeps it out.
+            // Pinned to any of them, none leases it either: the lease's own
+            // clause keeps them out, a hosted runtime's included.
             for runtime in [hosted, lane.member_desktop, personal_browser, space.runtime] {
-                lane.pin(job, runtime).await?;
+                lane.pin(job, Some(runtime)).await?;
                 lane.leases_nothing(runtime, "pinned there").await?;
             }
-            lane.pin(job, lane.desktop).await?;
-            // Its own computer does not either, once it no longer attests a
-            // ready capability of version 1, or its person as its owner.
+            lane.pin(job, None).await?;
+            // Nor does the person's own computer while it attests no ready
+            // capability of version 1, or another owner.
             for (what, attested) in [
                 (
                     "not ready",
-                    capabilities(
-                        Some(space.owner),
-                        json!({ "claudeCode": { "version": 1, "ready": false } }),
-                    ),
+                    capabilities(Some(space.owner), lane_not_ready()),
                 ),
                 (
                     "another version",
@@ -3526,6 +2884,7 @@ async fn only_its_own_ready_computer_leases_a_lane_turn_once() -> anyhow::Result
                 "skill_setup_openers",
                 crate::browser_hand_back::TURNS_SINCE_KEY,
                 crate::browser_hand_back::READS_NOTE_KEY,
+                crate::browser_hand_back::AFTER_A_PROMPT_KEY,
                 "space_pages",
                 "attachment_downloads",
             ] {
@@ -3539,52 +2898,150 @@ async fn only_its_own_ready_computer_leases_a_lane_turn_once() -> anyhow::Result
             .await?;
             assert_eq!(platform_records, 0, "no metering bind");
 
-            // Leased once: put back in the queue, as the idle release puts
-            // back an expired lease, no lease hands it out again.
-            sql(
-                lane.pool(),
-                "update agent_jobs set status = 'queued', leased_by_runtime_id = null,
-                        leased_at = null, lease_expires_at = null
-                  where id = $1",
-                &[&job],
-            )
-            .await?;
-            lane.leases_nothing(lane.desktop, "leased once").await?;
-
-            // Never after its minute to start.
-            lane.end_jobs().await?;
-            let (_, late) = lane.lane_turn(lane.desktop).await?;
-            sql(
-                lane.pool(),
-                "update agent_jobs set trigger_received_at = now() - interval '61 seconds'
-                  where id = $1",
-                &[&late],
-            )
-            .await?;
-            lane.leases_nothing(lane.desktop, "past its minute").await?;
+            // Leased once: put back in the queue, no computer of the person's
+            // leases it again.
+            lane.put_back(job).await?;
+            for computer in [lane.desktop, lane.second_desktop] {
+                lane.leases_nothing(computer, "leased once").await?;
+            }
             Ok(())
         },
     )
     .await
 }
 
-/// A lane turn is leased before any other job queued for its computer, and it
-/// is never batched. Its admission found the computer idle (G7), but another
-/// dispatch can queue a job for that computer as the turn is admitted, from a
-/// transaction that started earlier, so its job is older, and at any
-/// priority: the turn still goes first, so that job never uses up the turn's
-/// minute to start. The turn ends its batch, whatever else its computer could
-/// lease, and no batch's continuation takes it.
+/// One lane turn runs at a time for each person, on any of their computers
+/// (docs/Local-Engine-Turns.md 11.7, 11.8): while one of the owner's turns
+/// runs on their second computer, neither computer leases their next, and
+/// the index refuses a second running one; another person's turn runs
+/// meanwhile; and once the first ends, the other computer takes the next.
 #[tokio::test]
-async fn a_lane_turn_is_leased_first_and_never_batched() -> anyhow::Result<()> {
+async fn one_lane_turn_runs_at_a_time_for_each_person_on_any_of_their_computers(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-one-running",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (_, first) = lane.lane_turn().await?;
+            let (_, next) = lane.lane_turn().await?;
+            // Either computer of the person's takes their oldest waiting turn.
+            lane.lease_one(lane.second_desktop, first).await?;
+            for computer in [lane.desktop, lane.second_desktop] {
+                lane.leases_nothing(computer, "one runs at a time").await?;
+            }
+            assert_eq!(lane.job(next).await?.status, "queued");
+            // The index agrees: a second running turn of the person's fails.
+            let refused = sql(
+                lane.pool(),
+                "update agent_jobs set status = 'leased', lease_attempts = 1,
+                        leased_by_runtime_id = $2, leased_at = now(),
+                        lease_expires_at = now() + interval '2 minutes'
+                  where id = $1",
+                &[&next, &lane.desktop],
+            )
+            .await
+            .expect_err("a second running turn");
+            let refused = refused
+                .downcast_ref::<tokio_postgres::Error>()
+                .expect("a database error");
+            assert!(
+                claude_code_lane::is_second_running_turn(refused),
+                "{refused}"
+            );
+            // Another person's turn runs meanwhile.
+            let member_turn = lane
+                .admitted_as(
+                    &lane.token(space.member),
+                    lane.chat().await?,
+                    &lane_send(lane_metadata(json!({}))),
+                )
+                .await?;
+            lane.lease_one(lane.member_desktop, member_turn).await?;
+            // The first ends: the other computer takes the next.
+            lane.harness
+                .complete(
+                    lane.second_desktop,
+                    first,
+                    json!({ "outcome": "succeeded", "summary": "Fixed the build." }),
+                )
+                .await?;
+            lane.lease_one(lane.desktop, next).await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A lane turn waits for its person's computer however long
+/// (docs/Local-Engine-Turns.md 11.7): sent while none of their computers can
+/// take it, it is admitted, and past the minute a granted turn has to start
+/// and the stranded-platform grace, no sweep fails it; once a computer of
+/// theirs is back, it takes the turn.
+#[tokio::test]
+async fn a_lane_turn_waits_for_its_persons_computer_however_long() -> anyhow::Result<()> {
+    with_lane(
+        "lane-waits",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            // One of the owner's computers is off, and the other's Claude
+            // Code is not ready.
+            sql(
+                lane.pool(),
+                "update runtimes set status = 'stopped' where id = $1",
+                &[&lane.desktop],
+            )
+            .await?;
+            lane.set_capabilities(
+                lane.second_desktop,
+                capabilities(Some(space.owner), lane_not_ready()),
+            )
+            .await?;
+            let (_, job) = lane.lane_turn().await?;
+            lane.leases_nothing(lane.second_desktop, "not ready")
+                .await?;
+            sql(
+                lane.pool(),
+                "update agent_jobs
+                    set created_at = now() - interval '3 days',
+                        trigger_received_at = now() - interval '3 days'
+                  where id = $1",
+                &[&job],
+            )
+            .await?;
+            lane.sweep_while_active().await?;
+            let waiting = lane.job(job).await?;
+            assert_eq!(
+                (waiting.status.as_str(), waiting.lease_attempts),
+                ("queued", 0)
+            );
+            assert_eq!(
+                lane.run_status(waiting.run_id.expect("run")).await?,
+                "queued"
+            );
+            // Its computer is back.
+            lane.lease_one(lane.desktop, job).await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A computer takes the work pinned to it before a lane turn that waits for
+/// any of its person's computers (version 1's "lane turn first" is gone), and
+/// a lane turn is never batched: it is leased alone, and no batch's
+/// continuation takes it, not even one of a team's plan in its own chat.
+#[tokio::test]
+async fn a_lane_turn_waits_behind_its_computers_pinned_work_and_is_never_batched(
+) -> anyhow::Result<()> {
     with_lane(
         "lane-batch",
         |_, _| {},
         |lane| async move {
             let space = lane.space();
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
-            // Queued for the same computer as the turn was admitted, older
-            // and at the highest priorities: a read-only job of a team's
+            let (_, job) = lane.lane_turn().await?;
+            // Work pinned to the same computer: a read-only job of a team's
             // plan, whose batch would take its plan's read-only jobs, and an
             // ordinary one.
             let other_chat = lane.chat().await?;
@@ -3603,23 +3060,14 @@ async fn a_lane_turn_is_leased_first_and_never_batched() -> anyhow::Result<()> {
             let ordinary = lane
                 .queue_codex_job(lane.desktop, other_chat, 1, json!({}))
                 .await?;
-            sql(
-                lane.pool(),
-                "update agent_jobs set created_at = now() - interval '1 minute'
-                  where id = any($1)",
-                &[&vec![plan_job, ordinary]],
-            )
-            .await?;
-            // The turn first, alone: it ends its batch.
-            lane.lease_one(lane.desktop, job).await?;
             lane.lease_one(lane.desktop, plan_job).await?;
             lane.lease_one(lane.desktop, ordinary).await?;
+            lane.lease_one(lane.desktop, job).await?;
 
             // No batch's continuation takes a lane turn, not even one of a
             // team's plan in the turn's own chat.
             lane.end_jobs().await?;
-            let (chat_of_next, next) = lane.lane_turn(lane.desktop).await?;
-            assert_ne!(chat_of_next, chat);
+            let (chat_of_next, next) = lane.lane_turn().await?;
             {
                 let mut connection = lane.pool().get().await?;
                 let transaction = connection.transaction().await?;
@@ -3654,7 +3102,7 @@ async fn a_lane_turn_is_leased_first_and_never_batched() -> anyhow::Result<()> {
 
 /// An expired lane lease, in a space that is still active, is never renewed
 /// or leased again: a heartbeat on it gets a 409, and the 10 s sweep fails
-/// the turn as `run_once_interrupted`, with the message its author's Studio
+/// the turn as `run_once_interrupted`, with the message its person's Studio
 /// words.
 #[tokio::test]
 async fn an_expired_lane_lease_ends_its_turn_for_good() -> anyhow::Result<()> {
@@ -3662,7 +3110,7 @@ async fn an_expired_lane_lease_ends_its_turn_for_good() -> anyhow::Result<()> {
         "lane-expired-lease",
         |_, _| {},
         |lane| async move {
-            let (_, job) = lane.lane_turn(lane.desktop).await?;
+            let (_, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let heartbeat = || {
                 lane.agent_call(
@@ -3698,90 +3146,37 @@ async fn an_expired_lane_lease_ends_its_turn_for_good() -> anyhow::Result<()> {
             let (_, metadata) = lane.failure_message(run).await?;
             assert_eq!(metadata["kind"], json!("run_once_interrupted"));
             assert_lane_failure(&metadata, "run_once_interrupted", "an expired lease");
-            lane.leases_nothing(lane.desktop, "an ended turn").await?;
+            for computer in [lane.desktop, lane.second_desktop] {
+                lane.leases_nothing(computer, "an ended turn").await?;
+            }
             Ok(())
         },
     )
     .await
 }
 
-/// The run-once sweep fails a lane turn that can no longer start: past its
-/// minute as `start_by_passed`, and put back in the queue after a lease as
-/// `run_once_interrupted`, each with the message its author's Studio words.
-/// G8 and the one-active-turn index agree on a queued turn past its minute:
-/// both count it until the sweep fails it, and neither does after.
+/// The run-once sweep fails a lane turn put back in the queue after a lease
+/// as `run_once_interrupted`, with the message its person's Studio words, and
+/// leaves the turn that waits behind it, never leased, however old; that one
+/// then runs.
 #[tokio::test]
-async fn the_run_once_sweep_fails_a_lane_turn_that_can_no_longer_start() -> anyhow::Result<()> {
+async fn the_run_once_sweep_fails_a_lane_turn_put_back_after_a_lease() -> anyhow::Result<()> {
     with_lane(
         "lane-run-once-sweep",
         |_, _| {},
         |lane| async move {
-            let owner = lane.owner();
-            let (_, late) = lane.lane_turn(lane.desktop).await?;
+            let (_, interrupted) = lane.lane_turn().await?;
+            lane.lease_one(lane.desktop, interrupted).await?;
+            lane.put_back(interrupted).await?;
+            let (_, waiting) = lane.lane_turn().await?;
             sql(
                 lane.pool(),
-                "update agent_jobs set trigger_received_at = now() - interval '61 seconds'
+                "update agent_jobs set trigger_received_at = now() - interval '2 hours'
                   where id = $1",
-                &[&late],
+                &[&waiting],
             )
             .await?;
-            let next_chat = lane.chat().await?;
-            let next = lane_send(lane.second_desktop, lane_metadata(json!({})));
-            lane.refused(
-                &owner,
-                next_chat,
-                next.clone(),
-                (
-                    StatusCode::CONFLICT,
-                    claude_code_lane::TURN_ACTIVE,
-                    claude_code_lane::START_WINDOW_PASSED,
-                ),
-            )
-            .await?;
-            let duplicate = sql(
-                lane.pool(),
-                "insert into agent_jobs (project_id, conversation_id, intent, status, payload,
-                                         engine, trigger_received_at)
-                 select project_id, conversation_id, intent, 'queued', payload, engine, now()
-                   from agent_jobs where id = $1",
-                &[&late],
-            )
-            .await
-            .expect_err("the index counts it too");
-            let duplicate = duplicate
-                .downcast_ref::<tokio_postgres::Error>()
-                .expect("database error");
-            assert!(
-                claude_code_lane::is_second_active_turn(duplicate),
-                "{duplicate}"
-            );
 
-            lane.sweep_while_active().await?;
-            let (status, error, _) = lane.ended(late).await?;
-            assert_eq!(status, "failed");
-            assert!(
-                error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("start by a set time")),
-                "{error:?}"
-            );
-            let run = lane.job(late).await?.run_id.expect("run");
-            assert_eq!(lane.run_status(run).await?, "failed");
-            let (_, metadata) = lane.failure_message(run).await?;
-            assert_eq!(metadata["kind"], json!("start_by_passed"));
-            assert_lane_failure(&metadata, "start_by_passed", "past its minute");
-
-            // Neither G8 nor the index counts it now.
-            let interrupted = lane.admitted(next_chat, &next).await?;
-            lane.lease_one(lane.second_desktop, interrupted).await?;
-            sql(
-                lane.pool(),
-                "update agent_jobs set status = 'queued', leased_by_runtime_id = null,
-                        leased_at = null, lease_expires_at = null
-                  where id = $1",
-                &[&interrupted],
-            )
-            .await?;
             lane.sweep_while_active().await?;
             let (status, error, _) = lane.ended(interrupted).await?;
             assert_eq!(status, "failed");
@@ -3792,67 +3187,81 @@ async fn the_run_once_sweep_fails_a_lane_turn_that_can_no_longer_start() -> anyh
                 "{error:?}"
             );
             let run = lane.job(interrupted).await?.run_id.expect("run");
+            assert_eq!(lane.run_status(run).await?, "failed");
             let (_, metadata) = lane.failure_message(run).await?;
             assert_eq!(metadata["kind"], json!("run_once_interrupted"));
             assert_lane_failure(&metadata, "run_once_interrupted", "put back after a lease");
+
+            assert_eq!(lane.job(waiting).await?.status, "queued");
+            lane.lease_one(lane.desktop, waiting).await?;
             Ok(())
         },
     )
     .await
 }
 
-/// A runtime stop fails a lane turn, queued or leased, as
-/// `claude_code_machine_stopped`: it keeps its pin, its run fails and its
-/// message carries what its author's Studio words it by. The stop requeues
-/// the computer's other work as before, and none of the lane turn.
+/// A runtime stop fails the lane turn that runtime leased as
+/// `claude_code_machine_stopped` (docs/Local-Engine-Turns.md 11.7): its run
+/// fails and its message carries what its person's Studio words it by. A
+/// waiting turn has no pin and keeps waiting, whichever computer stops, and
+/// the person's other computer takes it. The stop requeues the computer's
+/// other work as before, and fails a lane turn still pinned to it, which
+/// version 2 never queues.
 #[tokio::test]
-async fn a_runtime_stop_fails_a_lane_turn_and_requeues_none_of_it() -> anyhow::Result<()> {
+async fn a_runtime_stop_fails_the_lane_turn_it_leased_and_leaves_waiting_ones_queued(
+) -> anyhow::Result<()> {
     with_lane(
         "lane-runtime-stop",
         |_, _| {},
         |lane| async move {
-            let (_, queued) = lane.lane_turn(lane.desktop).await?;
+            let (_, first) = lane.lane_turn().await?;
             let codex_chat = lane.chat().await?;
-            let codex = lane
-                .admitted(
-                    codex_chat,
-                    &json!({
-                        "promptText": "Read the logs.",
-                        "intent": "feature",
-                        "runtimeId": lane.desktop.to_string(),
-                        "metadata": without(lane_metadata(json!({})), &["turnEngine"]),
-                    }),
-                )
-                .await?;
+            let codex = lane.admitted(codex_chat, &octo_send(lane.desktop)).await?;
             let (requeued, failed) = lane.stop_runtime(lane.desktop).await?;
             assert_eq!(requeued, vec![codex]);
-            assert_eq!(failed, vec![(queued, true)], "failed with a message");
-            let job = lane.job(queued).await?;
-            assert_eq!(job.status, "failed");
-            assert_eq!(job.target_runtime_id, Some(lane.desktop), "never unpinned");
-            let run = job.run_id.expect("run");
-            assert_eq!(lane.run_status(run).await?, "failed");
-            let (content, metadata) = lane.failure_message(run).await?;
-            assert_eq!(content, claude_code_lane::MACHINE_STOPPED_MESSAGE);
-            assert_eq!(metadata["kind"], json!(claude_code_lane::MACHINE_STOPPED));
-            assert_lane_failure(&metadata, claude_code_lane::MACHINE_STOPPED, "queued");
+            assert!(failed.is_empty(), "a waiting turn: {failed:?}");
+            let waiting = lane.job(first).await?;
+            assert_eq!(
+                (
+                    waiting.status.as_str(),
+                    waiting.target_runtime_id,
+                    waiting.lease_attempts
+                ),
+                ("queued", None, 0)
+            );
+            lane.end_job(codex).await?;
 
-            // Leased, it fails the same way.
-            lane.end_jobs().await?;
-            let (_, leased) = lane.lane_turn(lane.desktop).await?;
-            lane.lease_one(lane.desktop, leased).await?;
+            // Leased, it fails; the person's next turn keeps waiting.
+            lane.lease_one(lane.desktop, first).await?;
+            let (_, next) = lane.lane_turn().await?;
             let (requeued, failed) = lane.stop_runtime(lane.desktop).await?;
             assert!(requeued.is_empty(), "{requeued:?}");
-            assert_eq!(failed, vec![(leased, true)]);
-            let (status, error, _) = lane.ended(leased).await?;
+            assert_eq!(failed, vec![(first, true)], "failed with a message");
+            let (status, error, _) = lane.ended(first).await?;
             assert_eq!(status, "failed");
             assert_eq!(
                 error.as_deref(),
                 Some(claude_code_lane::MACHINE_STOPPED_MESSAGE)
             );
-            let run = lane.job(leased).await?.run_id.expect("run");
-            let (_, metadata) = lane.failure_message(run).await?;
+            let run = lane.job(first).await?.run_id.expect("run");
+            assert_eq!(lane.run_status(run).await?, "failed");
+            let (content, metadata) = lane.failure_message(run).await?;
+            assert_eq!(content, claude_code_lane::MACHINE_STOPPED_MESSAGE);
+            assert_eq!(metadata["kind"], json!(claude_code_lane::MACHINE_STOPPED));
             assert_lane_failure(&metadata, claude_code_lane::MACHINE_STOPPED, "leased");
+            let next_job = lane.job(next).await?;
+            assert_eq!(
+                (next_job.status.as_str(), next_job.target_runtime_id),
+                ("queued", None)
+            );
+            lane.lease_one(lane.second_desktop, next).await?;
+
+            // One still pinned to the stopped computer fails too.
+            let (_, pinned) = lane.lane_turn().await?;
+            lane.pin(pinned, Some(lane.desktop)).await?;
+            let (_, failed) = lane.stop_runtime(lane.desktop).await?;
+            assert_eq!(failed, vec![(pinned, true)]);
+            assert_eq!(lane.job(next).await?.status, "leased", "another computer's");
             Ok(())
         },
     )
@@ -3875,7 +3284,7 @@ async fn a_runtime_stop_never_waits_on_its_lane_turns_chat() -> anyhow::Result<(
         "lane-stop-lock-order",
         |_, _| {},
         |lane| async move {
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
             let wait = std::time::Duration::from_secs(10);
@@ -3971,7 +3380,7 @@ async fn two_writers_of_a_stopped_lane_turns_end_write_it_once() -> anyhow::Resu
         "lane-stop-two-writers",
         |_, _| {},
         |lane| async move {
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
             let (_, turns) = lane.stop_runtime_only(lane.desktop).await?;
@@ -4042,7 +3451,7 @@ async fn a_runtime_stop_publishes_its_lane_turns_failure() -> anyhow::Result<()>
         "lane-stop-publish",
         |_, _| {},
         |lane| async move {
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
             let mut events = lane.harness.state.events.subscribe();
@@ -4125,7 +3534,7 @@ async fn the_idle_sweep_writes_a_stopped_lane_turns_end_its_stop_never_wrote() -
         "lane-stop-repair",
         |_, _| {},
         |lane| async move {
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
             let (_, turns) = lane.stop_runtime_only(lane.desktop).await?;
@@ -4213,7 +3622,7 @@ async fn the_idle_sweep_leaves_a_stopped_lane_turn_with_the_lane_off_or_too_old(
         "lane-stop-repair-bounds",
         |_, _| {},
         |lane| async move {
-            let (_, job) = lane.lane_turn(lane.desktop).await?;
+            let (_, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
             lane.stop_runtime_only(lane.desktop).await?;
@@ -4260,7 +3669,7 @@ async fn a_recorded_claim_of_a_stopped_lane_turns_end_never_stands_in_for_it() -
         "lane-stop-claimed-end",
         |_, _| {},
         |lane| async move {
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
             lane.record_claims_of_a_stopped_turns_end(chat, job).await?;
@@ -4325,7 +3734,7 @@ async fn a_recorded_claim_of_a_stopped_lane_turns_end_never_stops_the_sweep_writ
         "lane-stop-repair-claimed-end",
         |_, _| {},
         |lane| async move {
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
             lane.record_claims_of_a_stopped_turns_end(chat, job).await?;
@@ -4384,7 +3793,7 @@ async fn only_the_controllers_own_message_is_a_stopped_lane_turns_end() -> anyho
         "lane-stop-receipt",
         |_, _| {},
         |lane| async move {
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
             let (_, turns) = lane.stop_runtime_only(lane.desktop).await?;
@@ -4456,9 +3865,10 @@ async fn only_the_controllers_own_message_is_a_stopped_lane_turns_end() -> anyho
 }
 
 /// The paths that take a job with no credential for Instafy AI, or run a
-/// failed turn again, ignore a lane turn: the stranded-platform sweep leaves
-/// it queued, a short rate limit fails it rather than put it back in the
-/// queue, and its end teaches the upstream pacing nothing.
+/// failed turn again, ignore a lane turn: a short rate limit fails it rather
+/// than put it back in the queue, and its end teaches the upstream pacing
+/// nothing. (No sweep takes a waiting one for a stranded platform job either:
+/// `a_lane_turn_waits_for_its_persons_computer_however_long`.)
 #[tokio::test]
 async fn platform_sweeps_retries_and_pacing_ignore_a_lane_turn() -> anyhow::Result<()> {
     with_lane(
@@ -4466,18 +3876,7 @@ async fn platform_sweeps_retries_and_pacing_ignore_a_lane_turn() -> anyhow::Resu
         |_, _| {},
         |lane| async move {
             let space = lane.space();
-            let (_, job) = lane.lane_turn(lane.desktop).await?;
-            // Queued for longer than the stranded-platform grace, on a private
-            // computer, with no credential, and within its minute to start.
-            sql(
-                lane.pool(),
-                "update agent_jobs set created_at = now() - interval '5 minutes' where id = $1",
-                &[&job],
-            )
-            .await?;
-            lane.sweep_while_active().await?;
-            assert_eq!(lane.job(job).await?.status, "queued");
-
+            let (_, job) = lane.lane_turn().await?;
             // A short rate limit that puts a person's ordinary turn back in
             // the queue, and paces the platform's upstream, fails it.
             const RATE_LIMITED: &str = "rate limit exceeded: The upstream provider rate limit \
@@ -4531,7 +3930,7 @@ async fn a_lane_turn_takes_no_input_secrets_proxy_token_or_plan() -> anyhow::Res
         },
         |lane| async move {
             let space = lane.space();
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             let leased = lane.lease_one(lane.desktop, job).await?;
             let run = lane.job(job).await?.run_id.expect("run");
 
@@ -4749,7 +4148,7 @@ async fn a_lane_turn_takes_no_input_secrets_proxy_token_or_plan() -> anyhow::Res
 /// (docs/Local-Engine-Turns.md 2.4, 2.6), as for every job. Neither a token
 /// with no runtime, which any member with write access can mint for the agent
 /// routes, nor another runtime's of the space, a teammate's computer or the
-/// person's own other one, completes, fails or posts to the turn, queued or
+/// person's own other one, completes, fails or posts to the turn, waiting or
 /// leased: the token with no runtime is refused outright, another runtime is
 /// answered as for a job it cannot find, and none writes a reply, usage row,
 /// failure, conversation state or run change. The turn's own computer still
@@ -4779,7 +4178,7 @@ async fn only_the_computer_that_leased_a_lane_turn_ends_it_or_posts_to_it() -> a
             let teammates_computer = lane.harness.agent_token(lane.member_desktop).await?;
             let own_other_computer = lane.harness.agent_token(lane.second_desktop).await?;
 
-            let (_, job) = lane.lane_turn(lane.desktop).await?;
+            let (_, job) = lane.lane_turn().await?;
             let run = lane.job(job).await?.run_id.expect("run");
             let step = json!({
                 "job_id": job,
@@ -4899,7 +4298,7 @@ async fn a_lane_turns_notes_keep_their_placement_hint() -> anyhow::Result<()> {
         |_, _| {},
         |lane| async move {
             let space = lane.space();
-            let (chat, job) = lane.lane_turn(lane.desktop).await?;
+            let (chat, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             let hint = json!({ "placement": "reply_note" });
             let notes = [
@@ -5001,7 +4400,7 @@ async fn a_lane_turns_completion_keeps_only_what_the_lane_writes() -> anyhow::Re
             let space = lane.space();
             let before = lane.written().await?;
             let session = Uuid::new_v4();
-            let (_, job) = lane.lane_turn(lane.desktop).await?;
+            let (_, job) = lane.lane_turn().await?;
             lane.lease_one(lane.desktop, job).await?;
             lane.harness
                 .complete(
@@ -5090,7 +4489,7 @@ async fn a_lane_turns_completion_keeps_only_what_the_lane_writes() -> anyhow::Re
             // A failure: a code Studio words is copied, and a malformed state
             // is dropped.
             for (code, copied) in [("not_signed_in", true), ("launch_the_rockets", false)] {
-                let (_, failed) = lane.lane_turn(lane.desktop).await?;
+                let (_, failed) = lane.lane_turn().await?;
                 lane.lease_one(lane.desktop, failed).await?;
                 lane.harness
                     .complete(
@@ -5126,17 +4525,7 @@ async fn a_lane_turns_completion_keeps_only_what_the_lane_writes() -> anyhow::Re
             // A Codex job that reports Claude Code's provider and state keeps
             // neither.
             let codex_chat = lane.chat().await?;
-            let codex = lane
-                .admitted(
-                    codex_chat,
-                    &json!({
-                        "promptText": "Read the logs.",
-                        "intent": "feature",
-                        "runtimeId": space.runtime.to_string(),
-                        "metadata": without(lane_metadata(json!({})), &["turnEngine"]),
-                    }),
-                )
-                .await?;
+            let codex = lane.admitted(codex_chat, &octo_send(space.runtime)).await?;
             lane.lease_one(space.runtime, codex).await?;
             lane.harness
                 .complete(
@@ -5175,19 +4564,31 @@ async fn a_lane_turns_completion_keeps_only_what_the_lane_writes() -> anyhow::Re
     .await
 }
 
-/// The next lane turn resumes only its own engine's session: its sender's,
-/// with the same agent, in the same chat, on the computer it was admitted
-/// on. A turn that saved no state, such as a stopped one, is passed over, and
-/// a reset starts a new session. The Codex loader never returns lane state.
+/// A lane session's conversation state, as the runtime saves it.
+fn lane_session(runtime: Uuid, session: Uuid) -> JsonValue {
+    json!({
+        "provider": "claude-code",
+        "version": 1,
+        "sessionId": session.to_string(),
+        "runtimeId": runtime.to_string(),
+    })
+}
+
+/// The next lane turn resumes its own engine's session
+/// (docs/Local-Engine-Turns.md 11.9): its person's, with the same agent, in
+/// the same chat, whichever of their computers saved it, and the latest one.
+/// A turn that saved no state, such as a stopped one, is passed over, and a
+/// reset starts a new session. The Codex loader never returns lane state.
 #[tokio::test]
-async fn a_lane_turn_resumes_only_its_own_session() -> anyhow::Result<()> {
+async fn a_lane_turn_resumes_its_own_session_on_any_of_its_persons_computers() -> anyhow::Result<()>
+{
     with_lane(
         "lane-resume",
         |_, _| {},
         |lane| async move {
             let space = lane.space();
             let chat = lane.chat().await?;
-            let send = |runtime: Uuid| lane_send(runtime, lane_metadata(json!({})));
+            let send = || lane_send(lane_metadata(json!({})));
             let state_of = |job: Uuid| {
                 let lane = &lane;
                 async move {
@@ -5200,13 +4601,9 @@ async fn a_lane_turn_resumes_only_its_own_session() -> anyhow::Result<()> {
                     )
                 }
             };
-            let session = Uuid::new_v4();
-            let first = lane.admitted(chat, &send(lane.desktop)).await?;
+            let (first_session, latest_session) = (Uuid::new_v4(), Uuid::new_v4());
+            let first = lane.admitted(chat, &send()).await?;
             assert_eq!(state_of(first).await?, None, "a first turn starts a session");
-            let octo = lane.job(first).await?.payload["metadata"]["agent"]["id"]
-                .as_str()
-                .and_then(|id| Uuid::parse_str(id).ok())
-                .expect("the sender's @octo");
             lane.lease_one(lane.desktop, first).await?;
             lane.harness
                 .complete(
@@ -5215,16 +4612,19 @@ async fn a_lane_turn_resumes_only_its_own_session() -> anyhow::Result<()> {
                     json!({
                         "outcome": "succeeded",
                         "summary": "Done.",
-                        "proxy_metadata": { "conversation": lane_session(lane.desktop, session) },
+                        "proxy_metadata": {
+                            "conversation": lane_session(lane.desktop, first_session),
+                        },
                     }),
                 )
                 .await?;
 
-            // The loader keeps to the person, agent, chat and computer.
+            // The loader keeps to the person, the agent and the chat, and not
+            // to the computer that saved it.
             {
                 let mut connection = lane.pool().get().await?;
                 let transaction = connection.transaction().await?;
-                let load = |conversation: Uuid, sender: Uuid, agent: Uuid, runtime: Uuid| {
+                let load = |conversation: Uuid, person: Uuid, agent: Uuid| {
                     let transaction = &transaction;
                     let project = space.project_id;
                     async move {
@@ -5232,26 +4632,25 @@ async fn a_lane_turn_resumes_only_its_own_session() -> anyhow::Result<()> {
                             transaction,
                             &project,
                             &conversation,
-                            &sender,
+                            &person,
                             Some(&agent),
-                            &runtime,
                         )
                         .await
                         .map_err(|(status, error)| anyhow::anyhow!("{status} {}", error.message))
                     }
                 };
                 assert_eq!(
-                    load(chat, space.owner, octo, lane.desktop).await?,
-                    Some(lane_session(lane.desktop, session))
+                    load(chat, space.owner, lane.owner_claude).await?,
+                    Some(lane_session(lane.desktop, first_session))
                 );
-                for (what, conversation, sender, agent, runtime) in [
-                    ("another chat", space.log, space.owner, octo, lane.desktop),
-                    ("another person", chat, space.member, octo, lane.desktop),
-                    ("another agent", chat, space.owner, space.owner_agent, lane.desktop),
-                    ("another computer", chat, space.owner, octo, lane.second_desktop),
+                for (what, conversation, person, agent) in [
+                    ("another chat", space.log, space.owner, lane.owner_claude),
+                    ("another person", chat, space.member, lane.owner_claude),
+                    ("another person's agent", chat, space.member, lane.member_claude),
+                    ("another agent", chat, space.owner, space.owner_agent),
                 ] {
                     assert_eq!(
-                        load(conversation, sender, agent, runtime).await?,
+                        load(conversation, person, agent).await?,
                         None,
                         "{what}"
                     );
@@ -5264,7 +4663,7 @@ async fn a_lane_turn_resumes_only_its_own_session() -> anyhow::Result<()> {
                     .await?;
                 assert_eq!(
                     run_metadata["agent"]["id"],
-                    json!(octo.to_string()),
+                    json!(lane.owner_claude.to_string()),
                     "{run_metadata}"
                 );
                 transaction
@@ -5280,8 +4679,8 @@ async fn a_lane_turn_resumes_only_its_own_session() -> anyhow::Result<()> {
                     &space.project_id,
                     &chat,
                     None,
-                    Some(&octo),
-                    Some("octo"),
+                    Some(&lane.owner_claude),
+                    Some(CLAUDE),
                     None,
                 )
                 .await
@@ -5290,56 +4689,730 @@ async fn a_lane_turn_resumes_only_its_own_session() -> anyhow::Result<()> {
                 transaction.rollback().await?;
             }
 
-            // The next turn resumes the session.
-            let second = lane.admitted(chat, &send(lane.desktop)).await?;
+            // The next turn resumes it on the person's other computer, which
+            // saves a session of its own.
+            let second = lane.admitted(chat, &send()).await?;
             assert_eq!(
                 state_of(second).await?,
-                Some(lane_session(lane.desktop, session))
+                Some(lane_session(lane.desktop, first_session))
+            );
+            lane.lease_one(lane.second_desktop, second).await?;
+            lane.harness
+                .complete(
+                    lane.second_desktop,
+                    second,
+                    json!({
+                        "outcome": "succeeded",
+                        "summary": "Done.",
+                        "proxy_metadata": {
+                            "conversation": lane_session(lane.second_desktop, latest_session),
+                        },
+                    }),
+                )
+                .await?;
+            // The turn after resumes the latest, wherever it runs.
+            let third = lane.admitted(chat, &send()).await?;
+            assert_eq!(
+                state_of(third).await?,
+                Some(lane_session(lane.second_desktop, latest_session))
             );
             // Stopped, it saves nothing: the turn after it resumes the same
             // session.
-            lane.lease_one(lane.desktop, second).await?;
+            lane.lease_one(lane.desktop, third).await?;
             let (status, body) = lane
                 .harness
                 .call(
                     "POST",
-                    format!("/jobs/{second}/cancel"),
+                    format!("/jobs/{third}/cancel"),
                     Some(&lane.owner()),
                     Some(json!({})),
                 )
                 .await?;
             assert_eq!(status, StatusCode::OK, "{body}");
-            // On the person's other computer it starts a new session.
-            let elsewhere = lane.admitted(chat, &send(lane.second_desktop)).await?;
-            assert_eq!(state_of(elsewhere).await?, None, "another computer");
-            lane.end_jobs().await?;
-            let third = lane.admitted(chat, &send(lane.desktop)).await?;
+            let fourth = lane.admitted(chat, &send()).await?;
             assert_eq!(
-                state_of(third).await?,
-                Some(lane_session(lane.desktop, session)),
-                "a stopped turn and another computer's turn are passed over"
+                state_of(fourth).await?,
+                Some(lane_session(lane.second_desktop, latest_session)),
+                "a stopped turn is passed over"
             );
 
-            // A resume that missed resets it: the next turn starts afresh.
-            lane.lease_one(lane.desktop, third).await?;
+            // A reset starts the next turn afresh.
+            lane.lease_one(lane.desktop, fourth).await?;
             lane.harness
                 .complete(
                     lane.desktop,
-                    third,
+                    fourth,
                     json!({
                         "outcome": "failed",
-                        "error_message": "No conversation found with that session ID.",
+                        "error_message": "Claude Code stopped.",
                         "proxy_metadata": { "conversation": {
                             "provider": "claude-code", "version": 1, "reset": true,
                         } },
-                        "artifacts": [{ "kind": "claude-code/failure", "code": "session_unavailable" }],
                     }),
                 )
                 .await?;
-            let fourth = lane.admitted(chat, &send(lane.desktop)).await?;
-            assert_eq!(state_of(fourth).await?, None, "a reset starts a new session");
+            let fifth = lane.admitted(chat, &send()).await?;
+            assert_eq!(state_of(fifth).await?, None, "a reset starts a new session");
             Ok(())
         },
     )
     .await
+}
+
+/// The CHECK on `agent_jobs.engine` rejects every lane row it forbids: one
+/// with a credential, grants, a parent, a plan group or a role, one with no
+/// receive time, and an engine that is not `claude-code`.
+#[tokio::test]
+async fn the_engine_check_rejects_every_forbidden_lane_row() -> anyhow::Result<()> {
+    with_lane(
+        "lane-check",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let chat = lane.chat().await?;
+            let parent = lane.queued_job().await?;
+            let insert = |extra_columns: &'static str, extra_values: &'static str| {
+                format!(
+                    "insert into agent_jobs (project_id, conversation_id, intent, status, payload,
+                                         engine, trigger_received_at{extra_columns})
+                 values ($1, $2, 'feature', 'completed', '{{}}'::jsonb, $3, now(){extra_values})"
+                )
+            };
+            let credential = lane.owner_credential;
+            let cases: Vec<(
+                String,
+                Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>,
+            )> = vec![
+                (
+                    insert(", credential_id", ", $4"),
+                    vec![Box::new(credential)],
+                ),
+                (
+                    insert(", grant_ids", ", $4"),
+                    vec![Box::new(vec![Uuid::new_v4()])],
+                ),
+                (insert(", parent_job_id", ", $4"), vec![Box::new(parent)]),
+                (
+                    insert(", plan_group_id", ", $4"),
+                    vec![Box::new(Uuid::new_v4())],
+                ),
+                (
+                    insert(", agent_role", ", $4"),
+                    vec![Box::new("worker".to_string())],
+                ),
+            ];
+            for (statement, extra) in &cases {
+                let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                    vec![&space.project_id, &chat, &claude_code_lane::ENGINE];
+                for value in extra {
+                    params.push(value.as_ref());
+                }
+                let error = lane
+                    .pool()
+                    .get()
+                    .await?
+                    .execute(statement.as_str(), &params)
+                    .await
+                    .expect_err(statement);
+                assert_check_violation(&error, statement);
+            }
+            let no_receive_time = "insert into agent_jobs (project_id, conversation_id, intent,
+                                                        status, payload, engine,
+                                                        trigger_received_at)
+                               values ($1, $2, 'feature', 'completed', '{}'::jsonb, $3, null)";
+            let error = lane
+                .pool()
+                .get()
+                .await?
+                .execute(
+                    no_receive_time,
+                    &[&space.project_id, &chat, &claude_code_lane::ENGINE],
+                )
+                .await
+                .expect_err("no receive time");
+            assert_check_violation(&error, "no receive time");
+            let error = lane
+                .pool()
+                .get()
+                .await?
+                .execute(
+                    insert("", "").as_str(),
+                    &[&space.project_id, &chat, &"codex"],
+                )
+                .await
+                .expect_err("another engine");
+            assert_check_violation(&error, "another engine");
+            // The one shape it allows.
+            lane.pool()
+                .get()
+                .await?
+                .execute(
+                    insert("", "").as_str(),
+                    &[&space.project_id, &chat, &claude_code_lane::ENGINE],
+                )
+                .await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+fn assert_check_violation(error: &tokio_postgres::Error, what: &str) {
+    assert_eq!(
+        error.code(),
+        Some(&tokio_postgres::error::SqlState::CHECK_VIOLATION),
+        "{what}: {error}"
+    );
+    assert_eq!(
+        error.as_db_error().and_then(|error| error.constraint()),
+        Some("agent_jobs_engine_check"),
+        "{what}: {error}"
+    );
+}
+
+/// A client's copy of the controller's lane marks never persists: dispatch
+/// drops it from an ordinary send, and recording a message drops it, for the
+/// service role too.
+#[tokio::test]
+async fn a_clients_lane_stamps_never_persist() -> anyhow::Result<()> {
+    with_lane(
+        "lane-stamps",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let chat = lane.chat().await?;
+            let owner = lane.owner();
+            let forged = json!({
+                "claudeCode": { "version": 1 },
+                "claude_code": { "version": 1 },
+                "claudeCodeFailure": "plan_limit",
+                "claudeCodeSkipped": { "reason": "computer_away" },
+                "prompt_metadata": { "claudeCode": { "version": 1 } },
+            });
+            let lane_marks = [
+                "claudeCode",
+                "claude_code",
+                "claudeCodeFailure",
+                "claudeCodeSkipped",
+            ];
+            let mut send = octo_send(space.runtime);
+            send["metadata"] = metadata_for(&["octo"], forged.clone());
+            let job = lane.job(lane.admitted(chat, &send).await?).await?;
+            assert_eq!(job.engine, None);
+            assert_eq!(job.payload["metadata"]["aiAccessMode"], json!("byoc"));
+            let run_id = job.run_id.expect("run");
+            let message = lane
+                .metadata_of(
+                    "select metadata from conversation_messages
+                      where run_id = $1 and role = 'user'",
+                    run_id,
+                )
+                .await?;
+            let run = lane
+                .metadata_of("select metadata from runs where id = $1", run_id)
+                .await?;
+            for (what, value) in [
+                ("payload", &job.payload),
+                ("message", &message),
+                ("run", &run),
+            ] {
+                assert_never_holds(value, &lane_marks, what);
+            }
+
+            for token in [owner.as_str(), SERVICE_ROLE] {
+                let (status, recorded) = lane
+                    .harness
+                    .call(
+                        "POST",
+                        format!("/conversations/{chat}/messages/record"),
+                        Some(token),
+                        Some(json!({
+                            "content": "A note.",
+                            "metadata": with(forged.clone(), json!({
+                                "details": { "claudeCodeFailure": "not_signed_in" },
+                                "keep": true,
+                            })),
+                        })),
+                    )
+                    .await?;
+                anyhow::ensure!(status == StatusCode::OK, "record: {status} {recorded}");
+                assert_eq!(recorded["metadata"]["keep"], json!(true), "{recorded}");
+                let id = Uuid::parse_str(recorded["id"].as_str().unwrap_or_default())?;
+                let stored = lane
+                    .metadata_of(
+                        "select metadata from conversation_messages where id = $1",
+                        id,
+                    )
+                    .await?;
+                assert_never_holds(&stored, &lane_marks, token);
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// In a chat whose device grants name someone else
+/// (`device_grants::starts_agent_turns`), a send to a Claude Code agent is
+/// recorded and starts nothing, as any send there. The grant's own person's
+/// Claude Code turn there holds no grant, and their ordinary turn holds it.
+#[tokio::test]
+async fn a_chat_granted_to_someone_else_records_a_send_to_a_claude_code_agent_and_starts_nothing(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-granted-chat",
+        |config, space| config.device_grants = DeviceGrantUsers::Only(vec![space.member]),
+        |lane| async move {
+            let space = lane.space();
+            let chat = lane.chat().await?;
+            let member_octo = lane.agent_of(space.member, "octo").await?;
+            sql(
+                lane.pool(),
+                "insert into project_provider_devices (
+                     project_id, provider_id, provider_family_id, device_id, owner_user_id
+                 ) values ($1, $2, $2, $3, $4)",
+                &[&space.project_id, &DEVICE_PROVIDER, &DEVICE, &space.member],
+            )
+            .await?;
+            let grant = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into agent_device_grants (
+                     id, project_id, user_id, agent_id, provider_id, device_id, tool_ids,
+                     conversation_id, not_before
+                 ) values ($1, $2, $3, $4, $5, $6, $7, $8, now() - interval '1 hour')",
+                &[
+                    &grant,
+                    &space.project_id,
+                    &space.member,
+                    &member_octo,
+                    &DEVICE_PROVIDER,
+                    &DEVICE,
+                    &vec!["device.state.read".to_string()],
+                    &chat,
+                ],
+            )
+            .await?;
+
+            let before = lane.written().await?;
+            let (status, response) = lane
+                .send(&lane.owner(), chat, &lane_send(lane_metadata(json!({}))))
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            assert_eq!(response["status"], json!("recorded"), "{response}");
+            assert_eq!(
+                lane.written().await?,
+                Written {
+                    messages: before.messages + 1,
+                    ..before
+                }
+            );
+
+            // The grant's own person: a lane turn, holding no grant.
+            let member = lane.token(space.member);
+            let job = lane
+                .admitted_as(&member, chat, &lane_send(lane_metadata(json!({}))))
+                .await?;
+            assert_lane_job(
+                &lane.job(job).await?,
+                space.member,
+                lane.member_claude,
+                "the member's turn",
+            );
+            // Their ordinary turn there holds it, as before.
+            lane.end_jobs().await?;
+            let job = lane
+                .job(
+                    lane.admitted_as(&member, chat, &octo_send(lane.member_desktop))
+                        .await?,
+                )
+                .await?;
+            assert_eq!(job.engine, None);
+            assert_eq!(job.grant_ids, Some(vec![grant]));
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// An automation whose agents all use Claude Code (docs/Local-Engine-Turns.md
+/// 11.7): its run picks and launches no runtime and becomes a turn of its
+/// owner's own Claude Code agent in the automation's thread, waiting for
+/// their computer. A due run while that turn still waits is skipped, with no
+/// error or notice and its next run set, and adds no turn. While the turn
+/// runs, a due run is a turn again, which waits behind it. An automation
+/// that may report nothing gives Claude Code its "nothing to report"
+/// instruction in front of its words.
+#[tokio::test]
+async fn an_automation_of_claude_code_agents_waits_for_its_persons_computer_and_never_piles_up(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-automation",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let runtimes = lane.written().await?.runtimes;
+            let (automation, thread) = lane.automation(json!({})).await?;
+            let first_run = lane.run_automation(automation).await?;
+            let jobs = lane.jobs_in(thread).await?;
+            assert_eq!(jobs.len(), 1, "{jobs:?}");
+            let job = lane.job(jobs[0]).await?;
+            assert_lane_job(
+                &job,
+                space.owner,
+                lane.owner_claude,
+                "the automation's turn",
+            );
+            assert_eq!(job.payload["executionMode"], json!("shared_write"));
+            assert_eq!(job.payload["prompt_text"], json!(WORDS));
+            let thread_kind: Option<String> = sql_one(
+                lane.pool(),
+                "select thread_kind from conversations where id = $1",
+                &[&thread],
+            )
+            .await?;
+            assert_eq!(thread_kind.as_deref(), Some("automation"));
+            assert_eq!(
+                lane.written().await?.runtimes,
+                runtimes,
+                "no runtime picked or launched"
+            );
+            let last_error = || async {
+                sql_one::<Option<String>>(
+                    lane.pool(),
+                    "select last_error from automations where id = $1",
+                    &[&automation],
+                )
+                .await
+            };
+            assert_eq!(last_error().await?, None);
+
+            // A due run while it waits is skipped.
+            let messages = lane.written().await?.messages;
+            let skipped_run = lane.run_automation(automation).await?;
+            assert!(skipped_run > first_run, "{skipped_run} {first_run}");
+            assert_eq!(last_error().await?, None);
+            let next_run: Option<DateTime<Utc>> = sql_one(
+                lane.pool(),
+                "select next_run_at from automations where id = $1",
+                &[&automation],
+            )
+            .await?;
+            assert!(
+                next_run.is_some_and(|next| next > Utc::now() + chrono::Duration::hours(23)),
+                "{next_run:?}"
+            );
+            assert_eq!(lane.jobs_in(thread).await?, jobs, "no turn more");
+            assert_eq!(lane.written().await?.messages, messages, "no notice");
+
+            // While the turn runs, a due run is a turn again, which waits.
+            lane.lease_one(lane.desktop, jobs[0]).await?;
+            lane.run_automation(automation).await?;
+            let after = lane.jobs_in(thread).await?;
+            assert_eq!(after.len(), 2, "{after:?}");
+            assert_lane_job(
+                &lane.job(after[1]).await?,
+                space.owner,
+                lane.owner_claude,
+                "the next run's turn",
+            );
+
+            // An automation that may report nothing.
+            let (quiet, quiet_thread) = lane
+                .automation(json!({ "silentWhenNothingToReport": true }))
+                .await?;
+            lane.run_automation(quiet).await?;
+            let jobs = lane.jobs_in(quiet_thread).await?;
+            assert_eq!(jobs.len(), 1, "{jobs:?}");
+            let job = lane.job(jobs[0]).await?;
+            assert_lane_job(&job, space.owner, lane.owner_claude, "a quiet automation");
+            assert!(
+                crate::group_participation::job_payload_marks_agent_evaluation(&job.payload),
+                "{}",
+                job.payload
+            );
+            let prompt = job.payload["prompt_text"].as_str().unwrap_or_default();
+            assert!(
+                prompt.starts_with("[Scheduled automation run")
+                    && prompt.ends_with(&format!("\n\n{WORDS}")),
+                "{prompt}"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// An automation runs every turn in the `apply` mode, whatever mode it was
+/// saved with (`automations::normalize_execution_mode`), on Claude Code as on
+/// any engine (docs/Local-Engine-Turns.md 11.4): a `plan_only` automation's
+/// Claude Code turn is a writing one, as its Codex turn would be.
+#[tokio::test]
+async fn an_automation_runs_its_claude_code_turn_in_the_mode_it_runs_any_turn() -> anyhow::Result<()>
+{
+    with_lane(
+        "lane-automation-read-only",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (automation, thread) = lane
+                .automation(json!({
+                    "metadata": {
+                        "agentSelection": { "active": [CLAUDE], "mentions": [CLAUDE] },
+                        "execution_mode": "plan_only",
+                    },
+                }))
+                .await?;
+            lane.run_automation(automation).await?;
+            let jobs = lane.jobs_in(thread).await?;
+            assert_eq!(jobs.len(), 1, "{jobs:?}");
+            let job = lane.job(jobs[0]).await?;
+            assert_lane_job(&job, space.owner, lane.owner_claude, "a plan_only run");
+            assert_eq!(
+                (
+                    job.payload["executionMode"].clone(),
+                    job.payload["metadata"].get("execution_mode").cloned(),
+                ),
+                (json!("shared_write"), None),
+                "{}",
+                job.payload
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A person's own send in the read-only `plan_only` mode is a turn Claude
+/// Code can take (docs/Local-Engine-Turns.md 11.4, 11.12): its payload names
+/// the mode where runtime-agent reads it, and the read-only workspace mode.
+#[tokio::test]
+async fn a_read_only_turn_names_its_mode_where_the_runtime_reads_it() -> anyhow::Result<()> {
+    with_lane(
+        "lane-read-only",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let chat = lane.chat().await?;
+            let job = lane
+                .job(
+                    lane.admitted(
+                        chat,
+                        &lane_send(lane_metadata(json!({
+                            "execution_mode": "plan_only",
+                            "writeIntent": false,
+                        }))),
+                    )
+                    .await?,
+                )
+                .await?;
+            assert_lane_job(&job, space.owner, lane.owner_claude, "a read-only turn");
+            assert_eq!(job.payload["executionMode"], json!("shared_read"));
+            assert_eq!(
+                job.payload["metadata"]["execution_mode"],
+                json!("plan_only")
+            );
+            assert_eq!(job.payload["writeIntent"], json!(false));
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A project of `user`'s, for the payload builders.
+fn project_of(user: Uuid) -> crate::ProjectRecord {
+    crate::ProjectRecord {
+        id: Uuid::new_v4(),
+        org_id: None,
+        name: None,
+        sandbox_session_id: None,
+        project_type: None,
+        owner_user_id: Some(user),
+        _status: None,
+    }
+}
+
+/// The builders of a lane job's payload and of its reply: the reply is
+/// stamped as a lane turn's, and an evaluation's payload carries its
+/// participation instruction in front of the message for Claude Code, the
+/// same as for any engine (docs/Local-Engine-Turns.md 11.10), and keeps its
+/// marker.
+#[test]
+fn the_payload_and_reply_builders_keep_a_lane_turn_its_own() {
+    let reply = json!({ "source": "agent", "outcome": "completed" });
+    let stamped = crate::agent::stamp_ai_access_mode_from_job_payload(
+        reply.clone(),
+        &json!({ "metadata": {
+            "aiAccessMode": "claude-code",
+            "managedAiUsed": false,
+            "claudeCode": { "version": 1 },
+        } }),
+    );
+    assert_eq!(stamped["source"], json!("agent"));
+    assert_lane_stamps(&stamped, "reply");
+    let byoc = crate::agent::stamp_ai_access_mode_from_job_payload(
+        reply.clone(),
+        &json!({ "metadata": { "aiAccessMode": "byoc" } }),
+    );
+    assert_eq!(byoc["aiAccessMode"], json!("byoc"));
+    assert!(byoc.get("claudeCode").is_none());
+
+    let user = Uuid::new_v4();
+    let project = project_of(user);
+    let context = person_context(user);
+    let mut request = crate::dispatch::normalize_dispatch_request(
+        serde_json::from_value(json!({
+            "projectId": project.id.to_string(),
+            "conversationId": Uuid::new_v4().to_string(),
+            "promptText": WORDS,
+            "metadata": { "input": { "kind": "person" }, "writeIntent": true },
+        }))
+        .expect("request"),
+    )
+    .expect("normalized");
+    crate::group_participation::inject_skill_mode_agent_evaluation_metadata(&mut request.metadata);
+    let (run, prompt) = (Uuid::new_v4(), Uuid::new_v4());
+    let evaluation =
+        crate::agent::build_agent_job_payload(&project, &context, &request, &run, &prompt, None)
+            .expect("an evaluation payload");
+    assert_ne!(evaluation["prompt_text"], json!(WORDS), "the instruction");
+    request.claude_code_lane = Some(claude_code_lane::LaneAdmission);
+    let lane_evaluation =
+        crate::agent::build_agent_job_payload(&project, &context, &request, &run, &prompt, None)
+            .expect("a lane evaluation payload");
+    assert_eq!(
+        lane_evaluation["prompt_text"], evaluation["prompt_text"],
+        "the same instruction in front of the same words"
+    );
+    assert!(lane_evaluation["prompt_text"]
+        .as_str()
+        .is_some_and(|text| text.ends_with(WORDS)));
+    assert!(crate::group_participation::job_payload_marks_agent_evaluation(&lane_evaluation));
+    assert_lane_stamps(&lane_evaluation["metadata"], "a lane evaluation");
+}
+
+/// A lane job's payload names its workspace mode by its execution mode, which
+/// runtime-agent reads, whatever workspace mode the client's metadata asked
+/// for under any of the keys dispatch reads it by: a write in the space's
+/// folder, or `shared_read` for the read-only `plan_only`, which its metadata
+/// then names too (docs/Local-Engine-Turns.md 11.12). Any other job keeps the
+/// mode dispatch resolved from it.
+#[test]
+fn a_lane_payload_names_its_workspace_mode_by_its_execution_mode_alone() {
+    let user = Uuid::new_v4();
+    let project = project_of(user);
+    let context = person_context(user);
+    let (run, prompt) = (Uuid::new_v4(), Uuid::new_v4());
+    for (key, mode) in [
+        ("workspaceMode", "shared_read"),
+        ("workspaceMode", "isolated_write"),
+        ("executionMode", "isolated_write"),
+        ("workspace_mode", "shared_read"),
+        ("workspaceMode", "shared_write"),
+    ] {
+        let mut metadata = json!({ "input": { "kind": "person" }, "writeIntent": true });
+        metadata[key] = json!(mode);
+        let mut request = crate::dispatch::normalize_dispatch_request(
+            serde_json::from_value(json!({
+                "projectId": project.id.to_string(),
+                "conversationId": Uuid::new_v4().to_string(),
+                "promptText": WORDS,
+                "metadata": metadata,
+            }))
+            .expect("request"),
+        )
+        .expect("normalized");
+        assert_eq!(request.workspace_mode, mode, "{key}");
+        let codex = crate::agent::build_agent_job_payload(
+            &project, &context, &request, &run, &prompt, None,
+        )
+        .expect("a payload");
+        assert_eq!(codex["executionMode"], json!(mode), "{key}");
+        request.claude_code_lane = Some(claude_code_lane::LaneAdmission);
+        let lane = crate::agent::build_agent_job_payload(
+            &project, &context, &request, &run, &prompt, None,
+        )
+        .expect("a lane payload");
+        assert_eq!(
+            lane["executionMode"],
+            json!("shared_write"),
+            "{key}: {mode}"
+        );
+        assert!(lane["metadata"].get("execution_mode").is_none(), "{lane}");
+        assert_never_holds(&lane["metadata"], &["workspaceMode", "executionMode"], key);
+        request.execution_mode = "plan_only".to_string();
+        let read_only = crate::agent::build_agent_job_payload(
+            &project, &context, &request, &run, &prompt, None,
+        )
+        .expect("a read-only lane payload");
+        assert_eq!(
+            read_only["executionMode"],
+            json!("shared_read"),
+            "{key}: {mode}"
+        );
+        assert_eq!(read_only["metadata"]["execution_mode"], json!("plan_only"));
+    }
+}
+
+/// L1 and L2 of `check_target` (docs/Local-Engine-Turns.md 11.6): a target
+/// with no person behind the dispatch, or with no saved agent, is no turn of
+/// its owner's; a person the switch leaves out is refused; and a turn that
+/// needs Instafy's browser, as a strict browser target does, is refused with
+/// L3's reason. The owner's own plain turn passes.
+#[test]
+fn a_target_passes_only_as_its_owners_own_turn_on_the_switch() {
+    let (owner, outsider) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "lane-check-target",
+    );
+    config.claude_code_lane = ClaudeCodeLaneUsers(DeviceGrantUsers::Only(vec![owner]));
+    let request = crate::dispatch::normalize_dispatch_request(
+        serde_json::from_value(json!({
+            "projectId": Uuid::new_v4().to_string(),
+            "promptText": WORDS,
+            "metadata": lane_metadata(json!({})),
+        }))
+        .expect("request"),
+    )
+    .expect("normalized");
+    let agent = Some(Uuid::new_v4());
+    let check = |user: Option<Uuid>, agent_id: Option<Uuid>, uses_browser: bool| {
+        claude_code_lane::check_target(
+            &config,
+            &RequestContext {
+                user_id: user,
+                is_service_role: user.is_none(),
+                scoped_claims: None,
+            },
+            &request,
+            claude_code_lane::Target {
+                agent_id,
+                uses_browser,
+                prompt_text: &request.prompt_text,
+            },
+        )
+        .err()
+        .map(|(status, Json(error))| {
+            (
+                status,
+                error.code.clone().unwrap_or_default(),
+                reason_of(&error).unwrap_or_default().to_string(),
+            )
+        })
+    };
+    let refused =
+        |expected: Expected| Some((expected.0, expected.1.to_string(), expected.2.to_string()));
+    assert_eq!(check(Some(owner), agent, false), None);
+    assert_eq!(check(None, agent, false), refused(unsupported("no_owner")));
+    assert_eq!(
+        check(Some(owner), None, false),
+        refused(unsupported("no_owner"))
+    );
+    assert_eq!(check(Some(outsider), agent, false), refused(not_allowed()));
+    assert_eq!(
+        check(Some(owner), agent, true),
+        refused(unsupported("browser"))
+    );
 }

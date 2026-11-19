@@ -3349,8 +3349,24 @@ fn terminal_consent_signal(code: &'static str) -> JsonValue {
     })
 }
 
+/// The mark on the terminal signal of a call after the one that ended the run
+/// (`terminalConsent.endedEarlier`): the person answered that call's prompt, and
+/// no other. A later call asked them nothing, so its step carries no answer of
+/// theirs (`shared_browser_activity::browser_step_facts`): with one, one Deny
+/// read "you said no to 3 steps" in the turn's line, and Details listed three.
+pub(crate) const ENDED_EARLIER_KEY: &str = "endedEarlier";
+
+/// [`terminal_consent_signal`] for a call after the one that ended the run.
+fn ended_earlier_signal(code: &'static str) -> JsonValue {
+    let mut signal = terminal_consent_signal(code);
+    signal["terminalConsent"][ENDED_EARLIER_KEY] = JsonValue::Bool(true);
+    signal
+}
+
+/// What `status` reads once the run ended: the run's blocked state, marked as
+/// ended at an earlier call ([`ENDED_EARLIER_KEY`]), and nothing of the page.
 fn terminal_consent_status(code: &'static str) -> JsonValue {
-    let mut status = terminal_consent_signal(code);
+    let mut status = ended_earlier_signal(code);
     let object = status
         .as_object_mut()
         .expect("terminal consent signal is always an object");
@@ -3439,17 +3455,28 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
     result
 }
 
-/// The result of a call after the one that ended the run: the same as that call's
+/// The result of a call after the one that ended the run: that call's words
 /// ([`terminal_consent_call_result`]), except after a no, which was to an earlier step the
-/// person saw, not to this one, and ends the browser for the turn.
+/// person saw, not to this one, and ends the browser for the turn. Its step did not happen and
+/// asked the person nothing, so it is an error, marked as ended at an earlier call
+/// ([`ENDED_EARLIER_KEY`]): taken for a step that ended without one, a later open after a prompt
+/// left unanswered would count as a page opened.
 fn terminal_consent_later_call_result(code: &'static str) -> CallToolResult {
-    if code != "approval_denied" {
-        return terminal_consent_call_result(code);
-    }
-    let message = "The person said no to an earlier step, so the browser is done for this turn. End this turn now.";
-    let mut result = CallToolResult::error(vec![ContentBlock::text(message)]);
-    let mut structured = terminal_consent_signal(code);
-    structured["message"] = JsonValue::String(message.to_string());
+    let message = if code == "approval_denied" {
+        "The person said no to an earlier step, so the browser is done for this turn. End this turn now.".to_string()
+    } else {
+        let first = terminal_consent_call_result(code);
+        first
+            .structured_content
+            .as_ref()
+            .and_then(|structured| structured.get("message"))
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut result = CallToolResult::error(vec![ContentBlock::text(message.clone())]);
+    let mut structured = ended_earlier_signal(code);
+    structured["message"] = JsonValue::String(message);
     result.structured_content = Some(structured);
     result
 }

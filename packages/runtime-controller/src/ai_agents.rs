@@ -34,6 +34,10 @@ const PROVIDER_DEEPSEEK: &str = "deepseek";
 const PROVIDER_ZAI: &str = "zai";
 const PROVIDER_GEMINI: &str = "gemini";
 const PROVIDER_ASSISTANT: &str = "assistant";
+/// An agent whose turns run on its owner's own Claude Code, on their own
+/// computer (docs/Local-Engine-Turns.md 11.3). Only its owner chooses it, and
+/// only with no credential: no credential's hint ever makes an agent one.
+const PROVIDER_CLAUDE_CODE: &str = crate::claude_code_lane::PROVIDER;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +110,9 @@ pub(crate) struct UpdateAgentBody {
     model: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     reasoning_effort: Option<Option<String>>,
+    /// The agent's AI when it has no credential: `"claude-code"` makes it a
+    /// Claude Code agent (11.3), which takes no credential in the same body.
+    provider: Option<String>,
     project_id: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     runtime_id: Option<Option<String>>,
@@ -289,6 +296,39 @@ fn normalize_provider_id(raw: Option<&str>) -> Option<String> {
             PROVIDER_ASSISTANT => PROVIDER_ASSISTANT.to_string(),
             _ => PROVIDER_OPENAI.to_string(),
         })
+}
+
+/// Whether a request body's `provider` chooses Claude Code.
+fn chooses_claude_code(provider: Option<&str>) -> bool {
+    provider.is_some_and(|value| value.trim().eq_ignore_ascii_case(PROVIDER_CLAUDE_CODE))
+}
+
+/// Refuses Claude Code as an agent's AI when the rollout switch does not cover
+/// its owner, or when the same body also picks a credential.
+fn ensure_claude_code_choice(
+    state: &AppState,
+    user_id: Uuid,
+    picks_credential: bool,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if picks_credential {
+        return Err(bad_request(
+            "A Claude Code agent takes no credential: send provider or credentialId, not both.",
+        ));
+    }
+    if !state.config.claude_code_lane.allow(user_id) {
+        return Err(crate::claude_code_lane::not_allowed());
+    }
+    Ok(())
+}
+
+/// The AI an agent with no credential falls back to when it stops using
+/// Claude Code: @octo's own, or Instafy AI's default for any other agent.
+fn provider_without_credential(handle: &str) -> String {
+    if agent_face::is_octo_handle(handle) {
+        PROVIDER_ASSISTANT.to_string()
+    } else {
+        PROVIDER_OPENAI.to_string()
+    }
 }
 
 fn normalize_optional_model(
@@ -734,12 +774,17 @@ async fn create_my_agent(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    let provider = match credential_id.as_ref() {
-        Some(credential_id) => {
-            resolve_agent_provider_for_credential(&transaction, &user_id, credential_id).await?
+    let provider = if chooses_claude_code(body.provider.as_deref()) {
+        ensure_claude_code_choice(&state, user_id, credential_id.is_some())?;
+        PROVIDER_CLAUDE_CODE.to_string()
+    } else {
+        match credential_id.as_ref() {
+            Some(credential_id) => {
+                resolve_agent_provider_for_credential(&transaction, &user_id, credential_id).await?
+            }
+            None => normalize_provider_id(body.provider.as_deref())
+                .unwrap_or_else(|| PROVIDER_OPENAI.to_string()),
         }
-        None => normalize_provider_id(body.provider.as_deref())
-            .unwrap_or_else(|| PROVIDER_OPENAI.to_string()),
     };
 
     let (agent_id, _handle) = if let Some(handle) = body
@@ -965,7 +1010,13 @@ async fn update_my_agent(
         },
     };
 
+    let claude_code_chosen = chooses_claude_code(body.provider.as_deref());
+    if claude_code_chosen {
+        ensure_claude_code_choice(&state, user_id, body.credential_id.is_some())?;
+    }
+    let credential_cleared = matches!(body.credential_id, Some(None));
     let next_credential_id = match body.credential_id {
+        None if claude_code_chosen => None,
         None => existing_credential_id,
         Some(None) => None,
         Some(Some(value)) => {
@@ -994,8 +1045,17 @@ async fn update_my_agent(
     };
 
     let next_provider = match next_credential_id.as_ref() {
+        _ if claude_code_chosen => PROVIDER_CLAUDE_CODE.to_string(),
         Some(credential_id) => {
             resolve_agent_provider_for_credential(&transaction, &user_id, credential_id).await?
+        }
+        // Another AI with no credential, named in the body: Instafy AI.
+        None if body.provider.is_some() => normalize_provider_id(body.provider.as_deref())
+            .unwrap_or_else(|| provider_without_credential(&next_handle)),
+        // Clearing a Claude Code agent's credential, which it never has,
+        // chooses Instafy AI: it stops using Claude Code.
+        None if credential_cleared && existing_provider == PROVIDER_CLAUDE_CODE => {
+            provider_without_credential(&next_handle)
         }
         None => existing_provider,
     };

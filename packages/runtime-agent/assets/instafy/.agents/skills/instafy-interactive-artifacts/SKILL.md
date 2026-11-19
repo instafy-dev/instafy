@@ -39,7 +39,8 @@ own kind of page.
   size), the main one first, never for a number in a name (a chip, a model, a version): under 5 options no row moves,
   the page names the option each puts first under its title ("Lowest price: Option B"), and a phone shows the first
   one's value on each row. Facts carry their trust: `checked 17 Oct on maker.com`, `€549 at Shop · seen 17 Oct`,
-  `checked 4 min ago`, `Estimate`, `Unknown`. A tip no page gave is plain text, never styled like a source line.
+  `checked 4 min ago`, `Estimate`, `Unknown`, each drawn by the starter's `site.trust` or `site.cite` from the fact's
+  `"viewer"` (how it was read), never typed. A tip no page gave is plain text, never styled like a source line.
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
   why, as `instafy-comparing` says, never a blank or a dash. A note on the page never names the tools, searches or
   services you used. A value cites only a page that gives it: a count of

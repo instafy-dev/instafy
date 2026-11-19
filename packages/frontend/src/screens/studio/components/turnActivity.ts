@@ -557,7 +557,7 @@ function plural(count: number, one: string, many: string): string {
 /**
  * A step the person said no to, or left to run out: it did not happen, also
  * when it ended without an error, and its answer names it ("you said no to
- * opening google.com", "skipped opening httpbin.org: no answer in time").
+ * opening google.com", "skipped opening httpbin.org: no answer from you").
  */
 function isDeclined(step: TurnStep): boolean {
   return step.activity?.approval === "denied" || step.activity?.approval === "expired";
@@ -719,8 +719,8 @@ function summarizeGroups(steps: TurnStep[]): { phrases: string[]; firstHost: str
       }
       const entry: ActivityEntry = ranEntry.result === "unknown" ? { ...ranEntry, count: null } : ranEntry;
       // A step the person said no to, or left, did not happen, also when it
-      // ended without an error ("skipped opening httpbin.org: no answer in
-      // time" never also says "Opened httpbin.org").
+      // ended without an error ("skipped opening httpbin.org: no answer from
+      // you" never also says "Opened httpbin.org").
       if (step.state === "failed" || declined) {
         if (!tried && !declined && entry.role !== "quiet" && entry.live) {
           tried = entry;
@@ -968,8 +968,10 @@ function sessionAnsweredApproval(approval: SessionBrowserApproval): AnsweredAppr
 
 /**
  * "you allowed a search on visitlisboa.com", "you said no to opening
- * carris.pt", "skipped a click on carris.pt: no answer in time". The host is
- * left out when it is the site the line already names first.
+ * carris.pt", "skipped a click on carris.pt: no answer from you". The host is
+ * left out when it is the site the line already names first. A prompt left to
+ * run out is the person's step, said so: "no answer in time" read as the
+ * site's.
  */
 function approvalWords(approval: AnsweredApproval, namedHost: string | null): string {
   const host = approval.host && approval.host !== namedHost ? displayActivityHost(approval.host) : null;
@@ -987,7 +989,7 @@ function approvalWords(approval: AnsweredApproval, namedHost: string | null): st
     case "denied":
       return `you said no to ${noun}`;
     default:
-      return `skipped ${noun}: no answer in time`;
+      return `skipped ${noun}: no answer from you`;
   }
 }
 
@@ -1007,7 +1009,7 @@ function approvalsClause(answered: readonly AnsweredApproval[], namedHost: strin
     case "denied":
       return `you said no to ${same} steps`;
     default:
-      return `skipped ${same} steps: no answer in time`;
+      return `skipped ${same} steps: no answer from you`;
   }
 }
 
