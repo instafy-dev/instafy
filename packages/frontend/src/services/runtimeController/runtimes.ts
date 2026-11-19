@@ -130,12 +130,6 @@ export interface ControllerRuntimeClaudeCode {
   verified: boolean | null;
   /** True only when the probe found a Claude plan sign-in. */
   planSignIn: boolean;
-  /**
-   * While not ready: when the Claude plan's usage limit that holds it resets,
-   * as an RFC 3339 time (11.11). Absent otherwise, and when it does not read
-   * as a time.
-   */
-  resetsAt?: string;
 }
 
 const CLAUDE_CODE_CLI_VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,64})?$/;
@@ -163,17 +157,12 @@ export function mapControllerRuntimeClaudeCode(value: unknown): ControllerRuntim
     !record.ready && typeof record.reason === "string" && CLAUDE_CODE_NOT_READY_REASONS.has(record.reason)
       ? (record.reason as ControllerRuntimeClaudeCodeNotReadyReason)
       : null;
-  const resetsAt =
-    !record.ready && typeof record.resetsAt === "string" && !Number.isNaN(Date.parse(record.resetsAt))
-      ? record.resetsAt
-      : null;
   return {
     ready: record.ready,
     reason,
     cli,
     verified: typeof record.verified === "boolean" ? record.verified : null,
     planSignIn: record.planSignIn === true,
-    ...(resetsAt ? { resetsAt } : {}),
   };
 }
 

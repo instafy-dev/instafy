@@ -65,25 +65,6 @@ describe("mapControllerRuntimeClaudeCode", () => {
     expect(mapControllerRuntimeClaudeCode({ ...READY, reason: "bare_default" })?.reason).toBeNull();
   });
 
-  it("keeps a plan limit's reset time while not ready, when it reads as a time", () => {
-    const held = { version: 1, ready: false, reason: "plan_limit", resetsAt: "2026-11-19T20:00:00Z" };
-    expect(mapControllerRuntimeClaudeCode(held)).toEqual({
-      ready: false,
-      reason: "plan_limit",
-      cli: null,
-      verified: null,
-      planSignIn: false,
-      resetsAt: "2026-11-19T20:00:00Z",
-    });
-    for (const resetsAt of ["soon", 1763582400, null]) {
-      expect(mapControllerRuntimeClaudeCode({ ...held, resetsAt })).not.toHaveProperty("resetsAt");
-    }
-    // A reset time means nothing on a ready capability.
-    expect(mapControllerRuntimeClaudeCode({ ...READY, resetsAt: "2026-11-19T20:00:00Z" })).not.toHaveProperty(
-      "resetsAt",
-    );
-  });
-
   it("keeps exactly the not-ready reasons runtime-contracts lists", () => {
     expect(LANE.notReadyReasons.length).toBeGreaterThan(0);
     for (const reason of LANE.notReadyReasons) {
