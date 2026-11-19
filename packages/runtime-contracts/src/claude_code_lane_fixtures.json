@@ -20,7 +20,6 @@
     "stalled",
     "crashed",
     "unexpected_configuration",
-    "project_config",
     "unsafe_import",
     "unsafe_link",
     "preflight_failed"

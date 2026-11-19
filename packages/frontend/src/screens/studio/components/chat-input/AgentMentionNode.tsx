@@ -1,8 +1,8 @@
 import type { EditorConfig, LexicalNode, NodeKey, SerializedTextNode } from "lexical";
 import { TextNode } from "lexical";
+import { MENTION_CLASSES } from "../../../../components/mentionStyles";
 
-export const AGENT_MENTION_CLASS =
-  "inline-flex items-center rounded-full px-2 py-0.5 font-semibold leading-none ring-1 align-baseline bg-secondary-50 text-secondary-800 ring-secondary-200 dark:bg-secondary-500/15 dark:text-secondary-200 dark:ring-secondary-500/30";
+export const AGENT_MENTION_CLASS = MENTION_CLASSES.agent;
 
 export type SerializedAgentMentionNode = SerializedTextNode & {
   type: "agent-mention";

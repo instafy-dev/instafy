@@ -16,13 +16,15 @@ const TONE_CLASSES: Record<BrowserStateTone, string> = {
 export function BrowserStateBadge({
   tone = "neutral",
   compact = false,
+  size = "sm",
   className,
   ...props
-}: HTMLAttributes<HTMLSpanElement> & { tone?: BrowserStateTone; compact?: boolean }) {
+}: HTMLAttributes<HTMLSpanElement> & { tone?: BrowserStateTone; compact?: boolean; size?: "sm" | "xs" }) {
   return <span
     {...props}
     className={[
-      "inline-flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-full border text-xxs font-medium",
+      "inline-flex min-w-0 shrink-0 items-center gap-1 rounded-full border text-xxs font-medium",
+      size === "xs" ? "h-4" : "h-7",
       compact ? "px-1.5" : "px-2",
       TONE_CLASSES[tone],
       className,

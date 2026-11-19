@@ -5,6 +5,7 @@ import type { LocalTabControlState } from "../../../services/runtimeController/l
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { BrowserToolsOverlayContext, BrowserToolsPopover } from "./BrowserToolsPopover";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { StudioDialogBody } from "../../../components/aria/StudioDialogLayout";
 import { SharedLocalTabViewer } from "./SharedLocalTabViewer";
 import { Checkbox } from "../../../components/Checkbox";
 import { Select } from "../../../components/Select";
@@ -12,9 +13,9 @@ import { Input } from "../../../components/Input";
 import { Button, IconButton } from "../../../components/Button";
 import { Badge } from "../../../components/Badge";
 import { Text } from "../../../components/Text";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { useGatedInterval } from "../../../runtime/pollingGate";
-import { SEMANTIC_TONE_CLASSES } from "../../../theme/semanticTones";
 import { browserShareClient, publishLocalBrowserTab, type BrowserShare, type LocalTabPublication, type BrowserShareAudience, type BrowserSharePerson, type BrowserShareViewer } from "../../../services/runtimeController/browserShares";
 
 
@@ -161,14 +162,16 @@ function ParticipantTakeBack({ requestId, controlId, revoke }: { requestId?: str
     finally { setBusy(false); }
   }
   return <StudioDialogModal isOpen={open} onOpenChange={next => { if (!next) dismiss(); }} isDismissable={!busy} isKeyboardDismissDisabled={busy}
-    dialogAriaLabel="Take back control" modalClassName="!max-w-sm" dialogClassName="p-5" data-browser-session-safe-zone="true">
-    <h2 className="text-base font-semibold">Take back control?</h2>
-    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">Another participant is using your tab. They can keep watching when you take back control.</p>
-    {error ? <p role="alert" className={`mt-3 text-sm ${SEMANTIC_TONE_CLASSES.danger.text}`}>{error}</p> : null}
-    <div className="mt-5 flex justify-end gap-2">
-      <Button className="min-h-10 pointer-coarse:min-h-11" variant="ghost" isDisabled={busy} onPress={dismiss}>Keep watching</Button>
-      <Button className="min-h-10 pointer-coarse:min-h-11" isDisabled={busy} onPress={() => void takeBack()}>{busy ? "Taking back…" : "Take back"}</Button>
-    </div>
+    dialogAriaLabel="Take back control" size="sm" gutter="responsive" layout="editor" data-browser-session-safe-zone="true">
+    <StudioDialogBody scrollable>
+      <Text as="h2" variant="subtitle" tone="primary">Take back control?</Text>
+      <Text as="p" variant="body" tone="muted" className="mt-2">Another participant is using your tab. They can keep watching when you take back control.</Text>
+      {error ? <InlineNotice tone="danger" appearance="inline" role="alert" className="mt-3">{error}</InlineNotice> : null}
+      <div className="mt-5 flex flex-wrap justify-end gap-2">
+        <Button preset="form" variant="ghost" isDisabled={busy} onPress={dismiss}>Keep watching</Button>
+        <Button preset="form" isDisabled={busy} onPress={() => void takeBack()}>{busy ? "Taking back…" : "Take back"}</Button>
+      </div>
+    </StudioDialogBody>
   </StudioDialogModal>;
 }
 

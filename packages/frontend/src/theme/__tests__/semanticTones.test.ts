@@ -236,8 +236,7 @@ const classAttribute = (element: ReactElement) => /class="([^"]*)"/.exec(renderT
 // Mentions, a reply's Updated badge and unsaved state, the camera request chip,
 // the warning beside a speaker, and the landing page's Updated badge.
 const SAND_TEXT_FILES = [
-  "screens/studio/components/assistantMentionUI.tsx",
-  "screens/studio/components/chat-input/AgentMentionNode.tsx",
+  "components/mentionStyles.ts",
   "screens/studio/components/ChatFileChangeList.tsx",
   "screens/studio/components/ChatActivityEntries.tsx",
   "screens/studio/components/AssistantSpeakerIdentityPill.tsx",
