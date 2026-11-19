@@ -1626,7 +1626,11 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
             assert!(!browser_turn.contains(gone), "{transport}: {gone}");
         }
     }
-    assert!(BROWSER_CHOICE_CONTRACT.contains("Write `task` as the person's request: what to do."));
+    assert!(
+        BROWSER_CHOICE_CONTRACT
+            .contains("Write `task` as the person's request: what to do on each page it opens,")
+    );
+    assert!(!BROWSER_CHOICE_CONTRACT.contains("where to stop"));
     for stop in ["what did not work and stop", "where to stop"] {
         assert!(!prompt.contains(stop), "{stop}");
     }

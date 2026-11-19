@@ -390,7 +390,7 @@ fn required_worker_tool_evidence_accepts_commands_or_mcp_and_retains_failed_atte
     .unwrap();
     ensure_worker_tool_evidence(&job, &deferred, false, false, &mut vec![]).unwrap();
     let browser = extract_codex_outcome(&json!({"actions":[{
-        "type":"request_browser", "task":"Read the sources"
+        "type":"request_browser", "task":"Read the sources on https://example.com/sources"
     }]}))
     .unwrap();
     assert!(ensure_worker_tool_evidence(&job, &browser, false, false, &mut vec![]).is_err());

@@ -200,6 +200,12 @@ fn looks_like_secret(query: &str) -> bool {
         })
 }
 
+/// Whether `text` holds an e-mail address, as the rules find one in a query: a browser card's task
+/// never carries one either (`jobs::browser_request`).
+pub(crate) fn holds_an_email_address(text: &str) -> bool {
+    patterns().email.is_match(&collapse(text))
+}
+
 /// The query as the rules pass it: white space collapsed, and e-mail addresses, account numbers
 /// and long numbers removed. A query that looks like it holds a key or a password is refused, as is
 /// one with nothing left.

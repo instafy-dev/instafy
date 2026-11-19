@@ -233,7 +233,7 @@ mod tests {
         value["actions"]
             .as_array_mut()
             .unwrap()
-            .push(json!({"type":"request_browser", "task":"Inspect a page"}));
+            .push(json!({"type":"request_browser", "task":"Inspect https://example.com/settings"}));
         assert!(parse_action(&value).is_err());
         assert!(super::super::extract_codex_outcome(&value).is_err());
     }

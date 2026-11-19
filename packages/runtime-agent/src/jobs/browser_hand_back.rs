@@ -72,6 +72,8 @@
 //! hand-back after it) is never dropped without a word: the reply says the
 //! thing is not made yet ([`BUILD_NOT_MADE_LINE`]).
 
+use std::borrow::Cow;
+
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
@@ -532,6 +534,141 @@ fn json_object_line(line: &str) -> Option<serde_json::Map<String, JsonValue>> {
     }
 }
 
+/// Whether a JSON object is one of the lines a browser turn writes for Octo, not the person: a
+/// finding line (a `url`, [`finding_line`]), its missing line (`missing`, [`missing_line`]) or
+/// its unread line (`unread`, [`unread_line`]).
+fn for_octo(object: &serde_json::Map<String, JsonValue>) -> bool {
+    ["url", "missing", "unread"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+}
+
+/// The most words of a label right before an object for Octo ("Finding:", "Missing values:"),
+/// which goes with it ([`without_closing_label`]).
+const LABEL_MAX_WORDS: usize = 3;
+
+/// `text` with each JSON object a browser turn writes for Octo ([`for_octo`]) on a line of its
+/// own, wherever the turn wrote it: after its words on a line, between them, or over several
+/// lines (joined into one). Every reader of those lines reads whole lines ([`json_object_line`]),
+/// so one written after a reply's words was read as words, and the person read it: a browser
+/// turn ended "… home page is open in the browser. Finding: {"url":…}" on one line, the
+/// wrap-up pass wrote its lines again, and the reply kept that line (a local test, Nov 19). A
+/// short label right before the object ([`without_closing_label`]) and the backticks, brackets
+/// and punctuation around it go with it; the words around it stay where they were. An object
+/// inside another goes with that one, and one alone on its line stays as it is.
+fn own_lines(text: &str) -> Cow<'_, str> {
+    // Where each object for Octo that has no line of its own starts and ends.
+    let mut lifted: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find('{') {
+        let start = from + found;
+        let mut values =
+            serde_json::Deserializer::from_str(&text[start..]).into_iter::<JsonValue>();
+        let Some(Ok(JsonValue::Object(object))) = values.next() else {
+            from = start + 1;
+            continue;
+        };
+        let end = start + values.byte_offset();
+        from = end;
+        if !for_octo(&object) {
+            continue;
+        }
+        let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
+        let line_end = text[end..].find('\n').map_or(text.len(), |at| end + at);
+        let alone = !text[start..end].contains('\n')
+            && json_object_line(&text[line_start..line_end]).is_some();
+        if !alone {
+            lifted.push((start, end));
+        }
+    }
+    if lifted.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 2 * lifted.len());
+    let mut cursor = 0;
+    for (start, end) in lifted {
+        out.push_str(without_closing_label(&text[cursor..start]));
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        // A line break in an object stands between two of its tokens: a string holds none.
+        let object = text[start..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&object);
+        cursor = text[end..]
+            .find(|c: char| !matches!(c, '`' | ']' | ',' | '.' | ';' | ' ' | '\t'))
+            .map_or(text.len(), |at| end + at);
+        if !text[cursor..].is_empty() && !text[cursor..].starts_with(['\n', '\r']) {
+            out.push('\n');
+        }
+    }
+    out.push_str(&text[cursor..]);
+    Cow::Owned(out)
+}
+
+/// [`own_lines`] in place.
+fn put_on_own_lines(text: &mut String) {
+    let lifted = match own_lines(text.as_str()) {
+        Cow::Owned(lifted) => lifted,
+        Cow::Borrowed(_) => return,
+    };
+    *text = lifted;
+}
+
+/// The words before an object for Octo without what goes with it ([`own_lines`]): white space,
+/// an opening backtick or bracket, and a label of at most [`LABEL_MAX_WORDS`] words that ends the
+/// last line with a colon after its last sentence ("Finding:", "- Findings:").
+fn without_closing_label(before: &str) -> &str {
+    let words = before.trim_end().trim_end_matches(['`', '[']).trim_end();
+    let line_start = words.rfind('\n').map_or(0, |at| at + 1);
+    let line = &words[line_start..];
+    let label_start = [". ", "! ", "? ", "\u{2026} "]
+        .iter()
+        .filter_map(|end| line.rfind(end).map(|at| at + end.len()))
+        .max()
+        .unwrap_or(0);
+    let label = line[label_start..]
+        .trim_start_matches(['-', '*', '\u{2022}', ' '])
+        .trim();
+    if label.ends_with(':') && label.split_whitespace().count() <= LABEL_MAX_WORDS {
+        words[..line_start + label_start].trim_end()
+    } else {
+        words
+    }
+}
+
+/// `words` without what is left of an object for Octo written so that no reader could read it
+/// (a quote mark left unescaped, an object cut off): on each line, from the `{` before a quoted
+/// `url` key to the line's end, with a short label before it ([`without_closing_label`]). A line
+/// left with nothing goes.
+fn cut_unreadable_findings(words: &str) -> String {
+    let unreadable_start = |line: &str| {
+        let key = ["\"url\"", "'url'"]
+            .iter()
+            .flat_map(|key| {
+                line.match_indices(key)
+                    .filter(|(at, key)| line[at + key.len()..].trim_start().starts_with(':'))
+                    .map(|(at, _)| at)
+            })
+            .min()?;
+        line[..key].rfind('{')
+    };
+    words
+        .lines()
+        .filter_map(|line| match unreadable_start(line) {
+            None => Some(line),
+            Some(brace) => {
+                Some(without_closing_label(&line[..brace])).filter(|kept| !kept.is_empty())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// One finding line as the controller reads it (runtime-controller
 /// `browser_hand_back::json_finding`): one JSON object with a `url`, perhaps
 /// after a list marker, in backticks or before a comma. Some(true) when the
@@ -555,9 +692,11 @@ fn stop_of(object: &serde_json::Map<String, JsonValue>) -> Option<&str> {
 }
 
 /// A reply split into what the person reads and its finding lines, or None
-/// when it has no finding line. A fenced block, or a closing heading line
-/// ("Findings:"), left with nothing under it goes with them.
+/// when it has no finding line. A finding object is one wherever it sits
+/// ([`own_lines`]). A fenced block, or a closing heading line ("Findings:"),
+/// left with nothing under it goes with them.
 fn split_findings(reply: &str) -> Option<(String, Vec<String>)> {
+    let reply = own_lines(reply);
     let lines: Vec<&str> = reply.lines().collect();
     let is_finding: Vec<bool> = lines
         .iter()
@@ -915,6 +1054,7 @@ pub(super) fn words_of(answer: &str) -> String {
 /// line ([`MISSING_LINE`]) and, `with_unread` (a turn whose findings go back to the building turn,
 /// asked for it, [`finding_lines_pass_prompt`]), its first unread line after it ([`UNREAD_LINE`]).
 pub(super) fn closing_lines_of(answer: &str, with_unread: bool) -> Vec<String> {
+    let answer = own_lines(answer);
     let first = |is: fn(&str) -> bool| {
         answer
             .lines()
@@ -962,6 +1102,7 @@ fn unread_line(line: &str) -> Option<Vec<String>> {
 /// tried another way, or gave no answer or page there, and one it read is read. A tab on a page
 /// it read is named with that page, in words ([`UNREAD_LINE`]).
 pub(super) fn take_unread_pages(summary: &mut String) -> Vec<String> {
+    put_on_own_lines(summary);
     if !summary.lines().any(|line| unread_line(line).is_some()) {
         return Vec::new();
     }
@@ -1055,6 +1196,7 @@ fn missing_names_in(text: &str) -> Vec<String> {
 /// written, and returns the values they name ([`missing_names_in`]). The turn's note keeps them
 /// in one line of its own ([`move_findings_into_details`]).
 fn take_missing_names(summary: &mut String) -> Vec<String> {
+    put_on_own_lines(summary);
     if !summary.lines().any(|line| missing_line(line).is_some()) {
         return Vec::new();
     }
@@ -1214,6 +1356,7 @@ pub(super) fn leave_out_addresses_never_opened(
     opened: &[String],
     tried: &BrowserTried,
 ) {
+    put_on_own_lines(summary);
     // Whether a full address is one of these pages: a path among them is that page on any site.
     let among = |pages: &[(Option<String>, String)], site: &str, page: &str| {
         pages.iter().any(|(listed_site, listed_page)| {
@@ -1499,6 +1642,22 @@ pub(super) fn add_finding_lines(summary: &mut String, lines: &str) {
     } else {
         format!("{reply}\n\n{lines}")
     };
+}
+
+/// The finding lines the runtime adds to a browser turn whose answer held none it could read
+/// (`jobs::end_browser_turn_answer`): the wrap-up pass's second answer, or the pages its own steps
+/// opened. They stand in place of what the first answer wrote for Octo: what is left of an object
+/// no reader could read goes ([`cut_unreadable_findings`]), and so does its missing line when
+/// `lines` have one, which names what is still missing, as a second pass's does
+/// ([`add_the_second_pass`]). Kept beside clean lines, a first answer's own finding stayed in
+/// the reply the person read (a local test, Nov 19).
+pub(super) fn add_finding_lines_in_place_of_the_first(summary: &mut String, lines: &str) {
+    let mut words = cut_unreadable_findings(summary);
+    if lines.lines().any(|line| missing_line(line).is_some()) {
+        take_missing_names(&mut words);
+    }
+    *summary = words;
+    add_finding_lines(summary, lines);
 }
 
 /// How many pages read the finding lines of a reply name.
@@ -3259,6 +3418,119 @@ mod tests {
             "Take tram 15E toward Algés and get off at Belém."
         );
         assert!(turn.final_messages.is_empty());
+    }
+
+    /// A finding object is one wherever the turn wrote it ([`own_lines`]): a question's browser
+    /// turn ended its reply's last line "… is open in the browser. Finding: {"url":…}", no
+    /// reader took it for a finding, the wrap-up pass wrote the line again, and the reply the
+    /// person read kept the object (a local test, Nov 19). Its label and the marks around it go
+    /// with it, a missing or unread object goes as its line does, the turn needs no wrap-up
+    /// pass, and an object that is no line for Octo stays in the words.
+    #[test]
+    fn a_finding_object_anywhere_on_a_line_leaves_the_reply() {
+        let question = browser_job(json!({ "browserTransport": "shared" }));
+        let metadata = question.payload["metadata"].clone();
+        let finding = r#"{"url":"https://news.example/en","title":"Home | News","facts":["The home page leads with the latest report."]}"#;
+        let missing = r#"{"missing":["the linked article"]}"#;
+        let words = "I opened the company's official site, but the article linked earlier in this chat wasn't there to identify. Its home page is open in the browser.";
+        let pretty = finding
+            .replace("{\"url\"", "{\n  \"url\"")
+            .replace(",\"", ",\n  \"")
+            .replace("]}", "]\n}");
+        for answer in [
+            format!("{words} Finding: {finding}\n{missing}"),
+            format!("{words} Finding: `{finding}`. {missing}"),
+            format!("{words}\n- Finding: {finding}, Missing: {missing}"),
+            format!("{words}\nFinding:\n{pretty}\n{missing}"),
+        ] {
+            assert!(!needs_finding_lines(Some(&metadata), &answer), "{answer}");
+            let mut turn = execution(&answer);
+            move_findings_into_details(&question, &mut turn);
+            assert_eq!(turn.summary, words, "{answer}");
+            assert!(!turn.summary.contains("{\"url\""), "{answer}");
+            assert_eq!(turn.final_messages.len(), 1, "{answer}");
+            let note = &turn.final_messages[0].content;
+            let lines: Vec<&str> = note.lines().collect();
+            assert_eq!(lines.len(), 2, "{note}");
+            assert_eq!(
+                serde_json::from_str::<JsonValue>(lines[0]).unwrap(),
+                serde_json::from_str::<JsonValue>(finding).unwrap(),
+                "{note}"
+            );
+            assert_eq!(lines[1], missing, "{note}");
+        }
+        // Words on both sides of an object stay, each on a line of its own.
+        let mut turn = execution(&format!("The page {finding} lists the opening hours."));
+        move_findings_into_details(&question, &mut turn);
+        assert_eq!(turn.summary, "The page\nlists the opening hours.");
+        // A list of them on one line: each goes, and so do its brackets.
+        let other = r#"{"url":"https://news.example/en/press","facts":["The press page lists its contacts."]}"#;
+        let mut turn = execution(&format!("{words}\n[{finding}, {other}]"));
+        move_findings_into_details(&question, &mut turn);
+        assert_eq!(turn.summary, words);
+        assert_eq!(
+            turn.final_messages[0].content,
+            format!("{finding}\n{other}")
+        );
+        // An unread line written after the words is the runtime's alone.
+        let mut answer = format!(
+            "{words} {finding} Still to read: {{\"unread\": [\"https://news.example/en/press\"]}}"
+        );
+        assert_eq!(
+            take_unread_pages(&mut answer),
+            ["https://news.example/en/press"]
+        );
+        assert_eq!(answer, format!("{words}\n{finding}"));
+        // An object that is no line for Octo, and braces in words, stay as written.
+        for reply in [
+            r#"The page lists {"opens": "10:00"} as its hours."#,
+            "The menu says {soup of the day} on weekdays.",
+        ] {
+            assert!(matches!(own_lines(reply), Cow::Borrowed(_)), "{reply}");
+            assert!(needs_finding_lines(Some(&metadata), reply), "{reply}");
+        }
+    }
+
+    /// When the runtime adds finding lines for a turn whose answer held none it could read (the
+    /// wrap-up pass's second answer, or the pages its steps opened), they stand in place of what
+    /// that answer wrote for Octo: what is left of an object no reader could read leaves the
+    /// reply, with its label, and the second answer's missing line replaces the first's.
+    #[test]
+    fn a_second_answers_finding_lines_replace_what_the_first_wrote() {
+        let question = browser_job(json!({ "browserTransport": "shared" }));
+        let metadata = question.payload["metadata"].clone();
+        let words = "Its home page is open in the browser.";
+        let finding = r#"{"url":"https://news.example/en","title":"Home | News","facts":["The home page leads with the latest report."]}"#;
+        let second = format!("{finding}\n{{\"missing\":[\"the linked article\"]}}");
+        for unreadable in [
+            r#"{"url": "https://news.example/en", "facts": ["It reads "Welcome""]}"#,
+            "{'url': 'https://news.example/en', 'facts': ['Welcome']}",
+            r#"{"url": "https://news.example/en", "facts": ["Welcome"#,
+        ] {
+            let first =
+                format!("{words} Finding: {unreadable}\n{{\"missing\": [\"the article\"]}}");
+            assert!(needs_finding_lines(Some(&metadata), &first), "{first}");
+            let mut summary = first.clone();
+            add_finding_lines_in_place_of_the_first(&mut summary, &second);
+            let mut turn = execution(&summary);
+            move_findings_into_details(&question, &mut turn);
+            assert_eq!(turn.summary, words, "{first}");
+            assert!(!turn.summary.contains("url"), "{first}");
+            assert_eq!(turn.final_messages[0].content, second, "{first}");
+        }
+        // Lines from the pages the turn opened name nothing missing: the first's line stays.
+        let mut summary = format!("{words}\n{{\"missing\": [\"the article\"]}}");
+        add_finding_lines_in_place_of_the_first(
+            &mut summary,
+            r#"{"url":"https://news.example/en"}"#,
+        );
+        let mut turn = execution(&summary);
+        move_findings_into_details(&question, &mut turn);
+        assert_eq!(turn.summary, words);
+        assert_eq!(
+            turn.final_messages[0].content,
+            "{\"url\":\"https://news.example/en\"}\n{\"missing\":[\"the article\"]}"
+        );
     }
 
     /// A browser turn's missing line, the values it looked for and didn't find

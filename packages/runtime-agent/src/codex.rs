@@ -335,6 +335,11 @@ pub(crate) enum CodexFallbackSummaryKind {
     /// decline (`jobs::declined_a_turn_that_needs_an_answer`). Its summary is the model's own, so
     /// `classify_internal_codex_fallback_summary` never returns it.
     DeclinedATurnThatNeedsAnAnswer,
+    /// The answer asked for the browser only with a `request_browser` card refused for what its
+    /// task says: it named no page it opens, or it held an e-mail address
+    /// (`jobs::refused_browser_card`). Its summary is the model's own, so
+    /// `classify_internal_codex_fallback_summary` never returns it.
+    RefusedBrowserCard,
 }
 
 pub(crate) fn classify_internal_codex_fallback_summary(

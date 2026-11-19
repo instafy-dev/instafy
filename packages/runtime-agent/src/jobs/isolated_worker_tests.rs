@@ -104,7 +104,7 @@ fn isolated_worker_evidence_is_required_unless_a_valid_human_decision_defers_it(
     assert!(isolated_worker::validate_worker_evidence(&job, &completed, false, true).is_err());
     assert!(isolated_worker::validate_worker_evidence(&job, &completed, true, true).is_ok());
     let unsupported = extract_codex_outcome(
-        &json!({"actions":[{"type":"request_browser", "task":"Do the work"}]}),
+        &json!({"actions":[{"type":"request_browser", "task":"Do the work on https://example.com/app"}]}),
     )
     .unwrap();
     assert!(isolated_worker::validate_worker_evidence(&job, &unsupported, false, false).is_err());
