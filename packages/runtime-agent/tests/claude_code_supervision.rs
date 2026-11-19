@@ -1,6 +1,6 @@
 //! A local-engine turn's `claude` process, run and stopped (docs/Local-Engine-Turns.md, 3.6 and
-//! 3.7; section 8, "Supervision" and "Events"), with the `--print` scenarios of
-//! tests/fixtures/fake-claude.
+//! 3.7; section 8, "Supervision" and "Events"; 11.9 and 11.12 for a session that is not here and
+//! a turn that only plans), with the `--print` scenarios of tests/fixtures/fake-claude.
 //!
 //! Hermetic: temporary folders, and the fake started through a wrapper each machine writes, as
 //! the lane would start the person's `claude`: from the checked target the probe found, with the
@@ -10,6 +10,7 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -22,8 +23,8 @@ use runtime_agent::claude_code::supervise::{
     FOLLOW_UP_GRACE, FOLLOW_UP_REARMS, TurnEnd, TurnLimits, TurnOutcome, TurnSpec, supervise,
 };
 use runtime_agent::claude_code::{
-    Confinement, FailureCode, Lane, LaunchEnvSnapshot, LaunchGrant, RawLaunchGrant, ReadyLane,
-    Trust,
+    Confinement, ExecutionMode, FailureCode, Lane, LaunchEnvSnapshot, LaunchGrant, RawLaunchGrant,
+    ReadyLane, Trust,
 };
 use runtime_agent::job_cancel::JobCancelSignal;
 use serde_json::{Value, json};
@@ -74,7 +75,7 @@ impl Machine {
         ] {
             folder(&root.join(name), mode);
         }
-        write_settings(&root, None);
+        write_settings(&root, &[]);
         let wrapper = root.join("bin/claude");
         std::fs::write(
             &wrapper,
@@ -139,9 +140,12 @@ impl Machine {
         self.root.join("home")
     }
 
-    /// The `--print` scenario the next turns run.
-    fn scenario(&self, name: &str) {
-        write_settings(&self.root, Some(name));
+    /// The `--print` scenario the next turns run, and the one a `claude` started with `--resume`
+    /// runs when it is another.
+    fn scenario(&self, name: &str, when_resumed: Option<&str>) {
+        let mut settings = vec![("FAKE_CLAUDE_SCENARIO", name)];
+        settings.extend(when_resumed.map(|name| ("FAKE_CLAUDE_RESUME_SCENARIO", name)));
+        write_settings(&self.root, &settings);
     }
 
     /// The pid a scenario step recorded as `name`, in any call.
@@ -176,15 +180,15 @@ impl Machine {
     }
 }
 
-fn write_settings(root: &Path, scenario: Option<&str>) {
+fn write_settings(root: &Path, settings: &[(&str, &str)]) {
     let mut text = format!(
         "FAKE_CLAUDE_RECORD_DIR={}\nFAKE_CLAUDE_FIXTURES={}\nFAKE_CLAUDE_SESSION={}\n",
         quote(root.join("record")),
         quote(FIXTURES),
         SESSION
     );
-    if let Some(scenario) = scenario {
-        text.push_str(&format!("FAKE_CLAUDE_SCENARIO={}\n", quote(scenario)));
+    for (key, value) in settings {
+        text.push_str(&format!("{key}={}\n", quote(value)));
     }
     let next = root.join("fake-claude.env.next");
     std::fs::write(&next, text).unwrap();
@@ -236,7 +240,10 @@ struct Run<'a> {
     limits: TurnLimits,
     stop: JobCancelSignal,
     shutdown: ShutdownSignal,
-    resumed: bool,
+    mode: ExecutionMode,
+    /// The session the turn resumes, and the scenario a `claude` started with `--resume` runs
+    /// when it is another than the turn's (a resume miss, say).
+    resume: Option<(Uuid, Option<&'static str>)>,
 }
 
 impl<'a> Run<'a> {
@@ -246,7 +253,8 @@ impl<'a> Run<'a> {
             limits: TurnLimits::standard().with_cleanup_latch(latch),
             stop: JobCancelSignal::new(),
             shutdown: ShutdownSignal::new(),
-            resumed: false,
+            mode: ExecutionMode::Apply,
+            resume: None,
         }
     }
 
@@ -255,19 +263,43 @@ impl<'a> Run<'a> {
         self
     }
 
+    /// A turn that resumes [`SESSION`], which the scenario runs as it is.
     fn resumed(mut self) -> Self {
-        self.resumed = true;
+        self.resume = Some((Uuid::parse_str(SESSION).unwrap(), None));
+        self
+    }
+
+    /// A turn that resumes `session`, for which the `claude` started with `--resume` runs
+    /// `scenario`; started without it, `claude` runs the turn's own scenario.
+    fn resuming(mut self, session: Uuid, scenario: &'static str) -> Self {
+        self.resume = Some((session, Some(scenario)));
+        self
+    }
+
+    /// A `plan_only` turn (11.12).
+    fn planning(mut self) -> Self {
+        self.mode = ExecutionMode::PlanOnly;
         self
     }
 
     async fn turn(&self, scenario: &str) -> Turn {
         let machine = self.machine;
-        machine.scenario(scenario);
+        machine.scenario(scenario, self.resume.and_then(|(_, when)| when));
         let grant = machine.lane.grant();
         let mcp_config = McpConfigFile::create(grant).unwrap();
-        let resume = self.resumed.then(|| Uuid::parse_str(SESSION).unwrap());
-        let command = turn_command(grant, &machine.ready, &mcp_config, resume, &machine.space());
-        let mut adapter = EventAdapter::for_turn(grant, &machine.space());
+        let space = machine.space();
+        let resume = self.resume.map(|(session, _)| session);
+        let command = turn_command(
+            grant,
+            &machine.ready,
+            &mcp_config,
+            self.mode,
+            resume,
+            &space,
+        );
+        let without_resume = resume
+            .map(|_| turn_command(grant, &machine.ready, &mcp_config, self.mode, None, &space));
+        let mut adapter = EventAdapter::for_turn(grant, &space, self.mode);
         let mut events = Vec::new();
         let mut sink = |event: &Value| events.push(event.clone());
         let started = Instant::now();
@@ -275,7 +307,7 @@ impl<'a> Run<'a> {
             command,
             TurnSpec {
                 prompt: PROMPT,
-                resumed: self.resumed,
+                without_resume,
                 stop: &self.stop,
                 shutdown: &self.shutdown,
             },
@@ -1485,89 +1517,208 @@ async fn sign_in_and_plan_limit_failures_are_classified() {
     );
 }
 
+/// The `--print` calls the fake recorded since `before`, by their argv, and each one's stdin.
+fn print_calls_since(machine: &Machine, before: usize) -> Vec<(Vec<String>, Vec<u8>)> {
+    machine.print_calls().split_off(before)
+}
+
+/// A resume miss's two starts: the first with `--resume <session>`, the second with the same
+/// argv but for `--resume` and the same prompt (11.9).
+fn started_again_without_resume(calls: &[(Vec<String>, Vec<u8>)], session: Uuid) {
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let (first, first_stdin) = &calls[0];
+    let (second, second_stdin) = &calls[1];
+    assert_eq!(
+        first[first.len() - 2..],
+        ["--resume".to_string(), session.to_string()]
+    );
+    assert_eq!(second[..], first[..first.len() - 2]);
+    assert!(!second.iter().any(|arg| arg == "--resume"), "{second:?}");
+    assert_eq!(first_stdin, PROMPT.as_bytes());
+    assert_eq!(second_stdin, PROMPT.as_bytes());
+}
+
+/// A session this computer does not have: `claude`, started with `--resume`, says so on stderr
+/// before any `init` and exits 1, as a version that says it only there would. The turn starts
+/// `claude` once more, without `--resume`, and runs on it in a new session (11.9). The same exit
+/// without a resume is another startup failure, and starts nothing else.
 #[tokio::test]
-async fn a_resume_miss_before_init_is_session_unavailable_and_starts_nothing_else() {
+async fn a_resume_miss_before_init_starts_claude_again_without_resume() {
     static LATCH: AtomicBool = AtomicBool::new(false);
     let machine = Machine::new().await;
-    let missed = Run::new(&machine, &LATCH)
-        .resumed()
-        .turn("resume-miss")
+    let missing = Uuid::new_v4();
+    let turn = Run::new(&machine, &LATCH)
+        .resuming(missing, "resume-miss")
+        .turn("success")
         .await;
-    let failure = missed.failed_with(FailureCode::SessionUnavailable);
-    assert!(
-        failure.message.starts_with("No conversation found"),
-        "{failure:?}"
+    turn.succeeded();
+    assert!(turn.outcome.started_again);
+    assert!(turn.outcome.cleanup_confirmed);
+    started_again_without_resume(&print_calls_since(&machine, 0), missing);
+    // The new session's turn, read from its start.
+    assert_eq!(
+        turn.adapter.init().map(|init| init.session_id.to_string()),
+        Some(SESSION.to_string())
     );
-    // One process, and no second one.
-    assert_eq!(machine.print_calls().len(), 1);
-    // The same exit without a resume is another startup failure.
+    assert!(turn.adapter.reply().is_some());
+    assert!(
+        turn.adapter
+            .run_log()
+            .events()
+            .iter()
+            .any(|event| event["type"] == "instafy.started_without_the_missing_session")
+    );
+
+    // Without `--resume`, the same exit is a crash, and nothing starts again.
+    let before = machine.print_calls().len();
     let fresh = Run::new(&machine, &LATCH).turn("resume-miss").await;
     fresh.failed_with(FailureCode::Crashed);
+    assert!(!fresh.outcome.started_again);
+    assert_eq!(print_calls_since(&machine, before).len(), 1);
 }
 
 /// Claude Code 2.1.325's resume miss (Phase 0, item 7): a `result` on stdout before any `init`,
-/// whose `errors` name the missing session, then exit 1. That `result` ends the turn, so the
-/// runtime's own SIGTERM races the exit: whether `claude` exits 1 by itself (its own shutdown
-/// came first) or 143 on the SIGTERM, the turn is `session_unavailable`. Without `--resume` the
-/// same line is another failure, in Claude Code's own words.
+/// whose `errors` name the missing session, then exit 1. That `result` ends the first `claude`'s
+/// turn, so the runtime's own SIGTERM races the exit: whether `claude` exits 1 by itself, 143 on
+/// the SIGTERM, 0 as a later version's may, or outlives the grace and is killed, the structured
+/// `errors` say it, and the turn starts again without `--resume` and runs (11.9). Without
+/// `--resume` the same line is another failure, in Claude Code's own words.
 #[tokio::test]
-async fn a_resume_miss_result_before_init_is_session_unavailable_whether_claude_exits_1_or_143() {
+async fn a_resume_miss_result_before_init_starts_claude_again_whatever_the_first_exit() {
     static LATCH: AtomicBool = AtomicBool::new(false);
     let machine = Machine::new().await;
-    for (scenario, exit_code) in [
-        ("resume-miss-result", 1),
-        ("resume-miss-result-then-term", 143),
+    for miss in [
+        "resume-miss-result",
+        "resume-miss-result-then-term",
+        "resume-miss-result-term-0",
+        "resume-miss-result-ignore-term",
     ] {
-        let missed = Run::new(&machine, &LATCH).resumed().turn(scenario).await;
-        let failure = missed.failed_with(FailureCode::SessionUnavailable);
+        let before = machine.print_calls().len();
+        let missing = Uuid::new_v4();
+        let turn = Run::new(&machine, &LATCH)
+            .limits(|limits| limits.with_stop_grace(Duration::from_millis(300)))
+            .resuming(missing, miss)
+            .turn("success")
+            .await;
+        turn.succeeded();
+        assert!(turn.outcome.started_again, "{miss}");
+        assert!(turn.outcome.cleanup_confirmed, "{miss}");
+        // The second `claude`'s exit: its own, or the runtime's SIGTERM at its `result`.
         assert!(
-            failure.message.starts_with("No conversation found"),
-            "{scenario}: {failure:?}"
+            matches!(turn.exit_code(), Some(0 | 143)),
+            "{miss}: {:?}",
+            turn.outcome
         );
-        assert_eq!(missed.exit_code(), Some(exit_code), "{scenario}");
-        assert!(missed.adapter.init().is_none(), "{scenario}");
-        assert!(missed.outcome.cleanup_confirmed, "{scenario}");
+        started_again_without_resume(&print_calls_since(&machine, before), missing);
     }
-    // One process a turn, and no second one.
-    assert_eq!(machine.print_calls().len(), 2);
+    let before = machine.print_calls().len();
     let fresh = Run::new(&machine, &LATCH).turn("resume-miss-result").await;
     let failure = fresh.failure();
     assert_eq!(failure.code, None, "{failure:?}");
     assert!(failure.message.starts_with("No conversation found"));
+    assert!(!fresh.outcome.started_again);
+    assert_eq!(print_calls_since(&machine, before).len(), 1);
 }
 
-/// When `claude`'s exit after that SIGTERM is 0, as a later version's may be, or `claude`
-/// outlives the grace and is killed, the structured `errors` still say it: the exit does not
-/// decide a resume miss (2.7).
+/// The second start is the only one a turn makes: when it fails too, the turn fails as it says.
+/// And a Stop that the check before the second start hears of starts nothing more (3.1, step
+/// 6). A session that is there is resumed, and nothing starts again.
 #[tokio::test]
-async fn a_resume_miss_result_before_init_is_session_unavailable_even_after_exit_0_or_a_kill() {
+async fn a_resume_miss_starts_claude_again_only_once_and_never_after_a_stop() {
     static LATCH: AtomicBool = AtomicBool::new(false);
     let machine = Machine::new().await;
-    let zero = Run::new(&machine, &LATCH)
-        .resumed()
-        .turn("resume-miss-result-term-0")
+    let missing = Uuid::new_v4();
+    let failed = Run::new(&machine, &LATCH)
+        .resuming(missing, "resume-miss-result")
+        .turn("not-signed-in")
         .await;
-    zero.failed_with(FailureCode::SessionUnavailable);
-    assert_eq!(zero.exit_code(), Some(0));
+    failed.failed_with(FailureCode::NotSignedIn);
+    assert!(failed.outcome.started_again);
+    started_again_without_resume(&print_calls_since(&machine, 0), missing);
 
-    let killed = Run::new(&machine, &LATCH)
-        .resumed()
-        .limits(|limits| limits.with_stop_grace(Duration::from_millis(300)))
-        .turn("resume-miss-result-ignore-term")
+    let before = machine.print_calls().len();
+    let run = Run::new(&machine, &LATCH).resuming(missing, "resume-miss-result");
+    run.stop
+        .check_lease_with(Arc::new(|| Box::pin(async { false })));
+    let stopped = run.turn("success").await;
+    assert!(
+        matches!(stopped.outcome.end, TurnEnd::Stopped),
+        "{:?}",
+        stopped.outcome
+    );
+    assert_eq!(print_calls_since(&machine, before).len(), 1);
+
+    let before = machine.print_calls().len();
+    let resumed = Run::new(&machine, &LATCH).resumed().turn("success").await;
+    resumed.succeeded();
+    assert!(!resumed.outcome.started_again);
+    assert_eq!(print_calls_since(&machine, before).len(), 1);
+}
+
+/// A `plan_only` turn passes `--permission-mode plan` and nothing else changes in its argv, and
+/// every `init` it reads must report `plan` (11.12). A turn of either mode whose `claude` reports
+/// the other mode ends as `unexpected_configuration`. A `plan_only` turn whose session is not
+/// here starts again in plan mode.
+#[tokio::test]
+async fn a_plan_only_turn_runs_claude_code_in_plan_mode() {
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::new().await;
+    let planned = Run::new(&machine, &LATCH)
+        .planning()
+        .turn("plan-only")
         .await;
-    killed.failed_with(FailureCode::SessionUnavailable);
-    {
-        use std::os::unix::process::ExitStatusExt;
-        assert_eq!(killed.exit_code(), None);
-        assert_eq!(
-            killed
-                .outcome
-                .exit_status
-                .and_then(|status| status.signal()),
-            Some(libc::SIGKILL)
-        );
+    planned.succeeded();
+    assert_eq!(
+        planned.adapter.reply(),
+        Some("Plan: rename the project in README.md, then update its tests.")
+    );
+    let applied = Run::new(&machine, &LATCH).turn("success").await;
+    applied.succeeded();
+    let calls = machine.print_calls();
+    assert_eq!(calls.len(), 2);
+    let (plan_argv, apply_argv) = (&calls[0].0, &calls[1].0);
+    let at = plan_argv
+        .iter()
+        .position(|arg| arg == "--permission-mode")
+        .unwrap();
+    assert_eq!(plan_argv[at + 1], "plan");
+    assert_eq!(apply_argv[at + 1], "acceptEdits");
+    // The same argv but for the mode, and for each turn's own MCP configuration file.
+    let config = plan_argv
+        .iter()
+        .position(|arg| arg == "--mcp-config")
+        .unwrap();
+    let mut same = plan_argv.clone();
+    same[at + 1] = "acceptEdits".to_string();
+    same[config + 1] = apply_argv[config + 1].clone();
+    assert_ne!(plan_argv[config + 1], apply_argv[config + 1]);
+    assert_eq!(&same, apply_argv);
+
+    for (run, scenario, expected) in [
+        (
+            Run::new(&machine, &LATCH).planning(),
+            "success",
+            "not plan.",
+        ),
+        (Run::new(&machine, &LATCH), "plan-only", "not acceptEdits."),
+    ] {
+        let turn = run.turn(scenario).await;
+        let failure = turn.failed_with(FailureCode::UnexpectedConfiguration);
+        assert!(failure.message.ends_with(expected), "{failure:?}");
+        assert!(turn.elapsed < Duration::from_secs(10), "{:?}", turn.elapsed);
     }
-    assert!(killed.outcome.cleanup_confirmed);
+
+    let before = machine.print_calls().len();
+    let missing = Uuid::new_v4();
+    let again = Run::new(&machine, &LATCH)
+        .planning()
+        .resuming(missing, "resume-miss-result")
+        .turn("plan-only")
+        .await;
+    again.succeeded();
+    let calls = print_calls_since(&machine, before);
+    started_again_without_resume(&calls, missing);
+    assert_eq!(calls[1].0[at + 1], "plan");
 }
 
 #[tokio::test]

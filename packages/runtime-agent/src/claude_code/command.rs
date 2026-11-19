@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{ChildStdin, Command};
 use uuid::Uuid;
 
-use super::{CheckedLaunch, LaunchGrant, ReadyLane};
+use super::{CheckedLaunch, ExecutionMode, LaunchGrant, ReadyLane};
 
 /// The one value Instafy sets (3.4). Documented by Claude Code: it only stops claude.ai
 /// connectors from loading, and does not depend on `--strict-mcp-config`.
@@ -26,18 +26,25 @@ pub const ENABLE_CLAUDEAI_MCP_SERVERS: &str = "ENABLE_CLAUDEAI_MCP_SERVERS";
 /// The strict MCP configuration: no server (3.3, D7).
 pub const EMPTY_MCP_CONFIG: &str = r#"{"mcpServers":{}}"#;
 
-/// The argv after the program (3.3). `--no-bare` only when `--help` lists it, `--resume` only
-/// with a session id the lane loader returned. Never `--bare`, `--dangerously-skip-permissions`,
-/// another permission mode, a system prompt, tool lists, `--add-dir`, `--settings`, `--model`,
-/// `--max-turns`, `--continue`, `--fork-session` or a prompt.
-pub fn lane_argv(no_bare: bool, mcp_config: &Path, resume: Option<Uuid>) -> Vec<OsString> {
+/// The argv after the program (3.3). The permission mode is the turn's
+/// ([`ExecutionMode::permission_mode`]): `acceptEdits` to apply, `plan` to plan only (11.12).
+/// `--no-bare` only when `--help` lists it, `--resume` only with a session id the lane loader
+/// returned. Never `--bare`, `--dangerously-skip-permissions`, another permission mode, a system
+/// prompt, tool lists, `--add-dir`, `--settings`, `--model`, `--max-turns`, `--continue`,
+/// `--fork-session` or a prompt.
+pub fn lane_argv(
+    no_bare: bool,
+    mcp_config: &Path,
+    mode: ExecutionMode,
+    resume: Option<Uuid>,
+) -> Vec<OsString> {
     let mut argv: Vec<OsString> = [
         "--print",
         "--output-format",
         "stream-json",
         "--verbose",
         "--permission-mode",
-        "acceptEdits",
+        mode.permission_mode(),
         "--permission-prompts",
         "none",
         "--setting-sources",
@@ -131,13 +138,15 @@ impl McpConfigFile {
 }
 
 /// The turn's `claude` process, unspawned (3.3, 3.6): the checked target the probe ran, the
-/// exact argv, a cleared environment holding only [`lane_environment`], the space's folder as
-/// working directory, piped stdio and `kill_on_drop`. It stays in runtime-agent's own process
-/// group, which Desktop signals and proves gone as a unit, so there is no `process_group(0)`.
+/// exact argv for the turn's mode, a cleared environment holding only [`lane_environment`], the
+/// space's folder as working directory, piped stdio and `kill_on_drop`. It stays in
+/// runtime-agent's own process group, which Desktop signals and proves gone as a unit, so there
+/// is no `process_group(0)`.
 pub fn turn_command(
     grant: &LaunchGrant,
     ready: &ReadyLane,
     mcp_config: &McpConfigFile,
+    mode: ExecutionMode,
     resume: Option<Uuid>,
     folder: &Path,
 ) -> Command {
@@ -146,6 +155,7 @@ pub fn turn_command(
         .args(lane_argv(
             ready.help().lists_no_bare(),
             mcp_config.path(),
+            mode,
             resume,
         ))
         .env_clear()
@@ -208,42 +218,51 @@ mod tests {
             .collect()
     }
 
+    /// The argv of each mode (3.3, 11.12): the same flags, but for the permission mode, which is
+    /// `acceptEdits` to apply and Claude Code's own `plan` to plan only.
     #[test]
-    fn the_argv_is_exactly_that_of_3_3() {
+    fn the_argv_is_exactly_that_of_3_3_in_either_mode() {
         let mcp_config = Path::new("/private/tmp/instafy-claude-code-mcp-x/mcp.json");
-        assert_eq!(
-            strings(&lane_argv(false, mcp_config, None)),
-            [
-                "--print",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--permission-mode",
-                "acceptEdits",
-                "--permission-prompts",
-                "none",
-                "--setting-sources",
-                "user",
-                "--strict-mcp-config",
-                "--mcp-config",
-                "/private/tmp/instafy-claude-code-mcp-x/mcp.json",
-                "--include-partial-messages",
-            ]
-        );
-        let session = Uuid::new_v4();
-        let resumed = strings(&lane_argv(true, mcp_config, Some(session)));
-        assert_eq!(
-            resumed[14..],
-            [
-                "--no-bare".to_string(),
-                "--resume".to_string(),
-                session.to_string()
-            ]
-        );
-        assert_eq!(
-            strings(&lane_argv(true, mcp_config, None))[14..],
-            ["--no-bare"]
-        );
+        for (mode, permission_mode) in [
+            (ExecutionMode::Apply, "acceptEdits"),
+            (ExecutionMode::PlanOnly, "plan"),
+        ] {
+            assert_eq!(
+                strings(&lane_argv(false, mcp_config, mode, None)),
+                [
+                    "--print",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-mode",
+                    permission_mode,
+                    "--permission-prompts",
+                    "none",
+                    "--setting-sources",
+                    "user",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    "/private/tmp/instafy-claude-code-mcp-x/mcp.json",
+                    "--include-partial-messages",
+                ],
+                "{mode:?}"
+            );
+            let session = Uuid::new_v4();
+            let resumed = strings(&lane_argv(true, mcp_config, mode, Some(session)));
+            assert_eq!(resumed[5], permission_mode);
+            assert_eq!(
+                resumed[14..],
+                [
+                    "--no-bare".to_string(),
+                    "--resume".to_string(),
+                    session.to_string()
+                ]
+            );
+            assert_eq!(
+                strings(&lane_argv(true, mcp_config, mode, None))[14..],
+                ["--no-bare"]
+            );
+        }
     }
 
     #[test]
@@ -269,28 +288,34 @@ mod tests {
         ];
         let mcp_config = Path::new("/private/tmp/instafy-claude-code-mcp-x/mcp.json");
         for no_bare in [false, true] {
-            for resume in [None, Some(Uuid::new_v4())] {
-                let argv = strings(&lane_argv(no_bare, mcp_config, resume));
-                let mut args = argv.iter();
-                while let Some(arg) = args.next() {
-                    assert!(arg.starts_with("--"), "{arg} is not a flag in {argv:?}");
-                    assert!(
-                        !FORBIDDEN.contains(&arg.as_str())
-                            && !arg.contains("system-prompt")
-                            && !arg.starts_with("--permission-mode="),
-                        "{arg} is never passed"
-                    );
-                    if FLAGS_WITH_VALUES.contains(&arg.as_str()) {
-                        let value = args.next().expect("a flag value");
-                        assert!(!FORBIDDEN.contains(&value.as_str()), "{value}");
+            for mode in [ExecutionMode::Apply, ExecutionMode::PlanOnly] {
+                for resume in [None, Some(Uuid::new_v4())] {
+                    let argv = strings(&lane_argv(no_bare, mcp_config, mode, resume));
+                    let mut args = argv.iter();
+                    while let Some(arg) = args.next() {
+                        assert!(arg.starts_with("--"), "{arg} is not a flag in {argv:?}");
+                        assert!(
+                            !FORBIDDEN.contains(&arg.as_str())
+                                && !arg.contains("system-prompt")
+                                && !arg.starts_with("--permission-mode="),
+                            "{arg} is never passed"
+                        );
+                        if FLAGS_WITH_VALUES.contains(&arg.as_str()) {
+                            let value = args.next().expect("a flag value");
+                            assert!(!FORBIDDEN.contains(&value.as_str()), "{value}");
+                            if arg == "--permission-mode" {
+                                // Only the two modes a lane turn runs in (11.12).
+                                assert!(["acceptEdits", "plan"].contains(&value.as_str()));
+                            }
+                        }
                     }
+                    assert_eq!(
+                        argv.iter()
+                            .filter(|arg| *arg == "--permission-mode")
+                            .count(),
+                        1
+                    );
                 }
-                assert_eq!(
-                    argv.iter()
-                        .filter(|arg| *arg == "--permission-mode")
-                        .count(),
-                    1
-                );
             }
         }
     }

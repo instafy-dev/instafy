@@ -1,58 +1,60 @@
-//! A local-engine turn's job (docs/Local-Engine-Turns.md 3.1 and 3.9): the checks that need only
-//! the leased job and this process's grant, and the session a turn resumes (2.7).
+//! A local-engine turn's job (docs/Local-Engine-Turns.md 3.1, 3.9 and 11.12): the checks that need
+//! only the leased job and this process's grant, the turn's execution mode, and the session a
+//! turn resumes (2.7, 11.9).
 //!
 //! [`refuse_unless_runnable`] runs in the job loop before anything of a job with an engine runs:
 //! no heartbeat, no secrets, no folder. [`LaneJob::of`] runs there and again when the turn starts.
 //! The workspace token's verification, the folder pre-flight and the per-turn probe need more
 //! than the job, so they run inside the turn (`jobs::claude_code_turn`). A refused job fails
 //! without starting `claude`, and an unknown engine never falls back to the embedded one.
+//!
+//! Version 2 runs every turn of an agent whose AI is Claude Code, whatever started it: a message,
+//! a queued or resent one, an automation's run, a goal's wake-up, an evaluation (11.4). So the
+//! job carries no mark of who started it that the runtime reads. What Claude Code cannot take is
+//! still refused here, as a backstop for dispatch's refusals: a browser turn, a team plan's turn,
+//! attachments, a command, an empty or too long prompt, and a mode other than `apply` and
+//! `plan_only`.
 
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::events::{LaneFailure, PROVIDER};
-use super::{FailureCode, Lane, LaunchGrant, NotReadyReason};
+use super::{ExecutionMode, FailureCode, Lane, LaunchGrant, NotReadyReason, PlanLimitHold};
 use crate::controller::LeaseJob;
 
 /// The `engine` of a local-engine turn's job (`agent_jobs.engine`, 2.1).
 pub const ENGINE: &str = "claude-code";
 
 /// The longest message a lane turn takes, in characters (Unicode scalar values): the limit the
-/// controller's gate enforces (G5, `CLAUDE_CODE_LANE_MAX_PROMPT_CHARS`), checked here again.
+/// controller's gate enforces (`CLAUDE_CODE_LANE_MAX_PROMPT_CHARS`), checked here again.
 pub const MAX_PROMPT_CHARS: usize = 100_000;
 
-/// What the person reads for a job that is not one plain message of their own (5.5's sentences
-/// for `claude_code_turn_not_person` and `claude_code_turn_not_plain`).
-const NOT_THE_PERSONS: &str = "Claude Code takes only a message you send yourself.";
-const NOT_PLAIN: &str = "Claude Code takes only a plain message to Octo, of at most 100,000 characters, without attachments or a command.";
-
-/// The metadata keys that mark a job nobody typed, or one Instafy wrote, queued or resent (3.9,
-/// "Markers"). Any value but null counts.
-const MARKER_KEYS: [&str; 16] = [
-    // An automation's run, a space review, a controller dispatch (`job_is_unattended`,
-    // `job_is_an_automations_run`).
-    "automation",
-    "spaceReview",
-    "controllerDispatch",
-    // A team plan's turn, or a worker's answer.
+/// The metadata keys that mark a team plan's turn: a lead's or a worker's (`multiAgentPlan` and
+/// its role), a worker's answer, and a plan's seed (11.4's `team_plan`). Any value but null
+/// counts. A worker must keep to its write scope and report through Instafy's tools, and Instafy
+/// can hold Claude Code to neither (D40).
+const TEAM_PLAN_KEYS: [&str; 4] = [
     "multiAgentPlan",
     "multi_agent_plan",
     "workerInputRouting",
-    // A browser turn's hand-back.
-    "browserHandBack",
-    "browser_hand_back",
-    // A resend, a goal's continuation.
-    "retryOfMessageId",
-    "goalContinuation",
-    "goal_continuation",
-    // A browser turn.
-    "browserTransport",
-    "browser_transport",
-    // Words the app runs in place of the shown ones.
-    "dispatchContent",
-    "dispatch_content",
     "plan_seed",
 ];
+/// The same, at the payload's top level.
+const TOP_LEVEL_TEAM_PLAN_KEYS: [&str; 2] = ["plan_seed", "planSeed"];
+
+/// The metadata keys that mark a turn that needs Instafy's browser (11.4's `browser`): its
+/// transport, a Shared Browser page it targets, and a browser turn's hand-back, which carries a
+/// browser turn on. Any value but null counts.
+const BROWSER_KEYS: [&str; 6] = [
+    "browserTransport",
+    "browser_transport",
+    "browserPageId",
+    "browser_page_id",
+    "browserHandBack",
+    "browser_hand_back",
+];
+/// The same, at the payload's top level: a hand-back's reading note.
+const TOP_LEVEL_BROWSER_KEYS: [&str; 1] = ["browser_hand_back_reads_note"];
 
 /// The keys of a message's files and images.
 const ATTACHMENT_KEYS: [&str; 3] = ["attachments", "attachment_downloads", "attachmentDownloads"];
@@ -82,8 +84,24 @@ pub fn not_ready_failure(reason: NotReadyReason) -> LaneFailure {
         NotReadyReason::BareDefault => {
             "This version of Claude Code no longer lets other apps use your sign-in for a turn."
         }
+        NotReadyReason::PlanLimit => {
+            "Your Claude plan's usage limit was reached, so this turn didn't start."
+        }
     };
     LaneFailure::new(FailureCode::from(reason), message)
+}
+
+/// The failure of a turn that a plan limit's hold kept from starting (11.11): `plan_limit`, with
+/// the reset time, in words as Claude Code's own plan limits are worded (2.6).
+pub fn plan_limit_hold_failure(hold: &PlanLimitHold) -> LaneFailure {
+    LaneFailure {
+        code: Some(FailureCode::PlanLimit),
+        message: format!(
+            "Claude Code reached your Claude plan's usage limit in an earlier turn, so this turn didn't start.\nThe limit resets at {}.",
+            hold.resets_at().format("%Y-%m-%d %H:%M UTC")
+        ),
+        resets_at: Some(hold.resets_at().timestamp()),
+    }
 }
 
 /// The artifacts a lane failure sends: its `claude-code/failure` code, when it has one (2.6).
@@ -130,17 +148,23 @@ fn unknown_engine(engine: &str) -> LaneFailure {
 pub struct LaneJob<'a> {
     job: &'a LeaseJob,
     prompt: &'a str,
+    mode: ExecutionMode,
 }
 
 impl<'a> LaneJob<'a> {
-    /// Checks `job` against 3.9 for `grant`'s person:
+    /// Checks `job` against 3.9 and 11.12 for `grant`'s person:
     /// - the job's shape: `engine` is `claude-code`, it is leased for the first time, it holds no
     ///   proxy envelope, controller token, device grant, grant token or credential, and it has a
     ///   workspace token (verified later, in the turn);
-    /// - the person and the mode: `payload.user_id` is the person who consented on this computer,
-    ///   the message is marked as one a person sent (`input.kind`), and the job applies its turn;
-    /// - no marker of a job nobody typed, or one Instafy wrote, queued or resent;
+    /// - the person: `payload.user_id` is the person who consented on this computer, the owner
+    ///   of the agent whose turn it is (11.5);
+    /// - the mode: `metadata.execution_mode` is absent, `apply` or `plan_only`;
+    /// - what Claude Code cannot take (11.4): no browser turn, no team plan's turn, no
+    ///   attachments;
     /// - the prompt: not empty, at most [`MAX_PROMPT_CHARS`], and no `/` command.
+    ///
+    /// Whatever started the turn passes: a person, a queue, a resend, an automation, a goal's
+    /// wake-up or an evaluation, whose words dispatch already put in `prompt_text` (11.10).
     pub fn of(job: &'a LeaseJob, grant: &LaunchGrant) -> Result<Self, LaneFailure> {
         match job.engine.as_deref() {
             Some(ENGINE) => {}
@@ -182,86 +206,96 @@ impl<'a> LaneJob<'a> {
                 "This Claude Code turn isn't from the Instafy account that set up Claude Code on this computer.",
             ));
         }
-        let metadata = payload.get("metadata").and_then(Value::as_object);
-        let input_kind = metadata
-            .and_then(|metadata| metadata.get("input"))
-            .and_then(|input| input.get("kind"))
-            .and_then(Value::as_str);
-        if input_kind != Some("person") {
-            return Err(uncoded(NOT_THE_PERSONS));
-        }
-        if !applies_its_turn(payload) {
-            return Err(uncoded(NOT_PLAIN));
-        }
+        let mode = execution_mode(payload)?;
 
-        let present = |key: &str| {
-            metadata
-                .and_then(|metadata| metadata.get(key))
-                .is_some_and(|value| !value.is_null())
+        let metadata = payload.get("metadata").and_then(Value::as_object);
+        let in_metadata = |keys: &[&str]| {
+            metadata.is_some_and(|metadata| {
+                keys.iter()
+                    .any(|key| metadata.get(*key).is_some_and(|value| !value.is_null()))
+            })
         };
-        let top_level = |key: &str| payload.get(key).is_some_and(|value| !value.is_null());
-        if MARKER_KEYS.iter().any(|key| present(key))
-            || ["plan_seed", "planSeed", "browser_hand_back_reads_note"]
-                .iter()
-                .any(|key| top_level(key))
-            || is_an_evaluation(payload)
-            || crate::personal_browser::payload_requests_personal_browser(payload)
-            || crate::shared_browser::payload_requests_shared_browser(payload)
-        {
-            return Err(uncoded(NOT_THE_PERSONS));
+        let at_top_level = |keys: &[&str]| {
+            keys.iter()
+                .any(|key| payload.get(*key).is_some_and(|value| !value.is_null()))
+        };
+        if in_metadata(&BROWSER_KEYS) || at_top_level(&TOP_LEVEL_BROWSER_KEYS) {
+            return Err(uncoded(
+                "Claude Code doesn't take turns that need Instafy's browser, so this turn didn't start.",
+            ));
+        }
+        if in_metadata(&TEAM_PLAN_KEYS) || at_top_level(&TOP_LEVEL_TEAM_PLAN_KEYS) {
+            return Err(uncoded(
+                "Claude Code doesn't take the turns of a team plan, so this turn didn't start.",
+            ));
         }
         if metadata.is_some_and(|metadata| {
             ATTACHMENT_KEYS
                 .iter()
                 .any(|key| metadata.get(*key).is_some_and(carries_something))
         }) {
-            return Err(uncoded(NOT_PLAIN));
+            return Err(uncoded(
+                "Claude Code doesn't take messages with attachments, so this turn didn't start.",
+            ));
         }
 
         let prompt = payload
             .get("prompt_text")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if prompt.trim().is_empty()
-            || prompt.chars().count() > MAX_PROMPT_CHARS
-            || prompt.trim_start().starts_with('/')
-        {
-            return Err(uncoded(NOT_PLAIN));
+        if prompt.trim().is_empty() {
+            return Err(uncoded(
+                "This turn has no words for Claude Code, so it didn't start.",
+            ));
         }
-        Ok(Self { job, prompt })
+        if prompt.chars().count() > MAX_PROMPT_CHARS {
+            return Err(uncoded(
+                "This turn has more than 100,000 characters, more than Claude Code takes from Instafy, so it didn't start.",
+            ));
+        }
+        if prompt.trim_start().starts_with('/') {
+            return Err(uncoded(
+                "This turn starts with /, which Claude Code would read as a command of its own, so it didn't start.",
+            ));
+        }
+        Ok(Self { job, prompt, mode })
     }
 
     pub fn job(&self) -> &'a LeaseJob {
         self.job
     }
 
-    /// Exactly the person's recorded message, byte for byte (3.5): never trimmed.
+    /// Exactly the words dispatch recorded for the turn, byte for byte (3.5, 11.10): never
+    /// trimmed.
     pub fn prompt(&self) -> &'a str {
         self.prompt
     }
+
+    /// Whether the turn applies its changes or only plans them (11.12).
+    pub fn mode(&self) -> ExecutionMode {
+        self.mode
+    }
 }
 
-/// The job applies its turn: its execution mode, where it says one, is `apply` (`execution_mode`
-/// in the job loop reads `metadata.execution_mode`). The payload's top-level `executionMode` is
-/// something else, the workspace mode the controller writes on every write job (`shared_write`),
-/// so it is not read here.
-fn applies_its_turn(payload: &Value) -> bool {
-    let is_apply = |value: Option<&Value>| match value {
-        None | Some(Value::Null) => true,
-        Some(Value::String(mode)) => mode.trim().eq_ignore_ascii_case("apply"),
-        Some(_) => false,
-    };
-    is_apply(payload.pointer("/metadata/execution_mode"))
-        && is_apply(payload.pointer("/metadata/executionMode"))
-}
-
-/// The controller's mark of a group turn where Octo first decides whether to answer
-/// (`groupParticipation.decision: "agent_evaluation"`).
-fn is_an_evaluation(payload: &Value) -> bool {
-    payload
-        .pointer("/metadata/groupParticipation/decision")
-        .and_then(Value::as_str)
-        == Some("agent_evaluation")
+/// The turn's execution mode (11.12): `metadata.execution_mode`, as the job loop reads it for any
+/// job, when it is `apply` or `plan_only`; `apply` when it is absent. Any other mode, such as
+/// `approval_required`, which no runtime implements for the lane, refuses the turn. The payload's
+/// top-level `executionMode` is something else, the workspace mode the controller writes on every
+/// job (`shared_write`, or `shared_read` for a `plan_only` turn), so it is not read here.
+fn execution_mode(payload: &Value) -> Result<ExecutionMode, LaneFailure> {
+    match payload.pointer("/metadata/execution_mode") {
+        None | Some(Value::Null) => Ok(ExecutionMode::Apply),
+        Some(Value::String(mode)) => ExecutionMode::parse(mode).ok_or_else(|| {
+            let shown: String = mode.trim().chars().take(40).collect();
+            uncoded(format!(
+                "Claude Code runs a turn only to apply its changes or to plan them, and this turn asked for {}, so it didn't start.",
+                super::events::redact_tokens(&shown)
+            ))
+        }),
+        Some(_) => Err(uncoded(
+            "Claude Code runs a turn only to apply its changes or to plan them, so this turn didn't start.",
+        )),
+    }
 }
 
 /// A list with an entry, or any other value but null.
@@ -273,23 +307,17 @@ fn carries_something(value: &Value) -> bool {
     }
 }
 
-/// The session a lane turn passes to `--resume` (2.7): only one from the lane's own conversation
-/// state that this runtime's own registration started, with a session id in UUID form. Anything
-/// else, the reset state included, starts a new session.
-pub fn resume_session(state: Option<&Value>, runtime_id: Uuid) -> Option<Uuid> {
+/// The session a lane turn passes to `--resume` (2.7, 11.9): the one in the lane's own
+/// conversation state, with a session id in UUID form, whichever computer saved it. When this
+/// computer does not have it, the turn starts again in a new session (`supervise`). Anything
+/// else, the reset state included, starts a new session. The state's `runtimeId` says which
+/// registration saved it, for Details, and is not read here.
+pub fn resume_session(state: Option<&Value>) -> Option<Uuid> {
     let state = state?.as_object()?;
     if state.get("provider").and_then(Value::as_str) != Some(PROVIDER)
         || state.get("version").and_then(Value::as_u64) != Some(1)
         || state.get("reset").and_then(Value::as_bool) == Some(true)
     {
-        return None;
-    }
-    let started_here = state
-        .get("runtimeId")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-        == Some(runtime_id);
-    if !started_here {
         return None;
     }
     let session = state.get("sessionId").and_then(Value::as_str)?;
@@ -398,12 +426,122 @@ mod tests {
         let lane_job = LaneJob::of(&job, &grant(person)).expect("runnable");
         assert_eq!(Some(lane_job.prompt()), job.payload["prompt_text"].as_str());
         assert_eq!(lane_job.job().id, job.id);
+        assert_eq!(lane_job.mode(), ExecutionMode::Apply);
         let spaced = LaneJob::of(&spaced, &grant(person)).expect("runnable");
         assert_eq!(spaced.prompt(), "  Rename the project in README.md\n");
     }
 
+    /// Every turn of a Claude Code agent runs, whatever started it (11.4, 11.12): what marked a
+    /// turn nobody typed in version 1 refuses nothing now. An evaluation's instruction is already
+    /// in front of its words in `prompt_text`, and runs as it is.
     #[test]
-    fn the_job_shape_person_mode_markers_and_prompt_are_checked() {
+    fn an_agents_turn_runs_whatever_started_it() {
+        let person = Uuid::new_v4();
+        let grant = grant(person);
+        let evaluation_words = "You are in a group chat. Reply only when you can help; otherwise reply NO_RESPONSE.\n\nSam: does the build pass?";
+        let runs = |name: &str, change: &dyn Fn(&mut LeaseJob)| {
+            let mut job = lane_job(person);
+            change(&mut job);
+            let lane_job =
+                LaneJob::of(&job, &grant).unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
+            assert_eq!(lane_job.mode(), ExecutionMode::Apply, "{name}");
+            assert_eq!(Some(lane_job.prompt()), job.payload["prompt_text"].as_str());
+        };
+        runs("no input kind", &|job| {
+            job.payload["metadata"]
+                .as_object_mut()
+                .unwrap()
+                .remove("input");
+        });
+        runs("a device's input", &|job| {
+            job.payload["metadata"]["input"] = json!({ "kind": "device" })
+        });
+        runs("an automation's run", &|job| {
+            job.payload["metadata"]["automation"] = json!({ "id": "nightly", "mode": "agent" })
+        });
+        runs("a space review", &|job| {
+            job.payload["metadata"]["spaceReview"] = json!({ "automationId": "review" });
+            job.payload["metadata"]["controllerDispatch"] = json!({ "suppressUserMessage": true });
+        });
+        runs("a goal's wake-up", &|job| {
+            job.payload["metadata"]["goalContinuation"] = json!({ "goalId": "g" });
+            job.payload["metadata"]["goal_continuation"] = json!(true);
+        });
+        runs("a resend", &|job| {
+            job.payload["metadata"]["retryOfMessageId"] = json!(Uuid::new_v4().to_string())
+        });
+        runs("words the app runs in place of the shown ones", &|job| {
+            job.payload["metadata"]["dispatchContent"] = json!("the words");
+            job.payload["metadata"]["dispatch_content"] = json!("the words");
+        });
+        runs("an evaluation", &|job| {
+            job.payload["metadata"]["groupParticipation"] =
+                json!({ "decision": "agent_evaluation", "reason": "skill_mode_ambient" });
+            job.payload["prompt_text"] = json!(evaluation_words);
+        });
+        runs("a queued message", &|job| {
+            job.payload["metadata"]["dispatch_queue_entry_id"] = json!(Uuid::new_v4().to_string())
+        });
+    }
+
+    /// The mode is `metadata.execution_mode`: `apply` or absent applies the turn's changes,
+    /// `plan_only` only plans them, and any other mode refuses the turn (11.12). The payload's
+    /// top-level `executionMode`, the workspace mode, is not read.
+    #[test]
+    fn the_mode_is_apply_or_plan_only_and_nothing_else() {
+        let person = Uuid::new_v4();
+        let grant = grant(person);
+        let mode_of = |mode: Value, workspace: &str| {
+            let mut job = lane_job(person);
+            job.payload["metadata"]["execution_mode"] = mode;
+            job.payload["executionMode"] = json!(workspace);
+            LaneJob::of(&job, &grant).map(|lane_job| lane_job.mode())
+        };
+        assert_eq!(
+            mode_of(Value::Null, "shared_write"),
+            Ok(ExecutionMode::Apply)
+        );
+        assert_eq!(
+            mode_of(json!("apply"), "shared_write"),
+            Ok(ExecutionMode::Apply)
+        );
+        assert_eq!(
+            mode_of(json!(" APPLY "), "shared_write"),
+            Ok(ExecutionMode::Apply)
+        );
+        assert_eq!(
+            mode_of(json!("plan_only"), "shared_read"),
+            Ok(ExecutionMode::PlanOnly)
+        );
+        assert_eq!(
+            mode_of(json!("Plan_Only"), "shared_read"),
+            Ok(ExecutionMode::PlanOnly)
+        );
+        let mut absent = lane_job(person);
+        absent.payload["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_mode");
+        assert_eq!(
+            LaneJob::of(&absent, &grant).map(|lane_job| lane_job.mode()),
+            Ok(ExecutionMode::Apply)
+        );
+        for other in [
+            json!("approval_required"),
+            json!("plan"),
+            json!(""),
+            json!("shared_read"),
+            json!(true),
+            json!({ "mode": "apply" }),
+        ] {
+            let failure = mode_of(other.clone(), "shared_write").expect_err("refused");
+            assert_eq!(failure.code, None, "{other}");
+            assert!(failure.message.contains("apply"), "{other}: {failure:?}");
+        }
+    }
+
+    #[test]
+    fn the_job_shape_the_person_the_mode_and_what_claude_code_cannot_take_are_checked() {
         let person = Uuid::new_v4();
         let grant = grant(person);
         let job_with = |change: &dyn Fn(&mut LeaseJob)| {
@@ -469,26 +607,9 @@ mod tests {
                 }),
             ),
             (
-                "no input".into(),
-                job_with(&|job| {
-                    job.payload["metadata"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("input");
-                }),
-            ),
-            (
-                "a device's input".into(),
-                job_with(&|job| job.payload["metadata"]["input"] = json!({ "kind": "device" })),
-            ),
-            (
-                "plan only".into(),
-                job_with(&|job| job.payload["metadata"]["execution_mode"] = json!("plan_only")),
-            ),
-            (
                 "approval required".into(),
                 job_with(&|job| {
-                    job.payload["metadata"]["executionMode"] = json!("approval_required")
+                    job.payload["metadata"]["execution_mode"] = json!("approval_required")
                 }),
             ),
             (
@@ -496,20 +617,41 @@ mod tests {
                 job_with(&|job| job.payload["plan_seed"] = json!({ "steps": [] })),
             ),
             (
-                "a hand-back's reading note".into(),
-                job_with(&|job| job.payload["browser_hand_back_reads_note"] = json!(true)),
+                "a plan seed, in camel case".into(),
+                job_with(&|job| job.payload["planSeed"] = json!({ "steps": [] })),
             ),
             (
-                "an evaluation".into(),
+                "a team plan's worker".into(),
                 job_with(&|job| {
-                    job.payload["metadata"]["groupParticipation"] =
-                        json!({ "decision": "agent_evaluation", "reason": "skill_mode_ambient" })
+                    job.payload["metadata"]["multiAgentPlan"] =
+                        json!({ "role": "worker", "groupId": "group-1" })
                 }),
+            ),
+            (
+                "a team plan's lead".into(),
+                job_with(&|job| {
+                    job.payload["metadata"]["multi_agent_plan"] =
+                        json!({ "role": "lead_continuation" })
+                }),
+            ),
+            (
+                "a hand-back's reading note".into(),
+                job_with(&|job| job.payload["browser_hand_back_reads_note"] = json!(true)),
             ),
             (
                 "a Personal Browser turn".into(),
                 job_with(&|job| {
                     job.payload["metadata"]["browserTransport"] = json!("desktop_personal")
+                }),
+            ),
+            (
+                "a Shared Browser turn".into(),
+                job_with(&|job| job.payload["metadata"]["browser_transport"] = json!("shared")),
+            ),
+            (
+                "any browser transport".into(),
+                job_with(&|job| {
+                    job.payload["metadata"]["browserTransport"] = json!("a-later-browser")
                 }),
             ),
             (
@@ -545,7 +687,7 @@ mod tests {
                 job_with(&|job| job.payload["prompt_text"] = json!("  /terminal ls")),
             ),
         ];
-        for key in MARKER_KEYS {
+        for key in TEAM_PLAN_KEYS.iter().chain(&BROWSER_KEYS) {
             cases.push((
                 format!("the marker {key}"),
                 job_with(&|job| job.payload["metadata"][key] = json!({ "any": "value" })),
@@ -557,6 +699,24 @@ mod tests {
             assert!(failure.artifact().is_none(), "{name}");
             assert!(!failure.message.is_empty(), "{name}");
         }
+        // Each of what Claude Code cannot take says what it is.
+        let says = |change: &dyn Fn(&mut LeaseJob), words: &str| {
+            let failure = refusal(&job_with(change), &grant);
+            assert!(failure.message.contains(words), "{words}: {failure:?}");
+        };
+        says(
+            &|job| job.payload["metadata"]["browserTransport"] = json!("shared"),
+            "browser",
+        );
+        says(
+            &|job| job.payload["metadata"]["multiAgentPlan"] = json!({ "role": "worker" }),
+            "team plan",
+        );
+        says(
+            &|job| job.payload["metadata"]["attachments"] = json!([{ "name": "a.png" }]),
+            "attachments",
+        );
+        says(&|job| job.payload["prompt_text"] = json!("/compact"), "/");
 
         // The limit is in characters, and the words are kept as they are.
         let mut longest = lane_job(person);
@@ -564,9 +724,10 @@ mod tests {
         assert!(LaneJob::of(&longest, &grant).is_ok());
         // Null markers and empty lists are no markers.
         let mut nulls = lane_job(person);
-        nulls.payload["metadata"]["automation"] = Value::Null;
+        nulls.payload["metadata"]["multiAgentPlan"] = Value::Null;
+        nulls.payload["metadata"]["browserTransport"] = Value::Null;
         nulls.payload["metadata"]["attachments"] = json!([]);
-        nulls.payload["metadata"]["groupParticipation"] = json!({ "decision": "respond" });
+        nulls.payload["plan_seed"] = Value::Null;
         assert!(LaneJob::of(&nulls, &grant).is_ok());
     }
 
@@ -578,6 +739,9 @@ mod tests {
         plain.engine = None;
         assert!(refuse_unless_runnable(&plain, Ok(&lane)).is_none());
         assert!(refuse_unless_runnable(&lane_job(person), Ok(&lane)).is_none());
+        let mut plan_only = lane_job(person);
+        plan_only.payload["metadata"]["execution_mode"] = json!("plan_only");
+        assert!(refuse_unless_runnable(&plan_only, Ok(&lane)).is_none());
 
         let mut unknown = lane_job(person);
         unknown.engine = Some("other-engine".into());
@@ -585,13 +749,7 @@ mod tests {
         assert_eq!(failure.code, None);
         assert!(failure.message.contains("other-engine"), "{failure:?}");
 
-        for reason in [
-            NotReadyReason::BinaryMissing,
-            NotReadyReason::BinaryUnsafe,
-            NotReadyReason::ProbeFailed,
-            NotReadyReason::UnsupportedVersion,
-            NotReadyReason::BareDefault,
-        ] {
+        for reason in NotReadyReason::ALL {
             let failure = refuse_unless_runnable(&lane_job(person), Err(reason)).expect("refused");
             assert_eq!(failure.code, Some(FailureCode::from(reason)));
             assert_eq!(
@@ -603,42 +761,68 @@ mod tests {
         let mut someone_else = lane_job(person);
         someone_else.payload["user_id"] = json!(Uuid::new_v4().to_string());
         assert!(refuse_unless_runnable(&someone_else, Ok(&lane)).is_some());
+        let mut approval = lane_job(person);
+        approval.payload["metadata"]["execution_mode"] = json!("approval_required");
+        assert!(refuse_unless_runnable(&approval, Ok(&lane)).is_some());
     }
 
+    /// A turn a plan limit's hold kept from starting fails as `plan_limit`, with the reset time
+    /// in its words, as Claude Code's own plan limits are worded, and as its own.
     #[test]
-    fn only_a_session_this_runtime_started_is_resumed() {
-        let runtime = Uuid::new_v4();
+    fn a_turn_the_plan_limit_holds_fails_as_plan_limit_with_the_reset_time() {
+        let now = chrono::DateTime::from_timestamp(1_900_000_000, 0).unwrap();
+        let hold = PlanLimitHold::after(Some(1_900_003_600), now).expect("a hold");
+        let failure = plan_limit_hold_failure(&hold);
+        assert_eq!(failure.code, Some(FailureCode::PlanLimit));
+        assert_eq!(failure.resets_at, Some(1_900_003_600));
+        assert!(
+            failure
+                .message
+                .ends_with("The limit resets at 2030-03-17 18:46 UTC."),
+            "{failure:?}"
+        );
+        assert_eq!(
+            failure_artifacts(&failure),
+            [json!({ "kind": "claude-code/failure", "code": "plan_limit" })]
+        );
+    }
+
+    /// A lane state's session is resumed whichever computer saved it (11.9): when this one does
+    /// not have it, the turn starts again in a new session.
+    #[test]
+    fn a_session_is_resumed_whichever_computer_saved_it() {
         let session = Uuid::new_v4();
-        let state = |session: &str, runtime: Uuid| {
-            json!({
+        let state = |session: &str, runtime: Option<Uuid>| {
+            let mut state = json!({
                 "provider": "claude-code",
                 "version": 1,
                 "sessionId": session,
-                "runtimeId": runtime.to_string(),
-            })
+            });
+            if let Some(runtime) = runtime {
+                state["runtimeId"] = json!(runtime.to_string());
+            }
+            state
         };
-        assert_eq!(
-            resume_session(Some(&state(&session.to_string(), runtime)), runtime),
-            Some(session)
-        );
-        // Another registration's session, a session id that is no UUID, the reset state, a Codex
-        // state, and none at all start a new session.
-        assert_eq!(
-            resume_session(Some(&state(&session.to_string(), Uuid::new_v4())), runtime),
-            None
-        );
+        for runtime in [Some(Uuid::new_v4()), Some(Uuid::new_v4()), None] {
+            assert_eq!(
+                resume_session(Some(&state(&session.to_string(), runtime))),
+                Some(session)
+            );
+        }
+        // A session id that is no UUID, the reset state, a Codex state, a newer version, and
+        // none at all start a new session.
         let simple = session.simple().to_string();
         for bad in ["", "not-a-uuid", "--fork-session", simple.as_str()] {
-            assert_eq!(resume_session(Some(&state(bad, runtime)), runtime), None);
+            assert_eq!(resume_session(Some(&state(bad, None))), None);
         }
         let reset = json!({ "provider": "claude-code", "version": 1, "reset": true });
-        assert_eq!(resume_session(Some(&reset), runtime), None);
-        let mut codex = state(&session.to_string(), runtime);
+        assert_eq!(resume_session(Some(&reset)), None);
+        let mut codex = state(&session.to_string(), None);
         codex["provider"] = json!("codex-embedded");
-        assert_eq!(resume_session(Some(&codex), runtime), None);
-        let mut newer = state(&session.to_string(), runtime);
+        assert_eq!(resume_session(Some(&codex)), None);
+        let mut newer = state(&session.to_string(), None);
         newer["version"] = json!(2);
-        assert_eq!(resume_session(Some(&newer), runtime), None);
-        assert_eq!(resume_session(None, runtime), None);
+        assert_eq!(resume_session(Some(&newer)), None);
+        assert_eq!(resume_session(None), None);
     }
 }

@@ -70,8 +70,6 @@ const EXPECTED: Record<ClaudeCodeFailureCode, string> = {
     "This version of Claude Code can't take turns from Instafy. Update Claude Code, then send your message again.",
   bare_default:
     "This version of Claude Code no longer lets other apps use your sign-in for a turn, so Instafy can't use it yet.",
-  session_unavailable:
-    "Claude Code couldn't continue its earlier session on this computer. Send your message again to start a new one.",
   turn_timeout:
     "Claude Code worked past its time limit for one turn, so it was stopped. Its changes stay on this computer and weren't saved to the space.",
   stalled: "Claude Code stopped responding, so this turn was stopped.",

@@ -1,6 +1,6 @@
 //! The local-engine lane before a turn runs (docs/Local-Engine-Turns.md, section 8): the capture
-//! of Desktop's launch grant, the probe of the granted `claude`, the capability, and the exact
-//! command and environment the child gets.
+//! of Desktop's launch grant, the probe of the granted `claude`, the capability and the plan
+//! limit's hold of it (11.11), and the exact command and environment the child gets.
 //!
 //! Hermetic: temporary folders and tests/fixtures/fake-claude, started through a wrapper each
 //! test writes. Nothing runs a real `claude` or looks one up on PATH. The process-wide capture
@@ -19,9 +19,9 @@ use runtime_agent::claude_code::command::{
     McpConfigFile, lane_environment, lane_path, turn_command, write_prompt,
 };
 use runtime_agent::claude_code::{
-    self, BIN_ENV, CapturedGrant, Confinement, ENV_JSON_ENV, LAUNCH_GRANT_ENV_KEYS, Lane,
-    LaunchEnvSnapshot, LaunchGrant, NotReadyReason, PATH_ENV, RawLaunchGrant, Readiness, Trust,
-    USER_ID_ENV,
+    self, BIN_ENV, CapturedGrant, Confinement, ENV_JSON_ENV, ExecutionMode, LAUNCH_GRANT_ENV_KEYS,
+    Lane, LaunchEnvSnapshot, LaunchGrant, NotReadyReason, PATH_ENV, RawLaunchGrant, Readiness,
+    Trust, USER_ID_ENV,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -538,6 +538,78 @@ async fn while_not_ready_a_timed_probe_publishes_once_the_result_changes() {
     reprobes.abort();
 }
 
+/// After a turn failed at the Claude plan's limit, the lane holds until the limit resets (11.11):
+/// its capability says not ready, as `plan_limit` with the reset time, which registers again; a
+/// probe meanwhile runs nothing and says so; and at the reset time the timed probe probes again
+/// and publishes what it finds, here ready, which registers again. A hold that starts while the
+/// timed probe waits wakes it, however long its interval.
+#[tokio::test]
+async fn a_plan_limit_holds_the_lane_until_its_reset_time() {
+    let machine = Machine::new();
+    let lane = Arc::new(machine.lane());
+    assert!(lane.probe_and_publish().await.readiness.is_ready());
+    let ready = lane.capability().unwrap();
+    let mut updates = lane.subscribe();
+    updates.borrow_and_update();
+    let reprobes = tokio::spawn({
+        let lane = lane.clone();
+        async move { lane.reprobe_while_not_ready(Duration::from_secs(600)).await }
+    });
+
+    // A reset time two seconds ahead.
+    let resets_at = chrono::Utc::now().timestamp() + 2;
+    let hold = lane.hold_for_plan_limit(Some(resets_at)).expect("a hold");
+    assert_eq!(hold.resets_at().timestamp(), resets_at);
+    assert!(updates.has_changed().unwrap());
+    let held = updates.borrow_and_update().clone().unwrap();
+    assert_eq!(
+        held,
+        json!({
+            "version": 1,
+            "ready": false,
+            "reason": "plan_limit",
+            "resetsAt": hold.resets_at().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        })
+    );
+    assert!(held["resetsAt"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(lane.plan_limit_hold(), Some(hold));
+
+    // Meanwhile a turn's probe runs nothing, says the limit holds, and changes nothing.
+    let before = machine.calls().len();
+    let probe = lane.probe_and_publish().await;
+    assert!(matches!(probe.readiness, Readiness::Held(found) if found == hold));
+    assert_eq!(probe.readiness.reason(), Some(NotReadyReason::PlanLimit));
+    assert!(!probe.capability_changed);
+    assert_eq!(machine.calls().len(), before, "nothing was probed");
+
+    // At the reset time the timed probe probes again, long before its interval.
+    tokio::time::timeout(Duration::from_secs(20), updates.changed())
+        .await
+        .expect("the lane probed again at the reset time")
+        .unwrap();
+    assert!(chrono::Utc::now().timestamp() >= resets_at);
+    assert_eq!(updates.borrow_and_update().clone(), Some(ready));
+    assert_eq!(lane.plan_limit_hold(), None);
+    assert!(machine.calls().len() > before, "the probe ran");
+
+    // A reset time that has passed holds nothing, and publishes nothing.
+    assert_eq!(lane.hold_for_plan_limit(Some(resets_at - 60)), None);
+    assert!(!updates.has_changed().unwrap());
+    // Without a reset time, the hold is an hour; one further ahead than a week is a week.
+    let now = chrono::Utc::now().timestamp();
+    let hour = lane.hold_for_plan_limit(None).expect("a hold");
+    assert!((now + 3_600..=now + 3_602).contains(&hour.resets_at().timestamp()));
+    let week = lane
+        .hold_for_plan_limit(Some(now + 30 * 24 * 3_600))
+        .expect("a hold");
+    assert!(
+        (now + 7 * 24 * 3_600..=now + 7 * 24 * 3_600 + 2).contains(&week.resets_at().timestamp())
+    );
+    assert_eq!(lane.plan_limit_hold(), Some(week));
+    assert_eq!(lane.capability().unwrap()["reason"], "plan_limit");
+    reprobes.abort();
+}
+
 /// The runtime registers, and so takes any turn, Codex's too, only once the startup probe ended:
 /// its three commands share one limit, the limit of one command, and a probe that runs out of it
 /// is `probe_failed`, which the timed re-probe corrects (3.2). A turn's probe keeps a limit for
@@ -832,8 +904,11 @@ fn path_entries_come_in_order_once_and_only_when_they_pass_the_checks() {
     );
 }
 
+/// The exact command of a turn in either mode (3.3, 11.12): a `plan_only` turn passes
+/// `--permission-mode plan` where a turn that applies its changes passes `acceptEdits`, and
+/// nothing else differs.
 #[tokio::test]
-async fn the_turn_command_is_exact_and_no_bare_is_passed_only_when_listed() {
+async fn the_turn_command_is_exact_in_either_mode_and_no_bare_is_passed_only_when_listed() {
     let machine = Machine::new();
     let prompt = "Rename the `--help` flag in README.md\n\nnaïve résumé 🎉 $HOME \"quotes\" -p\r\n\ttrailing white space  \n";
     let space = machine.root.join("workspace/space");
@@ -845,9 +920,14 @@ async fn the_turn_command_is_exact_and_no_bare_is_passed_only_when_listed() {
         assert_eq!(ready.help().lists_no_bare(), no_bare);
         let mcp_config = McpConfigFile::create(lane.grant()).unwrap();
         let session = Uuid::new_v4();
-        for resume in [None, Some(session)] {
+        for (mode, permission_mode, resume) in [
+            (ExecutionMode::Apply, "acceptEdits", None),
+            (ExecutionMode::Apply, "acceptEdits", Some(session)),
+            (ExecutionMode::PlanOnly, "plan", None),
+            (ExecutionMode::PlanOnly, "plan", Some(session)),
+        ] {
             let before = machine.calls().len();
-            let mut child = turn_command(lane.grant(), ready, &mcp_config, resume, &space)
+            let mut child = turn_command(lane.grant(), ready, &mcp_config, mode, resume, &space)
                 .spawn()
                 .unwrap();
             write_prompt(child.stdin.take().unwrap(), prompt)
@@ -863,7 +943,7 @@ async fn the_turn_command_is_exact_and_no_bare_is_passed_only_when_listed() {
                 "stream-json",
                 "--verbose",
                 "--permission-mode",
-                "acceptEdits",
+                permission_mode,
                 "--permission-prompts",
                 "none",
                 "--setting-sources",
@@ -1128,9 +1208,16 @@ fn the_child_gets_only_the_allowlist_whatever_the_process_environment_holds() {
         let space = root.join("workspace/space");
         let session = Uuid::new_v4();
         let prompt = "Fix the failing test\n";
-        let mut child = turn_command(lane.grant(), ready, &mcp_config, Some(session), &space)
-            .spawn()
-            .unwrap();
+        let mut child = turn_command(
+            lane.grant(),
+            ready,
+            &mcp_config,
+            ExecutionMode::Apply,
+            Some(session),
+            &space,
+        )
+        .spawn()
+        .unwrap();
         write_prompt(child.stdin.take().unwrap(), prompt)
             .await
             .unwrap();

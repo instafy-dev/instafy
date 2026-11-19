@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","cwd":"@CWD@","session_id":"@SESSION@","tools":["Bash","Read","Glob","Grep","ExitPlanMode"],"mcp_servers":[],"model":"claude-sonnet-4-5","permissionMode":"plan","apiKeySource":"none","claude_code_version":"2.1.325","uuid":"0b8f1a2c-3d4e-4f50-8a6b-7c8d9e0f1a2b"}
+{"type":"assistant","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"@CWD@/README.md"}}]},"parent_tool_use_id":null,"session_id":"@SESSION@"}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_read","type":"tool_result","content":"# Demo"}]},"parent_tool_use_id":null,"session_id":"@SESSION@"}
+#!write notes/plan.md A file that changed during a turn that only plans
+{"type":"result","subtype":"success","is_error":false,"duration_ms":600,"num_turns":2,"result":"Plan: rename the project in README.md, then update its tests.","session_id":"@SESSION@","total_cost_usd":0.01,"usage":{"input_tokens":150,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":25},"permission_denials":[]}
