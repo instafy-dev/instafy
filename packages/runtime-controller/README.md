@@ -49,6 +49,7 @@ This document explains how the Instafy runtime controller is structured and how 
 | GET | `/runs` | List runs for a project/session. |
 | GET | `/runs/:run_id/result` | Fetch stored result JSON (fallback if SSE missed). |
 | POST | `/runtime/ensure` | Guarantee a runtime record exists (creates idle agents when missing). |
+| POST | `/auth/session` | Exchanges a signed-in user's Supabase access token for a controller session token, `{ token, tokenType, expiresIn, expiresAt }`. Any other credential, a controller session token included, gets 401. See [Controller sessions](#controller-sessions). |
 | POST | `/agent/login` | Exchange shared key for agent token, lease/heartbeat URLs, and proxy envelope. |
 | POST | `/agent/lease` | Claim work with a signed runtime ID bound to an eligible registered runtime and its current generation, including when `STRICT_MODE=false`. |
 | POST | `/agent/message` | Post a step or reply of a job. Only the runtime that leased the job, while it is `leased`, for every job and including when `STRICT_MODE=false`: a token with no runtime ID gets 401; another runtime, or any runtime for a queued or requeued job, gets 404 (403 in strict mode) and writes nothing. |
@@ -86,6 +87,20 @@ work outside the snapshot. Existing interrupt/cancel routes retain their prior b
 The notice records `details.actorUserId`, `agentHandles`, per-job `agents`, `jobIds`,
 `runIds`, and `stopRequested`. Run snapshots expose reserved `metadata.initiatingUserId`
 derived from the initiating job's controller-authored user ID, never caller metadata.
+
+### Controller sessions
+
+`POST /auth/session` issues a controller session token, signed with `USER_TOKEN_SECRET`, only for a
+signed-in user's Supabase access token. Every other credential gets 401. A controller session token
+gets `a controller session can only be started from a Supabase access token`, so a client renews by
+presenting a fresh Supabase access token, never its session token.
+
+Each session token is accepted until `USER_TOKEN_TTL_SECONDS` (default 900) plus 30 seconds after it
+was issued, so a session ends that long after the route last accepted a Supabase access token for its
+user. The controller accepts a Supabase access token until 60 seconds past its expiry and does not
+check Supabase sign-out. This bounds the session token itself: runtime tokens minted with it (renewed
+whenever their runtime registers), Git tokens (up to an hour) and `GET /events` streams opened with it
+keep their own lifetimes.
 
 ### Invalidation signals on `/events`
 
