@@ -5,6 +5,8 @@ mod request;
 use request::{continuation_metadata, source_requires_explicit_resume};
 pub(crate) mod state;
 #[cfg(test)]
+mod teammate_tests;
+#[cfg(test)]
 mod tests;
 
 use axum::{http::StatusCode, Json};
