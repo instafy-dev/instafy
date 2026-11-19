@@ -48,7 +48,8 @@ const CLAUDE_CODE_CAPABILITY_VERSION: u64 = 1;
 /// Why a runtime's Claude Code cannot take a turn, as runtime-agent's probe
 /// reports it (docs/Local-Engine-Turns.md 3.2): runtime-contracts' list,
 /// which the runtime and Studio are tested against too.
-const CLAUDE_CODE_NOT_READY_REASONS: [&str; 6] =
+const CLAUDE_CODE_NOT_READY_REASONS: [&str;
+    runtime_contracts::claude_code_lane::NOT_READY_REASONS.len()] =
     runtime_contracts::claude_code_lane::NOT_READY_REASONS;
 
 /// A runtime's `claudeCode` capability, read from what the runtime reported
