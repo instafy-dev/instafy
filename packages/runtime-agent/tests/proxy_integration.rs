@@ -3102,3 +3102,40 @@ fn registration_for_live(runtime_id: Uuid) -> Registration {
         agent_token_ttl: Some(3600),
     }
 }
+
+/// The grant the controller signs for every model job, which the job loop
+/// refuses to run one without. Signed with an inert secret: the proxies these
+/// tests start have no controller, so they never check it, and the runtime
+/// checks only that its scope matches the lease. `proxy_origin` is the proxy
+/// without `/v1`, which the runtime adds, as the controller's grants name it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn job_grant(
+    job: &LeaseJob,
+    registration: &Registration,
+    proxy_origin: &str,
+) -> runtime_contracts::ProxyEnvelopePayload {
+    let project_id = job.project_id.expect("a model job belongs to a space");
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(30);
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &json!({
+            "aud": "proxy",
+            "iss": "runtime-controller",
+            "sub": format!("proxy:{project_id}:{}", registration.runtime_id),
+            "project_id": project_id,
+            "runtime_id": registration.runtime_id,
+            "job_id": job.id,
+            "lease_attempt": job.lease_attempts,
+            "run_id": job.run_id,
+            "credential_id": job.credential_id,
+            "exp": expires_at.timestamp(),
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(b"inert-integration-signer"),
+    )
+    .expect("sign an inert grant");
+    runtime_contracts::ProxyEnvelopePayload {
+        url: proxy_origin.to_string(),
+        token,
+        expires_at: Some(expires_at.to_rfc3339()),
+    }
+}

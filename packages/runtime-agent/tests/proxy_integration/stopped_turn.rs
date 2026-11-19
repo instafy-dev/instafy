@@ -386,7 +386,7 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
     let client = Arc::new(ControllerClient::new(&config)?);
     let executor = AgentExecutor::new(config.clone());
     executor.send_card_pictures_with(client.clone());
-    let job = LeaseJob {
+    let mut job = LeaseJob {
         id: Uuid::new_v4(),
         intent: Some("feature".to_string()),
         project_id: Some(project_id),
@@ -413,6 +413,11 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
         engine: None,
     };
     let registration = registration_for_live(Uuid::new_v4());
+    job.proxy = Some(job_grant(
+        &job,
+        &registration,
+        &format!("http://{proxy_address}"),
+    ));
 
     // The turn, as the job loop runs it.
     let result = tokio::time::timeout(
@@ -783,7 +788,7 @@ async fn run_stopped_as_leased(first: FirstModelCall) -> Result<()> {
     if first == FirstModelCall::Turn {
         metadata["agentRoutingPreflight"] = json!({});
     }
-    let job = LeaseJob {
+    let mut job = LeaseJob {
         id: Uuid::new_v4(),
         intent: Some("feature".to_string()),
         project_id: Some(project_id),
@@ -809,6 +814,11 @@ async fn run_stopped_as_leased(first: FirstModelCall) -> Result<()> {
     };
     let mut registration = registration_for_live(Uuid::new_v4());
     registration.heartbeat_url = controller_url.join("/agent/heartbeat")?;
+    job.proxy = Some(job_grant(
+        &job,
+        &registration,
+        &format!("http://{proxy_address}"),
+    ));
 
     // The job as the job loop runs it, before any heartbeat of its own told it
     // of the Stop.

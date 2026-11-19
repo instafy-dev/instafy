@@ -495,3 +495,38 @@ async fn a_worker_never_writes_a_page_another_chat_made() {
             .any(|artifact| artifact["kind"] == "write-scope/read-only-blocked")
     );
 }
+
+/// A sequential direct lane presents the job's own grant and nothing else: without one it fails,
+/// whatever keys or model address the runtime's own environment holds.
+#[tokio::test]
+async fn direct_worker_lanes_present_only_the_jobs_grant() {
+    // The lock every job's process environment is set under.
+    let _env = JOB_PROCESS_ENV_LOCK.lock().await;
+    let _runtime_environment = [
+        EnvOverride::apply("OPENAI_API_KEY", "inert-runtime-key"),
+        EnvOverride::apply("CODEX_API_KEY", "inert-runtime-key"),
+        EnvOverride::apply("OPENAI_BASE_URL", "https://model.example.invalid/v1"),
+        EnvOverride::remove("PROXY_BASE_URL"),
+    ];
+    let refusal = |grant: Option<&ProxyEnvelopePayload>| {
+        direct_worker_proxy_config(grant, "test-model".into(), None)
+            .err()
+            .expect("no grant to present")
+            .to_string()
+    };
+    assert_eq!(refusal(None), crate::job_proxy_auth::MISSING_GRANT);
+    let mut grant = ProxyEnvelopePayload {
+        url: "https://proxy.example.invalid/v1".into(),
+        token: " ".into(),
+        expires_at: None,
+    };
+    assert_eq!(refusal(Some(&grant)), crate::job_proxy_auth::MISSING_GRANT);
+
+    grant.token = "inert-job-grant".into();
+    let config = direct_worker_proxy_config(Some(&grant), "test-model".into(), None).unwrap();
+    assert_eq!(config.api_key, "inert-job-grant");
+    assert_eq!(
+        config.chat_completions_endpoint,
+        "https://proxy.example.invalid/v1/chat/completions"
+    );
+}

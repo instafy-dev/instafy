@@ -535,7 +535,7 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
         },
         &EncodingKey::from_ed_der(pkcs8.as_ref()),
     )?;
-    let job = LeaseJob {
+    let mut job = LeaseJob {
         id: Uuid::new_v4(),
         intent: Some("feature".to_string()),
         project_id: Some(project_id),
@@ -564,6 +564,11 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
         grant_token: None,
         engine: None,
     };
+    job.proxy = Some(job_grant(
+        &job,
+        &registration,
+        &format!("http://{proxy_address}"),
+    ));
 
     // The turn, as the job loop runs it.
     let result = tokio::time::timeout(

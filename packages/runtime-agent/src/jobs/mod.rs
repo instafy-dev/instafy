@@ -6834,11 +6834,7 @@ impl JobProcessor {
         envelope: Option<&ProxyEnvelopePayload>,
         worker_config: &crate::isolated_tool_worker::IsolatedWorkerJobConfig,
     ) -> Result<DirectWorkerProxyConfig> {
-        let envelope = envelope.context("parallel worker requires a job-scoped proxy envelope")?;
-        anyhow::ensure!(
-            !envelope.token.trim().is_empty(),
-            "parallel worker proxy token is missing"
-        );
+        let envelope = crate::job_proxy_auth::require_grant(envelope)?;
         let base = self
             .isolated_workers
             .proxy_base
@@ -8274,6 +8270,12 @@ impl JobProcessor {
                 )
                 .await;
         }
+        // A terminal-command job never reaches a model, which is why it may run without a proxy
+        // grant (`job_proxy_auth::needs_grant`): one that names no command ends here.
+        anyhow::ensure!(
+            !crate::job_proxy_auth::is_terminal_command(job),
+            "this terminal command job names no command"
+        );
 
         let mut prompt_override: Option<String> = None;
         let skills_request = skills::parse_skills_request(prompt_text);
@@ -17896,39 +17898,20 @@ struct DirectWorkerProxyConfig {
     run_timeout: Option<std::time::Duration>,
 }
 
+/// A sequential direct lane's model calls: the job's own grant, on the Instafy proxy it names or
+/// `PROXY_BASE_URL`. Never a key or a base URL from the runtime's own environment.
 fn direct_worker_proxy_config(
     envelope: Option<&ProxyEnvelopePayload>,
     model: String,
     job_effort: Option<ReasoningEffort>,
 ) -> Result<DirectWorkerProxyConfig> {
-    let api_key = envelope
-        .map(|value| value.token.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            env::var("OPENAI_API_KEY")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .or_else(|| {
-            env::var("CODEX_API_KEY")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .ok_or_else(|| anyhow!("OpenAI proxy token is missing for scoped worker lane"))?;
+    let envelope = crate::job_proxy_auth::require_grant(envelope)?;
+    let api_key = envelope.token.trim().to_string();
 
     let base_url = env::var("PROXY_BASE_URL")
         .ok()
         .and_then(|value| normalize_direct_worker_proxy_base(value.as_str()))
-        .or_else(|| {
-            envelope.and_then(|value| normalize_direct_worker_proxy_base(value.url.as_str()))
-        })
-        .or_else(|| {
-            env::var("OPENAI_BASE_URL")
-                .ok()
-                .and_then(|value| normalize_direct_worker_proxy_base(value.as_str()))
-        })
+        .or_else(|| normalize_direct_worker_proxy_base(envelope.url.as_str()))
         .ok_or_else(|| anyhow!("OpenAI proxy base URL is missing for scoped worker lane"))?;
 
     Ok(DirectWorkerProxyConfig {
@@ -25128,6 +25111,44 @@ mod tests {
         let command =
             extract_terminal_command_from_payload(&job, "ls -la", Path::new("/workspace/project"));
         assert_eq!(command.as_deref(), Some("ls -la"));
+    }
+
+    /// A terminal-command job may run without a proxy grant because it never reaches a model
+    /// (`job_proxy_auth::needs_grant`), so one that names no command ends before the model lanes.
+    #[test]
+    fn a_terminal_command_job_without_a_command_never_reaches_a_model() {
+        // `run_apply_job` needs a runtime-sized stack, as in production.
+        const STACK_SIZE: usize = 32 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .thread_stack_size(STACK_SIZE)
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let tmp = tempdir().expect("temp dir");
+                        let processor = test_job_processor(tmp.path());
+                        let mut registration = test_registration_with_proxy();
+                        registration.proxy = None;
+                        let job =
+                            test_lease_job(Some("terminal_command"), json!({ "prompt_text": " " }));
+                        let error = processor
+                            .run_apply_job(&registration, &job, false, None, None, None)
+                            .await
+                            .err()
+                            .expect("no command to run");
+                        assert_eq!(
+                            format!("{error:#}"),
+                            "this terminal command job names no command"
+                        );
+                    })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

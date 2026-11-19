@@ -2427,6 +2427,12 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
   };
   if (byocMode) {
     delete env.OPENAI_API_KEY;
+  } else if (!env.PROXY_STATIC_PLATFORM_CREDENTIALS) {
+    // RUNTIME_PROXY_STATIC_AUTH=1 asks for this proxy's own credentials on
+    // managed runs, which a proxy with a controller serves only when told to
+    // (packages/openai-proxy-server/README.md, "Static credentials with a
+    // controller").
+    env.PROXY_STATIC_PLATFORM_CREDENTIALS = "1";
   }
   if (!("CODEX_INCLUDE_PLAN_TOOL" in env)) env.CODEX_INCLUDE_PLAN_TOOL = "true";
   if (!("CODEX_INCLUDE_APPLY_PATCH_TOOL" in env)) env.CODEX_INCLUDE_APPLY_PATCH_TOOL = "true";

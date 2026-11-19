@@ -219,6 +219,8 @@ async fn main() -> anyhow::Result<()> {
     // A preview domain that overlaps Studio's, the API's or public tunnels'
     // would let any previewed site set cookies they trust.
     previews::check_preview_domain(&config)?;
+    // Runtimes run a model job only on the proxy grant signed here for it.
+    auth::check_proxy_signing_secret(&config)?;
     if let Some(warning) = config.previews.tunnel_domain_warning() {
         tracing::warn!("{warning}");
     }

@@ -60,6 +60,84 @@ enum ProxyBackend {
     RemoteDynamic,
 }
 
+/// `PROXY_STATIC_PLATFORM_CREDENTIALS`: whether a proxy with controller integration serves
+/// managed runs from its own static credentials (`OPENAI_API_KEY` or `auth.json`) rather than
+/// the controller's managed lease. A proxy without a controller has no managed runs: its static
+/// credentials serve every request, whatever the setting says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaticPlatformCredentials {
+    /// Unset. This release still loads and serves them, and warns at startup and on every
+    /// managed run they serve. The next release treats unset as [`Self::Refused`].
+    Unset,
+    /// On: loads and serves them, as before, in this release and the next.
+    Allowed,
+    /// Off: never loads them, so managed runs lease the controller's managed credential. The
+    /// next release's default.
+    Refused,
+}
+
+impl StaticPlatformCredentials {
+    pub const ENV: &'static str = "PROXY_STATIC_PLATFORM_CREDENTIALS";
+
+    pub fn from_env() -> Result<Self> {
+        Ok(match optional_boolean_env(Self::ENV)? {
+            None => Self::Unset,
+            Some(true) => Self::Allowed,
+            Some(false) => Self::Refused,
+        })
+    }
+}
+
+/// Whether the proxy binary reads static credentials (`OPENAI_API_KEY` or `auth.json`) at all:
+/// not when controller integration is configured and `PROXY_STATIC_PLATFORM_CREDENTIALS` is off.
+pub fn loads_static_credentials() -> Result<bool> {
+    Ok(
+        StaticPlatformCredentials::from_env()? != StaticPlatformCredentials::Refused
+            || ControllerIntegration::from_env()?.is_none(),
+    )
+}
+
+const STATIC_PLATFORM_CREDENTIALS_STARTUP_WARNING: &str = "[proxy] WARNING: managed runs are served from this proxy's own static credentials (OPENAI_API_KEY or auth.json) although controller integration is configured. The next release stops loading them here unless PROXY_STATIC_PLATFORM_CREDENTIALS=1 is set; managed runs then lease the controller's managed credential (MANAGED_AI_OPENAI_API_KEY on the controller). Set PROXY_STATIC_PLATFORM_CREDENTIALS=1 to keep serving them, or PROXY_STATIC_PLATFORM_CREDENTIALS=0 to lease now.";
+
+const STATIC_PLATFORM_CREDENTIALS_RUN_WARNING: &str = "[proxy] WARNING: a managed run was served from this proxy's own static credentials (OPENAI_API_KEY or auth.json) although controller integration is configured; the next release stops this unless PROXY_STATIC_PLATFORM_CREDENTIALS=1 is set (set it to 0 to lease the controller's managed credential now)";
+
+/// The backend a proxy serves with, from the static credentials it loaded, whether it has
+/// controller integration, and `PROXY_STATIC_PLATFORM_CREDENTIALS`.
+fn select_backend(
+    credentials: Option<Credentials>,
+    has_controller: bool,
+    setting: StaticPlatformCredentials,
+    pinned_model: Option<String>,
+) -> Result<ProxyBackend> {
+    if !has_controller && setting != StaticPlatformCredentials::Unset {
+        eprintln!(
+            "[proxy] {} has no effect without controller integration: static credentials serve every request",
+            StaticPlatformCredentials::ENV
+        );
+    }
+    if has_controller && setting == StaticPlatformCredentials::Refused {
+        eprintln!(
+            "[proxy] {}=0: this proxy uses no static credentials; managed runs lease the controller's managed credential",
+            StaticPlatformCredentials::ENV
+        );
+        return Ok(ProxyBackend::RemoteDynamic);
+    }
+    match credentials {
+        Some(creds) => {
+            let mut static_creds = StaticCredentials::new(creds, pinned_model);
+            if has_controller && setting == StaticPlatformCredentials::Unset {
+                eprintln!("{STATIC_PLATFORM_CREDENTIALS_STARTUP_WARNING}");
+                static_creds.managed_runs_warned = Some(Arc::new(AtomicU64::new(0)));
+            }
+            Ok(ProxyBackend::RemoteStatic(static_creds))
+        }
+        None if has_controller => Ok(ProxyBackend::RemoteDynamic),
+        None => anyhow::bail!(
+            "proxy requires either static credentials (OPENAI_API_KEY or auth.json) or controller integration (PROXY_CONTROLLER_BASE_URL/CONTROLLER_BASE_URL + CONTROLLER_INTERNAL_TOKEN + PROXY_CREDENTIAL_LEASE_TOKEN)"
+        ),
+    }
+}
+
 /// The credentials the proxy started with (`OPENAI_API_KEY` or `auth.json`).
 /// They serve the platform lane and, on a proxy without a controller, every
 /// request, so they are the operator's key just like the controller's managed
@@ -74,6 +152,10 @@ struct StaticCredentials {
     /// `PROXY_PINNED_MODEL`: at most one, and the proxy builds one backend per
     /// process.
     unpinned_managed_run_warnings: Arc<AtomicUsize>,
+    /// Managed runs served on these credentials with controller integration
+    /// configured and `PROXY_STATIC_PLATFORM_CREDENTIALS` unset, each with a
+    /// warning ([`select_backend`]); `None` when nothing warns.
+    managed_runs_warned: Option<Arc<AtomicU64>>,
 }
 
 impl StaticCredentials {
@@ -84,6 +166,7 @@ impl StaticCredentials {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
             unpinned_managed_run_warnings: Arc::new(AtomicUsize::new(0)),
+            managed_runs_warned: None,
         }
     }
 
@@ -99,6 +182,10 @@ impl StaticCredentials {
     /// model-naming client tools. Without the setting the lease is unpinned
     /// and none of that applies.
     fn platform_lease(&self) -> LeasedCredentials {
+        if let Some(warned) = self.managed_runs_warned.as_ref() {
+            warned.fetch_add(1, Ordering::Relaxed);
+            eprintln!("{STATIC_PLATFORM_CREDENTIALS_RUN_WARNING}");
+        }
         if self.pinned_model.is_none()
             && self
                 .unpinned_managed_run_warnings
@@ -1162,23 +1249,14 @@ where
         );
     }
 
-    let backend = match credentials {
-        // Only static credentials read the pin: a remote_dynamic proxy takes
-        // it from the controller's managed lease.
-        Some(creds) => ProxyBackend::RemoteStatic(StaticCredentials::new(
-            creds,
-            std::env::var("PROXY_PINNED_MODEL").ok(),
-        )),
-        None => {
-            if controller.is_some() {
-                ProxyBackend::RemoteDynamic
-            } else {
-                anyhow::bail!(
-                    "proxy requires either static credentials (OPENAI_API_KEY or auth.json) or controller integration (PROXY_CONTROLLER_BASE_URL/CONTROLLER_BASE_URL + CONTROLLER_INTERNAL_TOKEN + PROXY_CREDENTIAL_LEASE_TOKEN)"
-                );
-            }
-        }
-    };
+    // Only static credentials read the pin: a remote_dynamic proxy takes it
+    // from the controller's managed lease.
+    let backend = select_backend(
+        credentials,
+        controller.is_some(),
+        StaticPlatformCredentials::from_env()?,
+        std::env::var("PROXY_PINNED_MODEL").ok(),
+    )?;
 
     let state = ProxyState {
         backend,
@@ -1305,16 +1383,21 @@ async fn readyz(State(state): State<ProxyState>) -> impl IntoResponse {
 }
 
 fn boolean_env(name: &str) -> Result<bool> {
+    Ok(optional_boolean_env(name)?.unwrap_or(false))
+}
+
+/// A boolean setting, `None` when unset or blank.
+fn optional_boolean_env(name: &str) -> Result<Option<bool>> {
     let Some(raw) = std::env::var(name)
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
     else {
-        return Ok(false);
+        return Ok(None);
     };
     match raw.as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
         _ => anyhow::bail!("{name} must be a boolean (1/0, true/false, yes/no, on/off)"),
     }
 }
@@ -4299,6 +4382,61 @@ mod tests {
             pinned.unpinned_managed_run_warnings.load(Ordering::Relaxed),
             0
         );
+    }
+
+    /// `PROXY_STATIC_PLATFORM_CREDENTIALS` with controller integration: unset keeps today's
+    /// static platform lane and warns on every managed run it serves, on keeps it quietly, and
+    /// off never uses static credentials. Without a controller the setting changes nothing.
+    #[test]
+    fn static_platform_credentials_setting_picks_the_backend() {
+        use StaticPlatformCredentials::{Allowed, Refused, Unset};
+        let key = || Some(api_key("https://api.openai.com/v1/responses", None));
+        let warned = |backend: &ProxyBackend| match backend {
+            ProxyBackend::RemoteStatic(static_creds) => Some(
+                static_creds
+                    .managed_runs_warned
+                    .as_ref()
+                    .map(|count| count.load(Ordering::Relaxed)),
+            ),
+            ProxyBackend::RemoteDynamic => None,
+        };
+
+        let unset = select_backend(key(), true, Unset, None).unwrap();
+        assert_eq!(warned(&unset), Some(Some(0)));
+        let ProxyBackend::RemoteStatic(static_creds) = &unset else {
+            unreachable!()
+        };
+        // Handlers get a clone of the state, so the count is shared.
+        for _ in 0..3 {
+            static_creds.clone().platform_lease();
+        }
+        static_creds.unauthenticated_lease();
+        assert_eq!(warned(&unset), Some(Some(3)));
+
+        assert_eq!(
+            warned(&select_backend(key(), true, Allowed, None).unwrap()),
+            Some(None)
+        );
+        for credentials in [key(), None] {
+            for setting in [Unset, Allowed, Refused] {
+                let backend = select_backend(credentials.clone(), true, setting, None).unwrap();
+                if credentials.is_none() || setting == Refused {
+                    assert!(
+                        matches!(backend, ProxyBackend::RemoteDynamic),
+                        "{setting:?}"
+                    );
+                }
+            }
+        }
+
+        for setting in [Unset, Allowed, Refused] {
+            let backend = select_backend(key(), false, setting, None).unwrap();
+            assert_eq!(warned(&backend), Some(None), "{setting:?}");
+            let error = select_backend(None, false, setting, None)
+                .err()
+                .expect("nothing to serve with");
+            assert!(error.to_string().starts_with("proxy requires either"));
+        }
     }
 
     #[test]

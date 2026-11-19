@@ -107,6 +107,7 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `PROXY_CONTROLLER_BASE_URL` | Enables controller-integrated hosted mode | `None` |
 | `CONTROLLER_INTERNAL_TOKEN` | Required with controller integration; the proxy derives its token signing secret from it when `PROXY_SIGNING_SECRET` is unset | `None` |
 | `PROXY_CREDENTIAL_LEASE_TOKEN` | Dedicated bearer used only for controller credential leases | `None` |
+| `PROXY_STATIC_PLATFORM_CREDENTIALS` | With controller integration, whether static credentials serve managed runs: `1` keeps them, `0` never reads them. Unset keeps them with warnings in this release and means `0` from the next. A value that is not a boolean stops the proxy at startup. See [Static credentials with a controller](#static-credentials-with-a-controller) | Unset |
 | `PROXY_PINNED_MODEL` | The only model static credentials serve managed runs as (set it to the controller's `MANAGED_AI_MODEL_ID`); see [Model selection](#model-selection) | `None` |
 | `PROXY_PLATFORM_SERVICE_TIER_ENDPOINTS` | Which upstream endpoints get the platform lane's `service_tier: "default"`: `openai` (only hosts under `openai.com`), `all` (any endpoint that takes a tier) or `none`; any other value stops the proxy at startup. See [Service tier](#service-tier) | `openai` |
 | `PROXY_MANAGED_NATIVE_WEB_SEARCH` | Lets a managed run the controller granted native search use `/v1/alpha/search` through the search bridge: OpenAI's hosted web search on an API key, or a static ChatGPT login's own search, as many searches as the controller's check lets run. Read at startup; a value that is not a boolean stops the proxy. See [Native search for managed runs](#native-search-for-managed-runs) | Off |
@@ -126,6 +127,25 @@ is still set, with or without controller integration.
 Standalone local mode may read and refresh the operator's own `auth.json`. In
 controller-integrated mode, the controller is the only refresh-token authority: the proxy gets a
 short-lived access/API-key lease and never receives the stored refresh token.
+
+### Static credentials with a controller
+
+With controller integration, the proxy's own static credentials (`OPENAI_API_KEY` or `auth.json`)
+can serve managed runs, the platform lane (see [Model selection](#model-selection)).
+`PROXY_STATIC_PLATFORM_CREDENTIALS` decides whether they do:
+
+| Value | This release | The next release |
+| --- | --- | --- |
+| Unset | The proxy loads them and serves managed runs on them. It logs a warning at startup and for every managed run they serve | Same as `0` |
+| `1` (`true`, `yes`, `on`) | Loads and serves them, without the warnings | Same |
+| `0` (`false`, `no`, `off`) | Never reads `OPENAI_API_KEY` or `auth.json`. Managed runs lease the controller's managed credential (`MANAGED_AI_OPENAI_API_KEY` on the controller) | Same |
+
+Without controller integration the proxy has no managed runs: its static credentials serve every
+request, whatever the setting says. `/healthz` reports which credentials serve managed runs as
+`platformLane.servedBy`, `static` or `controller_lease` (see
+[Platform lane health report](#platform-lane-health-report)). Runtimes reach a model only through
+this proxy, on the grant the controller signs for each job (see
+[Model traffic goes through the Instafy proxy](../../docs/Self-Hosted-Runtime-Security.md#model-traffic-goes-through-the-instafy-proxy)).
 
 ### Model selection
 
@@ -170,7 +190,9 @@ access safeguards, optional user site policies and CLI search allowance; Instafy
 website denylist. Subscription quota and availability remain provider-owned.
 
 With controller integration, static proxy credentials (`OPENAI_API_KEY` or `auth.json`) serve
-the platform lane: managed runs, whose controller-signed job tokens carry a `run_id` and no
+the platform lane, as far as `PROXY_STATIC_PLATFORM_CREDENTIALS` allows (see
+[Static credentials with a controller](#static-credentials-with-a-controller)): managed runs,
+whose controller-signed job tokens carry a `run_id` and no
 `credential_id`. A job token also names the job and lease attempt it was minted for (`job_id`
 and `lease_attempt`) for the controller's usage metering. The proxy still accepts legacy tokens
 without that binding for ordinary requests, but native search requires it.
@@ -479,7 +501,7 @@ and logs it.
 
 | Field | Meaning |
 | --- | --- |
-| `servedBy` | `controller_lease` (no static credentials: the controller's managed lease), `static` (the proxy's static credentials), or `refused` (`PROXY_REQUIRE_CREDENTIAL_CLAIM` turns away every credential-less token) |
+| `servedBy` | `controller_lease` (no static credentials, or `PROXY_STATIC_PLATFORM_CREDENTIALS=0`: the controller's managed lease), `static` (the proxy's static credentials), or `refused` (`PROXY_REQUIRE_CREDENTIAL_CLAIM` turns away every credential-less token) |
 | `pinnedModel` | The model static credentials serve managed runs as (`PROXY_PINNED_MODEL`). `null` for a controller lease, which carries its own pin, and in standalone mode, where no token marks a managed run |
 | `staticCredentialKind` | `api_key`, `chatgpt` or `gemini_code_assist` when `servedBy` is `static`, else `null` |
 | `sessionTokensRefused` | `true` with controller integration: credential-less tokens without a `run_id` get 401 |
