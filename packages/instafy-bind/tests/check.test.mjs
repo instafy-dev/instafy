@@ -771,24 +771,25 @@ test("a price a check read counts for the filter; a check that found the shop bl
   }
 });
 
-// A price only a web search gave ("viewer": "provider search") is shown with its label, and the page lists its row
-// apart, never as within the limit (site.within), nor names it the lowest under the title: the note says so, for the
-// reply to say it too, and the sort check reads it as the page does.
+// A price only a web search gave ("viewer": "provider search", or any viewer that names a search, such as the "search
+// result" `instafy web search` gives its answers) is shown with its label, and the page lists its row apart, never as
+// within the limit (site.within), nor names it the lowest under the title: the note says so, for the reply to say it
+// too, and the sort check reads it as the page does.
 test("a price only a web search gave is noted as listed apart, as the page lists it", () => {
-  for (const starter of ["compare", "ranked"]) {
+  for (const [starter, viewer] of [["compare", "provider search"], ["ranked", "provider search"], ["compare", "search result"], ["ranked", "web search"]]) {
     const dir = optionsSite(starter, (data) => {
       const b = data.items[1];
-      if (starter === "compare") b.facts.price = { ...b.facts.price, viewer: "provider search" };
-      else b.price = { ...b.price, viewer: "provider search" };
+      if (starter === "compare") b.facts.price = { ...b.facts.price, viewer };
+      else b.price = { ...b.price, viewer };
       return { ...data, filter: { key: "price", max: 140, label: "Under $140" } };
     });
     try {
       const { notes, problems } = checkValues(dir);
-      assert.deepEqual(problems, [], starter);
-      assert.equal(notes.length, 2, `${starter}: ${notes.join("\n")}`);
-      assert.match(notes[0], /^1 item\(s\) have no price the page can show: Option C\./, starter);
+      assert.deepEqual(problems, [], `${starter}, ${viewer}`);
+      assert.equal(notes.length, 2, `${starter}, ${viewer}: ${notes.join("\n")}`);
+      assert.match(notes[0], /^1 item\(s\) have no price the page can show: Option C\./, `${starter}, ${viewer}`);
       const say = starter === "compare" ? "the reply" : "the lede and the reply";
-      assert.equal(notes[1], `1 item(s) have a price only a web search gave: Option B. The page lists them apart ("Price unknown"), never as "Under $140"; say so in ${say}.`, starter);
+      assert.equal(notes[1], `1 item(s) have a price only a web search gave: Option B. The page lists them apart ("Price unknown"), never as "Under $140"; say so in ${say}.`, `${starter}, ${viewer}`);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -801,7 +802,11 @@ test("a price only a web search gave is noted as listed apart, as the page lists
     items: [{ ref: "option:a", name: "A", facts: { price: priced("€449") } }, { ref: "option:b", name: "B", facts: { price: priced("€399", { viewer: "provider search" }) } }],
   };
   assert.deepEqual(unsortedNumbers(data), []);
+  data.items[1].facts.price = priced("€399", { viewer: "search result" });
+  assert.deepEqual(unsortedNumbers(data), []);
   data.items[1].facts.price = priced("€399");
+  assert.deepEqual(unsortedNumbers(data), [{ key: "price", label: "Price" }]);
+  data.items[1].facts.price = priced("€399", { viewer: "server fetch" });
   assert.deepEqual(unsortedNumbers(data), [{ key: "price", label: "Price" }]);
 });
 

@@ -551,6 +551,50 @@ test("a value that doesn't say how it was read shows its page alone, never \"che
   assert.doesNotMatch(page, /checked|seen/, page);
 });
 
+// `instafy web search` gives each of its answers the viewer "search result", and a value that kept it, an excerpt
+// nobody read, was still captioned "checked 27 Oct on <site>", a price "seen 27 Oct" (a review, Nov 19): only "provider
+// search" read as a search's. A viewer that names a search is one, whatever its words: the value reads "from a web
+// search", and no limit counts it as read.
+test("a value whose viewer names a search reads as a web search's, never \"checked\" or \"seen\"", async () => {
+  const review = (viewer) => ({ v: "A five-star all-rounder", src: "Review One", url: "https://review-one.example/headphones", date: DAY, viewer });
+  const listing = { v: "€349", src: "Shop One", url: "https://shop-one.example/headphones", date: DAY, viewer: "search result" };
+  const viewers = ["search result", "web search", "AI web search", "Search", "provider_search"];
+  APP.named = `site.start({ data: null, render: function () {
+    var viewers = ${JSON.stringify(viewers)}, list = document.getElementById("list");
+    viewers.forEach(function (viewer, i) {
+      list.appendChild(site.h("p", { id: "review-" + i }, site.trust(Object.assign(${JSON.stringify(review())}, { viewer: viewer }))));
+    });
+    list.appendChild(site.h("p", { id: "price" }, site.trust(${JSON.stringify(listing)}, { price: true })));
+    list.appendChild(site.h("p", { id: "seen" }, "Prices: ", site.seen(${JSON.stringify(listing)})));
+  } });`;
+  try {
+    const { document, site } = await draw("named", null);
+    const text = (id) => document.getElementById(id).textContent.replace(/\s+/g, " ").replace(/ 2026\b/g, "");
+    assert.deepEqual(viewers.map((_, i) => text(`review-${i}`)), viewers.map(() => "A five-star all-rounder · from a web search, 27 Oct · review-one.example ↗"));
+    assert.equal(text("price"), "€349 · from a web search, 27 Oct · shop-one.example ↗");
+    assert.equal(text("seen"), "Prices: from a web search, 27 Oct");
+    assert.deepEqual(viewers.map((viewer) => [site.fromSearch(review(viewer)), site.readThere(review(viewer))]), viewers.map(() => [true, false]));
+    // a reader whose name holds the letters of one is no search
+    assert.deepEqual(["server fetch", "research lane", "uw cite"].map((viewer) => site.fromSearch(review(viewer))), [false, false, false]);
+  } finally {
+    delete APP.named;
+  }
+  // under a stated limit, a price whose viewer is "search result" is listed apart, as one only a web search gave
+  const at = (v, host, extra = {}) => ({ v, src: host, url: `https://${host}/console`, date: DAY, ...extra });
+  const { document } = await draw("compare", {
+    title: "Consoles",
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }],
+    columns: [{ key: "price", label: "Price", type: "price" }],
+    filter: { key: "price", max: 500, label: "€500 or less", rest: "over €500" },
+    items: [
+      item("read", "Read Console", { price: at("€449", "shop-one.example", { viewer: "server fetch" }) }),
+      item("searched", "Searched Console", { price: at("€479", "shop-two.example", { viewer: "search result" }) }),
+    ],
+  });
+  assert.deepEqual(rows(document), { within: ["option:read"], apart: ["option:searched"], heading: "Price unknown" });
+  assert.match(rowText(document, "option:searched").replace(/ 2026\b/g, ""), /€479 · from a web search, 27 Oct · shop-two\.example ↗/);
+});
+
 // A price only a web search gave is no price read this turn ("Search never proves live stock or prices"): its row
 // shows it with its label, and a stated limit lists the row apart ("Price unknown"), never within it, the line under
 // the title never names it the lowest, and a sort puts it after the prices read, as it does a price that may have

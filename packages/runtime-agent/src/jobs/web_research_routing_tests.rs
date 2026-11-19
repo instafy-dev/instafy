@@ -1346,6 +1346,24 @@ fn a_searchs_fact_is_said_as_one_and_the_key_card_waits_to_be_asked_for() {
     );
 }
 
+/// The key card is only for a person who asks to set up search, as the research skill and `instafy web search`'s own
+/// tell say. A building turn's rule for a missing secret said to emit its card at once, whatever the task asked: with
+/// search off, a news question's reply carried a card asking for a search key, and no news (a local test, Nov 19). The
+/// rule is for a task that cannot be done without the credential; a news question can be answered from pages read.
+#[test]
+fn a_missing_secrets_card_is_for_a_task_that_cannot_be_done_without_it() {
+    let tmp = scaffolded_space();
+    let prompt = fresh_prompt(
+        tmp.path(),
+        "What's the latest news about the bridge closure?",
+        json!({}),
+    );
+    assert!(prompt.contains(
+        "- Missing secret/env UX: when the task asked for cannot be done without a credential the space lacks, emit the relevant `request_secret`/`request_integration` action immediately, then ask one short follow-up question"
+    ));
+    assert!(!prompt.contains("- Missing secret/env UX: emit the relevant"));
+}
+
 /// Three or more products to compare are a research team's job, one lane per product: a lane reads with the research
 /// skill's readers and follows `instafy-comparing` (a price from the maker's or a shop's page or why not, the reviews
 /// the request asks for, of that exact model). An ask for
@@ -1775,6 +1793,24 @@ fn fresh_prompt(tmp: &std::path::Path, request: &str, metadata: JsonValue) -> St
     prompt
 }
 
+/// A fresh turn's prompt for `request`, under a grant of the job's that lets it run the AI's own web search, or not.
+async fn granted_prompt(
+    tmp: &std::path::Path,
+    request: &str,
+    metadata: JsonValue,
+    native_web_search: bool,
+) -> String {
+    let mut job = test_lease_job(Some("feature"), json!({}));
+    job.project_id = Some(Uuid::new_v4());
+    job.run_id = Some(Uuid::new_v4());
+    let (auth, _guard) = crate::job_proxy_auth::granted_for_test(&mut job, native_web_search);
+    crate::job_proxy_auth::scope(
+        Some(auth),
+        async move { fresh_prompt(tmp, request, metadata) },
+    )
+    .await
+}
+
 /// A turn that may run the AI's own web search carries the research skill whatever its words, first and whole, as a
 /// browser turn carries the browser skill: the skill says how to say what a search found ("a web search on <date>
 /// found: …"), and what "checked" means. Searching turns whose words routed other skills stated a search's excerpts as
@@ -1823,25 +1859,25 @@ async fn a_turn_that_may_search_the_web_carries_the_research_skill_whatever_its_
     assert!(searching.contains("a web search on <date> found: …"));
 
     // The prompt of a turn whose grant lets it search carries it; one whose grant doesn't, or a browser turn's, doesn't.
-    let prompt = |native_web_search: bool, metadata: JsonValue| {
-        let mut job = test_lease_job(Some("feature"), json!({}));
-        job.project_id = Some(Uuid::new_v4());
-        job.run_id = Some(Uuid::new_v4());
-        let (auth, guard) = crate::job_proxy_auth::granted_for_test(&mut job, native_web_search);
-        let path = tmp.path().to_path_buf();
-        async move {
-            let _guard = guard;
-            crate::job_proxy_auth::scope(Some(auth), async move {
-                fresh_prompt(&path, request, metadata)
-            })
+    assert!(
+        granted_prompt(tmp.path(), request, json!({}), true)
             .await
-        }
-    };
-    assert!(prompt(true, json!({})).await.contains(heading));
-    assert!(!prompt(false, json!({})).await.contains(heading));
+            .contains(heading)
+    );
+    assert!(
+        !granted_prompt(tmp.path(), request, json!({}), false)
+            .await
+            .contains(heading)
+    );
     assert!(!fresh_prompt(tmp.path(), request, json!({})).contains(heading));
     for transport in ["shared", "desktop-personal"] {
-        let browser = prompt(true, json!({ "browserTransport": transport })).await;
+        let browser = granted_prompt(
+            tmp.path(),
+            request,
+            json!({ "browserTransport": transport }),
+            true,
+        )
+        .await;
         assert!(!browser.contains(heading), "{transport}");
     }
 }
@@ -3264,13 +3300,17 @@ fn the_browser_rule_and_the_skills_name_the_same_pages_for_the_browser() {
 /// A topic skill has a room of its own in a turn's snapshot. Taken from the shared room, the two topics and their
 /// index lines left the skills loaded last, the router last of all, without theirs: a lookup's build lost the
 /// router's "Answer from memory only when no page can be read", and so did a coding request's, by the index lines
-/// alone (a local test, Nov 16).
-#[test]
-fn the_topic_skills_take_no_room_from_the_skills_loaded_after_them() {
+/// alone (a local test, Nov 16). The research skill a turn that may search carries whatever its words has one too:
+/// taken from the shared room, it left a route request's build without the router, and a coding request's without
+/// the skills loaded after it (a review, Nov 19).
+#[tokio::test]
+async fn the_topic_skills_take_no_room_from_the_skills_loaded_after_them() {
     let tmp = scaffolded_space();
     let last =
         "Answer from memory only when no page can be read, and then say no live browsing was used.";
     assert!(ROUTER_SKILL.trim_end().ends_with(last));
+    let research =
+        "## Context: instafy-web-research (.agents/skills/instafy-web-research/SKILL.md)";
     for (request, topic) in [
         (
             "Look up the specs of the e-reader",
@@ -3282,11 +3322,17 @@ fn the_topic_skills_take_no_room_from_the_skills_loaded_after_them() {
         ),
         ("Add a route for /api/users to the Express server", None),
     ] {
-        let prompt = fresh_prompt(tmp.path(), request, json!({}));
-        assert!(prompt.contains(last), "{request}");
-        if let Some(topic) = topic {
-            let loaded = format!("## Context: {topic} (.agents/skills/{topic}/SKILL.md)");
-            assert!(prompt.contains(&loaded), "{request}");
+        let searching = granted_prompt(tmp.path(), request, json!({}), true).await;
+        assert!(searching.contains(research), "{request}");
+        for (prompt, searches) in [
+            (fresh_prompt(tmp.path(), request, json!({})), false),
+            (searching, true),
+        ] {
+            assert!(prompt.contains(last), "{request} (searches: {searches})");
+            if let Some(topic) = topic {
+                let loaded = format!("## Context: {topic} (.agents/skills/{topic}/SKILL.md)");
+                assert!(prompt.contains(&loaded), "{request} (searches: {searches})");
+            }
         }
     }
 }
