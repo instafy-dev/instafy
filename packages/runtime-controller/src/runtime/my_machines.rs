@@ -25,7 +25,8 @@
 //! `run.progress` of each turn it interrupted are published.
 //!
 //! Neither touches the person's sign-in: a machine that still holds it can
-//! mint itself a new token.
+//! mint itself a new token. Signing out everywhere
+//! (`crate::sign_out_everywhere`) revokes them all and ends those sign-ins.
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -46,7 +47,7 @@ use crate::{bad_request, internal_error, ApiError, AppState};
 use super::access::{runtime_is_private_self_hosted, self_hosted_owner_user_id};
 use super::revocation::{
     attested_owner_is, end_machines_of_their_owner, generation_token_lifetime_bound,
-    owner_revoked_at, OwnMachines,
+    owner_revoked_at, EndedRuntime, OwnMachines,
 };
 
 /// The most ids one revocation names. A person with more revokes them all.
@@ -295,29 +296,47 @@ pub(crate) async fn revoke_my_runtimes(
         .await
         .map_err(|error| internal_error(format!("failed to commit the revocation: {error}")))?;
     drop(connection);
+    stop_revoked_machines(&state, &ended.runtimes, REVOKED_STOP_SOURCE).await;
 
-    // Its tokens have ended either way; the stop releases a running
-    // machine's jobs and revokes its tunnels now, and open tabs hear of it
-    // as of a person's Stop.
-    for runtime in &ended.runtimes {
+    Ok(Json(RevokeMyRuntimesResponse {
+        revoked: ended
+            .runtimes
+            .iter()
+            .map(|runtime| runtime.runtime_id)
+            .collect(),
+        pending_ended: ended.pending,
+    }))
+}
+
+/// Stop each of `runtimes`, which a person's revocation ended, that was still
+/// running, as a person's Stop stops it, with `source` in its
+/// `runtime.stopped`. Its tokens have ended either way; the stop releases a
+/// running machine's jobs and revokes its tunnels now, and open tabs hear of
+/// it as of a person's Stop. A stop that fails is logged.
+pub(crate) async fn stop_revoked_machines(
+    state: &AppState,
+    runtimes: &[EndedRuntime],
+    source: &'static str,
+) {
+    for runtime in runtimes {
         if matches!(runtime.status.as_str(), "stopped" | "offline" | "removed") {
             continue;
         }
         match super::stop_runtime_for_project(
-            &state,
+            state,
             &runtime.project_id,
             &runtime.runtime_id,
             Some(REVOKED_STOP_REASON.to_string()),
-            REVOKED_STOP_SOURCE,
+            source,
         )
         .await
         {
             Ok(stopped) => {
                 super::stop::announce_committed_stop_of(
-                    &state,
+                    state,
                     runtime.project_id,
                     runtime.runtime_id,
-                    Some((REVOKED_STOP_REASON, REVOKED_STOP_SOURCE)),
+                    Some((REVOKED_STOP_REASON, source)),
                     stopped.skip_reason.as_deref(),
                 )
                 .await;
@@ -333,15 +352,6 @@ pub(crate) async fn revoke_my_runtimes(
             }
         }
     }
-
-    Ok(Json(RevokeMyRuntimesResponse {
-        revoked: ended
-            .runtimes
-            .iter()
-            .map(|runtime| runtime.runtime_id)
-            .collect(),
-        pending_ended: ended.pending,
-    }))
 }
 
 /// The ids a revocation names, or `None` for all of the person's machines.

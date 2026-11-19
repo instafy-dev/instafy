@@ -39,6 +39,13 @@ const supabaseAuth = vi.hoisted(() => ({
   onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => undefined } } }),
 }));
 
+// The controller's sign-out everywhere, and the tokens whose refusals the
+// page was told to expect meanwhile.
+const controller = vi.hoisted(() => ({
+  signOutEverywhere: vi.fn<(params?: { accessToken?: string | null }) => Promise<unknown>>(),
+  expected: [] as string[],
+}));
+
 const telemetry = vi.hoisted(() => ({
   post: vi.fn<(event: { kind: string; message?: string | null }) => Promise<void>>(async () => undefined),
 }));
@@ -102,6 +109,18 @@ vi.mock("../../notifications/notificationActions", () => ({
 }));
 vi.mock("../../services/runtimeController/authTelemetry", () => ({
   postAuthTelemetryEvent: telemetry.post,
+}));
+vi.mock("../../services/runtimeController/signOutEverywhere", () => ({
+  signOutEverywhere: controller.signOutEverywhere,
+}));
+vi.mock("../../services/runtimeController/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/runtimeController/core")>()),
+  expectControllerSignOut: (accessToken: string) => {
+    controller.expected.push(accessToken);
+    return () => {
+      controller.expected.splice(controller.expected.indexOf(accessToken), 1);
+    };
+  },
 }));
 
 import { AuthProvider, useAuth } from "../AuthProvider";
@@ -488,6 +507,59 @@ describe("AuthProvider's signOut on the web", () => {
 
     expect(supabaseAuth.signOut).toHaveBeenCalledTimes(1);
     expect(readOtherAccountLink()).toBeNull();
+  });
+
+  it("signs out everywhere, then signs this page out locally", async () => {
+    const summary = {
+      signedOutAt: "2026-11-19T12:00:00.000Z",
+      sessionsEnded: 2,
+      machinesRevoked: [],
+      pendingMintsEnded: [],
+      deviceGrantsRevoked: 0,
+      previewSessionsRevoked: 0,
+      pushRegistrationsRemoved: 1,
+    };
+    let expectedWhileItRan: string[] = [];
+    controller.signOutEverywhere.mockReset();
+    controller.signOutEverywhere.mockImplementation(async () => {
+      expectedWhileItRan = [...controller.expected];
+      return { success: true, summary };
+    });
+    holdOtherAccountLink(OTHER_ACCOUNT_LINK);
+    await mountSignedIn();
+
+    let result: unknown = null;
+    await act(async () => {
+      result = await auth!.signOutEverywhere();
+    });
+
+    expect(controller.signOutEverywhere).toHaveBeenCalledWith({ accessToken: SIGNED_IN_SESSION.access_token });
+    // The controller refuses this sign-in once it commits, before it
+    // answers: those refusals were expected, and only while it ran.
+    expect(expectedWhileItRan).toEqual([SIGNED_IN_SESSION.access_token]);
+    expect(controller.expected).toEqual([]);
+    expect(result).toEqual(summary);
+    expect(supabaseAuth.signOut).toHaveBeenCalledTimes(1);
+    expect(supabaseAuth.signOut).toHaveBeenCalledWith({ scope: "local" });
+    expect(auth!.user).toBeNull();
+    expect(auth!.session).toBeNull();
+    expect(readOtherAccountLink()).toBeNull();
+  });
+
+  it("leaves you signed in when the controller does not sign you out everywhere", async () => {
+    controller.signOutEverywhere.mockReset();
+    controller.signOutEverywhere.mockResolvedValue({ success: false, error: "Unable to sign out everywhere (503)" });
+    holdOtherAccountLink(OTHER_ACCOUNT_LINK);
+    await mountSignedIn();
+
+    await act(async () => {
+      await expect(auth!.signOutEverywhere()).rejects.toThrow("Unable to sign out everywhere (503)");
+    });
+
+    expect(controller.expected).toEqual([]);
+    expect(supabaseAuth.signOut).not.toHaveBeenCalled();
+    expect(auth!.user?.id).toBe(SIGNED_IN_SESSION.user.id);
+    expect(readOtherAccountLink()).toEqual(OTHER_ACCOUNT_LINK);
   });
 
   // Dropped before anything else, so a sign-out that fails partway leaves no link behind.

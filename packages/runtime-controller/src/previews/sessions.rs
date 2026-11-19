@@ -403,7 +403,9 @@ pub(super) async fn post_preview_view(
 ) -> ApiResult<Json<PreviewViewResponse>> {
     let origin = ensure_previews_available(&state).await?;
     let project_id = crate::tunnels::parse_required_uuid(&params.project_id, "projectId")?;
-    let context = authenticate_request(&state.config, &headers).await?;
+    let authenticated =
+        crate::auth::authenticate_request_with_sign_in(&state.config, &headers).await?;
+    let context = authenticated.context;
     if context.scoped_claims.is_some() {
         return Err(forbidden("previews are opened from a Studio session"));
     }
@@ -454,12 +456,13 @@ pub(super) async fn post_preview_view(
 
     let label = mint_capability_label();
     let created_at = insert_preview_session(
-        &state.pool,
+        &state,
         &capability_hash(&label),
         &grant.record.tunnel_id,
         &project_id,
         &user_id,
         query.tab.unwrap_or(false),
+        authenticated.signed_in_at,
     )
     .await?;
     // Opening a preview is activity in the space, like any Studio ping.
@@ -480,16 +483,20 @@ fn uuid_of(grant: &PreviewGrant) -> ApiResult<Uuid> {
 
 /// Store a new session and keep at most [`SESSIONS_PER_VIEWER`] live for this
 /// user and preview, revoking the oldest. The advisory lock makes two
-/// concurrent Opens count each other.
+/// concurrent Opens count each other. `signed_in_at` is when the user signed
+/// in for the credential that asked: a sign-out everywhere that ended it
+/// refuses the session, and one at the same moment revokes it.
 pub(super) async fn insert_preview_session(
-    pool: &PgPool,
+    state: &AppState,
     hash: &str,
     tunnel_id: &str,
     project_id: &Uuid,
     user_id: &Uuid,
     extended_by_use: bool,
+    signed_in_at: Option<i64>,
 ) -> ApiResult<DateTime<Utc>> {
-    let mut connection = pool
+    let mut connection = state
+        .pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
@@ -497,6 +504,8 @@ pub(super) async fn insert_preview_session(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start preview session: {error}")))?;
+    crate::sign_out_everywhere::hold_sign_in(&state.config, &transaction, *user_id, signed_in_at)
+        .await?;
     let lock_key = format!("runtime_preview_sessions:{user_id}:{tunnel_id}");
     transaction
         .execute("select pg_advisory_xact_lock(hashtext($1))", &[&lock_key])
@@ -767,6 +776,24 @@ pub(super) async fn record_viewing_activity(pool: &PgPool, project_id: &Uuid, us
     if let Err(Some(error)) = result {
         warn!(%project_id, %error, "failed to record preview viewing activity");
     }
+}
+
+/// End every viewer session of `user_id`, of every preview, as their sign-out
+/// everywhere does. Returns how many it ended. The broker may still serve a
+/// session it cached for up to [`HOOK_MAX_TTL_SECONDS`].
+pub(crate) async fn revoke_preview_sessions_of(
+    transaction: &tokio_postgres::Transaction<'_>,
+    user_id: Uuid,
+) -> ApiResult<u64> {
+    transaction
+        .execute(
+            "update runtime_preview_sessions
+             set revoked_at = now()
+             where user_id = $1 and revoked_at is null",
+            &[&user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to revoke preview sessions: {error}")))
 }
 
 /// End every viewer session of a preview tunnel. Best effort: a failure is

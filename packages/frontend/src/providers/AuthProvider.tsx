@@ -38,6 +38,11 @@ import { setFollowAccount } from "../screens/studio/components/previewHost/follo
 import { changeNotificationSession, releaseNotificationSession } from "../notifications/notificationLifecycle";
 import { installNotificationActionListeners } from "../notifications/notificationActions";
 import { postAuthTelemetryEvent } from "../services/runtimeController/authTelemetry";
+import { expectControllerSignOut } from "../services/runtimeController/core";
+import {
+  signOutEverywhere as requestSignOutEverywhere,
+  type SignOutEverywhereSummary,
+} from "../services/runtimeController/signOutEverywhere";
 import {
   isInvalidRefreshTokenError,
   signInWithPasswordRecoveringInvalidRefreshToken,
@@ -62,6 +67,12 @@ interface AuthContextValue {
   updatePassword: (password: string) => Promise<void>;
   signInAnonymously: () => Promise<void>;
   signOut: () => Promise<void>;
+  /**
+   * End every sign-in of yours, on every device, this one too, then sign
+   * this page out. Throws, leaving you signed in, when the controller does
+   * not sign you out.
+   */
+  signOutEverywhere: () => Promise<SignOutEverywhereSummary>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -869,6 +880,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           throw error;
         }
         clearProjectState();
+      },
+      async signOutEverywhere() {
+        if (baseFallback || devGuestFallbackEnabled) {
+          throw new Error("Sign in to sign out everywhere.");
+        }
+        // The client's current session, which it renews first when its
+        // access token expired, as in a tab left in the background.
+        const current = await supabase.auth.getSession().catch(() => null);
+        const accessToken = current?.data.session?.access_token ?? session?.access_token ?? null;
+        if (!accessToken) {
+          throw new Error("Sign in to sign out everywhere.");
+        }
+        // Once the controller commits, it refuses this sign-in, before it
+        // answers: a refusal meanwhile is expected, not a lost session.
+        const stopExpecting = expectControllerSignOut(accessToken);
+        try {
+          const result = await requestSignOutEverywhere({ accessToken });
+          if (!result.success) {
+            throw new Error(result.error);
+          }
+          dropOtherAccountLink();
+          await releaseNotificationSession();
+          // Every session of theirs has ended, this one too: only this
+          // device's copy of it is left to remove, offline or not.
+          await supabase.auth.signOut({ scope: "local" }).catch(() => {});
+          clearSupabaseAuthStorage();
+          setSession(null);
+          setUser(null);
+          clearProjectState();
+          return result.summary;
+        } finally {
+          stopExpecting();
+        }
       }
     }),
     [baseFallback, devGuestFallbackEnabled, loading, session, user]

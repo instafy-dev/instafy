@@ -780,3 +780,7 @@ mod machine_lifetime_tests;
 #[cfg(test)]
 #[path = "my_machines_tests.rs"]
 mod my_machines_tests;
+
+#[cfg(test)]
+#[path = "sign_out_everywhere_tests.rs"]
+mod sign_out_everywhere_tests;

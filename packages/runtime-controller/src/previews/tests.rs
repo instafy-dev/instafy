@@ -1809,12 +1809,13 @@ async fn a_session_is_not_stored_for_a_preview_revoked_after_the_open_check() ->
                 .await?;
             let label = mint_capability_label();
             let result = insert_preview_session(
-                &f.state.pool,
+                &f.state,
                 &capability_hash(&label),
                 &preview_id,
                 &f.project,
                 &f.users[0],
                 false,
+                Some(chrono::Utc::now().timestamp()),
             )
             .await;
             let Err((status, _)) = result else {
@@ -1833,6 +1834,89 @@ async fn a_session_is_not_stored_for_a_preview_revoked_after_the_open_check() ->
                 .await?
                 .get(0);
             assert_eq!(stored, 0);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A viewer session asked for with a sign-in its person's sign-out
+/// everywhere ended is not stored, even by a controller that has not heard of
+/// the sign-out (`crate::sign_out_everywhere`); one with a later sign-in is.
+#[tokio::test]
+async fn a_session_is_not_stored_for_a_sign_in_a_sign_out_everywhere_ended() -> anyhow::Result<()> {
+    run(|f| {
+        Box::pin(async move {
+            let job = f.job(None).await?;
+            let preview_id = f.open(&job).await?;
+            let viewer = f.users[0];
+            let signed_in_at = chrono::Utc::now().timestamp();
+            let connection = f.state.pool.get().await?;
+            connection
+                .execute(
+                    "insert into user_sign_outs (user_id, signed_out_at)
+                     values ($1, clock_timestamp())",
+                    &[&viewer],
+                )
+                .await?;
+            let cutoff: i64 = connection
+                .query_one(
+                    "select floor(extract(epoch from signed_out_at))::bigint
+                     from user_sign_outs where user_id = $1",
+                    &[&viewer],
+                )
+                .await?
+                .get(0);
+            drop(connection);
+            let stored = || async {
+                anyhow::Ok(
+                    f.state
+                        .pool
+                        .get()
+                        .await?
+                        .query_one(
+                            "select count(*) from runtime_preview_sessions
+                             where tunnel_id = $1 and user_id = $2",
+                            &[&preview_id, &viewer],
+                        )
+                        .await?
+                        .get::<_, i64>(0),
+                )
+            };
+            let before = stored().await?;
+
+            let result = insert_preview_session(
+                &f.state,
+                &capability_hash(&mint_capability_label()),
+                &preview_id,
+                &f.project,
+                &viewer,
+                false,
+                Some(signed_in_at),
+            )
+            .await;
+            let Err((status, Json(error))) = result else {
+                anyhow::bail!("a session was stored for an ended sign-in");
+            };
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{}", error.message);
+            assert_eq!(
+                error.code.as_deref(),
+                Some(crate::auth::SIGNED_OUT_EVERYWHERE_CODE)
+            );
+            assert_eq!(stored().await?, before);
+
+            insert_preview_session(
+                &f.state,
+                &capability_hash(&mint_capability_label()),
+                &preview_id,
+                &f.project,
+                &viewer,
+                false,
+                Some(cutoff + 1),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("a later sign-in: {error:?}"))?;
+            assert_eq!(stored().await?, before + 1);
             Ok(())
         })
     })

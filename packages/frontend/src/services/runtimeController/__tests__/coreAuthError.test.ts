@@ -118,3 +118,55 @@ describe("emitControllerAuthError with an injected override token", () => {
     window.removeEventListener(core.CONTROLLER_AUTH_ERROR_EVENT, listener);
   });
 });
+
+describe("emitControllerAuthError while a sign-out everywhere ends this sign-in", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubEnv("VITE_CONTROLLER_URL", "https://controller.example.test");
+    vi.stubEnv("PROD", false);
+    window.sessionStorage.clear();
+    window.__INSTAFY_CONTROLLER_TOKEN__ = null;
+    window.__INSTAFY_CONTROLLER_BASE_URL__ = null;
+  });
+
+  afterEach(() => {
+    vi.doUnmock("../../../lib/supabaseClient");
+    window.sessionStorage.clear();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("does not sign the page out for the refusals it expects, and does once it stops expecting them", async () => {
+    const accessToken = futureJwt();
+    vi.doMock("../../../lib/supabaseClient", () => ({
+      supabase: {
+        auth: {
+          getSession: async () => ({
+            data: { session: { access_token: accessToken, expires_at: Math.floor(Date.now() / 1000) + 3600 } },
+          }),
+        },
+      },
+    }));
+    const core = await import("../core");
+    const received: string[] = [];
+    const listener = (event: Event) => {
+      received.push((event as CustomEvent<{ message: string }>).detail.message);
+    };
+    window.addEventListener(core.CONTROLLER_AUTH_ERROR_EVENT, listener);
+    // A request this page made with its own sign-in, as any poll is.
+    const context = await core.resolveControllerRequestContext(null);
+    expect(context.credentialSource).toBe("ambient");
+
+    const stopExpecting = core.expectControllerSignOut(accessToken);
+    core.emitControllerAuthError(
+      { status: 401, message: "You signed out everywhere, which ended this sign-in." },
+      context,
+    );
+    expect(received).toEqual([]);
+
+    stopExpecting();
+    core.emitControllerAuthError({ status: 401, message: "Session expired." }, context);
+    expect(received).toEqual(["Session expired."]);
+    window.removeEventListener(core.CONTROLLER_AUTH_ERROR_EVENT, listener);
+  });
+});

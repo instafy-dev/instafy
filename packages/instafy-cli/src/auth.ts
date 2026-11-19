@@ -13,11 +13,14 @@ import {
   readInstafyCliConfig,
   readInstafyProfileConfig,
   resolveActiveProfile,
+  resolveControllerUrl,
   resolveUserAccessToken,
   writeInstafyCliConfig,
   writeInstafyProfileConfig,
   type ActiveProfile,
 } from "./config.js";
+import { fetchWithControllerAuth } from "./controller-fetch.js";
+import { formatAuthRejectedError } from "./errors.js";
 import { installGitCredentialHelper, uninstallGitCredentialHelper } from "./git-setup.js";
 import { shownPath } from "./terminal-text.js";
 
@@ -726,11 +729,144 @@ export async function login(options: {
   console.log(`- ${kleur.cyan("instafy runtime start")}`);
 }
 
-export async function logout(options?: { json?: boolean; profile?: string }): Promise<void> {
+/** What `POST /me/sign-out-everywhere` ended, as `instafy logout --everywhere --json` shows it. */
+export type SignedOutEverywhere = {
+  /** Every sign-in of the account made at or before this moment's second has ended. */
+  signedOutAt: string | null;
+  /** Browser, app and CLI logins ended: none of them can refresh again. */
+  sessionsEnded: number;
+  machinesRevoked: string[];
+  /** Runtime tokens minted for machines that had not connected yet. */
+  pendingMintsEnded: string[];
+  deviceGrantsRevoked: number;
+  previewSessionsRevoked: number;
+  /** Browsers and phones that no longer get the account's notifications. */
+  pushRegistrationsRemoved: number;
+};
+
+const SIGN_OUT_EVERYWHERE_NOTE =
+  "Every browser, app and terminal signed in to this account is signed out, this one too, and all its machines are revoked.";
+
+function readCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function readIds(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+}
+
+/**
+ * End every sign-in of the account the saved session belongs to, on every device, this one too,
+ * with that session (renewed first when it expired). It asks first only where a person can
+ * answer: stdin and stdout are a terminal, the output is not `--json` and `CI` is not "true".
+ * Anywhere else it needs `yes`.
+ */
+async function signOutEverywhere(params: {
+  profile: string | null;
+  configPath: string;
+  yes?: boolean;
+  json?: boolean;
+}): Promise<SignedOutEverywhere> {
+  const saved = params.profile ? readInstafyProfileConfig(params.profile) : readInstafyCliConfig();
+  const accessToken = saved.accessToken?.trim() ?? "";
+  if (!accessToken) {
+    const where = params.profile ? `for profile "${params.profile}"` : `in ${params.configPath}`;
+    throw new Error(`No session is saved ${where} to sign out everywhere with. Run \`instafy login\` first.`);
+  }
+  if (!params.yes) {
+    const interactive = Boolean(
+      process.stdin.isTTY && process.stdout.isTTY && params.json !== true && process.env.CI !== "true",
+    );
+    if (!interactive) {
+      throw new Error("Refusing to sign out everywhere without confirmation. Re-run with --yes.");
+    }
+    const { confirm, isCancel } = await import("@clack/prompts");
+    console.log(kleur.yellow(SIGN_OUT_EVERYWHERE_NOTE));
+    const answer = await confirm({ message: "Sign out everywhere?", initialValue: false });
+    if (isCancel(answer) || !answer) {
+      throw new Error("Cancelled.");
+    }
+  }
+
+  const url = new URL("/me/sign-out-everywhere", `${resolveControllerUrl({ profile: params.profile })}/`);
+  const { response } = await fetchWithControllerAuth({
+    url: url.toString(),
+    init: {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: "{}",
+      redirect: "error",
+    },
+    accessToken,
+    tokenSource: "config",
+    profile: params.profile,
+    cwd: process.cwd(),
+  });
+  const text = await response.text().catch(() => "");
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw formatAuthRejectedError({
+        status: response.status,
+        responseBody: text,
+        retryCommand: "instafy logout --everywhere",
+      });
+    }
+    const suffix = text.trim() ? `: ${text}` : "";
+    throw new Error(`Request failed (${response.status} ${response.statusText})${suffix}`);
+  }
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error("Expected JSON response from controller API");
+  }
+  return {
+    signedOutAt: typeof payload.signedOutAt === "string" ? payload.signedOutAt : null,
+    sessionsEnded: readCount(payload.sessionsEnded),
+    machinesRevoked: readIds(payload.machinesRevoked),
+    pendingMintsEnded: readIds(payload.pendingMintsEnded),
+    deviceGrantsRevoked: readCount(payload.deviceGrantsRevoked),
+    previewSessionsRevoked: readCount(payload.previewSessionsRevoked),
+    pushRegistrationsRemoved: readCount(payload.pushRegistrationsRemoved),
+  };
+}
+
+function counted(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/** What a sign-out everywhere ended, in one line. */
+function describeSignOutEverywhere(ended: SignedOutEverywhere): string {
+  const parts = [`${counted(ended.sessionsEnded, "sign-in", "sign-ins")} ended`];
+  if (ended.machinesRevoked.length > 0) {
+    parts.push(`${counted(ended.machinesRevoked.length, "machine", "machines")} revoked`);
+  }
+  if (ended.pendingMintsEnded.length > 0) {
+    parts.push(
+      `${counted(ended.pendingMintsEnded.length, "token", "tokens")} for a machine that had not connected yet ended`,
+    );
+  }
+  if (ended.deviceGrantsRevoked > 0) {
+    parts.push(`${counted(ended.deviceGrantsRevoked, "device grant", "device grants")} revoked`);
+  }
+  return `Signed out everywhere: ${parts.join(", ")}.`;
+}
+
+export async function logout(options?: {
+  json?: boolean;
+  profile?: string;
+  everywhere?: boolean;
+  yes?: boolean;
+}): Promise<void> {
   // The session `instafy login` saves here: the selected profile's, or else the default one.
   const active = resolveActiveProfile({ profile: options?.profile ?? null });
   const profile = active?.name ?? null;
   const configPath = profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath();
+  // Signing out everywhere comes first, with the very session this then clears: when it fails,
+  // nothing is cleared, and that session can try again.
+  const everywhere = options?.everywhere
+    ? await signOutEverywhere({ profile, configPath, yes: options.yes, json: options.json })
+    : null;
   const saved = profile ? readInstafyProfileConfig(profile) : readInstafyCliConfig();
   // A cloned repository's binding can name a profile that was never saved, and clearing a file that
   // is not there would create it, which `instafy profile list` then shows. Only a file that is
@@ -755,8 +891,16 @@ export async function logout(options?: { json?: boolean; profile?: string }): Pr
     }
   }
   if (options?.json) {
-    console.log(JSON.stringify({ ok: true, profile, configPath, cleared }));
+    console.log(
+      JSON.stringify(
+        everywhere ? { ok: true, profile, configPath, cleared, everywhere } : { ok: true, profile, configPath, cleared },
+      ),
+    );
     return;
+  }
+  if (everywhere) {
+    console.log(kleur.green(describeSignOutEverywhere(everywhere)));
+    console.log(kleur.gray("To use Instafy again on any device, sign in again."));
   }
   if (!profile) {
     console.log(

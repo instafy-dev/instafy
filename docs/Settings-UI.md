@@ -527,6 +527,14 @@ only when that came before the revocation. After a successful revoke, focus retu
 stable row. An offline first read shows an offline notice and a failed read hides the list, so
 neither looks like "No machines." nor leaves a stale list to revoke from.
 
+Below the list, **Sign out everywhere** ends every sign-in of the person's, on every device, this
+one too. It also revokes all their machines and ends their device grants, preview sessions and push
+registrations. It asks first. Once the controller answers, the page removes its own copy of the
+sign-in, offline too, and goes to sign-in. The refusals the controller sends meanwhile for this page's
+own sign-in do not show the "session is no longer valid" error. If the controller does not sign the
+person out, nothing changes and the error says why. See
+[Signing out everywhere](Self-Hosted-Runtime-Security.md#signing-out-everywhere).
+
 Utility pages such as Settings, Credits, AI and Machines share one temporary workspace tab.
 Browsing a different utility replaces that preview; settings categories reuse the same Settings
 tab. Chat and file previews each have their own slot. Italic titles identify previews. Double-click,

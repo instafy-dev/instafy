@@ -462,6 +462,7 @@ where
             .merge(crate::projects::router())
             .merge(crate::origins::router())
             .merge(crate::agent::router())
+            .merge(crate::sign_out_everywhere::router())
             .with_state(state.clone()),
         state,
         config,

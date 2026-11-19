@@ -46,6 +46,7 @@ Utilities:
 ```bash
 instafy profile list
 instafy logout --profile work
+instafy logout --everywhere
 ```
 
 Commands use one saved session: the profile `INSTAFY_PROFILE` names, else the one the nearest
@@ -63,6 +64,18 @@ clears the `work` session; if `work` has none, it clears nothing and says so. It
 session and the git credential helper as they are, and says when the default session is still
 signed in. Only `instafy logout` with no profile selected clears the default session and removes the
 helper.
+
+`instafy logout --everywhere` is for a lost computer or phone. Before it clears that session, it
+uses it to end every sign-in of its account, on every device: browsers, apps and terminals, this
+one too. It also revokes the account's machines, the device access it gave agents and its preview
+sessions, and stops notifications on every device. It refreshes the saved session first if it
+expired. It asks first; `--yes` skips the question and is required with `--json` or when not
+running in a terminal. If the controller does not sign the account out, for example because an
+earlier sign-out everywhere already ended this session, the session is kept and the command fails.
+Sign in again and retry. `--json` adds what was ended under `everywhere`. A device that already has
+Instafy open keeps database, storage and realtime access, and any Git or origin token it was given,
+until those expire (an hour by default). See
+[Signing out everywhere](Self-Hosted-Runtime-Security.md#signing-out-everywhere).
 
 Git runs the credential helper `instafy login` installs from the repository's top folder, so `git`
 uses the session selected there, not one a subfolder's `.instafy/space.json` selects. In a
@@ -449,7 +462,7 @@ with `--all`, and stops the ones still running. A machine already revoked is ski
 first; `--yes` skips the question and is required with `--json` or when not running in a terminal,
 as in a script or CI. To use a revoked machine again, start it again with your sign-in. Revoking does not sign you out on
 the machine: one that still has your sign-in, such as a computer where you ran `instafy login`,
-can mint itself a new token. See
+can mint itself a new token. `instafy logout --everywhere` ends those sign-ins too. See
 [Revoking your own machines](Self-Hosted-Runtime-Security.md#revoking-your-own-machines).
 
 ## Local Hardware

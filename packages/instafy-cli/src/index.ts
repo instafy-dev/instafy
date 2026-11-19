@@ -257,15 +257,28 @@ program
 
 program
   .command("logout")
-  .description("Clear the saved CLI access token")
+  .description("Clear the saved CLI access token, or with --everywhere end every sign-in of your account first")
   .option(
     "--profile <name>",
     "Clear this profile's session (default: INSTAFY_PROFILE, then the folder's .instafy/space.json profile, else ~/.instafy/config.json)",
   )
+  .option(
+    "--everywhere",
+    "First end every sign-in of the account this session belongs to, on every device (browsers, apps and terminals, this one too), and revoke all its machines",
+  )
+  .option(
+    "--yes",
+    "Skip the --everywhere confirmation prompt (required with --json, when CI=true, or when not running in a terminal)",
+  )
   .option("--json", "Output JSON")
   .action(async (opts) => {
     try {
-      await logout({ json: opts.json, profile: opts.profile });
+      await logout({
+        json: opts.json,
+        profile: opts.profile,
+        everywhere: Boolean(opts.everywhere),
+        yes: Boolean(opts.yes),
+      });
     } catch (error) {
       console.error(kleur.red(String(error)));
       process.exit(1);

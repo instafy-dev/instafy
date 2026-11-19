@@ -1,0 +1,5 @@
+---
+"@instafy/cli": patch
+---
+
+Add `instafy logout --everywhere`, for a lost computer or phone. It first ends every sign-in of the account the saved session belongs to, on every device: browsers, apps and terminals, this one too. It also revokes all that account's machines, the device access it gave agents and its preview sessions, and stops notifications on every device. Then it clears the saved session as `instafy logout` does. It uses the session `instafy logout` would clear (`--profile`, `INSTAFY_PROFILE` or the folder's binding, else the default one), and refreshes it first if it expired. It asks first unless you pass `--yes`, which `--json`, a script or CI needs. If the controller does not sign the account out, the saved session is kept. `--json` adds what was ended under `everywhere`. Every other sign-in has to sign in again. A device with Instafy already open keeps database, storage and realtime access, and any Git or origin token it was given, until those expire (an hour by default).

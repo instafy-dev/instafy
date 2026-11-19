@@ -79,6 +79,7 @@ use serve::PreviewServe;
 use sessions::PreviewOrigin;
 pub(crate) use sessions::{
     check_preview_domain, prune_preview_sessions, revoke_preview_sessions_for_tunnel,
+    revoke_preview_sessions_of,
 };
 
 type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;

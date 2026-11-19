@@ -55,12 +55,14 @@ pub(crate) const AUTOMATION_SCHEDULER: LoopSchedule = schedule("automation_sched
 pub(crate) const HOSTED_RUNTIME_CREDIT_SWEEP: LoopSchedule =
     schedule("hosted_runtime_credit_sweep", 60, 9);
 pub(crate) const GOAL_CONTINUATION: LoopSchedule = schedule("goal_continuation", 30, 17);
+/// How late another controller's sign-out everywhere can be refused here.
+pub(crate) const SIGN_OUT_SYNC: LoopSchedule = schedule("sign_out_sync", 30, 27);
 pub(crate) const RETENTION_PRUNE: LoopSchedule = schedule("retention_prune", 300, 19);
 
 /// Every periodic loop that uses the database pool. Each schedule constant
 /// above must appear here exactly once, which the tests check.
 #[cfg(test)]
-pub(crate) const DATABASE_LOOPS: [LoopSchedule; 10] = [
+pub(crate) const DATABASE_LOOPS: [LoopSchedule; 11] = [
     SEND_QUEUE_RECOVERY,
     NOTIFICATION_WORKER,
     IDLE_ACTIVITY_SWEEP,
@@ -71,6 +73,7 @@ pub(crate) const DATABASE_LOOPS: [LoopSchedule; 10] = [
     HOSTED_RUNTIME_CREDIT_SWEEP,
     RETENTION_PRUNE,
     GOAL_CONTINUATION,
+    SIGN_OUT_SYNC,
 ];
 
 /// An interval that first ticks `schedule.offset` from now and then every

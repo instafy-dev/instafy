@@ -11,9 +11,13 @@ const mocks = vi.hoisted(() => ({
   userId: "user-a",
   listMine: vi.fn(),
   revokeMine: vi.fn(),
+  signOutEverywhere: vi.fn(),
   showStatus: vi.fn(),
 }));
-vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: mocks.userId } }) }));
+vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({
+  user: mocks.userId ? { id: mocks.userId } : null,
+  signOutEverywhere: mocks.signOutEverywhere,
+}) }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   runtimes: { listMine: mocks.listMine, revokeMine: mocks.revokeMine },
@@ -95,6 +99,7 @@ describe("your machines settings", () => {
     mocks.userId = "user-a";
     mocks.listMine.mockReset();
     mocks.revokeMine.mockReset();
+    mocks.signOutEverywhere.mockReset();
     mocks.showStatus.mockReset();
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     container = document.createElement("div");
@@ -491,6 +496,59 @@ describe("your machines settings", () => {
     await settle();
     expect(mocks.showStatus).not.toHaveBeenCalled();
     expect(button()?.disabled).toBe(false);
+  });
+
+  it("signs you out everywhere once you confirm, without revoking from the list", async () => {
+    mocks.listMine.mockResolvedValue({ success: true, machines: machines() });
+    mocks.signOutEverywhere.mockResolvedValue({
+      signedOutAt: new Date().toISOString(),
+      sessionsEnded: 2,
+      machinesRevoked: [ONLINE],
+      pendingMintsEnded: [PENDING],
+      deviceGrantsRevoked: 0,
+      previewSessionsRevoked: 0,
+      pushRegistrationsRemoved: 1,
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render();
+    await settle();
+    expect(testId("sign-out-everywhere-section")?.textContent).toContain("End every sign-in of yours");
+    await press("sign-out-everywhere");
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Sign out everywhere?"));
+    expect(mocks.signOutEverywhere).toHaveBeenCalledTimes(1);
+    expect(mocks.revokeMine).not.toHaveBeenCalled();
+    expect(mocks.showStatus).toHaveBeenCalledWith("Signed out everywhere.", "success", 2500);
+  });
+
+  it("signs nothing out when you cancel", async () => {
+    mocks.listMine.mockResolvedValue({ success: true, machines: machines() });
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    await render();
+    await settle();
+    await press("sign-out-everywhere");
+    expect(mocks.signOutEverywhere).not.toHaveBeenCalled();
+    expect(mocks.showStatus).not.toHaveBeenCalled();
+  });
+
+  it("says why signing out everywhere failed, and offers it again", async () => {
+    mocks.listMine.mockResolvedValue({ success: true, machines: machines() });
+    mocks.signOutEverywhere.mockRejectedValue(new Error("Unable to sign out everywhere (503)"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render();
+    await settle();
+    await press("sign-out-everywhere");
+    expect(mocks.showStatus).toHaveBeenCalledWith("Unable to sign out everywhere (503)", "error", 4500);
+    const button = testId("sign-out-everywhere") as HTMLButtonElement | null;
+    expect(button?.disabled).toBe(false);
+    expect(button?.hasAttribute("aria-disabled")).toBe(false);
+  });
+
+  it("offers signing out everywhere only while you are signed in", async () => {
+    mocks.userId = "";
+    await render();
+    await settle();
+    expect(mocks.listMine).not.toHaveBeenCalled();
+    expect(testId("sign-out-everywhere")).toBeNull();
   });
 
   it("names a machine's state and age plainly", () => {

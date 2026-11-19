@@ -766,7 +766,10 @@ pub(crate) async fn agent_login(
     headers: RedactedHeaders,
     axum::Json(payload): axum::Json<AgentLoginRequest>,
 ) -> Result<Json<runtime::RuntimeRegisterResponse>, (StatusCode, Json<ApiError>)> {
-    let auth_context = authenticate_request(&state.config, &headers).await?;
+    let authenticated =
+        crate::auth::authenticate_request_with_sign_in(&state.config, &headers).await?;
+    let signed_in_at = authenticated.signed_in_at;
+    let auth_context = authenticated.context;
     if auth_context.scoped_claims.is_some() {
         // `/agent/login` is the user/service bootstrap for self-hosted
         // runtimes. Letting an already-issued runtime/agent token bootstrap a
@@ -817,9 +820,20 @@ pub(crate) async fn agent_login(
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
     // A person's login admits a machine for them: serialize it with a
-    // membership change's fence for that person (see `runtime::revocation`).
+    // membership change's fence for that person (see `runtime::revocation`),
+    // and with their sign-out everywhere, which ends every sign-in of theirs
+    // from before it, even one this controller has not heard of yet.
     if let Some(owner) = runtime::self_hosted_person_owner(&state, Some(runtime_owner)) {
         runtime::share_runtime_owner_lock(&transaction, owner).await?;
+        if auth_context.user_id == Some(owner) && !auth_context.is_service_role {
+            crate::sign_out_everywhere::ensure_sign_in_not_ended(
+                &state.config,
+                &transaction,
+                owner,
+                signed_in_at,
+            )
+            .await?;
+        }
     }
 
     let project = load_project_record(&transaction, &project_id).await?;

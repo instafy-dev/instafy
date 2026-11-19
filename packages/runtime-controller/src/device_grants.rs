@@ -1078,7 +1078,9 @@ async fn create_grant(
     AxumPath(project_id_raw): AxumPath<String>,
     Json(body): Json<CreateGrantBody>,
 ) -> Result<Json<DeviceGrant>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers).await?;
+    let authenticated =
+        crate::auth::authenticate_request_with_sign_in(&state.config, &headers).await?;
+    let context = authenticated.context;
     let user_id = grant_person(&state.config, &context)?;
     let project_id = parse_uuid(&project_id_raw, "projectId")?;
     let provider_id = normalize_provider_id(&body.provider_id)?;
@@ -1094,6 +1096,16 @@ async fn create_grant(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    // A sign-out everywhere revokes every grant of the person's: one made
+    // from a sign-in it ended is refused here, and one made at the same
+    // moment is revoked by it.
+    crate::sign_out_everywhere::hold_sign_in(
+        &state.config,
+        &transaction,
+        user_id,
+        authenticated.signed_in_at,
+    )
+    .await?;
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, None).await?;
     crate::dispatch::ensure_project_prompt_access(&transaction, &project, &context, None).await?;
@@ -1227,6 +1239,17 @@ async fn revoke_where(
         crate::provider_requests::cancel_open_provider_requests_of_grants(transaction, &revoked)
             .await?;
     Ok((revoked.len(), canceled))
+}
+
+/// Revokes every live grant `user_id` gave, in every space, as their sign-out
+/// everywhere does, and cancels the open requests their turns made. Returns
+/// how many it revoked, and those requests, to publish once the transaction
+/// commits.
+pub(crate) async fn revoke_every_grant_of(
+    transaction: &Transaction<'_>,
+    user_id: Uuid,
+) -> Result<(usize, Vec<ProviderRequestRecord>), (StatusCode, Json<ApiError>)> {
+    revoke_where(transaction, "user_id = $1", &[&user_id]).await
 }
 
 /// Revokes one of the caller's grants. Its turns' further calls are refused,
