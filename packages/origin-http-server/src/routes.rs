@@ -4241,7 +4241,6 @@ mod tests {
     use std::io::{Cursor, Write};
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::process::Command;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -4272,7 +4271,7 @@ mod tests {
     use crate::config::ServerConfig;
 
     fn run_test_git(workspace: &std::path::Path, args: &[&str]) -> std::process::Output {
-        let output = Command::new("git")
+        let output = crate::test_support::plain_git()
             .current_dir(workspace)
             .args(args)
             .output()
@@ -4287,7 +4286,7 @@ mod tests {
     }
 
     fn run_test_instafy_git(workspace: &std::path::Path, args: &[&str]) -> std::process::Output {
-        let mut command = Command::new("git");
+        let mut command = crate::test_support::plain_git();
         command
             .current_dir(workspace)
             .arg("--git-dir")

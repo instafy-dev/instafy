@@ -354,7 +354,7 @@ async fn smart_http_backend(
     let path = parts.uri.path().to_string();
     let pack_answer =
         parts.method == axum::http::Method::POST && path.ends_with("/git-upload-pack");
-    let mut command = std::process::Command::new("git");
+    let mut command = crate::test_support::plain_git();
     command
         .arg("http-backend")
         .env("GIT_PROJECT_ROOT", &shared.root)

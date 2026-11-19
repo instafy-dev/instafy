@@ -16,6 +16,7 @@ mod codex_policy;
 pub mod config;
 pub mod controller;
 pub mod controller_tokens;
+pub mod git_env;
 pub mod isolated_tool_worker;
 pub mod job_cancel;
 pub mod job_model;

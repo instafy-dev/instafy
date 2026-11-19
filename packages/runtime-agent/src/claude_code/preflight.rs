@@ -1565,7 +1565,7 @@ mod tests {
 
     #[cfg(unix)]
     fn git(folder: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
+        let status = crate::git_env::git_command()
             .args([
                 "-c",
                 "user.name=Instafy Test",

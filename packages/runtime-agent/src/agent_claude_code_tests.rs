@@ -88,7 +88,7 @@ fn write(folder: &Path, path: &str, text: &str) {
 }
 
 fn git(folder: &Path, home: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
+    let status = crate::git_env::git_command()
         .args([
             "-c",
             "user.name=Instafy Test",

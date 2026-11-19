@@ -1081,7 +1081,7 @@ async fn run_chains() -> Result<()> {
     fs::create_dir_all(&workspace)?;
     // Give the workspace its own repository so Codex's project-doc search stops there, as it
     // does in a real space.
-    let init = std::process::Command::new("git")
+    let init = runtime_agent::git_env::git_command()
         .args(["init", "-q"])
         .current_dir(&workspace)
         .output()?;

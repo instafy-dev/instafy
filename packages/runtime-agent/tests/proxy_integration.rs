@@ -893,7 +893,7 @@ const PARKED_FILE_CONTENT: &str = "# Parked\n";
 
 /// Runs git in `dir` without the operator's own git configuration.
 fn git_in(dir: &Path, args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("git")
+    let status = runtime_agent::git_env::git_command()
         .args(args)
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")

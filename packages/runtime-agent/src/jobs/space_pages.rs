@@ -2605,7 +2605,7 @@ mod tests {
 
     fn canonical_git(workspace: &Path, args: &[&str]) {
         let git_dir = workspace.join(".instafy/.git");
-        let output = std::process::Command::new("git")
+        let output = crate::git_env::git_command()
             .arg("--git-dir")
             .arg(&git_dir)
             .arg("--work-tree")

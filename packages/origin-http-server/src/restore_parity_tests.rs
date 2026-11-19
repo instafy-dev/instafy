@@ -328,7 +328,7 @@ impl Space {
             .join(format!("index-{}", Uuid::new_v4().simple()));
         let git = |args: &[&str], input: Option<&[u8]>| -> String {
             use std::io::Write as _;
-            let mut command = std::process::Command::new("git");
+            let mut command = crate::test_support::plain_git();
             command
                 .current_dir(&self.remote)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")

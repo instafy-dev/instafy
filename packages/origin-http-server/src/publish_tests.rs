@@ -823,7 +823,7 @@ fn n03_three_hundred_local_commits_publish_with_one_merge() {
         let index_file = sc.ws.join(".instafy/.git/n03-index");
         let env_index = index_file.to_string_lossy().to_string();
         let run = |args: &[&str], stdin: Option<&[u8]>| {
-            let mut command = std::process::Command::new("git");
+            let mut command = crate::test_support::plain_git();
             command
                 .current_dir(&sc.ws)
                 .env("GIT_INDEX_FILE", &env_index)
@@ -7723,7 +7723,6 @@ fn a_revert_never_brings_back_a_name_main_holds_in_another_case() {
 /// compare-and-swap, and the checkout's index given the same entry without
 /// stat data.
 fn site_backend_commit(sc: &Scenario, path: &str, bytes: &[u8]) -> String {
-    use std::process::Command;
     sc.write(path, bytes);
     let head = sc.head();
     let blob = git_output(
@@ -7745,7 +7744,7 @@ fn site_backend_commit(sc: &Scenario, path: &str, bytes: &[u8]) -> String {
     let index = tmp.path().join("index");
     let git = |args: &[&str], stdin: Option<&[u8]>| -> String {
         use std::io::Write as _;
-        let mut command = Command::new("git");
+        let mut command = crate::test_support::plain_git();
         command
             .current_dir(&sc.ws)
             .args(["--git-dir", ".instafy/.git", "--work-tree", "."])

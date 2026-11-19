@@ -32,6 +32,28 @@ const GIT_STAGE_CHUNK_SIZE: usize = 256;
 const DISABLED_GIT_HOOKS_CONFIG: &str = "core.hooksPath=/dev/null";
 const DISABLED_GIT_HELPER: &str = "/usr/bin/false";
 
+/// Inherited environment that would point a git process at another
+/// repository, index, object store or set of refs than the one it names.
+/// git still reads most of these when a command passes `--git-dir` and
+/// `--work-tree`. git exports GIT_DIR, as an absolute path in a linked
+/// worktree, to the commands `git rebase --exec` runs and to hooks, and
+/// GIT_INDEX_FILE to commit hooks, so a process started from one would
+/// otherwise read and write the repository that started it.
+pub const REPOSITORY_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_QUARANTINE_PATH",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+];
+
 /// Transfer rate, in bytes per second, below which curl counts a git HTTP
 /// transfer as stalled. It only has to separate "moving" from "stopped": a
 /// healthy transfer moves orders of magnitude faster, and the quiet phases of
@@ -87,10 +109,13 @@ fn http_low_speed_time_seconds() -> u32 {
 /// configuration must never be allowed to execute workspace code.
 pub(crate) fn server_git_command() -> Command {
     let mut command = Command::new(git_program());
-    // Do not inherit config injection or helper-program variables from the
-    // origin process. Explicit gitdir/worktree arguments are supplied by the
-    // caller, and the only authentication material is the scoped HTTP header
-    // added by `run_git` below.
+    // Do not inherit config injection, helper-program or repository variables
+    // from the origin process. Explicit gitdir/worktree arguments are supplied
+    // by the caller, and the only authentication material is the scoped HTTP
+    // header added by `run_git` below.
+    for key in REPOSITORY_ENV {
+        command.env_remove(key);
+    }
     for (key, _) in std::env::vars_os() {
         let key_text = key.to_string_lossy();
         if key_text.starts_with("GIT_CONFIG_")
@@ -2910,7 +2935,6 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::process::Command;
     use std::time::Duration;
     use tempfile::tempdir;
 
@@ -2978,7 +3002,7 @@ mod tests {
     }
 
     fn run_git(dir: &Path, args: &[&str]) -> anyhow::Result<()> {
-        let output = Command::new("git")
+        let output = crate::test_support::plain_git()
             .current_dir(dir)
             .args(args)
             .output()
@@ -3001,7 +3025,7 @@ mod tests {
     }
 
     fn git_stdout(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-        let output = Command::new("git")
+        let output = crate::test_support::plain_git()
             .current_dir(dir)
             .args(args)
             .output()
@@ -3031,7 +3055,7 @@ mod tests {
     }
 
     fn git_config_get(config_path: &Path, key: &str) -> anyhow::Result<String> {
-        let output = Command::new("git")
+        let output = crate::test_support::plain_git()
             .arg("config")
             .arg("--file")
             .arg(config_path)
@@ -3049,7 +3073,7 @@ mod tests {
     }
 
     fn git_config_set(config_path: &Path, key: &str, value: &str) -> anyhow::Result<()> {
-        let output = Command::new("git")
+        let output = crate::test_support::plain_git()
             .arg("config")
             .arg("--file")
             .arg(config_path)
@@ -4900,7 +4924,7 @@ mod tests {
             workspace_dir.to_str().unwrap(),
         ];
         full_args.extend_from_slice(args);
-        let output = Command::new("git")
+        let output = crate::test_support::plain_git()
             .current_dir(workspace_dir)
             .args(&full_args)
             .output()

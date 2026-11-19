@@ -21,17 +21,27 @@ pub(crate) fn git_in(dir: &Path, args: &[&str]) -> String {
         .to_string()
 }
 
+/// git for a test's own fixture, with none of the inherited variables that
+/// would point it at another repository ([`crate::git::REPOSITORY_ENV`]):
+/// run from `git rebase --exec` or a hook, a test's git would otherwise
+/// init, configure, stage and commit in the repository that started it.
+/// Every git a test starts itself is built here.
+pub(crate) fn plain_git() -> Command {
+    let mut command = Command::new("git");
+    for key in crate::git::REPOSITORY_ENV {
+        command.env_remove(key);
+    }
+    command
+}
+
 /// Plain git in `dir`, without global or system configuration, its output
 /// captured.
 fn git_command(dir: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new("git");
+    let mut command = plain_git();
     command
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -150,13 +160,11 @@ pub(crate) fn init_workspace_repo(root: &Path) {
 fn ig_stdin(ws: &Path, args: &[&str], stdin: &[u8], env: &[(&str, &str)]) -> String {
     let mut full: Vec<&str> = vec!["--git-dir", ".instafy/.git", "--work-tree", "."];
     full.extend_from_slice(args);
-    let mut command = Command::new("git");
+    let mut command = plain_git();
     command
         .current_dir(ws)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
         .args(&full)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -446,7 +454,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use super::{install_script, is_busy, probe_start, start_once_free};
+    use super::{git_in, install_script, is_busy, probe_start, start_once_free};
 
     /// A script that another process holds open for writing (as a child
     /// forked while the script was written does, until it starts its own
@@ -512,5 +520,120 @@ mod tests {
 
         Command::new(&script).status().unwrap();
         assert!(ran.exists(), "the script's own work never ran");
+    }
+
+    /// One test from each family of fixture helpers, and from the server
+    /// paths they drive, that git once let write into the repository that
+    /// started the run. The Origin Git Compatibility workflow runs this test
+    /// on git 2.34.1, and its `--skip` does not reach the tests this one
+    /// starts, so each of them must pass on that git too.
+    const RUN_BY_GIT: &[&str] = &[
+        "git::tests::server_git_sanitizes_workspace_controlled_helpers_and_filters",
+        "git::tests::commit_apply_failure_restores_head_and_exact_original_index",
+        "untrusted_git::tests::isolates_status_from_repo_config_and_preserves_unusual_paths",
+        "restore_parity_tests::a_new_folder_whose_name_a_file_on_main_takes_is_a_clash",
+        "hosted::write_tests::an_import_receipt_is_found_past_a_commit_dated_in_the_past",
+        "routes::tests::apply_route_restores_existing_file_when_local_commit_fails",
+        "working_state::tests::a_tick_leaves_head_the_index_and_status_alone",
+    ];
+
+    /// Run from `git rebase --exec` or a commit hook in a linked worktree,
+    /// the tests get that worktree's GIT_DIR, an absolute path, and its
+    /// GIT_INDEX_FILE. They must still build their fixtures in their own temp
+    /// folders and leave that repository's config, refs, index and objects
+    /// as they were.
+    #[test]
+    fn tests_run_by_git_leave_its_repository_alone() {
+        let named = tempfile::tempdir().unwrap();
+        let main = named.path().join("main");
+        let linked = named.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let identity = [
+                "-c",
+                "user.name=Named",
+                "-c",
+                "user.email=named@example.invalid",
+            ];
+            git_in(dir, &[&identity[..], args].concat())
+        };
+        git(&main, &["init", "-q", "-b", "main"]);
+        std::fs::write(main.join("README.md"), "not a fixture\n").unwrap();
+        git(&main, &["add", "README.md"]);
+        git(&main, &["commit", "-q", "-m", "named"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let git_dir = git(&linked, &["rev-parse", "--absolute-git-dir"]);
+        let config = || std::fs::read_to_string(main.join(".git/config")).unwrap();
+        let state = || {
+            [
+                git(
+                    &linked,
+                    &["for-each-ref", "--format=%(refname) %(objectname)"],
+                ),
+                git(&linked, &["symbolic-ref", "HEAD"]),
+                git(&linked, &["ls-files", "--stage"]),
+                git(&linked, &["count-objects"]),
+                git(&linked, &["status", "--porcelain", "--untracked-files=all"]),
+            ]
+        };
+        let config_before = config();
+        let before = state();
+
+        // The tests write to a file rather than a pipe, so a run that never
+        // ends is stopped at the deadline instead of holding the job.
+        let log = named.path().join("run.log");
+        let log_file = std::fs::File::create(&log).unwrap();
+        let mut run = Command::new(std::env::current_exe().unwrap())
+            .args(RUN_BY_GIT)
+            .arg("--exact")
+            .env("GIT_DIR", &git_dir)
+            .env(
+                "GIT_INDEX_FILE",
+                std::path::Path::new(&git_dir).join("index"),
+            )
+            .stdin(Stdio::null())
+            .stdout(log_file.try_clone().unwrap())
+            .stderr(log_file)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let status = loop {
+            if let Some(status) = run.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                let _ = run.kill();
+                let _ = run.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let output = std::fs::read_to_string(&log).unwrap();
+
+        assert_eq!(
+            config(),
+            config_before,
+            "a test changed the config of the repository GIT_DIR names"
+        );
+        assert_eq!(
+            state(),
+            before,
+            "a test changed the repository GIT_DIR names"
+        );
+        let status = status
+            .unwrap_or_else(|| panic!("the tests were still running after 5 minutes:\n{output}"));
+        assert!(status.success(), "{output}");
+        let all_passed = format!("test result: ok. {} passed;", RUN_BY_GIT.len());
+        assert!(output.contains(&all_passed), "{output}");
     }
 }

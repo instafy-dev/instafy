@@ -2206,14 +2206,12 @@ mod tests {
 
     /// Plain git in `dir` with the given home, outside the server's handle.
     fn git_output_env(dir: &Path, args: &[&str], home: &Path) -> std::process::Output {
-        std::process::Command::new("git")
+        crate::test_support::plain_git()
             .current_dir(dir)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("XDG_CONFIG_HOME", home)
             .env("HOME", home)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
             .args(args)
             .output()
             .unwrap()

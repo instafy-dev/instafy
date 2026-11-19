@@ -1005,7 +1005,7 @@ fn a_tick_leaves_head_the_index_and_status_alone() {
     ig(&fx.ws, &["add", "notes.md"]);
     let git_dir = fx.ws.join(".instafy/.git");
     let quiet_status = || {
-        let output = std::process::Command::new("git")
+        let output = crate::test_support::plain_git()
             .current_dir(&fx.ws)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")

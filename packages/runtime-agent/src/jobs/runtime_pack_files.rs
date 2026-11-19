@@ -25,7 +25,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use origin_http_server::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
 use sha2::{Digest, Sha256};
@@ -210,7 +209,7 @@ struct GitLink {
 }
 
 fn git(workspace_dir: &Path, link_args: &[OsString], args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("git")
+    let output = crate::git_env::git_command()
         .current_dir(workspace_dir)
         .args(link_args)
         .args(args)
@@ -662,6 +661,7 @@ mod tests {
     use super::*;
     use crate::skill_packs::{NodeRequirement, PackCli};
     use std::fs;
+    use std::process::Command;
 
     const NODE: Option<NodeVersion> = Some((22, 11, 0));
 
@@ -695,7 +695,7 @@ mod tests {
     }
 
     fn run_git(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = crate::git_env::git_command()
             .current_dir(dir)
             .args(args)
             .output()
@@ -718,7 +718,7 @@ mod tests {
             dir.display().to_string(),
         ];
         fs::create_dir_all(dir.join(".instafy")).unwrap();
-        let output = Command::new("git")
+        let output = crate::git_env::git_command()
             .arg("init")
             .arg("-q")
             .arg("--bare")
