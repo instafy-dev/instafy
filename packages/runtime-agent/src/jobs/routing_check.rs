@@ -1921,6 +1921,32 @@ mod tests {
                 covered.insert(case.id);
             }
         }
+        // Research that ends in a page stays `direct` where it searches first and browses first
+        // where it doesn't: a case filed under either sentence has the line that says research
+        // that ends in a page searches first exactly when that sentence says so. The line that
+        // Octo can search the web, alone, is not it.
+        for (sentence, searches_first) in [
+            (
+                "or that ends in a page when it searches first, stays `direct`",
+                true,
+            ),
+            (
+                "So is research that ends in a page (a comparison, prices, a route), unless it searches first.",
+                false,
+            ),
+        ] {
+            let (_, _, ids) = rules
+                .iter()
+                .find(|(rule, ..)| *rule == sentence)
+                .expect(sentence);
+            for id in *ids {
+                assert_eq!(
+                    case(&cases, id).research_pages_search_first,
+                    searches_first,
+                    "{id} is filed under: {sentence}"
+                );
+            }
+        }
         // Each case that can search has a twin rule on the same kind of message without it: news,
         // a comparison and a page of places put on a page browse first unless Octo can search the
         // web and research that ends in a page searches first. Three of them are word for word the

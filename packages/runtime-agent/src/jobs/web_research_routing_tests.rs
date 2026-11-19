@@ -1488,7 +1488,9 @@ fn the_research_skill_keeps_going_without_a_search_key() {
 /// lost?" and no use of the site's search; google.com tried by itself; sights sourced from a tourist-office kiosk
 /// page; a tram route from memory as "likely"; comparison rows "candidate 1/2/3"; a cookie banner left over the
 /// page). One "Finding a page" section in the part of the browser skill a snapshot carries, which the research skill
-/// points to instead of keeping its own copy.
+/// points to instead of keeping its own copy. It also says that "nothing found" or "covered" comes only from a step:
+/// a browser turn whose reading showed a cookie notice, with no step refused under it, wrote that the notice covered
+/// a booking site's search controls (a local test, Nov 19).
 #[test]
 fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1504,6 +1506,15 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
     ] {
         assert!(carried.contains(needle), "{needle}");
     }
+    let start = BROWSER_SKILL.find("## Finding a page").expect("section");
+    let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
+    let finding = flat(&BROWSER_SKILL[start..end]);
+    assert!(
+        finding.contains(
+            "- A page's own tab or link named for a value (its hours, its warranty) is a page to read before calling the value not found. Say \"nothing found\" or \"covered\" only when a step said so."
+        ),
+        "{finding}"
+    );
     // A topic's own judgement is its skill's: a route's in `instafy-getting-around`, comparing in
     // `instafy-comparing`, each under the browser and research skills.
     assert!(
