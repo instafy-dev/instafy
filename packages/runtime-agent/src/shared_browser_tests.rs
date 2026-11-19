@@ -14345,6 +14345,13 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
         ),
     ] {
         *latch.terminal_consent_failure.lock().await = Some(code);
+        // Only the first call is the one that ended the run; every later one is marked as
+        // ended at an earlier call and fails, as its step did not happen and asked nothing.
+        let first = !latch.terminal_answered.load(Ordering::SeqCst);
+        let mut answered = signal(code);
+        if !first {
+            answered[ENDED_EARLIER_KEY] = json!(true);
+        }
         let blocked = wire.call("snapshot", json!({})).await;
         // The words are in the structured content too: a call made outside a
         // code cell reads only that.
@@ -14352,12 +14359,15 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
             blocked["result"],
             json!({
                 "content": [{ "type": "text", "text": text }],
-                "structuredContent": { "terminalConsent": signal(code), "message": text },
-                "isError": is_error,
+                "structuredContent": { "terminalConsent": answered, "message": text },
+                "isError": is_error || !first,
             }),
             "{blocked}"
         );
-        // Status still answers, with the run's blocked state and nothing of the page.
+        // Status still answers, with the run's blocked state and nothing of the page: a look,
+        // never the person's answer.
+        let mut looked = signal(code);
+        looked[ENDED_EARLIER_KEY] = json!(true);
         let ready = code != BROWSER_UNAVAILABLE_CODE;
         let status = wire.call("status", json!({})).await;
         assert_eq!(
@@ -14368,7 +14378,7 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
                     "text": "Read the browser's status. Its result is in structuredContent.",
                 }],
                 "structuredContent": {
-                    "terminalConsent": signal(code),
+                    "terminalConsent": looked,
                     "ready": ready,
                     "originApproved": false,
                     "redacted": true,
@@ -14406,8 +14416,12 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
         ),
     ] {
         let blocked = wire.call("snapshot", json!({})).await;
+        let mut answered = signal("approval_denied");
+        if activity.is_none() {
+            answered[ENDED_EARLIER_KEY] = json!(true);
+        }
         let mut structured = json!({
-            "terminalConsent": signal("approval_denied"),
+            "terminalConsent": answered,
             "message": text,
         });
         if let Some(activity) = activity {

@@ -216,6 +216,16 @@ const BROWSER_FILL: BuiltinLabel = BuiltinLabel {
     live: "Filling in a form on {host}",
     done: single("filled in a form on {host}"),
 };
+// Typing into a site's own search box, before it is sent (`shared_browser_activity::
+// types_into_a_search_box`): the search it is, as the person would say it. Read as filling in a
+// form, typing a product's name into a shop's search read "Filling in a form on <site>" (a local
+// test, Nov 19). Quiet as filling in a form is: the line names the search once it is sent.
+const BROWSER_SEARCH_TYPING: BuiltinLabel = BuiltinLabel {
+    key: "browser/search-typing",
+    role: ActivityRole::Quiet,
+    live: "Searching {host}",
+    done: single("typed a search on {host}"),
+};
 // Clicks, other keys, sending a form that is not a search, scrolling, tabs and status: the line
 // names the pages and searches they lead to, not each step.
 const BROWSER_BROWSE: BuiltinLabel = BuiltinLabel {
@@ -1605,12 +1615,17 @@ pub fn browser_step_activity(step: &JsonValue) -> Option<JsonValue> {
         .get("refused")
         .and_then(JsonValue::as_str)
         .and_then(browser_refused_label);
+    let search_box = facts
+        .get(crate::shared_browser_activity::SEARCH_BOX_FACT)
+        .and_then(JsonValue::as_bool)
+        == Some(true);
     let label = match (kind, host, refused) {
         (_, None, _) => &BROWSER,
         (_, Some(_), Some(refused)) => refused,
         ("navigate" | "open_tab", Some(_), None) => &BROWSER_OPEN,
         ("snapshot", Some(_), None) => &BROWSER_READ,
         ("search", Some(_), None) => &BROWSER_SEARCH,
+        ("type", Some(_), None) if search_box => &BROWSER_SEARCH_TYPING,
         ("type" | "choose", Some(_), None) => &BROWSER_FILL,
         (_, Some(_), None) => &BROWSER_BROWSE,
     };
@@ -2700,6 +2715,20 @@ mod tests {
         assert_eq!(typed["live"], json!("Filling in a form on {host}"));
         assert_eq!(typed["done"], json!("filled in a form on {host}"));
         assert_eq!(typed["approval"], json!("routine"));
+        // Typing into the site's own search box reads as the search it is, and stays quiet
+        // until the search is sent (`shared_browser_activity::types_into_a_search_box`).
+        let searching = step(json!({
+            "step": "type", "host": "shop.example", "approval": "routine", "searchBox": true,
+        }));
+        assert_eq!(searching["key"], json!("browser/search-typing"));
+        assert_eq!(searching["role"], json!("quiet"));
+        assert_eq!(searching["live"], json!("Searching {host}"));
+        assert_eq!(searching["done"], json!("typed a search on {host}"));
+        assert_eq!(searching["step"], json!("type"));
+        assert!(searching.get("searchBox").is_none(), "{searching}");
+        // Only typing: a mark on any other step names nothing new.
+        let chosen = step(json!({"step": "choose", "host": "shop.example", "searchBox": true}));
+        assert_eq!(chosen["live"], json!("Filling in a form on {host}"));
         // No host known yet: "Using the browser", with how the step was allowed.
         let unnamed = step(json!({"step": "type", "approval": "denied"}));
         assert_eq!(unnamed["key"], json!("browser/use"));

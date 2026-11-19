@@ -1908,7 +1908,10 @@ changed (`approval_stale`), revocation, storage failure, or malformed approval
 protocol is terminal for that browser run. The
 runtime latches the failure, rejects later mutations without opening another
 prompt, and reports machine-readable terminal-consent state so the job layer
-does not invoke its normal missing-action retry. The user starts a new turn if
+does not invoke its normal missing-action retry. Each later call is marked as
+ended at an earlier call (`terminalConsent.endedEarlier`) and fails: it asked
+the person nothing, so its step carries no answer of theirs, and a look at the
+browser's status after it answers as before. The user starts a new turn if
 they want to try again. This keeps “Deny” from becoming a sequence of repeated
 consent prompts, and an unanswered prompt from becoming a chain of prompts
 while the person is away. What the person reads tells the two apart, with no code: an unanswered
@@ -1923,8 +1926,18 @@ earlier step, so the browser is done for this turn. End this turn now.",
 after you said yes, so I didn't do that step. Send a message and I'll ask again.", and every other terminal code reads one plain
 message. Each speaks
 only about the step that asked, because earlier steps of the same turn may
-already have opened pages or changed something. The code stays in the run's
-`browser/terminal-consent` artifact. The tool result tells
+already have opened pages or changed something, and only a pause the person
+continues in the browser (their fields, a cookie notice the browser couldn't
+decline, or a step only they take) replaces the turn's words. Any other end
+ended that step, not the message: the turn keeps its own words with the line
+under them and every finding line it wrote, and a turn whose findings go back
+to its build hands them back as any finished turn does; its build makes the
+change from what was read, writes "not checked" where only that step would
+give a value, and says in one line which step didn't run and that it can ask
+again, without trying it again or another way. The code, with the kind and
+site of the step that ended the run, stays in the run's
+`browser/terminal-consent` artifact, which the controller reads for the
+build's `stepNotDone`. The tool result tells
 the model that an unanswered prompt is not a denial and that it must end the
 turn without retrying.
 
@@ -3155,8 +3168,10 @@ unless the policy is `"covered"`.
   one line, one reply and the card ([Chat activity](Chat-Activity.md)). It does so only in the tab that sent both the
   card's prompt and the browser continuation, when nobody wrote after the
   browser turn, the turn succeeded within the last ten minutes and did not
-  stop for the person (`request_human_input`, or a step whose approval ended
-  the turn), and no draft or manual browser step is pending. The controller
+  pause for the person (`request_human_input` on their fields, a cookie notice
+  the browser couldn't decline, or a step only they take; a prompt they said
+  no to or left ended that step only), and no draft or manual browser step is
+  pending. The controller
   checks the same chain under the conversation's dispatch fence and stamps
   `browserHandBack` with what the browser turn was asked (at most 2,000
   characters), for a card the routing step posted the message's own words as
@@ -3167,7 +3182,9 @@ unless the policy is `"covered"`.
   its final reply as a labelled finding `{url, title, facts, readAt, viewer}`
   (plus `stopped` for a page that was not read: `login`, `captcha`, `paywall`,
   `blocked`, `robots`, `download`, `secret`, `link-only`, `no-page` for an
-  address with no page, `timed-out` for one that gave no answer in time or
+  address with no page, `unreachable` for a site the browser couldn't reach
+  (which the browser's own word gives it, whatever stop the turn wrote),
+  `timed-out` for one that gave no answer in time or
   `covered` for a page under a cookie notice or dialog the browser couldn't
   close, and any other reason counts as `blocked`, so a page that never loaded
   or was never seen is never called blocked): the address, title and facts come from the reply's JSON
@@ -3484,8 +3501,17 @@ unless the policy is `"covered"`.
   whose look left a step in the browser's log (a cookie notice the browser
   declined by itself) but whose steps opened no page and whose wrap-up pass
   wrote no line: which look a turn took never decides whether the message is
-  made. One whose first attempt opened a page and that is run again ends with
-  the pages of both attempts, whatever the retry did. Failed in
+  made. So does one whose steps answered but whose lines name no page read (an
+  open that failed, a site the browser couldn't reach, a prompt that ended its
+  first step): the count is of pages read, not steps answered, and its note
+  keeps where it stopped and what it didn't find, which the controller gives
+  the build with the message (`findings` of stops only, `missing`, and a
+  `stepNotDone` from its run's artifact), never its words. That build makes it
+  from the person's words, what the chat found and what its own tools find,
+  never tries a page that stopped the browser another way, and says what it
+  didn't find or why there is nothing to show; the failed open is not tried
+  again in the browser. One whose first attempt opened a page and that is run
+  again ends with the pages of both attempts, whatever the retry did. Failed in
   its place, a note on a map, a Continue after a Stop and a fill-in each needed
   Try again, and the note's Try again opened two sites nobody named. The person's
   message has no answer until the building turn gives one, so the controller

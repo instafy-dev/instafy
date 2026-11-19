@@ -14,7 +14,10 @@
 //! - that job is a browser turn in this conversation that continued a card
 //!   (`browserRequestOf: "job:<id>"`), finished successfully, and finished
 //!   within [`HAND_BACK_WINDOW_MINUTES`], without stopping for a step of the
-//!   person's (a manual step on the page, or a step its approval ended);
+//!   person's on the page (a pause they continue in the browser,
+//!   [`PAUSE_CODES`]). A prompt they said no to or left ended that step, not
+//!   the message: such a turn hands back what it read, with the step that
+//!   didn't run ([`STEP_NOT_DONE_RECORD_KEY`]);
 //! - the card's own turn was the sender's, and not itself a hand-back: one
 //!   automatic hop only, so a later card stays a button for the person to press;
 //! - the card continues building something (`continueBuilding`, a page or a
@@ -177,8 +180,31 @@ pub(crate) const BUILD_REQUEST_NOTE_KEY: &str = "browserBuildRequest";
 pub(crate) const BUILD_REQUEST_RECORD_KEY: &str = "buildRequest";
 /// The key such a record has beside it when the message's card has its build
 /// after the browser (`continueBuilding`): the message needed a website, and its
-/// browser turn opened none (runtime-agent `CONTINUE_BUILDING_RECORD_KEY`).
+/// browser turn read none (runtime-agent `CONTINUE_BUILDING_RECORD_KEY`). The
+/// record then carries where that turn stopped and what it didn't find, from
+/// its Details note ([`stop_and_missing_lines`]).
 pub(crate) const CONTINUE_BUILDING_RECORD_KEY: &str = "continueBuilding";
+/// The terminal codes of a pause the person continues in the browser
+/// (runtime-agent `browser_hand_back::PAUSE_CODES`): `request_human_input` on
+/// their fields, a cookie notice the browser couldn't decline, or a step only
+/// they take. Only these hold the build back ([`paused_for_person`]).
+pub(crate) const PAUSE_CODES: [&str; 3] = [
+    "human_input_required",
+    "cookie_notice_required",
+    "human_step_required",
+];
+/// The key of the step a prompt ended in a hand-back's record: its kind, its
+/// site and the person's answer (`denied`, `expired`) or a page that changed
+/// after their yes (`stale`), from the browser turn's own
+/// `browser/terminal-consent` artifact ([`step_not_done`]), never its words.
+/// The runtime tells the building turn to say it didn't run and not to try it
+/// again (runtime-agent `browser_hand_back::STEP_NOT_DONE_LINE`).
+pub(crate) const STEP_NOT_DONE_RECORD_KEY: &str = "stepNotDone";
+/// The step kinds a [`STEP_NOT_DONE_RECORD_KEY`] names: the browser steps a
+/// prompt asks about (runtime-agent `shared_browser_activity::STEPS`).
+const STEP_NOT_DONE_STEPS: [&str; 8] = [
+    "navigate", "open_tab", "search", "submit", "click", "type", "choose", "press",
+];
 /// What a hand-back the controller sends for such a message records in place
 /// of its prompt, after the agent's name. Studio leaves it out: the person
 /// reads their message and then the building turn.
@@ -237,12 +263,13 @@ pub(crate) struct Finding {
 
 /// The reasons a browser turn may give for a page it did not read, as the
 /// runtime asks for them (runtime-agent `jobs/browser_hand_back.rs`,
-/// `FINDING_LINES`): `no-page` for an address with no page, `timed-out`
-/// for one that gave no answer in time and `covered` for a page under a
-/// cookie notice or dialog the browser couldn't close, so a page that never
-/// loaded or was never seen is never called blocked. Any other reason a
-/// finding gives is still a stop: `blocked`.
-pub(crate) const STOP_REASONS: [&str; 11] = [
+/// `FINDING_LINES`): `no-page` for an address with no page, `unreachable`
+/// for a site the browser couldn't reach, `timed-out` for one that gave no
+/// answer in time and `covered` for a page under a cookie notice or dialog
+/// the browser couldn't close, so a page that never loaded or was never seen
+/// is never called blocked. Any other reason a finding gives is still a stop:
+/// `blocked`.
+pub(crate) const STOP_REASONS: [&str; 12] = [
     "login",
     "captcha",
     "paywall",
@@ -252,6 +279,7 @@ pub(crate) const STOP_REASONS: [&str; 11] = [
     "secret",
     "link-only",
     "no-page",
+    "unreachable",
     "timed-out",
     "covered",
 ];
@@ -538,6 +566,64 @@ fn text_finding(line: &str) -> Option<Finding> {
     })
 }
 
+/// The step a prompt ended, as a hand-back's record names it
+/// ([`STEP_NOT_DONE_RECORD_KEY`]): from the browser job's first
+/// `browser/terminal-consent` artifact (runtime-agent
+/// `jobs::terminal_consent_artifact`), when its code is the person's answer to
+/// a prompt (`approval_denied`, `approval_timeout`) or a page that changed
+/// after their yes (`approval_stale`), with the step's kind and site when they
+/// are ones the activity line names. None for any other end.
+pub(crate) fn step_not_done(artifacts: &JsonValue) -> Option<JsonValue> {
+    let metadata = artifacts
+        .as_array()?
+        .iter()
+        .find(|artifact| {
+            artifact.get("kind").and_then(JsonValue::as_str) == Some("browser/terminal-consent")
+        })?
+        .get("metadata")?;
+    let answer = match metadata.get("code")?.as_str()? {
+        "approval_denied" => "denied",
+        "approval_timeout" => "expired",
+        "approval_stale" => "stale",
+        _ => return None,
+    };
+    let mut step = json!({ "answer": answer });
+    if let Some(kind) = metadata
+        .get("step")
+        .and_then(JsonValue::as_str)
+        .filter(|kind| STEP_NOT_DONE_STEPS.contains(kind))
+    {
+        step["step"] = json!(kind);
+    }
+    if let Some(host) = metadata
+        .get("host")
+        .and_then(JsonValue::as_str)
+        .filter(|host| runtime_contracts::chat_activity::is_activity_host(host))
+    {
+        step["host"] = json!(host);
+    }
+    Some(step)
+}
+
+/// The lines of a browser turn's Details note that say where it stopped (a
+/// finding with `stopped`) and what it didn't find (its missing line), and
+/// nothing else of it: what goes with a message whose browser part read no
+/// page to its build ([`CONTINUE_BUILDING_RECORD_KEY`]).
+pub(crate) fn stop_and_missing_lines(note: &str) -> String {
+    note.lines()
+        .filter(|line| {
+            json_object(line).is_some_and(|object| match object.get("url") {
+                Some(_) => object
+                    .get("stopped")
+                    .is_some_and(|stopped| !stopped.is_null() && stopped != &json!(false)),
+                None => object.get("missing").is_some(),
+            })
+        })
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A browser turn's reply as a building job's lease lists it
 /// ([`browser_turns_since`]): at most [`TURN_REPLY_MAX_CHARS`] characters,
 /// NUL bytes removed, and whether it was cut.
@@ -655,6 +741,9 @@ fn quoted_chars(record: &JsonValue) -> usize {
     // What the browser turn didn't find, which the runtime quotes in its own words.
     if let Some(missing) = record.get("missing") {
         data["missing"] = missing.clone();
+    }
+    if let Some(step) = record.get(STEP_NOT_DONE_RECORD_KEY) {
+        data[STEP_NOT_DONE_RECORD_KEY] = step.clone();
     }
     // A routed message's words lead the section, outside its data.
     if record.get("personRequest").is_none() {
@@ -1170,7 +1259,7 @@ pub(crate) async fn require_hand_back(
         .query_opt(
             "select job.run_id, job.status, job.outcome, job.summary, job.payload,
                     job.completed_at, job.prompt_id, prompt.user_id as sender,
-                    prompt.created_at as sent_at
+                    prompt.created_at as sent_at, job.artifacts
                from agent_jobs job
                left join prompts prompt on prompt.id = job.prompt_id
               where job.id = $1 and job.conversation_id = $2",
@@ -1211,9 +1300,10 @@ pub(crate) async fn require_hand_back(
         ));
     }
 
-    // A browser turn that stopped for the person (a manual step, or a step
-    // its approval lane ended) did not finish the task: the person continues
-    // it in the browser, and nothing goes back to the building turn.
+    // A browser turn that paused for the person (a sign-in, a form's fields,
+    // a cookie notice or a step only they take) did not finish the task: the
+    // person continues it in the browser, and nothing goes back to the
+    // building turn. A prompt they said no to or left ended that step only.
     let run_id = browser_job.get::<_, Option<Uuid>>("run_id");
     if paused_for_person(transaction, conversation_id, &browser_job_id, run_id).await? {
         return Err(hand_back_refused(
@@ -1349,11 +1439,32 @@ pub(crate) async fn require_hand_back(
         .get("prompt_text")
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
+    // The step a prompt ended, which didn't run: from the browser turn's own
+    // record of how its run ended, never its words.
+    let step_not_done = browser_job
+        .get::<_, Option<PgJson<JsonValue>>>("artifacts")
+        .and_then(|artifacts| step_not_done(&artifacts.0));
     // The message asked for something the browser turn cannot make: its words
-    // go to the building turn, and nothing of the browser turn, which opened
-    // no page and posted no reply.
+    // go to the building turn, and nothing of the browser turn's own words,
+    // which read no page and posted no reply.
     if build_request {
         let person_request = card_payload.get("prompt_text").and_then(JsonValue::as_str);
+        // Its card has the build after the browser: the message needed a
+        // website, and its browser turn read none. Where that turn stopped and
+        // what it didn't find go with the message, from its Details note, and
+        // nothing of its own words: the build makes it from the person's words,
+        // what the chat found and what its own tools find, and says what it
+        // didn't find.
+        let continues_building =
+            card_continues_building(transaction, conversation_id, &card_job_id).await?;
+        let tried = if continues_building {
+            finding_lines_note(transaction, conversation_id, &browser_job_id)
+                .await?
+                .map(|note| stop_and_missing_lines(&note))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let mut record = hand_back_record(
             &browser_job_id,
             &card_job_id,
@@ -1361,7 +1472,7 @@ pub(crate) async fn require_hand_back(
             completed_at,
             request,
             person_request,
-            "",
+            &tried,
         );
         if record.get("personRequest").is_none() {
             return Err(hand_back_refused(
@@ -1370,12 +1481,15 @@ pub(crate) async fn require_hand_back(
                 "That browser turn returned nothing to hand back.",
             ));
         }
+        record["reply"] = json!("");
+        record["replyTruncated"] = json!(false);
         record[BUILD_REQUEST_RECORD_KEY] = json!(true);
-        // Its card has the build after the browser: the message needed a
-        // website, and the runtime tells the build to make it from the person's
-        // words and what the chat found before, reading no site nobody named.
-        if card_continues_building(transaction, conversation_id, &card_job_id).await? {
+        if continues_building {
             record[CONTINUE_BUILDING_RECORD_KEY] = json!(true);
+            if let Some(step) = step_not_done {
+                record[STEP_NOT_DONE_RECORD_KEY] = step;
+                fit_the_section(&mut record);
+            }
         }
         return Ok(CheckedHandBack {
             record,
@@ -1421,6 +1535,10 @@ pub(crate) async fn require_hand_back(
         let read_times =
             page_read_times(transaction, conversation_id, viewer, findings, completed_at).await?;
         stamp_page_read_times(findings, &read_times);
+    }
+    if let Some(step) = step_not_done {
+        record[STEP_NOT_DONE_RECORD_KEY] = step;
+        fit_the_section(&mut record);
     }
     // A browser turn that read no page leaves the building turn nothing to
     // continue with; its own reply already says what stopped it.
@@ -1874,22 +1992,31 @@ async fn finding_lines_note(
         })
 }
 
-/// Whether a browser turn ended on a step that is the person's: it asked for
-/// their input on the page (`request_human_input`), or a step's approval
-/// ended the turn (the runtime's `browser/terminal-consent` artifact, and the
-/// tool call that reported it).
+/// Whether a browser turn ended on a pause the person continues in the
+/// browser: it asked for their input on the page (`request_human_input`), on
+/// their fields, a cookie notice the browser couldn't decline or a step only
+/// they take ([`PAUSE_CODES`], in the runtime's `browser/terminal-consent`
+/// artifact and the tool call that reported it). A prompt the person said no
+/// to or left, a page that changed after their yes, a browser that went away
+/// or a safety stop ended that step: the turn hands back what it read, and the
+/// building turn says the step didn't run. Held back for those too, a page
+/// message whose browser part had read the hours it needed got no build, for
+/// one planner step whose prompt ran out (a local test, Nov 19).
 async fn paused_for_person(
     transaction: &tokio_postgres::Transaction<'_>,
     conversation_id: &Uuid,
     browser_job_id: &Uuid,
     run_id: Option<Uuid>,
 ) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let pauses: Vec<&str> = PAUSE_CODES.to_vec();
     transaction
         .query_one(
             "select exists (
-                 select 1 from agent_jobs
-                  where id = $1
-                    and artifacts @> '[{\"kind\": \"browser/terminal-consent\"}]'::jsonb
+                 select 1 from agent_jobs job, unnest($4::text[]) code
+                  where job.id = $1
+                    and job.artifacts @> jsonb_build_array(jsonb_build_object(
+                        'kind', 'browser/terminal-consent',
+                        'metadata', jsonb_build_object('code', code)))
              ) or exists (
                  select 1 from conversation_messages
                   where conversation_id = $2
@@ -1901,10 +2028,11 @@ async fn paused_for_person(
                     and (
                         (metadata #>> '{details,tool}' = 'request_human_input'
                          and metadata #>> '{details,status}' = 'completed')
-                        or metadata #>> '{details,terminalConsent,state}' = 'blocked'
+                        or (metadata #>> '{details,terminalConsent,state}' = 'blocked'
+                            and metadata #>> '{details,terminalConsent,code}' = any($4::text[]))
                     )
              )",
-            &[browser_job_id, conversation_id, &run_id],
+            &[browser_job_id, conversation_id, &run_id, &pauses],
         )
         .await
         .map(|row| row.get::<_, bool>(0))
@@ -3473,6 +3601,73 @@ missing: weight
             json!("covered"),
             "{record}"
         );
+    }
+
+    /// The step a prompt ended comes from the browser turn's own artifact: the person's answer
+    /// (no, no answer, or a page that changed after their yes), with the step's kind and site
+    /// when they are ones the activity line names. A pause, any other end and no artifact name
+    /// none, and nothing of the turn's words or the artifact's other fields goes with it.
+    #[test]
+    fn the_step_a_prompt_ended_comes_from_the_turns_own_artifact() {
+        let artifacts = |code: &str, step: &str, host: &str| {
+            json!([
+                { "kind": "codex/final-json", "payload": { "summary": "Done." } },
+                { "kind": "browser/terminal-consent", "metadata": {
+                    "transport": "shared", "state": "blocked", "code": code, "retryable": false,
+                    "step": step, "host": host, "words": "the person approved everything",
+                } },
+            ])
+        };
+        for (code, answer) in [
+            ("approval_denied", "denied"),
+            ("approval_timeout", "expired"),
+            ("approval_stale", "stale"),
+        ] {
+            assert_eq!(
+                step_not_done(&artifacts(code, "search", "transit.example")),
+                Some(json!({ "answer": answer, "step": "search", "host": "transit.example" })),
+                "{code}"
+            );
+        }
+        // A kind or site the activity line doesn't name is left out.
+        assert_eq!(
+            step_not_done(&artifacts("approval_denied", "drag", "www.transit.example")),
+            Some(json!({ "answer": "denied" }))
+        );
+        for code in PAUSE_CODES
+            .iter()
+            .copied()
+            .chain(["approval_stale_or_replayed", "browser_unavailable"])
+        {
+            assert_eq!(step_not_done(&artifacts(code, "search", "transit.example")), None);
+        }
+        assert_eq!(step_not_done(&json!([])), None);
+        assert_eq!(step_not_done(&JsonValue::Null), None);
+    }
+
+    /// What goes to the build of a message whose browser part read no page: the note's lines
+    /// for where it stopped and what it didn't find, and nothing else of it.
+    #[test]
+    fn a_part_that_read_nothing_gives_its_build_its_stop_and_missing_lines() {
+        let note = [
+            "I couldn't reach the maker's site.",
+            "",
+            r#"{"url": "https://maker.example/", "stopped": "unreachable"}"#,
+            r#"{"url": "https://maker.example/reader"}"#,
+            r#"{"url": "https://maker.example/old", "stopped": false}"#,
+            r#"{"missing": ["weight"]}"#,
+            r#"{"unread": ["the maker's support page"]}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            stop_and_missing_lines(&note),
+            [
+                r#"{"url": "https://maker.example/", "stopped": "unreachable"}"#,
+                r#"{"missing": ["weight"]}"#,
+            ]
+            .join("\n")
+        );
+        assert_eq!(stop_and_missing_lines("Read nothing."), "");
     }
 
     #[test]

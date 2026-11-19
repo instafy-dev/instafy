@@ -20,6 +20,7 @@
     "secret",
     "link-only",
     "no-page",
+    "unreachable",
     "timed-out",
     "covered"
   ],

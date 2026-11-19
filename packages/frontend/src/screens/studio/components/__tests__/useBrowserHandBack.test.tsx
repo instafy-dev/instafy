@@ -21,6 +21,7 @@ import {
   BROWSER_HAND_BACK_RECORD_KEY,
   browserHandBackCandidate,
   browserHandBackNotice,
+  browserTurnStoppedForPerson,
   forgetBrowserHandBacksForTests,
   isBrowserNoticePrompt,
   isUnsentBrowserNoticePrompt,
@@ -147,6 +148,23 @@ describe("browser hand-back: when Studio sends one", () => {
     expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
   });
 
+  // A prompt the person said no to, or left to run out, ended that step, not
+  // the message: what the turn read still goes to its build (a local test,
+  // Nov 19: a page message read the hours it needed, its planner prompt ran
+  // out, and no page was made). Only a pause they continue in the browser
+  // holds it back.
+  it.each(["approval_denied", "approval_timeout", "approval_stale"])(
+    "hands back a browser turn whose step's prompt ended it (%s)",
+    (code) => {
+      input.messages = [...input.messages.slice(0, -1), reply(BROWSER_JOB, "Tool call failed", now - 1_050, {
+        messageType: "mcp_tool_call",
+        details: { tool: "press", status: "failed", terminalConsent: { state: "blocked", code } },
+      }), input.messages.at(-1)!];
+      expect(browserTurnStoppedForPerson(input.messages, BROWSER_JOB)).toBe(false);
+      expect(browserHandBackCandidate(input)).toBe(BROWSER_JOB);
+    },
+  );
+
   // A browser turn whose findings go back to a build posts no words of its
   // own (runtime-agent `move_findings_into_details`): its reply is blank, and
   // the chat shows none ("Finished in the browser." stood there before). The
@@ -187,9 +205,16 @@ describe("browser hand-back: when Studio sends one", () => {
         messageType: "mcp_tool_call", details: { tool: "request_human_input", status: "completed" },
       })];
     }],
-    ["a step's approval ended the browser turn", () => {
-      input.messages = [...input.messages, reply(BROWSER_JOB, "Tool call failed", now - 500, {
-        messageType: "mcp_tool_call", details: { tool: "click", status: "failed", terminalConsent: { state: "blocked" } },
+    ["the browser turn paused on a cookie notice the browser couldn't decline", () => {
+      input.messages = [...input.messages, reply(BROWSER_JOB, "Tool call completed", now - 500, {
+        messageType: "mcp_tool_call",
+        details: { tool: "click", status: "completed", terminalConsent: { state: "blocked", code: "cookie_notice_required" } },
+      })];
+    }],
+    ["the browser turn paused on a step only the person takes", () => {
+      input.messages = [...input.messages, reply(BROWSER_JOB, "Tool call completed", now - 500, {
+        messageType: "mcp_tool_call",
+        details: { tool: "click", status: "completed", terminalConsent: { state: "blocked", code: "human_step_required" } },
       })];
     }],
     ["it was handed back already (the controller's copy, after a reload)", () => {

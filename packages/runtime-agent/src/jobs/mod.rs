@@ -9438,11 +9438,27 @@ impl JobProcessor {
             first_shared_browser_terminal_consent_failure,
             last_reply_was_a_pause(job),
         );
+        // A prompt that ended a step (no pause for the person) in a part with its build after it
+        // that read no page hands the person's message to that build, as any part that read none
+        // does: the step isn't tried again, and the build says it didn't run.
+        let prompt_ended_a_part_that_read_nothing = first_shared_browser_terminal_consent_failure
+            .is_some_and(|code| !browser_hand_back::is_a_pause(code))
+            && !cancel_signal
+                .as_ref()
+                .is_some_and(JobCancelSignal::is_canceled)
+            && browser_hand_back::hands_its_message_to_its_build(
+                job.payload.get("metadata"),
+                &outcome.summary,
+            );
+        if prompt_ended_a_part_that_read_nothing {
+            browser_hand_back::keep_only_its_lines(&mut outcome.summary);
+            outcome.actions.clear();
+        }
         augment_summary_for_onboarding_actions(&mut outcome.summary, &outcome.actions);
         let expects_workspace_file_changes_after_actions =
             workspace_file_changes_still_required(expects_workspace_file_changes, &outcome);
         let mut final_messages = build_final_messages_from_outcome(&outcome, Some(&workspace_dir));
-        if hands_the_message_to_the_building_turn {
+        if hands_the_message_to_the_building_turn || prompt_ended_a_part_that_read_nothing {
             final_messages.push(browser_hand_back::build_request_note(job));
         }
         final_messages.extend(put_back_edit_messages(
@@ -9574,15 +9590,7 @@ impl JobProcessor {
         }
 
         if let Some(code) = first_shared_browser_terminal_consent_failure {
-            artifacts.push(json!({
-                "kind": "browser/terminal-consent",
-                "metadata": {
-                    "transport": "shared",
-                    "state": "blocked",
-                    "code": code,
-                    "retryable": false,
-                }
-            }));
+            artifacts.push(terminal_consent_artifact(code, &interim_messages, None));
             tracing::info!(
                 job_id = %job_id,
                 consent_failure = code,
@@ -10247,6 +10255,22 @@ impl JobProcessor {
                 retry_shared_browser_terminal_consent_failure,
                 last_reply_was_a_pause(job),
             );
+            // As after a first attempt: a prompt that ended a step of a part with its build after
+            // it that read no page hands the message to that build.
+            let retry_prompt_ended_a_part_that_read_nothing =
+                retry_shared_browser_terminal_consent_failure
+                    .is_some_and(|code| !browser_hand_back::is_a_pause(code))
+                    && !cancel_signal
+                        .as_ref()
+                        .is_some_and(JobCancelSignal::is_canceled)
+                    && browser_hand_back::hands_its_message_to_its_build(
+                        job.payload.get("metadata"),
+                        &retry_outcome.summary,
+                    );
+            if retry_prompt_ended_a_part_that_read_nothing {
+                browser_hand_back::keep_only_its_lines(&mut retry_outcome.summary);
+                retry_outcome.actions.clear();
+            }
             // A retry that returned actions or wrote files did work of its
             // own that the first answer does not describe, so it keeps its own.
             let kept_first_attempt_answer = retry_shared_browser_terminal_consent_failure.is_none()
@@ -10392,16 +10416,7 @@ impl JobProcessor {
                 }));
             }
             if let Some(code) = retry_shared_browser_terminal_consent_failure {
-                retry_artifacts.push(json!({
-                    "kind": "browser/terminal-consent",
-                    "metadata": {
-                        "transport": "shared",
-                        "state": "blocked",
-                        "code": code,
-                        "retryable": false,
-                        "attempt": 2,
-                    }
-                }));
+                retry_artifacts.push(terminal_consent_artifact(code, &retry_messages, Some(2)));
             }
             retry_artifacts.insert(
                 0,
@@ -10592,7 +10607,9 @@ impl JobProcessor {
             }
             let mut retry_final_messages =
                 build_final_messages_from_outcome(&retry_outcome, Some(&workspace_dir));
-            if retry_hands_the_message_to_the_building_turn {
+            if retry_hands_the_message_to_the_building_turn
+                || retry_prompt_ended_a_part_that_read_nothing
+            {
                 retry_final_messages.push(browser_hand_back::build_request_note(job));
             }
             retry_final_messages.extend(put_back_edit_messages(
@@ -16683,6 +16700,45 @@ fn shared_browser_terminal_consent_failure(messages: &[JobMessage]) -> Option<&'
     })
 }
 
+/// The `browser/terminal-consent` artifact of a run that ended on `code`: the code, and the kind
+/// and site of the step that ended it, as its own facts name them (the call that ended the run,
+/// not a later one: `shared_browser::ENDED_EARLIER_KEY`). The controller reads them for a
+/// hand-back's `stepNotDone` (runtime-controller `browser_hand_back.rs`), so its build says
+/// which step didn't run without a word of the turn's.
+fn terminal_consent_artifact(code: &str, messages: &[JobMessage], attempt: Option<u32>) -> JsonValue {
+    let mut metadata = json!({
+        "transport": "shared",
+        "state": "blocked",
+        "code": code,
+        "retryable": false,
+    });
+    if let Some(attempt) = attempt {
+        metadata["attempt"] = json!(attempt);
+    }
+    let step = messages.iter().find_map(|message| {
+        let metadata = message.metadata.as_ref()?;
+        let signal = metadata.get("terminalConsent")?;
+        if signal.get("code").and_then(JsonValue::as_str) != Some(code)
+            || signal
+                .get(crate::shared_browser::ENDED_EARLIER_KEY)
+                .and_then(JsonValue::as_bool)
+                == Some(true)
+        {
+            return None;
+        }
+        metadata.pointer("/event/item/browserStep")
+    });
+    for field in ["step", "host"] {
+        if let Some(value) = step
+            .and_then(|step| step.get(field))
+            .and_then(JsonValue::as_str)
+        {
+            metadata[field] = json!(value);
+        }
+    }
+    json!({ "kind": "browser/terminal-consent", "metadata": metadata })
+}
+
 fn should_retry_codex_once(
     shared_browser_terminal_consent_failure: Option<&str>,
     recovery_retry_required: bool,
@@ -16783,6 +16839,14 @@ fn last_reply_was_a_pause(job: &LeaseJob) -> bool {
 /// the pages a turn read before it stopped reached no later build. Its lines
 /// for pages that stopped it don't stay: the person's next step acts on the
 /// page it stopped at (`browser_hand_back::read_lines_of`).
+///
+/// Only a pause the person continues in the browser is such a stop
+/// (`browser_hand_back::PAUSE_CODES`). Any other end (a prompt the person said
+/// no to or left, a page that changed after their yes, the browser gone, a
+/// safety stop) ended that step, not the message: the turn keeps its own words,
+/// with its line under them, and every line it wrote for Octo's later turns, so
+/// a turn whose findings go back to its build hands them back as any finished
+/// turn does (`browser_hand_back::add_under_the_words`).
 fn apply_terminal_shared_browser_summary(
     summary: &mut String,
     fallback_kind: &mut Option<CodexFallbackSummaryKind>,
@@ -16792,6 +16856,15 @@ fn apply_terminal_shared_browser_summary(
     let Some(code) = terminal_consent_failure else {
         return;
     };
+    if !browser_hand_back::is_a_pause(code) {
+        // A runtime fallback in place of an answer is no words of the turn's.
+        if fallback_kind.is_some() {
+            summary.clear();
+        }
+        browser_hand_back::add_under_the_words(summary, terminal_shared_browser_summary(code));
+        *fallback_kind = None;
+        return;
+    }
     let lines = browser_hand_back::read_lines_of(summary);
     *summary = match code {
         // The turn's own words say which step is the person's and what it does: a runtime
@@ -17521,14 +17594,18 @@ pub async fn end_browser_turn_answer(
         messages: second.messages,
         ..Default::default()
     };
-    if answer.stopped_for_the_person || second.stopped_for_the_person {
-        return ended;
-    }
     let canceled = answer
         .options
         .cancel_signal
         .as_ref()
         .is_some_and(JobCancelSignal::is_canceled);
+    if answer.stopped_for_the_person || second.stopped_for_the_person {
+        // A prompt that ended the second pass ended that step, not the turn.
+        if second.ended_on_a_prompt && !answer.stopped_for_the_person && !canceled {
+            hand_a_part_that_read_nothing_to_its_build(job, summary, &mut ended);
+        }
+        return ended;
+    }
     if answer.used_the_browser
         && !canceled
         && browser_hand_back::needs_finding_lines(metadata, summary)
@@ -17637,9 +17714,15 @@ pub async fn end_browser_turn_answer(
             ended.artifacts.extend(read.artifacts);
             ended.messages.extend(read.messages);
             if read.stopped_for_the_person {
+                if read.ended_on_a_prompt && !canceled {
+                    hand_a_part_that_read_nothing_to_its_build(job, summary, &mut ended);
+                }
                 return ended;
             }
         }
+    }
+    if !canceled && hand_a_part_that_read_nothing_to_its_build(job, summary, &mut ended) {
+        return ended;
     }
     if browser_hand_back::say_a_build_request_nothing_acts_on(metadata, answer.final_json, summary)
     {
@@ -17649,6 +17732,28 @@ pub async fn end_browser_turn_answer(
         );
     }
     ended
+}
+
+/// Hands the person's message to the build after a browser part that read no page
+/// (`browser_hand_back::hands_its_message_to_its_build`): the part keeps only where it stopped
+/// and what it didn't find (`browser_hand_back::keep_only_its_lines`), which the controller gives
+/// that build, and posts no words. Whether it did. A failed open still runs no step again: the
+/// build reads none of the part's pages.
+fn hand_a_part_that_read_nothing_to_its_build(
+    job: &LeaseJob,
+    summary: &mut String,
+    ended: &mut BrowserTurnEnd,
+) -> bool {
+    if !browser_hand_back::hands_its_message_to_its_build(job.payload.get("metadata"), summary) {
+        return false;
+    }
+    browser_hand_back::keep_only_its_lines(summary);
+    ended.hands_the_message_to_its_build = true;
+    tracing::info!(
+        job_id = %job.id,
+        "a browser part with its build after it read no page: the message goes to its build"
+    );
+    true
 }
 
 /// The options of the second pass of a browser turn over the pages its unread line named
@@ -17681,7 +17786,13 @@ struct UnreadPagesRead {
     ran: bool,
     artifacts: Vec<JsonValue>,
     messages: Vec<JobMessage>,
+    /// Whether it ended the turn's passes: a pause for the person, a page showing a secret, or
+    /// any other end of its run ([`UnreadPagesRead::ended_on_a_prompt`]).
     stopped_for_the_person: bool,
+    /// Whether its run ended on a step's prompt or any other end that is no pause for the person
+    /// (`browser_hand_back::is_a_pause`): that step didn't run, and the turn ends with what both
+    /// passes read.
+    ended_on_a_prompt: bool,
     pages: Vec<String>,
     not_given: Vec<String>,
     tried: crate::codex::BrowserTried,
@@ -17822,24 +17933,24 @@ async fn read_the_unread_pages(
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
     if let Some(code) = shared_browser_terminal_consent_failure(&read.messages) {
-        // As after the turn's own run: the step that asked is the person's to answer.
-        read.artifacts.push(json!({
-            "kind": "browser/terminal-consent",
-            "metadata": {
-                "transport": "shared",
-                "state": "blocked",
-                "code": code,
-                "retryable": false,
-            }
-        }));
-        let mut words = String::new();
-        apply_terminal_shared_browser_summary(
-            &mut words,
-            &mut None,
-            Some(code),
-            turn.paused_already,
-        );
-        browser_hand_back::stop_after_the_second_pass(summary, answer, Some(words.as_str()));
+        // As after the turn's own run: a pause is the person's next step, and any other end
+        // ended that step, not the turn, which keeps what both passes read and its line.
+        read.artifacts
+            .push(terminal_consent_artifact(code, &read.messages, None));
+        if browser_hand_back::is_a_pause(code) {
+            let mut words = String::new();
+            apply_terminal_shared_browser_summary(
+                &mut words,
+                &mut None,
+                Some(code),
+                turn.paused_already,
+            );
+            browser_hand_back::stop_after_the_second_pass(summary, answer, Some(words.as_str()));
+        } else {
+            browser_hand_back::add_the_second_pass(summary, answer, &output.browser_pages);
+            browser_hand_back::add_under_the_words(summary, terminal_shared_browser_summary(code));
+            read.ended_on_a_prompt = true;
+        }
         read.stopped_for_the_person = true;
     } else if browser_hand_back::stopped_for_the_person(
         &read.messages,
@@ -33264,6 +33375,8 @@ mod tests {
             assert!(!summary.contains(code), "the person never reads {code}");
             assert_eq!(fallback, None);
 
+            // The prompt ended that step, not the turn: its own words stay, and the line
+            // under them always says the step didn't happen.
             let mut false_success = "Done — the requested browser action succeeded.".to_string();
             let mut no_fallback = None;
             apply_terminal_shared_browser_summary(
@@ -33273,8 +33386,9 @@ mod tests {
                 false,
             );
             assert_eq!(
-                false_success, expected,
-                "terminal consent must never preserve a false success summary"
+                false_success,
+                format!("Done — the requested browser action succeeded.\n\n{expected}"),
+                "terminal consent must always say the step didn't happen"
             );
             assert_eq!(no_fallback, None);
         }
@@ -33294,13 +33408,287 @@ mod tests {
             apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code), true);
             assert_eq!(
                 summary,
-                "Instafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
+                "Done.\n\nInstafy's browser stopped this step to keep it safe, so it wasn't done. Send a message to try again."
             );
             assert!(!should_retry_codex_once(Some(code), true));
         }
 
         assert!(should_retry_codex_once(None, true));
         assert!(!should_retry_codex_once(None, false));
+    }
+
+    /// A routed message's browser part with its build after it (`browser_then_build`), as the
+    /// controller leases it.
+    fn browser_then_build_job() -> LeaseJob {
+        test_lease_job(
+            Some("feature"),
+            json!({
+                "browser_hand_back_reads_note": true,
+                "metadata": {
+                    "browserTransport": "shared",
+                    "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                    "browserHandsBack": true,
+                    "browserCardTurn": {
+                        "version": 1,
+                        "cardJobId": "00000000-0000-4000-8000-0000000000a1",
+                        "routed": true,
+                    },
+                },
+            }),
+        )
+    }
+
+    /// A Shared Browser step whose result ended the run on `code`.
+    fn step_that_ended_the_run(code: &str, browser_step: JsonValue) -> JobMessage {
+        JobMessage {
+            content: "Tool call completed: instafy_shared_browser/press".to_string(),
+            message_type: Some("mcp_tool_call".to_string()),
+            metadata: Some(json!({
+                "server": "instafy_shared_browser",
+                "tool": "press",
+                "status": "completed",
+                "terminalConsent": {
+                    "state": "blocked", "terminal": true, "retryable": false, "code": code,
+                },
+                "event": { "item": { "browserStep": browser_step } },
+            })),
+        }
+    }
+
+    /// A prompt the person left to run out, or said no to, ends that step, not the message: a
+    /// page message's browser part read the opening hours on two pages, its second planner
+    /// prompt ran out, and no build and no page followed (a local test, Nov 19). The part keeps
+    /// its own words with the runtime's line under them, every line it wrote and what it didn't
+    /// find. With its build after it and pages read, it posts nothing: its note goes to that build
+    /// as any finished part's does, and the step's prompt is named in the run's
+    /// `browser/terminal-consent` artifact, which the controller reads for the build's
+    /// `stepNotDone`. A question's turn posts its words with the line under them.
+    #[test]
+    fn a_prompt_that_ended_a_step_hands_back_what_the_part_read() {
+        let museum = r#"{"url":"https://museum.example/visit","title":"Plan your visit","facts":["Open 10:00 to 18:00, Tuesday to Sunday.","Closed on Mondays."]}"#;
+        let city = r#"{"url":"https://city.example/museum","title":"The museum","facts":["Today's hours: 10:00 to 18:00."]}"#;
+        let planner = r#"{"url":"https://transit.example/planner","title":"Journey planner","facts":["The planner has Start and Destination fields."]}"#;
+        let missing = r#"{"missing":["route"]}"#;
+        let words = "I read the museum's visit page and the city's page for it. I couldn't get the route: the planner's search waited for your OK.";
+        let answer = format!("{words}\n{museum}\n{city}\n{planner}\n{missing}\n{{\"unread\":[]}}");
+        for (code, line) in [
+            (
+                "approval_timeout",
+                "Your OK didn't come in time, so I didn't do that step. Send a message when you're ready and I'll ask again.",
+            ),
+            (
+                "approval_denied",
+                "You said no, so that step didn't happen, and nothing from it was sent. Tell Octo what to try instead.",
+            ),
+        ] {
+            let mut summary = answer.clone();
+            let mut fallback = None;
+            apply_terminal_shared_browser_summary(&mut summary, &mut fallback, Some(code), false);
+            let lines = format!("{museum}\n{city}\n{planner}\n{missing}");
+            assert_eq!(summary, format!("{words}\n\n{line}\n\n{lines}"), "{code}");
+            assert!(
+                !browser_hand_back::hands_its_message_to_its_build(
+                    browser_then_build_job().payload.get("metadata"),
+                    &summary
+                ),
+                "it read pages: the hand-back goes as any finished part's"
+            );
+
+            // With its build after it, it posts nothing, and its note holds its findings.
+            let ended = step_that_ended_the_run(
+                code,
+                json!({ "step": "search", "host": "transit.example" }),
+            );
+            let job = browser_then_build_job();
+            let mut execution = JobExecution {
+                summary: summary.clone(),
+                suggested_replies: Vec::new(),
+                provider: "codex-embedded".to_string(),
+                artifacts: Vec::new(),
+                provider_conversation_state: None,
+                messages: vec![ended.clone()],
+                messages_streamed: false,
+                final_messages: Vec::new(),
+            };
+            assert!(!browser_hand_back::stopped_for_the_person(&execution.messages, false));
+            browser_hand_back::move_findings_into_details(&job, &mut execution);
+            assert_eq!(execution.summary, "", "{code}: its build answers");
+            assert_eq!(execution.final_messages.len(), 1);
+            let note = &execution.final_messages[0];
+            assert_eq!(
+                note.content,
+                format!("{words}\n\n{line}\n\n{museum}\n{city}\n{planner}\n{missing}")
+            );
+            assert_eq!(
+                note.metadata.as_ref().unwrap()["browserFindings"],
+                json!({ "pages": 3, "pagesRead": 3 })
+            );
+
+            // The run's artifact names the step whose prompt ended it, for the build.
+            let artifact = terminal_consent_artifact(code, &[ended], None);
+            assert_eq!(artifact["kind"], "browser/terminal-consent");
+            assert_eq!(artifact["metadata"]["code"], code);
+            assert_eq!(artifact["metadata"]["step"], "search");
+            assert_eq!(artifact["metadata"]["host"], "transit.example");
+
+            // A question's turn answers the person: its words, then the line.
+            let question = test_lease_job(
+                Some("feature"),
+                json!({ "metadata": { "browserTransport": "shared" } }),
+            );
+            let mut execution = JobExecution {
+                summary,
+                suggested_replies: Vec::new(),
+                provider: "codex-embedded".to_string(),
+                artifacts: Vec::new(),
+                provider_conversation_state: None,
+                messages: Vec::new(),
+                messages_streamed: false,
+                final_messages: Vec::new(),
+            };
+            browser_hand_back::move_findings_into_details(&question, &mut execution);
+            assert_eq!(execution.summary, format!("{words}\n\n{line}"));
+        }
+    }
+
+    /// The run's artifact names the step that ended it, never a later call, which asked the
+    /// person nothing (`shared_browser::ENDED_EARLIER_KEY`), and nothing when its step's facts
+    /// name none.
+    #[test]
+    fn the_terminal_consent_artifact_names_the_step_whose_prompt_ended_the_run() {
+        let ended = step_that_ended_the_run(
+            "approval_denied",
+            json!({ "step": "search", "host": "transit.example", "approval": "denied" }),
+        );
+        let mut later = step_that_ended_the_run(
+            "approval_denied",
+            json!({ "step": "navigate", "host": "museum.example" }),
+        );
+        later.metadata.as_mut().unwrap()["terminalConsent"][crate::shared_browser::ENDED_EARLIER_KEY] =
+            json!(true);
+        let artifact = terminal_consent_artifact("approval_denied", &[later.clone(), ended], Some(2));
+        assert_eq!(
+            artifact,
+            json!({
+                "kind": "browser/terminal-consent",
+                "metadata": {
+                    "transport": "shared",
+                    "state": "blocked",
+                    "code": "approval_denied",
+                    "retryable": false,
+                    "attempt": 2,
+                    "step": "search",
+                    "host": "transit.example",
+                },
+            })
+        );
+        let unnamed = terminal_consent_artifact("approval_denied", &[later], None);
+        assert!(unnamed["metadata"].get("step").is_none(), "{unnamed}");
+    }
+
+    /// A part with its build after it whose only open failed read no page: it hands the person's
+    /// message to that build, with where it stopped and what it didn't find, and posts no words
+    /// (a local test, Nov 19: a fill-in whose maker site couldn't be reached ended with "Read 0
+    /// pages" and no build, and a page request with search on made no page). It counts the pages
+    /// it read, not the steps the browser answered. The failed open is not tried again: no pass
+    /// runs. A building card's part, with no build after it, keeps its words.
+    #[tokio::test]
+    async fn a_part_whose_only_open_failed_still_gets_its_build() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let client = crate::codex::CodexClient::new(crate::codex::CodexConfig {
+            workspace_dir: workspace.path().to_path_buf(),
+        });
+        let stop = r#"{"url":"https://maker.example/","stopped":"unreachable"}"#;
+        let missing = r#"{"missing":["weight","price"]}"#;
+        let answer = format!(
+            "I couldn't reach the maker's site, so I read 0 pages.\n{stop}\n{missing}\n{{\"unread\":[]}}"
+        );
+        let options = CodexRunOptions::default();
+        let final_json = json!({ "summary": answer, "actions": [] });
+        let end = |job: LeaseJob, summary: String| {
+            let options = &options;
+            let client = &client;
+            let final_json = &final_json;
+            async move {
+                let mut summary = summary;
+                let ended = end_browser_turn_answer(
+                    client,
+                    &job,
+                    BrowserTurnAnswer {
+                        options,
+                        thread: None,
+                        used_the_browser: true,
+                        stopped_for_the_person: false,
+                        refused_a_step: false,
+                        pages: Vec::new(),
+                        not_given: Vec::new(),
+                        tried: crate::codex::BrowserTried::from(vec![
+                            "https://maker.example/".to_string(),
+                        ]),
+                        final_json,
+                        progress: None,
+                        runtime_id: Uuid::nil(),
+                        paused_already: false,
+                    },
+                    &mut summary,
+                    &crate::task_usage::TaskUsage::default(),
+                )
+                .await;
+                (ended, summary)
+            }
+        };
+
+        let job = browser_then_build_job();
+        let (ended, summary) = end(job.clone(), answer.clone()).await;
+        assert!(ended.hands_the_message_to_its_build);
+        assert!(ended.artifacts.is_empty(), "no pass ran: {:?}", ended.artifacts);
+        assert_eq!(summary, format!("{stop}\n{missing}"));
+        // The job ends it with the build request note; the person reads nothing, and the note
+        // keeps where it stopped and what it didn't find, which the controller gives the build.
+        let mut execution = JobExecution {
+            summary,
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: Vec::new(),
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: vec![browser_hand_back::build_request_note(&job)],
+        };
+        browser_hand_back::move_findings_into_details(&job, &mut execution);
+        assert_eq!(execution.summary, "");
+        assert_eq!(execution.final_messages.len(), 2);
+        let note = &execution.final_messages[1];
+        assert_eq!(note.content, format!("{stop}\n{}", r#"{"missing":["weight","price"]}"#));
+        assert_eq!(
+            note.metadata.as_ref().unwrap()["browserFindings"],
+            json!({ "pages": 1, "pagesRead": 0 })
+        );
+
+        // A part that read a page goes back as any finished part does.
+        let read = r#"{"url":"https://reviews.example/reader","title":"Review","facts":["Weighs 174 g."]}"#;
+        let (ended, summary) = end(
+            browser_then_build_job(),
+            format!("Read one review.\n{read}\n{stop}\n{missing}"),
+        )
+        .await;
+        assert!(!ended.hands_the_message_to_its_build);
+        assert!(summary.contains(read), "{summary}");
+
+        // A building card's part has no build after it to hand the message to: its words stay.
+        let card = test_lease_job(
+            Some("feature"),
+            json!({
+                "metadata": {
+                    "browserTransport": "shared",
+                    "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                    "browserHandsBack": true,
+                },
+            }),
+        );
+        let (ended, summary) = end(card, answer.clone()).await;
+        assert!(!ended.hands_the_message_to_its_build);
+        assert!(summary.starts_with("I couldn't reach the maker's site"), "{summary}");
     }
 
     /// A turn that paused for the person, or that a step's approval ended, keeps the finding
@@ -33426,8 +33814,9 @@ mod tests {
             execution.final_messages
         );
 
-        // Every other way a step's approval ends the turn keeps them the same way, and a pause
-        // right after a pause too.
+        // A pause right after a pause keeps them the same way, and so does a prompt the person
+        // said no to or left, which ended that step only: its own words stay, with the line under
+        // them.
         for (code, again) in [
             ("approval_timeout", false),
             ("approval_denied", false),
@@ -33439,7 +33828,11 @@ mod tests {
                 summary.ends_with(&format!("\n\n{read}")),
                 "{code}: {summary}"
             );
-            assert!(!summary.starts_with("Waiting."), "{code}: {summary}");
+            assert_eq!(
+                summary.starts_with("Waiting.\n\n"),
+                !browser_hand_back::is_a_pause(code),
+                "{code}: {summary}"
+            );
         }
     }
 

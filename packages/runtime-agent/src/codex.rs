@@ -5625,6 +5625,16 @@ impl CodexEventStreamAdapter {
         }
     }
 
+    /// Marks the facts of a step that types into a site's own search box of the reading the run
+    /// was last given (`shared_browser_activity::types_into_a_search_box`), while it runs and
+    /// once it ends: its line reads as the search it is.
+    fn mark_a_search_box(&self, tool: &str, arguments: Option<&JsonValue>, step: &mut JsonValue) {
+        use crate::shared_browser_activity::{SEARCH_BOX_FACT, types_into_a_search_box};
+        if types_into_a_search_box(tool, arguments, self.browser_links.as_ref()) {
+            step[SEARCH_BOX_FACT] = JsonValue::Bool(true);
+        }
+    }
+
     /// A step that presses a link tries the link's own address, wherever its tab then ends
     /// (`shared_browser_activity::pressed_link`). One that presses a control of a reading the
     /// run was not given may try an address the run cannot name.
@@ -5933,7 +5943,12 @@ impl CodexEventStreamAdapter {
                             &mut self.last_browser_host,
                         )
                     };
-                    if let Some(step) = step {
+                    if let Some(mut step) = step {
+                        self.mark_a_search_box(
+                            &tool_call.invocation.tool,
+                            tool_call.invocation.arguments.as_ref(),
+                            &mut step,
+                        );
                         item["browserStep"] = step;
                     }
                     if waits {
@@ -6003,19 +6018,35 @@ impl CodexEventStreamAdapter {
                         .as_ref()
                         .and_then(|signal| signal.get("code"))
                         .and_then(JsonValue::as_str);
-                    // With a terminal code, only the step's kind is read from it.
+                    // With a terminal code, only the step's kind is read from it. Only the call
+                    // that ended the run carries the person's answer: a later one asked them
+                    // nothing (`shared_browser::ENDED_EARLIER_KEY`).
+                    let answered_code = terminal_code.filter(|_| {
+                        terminal_consent
+                            .as_ref()
+                            .and_then(|signal| {
+                                signal.get(crate::shared_browser::ENDED_EARLIER_KEY)
+                            })
+                            .and_then(JsonValue::as_bool)
+                            != Some(true)
+                    });
                     let payload = tool_call
                         .result
                         .as_ref()
                         .ok()
                         .and_then(|result| result.structured_content.as_ref());
-                    if let Some(step) = crate::shared_browser_activity::browser_step_facts(
+                    if let Some(mut step) = crate::shared_browser_activity::browser_step_facts(
                         &tool_call.invocation.tool,
                         tool_call.invocation.arguments.as_ref(),
                         payload,
-                        terminal_code,
+                        answered_code,
                         &mut self.last_browser_host,
                     ) {
+                        self.mark_a_search_box(
+                            &tool_call.invocation.tool,
+                            tool_call.invocation.arguments.as_ref(),
+                            &mut step,
+                        );
                         item["browserStep"] = step;
                     }
                     // A step the browser answered that took a tab to a page.
@@ -13094,6 +13125,104 @@ required = true
 
         let unrelated = adapter.collect(&event("untrusted_server"));
         assert!(unrelated[0]["item"].get("terminalConsent").is_none());
+    }
+
+    /// One Deny reads as one: only the call that ended the run carries the person's answer.
+    /// The calls after it (the run's later steps, which asked them nothing, and a look at the
+    /// browser's status) are marked as ended at an earlier call
+    /// (`shared_browser::ENDED_EARLIER_KEY`) and name no answer, so the turn's line said "you
+    /// said no to 3 steps" for one Deny no more (a local test, Nov 19). The same holds for a
+    /// prompt left to run out.
+    #[test]
+    fn only_the_call_that_ended_the_run_carries_the_persons_answer() {
+        for (code, answer) in [("approval_denied", "denied"), ("approval_timeout", "expired")] {
+            let mut adapter = CodexEventStreamAdapter::default();
+            let event = |call: &str, tool: &str, arguments: JsonValue, signal: JsonValue, error: bool| Event {
+                id: format!("evt_{call}"),
+                msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                    call_id: call.to_string(),
+                    invocation: McpInvocation {
+                        server: SHARED_BROWSER_MCP_SERVER_NAME.to_string(),
+                        tool: tool.to_string(),
+                        arguments: Some(arguments),
+                    },
+                    connector_id: None,
+                    mcp_app_resource_uri: None,
+                    link_id: None,
+                    app_name: None,
+                    action_name: None,
+                    plugin_id: None,
+                    duration: Duration::from_millis(1),
+                    result: Ok(CallToolResult {
+                        content: vec![json!({ "type": "text", "text": "The browser is done." })],
+                        structured_content: Some(json!({ "terminalConsent": signal })),
+                        is_error: Some(error),
+                        meta: None,
+                    }),
+                    mcp_app_ui: None,
+                    read_only_hint: None,
+                    turn_id: "turn-1".to_string(),
+                }),
+            };
+            let signal = json!({ "state": "blocked", "terminal": true, "retryable": false, "code": code });
+            let mut later_signal = signal.clone();
+            later_signal[crate::shared_browser::ENDED_EARLIER_KEY] = json!(true);
+            // The page the run read before its prompt names the site.
+            adapter.collect(&Event {
+                id: "evt_open".to_string(),
+                msg: EventMsg::McpToolCallEnd(McpToolCallEndEvent {
+                    call_id: "call_open".to_string(),
+                    invocation: McpInvocation {
+                        server: SHARED_BROWSER_MCP_SERVER_NAME.to_string(),
+                        tool: "navigate".to_string(),
+                        arguments: Some(json!({ "url": "https://planner.example.org/" })),
+                    },
+                    connector_id: None,
+                    mcp_app_resource_uri: None,
+                    link_id: None,
+                    app_name: None,
+                    action_name: None,
+                    plugin_id: None,
+                    duration: Duration::from_millis(1),
+                    result: Ok(CallToolResult {
+                        content: Vec::new(),
+                        structured_content: Some(json!({
+                            "activity": { "step": "navigate", "url": "https://planner.example.org/" },
+                        })),
+                        is_error: Some(false),
+                        meta: None,
+                    }),
+                    mcp_app_ui: None,
+                    read_only_hint: None,
+                    turn_id: "turn-1".to_string(),
+                }),
+            });
+            let ended = adapter.collect(&event(
+                "call_search",
+                "press",
+                json!({ "index": 0, "key": "Enter", "snapshotId": "s" }),
+                signal.clone(),
+                code == "approval_denied",
+            ));
+            assert_eq!(ended[0]["item"]["browserStep"]["approval"], answer, "{code}");
+            assert_eq!(ended[0]["item"]["browserStep"]["host"], "planner.example.org");
+            // A later step fails, and the browser's status still answers.
+            for (call, tool, arguments, error) in [
+                ("call_later_open", "navigate", json!({ "url": "https://museum.example.org/" }), true),
+                ("call_status", "status", json!({}), false),
+            ] {
+                let later = adapter.collect(&event(call, tool, arguments, later_signal.clone(), error));
+                let step = &later[0]["item"]["browserStep"];
+                assert!(step.get("approval").is_none(), "{code} {call}: {step}");
+                assert_eq!(
+                    later[0]["item"]["status"],
+                    if error { "failed" } else { "completed" },
+                    "{code} {call}"
+                );
+                // The run still ended on the person's answer.
+                assert_eq!(later[0]["item"]["terminalConsent"]["code"], code);
+            }
+        }
     }
 
     /// A Shared Browser call that could not reach the browser at all keeps the

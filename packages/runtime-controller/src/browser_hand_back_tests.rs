@@ -14,7 +14,8 @@ use crate::browser_hand_back::{
     BUILD_REQUEST_NOTE_KEY, BUILD_REQUEST_RECORD_KEY, CONTINUE_BUILDING_RECORD_KEY,
     HAND_BACK_CLAIM_KEY, HAND_BACK_KEY, HAND_BACK_NOTHING_READ_CODE, HAND_BACK_NOT_BUILDING_CODE,
     HAND_BACK_PAUSED_CODE, HAND_BACK_PROMPT, HAND_BACK_SECOND_HOP_CODE, HAND_BACK_SUPERSEDED_CODE,
-    HAND_BACK_USED_CODE, LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT,
+    HAND_BACK_USED_CODE, LET_OCTO_CONTINUE_LINE, LET_OCTO_CONTINUE_PROMPT, PAUSE_CODES,
+    STEP_NOT_DONE_RECORD_KEY,
 };
 
 fn fixtures() -> serde_json::Value {
@@ -331,6 +332,75 @@ impl Chain {
         let (card_job, browser_job) = self.card_and_running_browser_turn().await?;
         self.finish(&browser_job, Some(reply), "succeeded").await?;
         Ok((card_job, browser_job))
+    }
+
+    /// The runtime's end of a browser turn whose step's prompt ended its run on `code`: the step
+    /// says so as it ends, and the job completes with its `browser/terminal-consent` artifact
+    /// (runtime-agent `jobs::terminal_consent_artifact`), which names the step's kind and site.
+    async fn finish_on_a_prompt(
+        &self,
+        job_id: &Uuid,
+        code: &str,
+        reply: &str,
+    ) -> anyhow::Result<()> {
+        self.post(
+            job_id,
+            "Tool call completed: instafy_shared_browser/press",
+            "mcp_tool_call",
+            json!({
+                "kind": "codex_mcp_tool_call",
+                "status": "completed",
+                "server": "instafy_shared_browser",
+                "tool": "press",
+                "terminalConsent": {
+                    "state": "blocked", "terminal": true, "retryable": false, "code": code,
+                },
+            }),
+        )
+        .await?;
+        let token =
+            lease_job_to_space_runtime(&self.pool, &self.config, &self.project_id, job_id).await?;
+        let status = post_agent_endpoint(
+            &self.state,
+            &token,
+            "/agent/complete",
+            json!({
+                "job_id": job_id,
+                "outcome": "succeeded",
+                "summary": reply,
+                "artifacts": [{
+                    "kind": "browser/terminal-consent",
+                    "metadata": {
+                        "transport": "shared", "state": "blocked", "code": code,
+                        "retryable": false, "step": "search", "host": "transit.example",
+                    },
+                }],
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK, "completion for {job_id}");
+        Ok(())
+    }
+
+    /// The browser turn's Details note of its finding lines, as the runtime posts it
+    /// (runtime-agent `move_findings_into_details`).
+    async fn post_findings_note(
+        &self,
+        job_id: &Uuid,
+        lines: &str,
+        pages: usize,
+        pages_read: usize,
+    ) -> anyhow::Result<()> {
+        self.post(
+            job_id,
+            lines,
+            "status",
+            json!({
+                "kind": "agent_message",
+                "browserFindings": { "pages": pages, "pagesRead": pages_read },
+            }),
+        )
+        .await
     }
 
     async fn hand_back(
@@ -2112,6 +2182,118 @@ async fn only_a_routed_message_with_the_note_hands_a_build_request_back() -> any
             );
             assert_eq!(status, StatusCode::CONFLICT, "{}", body.message);
             assert_eq!(body.code.as_deref(), Some(HAND_BACK_NOT_BUILDING_CODE));
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A prompt the person left to run out, or said no to, ended that step, not the message: the
+/// browser turn hands back what it read, as any finished turn does, and its record names the
+/// step that didn't run (`stepNotDone`) from the turn's own `browser/terminal-consent` artifact,
+/// never its words. Held back, a page message whose browser part had read the hours it needed
+/// got no build and no page (a local test, Nov 19). Only a pause the person continues in the
+/// browser (their fields, a cookie notice, a step only they take) still holds it back, by its
+/// artifact or by the step that reported it.
+#[tokio::test]
+async fn a_prompt_that_ended_a_step_hands_back_what_the_turn_read() -> anyhow::Result<()> {
+    with_chain("browser-hand-back-prompt-ended-a-step", |chain| {
+        Box::pin(async move {
+            let hours = r#"{"url": "https://museum.example/visit", "title": "Plan your visit", "facts": ["Open 10:00 to 18:00, Tuesday to Sunday."]}"#;
+            let missing = r#"{"missing": ["route"]}"#;
+            for (code, answer) in [("approval_timeout", "expired"), ("approval_denied", "denied")] {
+                let (_, browser_job) = chain.card_and_running_browser_turn().await?;
+                chain
+                    .post_findings_note(&browser_job, &format!("{hours}\n{missing}"), 1, 1)
+                    .await?;
+                chain.finish_on_a_prompt(&browser_job, code, "").await?;
+                let response = chain
+                    .hand_back(&chain.owner, &browser_job, json!({}))
+                    .await
+                    .map_err(|error| controller_error("hand-back after a prompt", error))?;
+                let hand_back_job = chain.job_of(&response).await?;
+                let record = &chain.payload_metadata(&hand_back_job).await?[HAND_BACK_KEY];
+                assert_eq!(
+                    record["findings"][0]["url"], "https://museum.example/visit",
+                    "{record}"
+                );
+                assert_eq!(record["missing"], json!(["route"]), "{record}");
+                assert_eq!(
+                    record[STEP_NOT_DONE_RECORD_KEY],
+                    json!({ "answer": answer, "step": "search", "host": "transit.example" }),
+                    "{record}"
+                );
+            }
+
+            // A pause the person continues in the browser still holds the build back.
+            for code in PAUSE_CODES {
+                let (_, paused_job) = chain.card_and_running_browser_turn().await?;
+                chain
+                    .post_findings_note(&paused_job, &format!("{hours}\n{missing}"), 1, 1)
+                    .await?;
+                chain
+                    .finish_on_a_prompt(&paused_job, code, "Answer it in the browser.")
+                    .await?;
+                let (status, body) =
+                    refused(chain.hand_back(&chain.owner, &paused_job, json!({})).await);
+                assert_eq!(status, StatusCode::CONFLICT, "{code}: {}", body.message);
+                assert_eq!(body.code.as_deref(), Some(HAND_BACK_PAUSED_CODE), "{code}");
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A message whose browser part, with its build after it, read no page goes to that build with
+/// where the part stopped and what it didn't find, from the part's Details note, and none of its
+/// words: a fill-in whose maker site couldn't be reached ended with no answer at all (a local
+/// test, Nov 19). A prompt that ended the part's step goes with it too.
+#[tokio::test]
+async fn a_build_request_after_a_part_that_read_nothing_carries_where_it_stopped(
+) -> anyhow::Result<()> {
+    with_chain("routed-build-request-stops", |chain| {
+        Box::pin(async move {
+            let words = "Fill in the comparison's missing weights.";
+            let stop = r#"{"url": "https://maker.example/", "stopped": "unreachable"}"#;
+            let missing = r#"{"missing": ["weight"]}"#;
+            for prompt in [None, Some("approval_denied")] {
+                let routed = chain.routed_message(words, true).await?;
+                let browser = chain.routed_browser_turn(&routed, words).await?;
+                chain
+                    .post_findings_note(
+                        &browser,
+                        &format!("I couldn't reach the maker.\n\n{stop}\n{missing}"),
+                        1,
+                        0,
+                    )
+                    .await?;
+                chain.post_build_request(&browser).await?;
+                match prompt {
+                    Some(code) => chain.finish_on_a_prompt(&browser, code, "").await?,
+                    None => chain.finish(&browser, Some(""), "succeeded").await?,
+                }
+                let hand_backs = chain.hand_backs_of(&browser).await?;
+                assert_eq!(hand_backs.len(), 1, "{hand_backs:?}");
+                let record = &chain.payload_metadata(&hand_backs[0]).await?[HAND_BACK_KEY];
+                assert_eq!(record[BUILD_REQUEST_RECORD_KEY], json!(true), "{record}");
+                assert_eq!(record[CONTINUE_BUILDING_RECORD_KEY], json!(true), "{record}");
+                assert_eq!(record["personRequest"], json!(words));
+                assert_eq!(record["reply"], json!(""), "none of its words: {record}");
+                assert_eq!(record["findings"].as_array().map(Vec::len), Some(1), "{record}");
+                assert_eq!(record["findings"][0]["url"], "https://maker.example/");
+                assert_eq!(record["findings"][0]["stopped"], "unreachable");
+                assert_eq!(record["missing"], json!(["weight"]), "{record}");
+                assert!(!record.to_string().contains("couldn't reach the maker"), "{record}");
+                match prompt {
+                    Some(_) => assert_eq!(
+                        record[STEP_NOT_DONE_RECORD_KEY],
+                        json!({ "answer": "denied", "step": "search", "host": "transit.example" }),
+                        "{record}"
+                    ),
+                    None => assert!(record.get(STEP_NOT_DONE_RECORD_KEY).is_none(), "{record}"),
+                }
+            }
             Ok(())
         })
     })

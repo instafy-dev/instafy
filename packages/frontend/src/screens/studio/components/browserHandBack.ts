@@ -111,9 +111,22 @@ function promptMetadataString(metadata: unknown, keys: readonly string[]): strin
 }
 
 /**
+ * The runtime's codes for a pause the person continues in the browser: their
+ * fields, a cookie notice the browser couldn't decline, or a step only they
+ * take (runtime-agent `browser_hand_back::PAUSE_CODES`, runtime-controller
+ * `PAUSE_CODES`).
+ */
+const PAUSE_CODES: ReadonlySet<string> = new Set([
+  "human_input_required",
+  "cookie_notice_required",
+  "human_step_required",
+]);
+
+/**
  * The browser turn stopped on a step that is the person's: it asked for their
- * input on the page, or a step's approval ended the turn. The person goes on
- * in the browser; nothing goes back to the building turn.
+ * input on the page. The person goes on in the browser; nothing goes back to
+ * the building turn. A prompt they said no to or left ended that step, not the
+ * message: the turn's findings go back as any finished turn's do.
  */
 export function browserTurnStoppedForPerson(messages: readonly ChatMessage[], jobId: string): boolean {
   return messages.some((message) => {
@@ -122,7 +135,10 @@ export function browserTurnStoppedForPerson(messages: readonly ChatMessage[], jo
     const details = extractMessageDetails(message.metadata);
     if (!details) return false;
     const consent = details.terminalConsent;
-    if (isRecord(consent) && consent.state === "blocked") return true;
+    if (isRecord(consent) && consent.state === "blocked" && typeof consent.code === "string" &&
+        PAUSE_CODES.has(consent.code)) {
+      return true;
+    }
     return details.tool === "request_human_input" && details.status === "completed";
   });
 }
