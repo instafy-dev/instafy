@@ -1504,7 +1504,16 @@ No suite needs a Claude login, and public CI holds no Anthropic secret (AGENTS.m
 - runtime-controller's `RUSTFLAGS="-D dead_code -D unused_imports" cargo check --locked --all-targets` and runtime-agent's `cargo clippy --locked --all-targets -- -A clippy::all -D dead_code -D unused_imports`, as CI runs them (AGENTS.md);
 - the frontend checks listed in AGENTS.md.
 
-**Public CI.** The runtime-agent job in .github/workflows/build.yml, on Linux runners with no secret, runs the library tests and the lane's hermetic targets: `--test claude_code_lane --test claude_code_supervision --test claude_code_live`, whose real-`claude` test stays ignored, and `--test proxy_integration codex_never_starts_claude::`. scripts/check-rust-ci.test.mjs pins those command lines. The controller's own suite, as `pnpm test:controller` runs it, includes the census example's tests (6).
+**Public CI.** The runtime-agent job in .github/workflows/build.yml, on Linux runners with no secret, runs the library tests and the lane's hermetic targets: `--test claude_code_lane --test claude_code_supervision --test claude_code_live`, whose real-`claude` test stays ignored, and `--test proxy_integration codex_never_starts_claude::`. scripts/check-rust-ci.test.mjs pins those command lines.
+
+**The daily canary (D6).** `.github/workflows/claude-code-lane-canary.yml` runs the live suite every day against the newest Claude Code release:
+- on a macOS runner, the lane's platform;
+- signed in with Instafy's own API key, through an `apiKeyHelper` in a throwaway configuration folder that the suite grants as `CLAUDE_CONFIG_DIR`. The lane never forwards `ANTHROPIC_API_KEY` itself (3.4).
+- The suite runs in CI only with `INSTAFY_CLAUDE_CODE_CANARY=1` set, and fails there if `claude` is signed in with a Claude plan.
+- The workflow never runs for a pull request.
+- It needs the `ANTHROPIC_CANARY_API_KEY` secret in the `claude-code-canary` environment; without it the job warns and runs nothing.
+
+A failing run means that release no longer keeps out what the lane's flags should. Until a fixed release or a lane change, raise the floor (3.2) past it, which refuses that version and every older one. The controller's own suite, as `pnpm test:controller` runs it, includes the census example's tests (6).
 
 ---
 

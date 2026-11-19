@@ -3,7 +3,10 @@
 //! to the account of the person who runs it.
 //!
 //! A maintainer runs it by hand, on their own Mac and Claude account, for each Claude Code
-//! version the lane supports. No CI job or automated agent sets the variable:
+//! version the lane supports. The one CI job that sets the variable is Instafy's daily canary
+//! (.github/workflows/claude-code-lane-canary.yml, D6). It also sets
+//! `INSTAFY_CLAUDE_CODE_CANARY=1`, installs the newest Claude Code release and signs it in with
+//! Instafy's own API key; the suite refuses a Claude plan sign-in there. By hand:
 //!
 //! ```text
 //! INSTAFY_CLAUDE_CODE_LIVE=1 cargo test --manifest-path packages/runtime-agent/Cargo.toml \
@@ -56,8 +59,11 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, Lines};
 use tokio::process::{ChildStderr, ChildStdout};
 use uuid::Uuid;
 
-/// The variable that runs the suite. Only a person sets it, by hand.
+/// The variable that runs the suite: a person sets it, by hand, or the daily canary does.
 const LIVE_ENV: &str = "INSTAFY_CLAUDE_CODE_LIVE";
+/// The variable that lets the suite run in CI: only Instafy's daily canary sets it, signed in
+/// with Instafy's own API key (D6). A Claude plan sign-in fails the run there.
+const CANARY_ENV: &str = "INSTAFY_CLAUDE_CODE_CANARY";
 /// How long one turn of the suite may run before it is killed.
 const TURN_LIMIT: Duration = Duration::from_secs(300);
 /// How long `claude` gets to exit after a signal before it is killed: the lane's own grace for
@@ -74,24 +80,29 @@ const PLANTED_NAME: &str = "instafy-live-canary";
 static CLEANUP_LATCH: AtomicBool = AtomicBool::new(false);
 
 /// Whether the suite runs: only with [`LIVE_ENV`] set to `1`, and never in CI.
-fn live_gate(variable: Option<&str>, ci: bool) -> Result<(), String> {
+fn live_gate(variable: Option<&str>, ci: bool, canary: bool) -> Result<(), String> {
     if variable != Some("1") {
         return Err(format!(
             "not run: the live suite runs only with {LIVE_ENV}=1, by hand, on a computer with a signed-in claude; it never passes without running"
         ));
     }
-    if ci {
-        return Err("not run: the live suite never runs in CI".to_string());
+    if ci && !canary {
+        return Err(
+            "not run: the live suite never runs in CI, apart from Instafy's daily canary"
+                .to_string(),
+        );
     }
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "not run: the live suite runs the person's own signed-in claude, only by hand with INSTAFY_CLAUDE_CODE_LIVE=1 and --ignored (see tests/claude_code_live.rs)"]
+#[ignore = "not run: the live suite runs a signed-in claude, by hand with INSTAFY_CLAUDE_CODE_LIVE=1 and --ignored, or in the daily canary (see tests/claude_code_live.rs)"]
 async fn the_live_suite_runs_the_phase_0_checklist_on_the_installed_claude() {
+    let canary = std::env::var(CANARY_ENV).ok().as_deref() == Some("1");
     if let Err(not_run) = live_gate(
         std::env::var(LIVE_ENV).ok().as_deref(),
         std::env::var_os("CI").is_some(),
+        canary,
     ) {
         panic!("{not_run}");
     }
@@ -99,6 +110,11 @@ async fn the_live_suite_runs_the_phase_0_checklist_on_the_installed_claude() {
         Ok(live) => live,
         Err(why) => panic!("no ready claude: {why}"),
     };
+    if canary && live.ready.plan_sign_in() {
+        panic!(
+            "not run: the canary runs on Instafy's own API key, and this claude is signed in with a Claude plan"
+        );
+    }
     let report = live.run_checklist().await;
     report.print();
     assert!(report.passed(), "{}", report.failures());
@@ -2107,12 +2123,16 @@ fn fixture_lines(scenario: &str) -> Vec<Value> {
 #[test]
 fn the_suite_runs_only_when_a_person_sets_the_variable() {
     for unset in [None, Some(""), Some("0"), Some("true"), Some("yes")] {
-        let not_run = live_gate(unset, false).expect_err("not run");
-        assert!(not_run.starts_with("not run:"), "{not_run}");
-        assert!(not_run.contains("never passes"), "{not_run}");
+        for canary in [false, true] {
+            let not_run = live_gate(unset, false, canary).expect_err("not run");
+            assert!(not_run.starts_with("not run:"), "{not_run}");
+            assert!(not_run.contains("never passes"), "{not_run}");
+        }
     }
-    assert!(live_gate(Some("1"), true).is_err());
-    assert_eq!(live_gate(Some("1"), false), Ok(()));
+    // CI runs it only as the canary.
+    assert!(live_gate(Some("1"), true, false).is_err());
+    assert_eq!(live_gate(Some("1"), true, true), Ok(()));
+    assert_eq!(live_gate(Some("1"), false, false), Ok(()));
 }
 
 #[test]
