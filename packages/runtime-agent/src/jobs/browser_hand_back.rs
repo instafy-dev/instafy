@@ -330,6 +330,44 @@ pub(super) fn carries_on_a_routed_card(metadata: &JsonValue) -> bool {
             == Some(&JsonValue::Bool(true))
 }
 
+/// The message of the person's that a card the routing step posted answers
+/// ([`routed_card_message`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RoutedCardMessage {
+    /// A new message: one they wrote that carries on no run a Stop ended.
+    New,
+    /// Studio's Continue under a Stop, which sends the stopped request again.
+    /// `request_sent` is when that request first went out, when the controller
+    /// could tell.
+    Continue {
+        request_sent: Option<chrono::DateTime<chrono::Utc>>,
+    },
+}
+
+/// What the routed card a browser turn carries on ([`carries_on_a_routed_card`])
+/// answers, as the controller stamped it on the turn's send from the card's own
+/// job (`browserCardTurn.answers` and `requestSentAt`, runtime-controller
+/// `system_turns::verify_browser_card_turn`). The lease's history can't say:
+/// the controller lists no card in it, as it lists no other progress row. None
+/// for a turn that carries on no routed card, or a stamp that doesn't say.
+pub(super) fn routed_card_message(metadata: &JsonValue) -> Option<RoutedCardMessage> {
+    if !carries_on_a_routed_card(metadata) {
+        return None;
+    }
+    let stamp = metadata.get("browserCardTurn")?;
+    match stamp.get("answers").and_then(JsonValue::as_str)? {
+        "message" => Some(RoutedCardMessage::New),
+        "continue" => Some(RoutedCardMessage::Continue {
+            request_sent: stamp
+                .get("requestSentAt")
+                .and_then(JsonValue::as_str)
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&chrono::Utc)),
+        }),
+        _ => None,
+    }
+}
+
 /// Whether a browser turn is offered the build request ([`BUILD_REQUEST_LINE`]):
 /// it carries on the person's own message ([`carries_on_a_routed_card`]) and
 /// hands nothing back. A turn whose findings go back to the building turn

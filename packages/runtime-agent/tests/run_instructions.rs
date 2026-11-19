@@ -1715,8 +1715,10 @@ fn written_now() -> Value {
 /// browser part resumes it and sends 75k tokens there before the person stops it; the Continue
 /// (J14) has its browser part (J15) resume that thread, which ran the stopped part's turn. The
 /// controller lists each chat as Studio left it, each entry with when it was written: the
-/// comparison, its card, its browser part's request and the note its findings moved into, then
-/// the next message, its card and its browser part's request.
+/// comparison, its browser part's request and the note its findings moved into, then the next
+/// message and its browser part's request. It lists no card, as it lists no other progress row:
+/// each browser part's stamp says what its card answers, a new message, or a Continue with when
+/// the request it sends again first went out.
 async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
     let mut chats = Vec::new();
     for (labels, page, latest, fill_in_script) in [
@@ -1773,10 +1775,6 @@ async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
             .join("\n");
         let comparison = vec![
             json!({"role": "user", "content": format!("[[{}]] {J_COMPARE}", labels[0]), "runId": first_run, "createdAt": compare_sent}),
-            json!({"role": "assistant", "content": "", "runId": first_run, "createdAt": part_sent, "metadata": {
-                "jobId": card, "messageType": "action_request",
-                "details": {"browserRequest": {"task": task, "routed": true, "continueBuilding": true}},
-            }}),
             json!({"role": "user", "content": format!("[[{}]] {task}", labels[1]), "runId": browser_run, "lane": "browser",
                    "createdAt": part_sent, "metadata": {"prompt_metadata": metadata}}),
             json!({"role": "assistant", "content": note, "runId": browser_run, "lane": "browser", "createdAt": written_now(), "metadata": {
@@ -1784,7 +1782,7 @@ async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
                 "details": {"kind": "agent_message", "browserFindings": {"pages": 2, "pagesRead": 2}},
             }}),
         ];
-        let (history, part) = run_routed_message(
+        let (history, part, fill_in_sent) = run_routed_message(
             harness,
             chat,
             page,
@@ -1792,11 +1790,11 @@ async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
             comparison.clone(),
             [labels[2], labels[3]],
             J_FILL_IN,
-            (true, json!({})),
+            (true, json!({}), None),
             fill_in_script,
         )
         .await;
-        chats.push((chat, page, state, comparison, part, history));
+        chats.push((chat, page, state, comparison, part, history, fill_in_sent));
     }
 
     // J9 to J11: the question for the browser alone, its part, which fails, and its Try again,
@@ -1804,7 +1802,7 @@ async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
     // card's first browser turn. Try again is handed the state the failed job reported, or the
     // one saved before when it reported none.
     let (chat, page, state, comparison, ..) = chats[0].clone();
-    let (history, part) = run_routed_message(
+    let (history, part, _) = run_routed_message(
         harness,
         chat,
         page,
@@ -1812,7 +1810,7 @@ async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
         comparison,
         ["J9", "J10"],
         J_ASK,
-        (false, json!({})),
+        (false, json!({}), None),
         Vec::new(),
     )
     .await;
@@ -1834,8 +1832,9 @@ async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
 
     // J12 to J15: the person stopped each chat's fill-in part instead, and Continue under the
     // Stop sends the fill-in again. The stopped part saved no thread: its Continue's browser part
-    // is handed the state its chat's comparison part saved.
-    for ((chat, page, state, _, part, mut history), labels) in
+    // is handed the state its chat's comparison part saved. The fill-in first went out when it
+    // was sent.
+    for ((chat, page, state, _, part, mut history, fill_in_sent), labels) in
         chats.into_iter().zip([["J12", "J13"], ["J14", "J15"]])
     {
         let stopped = harness.turn(part).run_id;
@@ -1852,7 +1851,11 @@ async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
             history,
             labels,
             J_FILL_IN,
-            (true, json!({"continuedRunIds": [stopped]})),
+            (
+                true,
+                json!({"continuedRunIds": [stopped]}),
+                Some(fill_in_sent),
+            ),
             Vec::new(),
         )
         .await;
@@ -1861,8 +1864,10 @@ async fn run_messages_after_a_long_browser_thread(harness: &mut Harness) {
 
 /// A message of chain J the routing step sends to the browser (`labels[0]`), with a build after
 /// it or not and the metadata Studio sends it with, then its card's browser part (`labels[1]`)
-/// with `script`, both on `state`. Returns the chat's history with the message, its card and its
-/// part's request, and the part's label.
+/// with `script`, both on `state`. A Continue under a Stop (`request_sent`: when the request it
+/// sends again first went out) has its part's stamp say so, as the controller's does. Returns the
+/// chat's history with the message and its part's request, the part's label and when the message
+/// was sent.
 #[allow(clippy::too_many_arguments)]
 async fn run_routed_message(
     harness: &mut Harness,
@@ -1872,9 +1877,9 @@ async fn run_routed_message(
     mut history: Vec<Value>,
     labels: [&'static str; 2],
     message: &'static str,
-    (continue_building, metadata): (bool, Value),
+    (continue_building, metadata, request_sent): (bool, Value, Option<Value>),
     script: Vec<Step>,
-) -> (Vec<Value>, &'static str) {
+) -> (Vec<Value>, &'static str, Value) {
     let sent = written_now();
     harness
         .run(
@@ -1895,13 +1900,13 @@ async fn run_routed_message(
         "createdAt": sent, "metadata": {"prompt_metadata": metadata}}),
     );
     let part_sent = written_now();
-    history.push(json!({"role": "assistant", "content": "", "runId": run, "createdAt": part_sent, "metadata": {
-        "jobId": card, "messageType": "action_request",
-        "details": {"browserRequest": {"task": task, "routed": true, "continueBuilding": continue_building}},
-    }}));
     let mut metadata = routed_card_turn(card);
     if continue_building {
         metadata["browserHandsBack"] = json!(true);
+    }
+    if let Some(request_sent) = request_sent {
+        metadata["browserCardTurn"]["answers"] = json!("continue");
+        metadata["browserCardTurn"]["requestSentAt"] = request_sent;
     }
     let mut part = Spec::new(chat, Lane::Shared(page), state)
         .asking(task)
@@ -1914,7 +1919,7 @@ async fn run_routed_message(
         "runId": harness.turn(labels[1]).run_id, "lane": "browser", "createdAt": part_sent,
         "metadata": {"prompt_metadata": metadata}}),
     );
-    (history, labels[1])
+    (history, labels[1], sent)
 }
 
 /// The task of the card a message's routing step posted, which its browser part asks.
@@ -2130,8 +2135,8 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "a bare \"keep going\" carries on what a page here left open, and a change that needs a web page browses first",
             ),
             (
-                "So is research that ends in a page (a comparison, prices, a route), from the first message.",
-                "research ending in a page goes to the browser from the first message",
+                "So is research that ends in a page (a comparison, prices, a route), unless it searches first.",
+                "research ending in a page goes to the browser first unless it searches first",
             ),
             (
                 "or that ends in a page when it searches first, stays `direct`",
@@ -2219,11 +2224,13 @@ const NO_PAGE_LINE: &str =
 
 /// The metadata of the Shared Browser turn that carries on the routed card the turn `card` posted:
 /// Studio's continuation, and the controller's check that it asks the card's task, the person's own
-/// words (`browserCardTurn.routed`).
+/// words (`browserCardTurn.routed`), with what the card answers: a new message
+/// (runtime-controller `system_turns::verify_browser_card_turn`).
 fn routed_card_turn(card: Uuid) -> Value {
     let mut metadata = card_continuation(card, false);
-    metadata["browserCardTurn"] =
-        json!({"version": 1, "cardJobId": card.to_string(), "routed": true});
+    metadata["browserCardTurn"] = json!({
+        "version": 1, "cardJobId": card.to_string(), "routed": true, "answers": "message",
+    });
     metadata["writeScope"] = json!({"mode": "read_only", "ownedPaths": []});
     metadata
 }
@@ -2329,7 +2336,7 @@ fn check_a_fill_in_after_a_reply(harness: &Harness) -> Result<()> {
     ensure!(r1.routed, "L1 was not sent straight to the browser");
     ensure!(
         input_text(first_sampling_request(r1)).contains(
-            "and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address) and what to find."
+            "and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find."
         ),
         "L1's routing call was never told what its summary names"
     );
