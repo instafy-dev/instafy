@@ -39,17 +39,19 @@
  *
  * unnamedControlName(hints) names a control the page left unnamed from its
  * own hints (tooltip attribute, image text, icon name, the short text right
- * beside it, position), so a prompt never reads "button 5". Hosts mask it
- * like any other control name.
+ * beside it, the first words of its row or card, position), so a prompt never
+ * reads "button 5", and the alike controls of a list read apart ("+ beside
+ * “Adult”"). Hosts mask it like any other control name.
  *
  * controlNameRulesInPage() runs inside the page (a host sends its source):
  * the text a control shows, without what never draws (scripts, styles, an
  * svg's metadata, title or defs, hidden parts), and for a list (a select or
  * a listbox) its chosen option, never all of them; and the short text right
- * beside an unnamed control. stepLabels names a list by its own label, or by
- * that chosen option when it has none. isPlaceholderName(text) is true for text that
- * names nothing, such as a bare media type ("image/svg+xml") a page or an
- * svg's metadata leaves where a name would be.
+ * beside an unnamed control and the first words of its row or card.
+ * stepLabels names a list by its own label, or by that chosen option when it
+ * has none. isPlaceholderName(text) is true for text that names nothing, such
+ * as a bare media type ("image/svg+xml") a page or an svg's metadata leaves
+ * where a name would be.
  *
  * isFreeSiteSearch(target, pageUrl, submittedEntries) is the stricter test a
  * host applies before it lets Enter in a site's own search box go without a
@@ -744,8 +746,13 @@
    * A short name for a control the page left unnamed, built from the page's
    * own hints: a tooltip attribute or described-by text, an image's alt text
    * or an svg title, a generic noun for its icon, and where it sits ("top
-   * right"). Never field values or nearby page text. An image text that is
-   * an address or an email address is replaced by the icon noun.
+   * right"), or, in a row or a card, the first words of that row or card
+   * ("button beside “Adult”"), so the alike controls of a list are told
+   * apart. A control whose own name is only marks (`marks`: "+", "−", "×")
+   * is named by them, told apart the same way ("+ beside “Adult”"). Never
+   * field values. An image text that is an address or an email address is
+   * replaced by the icon noun, and words beside it or in its row that are
+   * one are not used.
    */
   function unnamedControlName(hints) {
     const source = hints && typeof hints === "object" ? hints : {};
@@ -755,19 +762,29 @@
     const placed = (base) => (where ? `${base} ${where}` : base);
     const tooltip = short(source.tooltip) || short(source.describedBy);
     if (tooltip) return tooltip;
+    // Words of the page around it, quoted as where it sits, never as its own
+    // name: the short text right beside it ("button next to “Idioma”"), and
+    // the first words of its row or card.
+    const words = (value) => {
+      const text = short(value, 40);
+      return text && /\p{L}/u.test(text) && !/@|:\/\/|^www\./i.test(text) ? text : "";
+    };
+    const nearby = words(source.nearby);
+    const row = words(source.row);
+    const marks = short(source.marks, 8);
+    if (marks && !/[\p{L}\p{N}]/u.test(marks)) {
+      if (nearby) return `${marks} next to \u201c${nearby}\u201d`;
+      return row ? `${marks} beside \u201c${row}\u201d` : marks;
+    }
+    const beside = (base) => (row ? `${base} beside \u201c${row}\u201d` : placed(base));
     const image = short(source.image);
-    if (image && !/@|:\/\/|^www\./i.test(image)) return placed(`${image} ${kind}`);
+    if (image && !/@|:\/\/|^www\./i.test(image)) return beside(`${image} ${kind}`);
     const hint = cleanText(source.iconHint);
     const noun = hint ? (ICON_NOUNS.find(([, pattern]) => pattern.test(hint)) || [null])[0] : null;
     if (noun === "profile") return placed(`${source.hasImage === true ? "profile picture" : "account"} ${kind}`);
-    if (noun) return placed(`${noun} ${kind}`);
-    // The short text right beside it, quoted as what it sits next to, never
-    // as its own name ("button next to “Idioma”").
-    const nearby = short(source.nearby, 40);
-    if (nearby && /\p{L}/u.test(nearby) && !/@|:\/\/|^www\./i.test(nearby)) {
-      return placed(`${kind} next to \u201c${nearby}\u201d`);
-    }
-    return placed(`unnamed ${kind}`);
+    if (noun) return beside(`${noun} ${kind}`);
+    if (nearby) return placed(`${kind} next to \u201c${nearby}\u201d`);
+    return row ? `${kind} beside \u201c${row}\u201d` : placed(`unnamed ${kind}`);
   }
 
   // Runs inside the page: it uses nothing from this file's scope, so a host
@@ -858,7 +875,56 @@
       own = clean(own, 200);
       return fits(own) ? own : "";
     };
-    return { shownTextOf, nearbyTextOf };
+    // The first words of the row or card an unnamed control sits in, so the
+    // alike controls of a list are told apart (a ticket shop's "+" beside
+    // "Adult" and beside "Child"): in the nearest element around it that
+    // shows words outside any control, the first of them in reading order,
+    // when that element is small (a row or a card, not the page). Never a
+    // control's own words, nor a field's value. At most `max` characters,
+    // cut between words; empty when there are none.
+    const ROW_MAX_CHARS = 400;
+    const rowTextOf = (element, max = 40) => {
+      if (!isElement(element)) return "";
+      const firstWords = (container) => {
+        let found = "";
+        let visited = 0;
+        const walk = (node) => {
+          if (found || visited > MAX_NODES) return;
+          visited += 1;
+          if (node.nodeType === 3) {
+            const text = clean(node.nodeValue || "", 200);
+            if (/\p{L}/u.test(text)) found = text;
+            return;
+          }
+          if (!isElement(node) || node === element) return;
+          if (node.namespaceURI === SVG) {
+            if (!SVG_TEXT.has(node.localName)) return;
+          } else if (NEVER_DRAWN.has(String(node.tagName).toUpperCase())) {
+            return;
+          }
+          // A field's words are its value, whatever draws it.
+          const editable = node.isContentEditable === true ||
+            String(node.getAttribute("contenteditable") ?? "false").trim().toLowerCase() !== "false";
+          if (hidden(node) || node.matches(CONTROL) || editable) return;
+          for (const child of node.childNodes) walk(child);
+        };
+        for (const child of container.childNodes) walk(child);
+        return found;
+      };
+      const doc = element.ownerDocument;
+      for (let node = element.parentElement, depth = 0; node && depth < 8; node = node.parentElement, depth += 1) {
+        if (node === doc.body || node === doc.documentElement) return "";
+        if (shownTextOf(node, ROW_MAX_CHARS + 1).length > ROW_MAX_CHARS) return "";
+        const words = firstWords(node);
+        if (!words) continue;
+        if (words.length <= max) return words;
+        const cut = words.slice(0, max + 1);
+        const end = cut.lastIndexOf(" ");
+        return end > 0 ? cut.slice(0, end) : words.slice(0, max);
+      }
+      return "";
+    };
+    return { shownTextOf, nearbyTextOf, rowTextOf };
   }
 
   function idLike(segment) {

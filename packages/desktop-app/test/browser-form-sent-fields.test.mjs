@@ -126,6 +126,48 @@ test("a field a step types into before it submits counts as filled", () => {
   assert.deepEqual(sentFieldNames(window, "query", true), ["Search places", "Open now"]);
 });
 
+test("the fields a step typed into on the page come first, by their labels, whether or not the form posts them", () => {
+  // A planner's stops are fields its own script reads, with no name its form
+  // posts them by: a prompt named only its day and time fields while the
+  // script sent the stops. Then the rest of what the form sends; never a field
+  // typed into in another form, or one the page has emptied since.
+  const window = page(`
+    <form method="post" action="/route">
+      <label for="from">From</label><input id="from" role="combobox" value="Sao Bento">
+      <label for="to">To</label><input id="to" role="combobox" value="Trindade">
+      <label for="via">Via</label><input id="via" role="combobox" value="">
+      <input id="nameless" value="Line D">
+      <label for="day">Day</label><input id="day" type="date" name="day" value="2026-10-31">
+      <label for="time">Time</label><input id="time" type="time" name="time" value="09:00">
+      <button id="find">Find connections</button>
+    </form>
+    <form action="/search"><label for="q">Search the site</label><input id="q" name="q" value="timetables"></form>`);
+  const rules = window.eval(`(${formSubmission.formSubmissionRulesInPage.toString()})()`);
+  const byId = (id) => window.document.getElementById(id);
+  const typed = ["from", "to", "via", "nameless", "q"].map(byId);
+  const sent = (id, typedHere = false) => {
+    const answer = rules.sentFields(byId(id), typedHere, typed);
+    return { names: [...answer.names], count: answer.count };
+  };
+  // The button, and Enter in a stop: the stops first, then the day and the
+  // time; the field with no name a person knows it by is counted.
+  assert.deepEqual(sent("find"), { names: ["From", "To", "Day", "Time"], count: 5 });
+  assert.deepEqual(sent("to"), { names: ["From", "To", "Day", "Time"], count: 5 });
+  // Typing into a field with submit fills it first: it comes first.
+  assert.deepEqual(sent("via", true), { names: ["Via", "From", "To", "Day", "Time"], count: 6 });
+  // With no field typed into, the stops are not named: what the browser's own
+  // post sends.
+  assert.deepEqual(sentFieldNames(window, "find"), ["Day", "Time"]);
+  // A typed field the page took out of its form or emptied is not named.
+  byId("to").value = "";
+  byId("from").remove();
+  assert.deepEqual(sent("find"), { names: ["Day", "Time"], count: 3 });
+  const said = sent("find").names.join(" ");
+  for (const value of ["Sao Bento", "Trindade", "Line D", "timetables", "Search the site"]) {
+    assert.ok(!said.includes(value), `${value} in ${said}`);
+  }
+});
+
 test("names come from the page's own words: aria names, a label's words without its controls, a placeholder", () => {
   const window = page(`
     <span id="mail-label">Your e-mail</span>

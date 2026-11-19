@@ -36,15 +36,18 @@
  *   keyActivatedButton(element)
  *     The button that Enter or Space on `element` clicks: the element or a
  *     <button> around it. Null for any other element.
- *   sentFields(element, typed)
+ *   sentFields(element, typed, typedFields)
  *     The names a person knows the fields by that the submission through
  *     `element` sends something from (typed text, a chosen item, a ticked
  *     box), for a prompt to say what a step sends: a label, a group's legend
  *     or the name attribute, never a value, and no hidden field. Radios and
  *     a list of boxes go by their group, never by the ones chosen. `typed`
- *     counts `element` as filled. { names, count }: the first 24 names, and
- *     how many it sends in all, so a prompt never reads a longer form as
- *     complete.
+ *     counts `element` as filled. The fields a step typed into on the page
+ *     (`typedFields`, and `element` when `typed`) come first, by their
+ *     labels, whether the browser's own post sends them or a script of the
+ *     page does: a planner's stops often have no name attribute. { names,
+ *     count }: the first 24 names, and how many it sends in all, so a prompt
+ *     never reads a longer form as complete.
  *
  * The rules, from the HTML form submission and implicit submission
  * algorithms, as Chromium runs them:
@@ -122,6 +125,11 @@
     const formElementsOf = accessor(HTMLFormElement.prototype, "elements");
     const labelControlOf = accessor(HTMLLabelElement.prototype, "control");
     const shadowHostOf = typeof ShadowRoot === "function" ? accessor(ShadowRoot.prototype, "host") : null;
+    const isConnectedOf = accessor(Node.prototype, "isConnected");
+    const textContentOf = accessor(Node.prototype, "textContent");
+    const inputValueOf = accessor(HTMLInputElement.prototype, "value");
+    const textAreaValueOf = accessor(HTMLTextAreaElement.prototype, "value");
+    const contentEditableOf = accessor(HTMLElement.prototype, "isContentEditable");
 
     const attribute = (element, name) => getAttribute.call(element, name);
     const has = (element, name) => hasAttribute.call(element, name);
@@ -479,13 +487,35 @@
       return filled || String(control.value || "") !== "";
     };
 
+    // Whether a field a step typed into still holds text, as what goes out
+    // from it: one still in the page, and `filled` when the step fills it
+    // first. Never what it holds.
+    const holdsText = (field, filled) => {
+      try {
+        if (!field || isConnectedOf.call(field) !== true) return false;
+        if (filled) return true;
+        if (field instanceof HTMLInputElement) return String(inputValueOf.call(field) || "") !== "";
+        if (field instanceof HTMLTextAreaElement) return String(textAreaValueOf.call(field) || "") !== "";
+        return field instanceof HTMLElement && contentEditableOf.call(field) === true &&
+          String(textContentOf.call(field) || "").trim() !== "";
+      } catch (_) {
+        return false;
+      }
+    };
+
     // What a person knows the fields by that the submission through
-    // `element` sends something from, in tree order, never a value: the
-    // first 24 (`names`), and how many it sends in all (`count`, which may be
-    // more). `typed` counts `element` as filled: a step that types into it
-    // and submits fills it first. None for a dialog submission, which sends
-    // nothing, and for an element with no form.
-    function sentFields(element, typed) {
+    // `element` sends something from, never a value: the first 24
+    // (`names`), and how many it sends in all (`count`, which may be more).
+    // `typed` counts `element` as filled: a step that types into it and
+    // submits fills it first. The fields a step typed into on the page come
+    // first, by their labels, whether or not the browser's own post sends
+    // them (`typedFields`, and `element` when `typed`), unless they are
+    // another form's: a page's script reads its fields itself, and a
+    // planner's stops, with no name attribute, were left out of a prompt
+    // that named only its day and time fields. Then the rest, in tree order.
+    // None for a dialog submission, which sends nothing, and for an element
+    // with no form.
+    function sentFields(element, typed, typedFields) {
       const none = { names: [], count: 0 };
       let submission = null;
       try {
@@ -507,14 +537,31 @@
       }
       const names = [];
       const seen = new Set();
-      for (const control of controls) {
-        if (!sendsField(control, typed === true && control === element)) continue;
-        const name = fieldName(control, boxes);
-        if (!name || seen.has(lower(name))) continue;
+      const add = (name) => {
+        if (!name || seen.has(lower(name))) return;
         seen.add(lower(name));
         if (names.length < MAX_FIELD_NAMES) names.push(name);
+      };
+      // A typed field with no name a person could know it by still counts.
+      let unnamed = 0;
+      const typedHere = [
+        ...(typed === true ? [element] : []),
+        ...(Array.isArray(typedFields) ? typedFields.slice(0, MAX_FIELD_NAMES) : []),
+      ];
+      for (const field of typedHere.filter((field, index) => typedHere.indexOf(field) === index)) {
+        // One of another form goes with that form, not this one.
+        const owner = formOwnerOf(field);
+        if (owner && owner !== submission.form) continue;
+        if (!holdsText(field, typed === true && field === element)) continue;
+        const name = fieldName(field, boxes);
+        if (name) add(name);
+        else unnamed += 1;
       }
-      return { names, count: seen.size };
+      for (const control of controls) {
+        if (!sendsField(control, typed === true && control === element)) continue;
+        add(fieldName(control, boxes));
+      }
+      return { names, count: seen.size + unnamed };
     }
 
     return { submissionOf, implicitSubmission, keyActivatedButton, sentFields };

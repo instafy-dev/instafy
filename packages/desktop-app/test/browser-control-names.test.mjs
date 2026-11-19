@@ -87,6 +87,56 @@ test("the text beside an unnamed control is short plain text, never another cont
   assert.equal(nearbyTextOf(byId("digits")), "");
 });
 
+test("an unnamed control is named by the first words of its row or card, so the alike controls of a list read apart", () => {
+  // A ticket page's reading listed its rows' buttons as "unnamed button",
+  // none told apart: a row's "+" is "+ beside “Adult”", and a card's arrow
+  // "button beside “Museum entrance”". Never another control's words, a
+  // field's value, hidden words, or the words of a part as big as a page.
+  const window = page(`
+    <div><p><span>Adult</span> <span>22.50 euros</span></p><p><button id="adult-less">\u2212</button> <span>0</span> <button id="adult-more">+</button></p></div>
+    <div><p><a href="/child">More about it</a> <span>Child</span></p><p><button id="child-more"></button></p></div>
+    <article><h3>Museum entrance</h3><p>The permanent collection</p><div><button id="card"></button></div></article>
+    <div><span hidden>Secret row</span><p><button id="hidden-row"></button></p></div>
+    <section><div contenteditable="true">Draft words</div><div><button id="beside-editable"></button></div></section>
+    <div><p>${"A part far too long to be a row or a card. ".repeat(12)}</p><p><button id="long-row"></button></p></div>
+    <div><p>An admission ticket for the whole day, with the audio tour</p><p><button id="long-words"></button></p></div>
+    <button id="alone"></button>`);
+  const { rowTextOf } = rules(window);
+  const byId = (id) => window.document.getElementById(id);
+  assert.equal(rowTextOf(byId("adult-less")), "Adult");
+  assert.equal(rowTextOf(byId("adult-more")), "Adult");
+  assert.equal(rowTextOf(byId("child-more")), "Child");
+  assert.equal(rowTextOf(byId("card")), "Museum entrance");
+  for (const id of ["hidden-row", "beside-editable", "long-row", "alone"]) {
+    assert.equal(rowTextOf(byId(id)), "", id);
+  }
+  // Cut between words.
+  assert.equal(rowTextOf(byId("long-words")), "An admission ticket for the whole day,");
+  // A row's words name a control with no name, or one named only by marks,
+  // which it shows: neither for one with a name of its own.
+  assert.equal(policy.unnamedControlName({ tag: "button", marks: "+", row: "Adult" }), "+ beside \u201cAdult\u201d");
+  assert.equal(policy.unnamedControlName({ tag: "button", marks: "\u2212", row: "Adult", position: "middle" }), "\u2212 beside \u201cAdult\u201d");
+  assert.equal(policy.unnamedControlName({ tag: "button", row: "Museum entrance", position: "middle" }), "button beside \u201cMuseum entrance\u201d");
+  assert.equal(policy.unnamedControlName({ tag: "button", iconHint: "icon-plus", row: "Child" }), "add button beside \u201cChild\u201d");
+  assert.equal(policy.unnamedControlName({ tag: "button", image: "Plus", row: "Child" }), "Plus button beside \u201cChild\u201d");
+  // The text right beside it comes first, and a tooltip names it whole.
+  assert.equal(policy.unnamedControlName({ tag: "button", marks: "+", nearby: "Adult", row: "Tickets" }), "+ next to \u201cAdult\u201d");
+  assert.equal(policy.unnamedControlName({ tag: "button", nearby: "Idioma", row: "Language" }), "button next to \u201cIdioma\u201d");
+  assert.equal(policy.unnamedControlName({ tag: "button", marks: "\u00d7", tooltip: "Close", row: "Your basket" }), "Close");
+  // With no row, marks alone stay its name, and an unnamed control is placed
+  // as before; a row's words that are an address are not used.
+  assert.equal(policy.unnamedControlName({ tag: "button", marks: "+" }), "+");
+  assert.equal(policy.unnamedControlName({ tag: "button", row: "alex@example.test", position: "top right" }), "unnamed button in the top right");
+  assert.equal(policy.unnamedControlName({ tag: "button", row: "www.example.test" }), "unnamed button");
+  // A profile picture keeps its place.
+  assert.equal(
+    policy.unnamedControlName({ tag: "button", iconHint: "avatar", hasImage: true, row: "Welcome back", position: "top right" }),
+    "profile picture button in the top right",
+  );
+  // Words and digits are a name, never marks: they keep it.
+  assert.equal(policy.unnamedControlName({ tag: "button", marks: "2", row: "Results" }), "button beside \u201cResults\u201d");
+});
+
 test("names come from what a control draws, never from text that names nothing", () => {
   assert.equal(policy.isPlaceholderName("image/svg+xml"), true);
   assert.equal(policy.isPlaceholderName(" image/PNG "), true);

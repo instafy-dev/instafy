@@ -1740,7 +1740,10 @@ carousel that turns by itself between every snapshot and the step after it
 (which changes the page's snapshot id and nothing its reading lists) still has
 both stations chosen with the snapshot each step returned, a list that changed
 itself is refused by its name and counted, and the planner's button asks once
-with a snapshot from before a turn and the route is read; and Ask mode asks for each choice, naming the option and the
+with a snapshot from before a turn and the route is read; a planner whose stops
+have no name its form posts them by names the stops typed into first in the
+prompt of its button and of Enter in a stop ("Sends: From, To, Day, Time"),
+never a field typed into in another form; and Ask mode asks for each choice, naming the option and the
 list, or the option alone for a list with no label. Last, other lists: one inside its own label is named by the label's own
 words, a car list with a "Swift" is no payment field, a list that holds several
 options is left to the person, an option past the first thousand is found, a
@@ -1849,7 +1852,14 @@ drawer or carousel item in place, turns a switch on, opens a page or loads the
 same one again, a type step, a choice and a choice of the option already chosen
 answer at once; a link to a part of the page already in view is read with the
 words the page draws for it 1.2 s later; a search typed and not sent says
-nothing was searched yet. The Personal
+nothing was searched yet. A field's own suggestion is chosen by a click from a
+list that closes as its field loses focus and from one that draws its stops
+anew under the pointer, found again by the reading's record and clicked once;
+a stop the list no longer shows is not clicked, and the step answers with the
+field's suggestions as they read now. A ticket shop's controls with no name of
+their own are named by their row or card ("+ beside “Adult”") and highlighted
+by that name, while the same rows in a frame are named by the frame's site
+and none is listed or counted. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 

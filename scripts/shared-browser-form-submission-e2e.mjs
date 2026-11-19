@@ -38,7 +38,11 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    changes the page's snapshot id and nothing its reading lists, both
 //    stations are still chosen with the snapshot each step returned, a list
 //    that changed itself is refused by its name, and the planner's button,
-//    which asks, asks once with a snapshot from before a turn.
+//    which asks, asks once with a snapshot from before a turn. A planner
+//    whose stops have no name its form posts them by: the prompt of its
+//    button, and of Enter in a stop, names the fields typed into on the page
+//    first, by their labels, then the rest, and never a field typed into in
+//    another form.
 // 5. Other lists: inside their own labels, with a word of a payment detail
 //    among their options, holding several options, long, posting to another
 //    site after an Allow or from Octo's own tab, signing in with another
@@ -218,6 +222,18 @@ window.live = {
   },
 };
 </script>`;
+// A planner whose stops are fields its own script reads, with no name its
+// form posts them by, beside a day and a time the form posts, and a site
+// search in a form of its own.
+const TYPED_PLANNER = `<h1>Journey Planner</h1>
+<form action="/route" method="post">
+<label for="from">From</label><input id="from" role="combobox" autocomplete="off">
+<label for="to">To</label><input id="to" role="combobox" autocomplete="off">
+<label for="day">Day</label><input id="day" type="date" name="day" value="2026-10-31">
+<label for="time">Time</label><input id="time" type="time" name="time" value="09:00">
+<button>Find connections</button>
+</form>
+<form action="/search" method="get"><label for="site-search">Search the site</label><input id="site-search" name="q"></form>`;
 // Other lists a person meets: lists inside their own labels, a list of cars
 // with a "Swift" among them, one that holds several options at once, a long
 // list, and a bulk-actions list the page posts to another site when it
@@ -346,6 +362,8 @@ export async function runSharedBrowserFormSubmissionFixture() {
         response.end(page("Searches", fill(SEARCH_CHECKS)));
       } else if (url.pathname === "/scenario/planner") {
         response.end(page("Journey Planner", fill(PLANNER)));
+      } else if (url.pathname === "/scenario/typed-planner") {
+        response.end(page("Journey Planner", fill(TYPED_PLANNER)));
       } else if (url.pathname === "/scenario/carousel-planner") {
         response.end(page("Metro", fill(CAROUSEL_PLANNER)));
       } else if (url.pathname === "/scenario/lists") {
@@ -984,7 +1002,30 @@ export async function runSharedBrowserFormSubmissionFixture() {
     assert.equal(routes[0].end, "Trindade");
     assert.match(plannedUnderCarousel.visibleText, /From São Bento to Trindade: take Line D/u);
 
-    // e. Ask mode, in the person's next run: each choice asks, naming the
+    // e. A planner whose stops are fields its own script reads, with no
+    // name its form posts them by. The prompt of its button, and of Enter in
+    // a stop, names the fields typed into on the page first, by their
+    // labels, then the rest of what the form sends, and never a field typed
+    // into in another form: a planner's prompt named only its day and time
+    // fields while its script sent the stops. Typing asks nothing, and
+    // nothing is sent when the person says no.
+    await runPage.goto(`${sites().transit}/scenario/typed-planner`);
+    snapshot = await ok("GET", "/v1/snapshot");
+    start = prompts.length;
+    requests.length = 0;
+    let typedStops = await ok("POST", "/v1/type", { index: control(snapshot, "To").index, snapshotId: snapshot.snapshotId, text: "Trindade" });
+    typedStops = await ok("POST", "/v1/type", { index: control(typedStops, "From").index, snapshotId: typedStops.snapshotId, text: "São Bento" });
+    typedStops = await ok("POST", "/v1/type", { index: control(typedStops, "Search the site").index, snapshotId: typedStops.snapshotId, text: "timetables" });
+    assert.deepEqual(promptsSince(start), [], "Typing asked");
+    await refused(/approval_denied|denied/i, "POST", "/v1/click", { index: control(typedStops, "Find connections").index, snapshotId: typedStops.snapshotId }, ["deny"]);
+    assert.deepEqual(promptsSince(start), [["action", "click", sites().transit]]);
+    assert.equal(prompts.at(-1).display.label, "Change something: Find connections \u00b7 Sends: From, To, Day, Time");
+    await refused(/approval_denied|denied/i, "POST", "/v1/press", { index: control(typedStops, "To").index, snapshotId: typedStops.snapshotId, key: "Enter" }, ["deny"]);
+    assert.equal(prompts.at(-1).operation, "press-enter");
+    assert.match(prompts.at(-1).display.label, /: To \u00b7 Sends: From, To, Day, Time$/u);
+    assert.deepEqual(requests, [], "A step the person said no to sent the planner's form");
+
+    // f. Ask mode, in the person's next run: each choice asks, naming the
     // option and the list by its own label, and a click on a list names the
     // list, never its options. Nothing is chosen when the person says no.
     for (const name of fs.readdirSync(approvalDirectory)) fs.rmSync(path.join(approvalDirectory, name));
@@ -1171,6 +1212,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
         "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read; a choose says what it chose and in which list, and in a form that was not sent that nothing was sent yet, naming the form's button with the words about a prompt only where a press of it needs none; the option a list already holds says only that, on the page a sent form came back with too, chooses nothing and asks nothing",
         "beside a carousel that turns by itself between every snapshot and the step after it, which changes the page's snapshot id and nothing its reading lists, both stations are chosen with the snapshot each step returned, a list that changed itself is refused by its name and counted, and the planner's button asks once with a snapshot from before a turn and the route is read",
+        "a planner's button, and Enter in one of its stops, whose stops have no name its form posts them by, name the fields typed into on the page first by their labels, then the rest the form sends, never a field typed into in another form",
         "a list is named by its own label or the option it holds, never its options, and a snapshot says which option it holds",
         "an option a list does not have chooses nothing and the answer lists the options; a control that is no list is refused",
         "a list the page posts when it changes may post to its own site, and a post elsewhere is stopped by the step's guard",
