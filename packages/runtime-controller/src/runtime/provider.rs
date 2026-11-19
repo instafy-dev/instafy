@@ -132,6 +132,32 @@ fn apply_browser_profile_persistence_env(
     }
 }
 
+/// The allocator settings a provider row's metadata can hold, the Hetzner API
+/// token among them: the keys `apply_provider_overrides` in
+/// runtime-provider-core reads. A provider service takes them from its own
+/// environment, and no provider reads them from a launch request. Every
+/// allocator hands launch metadata to the runtime, in `RUNTIME_METADATA` and on
+/// Hetzner in the server's user-data, which any process on the server can read,
+/// so a launch never carries them.
+const PROVIDER_ALLOCATOR_SETTING_KEYS: [&str; 12] = [
+    "dockerComposeFile",
+    "dockerService",
+    "dockerProjectPrefix",
+    "dockerRepoHost",
+    "dockerCodexRoot",
+    "hetznerToken",
+    "hetznerServerType",
+    "hetznerImage",
+    "hetznerLocation",
+    "hetznerNetworkId",
+    "hetznerFirewallId",
+    "hetznerUserData",
+];
+
+/// The metadata a launch sends the provider: the runtime's own metadata, with
+/// the provider row's metadata filling the keys it leaves unset. The row's
+/// transport env keys win, and its allocator settings
+/// ([`PROVIDER_ALLOCATOR_SETTING_KEYS`]) are left out.
 pub(super) fn merge_provider_metadata(
     runtime_meta: &Option<JsonValue>,
     provider_meta: &Option<JsonValue>,
@@ -146,6 +172,9 @@ pub(super) fn merge_provider_metadata(
     }
     if let Some(JsonValue::Object(map)) = provider_meta {
         for (key, value) in map {
+            if PROVIDER_ALLOCATOR_SETTING_KEYS.contains(&key.as_str()) {
+                continue;
+            }
             if key == "env" {
                 let runtime_env = merged
                     .entry(key.clone())
@@ -663,7 +692,7 @@ mod tests {
         apply_browser_profile_persistence_env, apply_browser_profile_persistence_policy,
         apply_controller_turn_credentials, apply_managed_transport_policy, call_provider_endpoint,
         merge_provider_metadata, provider_call_status_is_final_success,
-        resolve_provider_auth_tokens,
+        resolve_provider_auth_tokens, PROVIDER_ALLOCATOR_SETTING_KEYS,
     };
     use crate::browser_turn::BrowserTurnRestConfig;
     use serde_json::{json, Value as JsonValue};
@@ -822,6 +851,68 @@ mod tests {
             "[{\"urls\":[\"turns:trusted.test:443\"]}]"
         );
         assert_eq!(env["INSTAFY_BROWSER_WEBRTC_FPS"], "24");
+    }
+
+    #[test]
+    fn a_launch_never_carries_the_provider_rows_allocator_settings() {
+        let mut row = serde_json::Map::new();
+        for key in PROVIDER_ALLOCATOR_SETTING_KEYS {
+            row.insert(key.to_string(), json!(format!("row-{key}")));
+        }
+        row.insert("billing".to_string(), json!({ "creditBurnAmount": 2 }));
+        row.insert(
+            "env".to_string(),
+            json!({ "INSTAFY_BROWSER_WEBRTC_FPS": "24" }),
+        );
+        row.insert("source".to_string(), json!("provider-default"));
+        let row = Some(JsonValue::Object(row));
+        let runtime = Some(json!({ "source": "browser-session" }));
+
+        let merged = merge_provider_metadata(&runtime, &row).expect("merged metadata");
+        let launch = serde_json::to_string(&merged).expect("serialized launch metadata");
+        for key in PROVIDER_ALLOCATOR_SETTING_KEYS {
+            assert!(!launch.contains(key), "the launch carried {key}: {launch}");
+        }
+        assert_eq!(merged["billing"], json!({ "creditBurnAmount": 2 }));
+        assert_eq!(merged["env"]["INSTAFY_BROWSER_WEBRTC_FPS"], "24");
+        assert_eq!(merged["source"], "browser-session");
+
+        // A row of allocator settings alone adds nothing to a launch.
+        let only_settings = Some(json!({ "hetznerToken": "row-token", "dockerService": "x" }));
+        assert_eq!(merge_provider_metadata(&None, &only_settings), None);
+        assert_eq!(
+            merge_provider_metadata(&runtime, &only_settings),
+            runtime,
+            "the runtime's own metadata is unchanged"
+        );
+    }
+
+    /// The controller's list is exactly the provider metadata keys
+    /// runtime-provider-core configures an allocator from, so a new allocator
+    /// setting cannot start riding along in launches unnoticed.
+    #[test]
+    fn provider_allocator_setting_keys_are_every_key_an_allocator_reads() {
+        let source = include_str!("../../../runtime-provider-core/src/allocator/mod.rs");
+        let start = source
+            .find("fn apply_provider_overrides(")
+            .expect("apply_provider_overrides in runtime-provider-core");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("end of apply_provider_overrides")];
+        let mut read = Vec::new();
+        for call in ["string(\"", "meta.get(\""] {
+            let mut rest = body;
+            while let Some(found) = rest.find(call) {
+                let key = &rest[found + call.len()..];
+                let end = key.find('"').expect("closing quote");
+                read.push(&key[..end]);
+                rest = &key[end..];
+            }
+        }
+        read.sort_unstable();
+        read.dedup();
+        let mut listed = PROVIDER_ALLOCATOR_SETTING_KEYS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(read, listed);
     }
 
     #[test]
