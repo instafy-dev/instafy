@@ -10,6 +10,7 @@ import type {
   DesktopRuntimeLaunchGrantValue,
 } from "../desktopExtensionRegistry";
 import {
+  CLAUDE_CODE_CONSENT_VERSION,
   CLAUDE_CODE_LAUNCH_GRANT_ENV_KEYS,
   CLAUDE_CODE_LOCAL_ENGINE,
   buildClaudeCodeConsentDialog,
@@ -70,7 +71,7 @@ export type ClaudeCodeDesktopStatus = Readonly<{
    * recorded ones it no longer can. Such a Find turned up that program or,
    * as for an alias, no program at all; one that turned up another copy, in
    * the usual folders too, shows that copy instead. The path and values in
-   * use stay until Use for my messages confirms this one.
+   * use stay until Use Claude Code on this computer confirms this one.
    */
   candidatePath?: string;
   /** While the lane is on: why Desktop won't use `candidatePath`, or that Find found nothing. */
@@ -97,7 +98,7 @@ type Candidate = Readonly<{
   shellAnswered: boolean;
 }>;
 
-/** What Use for my messages records: a program, with the PATH entries and values it runs with. */
+/** What Use Claude Code on this computer records: a program, with the PATH entries and values it runs with. */
 type Choice = Readonly<{
   binaryPath: string;
   pathEntries: readonly string[];
@@ -160,7 +161,7 @@ export function createClaudeCodeDesktopFeatureModule(
   const osAccount = options.osAccount ?? defaultOsAccount;
   const lang = options.lang ?? (() => process.env.LANG);
   const now = options.now ?? (() => new Date());
-  // What Find or Locate turned up, which Use for my messages confirms. Kept
+  // What Find or Locate turned up, which Use Claude Code on this computer confirms. Kept
   // in memory per controller and user: a found path is not a consent.
   const candidates = new Map<string, Candidate>();
 
@@ -231,7 +232,7 @@ export function createClaudeCodeDesktopFeatureModule(
   // when it shows beside the program in use; null when it doesn't. Another
   // program, or nothing found, always shows. The program in use shows only
   // when Find read login-shell values for it that Desktop can use while the
-  // recorded ones it no longer can (D26): Use for my messages then confirms
+  // recorded ones it no longer can (D26): Use Claude Code on this computer then confirms
   // those through the consent dialog, as it would another program. A Find
   // that turned up no program, as for an alias, but whose login shell
   // answered read values for the program in use all the same. A shell that
@@ -259,7 +260,7 @@ export function createClaudeCodeDesktopFeatureModule(
     return renewed.problem ? nothingNew : renewed;
   };
 
-  // What Use for my messages confirms. With no record, what the last Find or
+  // What Use Claude Code on this computer confirms. With no record, what the last Find or
   // Locate turned up. While the lane is on, another program they turned up,
   // or new login-shell values for the program in use when the answer offers
   // them; otherwise the record as it is, so nothing the answer did not offer
@@ -452,6 +453,7 @@ export function createClaudeCodeDesktopFeatureModule(
               env: { ...chosen.env },
               consentedAt: now().toISOString(),
               osUser: osAccount().username,
+              consentVersion: CLAUDE_CODE_CONSENT_VERSION,
             });
             // The find stays: if the shell rolls this back, it can be
             // confirmed again without another Find.
