@@ -279,7 +279,7 @@ cancels, and the login still saves nothing.
 
 Apply the migration `20261120193012_ai_connection_attempts` before deploying the controller that
 counts these limits: without its table, connection tests and ChatGPT-login starts fail. Apply
-`20261116120010_ai_connection_attempts_side_calls` and `20261116130600_ai_side_call_minutes`
+`20261120193014_ai_connection_attempts_side_calls` and `20261120193016_ai_side_call_minutes`
 before deploying the controller that also counts inline completions and conversation titles:
 until the receipts table takes their receipts and the minute table exists, every completion and
 title request fails with HTTP 500, which the Studio shows as no completion and the fallback
