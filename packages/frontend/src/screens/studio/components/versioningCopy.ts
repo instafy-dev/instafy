@@ -833,8 +833,9 @@ const LEGACY_SAVE_DID_NOT_RUN_MESSAGE =
 // The message-level note when the turn's save failed or did not run.
 export function describeUnsavedChanges(reason: ChatMessageUnsavedReason, placement: UnsavedWorkPlacement): string {
   if (reason === "stopped_before_save") {
-    // A later turn saves only what it changes itself, so nothing promises
-    // these a save.
+    // A later turn saves only what it changes itself, and the chat's next
+    // turn puts these back before it changes anything, so nothing promises
+    // them a save.
     return `Stopped before these changes were saved. They're ${keptAs(placement)}.`;
   }
   if (reason === "save_not_started") {
@@ -851,6 +852,15 @@ export function describeUnsavedChanges(reason: ChatMessageUnsavedReason, placeme
   // refresh publishes what a save left behind.
   return `These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is ${keptAs(placement)}.`;
 }
+
+// A change a Stop left unsaved that a later turn's save took with its own:
+// that turn could not put it back first (the person had changed the file
+// since), or the person asked to go on with it. The row no longer reads Not
+// saved. A save takes the file as that turn left it, so the note promises
+// only what was left of the stopped change, as that turn's reply does.
+export const STOPPED_CHANGE_SAVED_LATER_LABEL = "Saved later";
+export const STOPPED_CHANGE_SAVED_LATER_MESSAGE =
+  "Stopped before these changes were saved. A later change saved what was left of them with its own.";
 
 // Why one file of the turn was left out of the saved history.
 export function describeFileNotSaved(notSaved: ChatMessageFileNotSaved, placement: UnsavedWorkPlacement): string {

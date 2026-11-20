@@ -26,6 +26,16 @@
 //! attached. Unlike a running turn's progress, it stays in the conversation
 //! history that later turns read: it is what the stopped turn left, which a
 //! turn that goes on, or undoes it, needs to know.
+//!
+//! A change such a turn never saved stays in its folder. The chat's next turn
+//! puts it back before it changes anything, as the change's own Undo does, so
+//! its save holds only its own change, and its runtime reports that
+//! (`POST /agent/stopped/put-back`, [`agent_put_back`]). Taken only from the
+//! runtime that holds that next turn's job, for the report of a turn that
+//! never saved and whose files that runtime's folder holds, it records the
+//! line an Undo leaves, in its own words (`change_undone.rs`): the stopped row
+//! reads as undone in every Studio, and later turns read that the files no
+//! longer hold the change. It is no turn and moves no credit.
 
 use super::*;
 
@@ -394,9 +404,209 @@ pub(crate) async fn agent_stopped(
     Ok(Json(AgentStoppedResponseBody { ok: true }))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct AgentPutBackPayload {
+    /// The job of the turn that put the change back.
+    #[serde(rename = "job_id")]
+    job_id: String,
+    /// The stopped turn's report: the message whose row shows the change.
+    #[serde(rename = "message_id", alias = "messageId")]
+    message_id: String,
+    /// The files put back or removed.
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AgentPutBackResponseBody {
+    ok: bool,
+    /// The line, as the chat's history carries it to later turns.
+    line: JsonValue,
+}
+
+/// Whether `metadata` is the report of a stopped turn that never saved its
+/// change, which the folder of runtime `runtime_id` holds.
+fn is_unsaved_change_held_by(metadata: &JsonValue, runtime_id: &Uuid) -> bool {
+    let text = |pointer: &str| metadata.pointer(pointer).and_then(JsonValue::as_str);
+    text("/source") == Some("agent")
+        && text("/outcome") == Some("canceled")
+        && metadata
+            .get("artifacts")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .any(|artifact| {
+                artifact.get("kind").and_then(JsonValue::as_str) == Some("apply/files")
+                    && artifact.pointer("/metadata/stoppedBeforeSave") == Some(&json!(true))
+                    && artifact
+                        .pointer("/metadata/undo/runtimeId")
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|held_by| held_by.trim() == runtime_id.to_string())
+            })
+}
+
+pub(crate) async fn agent_put_back(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    axum::Json(payload): axum::Json<AgentPutBackPayload>,
+) -> Result<Json<AgentPutBackResponseBody>, (StatusCode, Json<ApiError>)> {
+    let token = extract_agent_token(&headers)?;
+    let claims = verify_agent_token_with_scopes(&state.config, token, &["agent.message"])?;
+    let runtime_id = claims
+        .runtime_id
+        .ok_or_else(|| unauthorized("a put-back is reported by the runtime that made it"))?;
+    let job_id =
+        Uuid::from_str(&payload.job_id).map_err(|_| bad_request("job_id must be a valid UUID"))?;
+    let message_id = Uuid::from_str(payload.message_id.trim())
+        .map_err(|_| bad_request("message_id must be a valid UUID"))?;
+    if payload.paths.is_empty() || payload.paths.len() > MAX_REPORTED_FILES {
+        return Err(bad_request("paths names the 1 to 80 files put back"));
+    }
+
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    ensure_agent_token_matches_runtime_lease_for_job(&state, &transaction, &claims, &runtime_id)
+        .await?;
+    // Only the runtime that holds the next turn's job, while it holds it.
+    let job = transaction
+        .query_opt(
+            "select conversation_id, payload
+               from agent_jobs
+              where id = $1
+                and project_id = $2
+                and status = 'leased'
+                and leased_by_runtime_id = $3",
+            &[&job_id, &claims.project_id, &runtime_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load the turn's job: {error}")))?
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                Json(ApiError::new(
+                    "the job is not a turn this runtime is running",
+                )),
+            )
+        })?;
+    let conversation_id = job
+        .get::<_, Option<Uuid>>("conversation_id")
+        .or_else(|| {
+            job.get::<_, PgJson<JsonValue>>("payload")
+                .0
+                .get("conversation_id")
+                .and_then(JsonValue::as_str)
+                .and_then(|value| Uuid::from_str(value).ok())
+        })
+        .ok_or_else(|| bad_request("the turn's job has no chat"))?;
+    // The stopped turn's report, in the same chat.
+    let changed = transaction
+        .query_opt(
+            "select id, conversation_id, project_id, session_id, created_by, prompt_id,
+                    run_id, role, content, metadata, created_at
+               from conversation_messages
+              where id = $1 and project_id = $2 and conversation_id = $3",
+            &[&message_id, &claims.project_id, &conversation_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load the stopped change: {error}")))?
+        .map(|row| map_conversation_message_row(&row))
+        .ok_or_else(|| not_found("message not found"))?;
+    if !changed.role.eq_ignore_ascii_case("assistant")
+        || !is_unsaved_change_held_by(&changed.metadata, &runtime_id)
+    {
+        return Err(bad_request(
+            "this message is no unsaved change of a turn stopped on this runtime",
+        ));
+    }
+    let conversation = load_conversation_record(&transaction, &conversation_id).await?;
+    crate::conversations::ensure_not_internal_conversation(&transaction, &conversation.id).await?;
+    // Only this change's own files.
+    let change_paths = crate::change_undone::change_paths(&changed.metadata);
+    let put_back: std::collections::BTreeSet<String> = payload
+        .paths
+        .iter()
+        .map(|path| crate::change_undone::normalize_path(path))
+        .filter(|path| change_paths.contains(path))
+        .collect();
+    if put_back.is_empty() {
+        return Err(bad_request("none of these files are this change's"));
+    }
+    let (line, created) = crate::change_undone::record_taken_back(
+        &transaction,
+        &conversation,
+        &changed,
+        &change_paths,
+        put_back,
+        crate::change_undone::TakenBackBy::NextTurn(job_id),
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to record the put-back: {error}")))?;
+    if created {
+        // Every open Studio of the chat shows the change as undone.
+        publish_conversation_message_event(&state.events, &line);
+    }
+    Ok(Json(AgentPutBackResponseBody {
+        ok: true,
+        line: json!({
+            "id": line.id.to_string(),
+            "role": line.role,
+            "content": line.content,
+            "createdAt": line.created_at.to_rfc3339(),
+            "metadata": line.metadata,
+        }),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the report of a turn that never saved, on the machine whose
+    /// folder holds its change, can be recorded as put back.
+    #[test]
+    fn only_an_unsaved_change_this_runtimes_folder_holds_is_put_back() {
+        let runtime_id = Uuid::new_v4();
+        let report = |files_metadata: JsonValue| {
+            json!({
+                "source": "agent", "outcome": "canceled", "messageType": "file_change",
+                "artifacts": [{ "kind": "apply/files", "files": [{ "path": "a.js" }], "metadata": files_metadata }],
+            })
+        };
+        let unsaved = report(json!({
+            "stoppedBeforeSave": true,
+            "undo": { "runtimeId": runtime_id.to_string(), "leftAs": { "a.js": null }, "changedBefore": [] },
+        }));
+        assert!(is_unsaved_change_held_by(&unsaved, &runtime_id));
+        // Another machine's folder holds it.
+        assert!(!is_unsaved_change_held_by(&unsaved, &Uuid::new_v4()));
+        // A turn stopped while it saved, and one whose report says nothing of
+        // what it left.
+        assert!(!is_unsaved_change_held_by(
+            &report(json!({ "provider": "codex-embedded" })),
+            &runtime_id
+        ));
+        assert!(!is_unsaved_change_held_by(
+            &report(json!({ "stoppedBeforeSave": true })),
+            &runtime_id
+        ));
+        // A finished turn's reply, whatever its artifact claims.
+        let mut finished = unsaved.clone();
+        finished["outcome"] = json!("completed");
+        assert!(!is_unsaved_change_held_by(&finished, &runtime_id));
+        let mut persons = unsaved;
+        persons["source"] = json!("user");
+        assert!(!is_unsaved_change_held_by(&persons, &runtime_id));
+    }
 
     fn files(paths: &[&str]) -> JsonValue {
         json!([{

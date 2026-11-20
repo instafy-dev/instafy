@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types";
-import { conversationLaterChanges, readChangeUndone } from "../chatLaterChanges";
+import { conversationLaterChanges, readChangeUndone, readSavedLater } from "../chatLaterChanges";
 
 function filesMessage(id: string, timestamp: number, jobId: string, paths: string[]): ChatMessage {
   return {
@@ -81,5 +81,51 @@ describe("conversationLaterChanges", () => {
     const later = filesMessage("later", 2_000, "job-later", ["sites/a/app.js"]);
     expect(conversationLaterChanges([thread])("stopped", ["sites/a/app.js"])).toBe(false);
     expect(conversationLaterChanges([thread, later])("stopped", ["sites/a/app.js"])).toBe(true);
+  });
+
+  // A change a Stop left unsaved that a later turn's save took with its own:
+  // that turn's reply names the stopped row and the files. Only an agent's
+  // reply says so.
+  it("says which files of a stopped change a later turn's save took", () => {
+    const reply = (id: string, changes: unknown, metadata: Record<string, unknown> = {}): ChatMessage => ({
+      id,
+      role: "assistant",
+      content: "Added the battery column.",
+      timestamp: 2_000,
+      metadata: {
+        source: "agent",
+        jobId: "job-later",
+        artifacts: [
+          { kind: "origin/apply", metadata: { gitSyncStatus: "synced" } },
+          { kind: "stopped-turn/saved-later", metadata: { changes } },
+        ],
+        ...metadata,
+      },
+    });
+    const saved = reply("later", [{ messageId: "stopped", paths: ["./sites/a/app.js"] }]);
+    expect(readSavedLater(saved)).toEqual([{ messageId: "stopped", paths: ["sites/a/app.js"] }]);
+    expect(readSavedLater(stopped)).toEqual([]);
+    expect([...(conversationLaterChanges([stopped, saved]).savedLater?.("stopped") ?? [])]).toEqual(["sites/a/app.js"]);
+    expect(conversationLaterChanges([stopped, saved]).savedLater?.("later")).toBeNull();
+    expect(conversationLaterChanges([stopped]).savedLater?.("stopped")).toBeNull();
+    // The reply inside its turn's row.
+    const thread: ChatMessage = {
+      id: "thread-row",
+      role: "assistant",
+      content: "",
+      timestamp: 2_000,
+      messageType: "agent_job_thread",
+      metadata: { messageType: "agent_job_thread", jobId: "job-later", threadMessages: [saved] },
+    };
+    expect([...(conversationLaterChanges([stopped, thread]).savedLater?.("stopped") ?? [])]).toEqual(["sites/a/app.js"]);
+    // Nothing unreadable, and no message that only calls itself an agent's reply.
+    for (const changes of [null, "stopped", [{ messageId: "", paths: ["a.js"] }], [{ messageId: "stopped", paths: [] }], [7]]) {
+      expect(readSavedLater(reply("odd", changes))).toEqual([]);
+    }
+    expect(readSavedLater(reply("forged", [{ messageId: "stopped", paths: ["a.js"] }], { source: undefined }))).toEqual([]);
+    // A save by the turn the person asked to undo the change: that turn's
+    // reply says what became of it, so no row is told a later change saved it.
+    expect(readSavedLater(reply("asked", [{ messageId: "stopped", paths: ["a.js"], undoAsked: true }]))).toEqual([]);
+    expect(readSavedLater({ ...saved, role: "user" })).toEqual([]);
   });
 });

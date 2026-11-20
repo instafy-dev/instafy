@@ -738,3 +738,282 @@ async fn a_turn_retried_after_a_rate_limit_is_reported_once_when_stopped() -> an
     )
     .await
 }
+
+/// The chat's next turn puts a stopped turn's unsaved change back before it
+/// changes anything, and its runtime reports that (`POST
+/// /agent/stopped/put-back`): the controller records the line an Undo leaves,
+/// in its words for this, once, for the stopped turn's report and its files.
+/// Only the runtime that holds the next turn's job is heard, and only for a
+/// change no save took that its own folder holds. Nothing else moves.
+#[tokio::test]
+async fn the_next_turn_records_the_unsaved_change_it_put_back() -> anyhow::Result<()> {
+    on_a_space("stopped-turn-put-back", |pool, state, space| async move {
+        const REQUEST: &str = "Add a warranty column to the comparison.";
+        let page = PAGE.trim_start_matches(WORKSPACE);
+        let turn = space.running_turn(&pool, &space.runtime_id).await?;
+        pool.get()
+            .await?
+            .execute(
+                "insert into conversation_messages (
+                     id, conversation_id, project_id, run_id, role, content, metadata, created_by,
+                     created_at
+                 ) values ($1, $2, $3, $4, 'user', $5, '{}'::jsonb, $6, now() - interval '1 minute')",
+                &[
+                    &Uuid::new_v4(),
+                    &turn.conversation_id,
+                    &space.project_id,
+                    &turn.run_id,
+                    &REQUEST,
+                    &space.owner_user_id,
+                ],
+            )
+            .await?;
+        space.stop(&state, &turn).await?;
+        // The stopped turn's report: its change was never saved, and this is
+        // what it left in the file on the machine that ran it.
+        let unsaved = |runtime_id: &Uuid, job_id: &Uuid| {
+            json!({
+                "job_id": job_id.to_string(),
+                "content": format!("Applied file changes: {PAGE}"),
+                "message_type": "file_change",
+                "metadata": {
+                    "kind": "codex_file_change", "itemId": "stopped-turn-files",
+                    "eventType": "item.completed", "status": "completed",
+                    "paths": [PAGE], "activity": edit_label(1),
+                },
+                "artifacts": [{
+                    "kind": "apply/files",
+                    "files": [{
+                        "path": page, "workspacePath": page,
+                        "change": { "type": "changed" }, "changeType": "changed",
+                    }],
+                    "metadata": {
+                        "provider": "codex-embedded",
+                        "stoppedBeforeSave": true,
+                        "undo": {
+                            "runtimeId": runtime_id.to_string(),
+                            "leftAs": { page: "8c7e5a667f1b771847fe88c01c3de34413a1b220" },
+                            "changedBefore": [],
+                        },
+                    },
+                }],
+            })
+        };
+        assert_eq!(
+            space
+                .post(
+                    &state,
+                    &space.runtime_id,
+                    "/agent/stopped",
+                    unsaved(&space.runtime_id, &turn.job_id)
+                )
+                .await?,
+            StatusCode::OK
+        );
+        let report_id: Uuid = crate::tests::sql_one(
+            &pool,
+            "select id from conversation_messages
+              where conversation_id = $1 and metadata->>'jobId' = $2",
+            &[&turn.conversation_id, &turn.job_id.to_string()],
+        )
+        .await?;
+
+        // The chat's next turn, running on the same machine.
+        let next_run = Uuid::new_v4();
+        let next_job = Uuid::new_v4();
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into runs (id, project_id, conversation_id, run_type, status, metadata)
+                     values ($1, $2, $3, 'prompt', 'in_progress', $4)",
+                    &[
+                        &next_run,
+                        &space.project_id,
+                        &turn.conversation_id,
+                        &PgJson(json!({ "initiatingUserId": space.owner_user_id })),
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into agent_jobs (
+                         id, project_id, conversation_id, run_id, status, payload,
+                         lease_attempts, leased_at, lease_expires_at, leased_by_runtime_id
+                     ) values (
+                         $1, $2, $3, $4, 'leased', $5, 1, now(), now() + interval '2 minutes', $6
+                     )",
+                    &[
+                        &next_job,
+                        &space.project_id,
+                        &turn.conversation_id,
+                        &next_run,
+                        &PgJson(json!({
+                            "user_id": space.owner_user_id,
+                            "conversation_id": turn.conversation_id,
+                            "prompt_text": "Add a battery column to the comparison.",
+                            "metadata": { "agent": { "handle": "octo" } },
+                        })),
+                        &space.runtime_id,
+                    ],
+                )
+                .await?;
+        }
+        let ledger_before = ledger_rows(&pool, &space.project_id).await?;
+        let put_back = |runtime_id: Uuid, job_id: Uuid, message_id: Uuid, paths: JsonValue| {
+            let (state, project_id) = (state.clone(), space.project_id);
+            async move {
+                let token = crate::auth::issue_agent_token(
+                    &state.config,
+                    &project_id,
+                    &runtime_id,
+                    None,
+                    None,
+                )
+                .map_err(|error| controller_error("issue agent token", error))?
+                .token;
+                let response = agent::router()
+                    .with_state(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/agent/stopped/put-back")
+                            .header(axum::http::header::CONTENT_TYPE, "application/json")
+                            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                            .body(Body::from(
+                                json!({
+                                    "job_id": job_id.to_string(),
+                                    "message_id": message_id.to_string(),
+                                    "paths": paths,
+                                })
+                                .to_string(),
+                            ))?,
+                    )
+                    .await?;
+                let status = response.status();
+                let body = to_bytes(response.into_body(), usize::MAX).await?;
+                let body: JsonValue = serde_json::from_slice(&body).unwrap_or(JsonValue::Null);
+                anyhow::Ok((status, body))
+            }
+        };
+        let lines = || async {
+            anyhow::Ok(
+                pool.get()
+                    .await?
+                    .query(
+                        "select id, content, metadata from conversation_messages
+                          where conversation_id = $1 and metadata->>'kind' = 'change_undone'
+                          order by created_at",
+                        &[&turn.conversation_id],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.get::<_, Uuid>("id"),
+                            row.get::<_, String>("content"),
+                            row.get::<_, PgJson<JsonValue>>("metadata").0,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        // Not from another machine of the space, which holds no such turn.
+        let (status, _) =
+            put_back(space.other_runtime_id, next_job, report_id, json!([page])).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        // Not in the name of a turn that is not running: the stopped one.
+        let (status, _) =
+            put_back(space.runtime_id, turn.job_id, report_id, json!([page])).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        // Not for files that are not the change's, nor for none.
+        let (status, _) =
+            put_back(space.runtime_id, next_job, report_id, json!(["sites/other.js"])).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = put_back(space.runtime_id, next_job, report_id, json!([])).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Not for a message that is no stopped turn's unsaved change: the Stop's notice.
+        let notice_id: Uuid = crate::tests::sql_one(
+            &pool,
+            "select id from conversation_messages
+              where conversation_id = $1 and metadata->>'kind' = 'run_cancellation'",
+            &[&turn.conversation_id],
+        )
+        .await?;
+        let (status, _) =
+            put_back(space.runtime_id, next_job, notice_id, json!([page])).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Nor for another chat's message.
+        let other = space.running_turn(&pool, &space.runtime_id).await?;
+        let (status, _) =
+            put_back(space.runtime_id, other.job_id, report_id, json!([page])).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(lines().await?.is_empty());
+
+        // From the machine running the chat's next turn: recorded.
+        let (status, body) =
+            put_back(space.runtime_id, next_job, report_id, json!([page])).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["ok"], true);
+        let line = &body["line"];
+        assert_eq!(line["role"], "assistant");
+        assert_eq!(
+            line["content"],
+            format!("The change from “{REQUEST}” was stopped before it was saved, so it was taken back before the next change")
+        );
+        assert_eq!(
+            line["metadata"],
+            json!({
+                "source": "controller",
+                "kind": "change_undone",
+                "presentation": { "hidden": true },
+                "undoneMessageId": report_id.to_string(),
+                "undonePaths": [page],
+                "undoneRunId": turn.run_id.to_string(),
+                "putBackByJobId": next_job.to_string(),
+            })
+        );
+        let recorded = lines().await?;
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(json!(recorded[0].0.to_string()), line["id"]);
+        assert_eq!(recorded[0].2, line["metadata"]);
+
+        // Told again, it answers with the line already there.
+        let (status, again) =
+            put_back(space.runtime_id, next_job, report_id, json!([page])).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(again["line"]["id"], line["id"]);
+        assert_eq!(lines().await?.len(), 1);
+
+        // Later turns of the chat read the line in its history.
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        let history = crate::agent::load_conversation_history_for_agent(
+            &transaction,
+            &turn.conversation_id,
+            None,
+            Some("octo"),
+            None,
+            50,
+        )
+        .await
+        .map_err(|error| controller_error("load the chat's history", error))?;
+        transaction.commit().await?;
+        assert!(
+            history.iter().any(|entry| entry["id"] == line["id"]
+                && entry["content"] == line["content"]
+                && entry["metadata"]["undoneMessageId"] == json!(report_id.to_string())),
+            "{history:?}"
+        );
+
+        // Nothing else moved: the stopped turn stays stopped, the next one
+        // keeps running, and no credit moved.
+        assert_eq!(job_state(&pool, &turn.job_id).await?.0, "canceled");
+        assert_eq!(job_state(&pool, &next_job).await?.0, "leased");
+        assert_eq!(run_status(&pool, &next_run).await?, "in_progress");
+        assert_eq!(ledger_rows(&pool, &space.project_id).await?, ledger_before);
+        Ok(())
+    })
+    .await
+}

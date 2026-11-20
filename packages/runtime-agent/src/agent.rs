@@ -1022,6 +1022,11 @@ impl RuntimeAgent {
                 .as_ref()
                 .and_then(|service| service.local_sync()),
         );
+        executor.set_unsaved_put_back(
+            origin_service
+                .as_ref()
+                .and_then(|service| service.unsaved_put_back()),
+        );
 
         let tunnel_refresh = tunnel_lifecycle
             .as_ref()
@@ -1077,6 +1082,7 @@ impl RuntimeAgent {
         // No more jobs run in this cycle; stop advertising the local origin
         // listener before it is torn down below.
         executor.set_local_origin_sync(None);
+        executor.set_unsaved_put_back(None);
 
         // Stop periodic snapshots before the clean shutdown snapshot so they do
         // not read/upload the live profile concurrently, and so an error path

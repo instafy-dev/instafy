@@ -45,6 +45,9 @@
 //! (`/git/revert` with `expected`, on this machine's own origin) and only
 //! for files the turn found as saved; otherwise it would also take back work
 //! that is not the turn's.
+//! The chat's next turn puts such a change back itself before it changes
+//! anything, by the same rule, so its save holds only its own change
+//! (`stopped_change`).
 //!
 //! A local-engine turn's report (docs/Local-Engine-Turns.md 3.6, step 5)
 //! leaves out what its saves leave out (`claude_code::saves`: `.claude/`,

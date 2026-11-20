@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -130,10 +131,39 @@ impl PartialEq for WorkingStateProbe {
 
 impl Eq for WorkingStateProbe {}
 
+type UnsavedPutBackFuture = Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send>>;
+
+/// Puts a stopped turn's unsaved change back in the folder of the origin
+/// hosted by this process, with what the files held kept as unsaved work: what
+/// a person's Undo of it does (see `origin_http_server::routes`). Given what
+/// the turn left in each file (its blob id, or `None` for nothing there), it
+/// resolves to the files it put back or removed, none when no file holds the
+/// change any more. It fails, leaving every file as it is, when one of them
+/// changed since or the folder is being written.
+#[derive(Clone)]
+pub struct UnsavedPutBack(
+    Arc<dyn Fn(BTreeMap<String, Option<String>>) -> UnsavedPutBackFuture + Send + Sync>,
+);
+
+impl UnsavedPutBack {
+    pub fn new<F, Fut>(put_back: F) -> Self
+    where
+        F: Fn(BTreeMap<String, Option<String>>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<String>>> + Send + 'static,
+    {
+        Self(Arc::new(move |expected| Box::pin(put_back(expected))))
+    }
+
+    pub async fn run(&self, expected: BTreeMap<String, Option<String>>) -> Result<Vec<String>> {
+        (self.0)(expected).await
+    }
+}
+
 pub struct OriginService {
     server: Option<OriginHttpServer>,
     presence_metadata: Option<Arc<RwLock<Value>>>,
     local_sync: Option<LocalOriginSync>,
+    unsaved_put_back: Option<UnsavedPutBack>,
 }
 
 impl OriginService {
@@ -271,6 +301,23 @@ impl OriginService {
             })
         });
 
+        let unsaved_put_back = server.unsaved_put_back().map(|origin| {
+            UnsavedPutBack::new(move |expected| {
+                let origin = origin.clone();
+                async move {
+                    let summary = origin
+                        .put_back(expected)
+                        .await
+                        .map_err(|error| anyhow!("the change was not put back: {error}"))?;
+                    Ok(summary
+                        .reverted
+                        .into_iter()
+                        .chain(summary.removed)
+                        .collect())
+                }
+            })
+        });
+
         let endpoint = settings
             .tunnel_url
             .clone()
@@ -353,7 +400,14 @@ impl OriginService {
                 read_only_refresh,
                 working_state,
             }),
+            unsaved_put_back,
         }))
+    }
+
+    /// The locally hosted origin's put-back of a stopped turn's unsaved
+    /// change, or None once the server has been shut down.
+    pub fn unsaved_put_back(&self) -> Option<UnsavedPutBack> {
+        self.unsaved_put_back.clone()
     }
 
     /// The locally listening origin's identity and loopback endpoint, or None
@@ -390,6 +444,7 @@ impl OriginService {
         self.server = None;
         self.presence_metadata = None;
         self.local_sync = None;
+        self.unsaved_put_back = None;
     }
 
     pub fn presence_metadata_handle(&self) -> Option<Arc<RwLock<Value>>> {
