@@ -86,6 +86,43 @@ pub(crate) fn canonical_managed_runtime_env_value(value: &JsonValue) -> Option<J
     Some(JsonValue::String(rendered))
 }
 
+/// Managed launch keys that, for a provider other than exact instafy_cloud, only the provider's
+/// operator sets, in the provider service's own environment or its user-data template: the
+/// Shared Browser's egress policy, the host the origin reaches its VNC server at, and the
+/// display's colour depth. For exact instafy_cloud the controller strips a client's value of
+/// each before the provider row adds its own; for any other provider a client's value would
+/// arrive with the row's and win over it.
+const EXACT_ONLY_LAUNCH_ENV_KEYS: &[&str] = &[
+    "INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS",
+    "INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV",
+    "INSTAFY_BROWSER_EGRESS_ISOLATION",
+    "INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS",
+    "INSTAFY_BROWSER_EGRESS_PROXY_BIND",
+    "INSTAFY_VNC_DEPTH",
+    "INSTAFY_VNC_HOST",
+];
+
+/// Whether a launch request's `metadata.env` entry sets a runtime variable, for every allocator
+/// that takes one: the environment the Docker allocator runs `docker compose` with and the env
+/// the Hetzner allocator writes into user-data follow the same rule. Exact instafy_cloud takes
+/// the managed launch keys, with scalar values. Any other provider takes them but the operator's
+/// browser policy (EXACT_ONLY_LAUNCH_ENV_KEYS), and takes the WebRTC switch only as a string: the
+/// controller applies its relay policy to the string "1" alone, while a `true` would turn WebRTC
+/// on past it.
+pub(crate) fn request_may_set_runtime_env(
+    exact_managed_provider: bool,
+    key: &str,
+    value: &JsonValue,
+) -> bool {
+    if exact_managed_provider {
+        return is_allowed_managed_runtime_env_key(key)
+            && canonical_managed_runtime_env_value(value).is_some();
+    }
+    is_allowed_managed_runtime_env_key(key)
+        && !EXACT_ONLY_LAUNCH_ENV_KEYS.contains(&key)
+        && (key != "INSTAFY_BROWSER_WEBRTC_ENABLED" || value.is_string())
+}
+
 /// Whether `provider` names exact instafy_cloud, read as the controller reads a provider id
 /// (`normalize_identifier` in runtime-controller's provider_identifiers.rs): trimmed, ASCII
 /// lowercased, with each run of `-`, `_` and ASCII whitespace one separator. Another whitespace

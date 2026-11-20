@@ -398,7 +398,7 @@ function rustStringListIn(source, file, name) {
 function allocatorEnvLists() {
   const lists = {
     managed: allocatorManagedEnvAllowlist(),
-    exactOnly: rustStringList(ALLOCATOR_DOCKER_FILE, "EXACT_ONLY_LAUNCH_ENV_KEYS"),
+    exactOnly: rustStringList(ALLOCATOR_ALLOWLIST_FILE, "EXACT_ONLY_LAUNCH_ENV_KEYS"),
     operatorOnly: rustStringList(ALLOCATOR_DOCKER_FILE, "OPERATOR_ONLY_RUNTIME_ENV_KEYS"),
     requestDerived: rustStringList(ALLOCATOR_DOCKER_FILE, "REQUEST_DERIVED_RUNTIME_ENV_KEYS"),
   };

@@ -25,10 +25,9 @@ use super::checkout_eviction::{
     sweep_checkouts, touch_checkout, CheckoutEvictionPolicy, CheckoutHost, CheckoutSweepReport,
 };
 use super::{
-    canonical_managed_runtime_env_value, is_allowed_managed_runtime_env_key,
-    is_exact_managed_provider, managed_webdev_generation_matches, runtime_metadata_for_process,
-    EnsureRuntimeOutcome, EnsureRuntimeRequest, RuntimeAllocator, MANAGED_RUNTIME_FLAVOR_KEY,
-    MANAGED_RUNTIME_LAUNCH_ATTESTATION, MANAGED_RUNTIME_WEBDEV_FLAVOR,
+    is_exact_managed_provider, managed_webdev_generation_matches, request_may_set_runtime_env,
+    runtime_metadata_for_process, EnsureRuntimeOutcome, EnsureRuntimeRequest, RuntimeAllocator,
+    MANAGED_RUNTIME_FLAVOR_KEY, MANAGED_RUNTIME_LAUNCH_ATTESTATION, MANAGED_RUNTIME_WEBDEV_FLAVOR,
 };
 use crate::config::ProviderConfig;
 
@@ -1069,22 +1068,6 @@ fn first_status_quantity(status: &str) -> Option<u64> {
         })
 }
 
-/// Managed launch keys that, for a provider other than exact instafy_cloud, only the provider's
-/// operator sets, in the provider service's own environment: the Shared Browser's egress
-/// policy, the host the origin reaches its VNC server at, and the display's colour depth. For
-/// exact instafy_cloud the controller strips a client's value of each before the provider row
-/// adds its own; for any other provider a client's value would arrive with the row's and win
-/// over it.
-const EXACT_ONLY_LAUNCH_ENV_KEYS: &[&str] = &[
-    "INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS",
-    "INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV",
-    "INSTAFY_BROWSER_EGRESS_ISOLATION",
-    "INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS",
-    "INSTAFY_BROWSER_EGRESS_PROXY_BIND",
-    "INSTAFY_VNC_DEPTH",
-    "INSTAFY_VNC_HOST",
-];
-
 /// The variables a runtime compose file passes into the runtime container that a launch request
 /// never sets, for any provider. The provider sets some itself (the runtime's ids, its token, its
 /// addresses); the others only its operator sets, in the provider service's own environment,
@@ -1157,21 +1140,6 @@ const REQUEST_DERIVED_RUNTIME_ENV_KEYS: &[&str] = &[
     "RUNTIME_METADATA",
 ];
 
-/// Whether a request's `metadata.env` entry joins the environment `docker compose` runs with.
-/// Exact instafy_cloud takes the managed launch keys, with scalar values. Any other provider takes
-/// them but the operator's browser policy (EXACT_ONLY_LAUNCH_ENV_KEYS), and takes the WebRTC
-/// switch only as a string: the controller applies its relay policy to the string "1" alone,
-/// while a `true` would turn WebRTC on here past it.
-fn request_may_set_compose_env(exact_managed_provider: bool, key: &str, value: &JsonValue) -> bool {
-    if exact_managed_provider {
-        return is_allowed_managed_runtime_env_key(key)
-            && canonical_managed_runtime_env_value(value).is_some();
-    }
-    is_allowed_managed_runtime_env_key(key)
-        && !EXACT_ONLY_LAUNCH_ENV_KEYS.contains(&key)
-        && (key != "INSTAFY_BROWSER_WEBRTC_ENABLED" || value.is_string())
-}
-
 /// A warning lists at most this many refused names, each cut to REFUSED_NAME_CHARS_LOGGED
 /// characters, so that no launch floods the log.
 const REFUSED_NAMES_LOGGED: usize = 16;
@@ -1198,7 +1166,7 @@ fn request_compose_env(
             continue;
         }
         if provider_set.contains(key)
-            || !request_may_set_compose_env(exact_managed_provider, key, value)
+            || !request_may_set_runtime_env(exact_managed_provider, key, value)
         {
             refused_names.push(key.as_str());
             continue;
@@ -1769,6 +1737,7 @@ fn resolve_path_search(path: &Path, require_exists: bool) -> anyhow::Result<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::allocator::{is_allowed_managed_runtime_env_key, EXACT_ONLY_LAUNCH_ENV_KEYS};
     use serde_json::json;
 
     fn sample_request(metadata: Option<JsonValue>) -> EnsureRuntimeRequest {

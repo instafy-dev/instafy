@@ -561,7 +561,7 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   values; the controller has already stripped every client value but the
   client launch keys. For any other provider it takes the same keys but the
   Shared Browser's egress policy and its VNC host and depth
-  (`EXACT_ONLY_LAUNCH_ENV_KEYS` in `allocator/docker.rs`), and the WebRTC
+  (`EXACT_ONLY_LAUNCH_ENV_KEYS` in `allocator/mod.rs`), and the WebRTC
   switch only as a string, the form the controller's relay policy reads. Of
   the WebRTC transport keys a launch can still set there, a provider row's
   value wins, and the controller's relay policy, where it applies, replaces
@@ -612,11 +612,14 @@ Runtimes can be provisioned with different runtime-agent container images (for e
   without `{{RUNTIME_ENV_FLAGS}}` gets the flags just before each
   `{{RUNTIME_AGENT_IMAGE}}` that follows a space. The env holds the
   allocator's own runtime, lease and origin values, which a request cannot
-  override, plus the request's `metadata.env` entries the provider takes:
-  exact `instafy_cloud` takes only the managed launch keys, and any other
-  provider takes those and the runtime container's own settings
-  (`RUNTIME_CONTAINER_ENV_KEYS` in `allocator/hetzner.rs`), such as
-  `INSTAFY_ENABLE_BROWSER_SESSION=1`. Every other key is dropped.
+  override, plus the request's `metadata.env` entries the provider takes,
+  by the Docker allocator's rule (`request_may_set_runtime_env` in
+  `allocator/mod.rs`): exact `instafy_cloud` takes the managed launch keys,
+  and any other provider takes them but the Shared Browser's egress policy
+  and its VNC host and depth, and the WebRTC switch only as a string, such
+  as `INSTAFY_ENABLE_BROWSER_SESSION=1`. Every other key is dropped: set the
+  runtime's model routing, its agent's switches, `ORIGIN_SKIP_AUTH` and the
+  other operator settings in the template itself.
 - Much of a Hetzner template's input comes from the launch request, so the
   allocator fills a template in one pass, in which no value reads as another
   placeholder, and writes each value to read back unchanged in a shell command,
