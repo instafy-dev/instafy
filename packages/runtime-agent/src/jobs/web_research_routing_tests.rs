@@ -2693,6 +2693,26 @@ fn a_planners_stops_are_clicked_and_no_route_comes_only_from_its_results() {
     assert!(GETTING_AROUND_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
 }
 
+/// A planner's stop fields were refused as secrets, since the site marks them against autofill:
+/// three turns ended with no route, and none showed the person the field. A later turn said they
+/// were "again" refused with no step of its own behind it, and a page captioned a planner nobody
+/// sent "checked …; no connection result" (a local test, Nov 20). `instafy-getting-around` says a
+/// field the browser refuses as a secret is the person's to fill, highlighted for them and never
+/// tried on another copy of that planner in the same message, that a planner nobody sent is "not
+/// run", and that the answer says the last step taken, and "again" only for a step of its turn.
+#[test]
+fn a_refused_planner_field_is_the_persons_and_an_unsent_planner_is_not_run() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let route = flat(GETTING_AROUND_SKILL);
+    for line in [
+        "- If the browser refuses a planner's field as a secret, filling it is the person's step: highlight it with `request_human_input` and say what goes in it. Don't try it on another copy of that planner in this message.",
+        "- A planner you didn't send is \"not run\", never \"checked\" or \"no result\". Say the last step you took (\"I typed the start; I couldn't choose a stop\"), and say \"again\" only for a step this turn took.",
+    ] {
+        assert!(route.contains(line), "{line}");
+    }
+    assert!(GETTING_AROUND_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+}
+
 /// A cookie notice is never a step Octo pauses on by itself: the skill's line of the person's steps once named
 /// consent beside sign-in and one-time codes, both browser turns of a local test (Nov 9) read it, and one paused on a
 /// notice's "Accept all" while another pressed a bar's accept and stopped. A notice's accept is no longer listed, so no

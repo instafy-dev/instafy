@@ -410,6 +410,43 @@ test("matching isolated targets still click, type, and apply editable key defaul
   assert.equal(input.value, "hell");
 });
 
+test("a field a one-time-code mark marks is typed into only without a sign of a code", async () => {
+  const harness = createPageHarness();
+  const typeInto = async (attributes, text) => {
+    const input = new harness.HTMLInputElement({ autocomplete: "one-time-code", ...attributes });
+    harness.document.elements = [input];
+    const snapshot = await harness.bridge.snapshotPersonalBrowserPage(harness.webContents);
+    const descriptor = snapshot.interactive[0].descriptor;
+    const result = await harness.bridge.typeIntoPersonalBrowserTarget(
+      harness.webContents,
+      { index: 0 },
+      text,
+      expectationFor(descriptor),
+    );
+    return { descriptor, result, value: input.value };
+  };
+  // A planner's stop, marked only to keep autofill out: its shape is read,
+  // and a place's name goes in.
+  const planner = await typeInto({ "aria-label": "Ziel wählen" }, "Deutsches Museum");
+  assert.deepEqual({ ...planner.descriptor.fieldShape }, { maxLength: null, size: null, pattern: "", opensList: false, formSignIn: false });
+  assert.equal(security.isSensitivePersonalBrowserEditable(planner.descriptor, "Deutsches Museum"), false);
+  assert.equal(planner.result.typed, true);
+  assert.equal(planner.result.blockedSensitive, false);
+  assert.equal(planner.value, "Deutsches Museum");
+  // Digits alone in the same field, a numeric "Code" field and one that
+  // holds 6 characters are a code's: nothing goes in.
+  for (const [attributes, text] of [
+    [{ "aria-label": "Ziel wählen" }, "482910"],
+    [{ "aria-label": "Code", inputmode: "numeric" }, "Deutsches Museum"],
+    [{ "aria-label": "Enter what we sent you", maxlength: "6" }, "AB12CD"],
+  ]) {
+    const code = await typeInto(attributes, text);
+    assert.equal(code.result.typed, false, JSON.stringify(attributes));
+    assert.equal(code.result.blockedSensitive, true, JSON.stringify(attributes));
+    assert.equal(code.value, "", JSON.stringify(attributes));
+  }
+});
+
 test("isolated type and press recheck identity after hostile focus-time DOM replacement", async () => {
   const harness = createPageHarness();
   const safeInput = new harness.HTMLInputElement({ id: "query", text: "Search" });

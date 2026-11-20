@@ -1588,6 +1588,37 @@ function describeInPage(rule, forms, names, element, sources, mode) {
         control instanceof HTMLInputElement && ["", "text", "email", "tel"].includes(String(control.type || "").toLowerCase()))
       : null;
     const formPasswordCount = controls.filter(isPassword).length;
+    // A field's shape, for its one-time-code mark (actionPolicy's
+    // isOneTimeCodeField): its maxlength and size, its pattern, whether it
+    // opens a list as a person types (a combobox, aria-autocomplete list or
+    // both, a datalist, or a list it names), and whether another field of
+    // its form is a sign-in's. Null for any other control.
+    let fieldShape = null;
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      const number = (name) => {
+        const raw = bounded(attribute(element, name), 16);
+        return /^\d+$/.test(raw) ? Number(raw) : null;
+      };
+      const namesList = (node) => ["aria-controls", "aria-owns"].some((name) =>
+        bounded(attribute(node, name), 400).split(/\s+/).filter(Boolean).slice(0, 16).some((id) => {
+          const named = node.ownerDocument?.getElementById(id);
+          return Boolean(named) && (["listbox", "grid", "tree", "menu"].includes(roleOf(named)) ||
+            ["UL", "OL", "DATALIST"].includes(tagOf(named)) || Boolean(named.querySelector("[role=option]")));
+        }));
+      const combobox = element.closest("[role=combobox]");
+      const signInMark = /(?:^|\s)(?:username|webauthn|current-password|new-password)(?:\s|$)/i;
+      fieldShape = {
+        maxLength: number("maxlength"),
+        size: number("size"),
+        pattern: bounded(attribute(element, "pattern"), 200),
+        opensList: Boolean(combobox) ||
+          ["list", "both"].includes(bounded(attribute(element, "aria-autocomplete"), 16).toLowerCase()) ||
+          (element instanceof HTMLInputElement && element.list instanceof HTMLDataListElement) ||
+          namesList(element) || (combobox ? namesList(combobox) : false),
+        formSignIn: controls.some((control) => control !== element && control.form === form &&
+          (isPassword(control) || signInMark.test(bounded(attribute(control, "autocomplete"), 200)))),
+      };
+    }
     return {
       href: link instanceof HTMLAnchorElement ? bounded(link.href, 4_096) : "",
       linkSelf: link instanceof HTMLAnchorElement && link === element,
@@ -1622,6 +1653,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       row: Boolean(row),
       nearMaskedText,
       iconHint,
+      fieldShape,
     };
   };
   let policy = null;
@@ -1976,16 +2008,19 @@ const DESCRIBE_IN_PAGE = new Function(
 );
 // Runs inside the page (DESCRIBE_ALL_IN_PAGE). Which of the page's controls
 // the list holds, judged for all of them first: every one a person can see,
-// up to `request.limit`. When more are shown, those scrolled past, above the
-// view, are left out, and then those the page turned off, so scrolling down a
-// long page reaches every control on it and a page full of taken seats still
+// up to `request.limit`. When more are shown, the options of the list the
+// focused field opened as a person typed (fieldListRulesInPage) are kept
+// first, so a type step names them and a click takes them on a page with more
+// controls than a reading holds; then those scrolled past, above the view,
+// are left out, and then those the page turned off, so scrolling down a long
+// page reaches every control on it and a page full of taken seats still
 // lists the free ones; past the limit the rest are left out in page order.
 // Neither depends on how many controls lie below the view. Each control the
 // list holds is described on its own (`describe`, DESCRIBE_IN_PAGE); every
 // other one is reported with its name alone, for the secret-screen check, as
 // `shown: false` or, shown and left out, `left: true`. One that cannot be
 // described is null.
-function listInPage(rule, describe, request) {
+function listInPage(rule, rules, describe, request) {
   const elements = request.elements;
   const glances = elements.map((element) => {
     let shown = true;
@@ -2011,8 +2046,22 @@ function listInPage(rule, describe, request) {
     return { shown, above, off };
   });
   let kept = glances.flatMap((glance, ordinal) => (glance.shown ? [ordinal] : []));
-  if (kept.length > request.limit) kept = kept.filter((ordinal) => !glances[ordinal].above);
-  if (kept.length > request.limit) kept = kept.filter((ordinal) => !glances[ordinal].off);
+  if (kept.length > request.limit) {
+    let rows = [];
+    try {
+      const field = rules.focusedField(document);
+      rows = field ? rules.listOf(field).rows : [];
+    } catch (_) {
+      rows = [];
+    }
+    const inside = (element, row) => row === element || (!row.matches("[role=option]") && row.contains(element));
+    const first = kept.filter((ordinal) => rows.some((row) => inside(elements[ordinal], row)));
+    let rest = kept.filter((ordinal) => !first.includes(ordinal));
+    const room = Math.max(request.limit - first.length, 0);
+    if (rest.length > room) rest = rest.filter((ordinal) => !glances[ordinal].above);
+    if (rest.length > room) rest = rest.filter((ordinal) => !glances[ordinal].off);
+    kept = [...first.slice(0, request.limit), ...rest.slice(0, room)].sort((a, b) => a - b);
+  }
   const listed = new Set(kept.slice(0, request.limit));
   return elements.map((element, ordinal) => {
     try {
@@ -2030,7 +2079,7 @@ function listInPage(rule, describe, request) {
 const DESCRIBE_ALL_IN_PAGE = new Function(
   "request",
   `const describe = ${DESCRIBE_IN_PAGE};
-  return (${listInPage})((${shownRuleInPage})(), describe, request);`,
+  return (${listInPage})((${shownRuleInPage})(), (${fieldListRulesInPage})(), describe, request);`,
 );
 // Runs inside the page through Playwright, so it must not use anything from
 // this file's scope. Where a click on `element` lands: Playwright clicks the
@@ -2302,6 +2351,22 @@ function policyFactsOf(raw) {
     row: raw.row === true,
     nearMaskedText: raw.nearMaskedText === true,
     iconHint: text(raw.iconHint, 160),
+    fieldShape: fieldShapeOf(raw.fieldShape),
+  };
+}
+
+// Bounds and types a field's shape (describeInPage). One that is missing or
+// malformed is none, and then a one-time-code mark alone marks a code's field,
+// as it did before the shape was read (actionPolicy's isOneTimeCodeField).
+function fieldShapeOf(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const length = (value) => (Number.isSafeInteger(value) && value >= 0 ? Math.min(value, 1_000_000) : null);
+  return {
+    maxLength: length(raw.maxLength),
+    size: length(raw.size),
+    pattern: typeof raw.pattern === "string" ? raw.pattern.slice(0, 200) : "",
+    opensList: raw.opensList === true,
+    formSignIn: raw.formSignIn === true,
   };
 }
 
@@ -2331,6 +2396,7 @@ function policyTarget(description) {
     name: description.nameAttribute || "",
     id: description.idAttribute || "",
     autocomplete: description.autocomplete || "",
+    inputMode: description.inputMode || "",
     href: facts.href || "",
     linkSelf: facts.linkSelf === true,
     download: facts.download === true,
@@ -2354,6 +2420,9 @@ function policyTarget(description) {
     row: facts.row === true,
     nearMaskedText: facts.nearMaskedText === true,
     iconHint: facts.iconHint || "",
+    // Absent when the page reported no shape: a one-time-code mark then
+    // marks a code's field alone (actionPolicy's isOneTimeCodeField).
+    ...(facts.fieldShape ? { fieldShape: facts.fieldShape } : {}),
   };
 }
 
@@ -2573,24 +2642,170 @@ const MAX_FIELD_LIST_OPTIONS = 400;
 const FIELD_LIST_NAMED = 4;
 const MAX_FIELD_LIST_NAME_CHARS = 80;
 
-// Runs inside the page through Playwright, so it must not use anything from
-// this file's scope. Of `request.elements`, the options a person can see and
-// choose in the list `field` opens as they type (a combobox's suggestions).
-// When the field, or the combobox it sits in, names a list of its own
-// (aria-controls, aria-owns, the list its active option sits in) or holds
-// one (`own`), those of that list (`listed`); when it names none, the
-// options shown anywhere that were not before the step typed (`fresh`;
-// `request.before` holds the words of those that were). Another list on the
-// page is never the field's: a step named a field's options under another
-// field, and a page's "Sort by" under a search. An option turned off (a
-// list's "Searching…" or "No matches" row) is none. Once the step typed
-// (`request.typed`), the field counts with the one the page moved the focus
-// to (a planner that opens its search in a field of its own). Answers too
-// whether a field says it opens a list (`named`), the words of each set
-// (`ownWords`, `freshWords`) and of every option shown (`shown`). Those words
-// never leave the step: it only compares them.
-function fieldListInPage(field, request) {
-  const answer = { kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [] };
+// Runs inside the page through Playwright, joined in front of the page
+// functions that look at the list a field opens as a person types
+// (fieldListInPage, suggestionFieldInPage, listInPage and fieldRowsInPage), so
+// it must not use anything from this file's scope. `listOf(field)` answers for
+// a field and the combobox it sits in: whether it says it opens a list
+// (`named`), the lists it names as its own (`lists`: aria-controls,
+// aria-owns, the list its active option sits in, the combobox around it), and
+// the rows a person can see and pick there (`rows`). A field that names none
+// has the rows of the list drawn against it: just under or over it, over the
+// page (placed absolute or fixed) and holding neither the field nor anything
+// around it, as a planner draws its stops, when a row there shares the start
+// of a word with what the field holds (a calendar drawn under a date field is
+// no list of its stops). A list's rows are its options (role=option), else
+// its items (li), else the most children it holds drawn alike, one under
+// another; a combobox around the field gives its options only. At most
+// MAX_ROWS rows, each with words. What the field holds never leaves the page.
+function fieldListRulesInPage() {
+  const MAX_ROWS = 50;
+  // How far under or over a field a list drawn against it may start.
+  const GAP = 24;
+  const MAX_NODES = 2_000;
+  const wordsOf = (element) => String(element.textContent || "").replace(/\s+/g, " ").trim();
+  const shown = (element) => {
+    try {
+      const box = element.getBoundingClientRect();
+      if (!(box.width > 0 && box.height > 0)) return false;
+      const style = element.ownerDocument.defaultView.getComputedStyle(element);
+      return style.visibility !== "hidden" && style.display !== "none";
+    } catch (_) {
+      return false;
+    }
+  };
+  const optionsOf = (list) => Array.from(list.querySelectorAll("[role=option]")).filter(shown);
+  // Words folded for a loose match: case, accents and ae, oe, ue aside.
+  const folded = (text) => String(text || "").normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase()
+    .replace(/ae/g, "a").replace(/oe/g, "o").replace(/ue/g, "u").replace(/\u00df/g, "ss")
+    .split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const related = (rows, field) => {
+    const held = typeof field.value === "string" ? field.value : String(field.textContent || "");
+    const starts = folded(held).filter((word) => word.length >= 3 && /\p{L}/u.test(word)).map((word) => word.slice(0, 3));
+    return starts.length > 0 && rows.some((row) => folded(wordsOf(row)).some((word) => starts.some((start) => word.startsWith(start))));
+  };
+  const rowsOf = (list) => {
+    const options = optionsOf(list);
+    if (options.length) return options;
+    const items = Array.from(list.querySelectorAll("li"))
+      .filter((item) => !item.querySelector("li") && shown(item) && wordsOf(item));
+    if (items.length) return items;
+    let best = [];
+    const queue = [list];
+    for (let seen = 0; queue.length && seen < MAX_NODES; seen += 1) {
+      const kids = Array.from(queue.shift().children).filter((kid) => shown(kid) && wordsOf(kid));
+      const alike = kids.length >= 2 && kids.every((kid, at) => kid.tagName === kids[0].tagName &&
+        (at === 0 || kid.getBoundingClientRect().top >= kids[at - 1].getBoundingClientRect().bottom - 1));
+      if (alike && kids.length > best.length) best = kids;
+      queue.push(...kids);
+    }
+    return best;
+  };
+  const drawnAgainst = (field) => {
+    const doc = field.ownerDocument;
+    const view = doc.defaultView;
+    const box = field.getBoundingClientRect();
+    if (!(box.width > 0 && box.height > 0)) return null;
+    const root = field.getRootNode();
+    const at = (x, y) => (typeof root.elementFromPoint === "function" ? root : doc).elementFromPoint(x, y);
+    const against = (rect) => {
+      const across = Math.min(rect.right, box.right) - Math.max(rect.left, box.left);
+      if (across < Math.min(rect.width, box.width) / 2) return false;
+      return (rect.top >= box.bottom - 2 && rect.top <= box.bottom + GAP) ||
+        (rect.bottom <= box.top + 2 && rect.bottom >= box.top - GAP);
+    };
+    for (const y of [box.bottom + 6, box.bottom + GAP, box.top - 6, box.top - GAP]) {
+      for (const x of [box.left + box.width / 4, box.left + box.width / 2]) {
+        if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) continue;
+        for (let node = at(x, y), depth = 0; node && depth < 32; node = node.parentElement, depth += 1) {
+          if (node === doc.body || node === doc.documentElement || node.contains(field)) break;
+          if (["absolute", "fixed"].includes(view.getComputedStyle(node).position) &&
+            against(node.getBoundingClientRect())) {
+            return node;
+          }
+        }
+      }
+    }
+    return null;
+  };
+  const listOf = (field) => {
+    const doc = field.ownerDocument;
+    const answer = { named: false, lists: [], rows: [] };
+    const combobox = field.closest("[role=combobox]");
+    const named = [];
+    for (const node of [field, combobox]) {
+      if (!node) continue;
+      const attribute = (name) => String(node.getAttribute(name) || "").toLowerCase().trim();
+      if (attribute("role") === "combobox" || ["list", "both", "inline"].includes(attribute("aria-autocomplete")) ||
+        (attribute("aria-haspopup") !== "" && attribute("aria-haspopup") !== "false") || node.hasAttribute("aria-expanded")) {
+        answer.named = true;
+      }
+      const root = node.getRootNode();
+      const byId = (id) => typeof root.getElementById === "function" ? root.getElementById(id) : doc.getElementById(id);
+      for (const name of ["aria-controls", "aria-owns"]) {
+        for (const id of String(node.getAttribute(name) || "").split(/\s+/).filter(Boolean).slice(0, 16)) {
+          const list = byId(id);
+          if (list) {
+            named.push(list);
+            answer.named = true;
+          }
+        }
+      }
+      const activeId = node.getAttribute("aria-activedescendant");
+      const active = activeId ? byId(activeId) : null;
+      if (active) named.push(active.closest("[role=listbox], [role=grid], [role=tree], [role=menu]") || active);
+      if (node === combobox && combobox !== field) answer.lists.push(combobox);
+    }
+    answer.lists.unshift(...named);
+    const drawn = answer.lists.length ? null : drawnAgainst(field);
+    const drawnRows = drawn ? rowsOf(drawn) : [];
+    const rows = [
+      ...(drawn ? (related(drawnRows, field) ? drawnRows : []) : named.flatMap(rowsOf)),
+      ...(combobox && combobox !== field ? optionsOf(combobox) : []),
+    ];
+    answer.rows = rows.filter((row, index) => rows.indexOf(row) === index).slice(0, MAX_ROWS);
+    return answer;
+  };
+  // The focused element, inside open shadow roots too, when it is a field
+  // a person types into; null otherwise.
+  const focusedField = (doc) => {
+    let field = doc.activeElement;
+    for (let depth = 0; field && field.shadowRoot && field.shadowRoot.activeElement && depth < 64; depth += 1) {
+      field = field.shadowRoot.activeElement;
+    }
+    return field && typeof field.matches === "function" &&
+      field.matches("input, textarea, [contenteditable], [role=combobox], [role=searchbox], [role=textbox]")
+      ? field
+      : null;
+  };
+  return { listOf, focusedField, MAX_ROWS };
+}
+
+// Runs inside the page through Playwright, with fieldListRulesInPage's rules
+// joined in front (FIELD_LIST_IN_PAGE), so it must not use anything from this
+// file's scope. Of `request.elements`, the options a person can see and choose
+// in the list `field` opens as they type (a combobox's suggestions, a
+// planner's stops): its options and rows (fieldListRulesInPage), or the one
+// control a row holds (a stop's link). When the field, or the combobox it
+// sits in, names a list of its own (aria-controls, aria-owns, the list its
+// active option sits in) or holds one (`own`), those of that list (`listed`);
+// when it names none, those shown anywhere, and the rows of the list drawn
+// against it, that were not before the step typed (`fresh`; `request.before`
+// holds the words of those that were). Another list on the page is never the
+// field's: a step named a field's options under another field, and a page's
+// "Sort by" under a search. An option turned off (a list's "Searching…" or
+// "No matches" row) is none. Once the step typed (`request.typed`), the field
+// counts with the one the page moved the focus to (a planner that opens its
+// search in a field of its own). Answers too whether a field says it opens a
+// list (`named`), the words of each set (`ownWords`, `freshWords`, with the
+// rows `request.elements` leaves out, whose number is `unlisted`) and of every
+// option shown (`shown`). Those words never leave the step: it only compares
+// them.
+function fieldListInPage(rules, field, request) {
+  const answer = {
+    kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [],
+    unlisted: { own: 0, fresh: 0 },
+  };
   try {
     const elements = Array.isArray(request && request.elements) ? request.elements.slice(0, 400) : [];
     const before = new Set(Array.isArray(request && request.before) ? request.before.slice(0, 400) : []);
@@ -2603,41 +2818,18 @@ function fieldListInPage(field, request) {
       const style = view.getComputedStyle(element);
       return style.visibility !== "hidden" && style.display !== "none";
     };
-    let focused = doc.activeElement;
-    for (let depth = 0; focused && focused.shadowRoot && focused.shadowRoot.activeElement && depth < 32; depth += 1) {
-      focused = focused.shadowRoot.activeElement;
-    }
+    const focused = rules.focusedField(doc);
     const fields = [field];
-    if (request && request.typed === true && focused && focused !== field && focused instanceof view.Element &&
-      focused.matches("input, textarea, [contenteditable], [role=combobox], [role=searchbox], [role=textbox]")) {
+    if (request && request.typed === true && focused && focused !== field && focused instanceof view.Element) {
       fields.push(focused);
     }
     const lists = [];
+    const rows = [];
     for (const each of fields) {
-      const combobox = each.closest("[role=combobox]");
-      for (const node of [each, combobox]) {
-        if (!node) continue;
-        const attribute = (name) => String(node.getAttribute(name) || "").toLowerCase().trim();
-        if (attribute("role") === "combobox" || ["list", "both", "inline"].includes(attribute("aria-autocomplete")) ||
-          (attribute("aria-haspopup") !== "" && attribute("aria-haspopup") !== "false") || node.hasAttribute("aria-expanded")) {
-          answer.named = true;
-        }
-        const root = node.getRootNode();
-        const byId = (id) => typeof root.getElementById === "function" ? root.getElementById(id) : doc.getElementById(id);
-        for (const name of ["aria-controls", "aria-owns"]) {
-          for (const id of String(node.getAttribute(name) || "").split(/\s+/).filter(Boolean).slice(0, 16)) {
-            const list = byId(id);
-            if (list) {
-              lists.push(list);
-              answer.named = true;
-            }
-          }
-        }
-        const activeId = node.getAttribute("aria-activedescendant");
-        const active = activeId ? byId(activeId) : null;
-        if (active) lists.push(active.closest("[role=listbox], [role=grid], [role=tree], [role=menu]") || active);
-        if (node === combobox && combobox !== each) lists.push(combobox);
-      }
+      const list = rules.listOf(each);
+      if (list.named) answer.named = true;
+      lists.push(...list.lists);
+      rows.push(...list.rows);
     }
     const inside = (element, list) => {
       for (let node = element, depth = 0; node && depth < 512; node = node.parentNode || node.host, depth += 1) {
@@ -2645,29 +2837,49 @@ function fieldListInPage(field, request) {
       }
       return false;
     };
-    const options = elements.filter((element) =>
-      element instanceof view.Element && element.matches("[role=option]") && shown(element));
-    const usable = options.filter((option) => !option.matches(":disabled") && !option.closest("[aria-disabled=true]"));
-    const own = lists.length ? usable.filter((option) => lists.some((list) => inside(option, list))) : [];
-    const fresh = lists.length ? [] : usable.filter((option) => !before.has(wordsOf(option)));
+    // A row stands for itself, and a row that is no option for the one
+    // element given inside it (a stop's link).
+    const standsFor = (element, row) => row === element || (!row.matches("[role=option]") && inside(element, row) &&
+      elements.filter((other) => inside(other, row)).length === 1);
+    const options = elements.filter((element) => element instanceof view.Element && shown(element) &&
+      (element.matches("[role=option]") || rows.some((row) => standsFor(element, row))));
+    // The rows no element given stands for: a list the reading leaves out.
+    const loose = rows.filter((row) => !options.some((option) => inside(option, row)));
+    const turnedOn = (option) => !option.matches(":disabled") && !option.closest("[aria-disabled=true]");
+    const usable = options.filter(turnedOn);
+    const usableLoose = loose.filter(turnedOn);
+    const ownOf = (set) => lists.length ? set.filter((option) => lists.some((list) => inside(option, list))) : [];
+    const freshOf = (set) => lists.length ? [] : set.filter((option) => !before.has(wordsOf(option)));
+    const own = ownOf(usable);
+    const fresh = freshOf(usable);
+    const ownLoose = ownOf(usableLoose);
+    const freshLoose = freshOf(usableLoose);
     answer.own = lists.length > 0;
     answer.listed = elements.map((element) => own.includes(element));
     answer.fresh = elements.map((element) => fresh.includes(element));
-    answer.ownWords = own.map(wordsOf);
-    answer.freshWords = fresh.map(wordsOf);
-    answer.shown = options.map(wordsOf);
+    answer.ownWords = [...own, ...ownLoose].map(wordsOf);
+    answer.freshWords = [...fresh, ...freshLoose].map(wordsOf);
+    answer.unlisted = { own: ownLoose.length, fresh: freshLoose.length };
+    answer.shown = [...options, ...loose].map(wordsOf);
     return answer;
   } catch (_) {
-    return { kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [] };
+    return {
+      kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [],
+      unlisted: { own: 0, fresh: 0 },
+    };
   }
 }
+const FIELD_LIST_IN_PAGE = new Function(
+  "...args",
+  `return (${fieldListInPage})((${fieldListRulesInPage})(), ...args);`,
+);
 
 // What fieldListInPage answers for the type step's field of `elements`, once
 // the step typed or before (`typed`), or null when the page cannot say in
 // time.
 async function fieldListOf(target, elements, before, typed) {
   return await within(FIELD_READ_MS, (async () => {
-    const answer = await target.locator.evaluate(fieldListInPage, { kind: "field-list", elements, before, typed });
+    const answer = await target.locator.evaluate(FIELD_LIST_IN_PAGE, { kind: "field-list", elements, before, typed });
     return answer && answer.kind === "field-list" &&
       ["listed", "fresh", "ownWords", "freshWords", "shown"].every((key) => Array.isArray(answer[key]))
       ? answer
@@ -2718,9 +2930,12 @@ async function fieldListAfterTyping(page, target, before) {
 // The words of the list a field opened as it was typed into, from the reading
 // the type step answers with (readingControls): how many options it shows and
 // the first ones, by the names and indices that reading gives them, of the set
-// fieldListAfterTyping chose. A planner that lists a stop's names as a person
-// types sends nothing until one is chosen. `next` ends it: what to do with
-// them. Null when the reading lists none of them, or withholds the page.
+// fieldListAfterTyping chose. A reading lists a field's open options, its
+// plain rows too, first under its cap (listInPage, collectInteractiveElements);
+// those it still leaves out are counted, never named, since only a reading
+// masks a page's words. A planner that lists a stop's names as a person types
+// sends nothing until one is chosen. `next` ends it: what to do with them.
+// Null when no option came, or the reading withholds the page.
 async function fieldListLine(target, reading, before, set, next = "Click one.") {
   const controls = readingControls;
   if (!set || !before || !controls || !reading || reading.secretScreen === true ||
@@ -2730,7 +2945,16 @@ async function fieldListLine(target, reading, before, set, next = "Click one.") 
   const answer = await fieldListOf(target, controls.map(({ locator }) => locator), before.shown, true);
   if (!answer) return null;
   const options = reading.interactiveElements.filter((_, index) => answer[set][index] === true);
-  if (!options.length) return null;
+  const left = answer.unlisted && Number.isSafeInteger(answer.unlisted[set === "listed" ? "own" : "fresh"])
+    ? answer.unlisted[set === "listed" ? "own" : "fresh"]
+    : 0;
+  const total = options.length + left;
+  const count = total === 1 ? "1 suggestion" : `${total} suggestions`;
+  if (!options.length) {
+    return left > 0
+      ? `${count} came under ${quotedControlLabel(target.description)}, but this reading doesn't list them, so none can be clicked here.`
+      : null;
+  }
   const name = (label) => {
     const characters = Array.from(String(label || ""));
     return characters.length > MAX_FIELD_LIST_NAME_CHARS
@@ -2738,8 +2962,7 @@ async function fieldListLine(target, reading, before, set, next = "Click one.") 
       : characters.join("");
   };
   const named = options.slice(0, FIELD_LIST_NAMED).map((option) => `"${name(option.label)}" (index ${option.index})`);
-  const count = options.length === 1 ? "1 suggestion" : `${options.length} suggestions`;
-  return `${count} under ${quotedControlLabel(target.description)}: ${named.join(", ")}${options.length > FIELD_LIST_NAMED ? ", …" : ""}. ${next}`;
+  return `${count} under ${quotedControlLabel(target.description)}: ${named.join(", ")}${total > FIELD_LIST_NAMED ? ", …" : ""}. ${next}`;
 }
 
 function isCheckableDescription(description) {
@@ -2842,6 +3065,50 @@ function choicePromptLabel(description, option) {
   return list ? `${name} \u00b7 In: ${boundedBytes(list, PROMPT_NAME_BYTES)}` : name;
 }
 
+// Runs inside the page through Playwright, with fieldListRulesInPage's rules
+// joined in front (FIELD_ROWS_IN_PAGE), so it must not use anything from this
+// file's scope. The rows of the list the focused field opened as a person
+// typed (fieldListRulesInPage) that are no control and hold none
+// (`request.selector`): a planner's stops drawn as plain rows. Empty for
+// anything else.
+function fieldRowsInPage(rules, request) {
+  try {
+    const field = rules.focusedField(document);
+    const selector = String((request && request.selector) || "");
+    if (!field || !selector) return [];
+    return rules.listOf(field).rows.filter((row) => !row.matches(selector) && !row.querySelector(selector));
+  } catch (_) {
+    return [];
+  }
+}
+const FIELD_ROWS_IN_PAGE = new Function(
+  "...args",
+  `return (${fieldRowsInPage})((${fieldListRulesInPage})(), ...args);`,
+);
+
+// The rows fieldRowsInPage finds, as handles a reading lists after the
+// page's controls; none when the page cannot say in time.
+async function fieldRowsOf(page) {
+  try {
+    const found = await within(
+      FIELD_READ_MS,
+      page.evaluateHandle(FIELD_ROWS_IN_PAGE, { kind: "field-rows", selector: INTERACTIVE_SELECTOR }),
+      null,
+    );
+    if (!found || typeof found.getProperties !== "function") return [];
+    const rows = [];
+    for (const handle of (await found.getProperties()).values()) {
+      const element = handle.asElement();
+      if (element) rows.push(element);
+      else await handle.dispose().catch(() => {});
+    }
+    await found.dispose().catch(() => {});
+    return rows;
+  } catch (_) {
+    return [];
+  }
+}
+
 // The controls a person can see, in document order. Snapshots and actions
 // both index this list, so an index means the same control in both. The page
 // is asked once for its controls and once to judge and describe them all
@@ -2858,10 +3125,14 @@ function choicePromptLabel(description, option) {
 // (declineCookieBanner), which looks for its refusal beside them.
 async function collectInteractiveElements(page, hiddenNames = null, leftNames = null, accepts = null) {
   const matches = await page.locator(INTERACTIVE_SELECTOR).elementHandles();
-  const handles = matches.slice(0, MAX_JUDGED_CONTROLS);
+  const judged = matches.slice(0, MAX_JUDGED_CONTROLS);
   if (leftNames) {
-    for (let ordinal = handles.length; ordinal < matches.length; ordinal += 1) leftNames.push("");
+    for (let ordinal = judged.length; ordinal < matches.length; ordinal += 1) leftNames.push("");
   }
+  // The rows of the list the focused field opened that are no controls of
+  // their own (a planner's stops drawn as plain rows) come after the page's
+  // controls: a type step names them, and a click takes them.
+  const handles = [...judged, ...(await fieldRowsOf(page))];
   const described = await page
     .evaluate(DESCRIBE_ALL_IN_PAGE, { elements: handles, sources: PAGE_POLICY_SOURCES, limit: MAX_INTERACTIVE_ELEMENTS })
     .catch(() => null);
@@ -3494,20 +3765,31 @@ function controlGoneInPage(element) {
 }
 
 // A field whose value is a password, a code, a payment detail or another
-// secret: typing or choosing there is the person's step.
-function sensitiveField(description, step = "type") {
+// secret: typing or choosing there is the person's step. `typed` is the text a
+// type step puts in it, when there is one. A one-time-code mark makes a code's
+// field only with a sign of a code (actionPolicy's isOneTimeCodeField): sites
+// put the mark on a planner's stops too, to keep autofill out of them, and
+// its words are no label of the field's.
+function sensitiveField(description, step = "type", typed = undefined) {
   const sensitiveAutocomplete = new Set([
     "current-password",
     "new-password",
-    "one-time-code",
   ]);
   const autocompleteTokens = String(description.autocomplete || "")
     .toLowerCase()
     .split(/\s+/)
     .filter(Boolean);
+  if (autocompleteTokens.includes("one-time-code") &&
+    actionPolicy.isOneTimeCodeField(policyTarget(description), typeof typed === "string" ? { typed } : {})) {
+    return true;
+  }
   // A list is judged by its own names and its form, never its options: they
   // are values ("Suzuki Swift" in a list of cars is no payment detail).
-  const content = step === "choose" ? listContent(description) : descriptionContent(description);
+  const named = {
+    ...description,
+    autocomplete: autocompleteTokens.filter((token) => token !== "one-time-code").join(" "),
+  };
+  const content = step === "choose" ? listContent(named) : descriptionContent(named);
   const sensitiveLabel =
     /\b(password|passcode|pin|otp|2fa|mfa|one[- ]?time|verification[\s_-]*code|security[\s_-]*code|auth(?:entication)?[\s_-]*code|login[\s_-]*code|access[\s_-]*code|api[\s_-]*key|client[\s_-]*secret|secret|private[\s_-]*key|seed[\s_-]*phrase|recovery[\s_-]*phrase|wallet|credit[\s_-]*card|card[\s_-]*number|cvv|cvc|social[\s_-]*security|government[\s_-]*id|passport|driver(?:'s)?[\s_-]*licen[cs]e|tax[\s_-]*id|date[\s_-]*of[\s_-]*birth|birthdate|maiden[\s_-]*name|bank[\s_-]*account|routing[\s_-]*number|iban|swift)\b/i;
   return (
@@ -4195,7 +4477,7 @@ async function controlFoundAgain(page, body, target) {
 async function suggestionFieldOf(target) {
   const handle = await within(
     FIELD_READ_MS,
-    (async () => target.locator.evaluateHandle(suggestionFieldInPage))().catch(() => null),
+    (async () => target.locator.evaluateHandle(SUGGESTION_FIELD_IN_PAGE))().catch(() => null),
     null,
   );
   const field = typeof handle?.asElement === "function" ? handle.asElement() : null;
@@ -4386,9 +4668,9 @@ function listContent(description) {
 
 // Authentication, payment and identity fields are the person's to fill: a
 // step that types into one, presses a key in one or chooses its option is
-// refused.
-function assertSafeTypeTarget(description, step = "type") {
-  if (sensitiveField(description, step)) {
+// refused. `typed`: the text a type step types.
+function assertSafeTypeTarget(description, step = "type", typed = undefined) {
+  if (sensitiveField(description, step, typed)) {
     refusedStep = "sensitive";
     throw new Error(
       step === "choose"
@@ -4754,7 +5036,8 @@ function freeSearchEntries(answer, typed) {
 // (FREE_SEARCH_POST_ORIGINS). In one of Octo's own tabs the page was opened in
 // this run, and routine browsing covers the run's tabs alike.
 async function freeSiteSearch(page, target, typed) {
-  if (!target.description.policy || sensitiveField(target.description) || !approvalProtocol.routineBrowsingAllowed()) {
+  if (!target.description.policy || sensitiveField(target.description, "type", typed ?? undefined) ||
+    !approvalProtocol.routineBrowsingAllowed()) {
     return false;
   }
   const facts = policyTarget(target.description);
@@ -5314,60 +5597,42 @@ const PAGE_READING_IN_PAGE = new Function(
   `return (${pageReadingInPage})((${shownRuleInPage})(), (${shownTextInPage}), ...args);`,
 );
 
-// Runs inside the page through Playwright, so it must not use anything from
+// Runs inside the page through Playwright, with fieldListRulesInPage's rules
+// joined in front (SUGGESTION_FIELD_IN_PAGE), so it must not use anything from
 // this file's scope. The field whose own list of suggestions holds `element`,
 // an option a person picks as they type (a planner's stops): the focused
-// field, inside open shadow roots too, when the option is in a list it or the
-// combobox it sits in names as its own (`aria-controls`, `aria-owns`, the list
-// its active option is in) or holds, or, for a field that says it opens a
-// list and names none, any option. Null for anything else.
-function suggestionFieldInPage(element) {
+// field, inside open shadow roots too, when `element` is one of its list's
+// rows or the one control in a row (fieldListRulesInPage), or an option in a
+// list it or the combobox it sits in names as its own (`aria-controls`,
+// `aria-owns`, the list its active option is in) or holds, or, for a field
+// that says it opens a list and names none, any option. Null for anything
+// else.
+function suggestionFieldInPage(rules, element) {
   try {
-    if (!element || typeof element.matches !== "function" || !element.matches("[role=option]")) return null;
-    const doc = element.ownerDocument;
-    let field = doc.activeElement;
-    for (let depth = 0; field && field.shadowRoot && field.shadowRoot.activeElement && depth < 64; depth += 1) {
-      field = field.shadowRoot.activeElement;
-    }
-    if (!field || field === element || typeof field.matches !== "function" ||
-      !field.matches("input, textarea, [contenteditable], [role=combobox], [role=searchbox], [role=textbox]")) {
-      return null;
-    }
+    if (!element || typeof element.matches !== "function") return null;
+    const field = rules.focusedField(element.ownerDocument);
+    if (!field || field === element) return null;
     const inside = (node, list) => {
       for (let current = node, depth = 0; current && depth < 512; current = current.parentNode || current.host, depth += 1) {
         if (current === list) return true;
       }
       return false;
     };
-    const lists = [];
-    let opensOne = false;
-    const combobox = field.closest("[role=combobox]");
-    for (const node of [field, combobox]) {
-      if (!node) continue;
-      const attribute = (name) => String(node.getAttribute(name) || "").toLowerCase().trim();
-      if (attribute("role") === "combobox" || ["list", "both", "inline"].includes(attribute("aria-autocomplete")) ||
-        (attribute("aria-haspopup") !== "" && attribute("aria-haspopup") !== "false") || node.hasAttribute("aria-expanded")) {
-        opensOne = true;
-      }
-      const root = node.getRootNode();
-      const byId = (id) => typeof root.getElementById === "function" ? root.getElementById(id) : doc.getElementById(id);
-      for (const name of ["aria-controls", "aria-owns"]) {
-        for (const id of String(node.getAttribute(name) || "").split(/\s+/).filter(Boolean).slice(0, 16)) {
-          const list = byId(id);
-          if (list) lists.push(list);
-        }
-      }
-      const activeId = node.getAttribute("aria-activedescendant");
-      const active = activeId ? byId(activeId) : null;
-      if (active) lists.push(active.closest("[role=listbox], [role=grid], [role=tree], [role=menu]") || active);
-      if (node === combobox && combobox !== field) lists.push(combobox);
+    const list = rules.listOf(field);
+    if (list.rows.some((row) => row === element || (!row.matches("[role=option]") && inside(element, row)))) {
+      return field;
     }
-    if (lists.length) return lists.some((list) => inside(element, list)) ? field : null;
-    return opensOne ? field : null;
+    if (!element.matches("[role=option]")) return null;
+    if (list.lists.length) return list.lists.some((each) => inside(element, each)) ? field : null;
+    return list.named ? field : null;
   } catch (_) {
     return null;
   }
 }
+const SUGGESTION_FIELD_IN_PAGE = new Function(
+  "...args",
+  `return (${suggestionFieldInPage})((${fieldListRulesInPage})(), ...args);`,
+);
 
 // Runs inside the page. Moves focus as a press of `element` is about to: to
 // the control, or out of the field that holds it when the control takes none.
@@ -7366,7 +7631,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     assertSameOrigin(page.url(), sourceOrigin);
     let target = await targetLocator(page, body);
     assertControlOn(target.description);
-    assertSafeTypeTarget(target.description);
+    assertSafeTypeTarget(target.description, "type", body.text);
     const submitting = body.submit === true;
     const typingStep = classifyStep("type", target.description, { pageUrl: page.url() });
     refuseUserStep(typingStep);
@@ -7437,7 +7702,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       destination,
       submitting ? "target-or-page" : "none",
     );
-    assertSafeTypeTarget(target.description);
+    assertSafeTypeTarget(target.description, "type", body.text);
     assertStepOnTime();
     emitAction({
       type: "type",
@@ -7448,7 +7713,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await approvedTarget(page, body, target.asked, { around: false });
-    assertSafeTypeTarget(target.description);
+    assertSafeTypeTarget(target.description, "type", body.text);
     assertSameTarget(
       target,
       page.url(),

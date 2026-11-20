@@ -605,6 +605,83 @@ const UNNAMED_LIST = SUGGESTION_LIST('list.addEventListener("mouseover", () => d
   .replace(' role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="from-stops"', ' aria-autocomplete="list"')
   .replace('<ul id="from-stops" role="listbox"></ul>', '<ul id="from-stops"></ul>')
   .replace('  field.setAttribute("aria-expanded", stops.length ? "true" : "false");\n', "");
+// 250 links, more than a reading holds with the planner's own controls.
+const MANY_LINES = Array.from({ length: 250 }, (_, index) => `<a href="/reading/line-${index + 1}">Line ${index + 1}</a>`).join(" ");
+// A planner whose stops fall past a reading's cap: a field at the top that
+// names its list, 250 links under it, and its list drawn under the field but
+// put at the end of the page, as such lists are put. A reading holds 200
+// controls, so the stops came after them, and the type step named none.
+const CAPPED_LIST = `<h1>Journey planner</h1>
+<p><label for="from">From</label><input id="from" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="from-stops" autocomplete="off"></p>
+<nav>${MANY_LINES}</nav>
+<ul id="from-stops" role="listbox" style="position:absolute;margin:0;padding:0;list-style:none;background:#fff"></ul>
+<script>
+const field = document.getElementById("from");
+const list = document.getElementById("from-stops");
+window.chosen = 0;
+field.addEventListener("input", () => {
+  const box = field.getBoundingClientRect();
+  list.style.top = (box.bottom + scrollY) + "px";
+  list.style.left = (box.left + scrollX) + "px";
+  list.innerHTML = field.value ? ["Central Station", "Central Square"].map((stop) => '<li role="option">' + stop + '</li>').join("") : "";
+  field.setAttribute("aria-expanded", field.value ? "true" : "false");
+});
+list.addEventListener("mousedown", (event) => event.preventDefault());
+list.addEventListener("click", (event) => {
+  const option = event.target.closest("[role=option]");
+  if (!option) return;
+  window.chosen += 1;
+  field.value = option.textContent;
+  list.innerHTML = "";
+});
+</script>`;
+// A planner whose field says nothing of a list (no role, no aria), marked
+// against autofill as some sites mark a planner's stops
+// (autocomplete="one-time-code"), and whose stops come as plain rows of a list
+// put at the end of the page and drawn under the field, each a stop and its
+// town: no option, link or button, as an older planner draws them. The list
+// keeps the focus in the field while a row is pressed and closes as the field
+// loses it. A day field beside it opens a calendar under it, which is no list
+// of its stops; 250 links sit between them and the lists.
+const PLAIN_ROWS = `<h1>Journey planner</h1>
+<form action="/reading/journey" method="get">
+<p><label for="origin">Origin</label><input id="origin" name="origin" autocomplete="one-time-code"></p>
+<p><label for="day">Day</label><input id="day" name="day" autocomplete="off"></p>
+<p><button>Plan journey</button></p></form>
+<nav>${MANY_LINES}</nav>
+<ul id="menu" style="position:absolute;display:none;margin:0;padding:0;list-style:none;background:#fff;border:1px solid #888"></ul>
+<table id="calendar" style="position:absolute;display:none;background:#fff">${[1, 8, 15, 22].map((first) =>
+  `<tr>${Array.from({ length: 7 }, (_, day) => `<td>${first + day}</td>`).join("")}</tr>`).join("")}</table>
+<script>
+const origin = document.getElementById("origin");
+const menu = document.getElementById("menu");
+window.chosen = 0;
+const under = (element, field) => {
+  const box = field.getBoundingClientRect();
+  element.style.top = (box.bottom + scrollY) + "px";
+  element.style.left = (box.left + scrollX) + "px";
+  element.style.width = box.width + "px";
+};
+origin.addEventListener("input", () => {
+  const stops = origin.value ? ["München Hbf", "Hauptbahnhof (U, Tram)", "Hauptbahnhof Nord", "Hauptbahnhof Süd"] : [];
+  menu.innerHTML = stops.map((stop) => '<li><div tabindex="-1"><b>' + stop + '</b> <small>München</small></div></li>').join("");
+  under(menu, origin);
+  menu.style.display = stops.length ? "block" : "none";
+});
+origin.addEventListener("blur", () => { menu.style.display = "none"; });
+menu.addEventListener("mousedown", (event) => event.preventDefault());
+menu.addEventListener("click", (event) => {
+  const row = event.target.closest("li");
+  if (!row) return;
+  window.chosen += 1;
+  origin.value = row.querySelector("b").textContent;
+  menu.style.display = "none";
+});
+const day = document.getElementById("day");
+const calendar = document.getElementById("calendar");
+day.addEventListener("focus", () => { under(calendar, day); calendar.style.display = "table"; });
+day.addEventListener("blur", () => { calendar.style.display = "none"; });
+</script>`;
 // A link that keeps moving, which the page never lets a click take, to a
 // page that loads at once.
 const MOVING_LINK = `<style>@keyframes sway { from { transform: translateX(0); } to { transform: translateX(24px); } }
@@ -783,6 +860,8 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/blur-suggestion": page("Journey planner", BLUR_SUGGESTION),
       "site.test /reading/address-search": page("Journey planner", ADDRESS_SEARCH),
       "site.test /reading/key-lists": page("Journey planner", KEY_LISTS),
+      "site.test /reading/capped-list": page("Journey planner", CAPPED_LIST),
+      "site.test /reading/plain-rows": page("Journey planner", PLAIN_ROWS),
       "site.test /reading/moving-link": page("Museum", MOVING_LINK),
       "site.test /reading/key-only-list": page("Find a stop", KEY_ONLY_LIST),
       "site.test /reading/sorted-search": page("Museums", SORTED_SEARCH),
@@ -1657,6 +1736,52 @@ export async function runSharedBrowserPageReadingFixture() {
     const typedFind = await ok("POST", "/v1/type", { index: control(typedStart, "Find").index, snapshotId: typedStart.snapshotId, text: "Old Town" });
     assert.equal(await runPage.evaluate(() => document.getElementById("find").value), "Old Town", "the field the page put in was left short");
     assert.match(typedFind.done, /^Typed 8 characters into "Find"\. /u, typedFind.done);
+    // A field's options a reading's cap would leave out, and stops drawn as
+    // plain rows. A planner's stops showed only in a page's text: the reading
+    // listed 40 controls and left out 1,211, the type step named no stop, and
+    // the turn clicked a map and said it had chosen one. The options the
+    // field opened are listed first under the cap, its plain rows too, and
+    // the type step names them with the indices the next click takes.
+    for (const [pathname, label, text, stops] of [
+      ["/reading/capped-list", "From", "Central", ["Central Station", "Central Square"]],
+      ["/reading/plain-rows", "Origin", "München Hauptbahnhof",
+        ["München Hbf München", "Hauptbahnhof (U, Tram) München", "Hauptbahnhof Nord München", "Hauptbahnhof Süd München"]],
+    ]) {
+      await runPage.mouse.move(1, 1);
+      reading = await read(pathname);
+      assert.ok(reading.omittedControls > 0, `${pathname}: the page holds more controls than a reading: ${reading.omittedControls}`);
+      requests.length = 0;
+      // The field the site marks against autofill alone is typed into.
+      const typedStops = await ok("POST", "/v1/type", { index: control(reading, label).index, snapshotId: reading.snapshotId, text });
+      const listed = stops.map((stop) => control(typedStops, stop));
+      assert.equal(typedStops.interactiveElements.length, 200, `${pathname}: the reading holds its 200 controls`);
+      assert.match(
+        typedStops.done,
+        new RegExp(`^Typed ${Array.from(text).length} characters into "${label}"\\. A page's reading never shows typed text\\. `, "u"),
+        typedStops.done,
+      );
+      assert.ok(
+        typedStops.done.includes(`${stops.length} suggestions under "${label}": ${listed.slice(0, 4).map(({ index }, at) => `"${stops[at]}" (index ${index})`).join(", ")}. Click one.`),
+        `${pathname}: the type step did not name the field's options: ${typedStops.done}`,
+      );
+      // The index it names is the one the click takes: the stop is chosen
+      // once, with the focus left in the field.
+      const chosen = await runTool("POST", "/v1/click", { index: listed[1].index, snapshotId: typedStops.snapshotId });
+      assert.equal(chosen.code, 0, `${pathname}: the click on a suggestion failed: ${chosen.stderr}`);
+      assert.equal(await runPage.evaluate(() => window.chosen), 1, `${pathname}: the stop was not chosen once`);
+      assert.equal(
+        await runPage.evaluate((id) => document.getElementById(id).value, pathname === "/reading/capped-list" ? "from" : "origin"),
+        stops[1].replace(/ München$/u, ""),
+        `${pathname}: another stop was chosen`,
+      );
+      assert.deepEqual(requests, [], `${pathname}: choosing a stop sent something`);
+    }
+    // A calendar a day field opens under it is no list of its stops: the
+    // type step names none of its rows.
+    reading = await read("/reading/plain-rows");
+    const typedDay = await ok("POST", "/v1/type", { index: control(reading, "Day").index, snapshotId: reading.snapshotId, text: "20.11.2026" });
+    assert.equal(await runPage.evaluate(() => getComputedStyle(document.getElementById("calendar")).display), "table", "the calendar never opened");
+    assert.doesNotMatch(typedDay.done, /suggestion/u, `a calendar's rows were named as the field's suggestions: ${typedDay.done}`);
     // h. A click on a plain link the page does not take in time (one that
     // keeps moving) opens the link's address in the tab, as a link under a
     // cookie notice does: a museum's hours link timed out, and the turn said
@@ -1867,7 +1992,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so (a link to the page itself is refused as a button is), a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never Octo's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's settings or limited accept is a cookie notice's pause, while one on a refusal no list knows or a booking's button in small print that speaks of cookies is a step of the person's, the booking's button scrolled into view, each outlined and published with fixed labels and nothing pressed; a pause on an account's deletion dressed up as a notice is refused, outlining and publishing nothing, as is any pause in Octo's own tab; under a bar whose only button accepts the planner's own button works with no prompt",
         "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first, and one whose result comes 5 s later reads it too; one whose page still reads as before 6 s on says so and that its reading is the page as it is now, leaving no snapshot to take; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
-        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; a click on a plain link that keeps moving opens the link's address in the tab, once",
+        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; on a page with more controls than a reading holds, the options a field opened, and the plain rows of a list drawn under a field that names none (marked against autofill alone), are listed first and named with the indices a click then takes to choose one, while a calendar under a day field is no list of its stops; a click on a plain link that keeps moving opens the link's address in the tab, once",
         "a field's own suggestion is chosen by a click that leaves the focus in the field, from a list that closes as the field loses it and from one that draws its stops anew under the pointer, found again by the reading's record and clicked once; a stop the list no longer shows is not clicked, and the step answers with the field's suggestions as they read now",
         "a ticket shop's controls with no name of their own are named by their row or card (\"+ beside “Adult”\"), listed and highlighted by that name, while the same rows in a frame are named by the frame's site and none is listed or counted",
         "a row's words only tell its controls apart where they are named: reading steps in rows that speak of deleting, booking or saving go without a prompt, in Octo's own tab too, a pause on a booking's icon button under a line about cookies is the person's step, a key beside an icon button names no control, whole or in part, a withheld page's controls are named without their rows' words in its reading and a step's words, and a stop drawn anew for a field that names no list of its own names no other list's options",

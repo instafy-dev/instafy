@@ -404,7 +404,10 @@ values only; the canary key is assembled by script at run time.
 Agent typing into the following classes of fields is rejected, even after origin approval:
 
 - passwords, passcodes, PINs, and password-manager fields;
-- one-time codes, OTP, 2FA/MFA, and verification/security codes;
+- one-time codes, OTP, 2FA/MFA, and verification/security codes (a field marked
+  `autocomplete="one-time-code"` with a sign of a code, as the Shared Browser
+  judges it: the mark alone is put on a planner's stops too, and those are typed
+  into);
 - card numbers, CVV/CVC, expiration values, cardholder fields, and payment-like fields.
 
 Detection checks input type, autocomplete tokens, accessible labels, names, placeholders, IDs, and related descriptors before and after focus. The user may Pause (or press Escape) and complete these steps manually in the visible browser; the agent cannot type them through the RPC.

@@ -1765,7 +1765,13 @@ passkey), after the click that opened it read it, and the pause with that read
 still highlights exactly those fields and ends the turn with nothing sent. The
 person then signs in on the page, and a fresh run on the same page (what **Let
 Octo continue** starts) stars the repository, asking once before the form post.
-The person's values never reach a tool's output or the action feed.
+A planner whose fields the site marks against autofill alone
+(`autocomplete="one-time-code"`) is typed into, a start that opens its list as
+a person types with digits too, and the page names no sign-in; digits typed
+into its destination, a numeric "Code" field, one that holds 6 characters and
+one that takes digits are refused before any prompt, and the code page names
+them as a sign-in's. The person's values never reach a tool's output or the
+action feed.
 
 Last, `scripts/shared-browser-allowed-step-e2e.mjs` answers prompts on loopback
 pages that change by themselves while a prompt waits. On a journey planner, a
@@ -1857,7 +1863,12 @@ list that closes as its field loses focus and from one that draws its stops
 anew under the pointer, found again by the reading's record and clicked once;
 a stop the list no longer shows is not clicked, and the step answers with the
 field's suggestions as they read now; for a field that names no list of its
-own beside a "Sort by" list, it names no other list's options. A ticket shop's
+own beside a "Sort by" list, it names no other list's options. On a page with
+more controls than a reading holds, the options a field opened past the cap,
+and the plain rows of a list drawn under a field that names none (marked
+against autofill alone), are listed first and named with the indices a click
+then takes to choose one, while a calendar under a day field names no
+suggestions. A ticket shop's
 controls with no name of their own are named by their row or card ("+ beside
 “Adult”") and highlighted by that name, while the same rows in a frame are
 named by the frame's site and none is listed or counted. A row's words only

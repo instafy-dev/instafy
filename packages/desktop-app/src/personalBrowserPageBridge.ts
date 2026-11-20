@@ -7,6 +7,7 @@ import {
   type PersonalBrowserEditableDescriptor,
 } from "./personalBrowserSecurity";
 import {
+  CODE_WORD_SOURCE,
   CREDENTIAL_CONTEXT_SOURCE,
   KNOWN_SECRET_PATTERN_SOURCES,
   MASKED_TEXT_SOURCE,
@@ -14,7 +15,7 @@ import {
   pageLinksInPage,
   type RawPageLink,
 } from "./personalBrowserRedaction";
-import { controlNameRulesInPage, formSubmissionRulesInPage } from "./personalBrowserActionPolicy";
+import { controlNameRulesInPage, formSubmissionRulesInPage, oneTimeCodeRulesInPage } from "./personalBrowserActionPolicy";
 
 // The shared reader's link listing (pageCapture.js), run inside the page as it
 // stands: the same function the Shared Browser's origin runs.
@@ -226,6 +227,10 @@ const FORM_SUBMISSION_RULES_SOURCE = formSubmissionRulesInPage.toString();
 // The text a control draws (no scripts, styles, svg metadata or hidden
 // parts); the Shared Browser runs the same rules.
 const CONTROL_NAME_RULES_SOURCE = controlNameRulesInPage.toString();
+// Whether a field a one-time-code mark marks holds a code, judged in the page
+// before a type step types, by the rule and code words the host and the
+// Shared Browser use.
+const ONE_TIME_CODE_RULES_SOURCE = oneTimeCodeRulesInPage.toString();
 
 function buildPageScript(argumentsValue: unknown, body: string): string {
   return `(() => {
@@ -553,6 +558,45 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
           control instanceof HTMLInputElement && ["", "text", "email", "tel"].includes(String(control.type || "").toLowerCase()))
         : null;
       const signInIdentifier = Boolean(identifierCandidate) && identifierCandidate === element;
+      // A field's shape, for its one-time-code mark (the action policy's
+      // isOneTimeCodeField), read as the Shared Browser reads it: its
+      // maxlength and size, its pattern, whether it opens a list as a person
+      // types (a combobox, aria-autocomplete list or both, a datalist, or a
+      // list it names), and whether another field of its form is a
+      // sign-in's. Null for any other control, or when the page cannot say,
+      // and then the mark alone makes a code's field.
+      let fieldShape = null;
+      try {
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+          const number = (name) => {
+            const raw = clean(element.getAttribute(name), 16);
+            return /^\\d+$/.test(raw) ? Number(raw) : null;
+          };
+          const roleOf = (node) => clean(node.getAttribute("role"), 64).toLowerCase();
+          const namesList = (node) => ["aria-controls", "aria-owns"].some((name) =>
+            clean(node.getAttribute(name), 400).split(/\\s+/).filter(Boolean).slice(0, 16).some((id) => {
+              const named = document.getElementById(id);
+              return Boolean(named) && (["listbox", "grid", "tree", "menu"].includes(roleOf(named)) ||
+                ["UL", "OL", "DATALIST"].includes(String(named.tagName).toUpperCase()) ||
+                Boolean(named.querySelector("[role=option]")));
+            }));
+          const combobox = element.closest("[role=combobox]");
+          const signInMark = /(?:^|\\s)(?:username|webauthn|current-password|new-password)(?:\\s|$)/i;
+          fieldShape = {
+            maxLength: number("maxlength"),
+            size: number("size"),
+            pattern: clean(element.getAttribute("pattern"), 200),
+            opensList: Boolean(combobox) ||
+              ["list", "both"].includes(clean(element.getAttribute("aria-autocomplete"), 16).toLowerCase()) ||
+              (typeof HTMLDataListElement === "function" && element.list instanceof HTMLDataListElement) ||
+              namesList(element) || (combobox ? namesList(combobox) : false),
+            formSignIn: formControls.some((control) => control !== element && control.form === form &&
+              (isPasswordControl(control) || signInMark.test(clean(control.getAttribute("autocomplete"), 200)))),
+          };
+        }
+      } catch {
+        fieldShape = null;
+      }
       const formLabelledBy = clean(form?.getAttribute("aria-labelledby"))
         .split(/\\s+/)
         .map((id) => document.getElementById(id))
@@ -665,6 +709,7 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         formPasswordCount,
         signInIdentifier,
         formFieldCount,
+        fieldShape,
         formSubmitLabels,
         contentEditable: element.isContentEditable === true,
         ...structure,
@@ -964,12 +1009,18 @@ export async function typeIntoPersonalBrowserTarget(
       }
       const element = guarded.element;
       const item = guarded.item;
+      // A one-time-code mark makes a code's field only with a sign of a code
+      // (the action policy's isOneTimeCodeField, the text typed included),
+      // and its words are no label of the field's.
+      const marks = String(item.autocomplete || "").split(/\\s+/)
+        .filter((token) => token && token.toLowerCase() !== "one-time-code").join(" ");
       const sensitiveText = [
-        item.tag, item.type, item.name, item.id, item.autocomplete,
+        item.tag, item.type, item.name, item.id, marks,
         item.ariaLabel, item.placeholder, item.inputMode
       ].join(" ");
       const sensitive = item.type === "password"
-        || /(?:current-password|new-password|one-time-code|cc-(?:number|csc|exp|name))/i.test(item.autocomplete)
+        || /(?:current-password|new-password|cc-(?:number|csc|exp|name))/i.test(item.autocomplete)
+        || (${ONE_TIME_CODE_RULES_SOURCE})(${serializeForScript(CODE_WORD_SOURCE)}).isOneTimeCodeField(item, { typed: args.text })
         || /(?:\\bpass(?:word|code|phrase)?\\b|\\bpin\\b|\\bone[\\s_-]*time\\b|\\botp\\b|\\b2fa\\b|\\bmfa\\b|\\bverification[\\s_-]*code\\b|\\bsecurity[\\s_-]*code\\b|\\bcvv\\b|\\bcvc\\b|\\bcard[\\s_-]*(?:number|code)\\b|\\bcredit[\\s_-]*card\\b|\\bdebit[\\s_-]*card\\b|\\bpayment\\b)/i.test(sensitiveText);
       if (sensitive) {
         return { typed: false, blockedSensitive: true, targetChanged: false, descriptor: item };

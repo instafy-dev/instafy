@@ -337,6 +337,51 @@ test("Personal Browser hard-blocks password, OTP, and payment field typing", () 
   assert.equal(isSensitivePersonalBrowserEditable({ name: "search", type: "text" }), false);
 });
 
+test("a one-time-code mark makes a code's field only with a sign of a code", () => {
+  // The shape the page reads of a field; a descriptor without one keeps the
+  // mark alone as the sign (the test above).
+  const shape = (overrides = {}) => ({ maxLength: null, size: null, pattern: "", opensList: false, formSignIn: false, ...overrides });
+  const field = (overrides) => ({ tag: "input", type: "text", autocomplete: "one-time-code", ...overrides });
+  // A planner's stops, marked only to keep autofill out: a plain field, and a
+  // combobox whose list opens as a person types, even with digits typed.
+  const typed = [
+    [field({ ariaLabel: "Ziel wählen", fieldShape: shape() }), "Deutsches Museum"],
+    [field({ ariaLabel: "Start", role: "combobox", fieldShape: shape({ opensList: true }) }), "München Hauptbahnhof"],
+    [field({ ariaLabel: "Start", fieldShape: shape({ opensList: true, maxLength: 6 }) }), "80331"],
+  ];
+  for (const [descriptor, text] of typed) {
+    assert.equal(isSensitivePersonalBrowserEditable(descriptor, text), false, JSON.stringify(descriptor));
+  }
+  // A code: a numeric "Code" field, one that holds 6 characters, one that
+  // takes digits by its type or pattern, one that names a code or a
+  // password, one in a form with a password or a sign-in field, and digits
+  // typed into a plain one.
+  const blocked = [
+    [field({ ariaLabel: "Code", inputMode: "numeric", fieldShape: shape() }), "Deutsches Museum"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ maxLength: 6 }) }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ size: 8 }) }), "AB12CD"],
+    [field({ type: "tel", ariaLabel: "Enter what we sent you", fieldShape: shape() }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ pattern: "[0-9]{6}" }) }), "AB12CD"],
+    [field({ name: "otp", fieldShape: shape() }), "AB12CD"],
+    [field({ placeholder: "Your PIN", fieldShape: shape() }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", formHasPassword: true, fieldShape: shape() }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ formSignIn: true }) }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape() }), "482 910"],
+  ];
+  for (const [descriptor, text] of blocked) {
+    assert.equal(isSensitivePersonalBrowserEditable(descriptor, text), true, JSON.stringify(descriptor));
+  }
+  // Every other rule stays: a password field, a card field and a secret's
+  // words, in a field that opens a list too.
+  for (const descriptor of [
+    field({ type: "password", fieldShape: shape({ opensList: true }) }),
+    field({ autocomplete: "one-time-code cc-number", fieldShape: shape({ opensList: true }) }),
+    field({ ariaLabel: "Verification code", fieldShape: shape({ opensList: true }) }),
+  ]) {
+    assert.equal(isSensitivePersonalBrowserEditable(descriptor, "Start"), true, JSON.stringify(descriptor));
+  }
+});
+
 test("Space and Enter are treated as activations and mutating keys stay blocked on secrets", () => {
   assert.equal(isPersonalBrowserActivationKey("Enter"), true);
   assert.equal(isPersonalBrowserActivationKey(" "), true);

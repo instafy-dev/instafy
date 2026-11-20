@@ -135,6 +135,36 @@ export declare function isSearchField(target: PersonalBrowserStepTarget): boolea
  */
 export declare function isSignInField(target: PersonalBrowserStepTarget): boolean;
 /**
+ * The shape a host reads of a field, for isOneTimeCodeField: its maxlength
+ * and size (null when absent), its pattern, whether it opens a list as a
+ * person types (a combobox, aria-autocomplete list or both, or a list it
+ * names) and whether another field of its form is a sign-in's (marked
+ * username, webauthn, current-password or new-password).
+ */
+export type FieldShape = {
+  maxLength: number | null;
+  size: number | null;
+  pattern: string;
+  opensList: boolean;
+  formSignIn: boolean;
+};
+/**
+ * Whether a field `autocomplete="one-time-code"` marks holds a one-time
+ * code: with a sign of one (its own names name a code, a password or a
+ * code's step, it sits in a credential context, it takes digits, it holds at
+ * most 10 characters, its form holds a password or sign-in field, or
+ * `ctx.typed` is digits alone), and never by the mark alone for a field that
+ * opens a list. Without `target.fieldShape` the mark is the sign, as it was.
+ */
+export declare function isOneTimeCodeField(
+  target: PersonalBrowserStepTarget,
+  ctx?: { typed?: string },
+): boolean;
+/** Run inside the page from its source, with the redaction module's CODE_WORD_SOURCE: isOneTimeCodeField's rule. */
+export declare function oneTimeCodeRulesInPage(codeWordSource: string): {
+  isOneTimeCodeField(target: PersonalBrowserStepTarget, ctx?: { typed?: string }): boolean;
+};
+/**
  * A link or button that only opens a site's sign-in page ("Sign in", "Log in"
  * outside any form with a password field, never a form's submit button).
  * Hosts name it on a page with no sign-in fields yet, so a sign-in the person
