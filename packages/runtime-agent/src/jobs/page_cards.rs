@@ -42,6 +42,12 @@
 //! reply goes the runtime's own line, as under a reply whose change to another chat's page was put
 //! back ([`NOT_READY_TO_OPEN`]). It says "new", as the step is only for a page the turn made: the
 //! line beside it may name another chat's page, which opens as it did.
+//!
+//! The binder holds one more card back: that of a page that says "checked <date>" or "seen
+//! <date>" in typed words. Only the starter's helpers write those words, from a fact that says how
+//! its page was read. In a local test (Nov 20) a page written by hand with no starter, which no
+//! check had run on, got its card from this step with "Specs are checked 20 Nov 2026 on …" typed
+//! on it. Such a page has no card either, so its reply gets a line too ([`NOT_READY_CHECKED`]).
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -85,13 +91,21 @@ const NOT_READY_TO_OPEN: &str =
     "The new page isn't ready to open: it uses files from outside its own folder.";
 const NOT_READY_TO_OPEN_SEVERAL: &str =
     "The new pages aren't ready to open: they use files from outside their own folders.";
+/// The binder's reason for holding back the card of a page that says "checked <date>" or "seen
+/// <date>" in typed words, as `instafy bind card --json` answers it (the binder's own test pins
+/// these words).
+const SAYS_CHECKED_IN_TYPED_WORDS: &str = "it says \"checked <date>\" in typed words";
+/// The line under the reply of a turn that left such a page, and of one that left several.
+const NOT_READY_CHECKED: &str = "The new page isn't ready to open: a line on it says \"checked\" with a date, which has to be fixed first.";
+const NOT_READY_CHECKED_SEVERAL: &str = "The new pages aren't ready to open: lines on them say \"checked\" with a date, which has to be fixed first.";
 
 /// Posts the card of each page the turn left without one ([`pages_without_a_card`]), before the
 /// reply. `files` are the turn's files as its save lists them, `events` its Codex events, from
 /// each of its passes. One page at a time, at most [`MAX_CARDS`], for at most [`CARD_TIMEOUT`] in
 /// all; a Stop ends it. Returns the lines that go under the reply: [`NOT_READY_TO_OPEN`] when the
 /// binder held back the card of a page nobody can open, [`NOT_READY_TO_OPEN_SEVERAL`] when it held
-/// back more than one.
+/// back more than one, and [`NOT_READY_CHECKED`] or [`NOT_READY_CHECKED_SEVERAL`] the same way for
+/// pages that say "checked <date>" in typed words.
 pub(super) async fn post_missing_cards(
     workspace_dir: &Path,
     project_id: &Uuid,
@@ -166,7 +180,7 @@ async fn post_missing_cards_within(
     }
     let environment = card_environment();
     let deadline = Instant::now() + timeout;
-    let mut held_back = 0;
+    let (mut held_back, mut says_checked) = (0, 0);
     for folder in folders.iter().take(MAX_CARDS) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
@@ -176,14 +190,22 @@ async fn post_missing_cards_within(
         match post_card(workspace_dir, folder, &environment, left, cancel).await {
             Posted::Stopped => break,
             Posted::HeldBack => held_back += 1,
+            Posted::SaysChecked => says_checked += 1,
             Posted::Yes | Posted::No => {}
         }
     }
-    match held_back {
-        0 => Vec::new(),
-        1 => vec![NOT_READY_TO_OPEN.to_string()],
-        _ => vec![NOT_READY_TO_OPEN_SEVERAL.to_string()],
-    }
+    let line = |count: usize, one: &str, several: &str| match count {
+        0 => None,
+        1 => Some(one.to_string()),
+        _ => Some(several.to_string()),
+    };
+    [
+        line(held_back, NOT_READY_TO_OPEN, NOT_READY_TO_OPEN_SEVERAL),
+        line(says_checked, NOT_READY_CHECKED, NOT_READY_CHECKED_SEVERAL),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// The page folders (`sites/<name>`) whose `index.html` the turn made (`files`, as its save lists
@@ -372,6 +394,8 @@ enum Posted {
     No,
     /// The binder held the card back for what the page does: nobody can open it.
     HeldBack,
+    /// The binder held the card back for what the page says: "checked <date>" in typed words.
+    SaysChecked,
     Stopped,
 }
 
@@ -477,9 +501,13 @@ async fn post_card(
             if status.code() == Some(2) {
                 info!(folder, said = %said, "no card to post for a page the turn left without one");
                 // Served from its own folder, it can't load files from outside it: nobody can open
-                // it. Any other answer says it has its card, or that none can be posted here.
+                // it. Nor one whose card waits for typed "checked <date>" words to be deleted. Any
+                // other answer says it has its card, or that none can be posted here.
                 if said == LOADS_FILES_FROM_OUTSIDE {
                     return Posted::HeldBack;
+                }
+                if said == SAYS_CHECKED_IN_TYPED_WORDS {
+                    return Posted::SaysChecked;
                 }
             } else {
                 warn!(
@@ -695,7 +723,8 @@ mod tests {
     /// it was given; `bind card` for `sites/fails` fails, for `sites/hangs` starts a helper in its
     /// group and hangs, for `sites/none` answers that there is no card to post, for `sites/borrow…`
     /// that it holds the card back, as the binder does for a page that loads files from outside its
-    /// folder, and for any other folder answers that it posted the card.
+    /// folder, for `sites/type…` that it holds it back for typed "checked <date>" words, and for
+    /// any other folder answers that it posted the card.
     #[cfg(unix)]
     fn stand_in(bin: &Path, seen: &Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -710,6 +739,7 @@ case "$3" in
   ./sites/hangs) sleep 300 & echo "helper=$!" >> "$seen"; sleep 300 ;;
   ./sites/none) echo '{{"posted":false,"reason":"a preview shows it"}}'; exit 2 ;;
   ./sites/borrow*) echo '{{"posted":false,"reason":"it loads files from outside its folder"}}'; exit 2 ;;
+  ./sites/type*) echo '{{"posted":false,"reason":"it says \"checked <date>\" in typed words","typed":[{{"file":"index.html","line":"Specs are checked 20 Nov 2026"}}]}}'; exit 2 ;;
 esac
 echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer":{{"status":"live"}}}}'
 "#,
@@ -725,8 +755,9 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
     // without a card, with the turn's credential and chat and nothing else secret, one page at a
     // time; a command that fails or runs out of time ends with nothing left of its group, and a
     // Stop ends the step, before it starts or while a card is posted. Only a card held back for a
-    // page that loads files from outside its folder gives a line for the reply: one line, for one
-    // such page or for several.
+    // page that loads files from outside its folder, or for one that says "checked <date>" in
+    // typed words, gives a line for the reply: one line of each kind, for one such page or for
+    // several.
     #[cfg(unix)]
     #[test]
     fn the_card_step_runs_the_binders_card_command_for_each_page_with_the_turns_credential() {
@@ -780,7 +811,8 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         let seen_file = sandbox.join("seen");
         let workspace = sandbox.join("workspace");
         for page in [
-            "new", "fails", "none", "hangs", "later", "mine", "borrows", "borrowed",
+            "new", "fails", "none", "hangs", "later", "mine", "borrows", "borrowed", "typed",
+            "types",
         ] {
             write(&workspace, &format!("sites/{page}/index.html"));
         }
@@ -949,6 +981,47 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         assert_eq!(
             lines[10..],
             [expected("borrowed"), expected("borrows"), expected("none")],
+            "{lines:#?}"
+        );
+
+        // A page whose card waits for typed "checked <date>" words to be deleted has no card
+        // either: its reply gets a line of its own, beside the line of a page that loads files
+        // from outside its folder, and one line for several such pages.
+        let said = run(
+            made(&["borrows", "later", "typed"]),
+            false,
+            None,
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            said,
+            vec![NOT_READY_TO_OPEN.to_string(), NOT_READY_CHECKED.to_string()]
+        );
+        assert_eq!(
+            NOT_READY_CHECKED,
+            "The new page isn't ready to open: a line on it says \"checked\" with a date, which has to be fixed first."
+        );
+        let said = run(
+            made(&["typed", "types"]),
+            false,
+            None,
+            Duration::from_secs(30),
+        );
+        assert_eq!(said, vec![NOT_READY_CHECKED_SEVERAL.to_string()]);
+        assert_eq!(
+            NOT_READY_CHECKED_SEVERAL,
+            "The new pages aren't ready to open: lines on them say \"checked\" with a date, which has to be fixed first."
+        );
+        let lines = seen();
+        assert_eq!(
+            lines[13..],
+            [
+                expected("borrows"),
+                expected("later"),
+                expected("typed"),
+                expected("typed"),
+                expected("types")
+            ],
             "{lines:#?}"
         );
     }

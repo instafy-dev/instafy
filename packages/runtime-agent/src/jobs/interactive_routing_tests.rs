@@ -281,6 +281,31 @@ fn a_pages_card_comes_from_its_check_and_never_waits_for_one_that_fails() {
     }
 }
 
+/// A page to share went out saying a journey planner nobody ran was "checked 20 Nov 2026" (a local
+/// test, Nov 20). Its check had named that line twice and ended with the card's command each
+/// time, as the hub said a failing check does: the turn reworded the caption, then ran the check
+/// and the card's command joined by ";". A later turn changed the page and ran no check, and
+/// left "…; I didn't find a confirmed route." on it. A failing check still never holds the card
+/// back (the test above): the hub now names the two findings that do, says a typed "checked" is
+/// deleted, never reworded, what a tool nobody ran is captioned, that a page never says "I", and
+/// that an edit is followed by the check.
+#[test]
+fn a_typed_checked_holds_the_card_and_a_tool_nobody_ran_says_not_run() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub = flat(include_str!(
+        "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
+    ));
+    for needle in [
+        "A failing check never holds the card back: it names the card's command. Two findings are the exception: files loaded from outside the page's folder, and a typed \"checked <date>\" or \"seen <date>\", which is always deleted, never reworded (the card's own command names it too).",
+        "A tool or step nobody ran (a planner whose form was never sent) gets a caption that links it by its name and says \"not run\", with no day.",
+        "A page says what it shows, never \"I\".",
+        "4. After any edit, check again. No new card is needed: once your change is saved, every open view of the page loads it again by itself.",
+    ] {
+        assert!(hub.contains(needle), "{needle}");
+    }
+    assert!(hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+}
+
 /// A comparison looked right on a laptop and cramped on a phone, and the hub said only
 /// "Phone-first". It says what that means for a page Octo writes itself (the starters already do
 /// it): never wider than the screen, one column when narrow.

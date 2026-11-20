@@ -20,15 +20,20 @@
 // text they say so of anything, and a page captioned a journey planner whose form was never sent "<planner> · checked
 // 20 Nov 2026; no connection result", inside a link, so the line passed. The check names each line that types them,
 // linked or not (typedReads): a caption, never a fact site.trust or site.cite draws (its own "date" is no typed word),
-// a line that says the opposite or a sentence for a visitor. A page is served from its own folder, so the check also
-// fails a page that loads a file from outside it ("../another-page/site.js"), and names the command that gives the
-// page its own files. Pure helpers are exported for the tests.
+// a line that says the opposite or a sentence for a visitor. For each it says the words to delete (typedWords), since
+// that is always the fix: a page went out saying a planner nobody ran was "checked 20 Nov 2026", after its check had
+// named that line twice and ended with the card's command each time, and the first answer to the check was to reword
+// the caption. So those words hold the page's card until they are gone, at the check and at the card's own command
+// (cardWaits), and a check that finds them again says that rewording never passes. A page is served from its own
+// folder, so the check also fails a page that loads a file from outside it ("../another-page/site.js"), and names the
+// command that gives the page its own files. Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
 import { codeOnly, readScript } from "./script-text.mjs";
 import { STARTER_HTML, STARTERS, STARTERS_DIR } from "./init.mjs";
 import { shellWord } from "./preview-host.mjs";
+import { bindDir } from "./tokens.mjs";
 
 const SKIP_DIRS = new Set([".bind", "node_modules", "handlers", ".git", ".uwcache", "test", "tests"]);
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -160,6 +165,13 @@ const NO_SPAN_AFTER = `(?!(?:,?\\s*\\d{4})?\\s*(?:to|until|till|through|[–—-
  *  nor words put together while the page runs ("checked " + day), which the check cannot read. */
 export const TYPED_READ = new RegExp(`${NO_CAPTION_BEFORE}\\b(?:checked|seen)(?:\\s*:)?\\s+(?:on\\s+)?(?:${WEEKDAY}\\.?,?\\s+)?(?:the\\s+)?${DAY}${NO_SPAN_AFTER}`, "i");
 
+/** The typed words as a line holds them, for the check to say what to delete: "checked 20 Nov 2026 on maker.example",
+ *  with the day's year and the site the caption names after it, which are part of what was typed. */
+const TYPED_WORDS = new RegExp(`${TYPED_READ.source}(?:(?:,?\\s+|-)\\d{4}\\b)?(?:\\s+on\\s+[\\w-]+(?:\\.[\\w-]+)+)?`, "i");
+export function typedWords(line) {
+  return TYPED_WORDS.exec(String(line ?? ""))?.[0] ?? "";
+}
+
 /** A line of at most 160 characters that holds the words found in it at [at, end): the whole line when it is that
  *  short, its start when they are there, else from 60 characters before them, with "…" where it is cut. */
 function around(line, at, end) {
@@ -188,6 +200,25 @@ function everyString(value, out = []) {
   if (typeof value === "string") out.push(value);
   else if (Array.isArray(value)) for (const v of value) everyString(v, out);
   else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) if (k.toLowerCase() !== "expect") everyString(v, out);
+  return out;
+}
+
+/** A fact that says how its page was read, as site.js reads one: an https page and a "viewer" that names its reader,
+ *  never a search. Only for such a fact do site.trust and site.cite write "checked" or "seen". */
+const readFact = (value) => typeof value.url === "string" && /^\s*https:\/\//i.test(value.url)
+  && typeof value.viewer === "string" && !!value.viewer.trim() && !/(^|[^a-z])search/i.test(value.viewer);
+
+/** The strings such a fact holds itself in a data file: its value, its note. */
+function readFactStrings(value, out = []) {
+  if (Array.isArray(value)) for (const v of value) readFactStrings(v, out);
+  else if (value && typeof value === "object") {
+    const fact = readFact(value);
+    for (const [k, v] of Object.entries(value)) {
+      if (k.toLowerCase() === "expect") continue;
+      if (typeof v !== "string") readFactStrings(v, out);
+      else if (fact) out.push(v);
+    }
+  }
   return out;
 }
 
@@ -520,8 +551,9 @@ const before = (version, [major, minor]) => !!version && (version[0] < major || 
  *  they fetch text from another site), the source lines its pages and scripts draw by hand ([{ file, line, linked }]),
  *  the lines that say "checked <date>" or "seen <date>" in typed words (`typed`: [{ file, line }], from what the build
  *  writes by hand: its HTML pages, its own scripts and data.json; never a file a command writes, such as a check's
- *  records or a map's layers, which may quote a page's own words), the lines that set HTML from a string (`markup`), what it loads from outside its folder (`outside`) and the starter
- *  whose files those are (`starter`). */
+ *  records or a map's layers, which may quote a page's own words; `fact`: true on a line that a fact of data.json
+ *  holds which says how its page was read, so its caption is drawn already), the lines that set HTML from a string
+ *  (`markup`), what it loads from outside its folder (`outside`) and the starter whose files those are (`starter`). */
 export function readSite(dir) {
   const root = path.resolve(dir);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error(`no site folder at ${dir}`);
@@ -532,8 +564,9 @@ export function readSite(dir) {
   const markup = [];
   let declared = [];
   const files = [];
-  const typedIn = (file, texts) => {
-    for (const line of typedReads(texts)) if (!typed.some((t) => t.file === file && t.line === line)) typed.push({ file, line });
+  const typedIn = (file, texts, facts = []) => {
+    const inFact = new Set(typedReads(facts));
+    for (const line of typedReads(texts)) if (!typed.some((t) => t.file === file && t.line === line)) typed.push({ file, line, ...(inFact.has(line) ? { fact: true } : {}) });
   };
   for (const file of siteFiles(root)) {
     try {
@@ -575,7 +608,7 @@ export function readSite(dir) {
       // a comparison's stored lede is not drawn: only the words the page shows count
       if (rel === "data.json" && ownLede && value && typeof value === "object" && "lede" in value) value = { ...value, lede: undefined };
       parts.push({ file: rel, kind: "data", text: jsonStrings(value).join("\n") });
-      if (rel === "data.json") typedIn(rel, everyString(value));
+      if (rel === "data.json") typedIn(rel, everyString(value), readFactStrings(value));
     } else if (SOURCE.test(file)) {
       scripts.push({ file: rel, other: raw, loads: SOURCE_LOADS.test(raw) });
     } else if (/\.m?js$/i.test(file)) {
@@ -1127,14 +1160,68 @@ function answeredPort(output) {
   return Number.isInteger(port) && port > 0 && port < 65536 ? port : null;
 }
 
+/** The words of a check that named typed "checked <date>" or "seen <date>" lines: for each line the words to delete,
+ *  and for one a fact holds that says how its page was read, that its caption is drawn already. They quote nothing
+ *  site.trust or site.cite draw: quoted, a drawn caption was the shape of the captions typed afterwards. `again`: the
+ *  check before this one named typed words too. */
+function typedLines(typed, { again = false } = {}) {
+  const lines = [`TYPED: ${typed.length} line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:`];
+  for (const { file, line, fact } of typed.slice(0, 8)) {
+    const words = typedWords(line);
+    const where = words === line ? "the whole line" : `from "${line}"`;
+    lines.push(`- ${file}: delete "${words}", ${where}${fact ? '. Its fact says how its page was read, so site.trust(fact) or site.cite(fact) writes them from its "date" and "viewer"' : ""}.`);
+  }
+  if (typed.length > 8) lines.push(`- and ${typed.length - 8} more line(s): delete them there too.`);
+  lines.push('Only site.trust(fact) and site.cite(fact) write those words, from a fact that says how its page was read ({"v", "src", "url", "date", "viewer"}): where a line is about such a fact, that call goes in the words\' place. A tool or a form nobody ran has no such fact: its line keeps its name and its link and says "not run", with no day. A day that is the page\'s own content, not when a source was read, goes in a cell or field of its own.');
+  if (again) lines.push("The check before this one named typed words here too. Rewording a line never passes: only deleting those words does.");
+  return lines;
+}
+/** The step after those lines, where a card's command would be named: the card waits. */
+const TYPED_NEXT = "delete the typed words named above, then check again: the page's card waits until they are gone";
+
+/** What the last check of the site in `dir` found typed, kept in its .bind folder (never served, never saved with the
+ *  space's files): whether that check named typed words too, read before this check's own count is kept for the next
+ *  one. A turn's first answer to those lines was to reword them, so a second check that finds them says rewording
+ *  never passes. A folder that can't be written keeps nothing, and its checks say nothing of the one before. */
+const LAST_CHECK = "check.json";
+function typedBefore(dir, typed) {
+  const file = path.join(dir, ".bind", LAST_CHECK);
+  let before = false;
+  try {
+    before = Number(JSON.parse(fs.readFileSync(file, "utf8"))?.typed) > 0;
+  } catch {
+    // no check before this one, or none that found any
+  }
+  try {
+    if (typed.length) fs.writeFileSync(path.join(bindDir(dir), LAST_CHECK), `${JSON.stringify({ typed: typed.length })}\n`, { mode: 0o600 });
+    else if (before) fs.rmSync(file, { force: true });
+  } catch {
+    // the check still says what it found
+  }
+  return before;
+}
+
+/** What makes the card of the page in `dir` wait, as the card's own command reads it (`instafy preview open` for a page
+ *  the binder serves, and `instafy bind card`): the check's own lines for its typed "checked <date>" and "seen <date>",
+ *  or null when it types none. A check and the card's command joined by ";", a change nobody checked and a page
+ *  written by hand with no starter all meet the same scan there. */
+export function cardWaits(dir) {
+  const { typed } = readSite(dir);
+  const again = typedBefore(dir, typed);
+  return typed.length ? { typed, lines: [...typedLines(typed, { again }), `next: ${TYPED_NEXT}`] } : null;
+}
+
 /** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing, a value to fix, a source
  *  line that links no page, a typed "checked <date>" or "seen <date>", a file loaded from outside the site's folder or
  *  an error on the page as drawn, 2 nothing to check, or items it could tell about neither from the files nor from the
  *  page as drawn. `card`: the command that
  *  serves the site and posts its card, while no preview shows it. A check that passes takes that step itself with
  *  `post` (which runs the command and says what it answered); any other answer ends with the command, since a failing
- *  check never holds the card back, except for a page that loads files from outside its folder: served on its own it
- *  can't load them, so its card waits for the check that passes. An item whose words a script holds where the check
+ *  check never holds the card back, except for two findings. A page that loads files from outside its folder can't
+ *  load them served on its own, so its card waits for the check that passes. And a typed "checked <date>" or "seen
+ *  <date>" says on a page to share that something was read: its fix is always to delete the words, so the card waits
+ *  until they are gone, and the answer ends with that step in the command's place. An item whose words a script holds
+ *  where the check
  *  cannot read them (a page that draws its text with document.createElement, or as HTML from a string) is looked for
  *  on the page as drawn, in the same step: a new page's card is posted first, as a passing check posts it, and `look`
  *  runs the page check on the port it is served on (that card's, else `served`'s: a preview that already shows it).
@@ -1144,7 +1231,9 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   const values = checkValues(dir);
   const { missing, unknown, unlinked, typed, outside, markup } = result;
   const fix = outside.length ? outsideLines(dir, outside, starter) : null;
-  const next = card && !fix ? `post its card: ${card}` : null;
+  const again = typedBefore(dir, typed);
+  // where a card's command would be named, a page that types those words is told its card waits for their deletion
+  const next = !card || fix ? null : typed.length ? TYPED_NEXT : `post its card: ${card}`;
   const nextLines = next ? [`next: ${next}`] : [];
   const markupNotes = markup.slice(0, 5).map((m) => `NOTE: ${m.file}:${m.line} sets HTML from a string (${m.code}): draw its text with site.h, which sets text as text, and each fact with site.trust(fact), which links its page.`);
   if (markup.length > 5) markupNotes.push(`NOTE: ${markup.length - 5} more line(s) set HTML from a string: draw them the same way.`);
@@ -1167,7 +1256,7 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   if (json) {
     const step = posted ? { card: { posted: posted.ok, command: posted.command, ...(posted.ok ? { answer: answerOf(posted.output) } : { error: posted.error }) }, ...(posted.ok ? {} : { next: `post its card: ${posted.command}` }) } : next ? { next } : {};
     const page = drawn ? { drawn } : unknown.length && !failing ? { drawn: { port, error: unseen ?? "nothing serves the page" } } : {};
-    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(fix ? { init: fix.init } : {}), ...page, ...step })] };
+    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(again && typed.length ? { typedAgain: true } : {}), ...(fix ? { init: fix.init } : {}), ...page, ...step })] };
   }
   const lines = [...(fix ? fix.lines : [])];
   const absent = [...missing, ...(drawn ? drawn.missing.map((m) => (m.sizes.length ? `${m.item} (not on the ${listed(m.sizes)} size)` : m.item)) : [])];
@@ -1185,13 +1274,9 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   }
   if (unlinked.length) {
     lines.push(`UNLINKED: ${unlinked.length} source line(s) link no page: ${unlinked.map((u) => `"${u.line}" (${u.file})`).join(", ")}.`);
-    lines.push('Draw each fact with site.trust({"v", "src", "url", "date", "viewer"}), which links the page it was read on ("checked 8 Nov on maker.com ↗"), or link that page in the line. Something no page gave says "not checked".');
+    lines.push('Draw each fact with site.trust({"v", "src", "url", "date", "viewer"}), which links the page it was read on, or link that page in the line. Something no page gave says "not checked".');
   }
-  if (typed.length) {
-    const named = typed.slice(0, 8).map((t) => `"${t.line}" (${t.file})`).join(", ");
-    lines.push(`TYPED: ${typed.length} line(s) say "checked <date>" or "seen <date>" in typed words: ${named}${typed.length > 8 ? ` and ${typed.length - 8} more` : ""}.`);
-    lines.push('Those words are site.trust\'s and site.cite\'s, written from how a fact\'s page was read: draw the fact ({"v", "src", "url", "date", "viewer"}) with one of them ("checked 8 Nov on maker.com ↗") and take the typed words out. A page nobody read, or a form that was never sent, was not checked: link it by its name alone, with no day.');
-  }
+  if (typed.length) lines.push(...typedLines(typed, { again }));
   for (const note of values.notes) lines.push(`NOTE: ${note}`);
   lines.push(...markupNotes);
   if (result.items.length) {

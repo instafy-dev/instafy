@@ -16,7 +16,7 @@ import { COMMAND_NAMES, safeText } from "../src/protocol.mjs";
 import { envNameRefusal } from "../src/executors/script.mjs";
 import { DEFAULT_AGENT_BUDGET_PER_HOUR } from "../src/budget.mjs";
 import { handlerHash, readTried, tryIntent } from "../src/try.mjs";
-import { cardTitle, checkReport, readSite } from "../src/check.mjs";
+import { cardTitle, cardWaits, checkReport, readSite } from "../src/check.mjs";
 import { cardArgs, cardCommand, inFolder, inSpace, lookAtPage, pageRecorded, previewPort, previewShows, shellWord } from "../src/preview-host.mjs";
 
 const HELP = `instafy-bind: a website plus a generic backend that turns clicks into typed intents.
@@ -70,15 +70,17 @@ check      Does the site show every item the request named (each product, stop o
            they were read, and a filter that would count a row whose value is unknown; and it notes the rows a
            filter lists apart. On any page it lists a source line drawn by hand (class "trust") that links no
            page, unless it says "not checked", and a fact with its source and no page; and each line that says
-           "checked <date>" or "seen <date>" in typed words, linked or not: site.trust and site.cite write those
-           from how a fact's page was read ("viewer"). Exit 1 when an item is
+           "checked <date>" or "seen <date>" in typed words, linked or not, with the words to delete: site.trust
+           and site.cite write those from how a fact's page was read ("viewer"). Exit 1 when an item is
            missing, a value or a source line needs fixing; 2 when there is nothing to check. It also fails a page
            that loads a file from outside its folder (a page is served from its own folder) and names the init
            command that gives it its own files. Items: --expect, plus an "expect" array in data.json. Run it
            before telling anyone the page is done. In a space, while no preview shows the site, a check that
            passes on a new page (one whose card was never opened) serves it and posts its card itself, and any
            other check ends with the command that does: a failing check never holds the card back, except for a
-           page that loads files from outside its folder. An item whose words a script holds where the check
+           page that loads files from outside its folder and one with typed "checked <date>" words, whose card
+           waits until they are deleted (a second check that finds them says rewording never passes; the card's
+           own command names them too, and posts no card). An item whose words a script holds where the check
            cannot place them (or fetches from another site) is looked for on the page as drawn, in the same step:
            where the page is served (a new page's card is posted first, as a passing check posts it), the page
            check (\`instafy preview check\`) loads it, and the check answers with what it drew, failing (1) for
@@ -86,8 +88,9 @@ check      Does the site show every item the request named (each product, stop o
            It names each line that sets HTML from a string (innerHTML), which never fails the page.
 card       The card step a check that passes takes, without the check: in a space, for a page whose card was
            never opened, while no preview shows it, it serves the page and posts its card, titled from the page.
-           As for a check, none for a page that loads files from outside its folder. Exit 0 when it posted the
-           card, 1 when the card's command failed, 2 when there is no card to post.
+           As for a check, none for a page that loads files from outside its folder, or that says "checked
+           <date>" in typed words (it answers with the check's lines for them). Exit 0 when it posted the card,
+           1 when the card's command failed, 2 when there is no card to post.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -404,8 +407,10 @@ function postCard(dir) {
  *  of its pages holds (its card was opened before: another chat's page, or one a person stopped), while a preview shows
  *  the folder, outside a space, for a folder the binder does not serve as one page, or for a page that loads files from
  *  outside its folder (the check's own reading of it): served from its own folder it can't load them, so, as for the
- *  check, its card waits until it loads its own. `{ exit, lines }`: 0 posted, 1 its command failed, 2 no card to post,
- *  with why. */
+ *  check, its card waits until it loads its own. Nor for a page that says "checked <date>" or "seen <date>" in typed
+ *  words: as for the check, its card waits until they are deleted, and the answer is the check's own lines for them
+ *  (`typed` in --json). `{ exit, lines }`: 0 posted, 1 its command failed, 2 no card to post, with why. */
+const TYPED_WORDS_HOLD = 'it says "checked <date>" in typed words';
 function cardReport(dir, { json = false } = {}) {
   const none = !inSpace(dir)
     ? "the folder is not in a space"
@@ -419,6 +424,8 @@ function cardReport(dir, { json = false } = {}) {
             ? "it loads files from outside its folder"
             : null;
   if (none) return { exit: 2, lines: [json ? JSON.stringify({ posted: false, reason: none }) : `No card to post: ${none}.`] };
+  const waits = cardWaits(dir);
+  if (waits) return { exit: 2, lines: json ? [JSON.stringify({ posted: false, reason: TYPED_WORDS_HOLD, typed: waits.typed })] : [`No card to post: ${TYPED_WORDS_HOLD}.`, ...waits.lines] };
   const posted = postCard(dir);
   const exit = posted.ok ? 0 : 1;
   if (json) {
@@ -652,7 +659,8 @@ async function main() {
       // In a space the page ends with its card, posted by the command that also serves it, unless a preview already
       // shows the folder (a page made before: an edit needs no new card); anywhere else the binder runs on its own, and
       // serving the site is the next step. A page with content to check gets its card from the check: one that passes
-      // posts it, and one that fails names its command, so it never holds the card back. Named here as well, the card
+      // posts it, and one that fails names its command, so it never holds the card back (but for the two findings whose
+      // card waits: files from outside the folder, and typed "checked <date>" words). Named here as well, the card
       // was asked for twice, the second time under another title.
       const content = flags.starter ? path.join(rest[0], flags.starter === "blank" ? "app.js" : "data.json") : null;
       if (inSpace(rest[0])) {

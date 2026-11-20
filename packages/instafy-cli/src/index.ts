@@ -2290,7 +2290,7 @@ webSettingsCommand
 const previewOpenCommand = previewCommand
   .command("open")
   .description(
-    "Open a private preview of a local port (exit 2: nothing listening, or a page that answers 404, which gets no card; 3: port not allowed or another site's; 5: previews not available)",
+    "Open a private preview of a local port (exit 1: a page `instafy bind serve` serves that says \"checked <date>\" in typed words, which gets its check's lines and no card; 2: nothing listening, or a page that answers 404, which gets no card; 3: port not allowed or another site's; 5: previews not available)",
   )
   .option("--port <port>", "Local port the site listens on (1024-65535); with --start, leave it out and a free one is picked")
   .requiredOption("--title <title>", "Card title (at most 120 characters)")
