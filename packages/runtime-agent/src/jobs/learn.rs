@@ -1369,7 +1369,7 @@ pub fn clear_scaffold_only_folder(workspace_dir: &Path) -> std::io::Result<bool>
     }
     let own_entries = || -> std::io::Result<Vec<std::ffi::OsString>> {
         let mut names = Vec::new();
-        for entry in fs::read_dir(workspace_dir)? {
+        for entry in std::fs::read_dir(workspace_dir)? {
             let name = entry?.file_name();
             // What the origin's emptiness check skips (`workspace_dir_empty`).
             if name != ".instafy" && name != ".git" && name != ".DS_Store" {
@@ -1392,10 +1392,10 @@ pub fn clear_scaffold_only_folder(workspace_dir: &Path) -> std::io::Result<bool>
     }
     for name in &names {
         let path = workspace_dir.join(name);
-        if fs::symlink_metadata(&path)?.is_dir() {
-            fs::remove_dir_all(&path)?;
+        if std::fs::symlink_metadata(&path)?.is_dir() {
+            std::fs::remove_dir_all(&path)?;
         } else {
-            fs::remove_file(&path)?;
+            std::fs::remove_file(&path)?;
         }
     }
     Ok(true)
@@ -1404,8 +1404,8 @@ pub fn clear_scaffold_only_folder(workspace_dir: &Path) -> std::io::Result<bool>
 /// Whether `path` is exactly what the scaffold wrote at `reference`: a file with the same bytes,
 /// or a directory every entry of which is (Finder's `.DS_Store` aside). A symlink never is.
 fn same_as_scaffold(path: &Path, reference: &Path) -> std::io::Result<bool> {
-    let metadata = fs::symlink_metadata(path)?;
-    let Ok(reference_metadata) = fs::symlink_metadata(reference) else {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let Ok(reference_metadata) = std::fs::symlink_metadata(reference) else {
         return Ok(false);
     };
     if metadata.file_type().is_symlink() || reference_metadata.file_type().is_symlink() {
@@ -1415,7 +1415,7 @@ fn same_as_scaffold(path: &Path, reference: &Path) -> std::io::Result<bool> {
         if !reference_metadata.is_dir() {
             return Ok(false);
         }
-        for entry in fs::read_dir(path)? {
+        for entry in std::fs::read_dir(path)? {
             let name = entry?.file_name();
             if name == ".DS_Store" {
                 continue;
@@ -1428,7 +1428,7 @@ fn same_as_scaffold(path: &Path, reference: &Path) -> std::io::Result<bool> {
     }
     Ok(metadata.is_file()
         && reference_metadata.is_file()
-        && fs::read(path)? == fs::read(reference)?)
+        && std::fs::read(path)? == std::fs::read(reference)?)
 }
 
 fn is_earlier_copy(bytes: &[u8], earlier: &[&str]) -> bool {
