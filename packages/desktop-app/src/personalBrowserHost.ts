@@ -2866,7 +2866,10 @@ export class PersonalBrowserHost {
     }
 
     if (operation === "type") {
-      if (isSensitivePersonalBrowserEditable(resolvedTarget.descriptor)) {
+      // The text typed is judged too: digits alone in a field a
+      // one-time-code mark marks are a code.
+      const typed = typeof payload.text === "string" ? payload.text : undefined;
+      if (isSensitivePersonalBrowserEditable(resolvedTarget.descriptor, typed)) {
         throw new PersonalBrowserControlError(
           403,
           "sensitive_input_blocked",
@@ -2933,7 +2936,7 @@ export class PersonalBrowserHost {
         result,
         "The page or browser target changed immediately before typing.",
       );
-      if (result.blockedSensitive || isSensitivePersonalBrowserEditable(result.descriptor)) {
+      if (result.blockedSensitive || isSensitivePersonalBrowserEditable(result.descriptor, text)) {
         throw new PersonalBrowserControlError(
           403,
           "sensitive_input_blocked",

@@ -19,6 +19,8 @@ For every reader and browser. Pages are found as "Finding a page" in `instafy-br
 - In the planner, choose the start, the stop nearest the place (the one the place's own page names, else your pick) and the person's day and time (else a daytime hour); then press its button and read the route.
 - Choose each stop by clicking it in its field's own suggestions, not with Enter, which can send the form before a stop is chosen. Press the button once, when every field is filled.
 - Say there's no route only when the planner's own results say so. When a stop couldn't be chosen, say that instead.
+- If the browser refuses a planner's field as a secret, filling it is the person's step: highlight it with `request_human_input` and say what goes in it. Don't try it on another copy of that planner in this message.
+- A planner you didn't send is "not run", never "checked" or "no result". Say the last step you took ("I typed the start; I couldn't choose a stop"), and say "again" only for a step this turn took.
 
 ## A route's finding
 

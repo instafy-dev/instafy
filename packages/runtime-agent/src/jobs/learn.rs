@@ -744,6 +744,12 @@ const LEGACY_BROWSER_AUTOMATION_SHA256: &[&str] = &[
     // whatever the person calls it, and a browser turn said "nothing found" or "covered" only
     // when a step said so.
     "1b498f26b8149ea803f2743b103da995051a4c772be2d7ab103bbac2bb5c8c46", // v47
+    // From before a map's research stayed `direct` with the map, research that ends in a page
+    // went to the browser first unless it searches first in Octo's own turn (the browser can't
+    // search), the rule that keeps research with Octo stopped saying how its building turn reads,
+    // and the person's own steps named the final button that pays or books and a sign-in their
+    // request needs.
+    "b3a2cf3065fc8baa1150eaa850a2db58017f5e8e62da86fe32d82fd3fc59c92c", // v48
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,
@@ -866,6 +872,10 @@ const LEGACY_GETTING_AROUND_SHA256: &[&str] = &[
     // chosen by clicking it in its field's own suggestions, the planner's button was pressed once,
     // and "no route" came only from the planner's own results.
     "c796aec8725dd590b9f3955bc90f7c44d5831ad75d14eff487433dc8db50bed9", // v1
+    // From before a planner field the browser refuses as a secret was the person's to fill,
+    // highlighted for them, and a planner nobody sent was "not run", with the last step taken
+    // said and "again" only for a step of the same turn.
+    "867ef76cbe062683760a4cc911c22648cccd47085f4c5f221a0adb67a94c1179", // v2
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

@@ -1413,6 +1413,58 @@ impl HeldPages {
         self.pages.iter().any(|(_, held)| *held)
     }
 
+    /// Whether `message`, in a chat that has a page of its own, names a page of the space, by its
+    /// whole title or its folder, and every page it names is held: one another chat made, which
+    /// the person changes in that chat. A turn for such a message has no change of its own to
+    /// make here, and an answer that made none says so (`jobs`: no retry for files). A name
+    /// inside a longer one the message holds is that longer one's, and a name of one word names
+    /// nothing: it is a word of the message.
+    ///
+    /// In a chat that has made no page nothing is named: a title is drawn from the words of the
+    /// request that made its page, so the same request in a new chat holds that title whole
+    /// ("What's on in Lisbon this weekend? Put the best five on a map."), and it asks for this
+    /// chat's first page, not for a change to the other chat's. Words can't tell the two apart,
+    /// so such a turn keeps its second pass, which a new chat that answered "it's a page made in
+    /// another chat, so I left it unchanged" to a page request needs.
+    pub(super) fn names_only_held_pages(&self, message: &str) -> bool {
+        let made_a_page_here = self
+            .pages
+            .iter()
+            .any(|(page, held)| page.chat.is_some() && !held);
+        if !made_a_page_here {
+            return false;
+        }
+        let message = format!(" {} ", words_of(message));
+        let mut named: Vec<(usize, usize, bool)> = Vec::new();
+        for (page, held) in &self.pages {
+            for name in page.title.iter().chain(std::iter::once(&page.folder)) {
+                let name = words_of(name);
+                if !name.contains(' ') {
+                    continue;
+                }
+                let needle = format!(" {name} ");
+                let mut from = 0;
+                while let Some(at) = message[from..].find(&needle) {
+                    let start = from + at;
+                    named.push((start, start + needle.len(), *held));
+                    from = start + 1;
+                }
+            }
+        }
+        let named: Vec<bool> = named
+            .iter()
+            .filter(|(start, end, _)| {
+                !named.iter().any(|(other_start, other_end, _)| {
+                    other_start <= start
+                        && end <= other_end
+                        && other_end - other_start > end - start
+                })
+            })
+            .map(|(_, _, held)| *held)
+            .collect();
+        !named.is_empty() && named.iter().all(|held| *held)
+    }
+
     /// The held page a workspace path is in: the page with the deepest folder that holds it, when
     /// another chat made that page. Never a path the runtime owns (`.bind`, `.git`).
     fn page_of(&self, path: &str) -> Option<&RecordedPage> {
@@ -1931,6 +1983,19 @@ fn page_folder(site_dir: &str) -> Option<String> {
             .components()
             .all(|component| matches!(component, Component::Normal(_)));
     inside.then(|| folder.to_string())
+}
+
+/// A text as its words: lowercase letters and digits with one space between each, so a title or a
+/// folder (`sites/action-cameras`) reads the same in a message whatever its quotes, dashes, slashes
+/// or letter case.
+fn words_of(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A title on one line: no control characters, single spaces, at most the CLI's length.
@@ -3565,5 +3630,115 @@ mod tests {
         let mut reply = "I added each one's weight.".to_string();
         quiet.reply(&mut reply, &[]);
         assert_eq!(reply, "I added each one's weight.");
+    }
+
+    /// A message names a page by its whole title or its folder, whatever its quotes, dashes or
+    /// letter case, and it names only pages another chat made when every page it names is one.
+    /// "Add a waterproof depth column to Action cameras compared." in a chat that made a page
+    /// of its own names only the other chat's comparison. A page of this chat it names, a page
+    /// whose chat isn't recorded, no page at all, or a title that is one word, leaves it to the
+    /// turn as before; a title inside a longer one the message names is the longer one's.
+    ///
+    /// In a chat that has made no page, a message's words may hold another chat's title and
+    /// still ask for this chat's first page: titles are drawn from the words of the requests
+    /// that made them, so the same request sent again in a new chat holds the title whole
+    /// ("What's on in Lisbon this weekend? Put the best five on a map."). Nothing is named
+    /// there, and the turn keeps its second pass.
+    #[test]
+    fn a_message_names_only_pages_another_chat_made_by_their_titles_or_folders() {
+        let (this, other, fresh) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let workspace = tempfile::tempdir().unwrap();
+        for folder in [
+            "sites/action-cameras",
+            "sites/camera-a-vs-camera-b",
+            "sites/action-cameras-again",
+            "sites/map",
+            "sites/lisbon-weekend",
+            "seville-3-days",
+        ] {
+            std::fs::create_dir_all(workspace.path().join(folder)).unwrap();
+        }
+        write_record(
+            workspace.path(),
+            vec![
+                page(
+                    "sites/action-cameras",
+                    "Action cameras compared",
+                    Some(&other),
+                    &PAGE_SERVER,
+                ),
+                page(
+                    "sites/camera-a-vs-camera-b",
+                    "Camera A vs Camera B (2024)",
+                    Some(&this),
+                    &PAGE_SERVER,
+                ),
+                page(
+                    "sites/action-cameras-again",
+                    "Action cameras compared again",
+                    Some(&this),
+                    &PAGE_SERVER,
+                ),
+                page("sites/map", "Map", Some(&other), &PAGE_SERVER),
+                page(
+                    "sites/lisbon-weekend",
+                    "Lisbon this weekend",
+                    Some(&other),
+                    &PAGE_SERVER,
+                ),
+                page("seville-3-days", "Seville in 3 days", None, &PAGE_SERVER),
+            ],
+        );
+        const NAMED: [&str; 4] = [
+            "Add a waterproof depth column to Action cameras compared.",
+            "Add a waterproof depth column to \u{201c}Action cameras compared\u{201d}.",
+            "add a price row to action cameras compared, please",
+            "Put a weight row on sites/action-cameras.",
+        ];
+        let held = HeldPages::of_turn(workspace.path(), Some(&this), &[], None);
+        for message in NAMED {
+            assert!(held.names_only_held_pages(message), "{message}");
+        }
+        for message in [
+            // This chat's own page, alone or beside the other chat's.
+            "Add a waterproof column to Camera A vs Camera B (2024).",
+            "Copy Action cameras compared's prices into Camera A vs Camera B (2024).",
+            // A longer title of this chat's holds the other chat's: it names this chat's page.
+            "Add a waterproof column to Action cameras compared again.",
+            // A page whose chat isn't recorded is nobody's to hold.
+            "Add a day to Seville in 3 days.",
+            // A one-word title is a word of the message, and no page is named.
+            "Make a map of Lisbon.",
+            "Add a waterproof depth column to the camera comparison.",
+            "",
+        ] {
+            assert!(!held.names_only_held_pages(message), "{message}");
+        }
+        // A chat that has made no page names none: its message may ask for its first, in the
+        // words of the request that made the other chat's, or for a change to that page. Either
+        // way its turn keeps its second pass.
+        let first = HeldPages::of_turn(workspace.path(), Some(&fresh), &[], None);
+        for message in NAMED.into_iter().chain([
+            "What's on in Lisbon this weekend? Put the best five on a map.",
+            "Plan Lisbon this weekend on a small page I can share.",
+        ]) {
+            assert!(!first.names_only_held_pages(message), "{message}");
+        }
+        // In a chat with a page of its own the title's words name the other chat's page, also
+        // where the message means a new page on its subject, or names its own page only as
+        // "my page": words alone can't tell those apart, and an answer that changed nothing
+        // then stands, with the runtime's line under it.
+        for message in [
+            "What's on in Lisbon this weekend? Put the best five on a map.",
+            "Add the waterproof depths from Action cameras compared to my page.",
+        ] {
+            assert!(held.names_only_held_pages(message), "{message}");
+        }
+        // In the chat that made it, nothing is held.
+        let theirs = HeldPages::of_turn(workspace.path(), Some(&other), &[], None);
+        assert!(!theirs.names_only_held_pages(NAMED[0]));
+        // Holding switched off holds nothing.
+        let off = HeldPages::of_turn_when(false, workspace.path(), Some(&this), &[], None);
+        assert!(!off.names_only_held_pages(NAMED[0]));
     }
 }
