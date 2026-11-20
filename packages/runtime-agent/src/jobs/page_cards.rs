@@ -723,7 +723,7 @@ mod tests {
     /// it was given; `bind card` for `sites/fails` fails, for `sites/hangs` starts a helper in its
     /// group and hangs, for `sites/none` answers that there is no card to post, for `sites/borrow…`
     /// that it holds the card back, as the binder does for a page that loads files from outside its
-    /// folder, for `sites/typed…` that it holds it back for typed "checked <date>" words, and for
+    /// folder, for `sites/type…` that it holds it back for typed "checked <date>" words, and for
     /// any other folder answers that it posted the card.
     #[cfg(unix)]
     fn stand_in(bin: &Path, seen: &Path) {
@@ -739,7 +739,7 @@ case "$3" in
   ./sites/hangs) sleep 300 & echo "helper=$!" >> "$seen"; sleep 300 ;;
   ./sites/none) echo '{{"posted":false,"reason":"a preview shows it"}}'; exit 2 ;;
   ./sites/borrow*) echo '{{"posted":false,"reason":"it loads files from outside its folder"}}'; exit 2 ;;
-  ./sites/typed*) echo '{{"posted":false,"reason":"it says \"checked <date>\" in typed words","typed":[{{"file":"index.html","line":"Specs are checked 20 Nov 2026"}}]}}'; exit 2 ;;
+  ./sites/type*) echo '{{"posted":false,"reason":"it says \"checked <date>\" in typed words","typed":[{{"file":"index.html","line":"Specs are checked 20 Nov 2026"}}]}}'; exit 2 ;;
 esac
 echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer":{{"status":"live"}}}}'
 "#,
@@ -811,16 +811,8 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         let seen_file = sandbox.join("seen");
         let workspace = sandbox.join("workspace");
         for page in [
-            "new",
-            "fails",
-            "none",
-            "hangs",
-            "later",
-            "mine",
-            "borrows",
-            "borrowed",
-            "typed",
-            "typed-too",
+            "new", "fails", "none", "hangs", "later", "mine", "borrows", "borrowed", "typed",
+            "types",
         ] {
             write(&workspace, &format!("sites/{page}/index.html"));
         }
@@ -1010,7 +1002,7 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
             "The new page isn't ready to open: a line on it says \"checked\" with a date, which has to be fixed first."
         );
         let said = run(
-            made(&["typed", "typed-too"]),
+            made(&["typed", "types"]),
             false,
             None,
             Duration::from_secs(30),
@@ -1028,7 +1020,7 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
                 expected("later"),
                 expected("typed"),
                 expected("typed"),
-                expected("typed-too")
+                expected("types")
             ],
             "{lines:#?}"
         );
