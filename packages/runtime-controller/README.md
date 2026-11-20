@@ -98,9 +98,11 @@ presenting a fresh Supabase access token, never its session token.
 Each session token is accepted until `USER_TOKEN_TTL_SECONDS` (default 900) plus 30 seconds after it
 was issued, so a session ends that long after the route last accepted a Supabase access token for its
 user. The controller accepts a Supabase access token until 60 seconds past its expiry and does not
-check Supabase sign-out. This bounds the session token itself: runtime tokens minted with it (renewed
-whenever their runtime registers), Git tokens (up to an hour) and `GET /events` streams opened with it
-keep their own lifetimes.
+check Supabase sign-out. This bounds the session token itself. A runtime token minted with it ends no
+later than the session does (`POST /projects/:project_id/runtime/token`, below); a machine's token is
+then renewed whenever its runtime registers, until the machine's lifetime
+(`SELF_HOSTED_MACHINE_LIFETIME_SECONDS`) ends. Git tokens (up to an hour) and `GET /events` streams
+opened with it keep their own lifetimes.
 
 ### Invalidation signals on `/events`
 
