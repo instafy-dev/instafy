@@ -1347,6 +1347,90 @@ const _: () = assert!(EARLIER_COPY_READ_CAP >= LONGEST_EARLIER_COPY_BYTES);
 /// Whether `bytes` are exactly one of the earlier bundled copies whose SHA-256 (lowercase hex, as
 /// `sha256_hex` gives it) `earlier` lists: the digest is of the bytes as they are, so a copy that
 /// differs by a space or a line ending is not one.
+/// Clears a space's folder that holds nothing but the bundled Instafy files, as this runtime's
+/// scaffold writes them, and says whether it did.
+///
+/// A Desktop runtime that starts a space with no git remote seeds its folder with the bundled
+/// files: the controller advertises a remote only with `GIT_REMOTE_PUBLIC_BASE_URL`. Once a
+/// remote is advertised, the origin's first checkout refuses any folder with files in it
+/// (`origin-http-server`, "workspace root is not empty"), so that runtime could never register
+/// again (a local trial, Nov 20).
+///
+/// The bundled files are first brought up to date, as any turn in the folder would do. When
+/// every file then matches a fresh scaffold byte for byte, removing them loses nothing: the
+/// checkout brings the space's own copies, and the scaffold keeps them current.
+///
+/// A folder with anything else in it is left as it is, and the refusal stands: a file the person
+/// or a turn wrote, an edited bundled file, or a symlink. A folder with a checkout
+/// (`.instafy/.git`) is never touched.
+pub fn clear_scaffold_only_folder(workspace_dir: &Path) -> std::io::Result<bool> {
+    if workspace_dir.join(".instafy").join(".git").exists() {
+        return Ok(false);
+    }
+    let own_entries = || -> std::io::Result<Vec<std::ffi::OsString>> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(workspace_dir)? {
+            let name = entry?.file_name();
+            // What the origin's emptiness check skips (`workspace_dir_empty`).
+            if name != ".instafy" && name != ".git" && name != ".DS_Store" {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    };
+    if own_entries()?.is_empty() {
+        return Ok(false);
+    }
+    ensure_project_memory_scaffold_in(workspace_dir, ScaffoldScope::Local);
+    let reference = tempfile::tempdir()?;
+    ensure_project_memory_scaffold_in(reference.path(), ScaffoldScope::Local);
+    let names = own_entries()?;
+    for name in &names {
+        if !same_as_scaffold(&workspace_dir.join(name), &reference.path().join(name))? {
+            return Ok(false);
+        }
+    }
+    for name in &names {
+        let path = workspace_dir.join(name);
+        if fs::symlink_metadata(&path)?.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `path` is exactly what the scaffold wrote at `reference`: a file with the same bytes,
+/// or a directory every entry of which is (Finder's `.DS_Store` aside). A symlink never is.
+fn same_as_scaffold(path: &Path, reference: &Path) -> std::io::Result<bool> {
+    let metadata = fs::symlink_metadata(path)?;
+    let Ok(reference_metadata) = fs::symlink_metadata(reference) else {
+        return Ok(false);
+    };
+    if metadata.file_type().is_symlink() || reference_metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    if metadata.is_dir() {
+        if !reference_metadata.is_dir() {
+            return Ok(false);
+        }
+        for entry in fs::read_dir(path)? {
+            let name = entry?.file_name();
+            if name == ".DS_Store" {
+                continue;
+            }
+            if !same_as_scaffold(&path.join(&name), &reference.join(&name))? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    Ok(metadata.is_file()
+        && reference_metadata.is_file()
+        && fs::read(path)? == fs::read(reference)?)
+}
+
 fn is_earlier_copy(bytes: &[u8], earlier: &[&str]) -> bool {
     earlier.contains(&sha256_hex(bytes).as_str())
 }
@@ -4796,5 +4880,107 @@ fn find_first_model_string(value: &JsonValue, depth: usize) -> Option<String> {
             None
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod clear_scaffold_only_folder_tests {
+    use super::*;
+
+    fn scaffolded() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        ensure_project_memory_scaffold_in(dir.path(), ScaffoldScope::Local);
+        dir
+    }
+
+    fn own_entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name != ".instafy" && name != ".DS_Store")
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The trial's folder (Nov 20): what a runtime seeded before the space had a git remote, and
+    /// nothing else. It is cleared, so the origin's first checkout can go ahead.
+    #[test]
+    fn a_folder_with_only_the_bundled_files_is_cleared_for_the_checkout() {
+        let dir = scaffolded();
+        assert!(own_entries(dir.path()).contains(&AGENTS_DOC_FILENAME.to_string()));
+        assert!(clear_scaffold_only_folder(dir.path()).expect("clear"));
+        assert!(
+            own_entries(dir.path()).is_empty(),
+            "{:?}",
+            own_entries(dir.path())
+        );
+    }
+
+    #[test]
+    fn a_file_of_the_persons_keeps_the_folder_as_it_is() {
+        let dir = scaffolded();
+        fs::write(dir.path().join("notes.txt"), "mine\n").expect("write");
+        let before = own_entries(dir.path());
+        assert!(!clear_scaffold_only_folder(dir.path()).expect("clear"));
+        assert_eq!(own_entries(dir.path()), before);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes.txt")).expect("read"),
+            "mine\n"
+        );
+    }
+
+    #[test]
+    fn an_edited_bundled_file_keeps_the_folder_as_it_is() {
+        let dir = scaffolded();
+        let agents = dir.path().join(AGENTS_DOC_FILENAME);
+        let edited = format!(
+            "{}\nMy own rule.\n",
+            fs::read_to_string(&agents).expect("read")
+        );
+        fs::write(&agents, &edited).expect("write");
+        assert!(!clear_scaffold_only_folder(dir.path()).expect("clear"));
+        assert_eq!(fs::read_to_string(&agents).expect("read"), edited);
+    }
+
+    #[test]
+    fn a_file_inside_a_bundled_folder_keeps_the_folder_as_it_is() {
+        let dir = scaffolded();
+        let skill = dir.path().join(SKILLS_ROOT_RELATIVE_PATH).join("my-skill");
+        fs::create_dir_all(&skill).expect("mkdir");
+        fs::write(skill.join("SKILL.md"), "# Mine\n").expect("write");
+        assert!(!clear_scaffold_only_folder(dir.path()).expect("clear"));
+        assert!(skill.join("SKILL.md").exists());
+        assert!(dir.path().join(AGENTS_DOC_FILENAME).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_keeps_the_folder_as_it_is() {
+        let dir = scaffolded();
+        std::os::unix::fs::symlink("/etc/hosts", dir.path().join("hosts")).expect("symlink");
+        assert!(!clear_scaffold_only_folder(dir.path()).expect("clear"));
+        assert!(dir.path().join("hosts").symlink_metadata().is_ok());
+    }
+
+    #[test]
+    fn a_folder_with_a_checkout_is_never_touched() {
+        let dir = scaffolded();
+        fs::create_dir_all(dir.path().join(".instafy").join(".git")).expect("mkdir");
+        assert!(!clear_scaffold_only_folder(dir.path()).expect("clear"));
+        assert!(dir.path().join(AGENTS_DOC_FILENAME).exists());
+    }
+
+    #[test]
+    fn an_empty_folder_is_left_as_it_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!clear_scaffold_only_folder(dir.path()).expect("clear"));
+        assert!(own_entries(dir.path()).is_empty());
     }
 }

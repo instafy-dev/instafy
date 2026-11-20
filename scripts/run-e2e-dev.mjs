@@ -3144,6 +3144,14 @@ async function startControllerIfNeeded(
     const edgePort = Number(process.env.GIT_EDGE_PORT || 8080);
     env.GIT_REMOTE_BASE_URL = `http://host.docker.internal:${edgePort}`;
   }
+  if (!env.GIT_REMOTE_PUBLIC_BASE_URL && (process.env.GIT_CANONICAL || "").trim() === "1") {
+    // Desktop and CLI runtimes on this computer check a space out only when the controller
+    // advertises a remote they can reach (docs/Architecture.md); host.docker.internal is the
+    // runtime containers' name for it. Without it a Desktop space's folder has no repository,
+    // and a Claude Code turn there fails its pre-flight (docs/Local-Engine-Turns.md).
+    const edgePort = Number(process.env.GIT_EDGE_PORT || 8080);
+    env.GIT_REMOTE_PUBLIC_BASE_URL = `http://127.0.0.1:${edgePort}`;
+  }
   if (!env.GIT_SHARDS && (process.env.GIT_CANONICAL || "").trim() === "1") {
     env.GIT_SHARDS = process.env.GIT_SHARDS || "http://git-shard-0:8081";
   }
