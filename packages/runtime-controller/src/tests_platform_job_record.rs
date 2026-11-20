@@ -1713,11 +1713,10 @@ async fn deleting_a_credential_or_its_person_fails_the_jobs_queued_on_it() -> an
 
 /// One dispatch to Octo on the platform lane and to an agent on its person's
 /// own AI shares a prompt, and the prompt's managed-AI reserve is the
-/// platform job's, though the agent's job carries the dispatch's
-/// `managedAiUsed` too. Deleting the agent's credential fails only the
-/// agent's job, and the sweep that settles it gives none of that reserve
-/// back. Octo's job keeps its platform record and still leases, with a token
-/// that names no credential.
+/// platform job's; the agent's job says `managedAiUsed: false`. Deleting the
+/// agent's credential fails only the agent's job, and the sweep that settles
+/// it gives none of that reserve back. Octo's job keeps its platform record
+/// and still leases, with a token that names no credential.
 #[tokio::test]
 async fn deleting_a_credential_leaves_the_platform_job_of_its_dispatch_alone() -> anyhow::Result<()>
 {
@@ -1761,8 +1760,8 @@ async fn deleting_a_credential_leaves_the_platform_job_of_its_dispatch_alone() -
             assert_eq!(reviewer.prompt_id, Some(prompt_id), "one prompt");
             assert_eq!(
                 reviewer.payload["metadata"]["managedAiUsed"],
-                json!(true),
-                "the agent's job carries the dispatch's managed AI flag"
+                json!(false),
+                "the agent's job is on its own AI, not the dispatch's managed AI"
             );
             let reserve = vec![(
                 "managed_ai_prompt".to_string(),
