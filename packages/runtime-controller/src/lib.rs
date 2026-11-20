@@ -8,6 +8,7 @@ pub mod config;
 mod credential_keys;
 pub mod jwks;
 pub mod model_defaults;
+pub mod sign_outs;
 
 #[allow(dead_code)]
 mod provider_identifiers;

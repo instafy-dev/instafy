@@ -137,7 +137,29 @@ Revoking (`POST /me/runtimes/revoke` with `{"runtimeIds": [...]}`, at most 100, 
 
 The controller records the generation a revocation wrote, in a capability that registration never takes from a runtime. The list shows a runtime as revoked while that generation is still its current one, and a later revocation skips it and does not report it again, so a revocation's answer lists only what it ended. Anything that writes a newer generation, above all a fresh mint, ends that, so a machine that can work again is never shown as revoked.
 
-Revoking does not end the person's sign-in. A machine that still has their sign-in, such as Instafy Desktop or a computer where they ran `instafy login`, can mint itself a new token and start again.
+Revoking does not end the person's sign-in. A machine that still has their sign-in, such as Instafy Desktop or a computer where they ran `instafy login`, can mint itself a new token and start again. [Signing out everywhere](#signing-out-everywhere) ends those sign-ins too.
+
+### Signing out everywhere
+
+A person who lost a computer can end every sign-in of theirs, not only its machines: Studio's Your settings → Machines → Sign out everywhere, or `instafy logout --everywhere`, which signs out with the saved session it then clears. `POST /me/sign-out-everywhere` answers only the person's own sign-in, a Supabase access token or a controller session (`POST /auth/session`). Runtime, agent, job, Git and origin tokens and the service role get 401. In one transaction, holding the person's owner lock exclusively, it:
+
+- revokes every machine of theirs and deletes every pending mint, as Revoke all does;
+- revokes every device grant they gave, and cancels the provider requests its turns have open;
+- revokes every preview viewer session of theirs;
+- removes every web push subscription and phone push token of theirs, as each device's own sign-out removes its own, so no device gets their notifications;
+- deletes every Supabase session of theirs (`auth.sessions`) and, with it, each session's refresh tokens, as Supabase's own global sign-out (`/logout?scope=global`) does, so no browser, app or CLI login can refresh again;
+- and records the moment, taken after those, in `user_sign_outs`.
+
+From then on the controller refuses each credential they signed in for at or before that second with 401 code `signed_out_everywhere`. It checks a Supabase access token by its `iat`, and a controller session by the sign-in it carries: the `iat` of the Supabase access token `POST /auth/session` made it from. The answer comes once that second has passed (at most two seconds), so a sign-in made after it works. The controller that signs them out knows at once. Every other controller reads `user_sign_outs` again every 30 seconds and refuses the old credentials from then. Any call that makes a credential outliving the request reads the table under the person's owner lock, not that memory: a runtime token mint, an agent login, a device grant and a preview viewer session. So no controller makes one from an ended sign-in, and none made at the same moment survives. A credential an earlier sign-out ended cannot sign the person out again: it gets the same 401 and changes nothing. The machines that were running are then stopped as the person's own Stop stops them, with the stop source `me_sign_out_everywhere`.
+
+Some credentials are not ended and last until they expire:
+
+- A Supabase access token, at the database API, storage and realtime, which check its signature and expiry, not its session: up to the project's JWT expiry, an hour by default. A device with Studio already open keeps that access until then.
+- Scoped tokens minted from a sign-in before it: a Git token (an hour at most), an origin token (five minutes), and a runtime token that is not a machine's, which ends with the session that minted it.
+- The means to sign in again. A device with a saved password, a mailbox it can read or an identity provider it is signed in to can make a new sign-in, which a sign-out before it does not end. Change the password and sign out of the identity provider too.
+- Accounts the controller holds for the person, such as a connected Codex or GitHub account. No device holds those, and they stay connected.
+
+`user_sign_outs` keeps each person's latest sign-out. A controller keeps in memory the sign-outs of the last eight days, longer than any credential from before one can live.
 
 ## Model traffic goes through the Instafy proxy
 

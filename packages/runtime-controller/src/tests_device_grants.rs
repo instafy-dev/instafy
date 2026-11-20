@@ -1347,6 +1347,60 @@ async fn a_granted_call_is_refused_once_its_grant_ends() -> anyhow::Result<()> {
     .await
 }
 
+/// A grant asked for with a sign-in its person's sign-out everywhere ended is
+/// refused, even by a controller that has not heard of the sign-out
+/// (`crate::sign_out_everywhere`); one asked with a later sign-in is made.
+#[tokio::test]
+async fn a_sign_in_a_sign_out_everywhere_ended_makes_no_grant() -> anyhow::Result<()> {
+    with_space("device-grants-sign-out", true, |harness| async move {
+        let space = &harness.space;
+        harness.register_device().await?;
+        let ended = harness.token(space.owner);
+        sql(
+            &harness.pool,
+            "insert into user_sign_outs (user_id, signed_out_at) values ($1, clock_timestamp())",
+            &[&space.owner],
+        )
+        .await?;
+        let (status, body) = harness
+            .call(
+                "POST",
+                format!("/projects/{}/device-grants", space.project_id),
+                Some(&ended),
+                Some(harness.grant_body(json!({}))),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(
+            body["code"],
+            json!(crate::auth::SIGNED_OUT_EVERYWHERE_CODE),
+            "{body}"
+        );
+        let live: i64 = sql_one(
+            &harness.pool,
+            "select count(*) from agent_device_grants where user_id = $1 and revoked_at is null",
+            &[&space.owner],
+        )
+        .await?;
+        assert_eq!(live, 0);
+
+        // A sign-in after the sign-out's second grants.
+        let cutoff: i64 = sql_one(
+            &harness.pool,
+            "select floor(extract(epoch from signed_out_at))::bigint
+             from user_sign_outs where user_id = $1",
+            &[&space.owner],
+        )
+        .await?;
+        while Utc::now().timestamp() <= cutoff {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        harness.grant(json!({})).await?;
+        Ok(())
+    })
+    .await
+}
+
 /// A stop racing a granted call leaves no request a device can run: a stop
 /// that ends the job, and one that only pauses its grant and leaves the turn
 /// running, each hold the lock a call waits on, and the call is then refused.

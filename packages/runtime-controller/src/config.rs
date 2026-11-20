@@ -822,6 +822,10 @@ pub struct AppConfig {
     /// asks for.
     pub supabase_jwks_on_demand_interval_seconds: u64,
     pub supabase_jwks_refresh_enabled: bool,
+    /// Each person's latest sign-out everywhere, by which authentication
+    /// refuses the sign-ins they made before it. Read at startup and kept
+    /// current by the controller (`sign_out_everywhere`).
+    pub sign_outs: crate::sign_outs::SignOuts,
     pub controller_internal_token: Option<String>,
     pub proxy_credential_lease_token: Option<String>,
     pub supabase_service_role_key: Option<String>,
@@ -1967,6 +1971,7 @@ impl AppConfig {
             supabase_jwks_refresh_seconds,
             supabase_jwks_on_demand_interval_seconds,
             supabase_jwks_refresh_enabled,
+            sign_outs: crate::sign_outs::SignOuts::default(),
             controller_internal_token,
             proxy_credential_lease_token,
             supabase_service_role_key,

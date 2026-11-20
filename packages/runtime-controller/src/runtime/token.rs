@@ -8,7 +8,7 @@ use serde_json::Value as JsonValue;
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::auth::{authenticate_request_with_expiry, require_user_session, RequestContext};
+use crate::auth::{authenticate_request_with_sign_in, require_user_session, RequestContext};
 use crate::config::{AppConfig, ClaudeCodeLaneUsers};
 #[cfg(test)]
 use crate::projects::ensure_scoped_claims_allow_requested_scopes;
@@ -473,8 +473,10 @@ pub(super) async fn mint_runtime_access_token(
     headers: HeaderMap,
     Json(body): Json<RuntimeTokenRequest>,
 ) -> Result<Json<RuntimeTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let (context, credential_expires_at) =
-        authenticate_request_with_expiry(&state.config, &headers).await?;
+    let authenticated = authenticate_request_with_sign_in(&state.config, &headers).await?;
+    let credential_expires_at = authenticated.expires_at;
+    let signed_in_at = authenticated.signed_in_at;
+    let context = authenticated.context;
     // Shipped production behavior (shared-browser collaboration): a scoped
     // access token may never mint a runtime access token. Runtime tokens carry
     // the machine-identity, lease and self-hosted generation bounds that a
@@ -590,9 +592,20 @@ pub(super) async fn mint_runtime_access_token(
         .await
         .map_err(|error| internal_error(format!("failed to start project lookup: {error}")))?;
     // A machine mint admits a machine for its person: serialize it with a
-    // membership change's fence for that person (see `super::revocation`).
+    // membership change's fence for that person (see `super::revocation`),
+    // and with their sign-out everywhere, which ends every sign-in of theirs
+    // from before it, even one this controller has not heard of yet.
     if let Some(person) = machine_person {
         super::revocation::share_runtime_owner_lock(&transaction, person).await?;
+        if context.user_id == Some(person) && !context.is_service_role {
+            crate::sign_out_everywhere::ensure_sign_in_not_ended(
+                &state.config,
+                &transaction,
+                person,
+                signed_in_at,
+            )
+            .await?;
+        }
     }
     let project = load_project_record(&transaction, &project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, None).await?;

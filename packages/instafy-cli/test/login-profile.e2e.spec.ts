@@ -22,16 +22,37 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
+/** What a controller answers a sign-out everywhere that ended two sign-ins and one machine. */
+const SIGNED_OUT_EVERYWHERE = {
+  signedOutAt: "2026-11-19T12:00:00Z",
+  sessionsEnded: 2,
+  machinesRevoked: ["11111111-1111-4111-8111-111111111111"],
+  pendingMintsEnded: [],
+  deviceGrantsRevoked: 0,
+  previewSessionsRevoked: 0,
+  pushRegistrationsRemoved: 1,
+};
+
 /**
  * A server that records each request with the token it carried. It lists conversations, so a
- * command can show which session it used; logins themselves should send it nothing.
+ * command can show which session it used, and answers a sign-out everywhere with `signOut`;
+ * logins themselves should send it nothing.
  */
-async function sessionServer(): Promise<{ url: string; requests: string[] }> {
+async function sessionServer(): Promise<{
+  url: string;
+  requests: string[];
+  signOut: { status: number; body: unknown };
+}> {
   const requests: string[] = [];
+  const signOut: { status: number; body: unknown } = { status: 200, body: SIGNED_OUT_EVERYWHERE };
   const server = http.createServer((request, response) => {
     requests.push(`${request.method} ${request.url} ${request.headers.authorization ?? "no token"}`);
     if (request.method === "GET" && /^\/projects\/[^/]+\/conversations(?:\?|$)/.test(request.url ?? "")) {
       response.writeHead(200, { "content-type": "application/json" }).end("[]");
+      return;
+    }
+    if (request.method === "POST" && request.url === "/me/sign-out-everywhere") {
+      response.writeHead(signOut.status, { "content-type": "application/json" }).end(JSON.stringify(signOut.body));
       return;
     }
     response.writeHead(404).end();
@@ -39,7 +60,7 @@ async function sessionServer(): Promise<{ url: string; requests: string[] }> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const address = server.address() as { port: number };
-  return { url: `http://127.0.0.1:${address.port}`, requests };
+  return { url: `http://127.0.0.1:${address.port}`, requests, signOut };
 }
 
 type Session = { controllerUrl: string; studioUrl: string; accessToken: string; refreshToken: string };
@@ -370,6 +391,92 @@ describe("instafy login and logout save the session every other command reads", 
       fs.chmodSync(profiles, 0o700);
     }
     expect(readJson(setup.workPath).accessToken).toBe("old-work-access-token");
+  });
+
+  it("signs out everywhere with the selected profile's session, then clears only that session", async () => {
+    const setup = await homeWithTwoSessions();
+    const result = await runCli(["logout", "--everywhere", "--yes", "--json", "--profile", "work"], {
+      home: setup.home,
+      cwd: tempDir("instafy-logout-cwd-"),
+    });
+
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      profile: "work",
+      configPath: setup.workPath,
+      cleared: true,
+      everywhere: SIGNED_OUT_EVERYWHERE,
+    });
+    expect(setup.servers.workController.requests).toEqual([
+      `POST /me/sign-out-everywhere Bearer ${setup.workSession.accessToken}`,
+    ]);
+    expect(setup.servers.defaultController.requests).toEqual([]);
+    expect(readJson(setup.workPath)).toMatchObject({ accessToken: null, refreshToken: null });
+    expect(fs.readFileSync(setup.configPath, "utf8")).toBe(setup.defaultBefore);
+  });
+
+  it("says what signing out everywhere ended before it clears the default session", async () => {
+    const setup = await homeWithTwoSessions();
+    const result = await runCli(["logout", "--everywhere", "--yes"], {
+      home: setup.home,
+      cwd: tempDir("instafy-logout-cwd-"),
+    });
+
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Signed out everywhere: 2 sign-ins ended, 1 machine revoked.");
+    expect(result.stdout).toContain("Logged out (cleared saved access token).");
+    expect(setup.servers.defaultController.requests).toEqual([
+      `POST /me/sign-out-everywhere Bearer ${setup.defaultSession.accessToken}`,
+    ]);
+    expect(readJson(setup.configPath).accessToken).toBeNull();
+    expect(fs.readFileSync(setup.workPath, "utf8")).toBe(setup.workBefore);
+  });
+
+  it("signs out nowhere without --yes where no one can answer its question", async () => {
+    const setup = await homeWithTwoSessions();
+    for (const args of [["logout", "--everywhere"], ["logout", "--everywhere", "--json"]]) {
+      const result = await runCli(args, { home: setup.home, cwd: tempDir("instafy-logout-cwd-") });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("Refusing to sign out everywhere without confirmation. Re-run with --yes.");
+    }
+    expect(setup.requests()).toEqual([]);
+    expect(fs.readFileSync(setup.configPath, "utf8")).toBe(setup.defaultBefore);
+  });
+
+  it("keeps the session saved when the controller does not sign it out everywhere", async () => {
+    const setup = await homeWithTwoSessions();
+    const cwd = tempDir("instafy-logout-cwd-");
+    setup.servers.workController.signOut.status = 503;
+    setup.servers.workController.signOut.body = { message: "The database is unavailable." };
+    const failed = await runCli(["logout", "--everywhere", "--yes", "--profile", "work"], { home: setup.home, cwd });
+    expect(failed.code).toBe(1);
+    expect(failed.stderr).toContain("Request failed (503");
+    expect(failed.stdout).not.toContain("Logged out");
+
+    // A sign-in an earlier sign-out everywhere ended cannot sign out the ones made since.
+    setup.servers.workController.signOut.status = 401;
+    setup.servers.workController.signOut.body = {
+      message: "You signed out everywhere, which ended this sign-in.",
+      code: "signed_out_everywhere",
+    };
+    const ended = await runCli(["logout", "--everywhere", "--yes", "--profile", "work"], { home: setup.home, cwd });
+    expect(ended.code).toBe(1);
+    expect(ended.stderr).toContain("Run: instafy login");
+    expect(ended.stderr).toContain("Then retry: instafy logout --everywhere");
+    expect(ended.stderr).toContain("Server: You signed out everywhere, which ended this sign-in.");
+    expect(fs.readFileSync(setup.workPath, "utf8")).toBe(setup.workBefore);
+  });
+
+  it("needs a saved session to sign out everywhere with", async () => {
+    const home = tempDir("instafy-logout-home-");
+    const configPath = path.join(home, ".instafy", "config.json");
+    const result = await runCli(["logout", "--everywhere", "--yes"], { home, cwd: tempDir("instafy-logout-cwd-") });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`No session is saved in ${configPath} to sign out everywhere with.`);
+    expect(fs.existsSync(configPath)).toBe(false);
   });
 
   it("clears a profile file it cannot read, which may still hold a token", async () => {

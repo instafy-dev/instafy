@@ -128,6 +128,9 @@ let controllerReloadReason: ControllerReloadRequiredDetail["reason"] | null = nu
 let controllerBindingGeneration = 0;
 let lastControllerAuthErrorAt = 0;
 let overrideDroppedForAuthErrorAt = 0;
+// Access tokens a sign-out everywhere is ending. The controller refuses them
+// as soon as it commits, before it answers, and those refusals are expected.
+const endingAccessTokens = new Set<string>();
 
 function normalizeInjectedToken(token: string | null | undefined): string | null {
   const normalized = typeof token === "string" ? token.trim() : "";
@@ -607,11 +610,26 @@ function controllerRequestContextIsCurrent(
   return context.credentialSource === "ambient";
 }
 
+/**
+ * Expect the controller to refuse `accessToken` while a sign-out everywhere
+ * ends it: those refusals do not sign this page out as a lost session would.
+ * Returns the function that stops expecting it.
+ */
+export function expectControllerSignOut(accessToken: string): () => void {
+  endingAccessTokens.add(accessToken);
+  return () => {
+    endingAccessTokens.delete(accessToken);
+  };
+}
+
 export function emitControllerAuthError(
   detail: ControllerAuthErrorDetail,
   requestContext?: ControllerRequestContext,
 ) {
   if (typeof window === "undefined") {
+    return;
+  }
+  if (detail.status === 401 && requestContext?.accessToken && endingAccessTokens.has(requestContext.accessToken)) {
     return;
   }
   if (

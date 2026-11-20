@@ -52,13 +52,14 @@ pub(crate) use limit_waits::{spawn_hosted_runtime_limit_wait_sweep, RUNTIME_LIMI
 pub(crate) use managed::{
     runtime_holds_browser_host_capability, runtime_supports_shared_browser_agent_consent,
 };
+pub(crate) use my_machines::stop_revoked_machines;
 pub(crate) use pre_stop_flush::{authorize_pre_stop_save_grant, PRE_STOP_SAVE_SCOPE};
 pub(crate) use provider::provider_is_self_hosted;
 pub(crate) use register::{runtime_token_subject_is_controller_service, RuntimeRegisterResponse};
 pub(crate) use revocation::{
-    ensure_self_hosted_owner_may_write, fence_runtimes_of_a_lost_writer,
-    prune_expired_pending_machine_mints, self_hosted_person_owner, share_runtime_owner_lock,
-    MembershipChangeScope,
+    end_machines_of_their_owner, ensure_self_hosted_owner_may_write,
+    fence_runtimes_of_a_lost_writer, prune_expired_pending_machine_mints, self_hosted_person_owner,
+    share_runtime_owner_lock, MembershipChangeScope, OwnMachines,
 };
 pub(crate) use run_interruptions::{announce_requeued_job_run, mark_interrupted_runs};
 pub(crate) use status::{

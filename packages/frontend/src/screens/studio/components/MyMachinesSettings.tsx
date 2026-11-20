@@ -39,9 +39,22 @@ const MY_MACHINES_DESCRIPTION = (
     <span className="font-mono">instafy runtime start</span>. A computer used in several spaces is listed once per
     space. Revoke one you lost or no longer use: its access to that space ends now, and it stops if it is running.
     Revoke all ends every one, in every space. Revoking doesn't sign you out on it, so a machine that still has your
-    sign-in can start again.
+    sign-in can start again: to end that too, sign out everywhere.
   </>
 );
+
+// Signing out everywhere ends every sign-in, this one too; only an access
+// token a device already holds lasts, at the database and file storage,
+// until it expires.
+const SIGN_OUT_EVERYWHERE_DESCRIPTION =
+  "Lost a computer or phone? End every sign-in of yours, in every browser, app and terminal, this one too. It also " +
+  "revokes all your machines and the access to your devices you gave agents, and stops your notifications on every " +
+  "device. To use Instafy again, sign in again. A device with Instafy already open may keep some access for up to " +
+  "an hour, until the sign-in it holds expires.";
+
+const SIGN_OUT_EVERYWHERE_QUESTION =
+  "Sign out everywhere? Every browser, app and terminal signed in as you is signed out, this one too, and all your " +
+  "machines are revoked. To use Instafy again, sign in again.";
 
 // A row and the list take focus only after a revocation (they are not in the
 // tab order), and show it with the shared focus ring.
@@ -174,6 +187,61 @@ function focusTargetAfterRevoke(
   // A heading takes focus only when it is given a tabindex.
   heading?.setAttribute("tabindex", "-1");
   return heading;
+}
+
+/**
+ * Sign out everywhere: every sign-in of yours ends, this one too, so this
+ * page goes to sign-in once it succeeds.
+ */
+function SignOutEverywhereSection({ isDisabled }: { isDisabled: boolean }) {
+  const { signOutEverywhere } = useAuth();
+  const { showStatus } = useStatus();
+  const [pending, setPending] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const signOut = useCallback(async () => {
+    if (typeof window !== "undefined" && !window.confirm(SIGN_OUT_EVERYWHERE_QUESTION)) {
+      return;
+    }
+    setPending(true);
+    try {
+      await signOutEverywhere();
+      // Shown on the sign-in page this one goes to.
+      showStatus("Signed out everywhere.", "success", 2500);
+    } catch (error) {
+      // Nothing was signed out: the controller signs out all or nothing.
+      showStatus(error instanceof Error ? error.message : "Unable to sign out everywhere.", "error", 4500);
+    } finally {
+      if (mountedRef.current) setPending(false);
+    }
+  }, [showStatus, signOutEverywhere]);
+
+  return (
+    <SettingsSection
+      title="Sign out everywhere"
+      description={SIGN_OUT_EVERYWHERE_DESCRIPTION}
+      data-testid="sign-out-everywhere-section"
+      actions={
+        <Button
+          variant="outline"
+          tone="danger"
+          size="sm"
+          radius="lg"
+          onPress={() => void signOut()}
+          // Pending, not disabled, so it keeps focus while it works.
+          isPending={pending}
+          isDisabled={!pending && isDisabled}
+          data-testid="sign-out-everywhere"
+        >
+          Sign out everywhere
+        </Button>
+      }
+    />
+  );
 }
 
 /** Profile → Machines: your own machines in every space, with Revoke. */
@@ -404,6 +472,7 @@ function ScopedMyMachinesSettings({ userId }: { userId: string | null }) {
           </ul>
         ) : null}
       </SettingsSection>
+      {userId ? <SignOutEverywhereSection isDisabled={busy} /> : null}
     </SettingsFormLayout>
   );
 }

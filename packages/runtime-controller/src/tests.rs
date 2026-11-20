@@ -232,6 +232,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         supabase_jwks_refresh_seconds: 300,
         supabase_jwks_on_demand_interval_seconds: 30,
         supabase_jwks_refresh_enabled: false,
+        sign_outs: Default::default(),
         controller_internal_token: Some("internal".to_string()),
         proxy_credential_lease_token: Some("credential-lease".to_string()),
         supabase_service_role_key: Some("service-role-token".to_string()),

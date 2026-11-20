@@ -93,6 +93,8 @@ mod runtime;
 mod secrets;
 mod send_intents;
 mod send_queue;
+mod sign_out_everywhere;
+mod sign_outs;
 mod site_intent;
 mod skills_discovery;
 mod speech_proxy;
@@ -225,6 +227,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("{warning}");
     }
     let pool = config.build_pool().await?;
+    // Sign-ins a person ended by signing out everywhere are refused from the
+    // first request; the sync below retries a read that fails here.
+    if let Err(error) = sign_out_everywhere::read_sign_outs(&pool, &config.sign_outs).await {
+        tracing::warn!(?error, "failed to read sign-outs at startup");
+    }
 
     // Hosted workspaces are git-canonical working copies on an ephemeral node
     // disk; the git remote is the ONLY durable copy. Without it, a controller
@@ -416,6 +423,7 @@ async fn main() -> anyhow::Result<()> {
     conversation_goals::spawn_scheduler(state.clone());
     notification_platform::spawn_worker(state.clone());
     send_queue::spawn_send_queue_recovery_sweep(state.clone());
+    sign_out_everywhere::spawn_sign_out_sync(state.clone());
     // Retries hosted launches the organization runtime limit refused while
     // work is queued behind it; see runtime/limit_waits.rs.
     runtime::spawn_hosted_runtime_limit_wait_sweep(state.clone());
@@ -601,6 +609,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(notifications::router())
         .merge(notification_platform::router())
         .merge(activity::router())
+        .merge(sign_out_everywhere::router())
         .merge(runs::router())
         .merge(workspace::router())
         .merge(ota::router())

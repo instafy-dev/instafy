@@ -53,6 +53,9 @@ struct SupabaseClaims {
     role: Option<String>,
     aud: Option<String>,
     exp: Option<i64>,
+    /// When Supabase issued the token: at the sign-in, or at a refresh of
+    /// its session.
+    iat: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,6 +67,11 @@ struct UserTokenClaims {
     session_id: Option<String>,
     iat: i64,
     exp: i64,
+    /// When the person signed in for the Supabase access token
+    /// `/auth/session` made this session from (that token's `iat`). Absent,
+    /// the token's own `iat`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sign_in_iat: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +97,37 @@ enum RequestCredential {
     Supabase,
     /// A scoped Ed25519 token: runtime, origin, git or job.
     Scoped,
+}
+
+/// A request's context with what its credential says about itself, from one
+/// parse of its header, so they cannot disagree.
+#[derive(Debug, Clone)]
+pub(crate) struct Authenticated {
+    pub(crate) context: RequestContext,
+    /// When the credential expires (its signed `exp`, in seconds since the
+    /// epoch). `None` for no credential and for the controller's own secrets,
+    /// which do not expire.
+    pub(crate) expires_at: Option<i64>,
+    /// When the person signed in for it, in seconds since the epoch, as a
+    /// sign-out everywhere compares it: a Supabase access token's `iat`, a
+    /// controller session's carried sign-in. `None` for a credential that is
+    /// not a person's sign-in, or whose token has no `iat`.
+    pub(crate) signed_in_at: Option<i64>,
+}
+
+/// The code of the refusal of a credential its person signed out everywhere
+/// after signing in for.
+pub(crate) const SIGNED_OUT_EVERYWHERE_CODE: &str = "signed_out_everywhere";
+
+pub(crate) fn signed_out_everywhere() -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ApiError {
+            message: "You signed out everywhere, which ended this sign-in.".to_string(),
+            code: Some(SIGNED_OUT_EVERYWHERE_CODE.to_string()),
+            details: None,
+        }),
+    )
 }
 
 /// Return the signed-in human user for account-level actions.
@@ -152,32 +191,65 @@ pub(crate) async fn authenticate_request(
     config: &AppConfig,
     headers: &HeaderMap,
 ) -> Result<RequestContext, (StatusCode, Json<ApiError>)> {
-    authenticate_request_with_credential(config, headers)
+    authenticate_request_with_sign_in(config, headers)
         .await
-        .map(|(context, _, _)| context)
+        .map(|authenticated| authenticated.context)
 }
 
-/// Authenticate a request, and say when the credential that did it expires
-/// (its signed `exp`, in seconds since the epoch). `None` for no credential
-/// and for the controller's own secrets, which do not expire. Both come from
-/// the same parse of the header, so they cannot disagree.
-pub(crate) async fn authenticate_request_with_expiry(
+/// Authenticate a request, and say when its credential expires and when its
+/// person signed in for it ([`Authenticated`]).
+///
+/// A person's Supabase access token or controller session that they signed
+/// in for at or before their latest sign-out everywhere, as this controller
+/// knows it ([`AppConfig::sign_outs`]), is refused with
+/// [`SIGNED_OUT_EVERYWHERE_CODE`].
+pub(crate) async fn authenticate_request_with_sign_in(
     config: &AppConfig,
     headers: &HeaderMap,
-) -> Result<(RequestContext, Option<i64>), (StatusCode, Json<ApiError>)> {
+) -> Result<Authenticated, (StatusCode, Json<ApiError>)> {
     authenticate_request_with_credential(config, headers)
         .await
-        .map(|(context, _, expires_at)| (context, expires_at))
+        .map(|(authenticated, _)| authenticated)
 }
 
-/// Authenticate a request and say which credential did it and when that
-/// credential expires ([`authenticate_request_with_expiry`]). Each return tags
-/// the credential and its expiry beside the context it builds, from the same
-/// parse of the header, so they cannot disagree.
+/// [`authenticate_request_with_sign_in`], and which credential did it, from
+/// the same parse of the header, so they cannot disagree.
 async fn authenticate_request_with_credential(
     config: &AppConfig,
     headers: &HeaderMap,
-) -> Result<(RequestContext, RequestCredential, Option<i64>), (StatusCode, Json<ApiError>)> {
+) -> Result<(Authenticated, RequestCredential), (StatusCode, Json<ApiError>)> {
+    let (context, credential, expires_at, signed_in_at) =
+        authenticate_header(config, headers).await?;
+    if let (Some(person), false, None) = (
+        context.user_id,
+        context.is_service_role,
+        context.scoped_claims.as_ref(),
+    ) {
+        if config.sign_outs.ended(&person, signed_in_at) {
+            return Err(signed_out_everywhere());
+        }
+    }
+    Ok((
+        Authenticated {
+            context,
+            expires_at,
+            signed_in_at,
+        },
+        credential,
+    ))
+}
+
+/// A request's context, its credential, when that expires and when its
+/// person signed in for it.
+type AuthenticatedHeader = (RequestContext, RequestCredential, Option<i64>, Option<i64>);
+
+/// Each return tags the credential, its expiry and its sign-in beside the
+/// context it builds, from the same parse of the header, so they cannot
+/// disagree.
+async fn authenticate_header(
+    config: &AppConfig,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedHeader, (StatusCode, Json<ApiError>)> {
     let Some(raw_value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -191,6 +263,7 @@ async fn authenticate_request_with_credential(
                 scoped_claims: None,
             },
             RequestCredential::Anonymous,
+            None,
             None,
         ));
     };
@@ -220,6 +293,7 @@ async fn authenticate_request_with_credential(
                 },
                 RequestCredential::ServiceSecret,
                 None,
+                None,
             ));
         }
     }
@@ -235,20 +309,22 @@ async fn authenticate_request_with_credential(
                 },
                 RequestCredential::ServiceSecret,
                 None,
+                None,
             ));
         }
     }
 
     match decode_controller_user_token(config, &token) {
-        Ok(Some((user_id, expires_at))) => {
+        Ok(Some(session)) => {
             return Ok((
                 RequestContext {
-                    user_id: Some(user_id),
+                    user_id: Some(session.user_id),
                     is_service_role: false,
                     scoped_claims: None,
                 },
                 RequestCredential::ControllerSession,
-                Some(expires_at),
+                Some(session.expires_at),
+                Some(session.signed_in_at),
             ));
         }
         Ok(None) => {}
@@ -308,6 +384,8 @@ async fn authenticate_request_with_credential(
                                 | "agent"
                         ) || audience == "service_role";
 
+                        // A service credential is no person's sign-in.
+                        let signed_in_at = if is_service_role { None } else { claims.iat };
                         return Ok((
                             RequestContext {
                                 user_id,
@@ -316,6 +394,7 @@ async fn authenticate_request_with_credential(
                             },
                             RequestCredential::Supabase,
                             claims.exp,
+                            signed_in_at,
                         ));
                     }
                     Err(error) => match error.kind() {
@@ -370,6 +449,7 @@ async fn authenticate_request_with_credential(
         },
         RequestCredential::Scoped,
         Some(expires_at),
+        None,
     ))
 }
 
@@ -511,9 +591,23 @@ pub(crate) struct ControllerToken {
     pub(crate) expires_in: i64,
 }
 
+/// A controller session for `user_id` that counts as signed in now.
+#[cfg(test)]
 pub(crate) fn issue_controller_token(
     config: &AppConfig,
     user_id: &Uuid,
+) -> Result<ControllerToken, (StatusCode, Json<ApiError>)> {
+    issue_controller_session_token(config, user_id, None)
+}
+
+/// A controller session for `user_id`, signed in at `signed_in_at` (seconds
+/// since the epoch) when it is made from a Supabase access token, so a
+/// sign-out everywhere after that sign-in still ends it. `None` counts as
+/// signed in now.
+fn issue_controller_session_token(
+    config: &AppConfig,
+    user_id: &Uuid,
+    signed_in_at: Option<i64>,
 ) -> Result<ControllerToken, (StatusCode, Json<ApiError>)> {
     let issued_at = Utc::now();
     let exp = issued_at + ChronoDuration::seconds(config.user_token_ttl_seconds);
@@ -525,6 +619,7 @@ pub(crate) fn issue_controller_token(
         session_id: None,
         iat: issued_at.timestamp(),
         exp: exp.timestamp(),
+        sign_in_iat: signed_in_at,
     };
 
     let token = encode(
@@ -541,12 +636,20 @@ pub(crate) fn issue_controller_token(
     })
 }
 
-/// The user and expiry of a session token this controller issued, `None`
-/// for any other token.
+/// A session token this controller issued.
+struct ControllerSession {
+    user_id: Uuid,
+    expires_at: i64,
+    /// Its carried sign-in, or else its own `iat`.
+    signed_in_at: i64,
+}
+
+/// The session a token this controller issued holds, `None` for any other
+/// token.
 fn decode_controller_user_token(
     config: &AppConfig,
     token: &str,
-) -> Result<Option<(Uuid, i64)>, (StatusCode, Json<ApiError>)> {
+) -> Result<Option<ControllerSession>, (StatusCode, Json<ApiError>)> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     validation.leeway = 30;
@@ -560,7 +663,11 @@ fn decode_controller_user_token(
         Ok(data) => {
             let user_id = Uuid::from_str(&data.claims.sub)
                 .map_err(|_| unauthorized("invalid controller token subject"))?;
-            Ok(Some((user_id, data.claims.exp)))
+            Ok(Some(ControllerSession {
+                user_id,
+                expires_at: data.claims.exp,
+                signed_in_at: data.claims.sign_in_iat.unwrap_or(data.claims.iat),
+            }))
         }
         Err(error) => match error.kind() {
             JwtErrorKind::ExpiredSignature => Err(unauthorized("controller token expired")),
@@ -582,7 +689,7 @@ pub(crate) struct ControllerSessionResponse {
     expires_at: i64,
 }
 
-/// Start a controller session from a Supabase sign-in.
+/// `POST /auth/session`: start a controller session from a Supabase sign-in.
 ///
 /// Only a Supabase access token for a signed-in user starts one. A session
 /// token this controller issued is refused: otherwise every token could buy
@@ -590,22 +697,15 @@ pub(crate) struct ControllerSessionResponse {
 /// accepted until `USER_TOKEN_TTL_SECONDS` plus 30 seconds of leeway after it
 /// was issued, so a session ends that long after this route last accepted a
 /// Supabase access token for the user. That access token is itself accepted
-/// until 60 seconds past its expiry; the controller does not check Supabase
-/// sign-out.
+/// until 60 seconds past its expiry; the controller does not check a Supabase
+/// sign-out, only a sign-out everywhere. The session carries the sign-in of
+/// the access token it was made from (its `iat`), so a sign-out everywhere
+/// after that sign-in ends it too.
 pub(crate) async fn create_controller_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ControllerSessionResponse>, (StatusCode, Json<ApiError>)> {
-    let (context, credential, _) =
-        authenticate_request_with_credential(&state.config, &headers).await?;
-    let user_id = require_user_session(&context)?;
-    if credential != RequestCredential::Supabase {
-        return Err(unauthorized(
-            "a controller session can only be started from a Supabase access token",
-        ));
-    }
-
-    let token = issue_controller_token(&state.config, &user_id)?;
+    let token = controller_session_for(&state.config, &headers).await?;
 
     Ok(Json(ControllerSessionResponse {
         token: token.token,
@@ -613,6 +713,24 @@ pub(crate) async fn create_controller_session(
         expires_in: token.expires_in,
         expires_at: token.expires_at,
     }))
+}
+
+/// The controller session `/auth/session` answers the request's person with.
+async fn controller_session_for(
+    config: &AppConfig,
+    headers: &HeaderMap,
+) -> Result<ControllerToken, (StatusCode, Json<ApiError>)> {
+    let (authenticated, credential) = authenticate_request_with_credential(config, headers).await?;
+    let user_id = require_user_session(&authenticated.context)?;
+    if credential != RequestCredential::Supabase {
+        return Err(unauthorized(
+            "a controller session can only be started from a Supabase access token",
+        ));
+    }
+    let signed_in_at = authenticated
+        .signed_in_at
+        .ok_or_else(|| unauthorized("a controller session needs a sign-in time (iat)"))?;
+    issue_controller_session_token(config, &user_id, Some(signed_in_at))
 }
 
 pub(crate) fn router() -> Router<AppState> {
@@ -1072,6 +1190,7 @@ mod tests {
             supabase_jwks_refresh_seconds: 300,
             supabase_jwks_on_demand_interval_seconds: 30,
             supabase_jwks_refresh_enabled: true,
+            sign_outs: Default::default(),
             controller_internal_token: None,
             proxy_credential_lease_token: None,
             supabase_service_role_key: None,
@@ -1666,6 +1785,9 @@ mod tests {
                 sub: String,
                 role: &'static str,
                 aud: &'static str,
+                // As every Supabase access token does: `/auth/session` makes a
+                // session only from a sign-in with its time.
+                iat: i64,
                 exp: i64,
             }
             let mut header = Header::new(Algorithm::ES256);
@@ -1676,6 +1798,7 @@ mod tests {
                     sub: user_id.to_string(),
                     role: "authenticated",
                     aud: "authenticated",
+                    iat: Utc::now().timestamp(),
                     exp: (Utc::now() + ChronoDuration::minutes(5)).timestamp(),
                 },
                 &EncodingKey::from_ec_der(&self.pkcs8),
@@ -1863,6 +1986,158 @@ mod tests {
             .expect("auth should succeed");
         assert_eq!(context.user_id, Some(user_id));
         assert!(!context.is_service_role);
+    }
+
+    /// A Supabase user access token issued at `issued_at`.
+    fn mint_access_token_issued_at(user_id: Uuid, issued_at: i64) -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            &serde_json::json!({
+                "sub": user_id.to_string(),
+                "role": "authenticated",
+                "aud": "authenticated",
+                "iat": issued_at,
+                "exp": (Utc::now() + ChronoDuration::minutes(5)).timestamp(),
+            }),
+            &EncodingKey::from_secret(TEST_SUPABASE_SECRET.as_bytes()),
+        )
+        .expect("failed to encode access token")
+    }
+
+    fn assert_signed_out(result: Result<RequestContext, (StatusCode, Json<ApiError>)>, what: &str) {
+        let (status, Json(error)) = result.expect_err(what);
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{what}");
+        assert_eq!(
+            error.code.as_deref(),
+            Some(SIGNED_OUT_EVERYWHERE_CODE),
+            "{what}: {}",
+            error.message
+        );
+    }
+
+    /// A person's controller session or Supabase access token that they
+    /// signed in for at or before their sign-out everywhere is refused, one
+    /// whose token has no `iat` too; a later sign-in, another person and a
+    /// service credential are not.
+    #[tokio::test]
+    async fn a_sign_out_everywhere_refuses_the_sign_ins_up_to_its_second() {
+        let mut config = base_app_config();
+        config.supabase_service_role_key = Some("different-service-token".to_string());
+        let (person, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let signed_in_now = issue_controller_token(&config, &person)
+            .expect("session")
+            .token;
+        let cutoff = Utc::now().timestamp();
+        let ended = [
+            (signed_in_now, "a session signed in up to the sign-out"),
+            (
+                issue_controller_session_token(&config, &person, Some(cutoff - 600))
+                    .expect("session")
+                    .token,
+                "a session made from an earlier sign-in",
+            ),
+            (
+                mint_access_token_issued_at(person, cutoff - 5),
+                "an access token issued before",
+            ),
+            (
+                mint_access_token_issued_at(person, cutoff),
+                "an access token issued in the same second",
+            ),
+            (
+                mint_access_token(
+                    TEST_SUPABASE_SECRET,
+                    "authenticated",
+                    "authenticated",
+                    Some(person),
+                    None,
+                ),
+                "an access token without iat",
+            ),
+        ];
+        for (token, what) in &ended {
+            let context = authenticate_request(&config, &header_with_token(token))
+                .await
+                .unwrap_or_else(|_| panic!("{what} works before the sign-out"));
+            assert_eq!(context.user_id, Some(person), "{what}");
+        }
+
+        config.sign_outs.record(person, cutoff);
+        for (token, what) in &ended {
+            assert_signed_out(
+                authenticate_request(&config, &header_with_token(token)).await,
+                what,
+            );
+        }
+        let kept = [
+            issue_controller_session_token(&config, &person, Some(cutoff + 1))
+                .expect("session")
+                .token,
+            mint_access_token_issued_at(person, cutoff + 1),
+            issue_controller_token(&config, &other)
+                .expect("session")
+                .token,
+            mint_access_token(
+                TEST_SUPABASE_SECRET,
+                "service_role",
+                "service_role",
+                Some(person),
+                None,
+            ),
+            "different-service-token".to_string(),
+        ];
+        for token in &kept {
+            authenticate_request(&config, &header_with_token(token))
+                .await
+                .expect("a later sign-in, another person and a service credential work");
+        }
+    }
+
+    /// `/auth/session` carries the sign-in of the access token it makes a
+    /// session from, so the session ends with that sign-in; and it makes none
+    /// from a token without `iat`, or from a controller session.
+    #[tokio::test]
+    async fn sessions_made_from_a_sign_in_end_with_it() {
+        let config = base_app_config();
+        let person = Uuid::new_v4();
+        let signed_in_at = Utc::now().timestamp() - 600;
+        let access_token = mint_access_token_issued_at(person, signed_in_at);
+        let first = controller_session_for(&config, &header_with_token(&access_token))
+            .await
+            .expect("a session from the access token");
+        let (status, Json(error)) =
+            controller_session_for(&config, &header_with_token(&first.token))
+                .await
+                .err()
+                .expect("a session starts no other session");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.message, SESSION_NEEDS_SUPABASE);
+        let without_iat = mint_access_token(
+            TEST_SUPABASE_SECRET,
+            "authenticated",
+            "authenticated",
+            Some(person),
+            None,
+        );
+        assert!(
+            controller_session_for(&config, &header_with_token(&without_iat))
+                .await
+                .is_err()
+        );
+
+        // Signed out after that sign-in, before the session was made from it.
+        config.sign_outs.record(person, signed_in_at + 1);
+        assert_signed_out(
+            authenticate_request(&config, &header_with_token(&first.token)).await,
+            "the session",
+        );
+        let (status, Json(error)) =
+            controller_session_for(&config, &header_with_token(&first.token))
+                .await
+                .err()
+                .expect("an ended session renews nothing");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.code.as_deref(), Some(SIGNED_OUT_EVERYWHERE_CODE));
     }
 
     #[tokio::test]
@@ -2491,7 +2766,7 @@ mod tests {
         ];
         for (bearer, expected) in cases {
             let headers = bearer.as_deref().map(header_with_token).unwrap_or_default();
-            let (_, credential, _) = authenticate_request_with_credential(&config, &headers)
+            let (_, credential) = authenticate_request_with_credential(&config, &headers)
                 .await
                 .expect("credential accepted");
             assert_eq!(credential, expected, "bearer {bearer:?}");
