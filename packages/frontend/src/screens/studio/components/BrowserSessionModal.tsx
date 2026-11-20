@@ -1281,10 +1281,10 @@ export function BrowserSessionModal({
   const agentTurnActions = effectiveAgentControlOwner && agentActionFloor !== null
     ? browserActions.filter((action) => action.seq > agentActionFloor)
     : [];
+  const sharedBrowserPageOrigin =
+    browserPageOrigin(sharedBrowserChrome?.pages.find((page) => page.id === sharedBrowserPageId)?.url);
   const sharedHumanInputRequest = selectSharedBrowserHumanInput(
-    browserActions, currentUserId, sharedBrowserPageId,
-    browserPageOrigin(sharedBrowserChrome?.pages.find((page) => page.id === sharedBrowserPageId)?.url),
-    humanInputRunIds,
+    browserActions, currentUserId, sharedBrowserPageId, sharedBrowserPageOrigin, humanInputRunIds,
   );
   const browserHumanInputIdentity =
     `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`;
@@ -1300,7 +1300,9 @@ export function BrowserSessionModal({
   // the page, and the chat's Continue under the stopped turn is the way on.
   const stoppedPause = sharedBrowserHumanInputStopped(shownPause, humanInputStoppedRunIds) ? shownPause : null;
   useEndStoppedBrowserPause({
-    request: stoppedPause,
+    // The outlines are on the pause's own site: a page that has gone on to
+    // another has none, and is sent nothing.
+    request: stoppedPause?.origin === sharedBrowserPageOrigin ? stoppedPause : null,
     projectId,
     browserSessionId,
     preferRuntimeId: forcedRuntimeId ?? preferRuntimeId,

@@ -948,7 +948,14 @@ describe("Shared Browser view while Octo drives", () => {
     expect(toolbarStatus()?.textContent ?? "Ready").not.toBe("Waiting for you");
     expect(document.body.textContent).not.toContain("Let Octo continue");
     expect(onContinue).not.toHaveBeenCalled();
-    // The browser is asked once; it ends only what is still the page's pause.
+    // The outlines were on the pause's own site: the page it went on to has
+    // none, and is sent nothing.
+    expect(mocks.endHumanInput).not.toHaveBeenCalled();
+    // Back on the pause's site with the Stop recorded: its outlines come off, once.
+    await act(async () => root.render(<Host agentHolds={false} {...props} stoppedRunIds={[PAUSE_RUN]} />));
+    await advance(200);
+    expect(pauseRow()).toBeNull();
+    expect(continueButtons()).toHaveLength(0);
     expect(mocks.endHumanInput).toHaveBeenCalledExactlyOnceWith({
       projectId, browserSessionId: "browser-session-1", preferRuntimeId: null, pageId: "PAGE1", handoffId: "handoff-1",
     });

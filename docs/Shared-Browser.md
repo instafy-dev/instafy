@@ -2769,9 +2769,11 @@ on. The view remembers the pause it showed, since a pause outlasts its
 request: a Stop ends it too once the sign-in has gone on to another site or
 the request has run out, and while the Browser view is behind Chat, where it
 reads no log. The outlines are on the page, so Studio then asks the browser to
-take them off: `POST /browser/pages/:id/end-pause` (`browser.control`, body
-`{ "handoffId" }`) puts back each highlighted control's own outline with the
-browser tools' own steps, sends the page nothing else and reads nothing of it,
+take them off, while the page is still on the pause's site (a page that has
+gone on to another has none): `POST /browser/pages/:id/end-pause`
+(`browser.control`, body `{ "handoffId" }`) puts back each highlighted
+control's own outline with the browser tools' own steps, sends the page
+nothing else and reads nothing of it,
 and only for the person the pause asked, on the page's latest pause with no
 reading of the page since (409 otherwise). A newer turn
 of the chat holding the browser (the person wrote to Octo instead) shows no
