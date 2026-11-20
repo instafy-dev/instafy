@@ -102,17 +102,6 @@ export function chatRunStopBetweenParts(chat: {
     chat.routedWaitingKeys.has(browserRequestKey(row));
 }
 
-/**
- * Whether the chat offers Stop (useChatRunStop's `active`): wherever the
- * chat's composer is, which holds Stop. Chat, the chat's Browser view, a page
- * or a file of the chat in front all keep that one composer, so a message
- * sent from any of them can be stopped there, from Enter to its reply. Never
- * in a job thread's tab, which is not the chat.
- */
-export function chatRunStopOnScreen(view: { jobThread: boolean }): boolean {
-  return !view.jobThread;
-}
-
 export function groupChatRunStopTargets(targets: readonly ChatRunStopTarget[]) {
   const groups = new Map<string, { handle: string; label: string; targets: ChatRunStopTarget[] }>();
   for (const target of targets) {

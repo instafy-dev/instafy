@@ -10,7 +10,7 @@ import { RuntimeStateProvider, useRuntimeState } from "../../../../runtime/Runti
 import type { RunRecord } from "../../../../types";
 import type { ChatMessage } from "../../types";
 import { ChatRunStopControl } from "../ChatRunStopControl";
-import { chatRunStopOnScreen, resolveChatRunStopTargets } from "../chatRunStopTargets";
+import { resolveChatRunStopTargets } from "../chatRunStopTargets";
 import {
   CHAT_RUN_STOP_HANDOVER_MS, CHAT_RUN_STOP_TIMEOUT_MS, useChatRunStop, type ChatRunStopController, type ChatRunStopOptions,
   type ChatRunStopTarget,
@@ -48,11 +48,9 @@ describe("useChatRunStop", () => {
   });
   afterEach(async () => { await act(async () => root.unmount()); document.body.innerHTML = ""; vi.useRealTimers(); });
 
-  it("offers Stop before any command and only with write capability in the active chat", async () => {
+  it("offers Stop before any command and only with write capability in the chat", async () => {
     await render(); expect(controller!.visible).toBe(true);
     await render({ canStop: false }); expect(controller!.visible).toBe(false);
-    await act(async () => controller!.requestStop()); expect(cancel).not.toHaveBeenCalled();
-    await render({ canStop: true, active: false }); expect(controller!.visible).toBe(false);
     await act(async () => controller!.requestStop()); expect(cancel).not.toHaveBeenCalled();
   });
   it("freezes exact IDs, prevents duplicate presses, and distinguishes acceptance from physical stopping", async () => {
@@ -175,35 +173,33 @@ describe("useChatRunStop", () => {
     const pause = { id: "m1", role: "assistant", content: "Tool call completed: instafy_shared_browser/request_human_input",
       timestamp: 1, metadata: { runId: "r1", jobId: JOB, type: "mcp_tool_call",
         details: { tool: "request_human_input", status: "completed" } } } as unknown as ChatMessage;
-    const active = chatRunStopOnScreen({ jobThread: false });
-    await render({ targets: resolveChatRunStopTargets([pausing("in_progress")], [pause]), active });
+    await render({ targets: resolveChatRunStopTargets([pausing("in_progress")], [pause]) });
     expect(controller!.visible).toBe(true);
     // The turn ends by itself: Stop goes.
-    await render({ targets: resolveChatRunStopTargets([pausing("success")], [pause]), active });
+    await render({ targets: resolveChatRunStopTargets([pausing("success")], [pause]) });
     await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS));
     expect(controller!.visible).toBe(false);
     // A press before then stops that turn.
     cancel.mockResolvedValueOnce(accepted(JOB));
-    await render({ targets: resolveChatRunStopTargets([pausing("in_progress")], [pause]), active });
+    await render({ targets: resolveChatRunStopTargets([pausing("in_progress")], [pause]) });
     await act(async () => controller!.requestStop());
     expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", [JOB]);
   });
 
   // Local tests, Nov 19 and 20: a note sent with the chat's map in front, and
   // a change sent with one of its pages in front, had no Stop at any moment
-  // of their turns, so neither could be stopped. The composer there is the
-  // chat's own, and Stop is in it from Enter to the reply.
-  it("stays from Enter to the reply for a message sent with a page or a map of the chat in front", async () => {
-    // Neither Chat nor the Browser view is on screen: only the page, over the composer.
-    const active = chatRunStopOnScreen({ jobThread: false });
+  // of their turns, so neither could be stopped. Stop follows the message's
+  // turns alone, from Enter to the reply, and takes no view to follow (that
+  // the chat gives it none is held in chatRunStopTargets.test.ts).
+  it("stays from Enter to the reply, through the gap between a message's parts", async () => {
     // Enter: the message's turn is queued, then runs.
-    await render({ targets: [octo], active });
+    await render({ targets: [octo] });
     expect(controller!.visible).toBe(true);
     // Between two of its parts (a browser part, then its build).
-    await render({ targets: [], between: true, active });
+    await render({ targets: [], between: true });
     expect(controller!.visible).toBe(true);
     const build: ChatRunStopTarget = { ...octo, jobId: "build-1", runId: "r4" };
-    await render({ targets: [build], between: false, active });
+    await render({ targets: [build], between: false });
     expect(controller!.visible).toBe(true);
     // A press there stops it at once.
     cancel.mockResolvedValueOnce(accepted("build-1"));
@@ -211,16 +207,11 @@ describe("useChatRunStop", () => {
     expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["build-1"]);
     // Unpressed, it goes with the reply.
     cancel.mockClear();
-    await render({ conversationId: "chat-2", targets: [octo], active });
+    await render({ conversationId: "chat-2", targets: [octo] });
     expect(controller!.visible).toBe(true);
-    await render({ conversationId: "chat-2", targets: [], active });
+    await render({ conversationId: "chat-2", targets: [] });
     await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS));
     expect(controller!.visible).toBe(false);
-    expect(cancel).not.toHaveBeenCalled();
-    // A job thread's tab is not the chat: no Stop there, and no press stops.
-    await render({ conversationId: "chat-2", targets: [octo], active: chatRunStopOnScreen({ jobThread: true }) });
-    expect(controller!.visible).toBe(false);
-    await act(async () => controller!.requestStop());
     expect(cancel).not.toHaveBeenCalled();
   });
 

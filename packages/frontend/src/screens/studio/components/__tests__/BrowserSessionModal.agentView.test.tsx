@@ -37,7 +37,9 @@ vi.mock("../../../../sdk/instafy", () => ({ controllerClient: {
   } },
 } }));
 vi.mock("../SharedBrowserProfileStatus", () => ({ SharedBrowserProfileStatus: () => null }));
-vi.mock("../useBrowserSessionActions", () => ({ useBrowserSessionActions: () => ({ actions: mocks.actions, latestClick: null,
+// A view behind Chat reads no log, as the real hook gives it none.
+vi.mock("../useBrowserSessionActions", () => ({ useBrowserSessionActions: ({ transportActive = true }: { transportActive?: boolean }) => ({
+  actions: transportActive ? mocks.actions : [], latestClick: null,
   logSeq: mocks.logRead ? mocks.actions.reduce((latest, action) => Math.max(latest, action.seq), 0) : null }) }));
 vi.mock("../browserSessionRfbFrame", () => ({
   observeBrowserRfbFrames: (rfb: { frame?: () => void }, onFrame: () => void) => { rfb.frame = onFrame; return () => {}; },
@@ -899,6 +901,101 @@ describe("Shared Browser view while Octo drives", () => {
         for (const socket of server.sockets) socket.pushState();
         root.render(<Host agentHolds={false} {...props} stoppedRunIds={[PAUSE_RUN]} />);
       });
+      await advance(2_000);
+      expect(pauseRow()).toBeNull();
+      expect(continueButtons()).toHaveLength(0);
+      expect(toolbarStatus()?.textContent ?? "Ready").not.toBe("Waiting for you");
+      expect(document.body.textContent).not.toContain("Let Octo continue");
+      expect(onContinue).not.toHaveBeenCalled();
+      expect(mocks.endHumanInput).toHaveBeenCalledTimes(1);
+      await act(async () => root.unmount());
+      root = createRoot(container);
+    }
+  });
+
+  // The Stop's record can reach the view after the pause's request has left
+  // its sight: the sign-in went on to its own site, the request ran out, or
+  // the view sat behind Chat, where it reads no log. The pause the row stands
+  // for is over all the same, with no way on but the chat's Continue.
+  it("ends a stopped pause whose sign-in had already gone on to another site", async () => {
+    const onContinue = vi.fn(async () => true);
+    const props = { compact: true, pausedRunId: PAUSE_RUN, earlierRunIds: [CARD_RUN], onContinue, agentPageIds: ["PAGE1"] };
+    mocks.actions = pauseAfterCard().slice(0, 2);
+    await octoTakesControl({ ...props, holdingRunId: PAUSE_RUN });
+    mocks.actions = pauseAfterCard();
+    await act(async () => root.render(<Host agentHolds holdingRunId={PAUSE_RUN} {...props} />));
+    await advance(100);
+    expect(pauseRow()).not.toBeNull();
+    // The sign-in page moves to its own site while the turn still ends: the
+    // request for the fields no longer matches the page.
+    const elsewhere = { ...props, pageUrl: "https://login.example.com/sso" };
+    await act(async () => root.render(<Host agentHolds holdingRunId={PAUSE_RUN} {...elsewhere} />));
+    await advance(100);
+    // The person presses Stop.
+    await act(async () => root.render(<Host agentHolds holdingRunId={PAUSE_RUN} {...elsewhere} stoppedRunIds={[PAUSE_RUN]} />));
+    await advance(100);
+    expect(pauseRow()).toBeNull();
+    expect(continueButtons()).toHaveLength(0);
+    // Octo has let go and the person holds the browser: no way on here.
+    server.owner = { kind: "human", participantId: "self" };
+    await act(async () => {
+      for (const socket of server.sockets) socket.pushState();
+      root.render(<Host agentHolds={false} {...elsewhere} stoppedRunIds={[PAUSE_RUN]} />);
+    });
+    await advance(2_000);
+    expect(pauseRow()).toBeNull();
+    expect(continueButtons()).toHaveLength(0);
+    expect(toolbarStatus()?.textContent ?? "Ready").not.toBe("Waiting for you");
+    expect(document.body.textContent).not.toContain("Let Octo continue");
+    expect(onContinue).not.toHaveBeenCalled();
+    // The browser is asked once; it ends only what is still the page's pause.
+    expect(mocks.endHumanInput).toHaveBeenCalledExactlyOnceWith({
+      projectId, browserSessionId: "browser-session-1", preferRuntimeId: null, pageId: "PAGE1", handoffId: "handoff-1",
+    });
+  });
+
+  it("ends a pause stopped from Chat, with the Browser view behind it, and shows no way on when the view comes back", async () => {
+    for (const ranOut of [false, true]) {
+      mocks.endHumanInput.mockClear();
+      const onContinue = vi.fn(async () => true);
+      const props = { compact: true, pausedRunId: PAUSE_RUN, earlierRunIds: [CARD_RUN], onContinue, agentPageIds: ["PAGE1"] };
+      const pause = signInPause(3, PAUSE_RUN);
+      const expiresAtMs = Date.now() + (ranOut ? 5_000 : 600_000);
+      const log = [...pauseAfterCard().slice(0, 2), { ...pause, humanInputRequest: { ...pause.humanInputRequest!, expiresAtMs } }];
+      mocks.actions = log.slice(0, 2);
+      await octoTakesControl({ ...props, holdingRunId: PAUSE_RUN });
+      mocks.actions = log;
+      await act(async () => root.render(<Host agentHolds holdingRunId={PAUSE_RUN} {...props} />));
+      await advance(100);
+      expect(pauseRow()).not.toBeNull();
+      // They go back to Chat: the Browser view stays behind it, reading no log.
+      await act(async () => root.render(<Host agentHolds hidden holdingRunId={PAUSE_RUN} {...props} />));
+      await advance(100);
+      // Stop, pressed in Chat: the outlines come off the page then, once.
+      await act(async () => root.render(<Host agentHolds hidden holdingRunId={PAUSE_RUN} {...props} stoppedRunIds={[PAUSE_RUN]} />));
+      await advance(100);
+      expect(mocks.endHumanInput).toHaveBeenCalledExactlyOnceWith({
+        projectId, browserSessionId: "browser-session-1", preferRuntimeId: null, pageId: "PAGE1", handoffId: "handoff-1",
+      });
+      // Octo lets go, and the request for the fields may run out meanwhile.
+      server.owner = { kind: "human", participantId: "self" };
+      await act(async () => {
+        for (const socket of server.sockets) socket.pushState();
+        root.render(<Host agentHolds={false} hidden {...props} stoppedRunIds={[PAUSE_RUN]} />);
+      });
+      await advance(ranOut ? 6_000 : 200);
+      expect(Date.now() > expiresAtMs).toBe(ranOut);
+      // Back in the Browser view, before it has read the log again...
+      mocks.actions = [];
+      await act(async () => root.render(<Host agentHolds={false} {...props} stoppedRunIds={[PAUSE_RUN]} />));
+      expect(pauseRow()).toBeNull();
+      expect(continueButtons()).toHaveLength(0);
+      await advance(1_000);
+      expect(pauseRow()).toBeNull();
+      expect(continueButtons()).toHaveLength(0);
+      // ...and once it has.
+      mocks.actions = log;
+      await act(async () => root.render(<Host agentHolds={false} {...props} stoppedRunIds={[PAUSE_RUN]} />));
       await advance(2_000);
       expect(pauseRow()).toBeNull();
       expect(continueButtons()).toHaveLength(0);

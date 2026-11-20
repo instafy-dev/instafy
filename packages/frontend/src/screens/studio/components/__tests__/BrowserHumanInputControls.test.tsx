@@ -168,7 +168,7 @@ describe("BrowserHumanInputControls", () => {
     // The pause waits while its turn ends.
     expect(container.querySelector('[role="status"].sr-only')?.textContent).toContain("Waiting for agent control to stop");
     // The Stop: the pause is over at once, before Octo has let go...
-    props = { ...props, requestStopped: true };
+    props = { ...props, stoppedHandoffId: "handoff" };
     await render();
     expect(container.querySelector('[data-testid="browser-human-input-controls"]')).toBeNull();
     // ...and once it has, with the person holding the browser.
@@ -178,16 +178,41 @@ describe("BrowserHumanInputControls", () => {
     expect(container.textContent).not.toContain("highlighted field");
     expect(container.querySelector('[data-testid="browser-human-input-continue"]')).toBeNull();
     expect(props.onContinue).not.toHaveBeenCalled();
-    // The chat's record of the Stop stays, so the pause stays over: after
-    // its request runs out of the log too.
-    props = { ...props, request: null, requestStopped: false };
+    // The pause stays over after its request has left the log, and after
+    // the Stop's record has left the chat's latest messages.
+    props = { ...props, request: null };
+    await render();
+    expect(container.textContent).not.toContain("Let Octo continue");
+    props = { ...props, stoppedHandoffId: null };
     await render();
     expect(container.textContent).not.toContain("Let Octo continue");
   });
 
+  // The Stop's record can come after the pause's request has gone: the
+  // sign-in went on to another site, the request ran out, or the view was
+  // behind Chat and read no log. The row the pause left is over all the same.
+  it("ends a stopped pause that had outlasted its request", async () => {
+    const request = { version: 1 as const, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
+    props = { ...props, request, canTakeOver: false, humanControlConfirmed: true };
+    await render();
+    props = { ...props, request: null };
+    await render();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.disabled).toBe(false);
+    props = { ...props, stoppedHandoffId: "handoff" };
+    await render();
+    expect(container.querySelector('[data-testid="browser-human-input-continue"]')).toBeNull();
+    expect(container.textContent).not.toContain("Let Octo continue");
+    // Its request, read from the log again, brings nothing back.
+    props = { ...props, request };
+    await render();
+    expect(container.querySelector('[data-testid="browser-human-input-continue"]')).toBeNull();
+    expect(container.textContent).not.toContain("highlighted field");
+    expect(props.onContinue).not.toHaveBeenCalled();
+  });
+
   it("keeps a pause through a take-over, which cancels its turn without a Stop", async () => {
     props.request = { version: 1, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
-    props.requestStopped = false;
+    props.stoppedHandoffId = null;
     await render();
     // They click into the page while the turn that paused still ends.
     props.takeoverRequestId = "page-click"; await render();
@@ -201,7 +226,7 @@ describe("BrowserHumanInputControls", () => {
 
   it("offers Let Octo continue again after a take-over that follows a stopped pause", async () => {
     const request = { version: 1 as const, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
-    props = { ...props, request, requestStopped: true, canTakeOver: false, humanControlConfirmed: true };
+    props = { ...props, request, stoppedHandoffId: "handoff", canTakeOver: false, humanControlConfirmed: true };
     await render();
     expect(container.textContent).not.toContain("Let Octo continue");
     // A later turn drives, and the person takes over: that is theirs to

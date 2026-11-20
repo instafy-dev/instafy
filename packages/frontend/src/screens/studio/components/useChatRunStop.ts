@@ -21,7 +21,6 @@ export type ChatRunStopOptions = {
   targets: readonly ChatRunStopTarget[];
   canStop: boolean;
   viewerUserId: string | null;
-  active?: boolean;
   /**
    * Whether Escape stops from the view on screen (default true). The chat's
    * Browser view keeps Escape for the browser: there the key stops nothing,
@@ -74,7 +73,7 @@ function effectivePhase(state: StopState, targets: readonly ChatRunStopTarget[])
 
 export function useChatRunStop(options: ChatRunStopOptions) {
   const feedbackId = useId();
-  const { conversationId, targets, canStop, active = true } = options;
+  const { conversationId, targets, canStop } = options;
   const [storedState, setState] = useState(() => emptyState(conversationId));
   const state = storedState.conversationId === conversationId ? storedState : emptyState(conversationId);
   // The chat's run records, where the Stop's answer is written.
@@ -126,7 +125,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
 
   const execute = useCallback(async (selection: readonly ChatRunStopTarget[]) => {
     const current = latest.current.options;
-    if (!current.canStop || current.active === false || !current.conversationId || busy.current || selection.length === 0) return;
+    if (!current.canStop || !current.conversationId || busy.current || selection.length === 0) return;
     const captured = [...new Map(selection.map((target) => [target.jobId, { ...target }])).values()];
     const capturedConversation = current.conversationId;
     const requestId = ++operation.current;
@@ -193,7 +192,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
 
   const requestStop = useCallback((selection?: readonly ChatRunStopTarget[]) => {
     const current = latest.current;
-    if (!current.options.canStop || current.options.active === false || !current.options.conversationId || busy.current) return;
+    if (!current.options.canStop || !current.options.conversationId || busy.current) return;
     const captured = (selection ?? current.options.targets.filter((target) => !current.state.acceptedJobIds.includes(target.jobId)))
       .map((target) => ({ ...target }));
     if (captured.length === 0) {
@@ -227,7 +226,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     if (!state.awaitingNext) return;
     const current = latest.current;
     const next = (current.options.followOnTargets ?? []).filter((target) => !state.acceptedJobIds.includes(target.jobId));
-    if (next.length > 0 && current.options.canStop && current.options.active !== false) {
+    if (next.length > 0 && current.options.canStop) {
       requestStop(next);
       return;
     }
@@ -251,7 +250,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     const snapshotEscapeOwner = (event: KeyboardEvent) => {
       const current = latest.current;
       if (chatRunStopEscapeBlocked(event, {
-        active: current.options.active !== false && current.options.canStop,
+        active: current.options.canStop,
         blocked: current.options.escapeBlocked || current.options.escapeStops === false || Boolean(current.state.confirmationTargets),
       })) blockedEvents.add(event);
     };
@@ -263,7 +262,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
         if (event.defaultPrevented || event.cancelBubble || blockedEvents.has(event)) return;
         const current = latest.current;
         if (chatRunStopEscapeBlocked(event, {
-          active: current.options.active !== false && current.options.canStop,
+          active: current.options.canStop,
           blocked: current.options.escapeBlocked || current.options.escapeStops === false
             || effectivePhase(current.state, current.options.targets) !== "idle" || Boolean(current.state.confirmationTargets),
         })) return;
@@ -280,7 +279,7 @@ export function useChatRunStop(options: ChatRunStopOptions) {
 
   const availableTargets = targets.filter((target) => !state.acceptedJobIds.includes(target.jobId));
   const phase = effectivePhase(state, targets);
-  const visible = active && canStop && Boolean(conversationId)
+  const visible = canStop && Boolean(conversationId)
     && (availableTargets.length > 0 || phase === "stopping" || phase === "error" || phase === "requested" || between);
   return {
     visible, phase, feedbackId, escapeStops: options.escapeStops !== false,

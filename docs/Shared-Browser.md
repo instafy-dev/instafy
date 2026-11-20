@@ -2689,8 +2689,11 @@ toolbar's "Waiting for you" go, and the chat's **Continue** under the stopped
 turn is the one way on. Studio reads that from the chat's own record of the
 Stop (the controller's notice names the runs it stopped), never from a
 canceled run alone, since a take-over cancels its run too and its pause goes
-on. The outlines are on the page, so Studio then asks the browser to take them
-off: `POST /browser/pages/:id/end-pause` (`browser.control`, body
+on. The view remembers the pause it showed, since a pause outlasts its
+request: a Stop ends it too once the sign-in has gone on to another site or
+the request has run out, and while the Browser view is behind Chat, where it
+reads no log. The outlines are on the page, so Studio then asks the browser to
+take them off: `POST /browser/pages/:id/end-pause` (`browser.control`, body
 `{ "handoffId" }`) puts back each highlighted control's own outline with the
 browser tools' own steps, sends the page nothing else and reads nothing of it,
 and only for the person the pause asked, on the page's latest pause with no

@@ -17,7 +17,6 @@ import {
   chatRunStopBetweenParts,
   chatRunStopFollowOnTargets,
   chatRunStopNeedsConfirmation,
-  chatRunStopOnScreen,
   groupChatRunStopTargets,
   resolveChatRunStopTargets,
   runsCanceledByStop,
@@ -253,26 +252,29 @@ describe("a message between two of its parts", () => {
 // message sent with a map or a page of the chat in front had no Stop at any
 // moment of its turn, under the same composer.
 describe("where the chat offers Stop", () => {
-  it("is wherever the chat's composer is, never in a job thread's tab", () => {
-    expect(chatRunStopOnScreen({ jobThread: false })).toBe(true);
-    expect(chatRunStopOnScreen({ jobThread: true })).toBe(false);
-  });
-
-  it("is what ChatPanel gives Stop, whichever of the chat's views is in front", () => {
+  it("is wherever the chat's composer is: no view in front decides it, and a job thread's tab has none", () => {
     const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
     const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
     const start = chatPanel.indexOf("const runStop = useChatRunStop({");
     expect(start).toBeGreaterThan(-1);
     const call = chatPanel.slice(start, chatPanel.indexOf("});", start));
-    expect(call).toContain("active: chatRunStopOnScreen({ jobThread: Boolean(jobThread) }),");
-    // Not the view in front: a page, a map or a file of the chat keeps Stop,
-    // as Chat and the Browser view do.
-    const active = call.split("\n").find((line) => line.trim().startsWith("active:"))!;
-    for (const view of ["chatVisible", "browserVisible", "activeSurfaceId", "resourceId", "selectedPreview", "selectedFile"]) {
-      expect(active).not.toContain(view);
-    }
-    // The Browser view keeps Escape for the browser, and Stop's words say so.
-    expect(call).toContain("escapeStops: !browserVisible,");
+    const code = (text: string) => text.split("\n").filter((line) => !line.trim().startsWith("//"));
+    // Stop takes no view: a page, a map or a file of the chat in front keeps
+    // it, as Chat and the Browser view do. Only Escape follows the view: the
+    // Browser view keeps that key for the browser, and Stop's words say so.
+    const views = ["chatVisible", "browserVisible", "splitSurfaces", "hasResources", "activeSurfaceId", "resourceId",
+      "selectedPreview", "selectedFile"];
+    expect(code(call).filter((line) => views.some((view) => line.includes(view))).map((line) => line.trim()))
+      .toEqual(["escapeStops: !browserVisible,"]);
+    expect(call).not.toContain("active:");
+    // Who may stop is no view's matter either: a writer of the space, in the
+    // chat itself, never in a job thread's tab.
+    expect(call).toContain("canStop: canStopRuns,");
+    const canStopFrom = chatPanel.indexOf("const canStopRuns =");
+    expect(canStopFrom).toBeGreaterThan(-1);
+    const canStop = chatPanel.slice(canStopFrom, chatPanel.indexOf(";", canStopFrom));
+    expect(canStop).toContain("&& !jobThread");
+    for (const view of views) expect(canStop).not.toContain(view);
     // One composer holds Stop, outside every view's own panel: the chat's,
     // the Browser view's, a file's and a page's.
     const composer = chatPanel.indexOf("<ChatComposerSurface");

@@ -1286,19 +1286,29 @@ export function BrowserSessionModal({
     browserPageOrigin(sharedBrowserChrome?.pages.find((page) => page.id === sharedBrowserPageId)?.url),
     humanInputRunIds,
   );
+  const browserHumanInputIdentity =
+    `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`;
+  // The pause this view last showed on this page. A pause outlasts its
+  // request, as its row does: the sign-in goes to another site, the request
+  // runs out, and a view behind Chat reads no log.
+  const shownPauseRef = useRef<{ identity: string; request: NonNullable<typeof sharedHumanInputRequest> } | null>(null);
+  if (sharedHumanInputRequest) {
+    shownPauseRef.current = { identity: browserHumanInputIdentity, request: sharedHumanInputRequest };
+  }
+  const shownPause = shownPauseRef.current?.identity === browserHumanInputIdentity ? shownPauseRef.current.request : null;
   // A Stop ended the turn that paused: its pause ends with it, here and on
   // the page, and the chat's Continue under the stopped turn is the way on.
-  const pauseStopped = sharedBrowserHumanInputStopped(sharedHumanInputRequest, humanInputStoppedRunIds);
+  const stoppedPause = sharedBrowserHumanInputStopped(shownPause, humanInputStoppedRunIds) ? shownPause : null;
   useEndStoppedBrowserPause({
-    request: pauseStopped ? sharedHumanInputRequest : null,
+    request: stoppedPause,
     projectId,
     browserSessionId,
     preferRuntimeId: forcedRuntimeId ?? preferRuntimeId,
   });
   const browserHumanInputOptions = {
-    identityKey: `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`,
+    identityKey: browserHumanInputIdentity,
     request: sharedHumanInputRequest,
-    requestStopped: pauseStopped,
+    stoppedHandoffId: stoppedPause?.handoffId ?? null,
     canTakeOver: transportActive && canControlBrowser && Boolean(effectiveAgentControlOwner && onTakeOverAgent),
     humanControlConfirmed: humanInputEnabled,
     canContinue: transportActive && Boolean(onContinueAfterHumanInput),

@@ -144,7 +144,7 @@ import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import { useChatRunStop } from "./useChatRunStop";
-import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, chatRunStopOnScreen, resolveChatRunStopTargets } from "./chatRunStopTargets";
+import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, resolveChatRunStopTargets } from "./chatRunStopTargets";
 import { runIdsEndedByStop } from "./controllerConversationNotice";
 import { ChatRunStopNoticeProvider } from "./ChatRunStopNotice";
 import { useChatRunStopContinuation } from "./useChatRunStopContinuation";
@@ -5960,6 +5960,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     messages,
     { getAgentDisplayName: (handle) => agentByHandle.get(handle)?.displayName },
   ), [agentByHandle, messages, runs, stopConversationId]);
+  // Who may stop: a writer of the space, in the chat itself. Never in a job
+  // thread's tab, which is not the chat.
   const canStopRuns = projectCapabilitiesResolved === true && canWriteProject === true
     && !projectAccessPending && Boolean(currentUserId) && !jobThread;
   // The newest message is between two of its parts, and the next goes on by
@@ -5980,9 +5982,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     followOnTargets: stopFollowOnTargets,
     canStop: canStopRuns,
     viewerUserId: currentUserId,
-    // Stop is in the composer, which every view of the chat keeps.
-    active: chatRunStopOnScreen({ jobThread: Boolean(jobThread) }),
-    // The Browser view keeps Escape for the browser.
+    // Stop is in the composer, which every view of the chat keeps (Chat, its
+    // Browser view, a page or a file in front): no view decides whether it
+    // is offered. The Browser view keeps Escape for the browser.
     escapeStops: !browserVisible,
     escapeBlocked: Boolean(messageMenu || imageLightbox || invitePrompt || connectSheetOpen
       || addMenuOpen || skillsImport.addSkillModalOpen || agentProfileModal),

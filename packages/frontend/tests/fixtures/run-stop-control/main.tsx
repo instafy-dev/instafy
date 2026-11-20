@@ -116,7 +116,7 @@ function Simulation({ scenario }: { scenario: Scenario }) {
   const [labelExpanded, setLabelExpanded] = useState(false);
   const useRail = scenario === "rail" || scenario === "command";
   const controller = useChatRunStop({
-    conversationId: CONVERSATION, targets, viewerUserId: VIEWER, canStop: scenario !== "viewer", active: true,
+    conversationId: CONVERSATION, targets, viewerUserId: VIEWER, canStop: scenario !== "viewer",
     cancelJobs: async (conversationId, jobIds) => {
       if (conversationId !== CONVERSATION) throw new Error("Incorrect conversation");
       setRequests(current => [...current, [...jobIds]]);
