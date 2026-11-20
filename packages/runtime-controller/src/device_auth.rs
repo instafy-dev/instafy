@@ -13,11 +13,12 @@ use futures_util::StreamExt;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
 use tokio_postgres::{error::SqlState, GenericClient, Row};
 use uuid::Uuid;
 
+use crate::ai_connection_limits::{self, AiConnectionLimits};
 use crate::auth::{authenticate_request, require_user_session};
 use crate::config::PgPool;
 use crate::credential_keys::CredentialKeyRing;
@@ -30,6 +31,10 @@ const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_DEVICE_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const USER_OAUTH_TOKEN_PROVIDER_GITHUB: &str = "github";
 const CODEX_DEVICE_AUTH_UNAVAILABLE_MESSAGE: &str = "Device-code login is unavailable on the configured Codex authentication server. Check the server configuration or try another connection method.";
+/// How long a cancel waits for a ChatGPT login's save in progress, which
+/// probes the model proxy for at most two seconds and then writes in one
+/// transaction.
+const CODEX_DEVICE_AUTH_CANCEL_WAIT_SECONDS: u64 = 5;
 const GITHUB_DEVICE_AUTH_ASSERTION_TTL_MINUTES: i64 = 30;
 const GITHUB_DEVICE_AUTH_TERMINAL_RETENTION_MINUTES: i64 = 30;
 const GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE: &str =
@@ -57,6 +62,19 @@ fn github_device_auth_service_unavailable(
     (
         HttpStatusCode::SERVICE_UNAVAILABLE,
         Json(ApiError::new(message)),
+    )
+}
+
+/// A cancel that a ChatGPT login's save outlasted: it changed nothing, and the
+/// login ends as the save decides, which its status shows.
+fn codex_device_auth_still_saving() -> (HttpStatusCode, Json<ApiError>) {
+    (
+        HttpStatusCode::CONFLICT,
+        Json(ApiError::with_details(
+            "This ChatGPT login is saving its connection. Check its status.",
+            "codex_device_auth_saving",
+            json!({ "retryable": true }),
+        )),
     )
 }
 
@@ -95,6 +113,9 @@ impl DeviceAuthRegistry {
         guard.get(session_id).cloned()
     }
 
+    /// Sets a session's status, except that a cancelled session stays
+    /// cancelled: a client that saw `cancelled` stops asking, so a poller that
+    /// ends later must not turn it into another outcome.
     pub(crate) async fn update_status(
         &self,
         session_id: &Uuid,
@@ -103,6 +124,9 @@ impl DeviceAuthRegistry {
         let mut guard = self.inner.write().await;
         prune_sessions(&mut guard);
         let session = guard.get_mut(session_id)?;
+        if matches!(session.status, DeviceAuthStatus::Cancelled) {
+            return Some(session.clone());
+        }
         session.status = status;
         session.completed_at = match &session.status {
             DeviceAuthStatus::Pending => None,
@@ -126,12 +150,34 @@ impl DeviceAuthRegistry {
         }
         true
     }
+
+    /// How many copies of the registry exist: one in each copy of the
+    /// controller state, such as the one a ChatGPT poller holds until it
+    /// ends. Tests wait on it for pollers to end.
+    #[cfg(test)]
+    pub(crate) fn copies(&self) -> usize {
+        Arc::strong_count(&self.inner)
+    }
+
+    /// Moves a session's code expiry, so a test can let a login expire.
+    #[cfg(test)]
+    pub(crate) async fn set_expires_at(&self, session_id: &Uuid, expires_at: DateTime<Utc>) {
+        if let Some(session) = self.inner.write().await.get_mut(session_id) {
+            session.expires_at = expires_at;
+        }
+    }
 }
 
 fn prune_sessions(sessions: &mut HashMap<Uuid, DeviceAuthSession>) {
     let now = Utc::now();
     for session in sessions.values_mut() {
-        if session.expires_at <= now && matches!(session.status, DeviceAuthStatus::Pending) {
+        // A session whose `saving` is held, by a ChatGPT login's poller saving
+        // its connection or by a cancel, ends as that decides, not as timed
+        // out first.
+        if session.expires_at <= now
+            && matches!(session.status, DeviceAuthStatus::Pending)
+            && session.saving.try_lock().is_ok()
+        {
             session.status = DeviceAuthStatus::Failed {
                 error: "Device login timed out.".to_string(),
             };
@@ -163,6 +209,12 @@ pub(crate) struct DeviceAuthSession {
     pub(crate) status: DeviceAuthStatus,
     pub(crate) completed_at: Option<DateTime<Utc>>,
     pub(crate) provider_state: DeviceAuthProviderState,
+    /// Held by a ChatGPT login's poller from its last look at the session,
+    /// just before it saves the connection, until the login ended. A cancel
+    /// takes it too, so it comes either before the save, which then saves
+    /// nothing, or after the login ended. While it is held the session does
+    /// not time out.
+    pub(crate) saving: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1251,9 +1303,42 @@ async fn start_device_auth(
                 .unwrap_or_else(|| DEFAULT_CODEX_ISSUER.to_string());
             let client_id = read_env_trimmed("CODEX_DEVICE_AUTH_CLIENT_ID")
                 .unwrap_or_else(|| DEFAULT_CODEX_CLIENT_ID.to_string());
-            let challenge = request_codex_user_code(&state, &issuer, &client_id).await?;
+            // Counted before OpenAI is asked for a code, so a refused start
+            // calls nobody. It ended the person's older logins; the ones this
+            // process polls stop here, and the others when their poller finds
+            // its receipt closed.
+            let replaced = ai_connection_limits::reserve_codex_device_auth(
+                &state.pool,
+                user_id,
+                session_id,
+                &AiConnectionLimits::FOR_EVERYONE,
+            )
+            .await?;
+            for replaced_session_id in &replaced {
+                state
+                    .device_auth_sessions
+                    .cancel(replaced_session_id, &user_id)
+                    .await;
+            }
+            let challenge = match request_codex_user_code(&state, &issuer, &client_id).await {
+                Ok(challenge) => challenge,
+                Err(error) => {
+                    // OpenAI was asked, so the start still counts. It is just
+                    // no longer pending.
+                    ai_connection_limits::finish_codex_device_auth(
+                        &state.pool,
+                        user_id,
+                        session_id,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
 
-            let expires_at = now + chrono::Duration::minutes(15);
+            let expires_at = now
+                + chrono::Duration::seconds(
+                    ai_connection_limits::CODEX_DEVICE_AUTH_LIFETIME_SECONDS,
+                );
             let verification_url = format!("{}/codex/device", issuer.trim_end_matches('/'));
 
             let session = DeviceAuthSession {
@@ -1271,10 +1356,15 @@ async fn start_device_auth(
                     client_id: client_id.clone(),
                     device_auth_id: challenge.device_auth_id.clone(),
                 },
+                saving: Arc::new(Mutex::new(())),
             };
 
             state.device_auth_sessions.insert(session).await;
-            tokio::spawn(poll_codex_device_auth(state.clone(), session_id));
+            tokio::spawn(run_codex_device_auth_poller(
+                state.clone(),
+                session_id,
+                user_id,
+            ));
 
             Ok(Json(DeviceAuthStartResponse {
                 session_id: session_id.to_string(),
@@ -1376,6 +1466,7 @@ async fn start_device_auth(
                     access_token: None,
                     scope: None,
                 },
+                saving: Arc::new(Mutex::new(())),
             };
 
             if let Err(error) =
@@ -1490,10 +1581,32 @@ async fn cancel_device_auth(
             return Err(not_found("device auth session not found"));
         }
         if session.provider != "github" {
+            // A ChatGPT login's poller holds this while it saves the
+            // connection, so the cancel comes either before the save, which
+            // then saves nothing, or after the login ended, which it leaves
+            // as it ended. A save that outlasts the wait goes on, and the
+            // cancel changes nothing.
+            let Ok(saving) = timeout(
+                Duration::from_secs(CODEX_DEVICE_AUTH_CANCEL_WAIT_SECONDS),
+                session.saving.lock(),
+            )
+            .await
+            else {
+                return Err(codex_device_auth_still_saving());
+            };
             let cancelled = state
                 .device_auth_sessions
                 .cancel(&session_id, &user_id)
                 .await;
+            drop(saving);
+            // Closing the receipt too frees the login's pending place at once
+            // and refuses its save in the database. Best effort: the cancel
+            // above stands, and stops the save, when the database cannot be
+            // reached.
+            if cancelled && session.provider == "codex" {
+                ai_connection_limits::finish_codex_device_auth(&state.pool, user_id, session_id)
+                    .await;
+            }
             return if cancelled {
                 Ok(HttpStatusCode::NO_CONTENT)
             } else {
@@ -1611,6 +1724,13 @@ async fn request_codex_user_code(
         .map_err(|error| internal_error(format!("device auth response invalid: {error}")))
 }
 
+/// Polls a ChatGPT login until it ends, then closes its receipt: however it
+/// ended, the login no longer counts as pending.
+async fn run_codex_device_auth_poller(state: AppState, session_id: Uuid, user_id: Uuid) {
+    poll_codex_device_auth(state.clone(), session_id).await;
+    ai_connection_limits::finish_codex_device_auth(&state.pool, user_id, session_id).await;
+}
+
 async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
     let Some(session) = state.device_auth_sessions.get(&session_id).await else {
         return;
@@ -1650,6 +1770,42 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
             return;
         }
 
+        // A newer start by the same person closes this login's receipt,
+        // perhaps on another controller: stop asking OpenAI about it. When the
+        // database cannot tell, keep polling. A newer start or a cancel can
+        // still come while OpenAI answers, so the poller looks at the session
+        // again before it saves, and the save at the receipt.
+        match ai_connection_limits::codex_device_auth_is_open(
+            &state.pool,
+            session.user_id,
+            session_id,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = state
+                    .device_auth_sessions
+                    .update_status(
+                        &session_id,
+                        DeviceAuthStatus::Failed {
+                            error: ai_connection_limits::CODEX_DEVICE_AUTH_REPLACED_MESSAGE
+                                .to_string(),
+                        },
+                    )
+                    .await;
+                return;
+            }
+            Err((status, error)) => {
+                tracing::warn!(
+                    http_status = %status,
+                    error = %error.0.message,
+                    session_id = %session_id,
+                    "failed to check whether a ChatGPT login was replaced; polling on"
+                );
+            }
+        }
+
         match poll_codex_token(&state, &issuer, &device_auth_id, &session.user_code).await {
             Ok(Some(code)) => {
                 match exchange_codex_code_for_tokens(&state, &issuer, &client_id, &code).await {
@@ -1657,6 +1813,26 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
                         let account_id = extract_chatgpt_account_id(&tokens.id_token);
                         let auth_json = build_codex_auth_json(tokens, account_id.as_deref());
                         let metadata = build_codex_metadata("device_code", account_id.as_deref());
+
+                        // Looks at the session again: a cancel that came while
+                        // OpenAI answered may not have reached the database to
+                        // close the receipt. A cancel waits for this lock,
+                        // held until the login ended, so none comes between
+                        // this look and the outcome. Nor does a timeout, so
+                        // this look checks the expiry itself: a code that
+                        // expired during the exchange saves nothing.
+                        let _saving = session.saving.lock().await;
+                        let pending = state
+                            .device_auth_sessions
+                            .get(&session_id)
+                            .await
+                            .is_some_and(|latest| {
+                                matches!(latest.status, DeviceAuthStatus::Pending)
+                                    && latest.expires_at > Utc::now()
+                            });
+                        if !pending {
+                            return;
+                        }
 
                         let result = credentials::insert_user_credential(
                             &state,
@@ -1666,6 +1842,7 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
                             auth_json,
                             Some("ChatGPT".to_string()),
                             None,
+                            Some(session_id),
                         )
                         .await;
 
@@ -1687,6 +1864,9 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
                                 return;
                             }
                             Err((_, error)) => {
+                                // A save refused because its receipt was
+                                // closed fails with the replaced message; a
+                                // cancelled login stays cancelled.
                                 let message = error.0.message.clone();
                                 let _ = state
                                     .device_auth_sessions
@@ -2669,12 +2849,14 @@ fn build_codex_metadata(source: &str, account_id: Option<&str>) -> JsonValue {
 #[cfg(test)]
 mod device_auth_session_tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
     use chrono::{Duration as ChronoDuration, Utc};
     use httpmock::{Method::POST, MockServer};
     use serde_json::json;
+    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     use super::{
@@ -2712,6 +2894,7 @@ mod device_auth_session_tests {
                 client_id: "test-client".to_string(),
                 device_auth_id: "test-device-auth".to_string(),
             },
+            saving: Arc::new(Mutex::new(())),
         }
     }
 
@@ -3029,6 +3212,110 @@ mod device_auth_session_tests {
             DeviceAuthStatus::Completed { .. }
         ));
         assert_eq!(completed.completed_at, Some(completed_at));
+    }
+
+    /// A poller that ends after the person cancelled leaves the session
+    /// cancelled, as the client last saw it.
+    #[tokio::test]
+    async fn cancelled_sessions_keep_their_status() {
+        let registry = DeviceAuthRegistry::new();
+        let user_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        registry
+            .insert(test_session(
+                session_id,
+                user_id,
+                Utc::now() + ChronoDuration::minutes(10),
+                DeviceAuthStatus::Pending,
+                None,
+            ))
+            .await;
+        assert!(registry.cancel(&session_id, &user_id).await);
+        let cancelled_at = registry
+            .get(&session_id)
+            .await
+            .expect("cancelled session should be retained")
+            .completed_at;
+
+        for status in [
+            DeviceAuthStatus::Completed {
+                credential_id: Some(Uuid::new_v4()),
+            },
+            DeviceAuthStatus::Failed {
+                error: "test failure".to_string(),
+            },
+            DeviceAuthStatus::Pending,
+        ] {
+            let session = registry
+                .update_status(&session_id, status)
+                .await
+                .expect("session should exist");
+            assert!(matches!(session.status, DeviceAuthStatus::Cancelled));
+            assert_eq!(session.completed_at, cancelled_at);
+        }
+    }
+
+    /// A login whose code expires while its poller saves the connection stays
+    /// pending until the save ends, and then reads as the save ended: it does
+    /// not read timed out first. Once nothing saves it, it times out.
+    #[tokio::test]
+    async fn sessions_being_saved_do_not_time_out() {
+        let registry = DeviceAuthRegistry::new();
+        let user_id = Uuid::new_v4();
+        let expired = Utc::now() - ChronoDuration::seconds(1);
+        let saved_id = Uuid::new_v4();
+        let unsaved_id = Uuid::new_v4();
+        let saved = test_session(saved_id, user_id, expired, DeviceAuthStatus::Pending, None);
+        let unsaved = test_session(
+            unsaved_id,
+            user_id,
+            expired,
+            DeviceAuthStatus::Pending,
+            None,
+        );
+        // Both pollers hold `saving`; one saves its connection, the other
+        // lets go without saving.
+        let saved_saving = saved.saving.clone();
+        let unsaved_saving = unsaved.saving.clone();
+        let saved_guard = saved_saving.lock().await;
+        let unsaved_guard = unsaved_saving.lock().await;
+        registry.insert(saved).await;
+        registry.insert(unsaved).await;
+
+        for session_id in [&saved_id, &unsaved_id] {
+            let session = registry
+                .get(session_id)
+                .await
+                .expect("session should exist");
+            assert!(matches!(session.status, DeviceAuthStatus::Pending));
+        }
+        let credential_id = Uuid::new_v4();
+        let session = registry
+            .update_status(
+                &saved_id,
+                DeviceAuthStatus::Completed {
+                    credential_id: Some(credential_id),
+                },
+            )
+            .await
+            .expect("session should exist");
+        drop(saved_guard);
+        assert!(matches!(
+            session.status,
+            DeviceAuthStatus::Completed { credential_id: Some(id) } if id == credential_id
+        ));
+
+        drop(unsaved_guard);
+        let session = registry
+            .get(&unsaved_id)
+            .await
+            .expect("session should exist");
+        assert!(matches!(
+            &session.status,
+            DeviceAuthStatus::Failed { error } if error == "Device login timed out."
+        ));
+        let session = registry.get(&saved_id).await.expect("session should exist");
+        assert!(matches!(session.status, DeviceAuthStatus::Completed { .. }));
     }
 
     #[test]
