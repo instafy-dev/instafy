@@ -740,6 +740,12 @@ const LEGACY_BROWSER_AUTOMATION_SHA256: &[&str] = &[
     // whatever the person calls it, and a browser turn said "nothing found" or "covered" only
     // when a step said so.
     "1b498f26b8149ea803f2743b103da995051a4c772be2d7ab103bbac2bb5c8c46", // v47
+    // From before a map's research stayed `direct` with the map, research that ends in a page
+    // went to the browser first unless it searches first in Octo's own turn (the browser can't
+    // search), the rule that keeps research with Octo stopped saying how its building turn reads,
+    // and the person's own steps named the final button that pays or books and a sign-in their
+    // request needs.
+    "b3a2cf3065fc8baa1150eaa850a2db58017f5e8e62da86fe32d82fd3fc59c92c", // v48
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

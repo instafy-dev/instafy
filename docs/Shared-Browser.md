@@ -1506,7 +1506,8 @@ building turn that must make a page can't ask for the browser and, on an AI
 with no web search of its own, reads only pages whose addresses it already
 knows. When Octo can search the web for the message (the job's grant lets its
 turn use the AI's own web search), the routing step reads one line that says
-so, after the section: availability for dates where nobody named the places,
+so, and that Instafy's browser can't, after the section: availability for
+dates where nobody named the places,
 answered in a reply, then stays with Octo, as other research answered in a
 reply does, and searches first (search finds the places, then at most one card
 checks their pages). On a runtime with `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST`
@@ -1514,7 +1515,12 @@ on, a second line says research that ends in a page searches first too, and
 such research stays with Octo as well; the `browser_then_build` line says so
 too ("unless it searches first"), since while it said "from the first message"
 news, a comparison and a page of places whose routing input had both lines
-still went to the browser first (a local test, Nov 19). Without the first line, on every AI
+still went to the browser first (a local test, Nov 19). It also says where that
+search runs ("in Octo's own turn: the browser can't") and that a map isn't such
+research: told only that such research searches first, the routing step read it
+as research to do first, in the browser, and sent news, a comparison and a page
+of places, and trips and events on a map, to the browser before the turn that
+could search (a local test, Nov 20). Without the first line, on every AI
 with no web search of its own, the routing input is as it was, and without the
 second, which is every runtime while the setting is off, research that ends in
 a page goes to the browser first, availability for dates put on a page among
@@ -1535,8 +1541,8 @@ input every chat shares. A change that needs
 what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,
-Nov 7). A map ("on a map") stays with Octo, since a map's skill finds and
-cites its places itself, and so do a change in the person's own words to a page
+Nov 7). A map ("on a map") stays with Octo, its research too, since a map's
+skill finds and cites its places itself, and so do a change in the person's own words to a page
 or map here (a note, a name, a color) and a page or change made only from what
 the chat already found and confirmed, each a change of files, in a line of
 their own: as the last sentences of the `browser_then_build` line they read as
@@ -2578,8 +2584,8 @@ Canceling leaves control unchanged; confirming starts the existing handoff.
 **Let Octo continue** then appears in a row under the toolbar. Reduced-motion
 preferences use a static edge glow. Agent-requested handoff
 uses `request_human_input` with one to eight indices from a fresh snapshot: a
-step only the person may do (a sign-in or one-time code, a payment or the final
-button that books or buys, a cookie choice, a part of a page Octo can't reach),
+step only the person may do (a sign-in or one-time code, the final button that
+pays or books, a cookie choice, a part of a page Octo can't reach),
 its fields and its buttons. It checks only what it highlights: each field must
 still be at its index with the same label and kind, in a form that sends to the
 same place, on the same address, and each button as a step's own control is

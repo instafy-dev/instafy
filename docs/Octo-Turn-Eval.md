@@ -215,9 +215,10 @@ history entries the runtime receives), the expected route and why. A case can al
 `workspaceFileChangeRequirement` values it accepts, what the routing preflight says the turn after it must change:
 after a Stop and an Undo, "keep going" must not require a change. Whether that turn then leaves the undone change
 alone, only a real turn shows. A case with `"integratedSearch": true` is sent where Octo can search the web for the
-message, as a job whose grant lets its turn search: its routing input then has the one line that says so, after the
-browser skill's routing section, and availability for dates at places nobody named, answered in a reply, stays `direct`
-as other research answered in a reply does, unless a site must be used first. With `"researchPagesSearchFirst": true`
+message, as a job whose grant lets its turn search: its routing input then has the one line that says so, and that
+Instafy's browser can't, after the browser skill's routing section, and availability for dates at places nobody
+named, answered in a reply, stays `direct` as other research answered in a reply does, unless a site must be used
+first. With `"researchPagesSearchFirst": true`
 as well, it is sent on a runtime with `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on: a second line says research that ends
 in a page searches first, and such research stays `direct` too; without it, research that ends in a page goes to the
 browser first. A case's `pages`

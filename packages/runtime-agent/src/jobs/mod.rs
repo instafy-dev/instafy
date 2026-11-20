@@ -171,9 +171,13 @@ const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_273;
 /// (`job_proxy_auth`), which the routing step itself never does. Only the fact: the section says
 /// what it changes (availability for dates at places nobody named, answered in a reply, stays
 /// with Octo, which searches first, as other research answered in a reply does, unless a site
-/// must be used first). Without it, which is every turn whose AI has no web search of its own,
-/// the routing input is as it was.
-const ROUTING_SEARCH_FACT: &str = "Octo can search the web for this message.\n";
+/// must be used first). It also says that Instafy's browser can't search: told only that research
+/// searches first, the routing step read that as research done first, in the browser, and sent
+/// news, a comparison and a page of places, and trips and events on a map, to the browser before
+/// the building turn that could search (a local test, Nov 20). Without it, which is every turn
+/// whose AI has no web search of its own, the routing input is as it was.
+const ROUTING_SEARCH_FACT: &str =
+    "Octo can search the web for this message; Instafy's browser can't.\n";
 /// What the routing step reads after [`ROUTING_SEARCH_FACT`] when this runtime also has
 /// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] on: research that ends in a page then stays with Octo too.
 /// Without it, such research goes to the browser first, as it did before Octo could search, also
