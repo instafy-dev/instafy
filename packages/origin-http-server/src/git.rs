@@ -2585,6 +2585,21 @@ pub fn keep_worktree_copies(
     workspace_root: &Path,
     paths: &[String],
 ) -> Result<Option<crate::recovery::RecoveryRefReport>, OriginError> {
+    keep_worktree_copies_as(
+        workspace_root,
+        paths,
+        crate::workspace_git::GitIdentity::new(&config.git_author_name, &config.git_author_email),
+        config.origin_id,
+    )
+}
+
+/// [`keep_worktree_copies`], kept by `author` for the origin `origin_id`.
+fn keep_worktree_copies_as(
+    workspace_root: &Path,
+    paths: &[String],
+    author: crate::workspace_git::GitIdentity,
+    origin_id: Uuid,
+) -> Result<Option<crate::recovery::RecoveryRefReport>, OriginError> {
     let mut kept: Vec<String> = paths
         .iter()
         .map(|path| path.trim().trim_end_matches('/').to_string())
@@ -2610,10 +2625,39 @@ pub fn keep_worktree_copies(
         &head,
         &kept,
         crate::recovery::RecoveryKind::Undone,
-        crate::workspace_git::GitIdentity::new(&config.git_author_name, &config.git_author_email),
-        config.origin_id,
+        author,
+        origin_id,
     )
     .map_err(internal)
+}
+
+/// A stopped turn's unsaved change, put back with what it held kept: what a
+/// person's Undo of it does once the folder is held (`/git/revert` with
+/// `keep` and `expected`). `expected` names what the turn left in each file.
+/// The files that still hold it go back as `HEAD` has them, after their
+/// work-tree copies went to an `undone` recovery ref, so History lists them
+/// under Unsaved work. A file that reads as `HEAD` has it is left alone, and
+/// one changed since refuses the whole of it (409 `head_moved`): nothing
+/// moves. Nothing is put back that could not be kept first.
+pub fn put_back_kept(
+    workspace_root: &Path,
+    expected: &BTreeMap<String, Option<String>>,
+    author: crate::workspace_git::GitIdentity,
+    origin_id: Uuid,
+) -> Result<GitRevertSummary, OriginError> {
+    let still = paths_still_as_expected(workspace_root, expected)?;
+    if still.is_empty() {
+        return Ok(GitRevertSummary {
+            reverted: Vec::new(),
+            removed: Vec::new(),
+        });
+    }
+    if keep_worktree_copies_as(workspace_root, &still, author, origin_id)?.is_none() {
+        return Err(OriginError::conflict(
+            "the change could not be kept, so it was not put back",
+        ));
+    }
+    revert_paths(workspace_root, &still)
 }
 
 /// Put each of `paths` back as `HEAD` has it, or remove it when `HEAD`

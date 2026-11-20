@@ -3832,6 +3832,84 @@ pub(crate) async fn refresh_checkout_read_only(
     .map_err(|error| OriginError::internal(format!("git refresh task failed: {error}")))?
 }
 
+/// A stopped turn's unsaved change, put back by the process hosting this
+/// single-tenant origin before the chat's next turn changes anything: what a
+/// person's Undo of it does (`/git/revert` with `keep` and `expected`), in
+/// process, under the same locks. `expected` names what the turn left in
+/// each file (see [`git::put_back_kept`]). A path a save never keeps is left
+/// as it is, as that Undo refuses it. A folder something else is writing
+/// refuses it (409), and nothing moves. The process is told which files
+/// changed, as after a person's Undo, so their sites are pictured again.
+pub(crate) async fn put_back_unsaved(
+    state: &AppState,
+    expected: std::collections::BTreeMap<String, Option<String>>,
+) -> Result<git::GitRevertSummary, OriginError> {
+    let project_id = state.config.project_id;
+    let mut wanted = std::collections::BTreeMap::new();
+    for (path, oid) in expected {
+        let Some(path) = normalize_relative_path(&path) else {
+            continue;
+        };
+        if path == ".instafy"
+            || path.starts_with(".instafy/")
+            || is_reserved_path(&path)
+            || crate::publish_policy::is_unpublishable(&path)
+            || crate::publish_policy::is_unsafe_path(&path)
+        {
+            continue;
+        }
+        let oid = match oid.map(|oid| oid.trim().to_ascii_lowercase()) {
+            Some(oid) if git::is_safe_git_rev(&oid) => Some(oid),
+            Some(_) => {
+                return Err(OriginError::bad_request(
+                    "expected blob ids must be hexadecimal",
+                ))
+            }
+            None => None,
+        };
+        wanted.insert(path, oid);
+    }
+    if wanted.is_empty() {
+        return Ok(git::GitRevertSummary {
+            reverted: Vec::new(),
+            removed: Vec::new(),
+        });
+    }
+    let apply_lock = project_apply_lock(state, project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    let workspace_root = checkout_root(state);
+    let config = state.config.clone();
+    let root = workspace_root.clone();
+    let summary = tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let _workspace_apply_guard = try_acquire_workspace_apply_lock(&root)?
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        git::put_back_kept(
+            root.as_path(),
+            &wanted,
+            crate::workspace_git::GitIdentity::new(
+                &config.git_author_name,
+                &config.git_author_email,
+            ),
+            config.origin_id,
+        )
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("put back task failed: {error}")))??;
+    if let Some(hook) = state.files_reverted.as_ref() {
+        let mut changed = summary.reverted.clone();
+        changed.extend(summary.removed.iter().cloned());
+        if !changed.is_empty() {
+            hook(FilesReverted {
+                project_id,
+                workspace_root,
+                paths: changed,
+            });
+        }
+    }
+    Ok(summary)
+}
+
 async fn post_commit_receipt(
     client: reqwest::Client,
     url: reqwest::Url,

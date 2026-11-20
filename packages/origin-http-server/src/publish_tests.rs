@@ -2566,6 +2566,127 @@ async fn a_revert_puts_back_only_what_the_turn_left() {
     server.abort();
 }
 
+/// The chat's next turn puts a stopped turn's unsaved change back before it
+/// changes anything, through the process hosting the origin and without a
+/// request: what the change's own Undo does. The files that still hold what
+/// the turn left go back as `HEAD` has them, what they held is kept on an
+/// `undone` recovery ref, and the process is told which files changed. A
+/// file the person changed since refuses the whole of it, and nothing moves;
+/// a file a save never keeps is left as it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hosting_process_puts_a_stopped_turns_unsaved_change_back() {
+    let sc = Scenario::new(Options::default());
+    let told = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<crate::routes::FilesReverted>::new(),
+    ));
+    let client = reqwest::Client::new();
+    let config = std::sync::Arc::new(sc.config.clone());
+    let validator = crate::auth::TokenValidator::new(client.clone(), config.jwks_url.clone());
+    let mut state = crate::routes::AppState::new(config, validator, client, sc.ws.clone(), None)
+        .expect("app state");
+    let sink = told.clone();
+    state.files_reverted = Some(std::sync::Arc::new(move |reverted| {
+        sink.lock().unwrap().push(reverted);
+    }));
+    let blob = crate::workspace_git::blob_oid;
+    let turn_readme = b"one\nBEFORE YOU GO\ntwo\n".as_slice();
+    let turn_plan = b"made by the stopped turn\n".as_slice();
+    let left = std::collections::BTreeMap::from([
+        ("README.md".to_string(), Some(blob(turn_readme))),
+        ("notes/plan.md".to_string(), Some(blob(turn_plan))),
+        // A secret file the turn wrote: no save keeps it, so it stays.
+        (
+            "site/.env".to_string(),
+            Some(blob(b"TOKEN=from-the-turn\n")),
+        ),
+    ]);
+    sc.write("notes/plan.md", turn_plan);
+    sc.write("site/.env", b"TOKEN=from-the-turn\n");
+
+    // The person changed README.md after the Stop: nothing moves.
+    sc.write("README.md", b"one\nBEFORE YOU GO\ntwo\nMY OWN LINE\n");
+    let refused = crate::routes::put_back_unsaved(&state, left.clone())
+        .await
+        .expect_err("a file changed since the turn left it");
+    assert!(
+        matches!(
+            &refused,
+            crate::error::OriginError::ConflictPaths { code: "head_moved", paths, .. }
+                if paths == &["README.md".to_string()]
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        sc.disk("README.md").as_deref(),
+        Some("one\nBEFORE YOU GO\ntwo\nMY OWN LINE\n")
+    );
+    assert_eq!(
+        sc.disk("notes/plan.md").as_deref(),
+        Some("made by the stopped turn\n")
+    );
+    assert_eq!(sc.local_refs(&format!("{LOCAL_RECOVERY_ROOT}/")).len(), 0);
+    assert!(told.lock().unwrap().is_empty());
+
+    // As the turn left them: both go back, and what they held is kept.
+    sc.write("README.md", turn_readme);
+    let summary = crate::routes::put_back_unsaved(&state, left.clone())
+        .await
+        .expect("put back");
+    assert_eq!(summary.reverted, ["README.md"]);
+    assert_eq!(summary.removed, ["notes/plan.md"]);
+    assert_eq!(sc.disk("README.md").as_deref(), Some(README));
+    assert_eq!(sc.disk("notes/plan.md"), None);
+    assert_eq!(
+        sc.disk("site/.env").as_deref(),
+        Some("TOKEN=from-the-turn\n")
+    );
+    let kept = sc.local_refs(&format!("{LOCAL_RECOVERY_ROOT}/"));
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].0.contains("-undone-"), "{kept:?}");
+    assert_eq!(
+        ig(&sc.ws, &["show", &format!("{}:README.md", kept[0].0)]),
+        "one\nBEFORE YOU GO\ntwo"
+    );
+    assert_eq!(
+        ig(&sc.ws, &["show", &format!("{}:notes/plan.md", kept[0].0)]),
+        "made by the stopped turn"
+    );
+    assert_eq!(
+        *told.lock().unwrap(),
+        vec![crate::routes::FilesReverted {
+            project_id: sc.config.project_id,
+            workspace_root: sc.ws.clone(),
+            paths: vec!["README.md".to_string(), "notes/plan.md".to_string()],
+        }]
+    );
+
+    // The next turn's save holds only its own change, and pushes what was
+    // kept to where History lists it.
+    sc.write("README.md", b"one\ntwo\nthree\nfour\nfive\nTHE NEXT TURN\n");
+    sc.publish_paths(&["README.md"]);
+    assert_eq!(
+        sc.remote_file("README.md").as_deref(),
+        Some("one\ntwo\nthree\nfour\nfive\nTHE NEXT TURN\n")
+    );
+    let pushed = sc.remote_refs("refs/instafy/recovery/");
+    assert_eq!(pushed.len(), 1, "{pushed:?}");
+    assert_eq!(
+        sc.recovery_file(&pushed[0].0, "README.md").as_deref(),
+        Some("one\nBEFORE YOU GO\ntwo\n")
+    );
+
+    // Asked again, no file holds the change any more: nothing moves.
+    let summary = crate::routes::put_back_unsaved(&state, left)
+        .await
+        .expect("nothing left to put back");
+    assert!(summary.reverted.is_empty() && summary.removed.is_empty());
+    assert_eq!(told.lock().unwrap().len(), 1);
+    assert_eq!(
+        sc.disk("README.md").as_deref(),
+        Some("one\ntwo\nthree\nfour\nfive\nTHE NEXT TURN\n")
+    );
+}
+
 /// Undo of a saved change: the saved revert lands on canonical `main` from
 /// another origin, and `/git/revert {saved}` brings this checkout to it, so
 /// the page this machine serves loses the change at once. The checkout

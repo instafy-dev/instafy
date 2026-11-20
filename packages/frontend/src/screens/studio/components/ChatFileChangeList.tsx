@@ -26,6 +26,8 @@ import {
   REVERT_RUNNING_MESSAGE,
   REVERT_STILL_RUNNING_MESSAGE,
   REVERT_WAITING_AGAIN_MESSAGE,
+  STOPPED_CHANGE_SAVED_LATER_LABEL,
+  STOPPED_CHANGE_SAVED_LATER_MESSAGE,
   UNSAVED_REVERT_CONFIRM_MESSAGE,
   UNSAVED_REVERT_MACHINE_OFF_MESSAGE,
   autoRetryDelayMs,
@@ -625,9 +627,20 @@ export function ChatFileChangeList({
 
   const likelyLabel = likelyWords ? `${likelyWords}${notSavedCount > 0 ? ` · ${notSavedCount} not saved` : ""}` : null;
 
+  // A change a Stop left unsaved that a later turn's save took with its own
+  // (that turn's reply says which files): it is saved now, and the row says so.
+  const savedLaterPaths = messageId ? laterChanges?.savedLater?.(messageId) ?? null : null;
+  const savedLater =
+    unsavedReason === "stopped_before_save" &&
+    savedLaterPaths !== null &&
+    pendingEntries.some(({ workspacePath }) => savedLaterPaths.has(normalizeUndonePath(workspacePath)));
   // Reverted files have nothing left to save, so the state follows the actions.
   const unsavedNote =
-    unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedReason, unsavedWorkPlacement) : null;
+    unsavedReason && pendingCount > 0
+      ? savedLater
+        ? STOPPED_CHANGE_SAVED_LATER_MESSAGE
+        : describeUnsavedChanges(unsavedReason, unsavedWorkPlacement)
+      : null;
   const unsavedNoteId = `${cardIdBase}-unsaved`;
 
   // A single file needs no summary/toggle chip: the file chip carries
@@ -1757,7 +1770,7 @@ export function ChatFileChangeList({
             data-testid="chat-file-change-unsaved"
           >
             <WarningTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
-            <span>Not saved</span>
+            <span>{savedLater ? STOPPED_CHANGE_SAVED_LATER_LABEL : "Not saved"}</span>
           </button>
         ) : null}
 

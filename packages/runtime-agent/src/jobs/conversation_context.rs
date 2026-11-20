@@ -120,8 +120,10 @@ fn is_controller_line(entry: &JsonValue, kind: &str) -> bool {
         && entry.pointer("/metadata/kind").and_then(JsonValue::as_str) == Some(kind)
 }
 
-/// Whether a history entry is the line an Undo left.
-fn is_undo_line(entry: &JsonValue) -> bool {
+/// Whether a history entry is the line an Undo left, or the one the controller records in its
+/// place when the chat's next turn puts a stopped turn's unsaved change back
+/// (`stopped_change.rs`).
+pub(super) fn is_undo_line(entry: &JsonValue) -> bool {
     is_controller_line(entry, CHANGE_UNDONE_KIND)
 }
 
@@ -438,13 +440,7 @@ const KEPT_FILES_MAX: usize = 10;
 /// The files a stopped turn's report says its save kept (`stopped_turn.rs`: the step of a turn
 /// that has ended, which the controller stores with the outcome `canceled` and later turns read).
 fn kept_files_of(entry: &JsonValue) -> impl Iterator<Item = &str> {
-    let field = |key: &str| entry.pointer(key).and_then(JsonValue::as_str);
-    let report = entry_text(entry, "role") == Some("assistant")
-        && field("/metadata/source") == Some("agent")
-        && field("/metadata/outcome") == Some("canceled")
-        && field("/metadata/messageType").or_else(|| field("/metadata/message_type"))
-            == Some("file_change");
-    report
+    is_stopped_turns_report(entry)
         .then(|| entry.pointer("/metadata/details/paths"))
         .flatten()
         .and_then(JsonValue::as_array)
@@ -453,6 +449,28 @@ fn kept_files_of(entry: &JsonValue) -> impl Iterator<Item = &str> {
         .filter_map(JsonValue::as_str)
         .map(str::trim)
         .filter(|path| !path.is_empty())
+}
+
+/// Whether a history entry is a stopped turn's report of what it changed (`stopped_turn.rs`).
+pub(super) fn is_stopped_turns_report(entry: &JsonValue) -> bool {
+    let field = |key: &str| entry.pointer(key).and_then(JsonValue::as_str);
+    entry_text(entry, "role") == Some("assistant")
+        && field("/metadata/source") == Some("agent")
+        && field("/metadata/outcome") == Some("canceled")
+        && field("/metadata/messageType").or_else(|| field("/metadata/message_type"))
+            == Some("file_change")
+}
+
+/// Whether `run` is of a request the person stopped and has not asked for again
+/// ([`stopped_requests`]), and that request in their words, when the history shows them.
+pub(super) fn stopped_request_of<'a>(
+    entries: &'a [JsonValue],
+    run: &str,
+) -> Option<Option<&'a str>> {
+    stopped_requests(entries)
+        .into_iter()
+        .find(|stopped| stopped.runs.contains(run))
+        .map(|stopped| stopped.words)
 }
 
 /// The runs a Stop's notice says it ended (`runIds`), or, when it lists none, its own run.

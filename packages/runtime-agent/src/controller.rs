@@ -1215,6 +1215,47 @@ impl ControllerClient {
             .await
     }
 
+    /// Tells the controller that job `job_id`'s turn put back, before it
+    /// changed anything, the unsaved change the stopped turn's report
+    /// `message_id` shows: `paths` are the files put back or removed. The
+    /// controller records the line an Undo leaves, in its words for this, and
+    /// answers with it as the chat's history carries it. `None` when it
+    /// refuses (asking again would be refused too); an error when the report
+    /// never reached it or failed there.
+    pub(crate) async fn record_stopped_change_put_back(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        message_id: &str,
+        paths: &[String],
+    ) -> Result<Option<JsonValue>> {
+        let url = self.base_url.join("/agent/stopped/put-back")?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.bearer_for_agent(registration))
+            .json(&json!({
+                "job_id": job_id,
+                "message_id": message_id,
+                "paths": &paths[..paths.len().min(MAX_AGENT_METADATA_ARRAY_ITEMS)],
+            }))
+            .send()
+            .await
+            .context("the put-back report failed")?;
+        let status = response.status();
+        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(anyhow!("the put-back report failed: status={status}"));
+        }
+        if !status.is_success() {
+            return Ok(None);
+        }
+        let body: JsonValue = response
+            .json()
+            .await
+            .context("invalid put-back report answer")?;
+        Ok(body.get("line").filter(|line| line.is_object()).cloned())
+    }
+
     fn absolute_url(&self, path: &str) -> Result<Url> {
         if let Ok(url) = Url::parse(path) {
             return Ok(url);

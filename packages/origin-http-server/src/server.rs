@@ -195,6 +195,27 @@ impl WorkingStateReader {
     }
 }
 
+/// Lets the process hosting a single-tenant origin put a stopped turn's
+/// unsaved change back in its folder before the chat's next turn changes
+/// anything, as a person's Undo of it does (see
+/// [`routes::put_back_unsaved`]).
+#[derive(Clone)]
+pub struct UnsavedPutBack {
+    state: AppState,
+}
+
+impl UnsavedPutBack {
+    /// `expected` names what the turn left in each file. Resolves to the
+    /// files put back and the files removed; none when no file holds the
+    /// change any more.
+    pub async fn put_back(
+        &self,
+        expected: std::collections::BTreeMap<String, Option<String>>,
+    ) -> Result<crate::git::GitRevertSummary, crate::error::OriginError> {
+        routes::put_back_unsaved(&self.state, expected).await
+    }
+}
+
 impl OriginHttpServer {
     /// An origin for `config`. A multi-tenant gateway gets the default
     /// gateway settings; use [`Self::new_hosted`] to choose them.
@@ -255,6 +276,16 @@ impl OriginHttpServer {
             return None;
         }
         self.state.clone().map(|state| CheckoutRefresher { state })
+    }
+
+    /// The in-process [`UnsavedPutBack`] of a single-tenant origin, once it
+    /// has started. `None` for the multi-tenant gateway, which hosts no
+    /// working folder.
+    pub fn unsaved_put_back(&self) -> Option<UnsavedPutBack> {
+        if self.config.multi_tenant {
+            return None;
+        }
+        self.state.clone().map(|state| UnsavedPutBack { state })
     }
 
     /// The in-process [`WorkingStateReader`] of a hosted checkout with a

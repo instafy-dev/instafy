@@ -23,6 +23,13 @@
 //! too. Only the controller writes such a line: a message a client records
 //! never keeps its `kind` (`conversations::sanitize_client_recorded_message_metadata`),
 //! and the line's readers also require its `source`.
+//!
+//! A change a Stop left unsaved is also taken back without the person's Undo:
+//! the chat's next turn puts it back before it changes anything, so its save
+//! holds only its own change, and its runtime reports that here
+//! (`agent/stopped_turn.rs`, `POST /agent/stopped/put-back`). The line is the
+//! same one, with the same readers, in other words: "The change from “…” was
+//! stopped before it was saved, so it was taken back before the next change".
 
 use std::str::FromStr;
 
@@ -61,21 +68,31 @@ pub(crate) fn router() -> Router<AppState> {
     )
 }
 
-/// The line, quoting the request that made the change. `only` names the
-/// files the Undo put back or removed when it left some of the change's
-/// files as they were.
-pub(crate) fn change_undone_line(request: &str, only: Option<&[String]>) -> String {
+/// Who took a change back.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TakenBackBy {
+    /// The person, with Studio's Undo.
+    Person(Uuid),
+    /// The chat's next turn (its job), before it changed anything: a change
+    /// a Stop left unsaved.
+    NextTurn(Uuid),
+}
+
+/// The request that made a change, on one line and no longer than a line
+/// quotes.
+fn quoted(request: &str) -> String {
     let words = request.split_whitespace().collect::<Vec<_>>().join(" ");
-    let quote = if words.chars().count() > REQUEST_QUOTE_MAX_CHARS {
+    if words.chars().count() > REQUEST_QUOTE_MAX_CHARS {
         let cut: String = words.chars().take(REQUEST_QUOTE_MAX_CHARS - 1).collect();
         format!("{}…", cut.trim_end())
     } else {
         words
-    };
-    let line = format!("The person undid the change from “{quote}”");
-    let Some(paths) = only.filter(|paths| !paths.is_empty()) else {
-        return line;
-    };
+    }
+}
+
+/// The files a line names when some of the change's files were left as they
+/// were.
+fn named(paths: &[String]) -> String {
     let mut named = paths
         .iter()
         .take(NAMED_PATHS_MAX)
@@ -88,11 +105,37 @@ pub(crate) fn change_undone_line(request: &str, only: Option<&[String]>) -> Stri
             paths.len() - NAMED_PATHS_MAX
         ));
     }
-    format!("{line} in {named} only")
+    named
+}
+
+/// The line, quoting the request that made the change. `only` names the
+/// files the Undo put back or removed when it left some of the change's
+/// files as they were.
+pub(crate) fn change_undone_line(request: &str, only: Option<&[String]>) -> String {
+    let line = format!("The person undid the change from “{}”", quoted(request));
+    match only.filter(|paths| !paths.is_empty()) {
+        Some(paths) => format!("{line} in {} only", named(paths)),
+        None => line,
+    }
+}
+
+/// The line for a change a Stop left unsaved that the chat's next turn put
+/// back before it changed anything, quoting the request that made the
+/// change. `only` names the files put back when some of the change's files
+/// were left as they were.
+pub(crate) fn change_put_back_line(request: &str, only: Option<&[String]>) -> String {
+    let line = format!(
+        "The change from “{}” was stopped before it was saved, so it was taken back before the next change",
+        quoted(request)
+    );
+    match only.filter(|paths| !paths.is_empty()) {
+        Some(paths) => format!("{line}: {} only", named(paths)),
+        None => line,
+    }
 }
 
 /// A workspace path as Studio's rows compare them.
-fn normalize_path(path: &str) -> String {
+pub(crate) fn normalize_path(path: &str) -> String {
     let mut path = path.trim().replace('\\', "/");
     while let Some(rest) = path.strip_prefix("./") {
         path = rest.to_string();
@@ -102,7 +145,7 @@ fn normalize_path(path: &str) -> String {
 
 /// The change's files as its row lists them: each file once, by the path its
 /// row shows (`workspacePath`, else `path`), as Studio sends them.
-fn change_paths(metadata: &JsonValue) -> std::collections::BTreeSet<String> {
+pub(crate) fn change_paths(metadata: &JsonValue) -> std::collections::BTreeSet<String> {
     metadata
         .get("artifacts")
         .and_then(JsonValue::as_array)
@@ -212,8 +255,40 @@ async fn record_change_undone(
         return Err(bad_request("none of these files are this change's"));
     }
 
-    // One line per file of a change, however often Studio reports it: a
-    // second Undo of the same files answers with the line already there.
+    let (line, created) = record_taken_back(
+        &transaction,
+        &conversation,
+        &changed,
+        &change_paths,
+        undone,
+        TakenBackBy::Person(actor_user_id),
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to record the undo: {error}")))?;
+    if created {
+        // Every open Studio of the chat shows the change as undone.
+        publish_conversation_message_event(&state.events, &line);
+    }
+    Ok(Json(message_row_to_payload(&line)))
+}
+
+/// Records, in `changed`'s chat, the line that says `by` took back its files
+/// `undone` (some of `change_paths`, the change's files as its row lists
+/// them), and whether the line is new. One line per file of a change,
+/// however often it is reported: files an earlier line already names answer
+/// with that line.
+pub(crate) async fn record_taken_back(
+    transaction: &tokio_postgres::Transaction<'_>,
+    conversation: &crate::conversations::ConversationRecord,
+    changed: &ConversationMessageRow,
+    change_paths: &std::collections::BTreeSet<String>,
+    undone: std::collections::BTreeSet<String>,
+    by: TakenBackBy,
+) -> Result<(ConversationMessageRow, bool), (StatusCode, Json<ApiError>)> {
+    let message_id = changed.id;
     transaction
         .query_one(
             "select pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -221,7 +296,7 @@ async fn record_change_undone(
         )
         .await
         .map_err(|error| internal_error(format!("failed to lock the undone change: {error}")))?;
-    let earlier = transaction
+    let mut earlier = transaction
         .query(
             "select id, conversation_id, project_id, session_id, created_by, prompt_id,
                     run_id, role, content, metadata, created_at
@@ -246,30 +321,33 @@ async fn record_change_undone(
         earlier.iter().flat_map(undone_paths_of).collect();
     let new_paths: Vec<String> = undone.difference(&already).cloned().collect();
     if new_paths.is_empty() {
-        if let Some(line) = earlier.last() {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| internal_error(format!("failed to finish: {error}")))?;
-            return Ok(Json(message_row_to_payload(line)));
+        if let Some(line) = earlier.pop() {
+            return Ok((line, false));
         }
     }
 
-    let request = request_of_change(&transaction, &changed).await?;
-    // The files are named when the Undo left some of the change as it was.
+    let request = request_of_change(transaction, changed).await?;
+    let request = request.as_deref().unwrap_or("an earlier message");
+    // The files are named when some of the change was left as it was.
     let whole_change = change_paths.iter().all(|path| new_paths.contains(path));
-    let content = change_undone_line(
-        request.as_deref().unwrap_or("an earlier message"),
-        (!whole_change).then_some(new_paths.as_slice()),
-    );
+    let only = (!whole_change).then_some(new_paths.as_slice());
     let mut metadata = json!({
         "source": "controller",
         "kind": CHANGE_UNDONE_KIND,
         "presentation": { "hidden": true },
         "undoneMessageId": message_id.to_string(),
         "undonePaths": new_paths,
-        "actorUserId": actor_user_id.to_string(),
     });
+    let content = match by {
+        TakenBackBy::Person(actor_user_id) => {
+            metadata["actorUserId"] = json!(actor_user_id.to_string());
+            change_undone_line(request, only)
+        }
+        TakenBackBy::NextTurn(job_id) => {
+            metadata["putBackByJobId"] = json!(job_id.to_string());
+            change_put_back_line(request, only)
+        }
+    };
     if let Some(run_id) = changed.run_id {
         metadata["undoneRunId"] = json!(run_id.to_string());
     }
@@ -292,14 +370,7 @@ async fn record_change_undone(
         )
         .await
         .map_err(|error| internal_error(format!("failed to record the undo: {error}")))?;
-    let message = map_conversation_message_row(&row);
-    transaction
-        .commit()
-        .await
-        .map_err(|error| internal_error(format!("failed to record the undo: {error}")))?;
-    // Every open Studio of the chat shows the change as undone.
-    publish_conversation_message_event(&state.events, &message);
-    Ok(Json(message_row_to_payload(&message)))
+    Ok((map_conversation_message_row(&row), true))
 }
 
 /// What a message in the person's role shows: its `displayContent`, else its
@@ -450,6 +521,24 @@ mod tests {
         let many = (0..12).map(|n| format!("f{n}.js")).collect::<Vec<_>>();
         let line = change_undone_line("Add a section.", Some(&many));
         assert!(line.ends_with("f9.js and 2 other files only"), "{line}");
+    }
+
+    /// A change a Stop left unsaved that the chat's next turn put back reads
+    /// as that, never as the person's Undo.
+    #[test]
+    fn the_line_for_a_change_the_next_turn_put_back_says_so() {
+        assert_eq!(
+            change_put_back_line("Add a warranty\n column.", None),
+            "The change from “Add a warranty column.” was stopped before it was saved, so it was taken back before the next change"
+        );
+        assert_eq!(
+            change_put_back_line("Add a column.", Some(&["sites/page/data.json".to_string()])),
+            "The change from “Add a column.” was stopped before it was saved, so it was taken back before the next change: sites/page/data.json only"
+        );
+        let long = "word ".repeat(60);
+        let line = change_put_back_line(&long, None);
+        assert!(line.contains("…”"), "{line}");
+        assert!(!line.contains("The person undid"), "{line}");
     }
 
     /// Anyone who can write a chat can record a message in it; none of them

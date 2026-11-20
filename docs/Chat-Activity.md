@@ -399,6 +399,31 @@ agent, as does a file the space's history leaves out (tmp, dependencies), which 
 "Ask the agent to undo it" sends a message in the person's name that names the change by its time,
 never by an id.
 
+The chat's next turn does not save such a change with its own. A save takes whole files, so a turn
+that changed a file still holding a stopped turn's unsaved change used to save both, and nothing
+said so. Now a turn that may save first puts back each unsaved change of a turn the person stopped
+and has not asked for again, before it changes anything and as that change's own Undo would
+(`jobs/stopped_change.rs`): through the origin in its own process, under the same locks, only while
+each file still holds what the stopped turn left, and never a change whose files that turn found
+already changed. What the files held is kept on an `undone` recovery ref, so History lists it under
+Unsaved work, and the machine reloads and pictures those files' sites. The turn's runtime then
+tells the controller (`POST /agent/stopped/put-back`), which takes it only from the runtime that
+holds that turn's job and records the line an Undo leaves, in other words: "The change from “…”
+was stopped before it was saved, so it was taken back before the next change". So the stopped row
+reads Undone in every Studio, with no Undo left to press, and this turn and later ones read that
+the files no longer hold the change. This happens after the turn's routing step, which reads the
+message as it was sent. A browser turn, a read-only turn and a turn on the person's own Claude Code
+put nothing back.
+
+A change that can't be put back stays in the folder: the person changed one of its files since, the
+stopped turn found one already changed, or the person asked to go on with it (Continue under the
+Stop). When the turn's save then takes a file that still held it, the turn's reply carries a
+`stopped-turn/saved-later` artifact that names the stopped row and those files. That row then reads
+"Saved later" in place of "Not saved" ("Stopped before these changes were saved. A later change
+saved them with its own."), its Review changes stays, and its Undo says a later turn changed the
+file and offers to ask the agent. Unless the person asked to go on with the change, the reply also
+ends with one sentence: "This also saved the change that was stopped earlier (“…”)."
+
 Undo under a saved change saves a new version that reverses it, on the space's own origin. Once
 that version is saved, the card says so and the chat's history gets its line (below); then the
 machine's folder, which serves the page the person sees, follows that version (`POST /git/revert

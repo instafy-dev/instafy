@@ -201,6 +201,13 @@ impl AgentExecutor {
         self.processor.set_local_origin_sync(value);
     }
 
+    /// Publish (or clear, with None) the locally hosted origin's put-back of
+    /// a stopped turn's unsaved change, which the chat's next turn runs
+    /// before it changes anything (`jobs::stopped_change`).
+    pub fn set_unsaved_put_back(&self, value: Option<crate::origin::UnsavedPutBack>) {
+        self.processor.set_unsaved_put_back(value);
+    }
+
     /// A turn that changed an open preview's site sends the preview's new
     /// picture with `client`, this runtime's own, after its reply.
     pub fn send_card_pictures_with(&self, client: Arc<ControllerClient>) {

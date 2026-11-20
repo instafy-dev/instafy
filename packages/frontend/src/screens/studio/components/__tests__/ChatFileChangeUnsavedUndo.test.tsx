@@ -398,4 +398,85 @@ describe("Undo of a change a Stop left unsaved", () => {
     expect(container.textContent).toContain("Not saved");
     expect(undoChip()).not.toBeNull();
   });
+
+  // The chat's next turn puts a change a Stop left unsaved back before it
+  // changes anything, as this row's own Undo does, and the controller records
+  // the line an Undo leaves. The row then reads as undone: its Undo is spent,
+  // and nothing here can take back what the next turn did to the same file.
+  it("reads Undone once the next turn put the change back, with no Undo left to press", async () => {
+    const putBack: ChatMessage = {
+      id: "line-put-back",
+      role: "assistant",
+      content:
+        "The change from “Add a warranty column.” was stopped before it was saved, so it was taken back before the next change",
+      timestamp: 1_900,
+      metadata: {
+        source: "controller",
+        kind: "change_undone",
+        presentation: { hidden: true },
+        undoneMessageId: STOPPED.id,
+        undoneRunId: "run-stopped",
+        undonePaths: [APP],
+        putBackByJobId: "job-later",
+      },
+    };
+    const later: ChatMessage = {
+      id: "msg-later",
+      role: "assistant",
+      content: "Added the battery column.",
+      timestamp: 2_000,
+      files: [fileChange(APP, "changed", null)],
+      metadata: { source: "agent", jobId: "job-later" },
+    };
+    await renderCard([STOPPED, putBack, later]);
+    expect(container.textContent).toContain("Undone");
+    expect(container.textContent).not.toContain("Not saved");
+    expect(container.textContent).not.toContain("Saved later");
+    expect(undoChip()).toBeNull();
+    expect(askChip()).toBeNull();
+    expect(container.querySelector('[data-testid="chat-file-change-review"]')).toBeNull();
+    expect(revertWorkspaceGitPaths).not.toHaveBeenCalled();
+    expect(recordChangeUndone).not.toHaveBeenCalled();
+  });
+
+  // The next turn could not put the change back (the person had changed the
+  // file since), and its save took the file: its reply names this row, which
+  // then says a later change saved it, never Not saved. Review changes stays,
+  // and Undo says why it can't take this change back alone.
+  it("says a later change saved it once that turn's save took the file", async () => {
+    const later: ChatMessage = {
+      id: "msg-later",
+      role: "assistant",
+      content: "Added the battery column.\n\nThis also saved the change that was stopped earlier.",
+      timestamp: 2_000,
+      files: [fileChange(APP, "changed", null)],
+      metadata: {
+        source: "agent",
+        jobId: "job-later",
+        artifacts: [
+          { kind: "stopped-turn/saved-later", metadata: { changes: [{ messageId: STOPPED.id, paths: [APP] }] } },
+        ],
+      },
+    };
+    await renderCard([STOPPED, later]);
+    expect(container.textContent).toContain("Saved later");
+    expect(container.textContent).not.toContain("Not saved");
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved-note"]')?.textContent).toBe(
+      "Stopped before these changes were saved. A later change saved them with its own.",
+    );
+    expect(container.querySelector('[data-testid="chat-file-change-review"]')).not.toBeNull();
+    await openUndo();
+    expect(dialog()?.getAttribute("data-state")).toBe("changed_later");
+    expect(dialog()?.textContent).toContain(
+      `A later turn changed ${APP}, so Undo here would take that back too. Nothing was undone.`,
+    );
+    expect(document.querySelector('[data-testid="chat-file-change-revert-ask-agent"]')).not.toBeNull();
+    expect(revertWorkspaceGitPaths).not.toHaveBeenCalled();
+
+    // A later turn that only changed the file, with no such word from its
+    // save, leaves the row as it was.
+    await renderCard([STOPPED, { ...later, metadata: { source: "agent", jobId: "job-later" } }]);
+    expect(container.textContent).toContain("Not saved");
+    expect(container.textContent).not.toContain("Saved later");
+  });
 });

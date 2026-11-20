@@ -325,6 +325,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/agent/complete", post(agent_complete))
         .route("/agent/stopped", post(stopped_turn::agent_stopped))
         .route(
+            "/agent/stopped/put-back",
+            post(stopped_turn::agent_put_back),
+        )
+        .route(
             "/agent/plan-groups/:group_id/status",
             get(agent_plan_group_status),
         )

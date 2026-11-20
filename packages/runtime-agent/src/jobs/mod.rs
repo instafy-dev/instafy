@@ -100,6 +100,7 @@ mod skill_routing;
 mod skill_routing_eval_tests;
 mod skills;
 pub(crate) mod space_pages;
+mod stopped_change;
 pub(crate) mod stopped_turn;
 mod turn_baseline;
 mod turn_continuation;
@@ -261,6 +262,9 @@ pub struct JobProcessor {
     /// Workspace sync uses it to keep byte transfers off the tunnel when the
     /// controller-selected origin is the one this process hosts (#153).
     local_origin_sync: Mutex<Option<LocalOriginSync>>,
+    /// That origin's put-back of a stopped turn's unsaved change, set and
+    /// cleared with it (see `stopped_change`).
+    unsaved_put_back: Mutex<Option<crate::origin::UnsavedPutBack>>,
     isolated_workers: isolated_worker::IsolatedWorkerSettings,
     isolated_apply: AsyncMutex<()>,
     /// The executable that serves a granted turn's `provider-mcp`: this runtime-agent's own
@@ -6662,6 +6666,7 @@ impl JobProcessor {
             terminal_sessions: Mutex::new(HashMap::new()),
             controller_tokens,
             local_origin_sync: Mutex::new(None),
+            unsaved_put_back: Mutex::new(None),
             isolated_workers: isolated_worker::IsolatedWorkerSettings::from_env(),
             isolated_apply: AsyncMutex::new(()),
             provider_mcp_program: None,
@@ -6761,6 +6766,16 @@ impl JobProcessor {
 
     fn local_origin_sync(&self) -> Option<LocalOriginSync> {
         self.local_origin_sync.lock().clone()
+    }
+
+    /// Publish (or clear, with None) the locally hosted origin's put-back of
+    /// a stopped turn's unsaved change.
+    pub fn set_unsaved_put_back(&self, value: Option<crate::origin::UnsavedPutBack>) {
+        *self.unsaved_put_back.lock() = value;
+    }
+
+    fn unsaved_put_back(&self) -> Option<crate::origin::UnsavedPutBack> {
+        self.unsaved_put_back.lock().clone()
     }
 
     /// The rolling saves of a write job, when it takes them (see
@@ -8723,6 +8738,29 @@ impl JobProcessor {
             );
             return Err(failure.into());
         }
+        // A change the person stopped before it was saved goes back before this turn changes
+        // anything, as its own Undo puts it back, so this turn's save holds only its own
+        // change (`stopped_change`). After the routing step, which reads the message as it was
+        // sent, and before the turn's prompt, which then says the files no longer hold it.
+        let job_storage_after_put_back;
+        let (job, standing_stopped_changes) = if commit_to_workspace
+            && !read_only_workspace
+            && !granted_execution
+            && !is_browser_turn(job)
+        {
+            let (with_lines, standing) = self
+                .put_back_stopped_changes(registration, job, project_id, cancel_signal.as_ref())
+                .await?;
+            match with_lines {
+                Some(with_lines) => {
+                    job_storage_after_put_back = with_lines;
+                    (&job_storage_after_put_back, standing)
+                }
+                None => (job, standing),
+            }
+        } else {
+            (job, stopped_change::StandingChanges::default())
+        };
         let scoped_worker_has_precollected_observations = is_multi_agent_worker_job(job)
             && !scoped_worker_requires_tools(job)
             && scoped_worker_path_observation
@@ -11022,6 +11060,12 @@ impl JobProcessor {
                                 retry_artifacts.push(origin_apply_artifact(&result, None));
                                 retry_saved = true;
                                 retry_not_saved.extend(result.not_saved_sentences());
+                                standing_stopped_changes.saved_with(
+                                    &result,
+                                    git_status_before.as_ref(),
+                                    &mut retry_artifacts,
+                                    &mut retry_not_saved,
+                                );
                                 if let Some(sender) = progress_sender
                                     .as_ref()
                                     .map(|progress| progress.sender.clone())
@@ -11379,6 +11423,12 @@ impl JobProcessor {
                             artifacts.push(origin_apply_artifact(&result, None));
                             saved = true;
                             not_saved.extend(result.not_saved_sentences());
+                            standing_stopped_changes.saved_with(
+                                &result,
+                                git_status_before.as_ref(),
+                                &mut artifacts,
+                                &mut not_saved,
+                            );
                             if let Some(sender) = progress_sender
                                 .as_ref()
                                 .map(|progress| progress.sender.clone())

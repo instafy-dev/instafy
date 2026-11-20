@@ -12,10 +12,19 @@ import { extractAgentJobId } from "./chatMessagePresentation";
  * `undone` names the files of `messageId`'s change the person already undid:
  * the chat holds the lines the controller records for an Undo
  * (`change_undone`), so the row shows those files as undone, with no Undo,
- * after a reload too. Null when they undid none of it.
+ * after a reload too. Null when they undid none of it. The chat's next turn
+ * leaves the same line when it puts back a change a Stop left unsaved, before
+ * it changes anything.
+ *
+ * `savedLater` names the files of `messageId`'s change, one a Stop left
+ * unsaved, that a later turn's save took with its own: that turn could not
+ * put the change back first (the person had changed the file since), or the
+ * person asked to go on with it. Its reply says which (`readSavedLater`), so
+ * the row no longer reads Not saved. Null when no save took any of it.
  */
 export type ChatLaterChanges = ((messageId: string, paths: readonly string[]) => boolean) & {
   undone?: (messageId: string) => ReadonlySet<string> | null;
+  savedLater?: (messageId: string) => ReadonlySet<string> | null;
 };
 
 /** The `kind` of the hidden line an Undo leaves in the chat (runtime-controller `change_undone.rs`). */
@@ -42,6 +51,37 @@ export function readChangeUndone(
     .map(normalizeUndonePath)
     .filter((path) => path.length > 0);
   return { messageId, runId: runId || null, paths };
+}
+
+/** The `kind` of the artifact a reply carries when its save took a stopped turn's unsaved change (runtime-agent `stopped_change.rs`). */
+export const SAVED_LATER_ARTIFACT_KIND = "stopped-turn/saved-later";
+
+/**
+ * The stopped changes a reply says its turn's save took: each one's row (its
+ * message) and the files. Only an agent's reply says so.
+ */
+export function readSavedLater(message: ChatMessage): { messageId: string; paths: readonly string[] }[] {
+  const metadata = message.metadata;
+  if (message.role !== "assistant" || !metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const record = metadata as Record<string, unknown>;
+  if (record.source !== "agent" || !Array.isArray(record.artifacts)) return [];
+  const saved: { messageId: string; paths: readonly string[] }[] = [];
+  for (const artifact of record.artifacts as unknown[]) {
+    if (!artifact || typeof artifact !== "object" || (artifact as Record<string, unknown>).kind !== SAVED_LATER_ARTIFACT_KIND) continue;
+    const details = (artifact as Record<string, unknown>).metadata;
+    const changes = details && typeof details === "object" ? (details as Record<string, unknown>).changes : null;
+    for (const change of Array.isArray(changes) ? (changes as unknown[]) : []) {
+      if (!change || typeof change !== "object") continue;
+      const { messageId, paths } = change as Record<string, unknown>;
+      const id = typeof messageId === "string" ? messageId.trim() : "";
+      const files = (Array.isArray(paths) ? paths : [])
+        .filter((path): path is string => typeof path === "string")
+        .map(normalizeUndonePath)
+        .filter((path) => path.length > 0);
+      if (id && files.length > 0) saved.push({ messageId: id, paths: files });
+    }
+  }
+  return saved;
 }
 
 /** A file's path as the Undo line and the rows compare them. */
@@ -108,6 +148,16 @@ export function conversationLaterChanges(messages: readonly ChatMessage[]): Chat
     for (const path of line.paths) paths.add(path);
     undone.set(line.messageId, paths);
   }
+  const savedLater = new Map<string, Set<string>>();
+  for (const message of messages) {
+    for (const reply of [message, ...threadMessagesOf(message)]) {
+      for (const change of readSavedLater(reply)) {
+        const paths = savedLater.get(change.messageId) ?? new Set<string>();
+        for (const path of change.paths) paths.add(path);
+        savedLater.set(change.messageId, paths);
+      }
+    }
+  }
   const later: ChatLaterChanges = (messageId, paths) => {
     const own = turnOfMessage.get(messageId);
     if (!own) return false;
@@ -117,5 +167,6 @@ export function conversationLaterChanges(messages: readonly ChatMessage[]): Chat
     );
   };
   later.undone = (messageId) => undone.get(messageId) ?? null;
+  later.savedLater = (messageId) => savedLater.get(messageId) ?? null;
   return later;
 }
