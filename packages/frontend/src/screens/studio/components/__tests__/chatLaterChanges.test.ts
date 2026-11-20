@@ -123,6 +123,9 @@ describe("conversationLaterChanges", () => {
       expect(readSavedLater(reply("odd", changes))).toEqual([]);
     }
     expect(readSavedLater(reply("forged", [{ messageId: "stopped", paths: ["a.js"] }], { source: undefined }))).toEqual([]);
+    // A save by the turn the person asked to undo the change: that turn's
+    // reply says what became of it, so no row is told a later change saved it.
+    expect(readSavedLater(reply("asked", [{ messageId: "stopped", paths: ["a.js"], undoAsked: true }]))).toEqual([]);
     expect(readSavedLater({ ...saved, role: "user" })).toEqual([]);
   });
 });

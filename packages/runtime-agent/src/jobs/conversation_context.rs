@@ -462,15 +462,21 @@ pub(super) fn is_stopped_turns_report(entry: &JsonValue) -> bool {
 }
 
 /// Whether `run` is of a request the person stopped and has not asked for again
-/// ([`stopped_requests`]), and that request in their words, when the history shows them.
+/// ([`stopped_requests`]), and that request in their own words, when the history shows them
+/// ([`persons_request_in`]): never the lines the controller adds for what they attached
+/// ([`persons_words`]), which a reply that quotes them would show as theirs.
 pub(super) fn stopped_request_of<'a>(
     entries: &'a [JsonValue],
     run: &str,
 ) -> Option<Option<&'a str>> {
     stopped_requests(entries)
         .into_iter()
-        .find(|stopped| stopped.runs.contains(run))
-        .map(|stopped| stopped.words)
+        .any(|stopped| stopped.runs.contains(run))
+        .then(|| {
+            persons_request_in(entries, run)
+                .map(persons_words)
+                .filter(|words| !words.is_empty())
+        })
 }
 
 /// The runs a Stop's notice says it ended (`runIds`), or, when it lists none, its own run.

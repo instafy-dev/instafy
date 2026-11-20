@@ -447,7 +447,7 @@ describe("Undo of a change a Stop left unsaved", () => {
     const later: ChatMessage = {
       id: "msg-later",
       role: "assistant",
-      content: "Added the battery column.\n\nThis also saved the change that was stopped earlier.",
+      content: "Added the battery column.\n\nThis also saved what was left of the change that was stopped earlier.",
       timestamp: 2_000,
       files: [fileChange(APP, "changed", null)],
       metadata: {
@@ -462,7 +462,7 @@ describe("Undo of a change a Stop left unsaved", () => {
     expect(container.textContent).toContain("Saved later");
     expect(container.textContent).not.toContain("Not saved");
     expect(container.querySelector('[data-testid="chat-file-change-unsaved-note"]')?.textContent).toBe(
-      "Stopped before these changes were saved. A later change saved them with its own.",
+      "Stopped before these changes were saved. A later change saved what was left of them with its own.",
     );
     expect(container.querySelector('[data-testid="chat-file-change-review"]')).not.toBeNull();
     await openUndo();
@@ -476,6 +476,67 @@ describe("Undo of a change a Stop left unsaved", () => {
     // A later turn that only changed the file, with no such word from its
     // save, leaves the row as it was.
     await renderCard([STOPPED, { ...later, metadata: { source: "agent", jobId: "job-later" } }]);
+    expect(container.textContent).toContain("Not saved");
+    expect(container.textContent).not.toContain("Saved later");
+  });
+
+  // A later save took one of the stopped change's two files, and the other
+  // is still unsaved in the folder: the row does not say its changes were
+  // saved. It does once a save has taken every file still on the row.
+  it("says Saved later only once a later save took every file the row still shows", async () => {
+    const OTHER = "porto-lello/data.js";
+    const files = [fileChange(APP), fileChange(OTHER)];
+    const stopped: ChatMessage = { ...STOPPED, files };
+    const reply = (id: string, jobId: string, path: string): ChatMessage => ({
+      id,
+      role: "assistant",
+      content: "Done.",
+      timestamp: 2_000,
+      files: [fileChange(path, "changed", null)],
+      metadata: {
+        source: "agent",
+        jobId,
+        artifacts: [{ kind: "stopped-turn/saved-later", metadata: { changes: [{ messageId: stopped.id, paths: [path] }] } }],
+      },
+    });
+    await renderCard([stopped, reply("msg-later", "job-later", APP)], { files });
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')?.textContent).toBe("Not saved");
+    expect(container.textContent).not.toContain("Saved later");
+
+    await renderCard([stopped, reply("msg-later", "job-later", APP), reply("msg-last", "job-last", OTHER)], { files });
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')?.textContent).toBe("Saved later");
+
+    // A file no save ever takes (the space's history leaves it out) does not
+    // keep the row at Not saved.
+    await renderCard([stopped, reply("msg-later", "job-later", APP)], {
+      files: [fileChange(APP), fileChange(PLAN, "created")],
+    });
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')?.textContent).toBe("Saved later");
+  });
+
+  // The person asked the agent to undo the stopped change (this row's "Ask
+  // the agent to undo it"), and that turn's save took the file: its reply
+  // says what became of the change, and this row is not told a later change
+  // saved it.
+  it("does not say Saved later for a save by the turn asked to undo the change", async () => {
+    const asked: ChatMessage = {
+      id: "msg-asked",
+      role: "assistant",
+      content: "Took the warranty column out.",
+      timestamp: 2_000,
+      files: [fileChange(APP, "changed", null)],
+      metadata: {
+        source: "agent",
+        jobId: "job-asked",
+        artifacts: [
+          {
+            kind: "stopped-turn/saved-later",
+            metadata: { changes: [{ messageId: STOPPED.id, paths: [APP], undoAsked: true }] },
+          },
+        ],
+      },
+    };
+    await renderCard([STOPPED, asked]);
     expect(container.textContent).toContain("Not saved");
     expect(container.textContent).not.toContain("Saved later");
   });

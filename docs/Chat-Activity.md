@@ -418,11 +418,21 @@ put nothing back.
 A change that can't be put back stays in the folder: the person changed one of its files since, the
 stopped turn found one already changed, or the person asked to go on with it (Continue under the
 Stop). When the turn's save then takes a file that still held it, the turn's reply carries a
-`stopped-turn/saved-later` artifact that names the stopped row and those files. That row then reads
-"Saved later" in place of "Not saved" ("Stopped before these changes were saved. A later change
-saved them with its own."), its Review changes stays, and its Undo says a later turn changed the
-file and offers to ask the agent. Unless the person asked to go on with the change, the reply also
-ends with one sentence: "This also saved the change that was stopped earlier (“…”)."
+`stopped-turn/saved-later` artifact that names the stopped row and those files. Once a save has
+taken every file that row still shows, it reads "Saved later" in place of "Not saved" ("Stopped
+before these changes were saved. A later change saved what was left of them with its own."), its
+Review changes stays, and its Undo says a later turn changed the file and offers to ask the agent.
+Unless the person asked to go on with the change, the reply also ends with one sentence: "This also
+saved what was left of the change that was stopped earlier (“…”)." The quote is the person's own
+words, without the lines the controller adds for what they attached. A save takes the file as the
+turn left it, and the turn may have changed or removed part of the stopped change, so both promise
+only what was left of it.
+
+A turn the person asked to undo that very change (the row's "Ask the agent to undo it", whose
+message names the row) says in its own reply what became of it: its save adds no sentence, and its
+artifact marks the change `undoAsked`, which the row does not read. Either way the artifact is the
+last word about those files: nothing of the stopped change in them is unsaved any more, so later
+turns put nothing of it back and say nothing of it, whatever changes those files next.
 
 Undo under a saved change saves a new version that reverses it, on the space's own origin. Once
 that version is saved, the card says so and the chat's history gets its line (below); then the

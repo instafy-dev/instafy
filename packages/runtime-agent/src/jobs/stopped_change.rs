@@ -8,15 +8,15 @@
 //! So a turn that may save first puts that change back, as the change's own
 //! Undo does ([`JobProcessor::put_back_stopped_changes`]). It reads the chat's
 //! history for the reports of turns the person stopped and has not asked for
-//! again, whose files this machine's folder holds and that no Undo took back
-//! ([`unsaved_changes`]). The origin in this process puts each one's files
-//! back as the saved version has them, with what they held kept under Unsaved
-//! work: only while each still holds what the turn left, and only for a
-//! change whose files the turn found as saved, as that Undo requires. The
-//! controller then records the line an Undo leaves, in its words for this
-//! (`/agent/stopped/put-back`), so the stopped row reads "Undone" in every
-//! Studio, and this turn and later ones read that the files no longer hold
-//! the change.
+//! again, whose files this machine's folder holds, that no Undo took back and
+//! no later save took ([`unsaved_changes`]). The origin in this process puts
+//! each one's files back as the saved version has them, with what they held
+//! kept under Unsaved work: only while each still holds what the turn left,
+//! and only for a change whose files the turn found as saved, as that Undo
+//! requires. The controller then records the line an Undo leaves, in its
+//! words for this (`/agent/stopped/put-back`), so the stopped row reads
+//! "Undone" in every Studio, and this turn and later ones read that the files
+//! no longer hold the change.
 //!
 //! A change that can't be put back stays: the person changed a file since,
 //! the turn found one already changed, or no origin in this process serves
@@ -25,7 +25,16 @@
 //! that still held such a change ([`StandingChanges::saved_with`]), the
 //! reply's `stopped-turn/saved-later` artifact names the stopped row's message
 //! and those files, so that row says a later change saved them, and, unless
-//! the person asked to go on with it, the reply says so in one sentence.
+//! the person asked to go on with it, the reply says so in one sentence. The
+//! save took the file as this turn left it, so the sentence promises only
+//! what was left of the stopped change. From then on nothing of that change
+//! in those files is unsaved, and later turns leave it alone and say nothing
+//! of it, whatever changes those files next.
+//!
+//! A turn the person asked to undo that very change (the stopped row's "Ask
+//! the agent to undo it", which names the row) says in its own reply what
+//! became of it: its save adds no sentence, and its artifact marks the change
+//! `undoAsked`, so the row is not told a later change saved it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
@@ -86,10 +95,40 @@ fn path_key(path: &str) -> String {
         .to_string()
 }
 
+/// The files in `paths`, a list of paths in a history entry, as [`path_key`]
+/// names them.
+fn path_keys(paths: Option<&JsonValue>) -> impl Iterator<Item = String> + '_ {
+    paths
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(JsonValue::as_str)
+        .map(path_key)
+}
+
+/// The stopped changes an agent's reply says its turn's save took
+/// (`stopped-turn/saved-later`): each one's report and files.
+fn saved_later_of(entry: &JsonValue) -> impl Iterator<Item = (&str, &JsonValue)> {
+    let agents_reply = text(entry, "/role") == Some("assistant")
+        && text(entry, "/metadata/source") == Some("agent");
+    agents_reply
+        .then(|| entry.pointer("/metadata/artifacts"))
+        .flatten()
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|artifact| text(artifact, "/kind") == Some(SAVED_LATER_ARTIFACT_KIND))
+        .filter_map(|artifact| artifact.pointer("/metadata/changes"))
+        .filter_map(JsonValue::as_array)
+        .flatten()
+        .filter_map(|change| Some((text(change, "/messageId")?, change.get("paths")?)))
+}
+
 /// The unsaved changes of stopped turns that the folder of runtime
 /// `runtime_id` may still hold, oldest first: each report in `history` whose
 /// turn never saved (`stoppedBeforeSave`) and says what it left in its files
-/// on that machine (`undo`), without the files an Undo's line already names.
+/// on that machine (`undo`), without the files an Undo's line already names
+/// and those a later turn's reply says its save took.
 pub(super) fn unsaved_changes(
     history: Option<&JsonValue>,
     runtime_id: &Uuid,
@@ -97,19 +136,25 @@ pub(super) fn unsaved_changes(
     let Some(entries) = history.and_then(JsonValue::as_array) else {
         return Vec::new();
     };
-    let mut undone: HashMap<&str, HashSet<String>> = HashMap::new();
-    for line in entries.iter().filter(|entry| is_undo_line(entry)) {
-        let Some(message_id) = text(line, "/metadata/undoneMessageId") else {
+    // The files of each report that no longer hold its change unsaved: an
+    // Undo put them back, or a later save took them.
+    let mut settled: HashMap<&str, HashSet<String>> = HashMap::new();
+    for entry in entries {
+        if is_undo_line(entry) {
+            if let Some(message_id) = text(entry, "/metadata/undoneMessageId") {
+                settled
+                    .entry(message_id)
+                    .or_default()
+                    .extend(path_keys(entry.pointer("/metadata/undonePaths")));
+            }
             continue;
-        };
-        undone.entry(message_id).or_default().extend(
-            line.pointer("/metadata/undonePaths")
-                .and_then(JsonValue::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(JsonValue::as_str)
-                .map(path_key),
-        );
+        }
+        for (message_id, paths) in saved_later_of(entry) {
+            settled
+                .entry(message_id)
+                .or_default()
+                .extend(path_keys(Some(paths)));
+        }
     }
     let runtime_id = runtime_id.to_string();
     let mut changes = Vec::new();
@@ -136,7 +181,7 @@ pub(super) fn unsaved_changes(
         if text(undo, "/runtimeId") != Some(runtime_id.as_str()) {
             continue;
         }
-        let taken_back = undone.get(message_id);
+        let no_longer_unsaved = settled.get(message_id);
         let left_as: BTreeMap<String, Option<String>> = undo
             .get("leftAs")
             .and_then(JsonValue::as_object)
@@ -146,7 +191,7 @@ pub(super) fn unsaved_changes(
             .map(|(path, blob)| (path.clone(), blob.as_str().map(str::to_string)))
             .filter(|(path, _)| {
                 !path_key(path).is_empty()
-                    && taken_back.is_none_or(|undone| !undone.contains(&path_key(path)))
+                    && no_longer_unsaved.is_none_or(|paths| !paths.contains(&path_key(path)))
             })
             .collect();
         if left_as.is_empty() {
@@ -177,6 +222,9 @@ struct Standing {
     /// and has not asked for it again.
     say: bool,
     request: Option<String>,
+    /// This turn was asked to undo the change: its reply says what became of
+    /// it, so its save adds no sentence and the stopped row is told nothing.
+    undo_asked: bool,
 }
 
 /// The stopped turns' unsaved changes a turn left in its folder as it began.
@@ -189,6 +237,8 @@ impl StandingChanges {
     /// status` then) and that reached the saved version now. The reply's
     /// artifact names each one's row and those files, and `sentences` gains
     /// one for each change the person stopped and has not asked for again.
+    /// A change this turn was asked to undo is only marked so in the
+    /// artifact, for later turns.
     pub(super) fn saved_with(
         &self,
         result: &CommitToOriginResult,
@@ -231,13 +281,16 @@ impl StandingChanges {
             if paths.is_empty() {
                 continue;
             }
-            taken.push(json!({ "messageId": change.message_id, "paths": paths }));
-            if change.say {
+            let mut took = json!({ "messageId": change.message_id, "paths": paths });
+            if change.undo_asked {
+                took["undoAsked"] = json!(true);
+            } else if change.say {
                 let sentence = saved_too_sentence(change.request.as_deref());
                 if !sentences.contains(&sentence) {
                     sentences.push(sentence);
                 }
             }
+            taken.push(took);
         }
         if !taken.is_empty() {
             artifacts.push(json!({
@@ -248,7 +301,10 @@ impl StandingChanges {
     }
 }
 
-/// What a reply says when its save took a change the person had stopped.
+/// What a reply says when its save took a file that still held a change the
+/// person had stopped. The save took the file as the turn left it, and the
+/// turn may have changed or removed part of that change, so the sentence
+/// promises only what was left of it.
 fn saved_too_sentence(request: Option<&str>) -> String {
     let words = request
         .map(|request| request.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -261,9 +317,11 @@ fn saved_too_sentence(request: Option<&str>) -> String {
             } else {
                 words
             };
-            format!("This also saved the change that was stopped earlier (“{quote}”)")
+            format!(
+                "This also saved what was left of the change that was stopped earlier (“{quote}”)"
+            )
         }
-        None => "This also saved the change that was stopped earlier".to_string(),
+        None => "This also saved what was left of the change that was stopped earlier".to_string(),
     }
 }
 
@@ -313,6 +371,9 @@ impl JobProcessor {
             .unsaved_put_back()
             .filter(|_| project_id == self.config.project_id);
         let goes_back = |change: &UnsavedChange| change.stopped && !change.changed_before;
+        // The change this turn's request names as the one to undo, if any
+        // (the stopped row's "Ask the agent to undo it").
+        let undo_target = super::undo_target_message_id_from_metadata(job.payload.get("metadata"));
         if put_back.is_some() && changes.iter().any(goes_back) {
             super::confirm_lease_held(cancel_signal, "before a stopped change was put back")
                 .await?;
@@ -352,6 +413,9 @@ impl JobProcessor {
                 }
             }
             standing.push(Standing {
+                undo_asked: undo_target
+                    .as_deref()
+                    .is_some_and(|target| target.eq_ignore_ascii_case(&change.message_id)),
                 message_id: change.message_id,
                 paths: change.left_as.into_keys().collect(),
                 say: change.stopped,

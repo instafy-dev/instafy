@@ -628,12 +628,16 @@ export function ChatFileChangeList({
   const likelyLabel = likelyWords ? `${likelyWords}${notSavedCount > 0 ? ` · ${notSavedCount} not saved` : ""}` : null;
 
   // A change a Stop left unsaved that a later turn's save took with its own
-  // (that turn's reply says which files): it is saved now, and the row says so.
+  // (that turn's reply says which files): the row says so once a save took
+  // every file it still shows that a save can take (never the files the
+  // space's history leaves out). Until then one of them is still unsaved in
+  // the folder, and the row keeps saying that.
   const savedLaterPaths = messageId ? laterChanges?.savedLater?.(messageId) ?? null : null;
-  const savedLater =
-    unsavedReason === "stopped_before_save" &&
-    savedLaterPaths !== null &&
-    pendingEntries.some(({ workspacePath }) => savedLaterPaths.has(normalizeUndonePath(workspacePath)));
+  const savedLater = (() => {
+    if (unsavedReason !== "stopped_before_save" || savedLaterPaths === null) return false;
+    const savable = pendingPaths.filter((path) => !isExcludedFromSpaceHistoryPath(path));
+    return savable.length > 0 && savable.every((path) => savedLaterPaths.has(normalizeUndonePath(path)));
+  })();
   // Reverted files have nothing left to save, so the state follows the actions.
   const unsavedNote =
     unsavedReason && pendingCount > 0

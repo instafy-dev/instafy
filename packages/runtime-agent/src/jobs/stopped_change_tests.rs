@@ -118,6 +118,30 @@ fn next_message() -> JsonValue {
     })
 }
 
+/// The message after that one.
+fn third_message() -> JsonValue {
+    json!({
+        "id": "message-3", "role": "user", "runId": "run-3",
+        "createdAt": "2026-11-20T02:20:10Z", "content": "Make the header blue.",
+    })
+}
+
+/// The reply of the turn that answered [`next_message`], whose save took the
+/// stopped changes `changes` name, as the chat's history carries it.
+fn saved_later_reply(changes: JsonValue) -> JsonValue {
+    json!({
+        "id": "message-reply-2", "role": "assistant", "runId": "run-2",
+        "createdAt": "2026-11-20T02:14:34Z", "content": "Added the battery column.",
+        "metadata": {
+            "source": "agent", "outcome": "completed", "jobId": "job-2",
+            "artifacts": [
+                { "kind": "origin/apply", "metadata": { "gitSyncStatus": "synced" } },
+                { "kind": "stopped-turn/saved-later", "metadata": { "changes": changes } },
+            ],
+        },
+    })
+}
+
 fn left_as_stopped() -> JsonValue {
     json!({ "leftAs": { PAGE: blob(STOPPED) }, "changedBefore": [] })
 }
@@ -199,6 +223,60 @@ fn only_a_change_the_folder_may_still_hold_is_read_from_the_chat() {
         .is_empty()
     );
 
+    // A later turn's save already took the file (its reply's artifact names
+    // it, also when that turn was asked to undo the change): nothing of it is
+    // unsaved any more, whatever changed that file since.
+    for change in [
+        json!({ "messageId": REPORT, "paths": [format!("./{PAGE}")] }),
+        json!({ "messageId": REPORT, "paths": [PAGE], "undoAsked": true }),
+    ] {
+        assert!(
+            read(&chat(
+                &runtime_id,
+                left_as_stopped(),
+                vec![next_message(), saved_later_reply(json!([change]))],
+                third_message()
+            ))
+            .is_empty()
+        );
+    }
+    // Only the files that save took: the change's other file is still unsaved.
+    let other = "sites/compare/app.js";
+    let two_files = read(&chat(
+        &runtime_id,
+        json!({ "leftAs": { PAGE: blob(STOPPED), other: blob("stopped\n") }, "changedBefore": [] }),
+        vec![
+            next_message(),
+            saved_later_reply(json!([{ "messageId": REPORT, "paths": [PAGE] }])),
+        ],
+        third_message(),
+    ));
+    assert_eq!(
+        two_files[0].left_as,
+        BTreeMap::from([(other.to_string(), Some(blob("stopped\n")))])
+    );
+    // Another change's, and a message that is no agent's reply, say nothing of this one.
+    let mut persons = saved_later_reply(json!([{ "messageId": REPORT, "paths": [PAGE] }]));
+    persons["role"] = json!("user");
+    let mut controllers = saved_later_reply(json!([{ "messageId": REPORT, "paths": [PAGE] }]));
+    controllers["metadata"]["source"] = json!("controller");
+    for unrelated in [
+        saved_later_reply(json!([{ "messageId": "message-other", "paths": [PAGE] }])),
+        persons,
+        controllers,
+    ] {
+        assert_eq!(
+            read(&chat(
+                &runtime_id,
+                left_as_stopped(),
+                vec![next_message(), unrelated],
+                third_message()
+            ))
+            .len(),
+            1
+        );
+    }
+
     // Another machine's folder holds it, not this one.
     assert!(
         unsaved_changes(
@@ -223,6 +301,30 @@ fn only_a_change_the_folder_may_still_hold_is_read_from_the_chat() {
     assert!(read(&unknown).is_empty());
     assert!(read(&json!([next_message()])).is_empty());
     assert!(unsaved_changes(None, &runtime_id).is_empty());
+}
+
+/// The reply quotes the stopped request in the person's own words: never the
+/// lines the controller adds to their message for what they attached, which
+/// the quote would show as theirs.
+#[test]
+fn the_stopped_request_is_quoted_in_the_persons_own_words() {
+    let runtime_id = Uuid::new_v4();
+    let read = |history: &JsonValue| unsaved_changes(Some(history), &runtime_id);
+    let mut attached = chat(&runtime_id, left_as_stopped(), vec![], next_message());
+    attached[0]["content"] = json!(
+        "Add this photo.\n\nUser attached file(s) stored with this conversation:\n- photo.png (mimeType: image/png, sizeBytes: 2048)\n"
+    );
+    assert_eq!(
+        read(&attached)[0].request.as_deref(),
+        Some("Add this photo.")
+    );
+    assert!(read(&attached)[0].stopped);
+    // A message that was only an attachment has no words to quote: the
+    // change is still one the person stopped.
+    attached[0]["content"] =
+        json!("User attached image(s):\n- photo.png (mimeType: image/png, sizeBytes: 2048)\n");
+    assert_eq!(read(&attached)[0].request, None);
+    assert!(read(&attached)[0].stopped);
 }
 
 /// The origin's own put-back of a change no save took, on `workspace`.
@@ -523,8 +625,181 @@ async fn a_change_that_cannot_be_put_back_stays_and_the_reply_says_it_was_saved_
     assert_eq!(
         reply,
         format!(
-            "Added the battery column.\n\nThis also saved the change that was stopped earlier (“{STOPPED_REQUEST}”)."
+            "Added the battery column.\n\nThis also saved what was left of the change that was stopped earlier (“{STOPPED_REQUEST}”)."
         )
+    );
+}
+
+/// The person asked the agent to undo the stopped change (the row's "Ask the
+/// agent to undo it", which its own Undo offers when it can't put the change
+/// back). What became of the change is that turn's to say: its save adds no
+/// sentence, and the stopped row is not told a later change saved it. The
+/// save is still noted for later turns, which then say nothing of it either.
+#[tokio::test]
+async fn a_turn_asked_to_undo_the_stopped_change_does_not_say_it_saved_it() {
+    let root = tempfile::tempdir().unwrap();
+    let (config, mut told) = controller(root.path()).await;
+    let processor = JobProcessor::new(Arc::new(config.clone()));
+    let workspace = config.project_workspace_dir(&config.project_id);
+    fs::create_dir_all(&workspace).unwrap();
+    checkout(&workspace);
+    processor.set_unsaved_put_back(Some(origin_put_back(workspace.clone())));
+    let registration = test_registration_with_proxy();
+
+    // The stopped turn's change with the person's own edit on top: the row's
+    // Undo can't put it back, and neither can this turn.
+    fs::write(workspace.join(PAGE), format!("{STOPPED}// my own note\n")).unwrap();
+    let request = "Please undo the change from your message at 2:12 AM.";
+    let mut ask = next_message();
+    ask["content"] = json!(request);
+    ask["metadata"] = json!({ "undoTargetMessageId": REPORT });
+    let job = test_lease_job(
+        Some("feature"),
+        json!({
+            "prompt_text": request,
+            "conversation_history": chat(&registration.runtime_id, left_as_stopped(), vec![], ask),
+            "metadata": { "undoTargetMessageId": REPORT.to_uppercase() },
+        }),
+    );
+
+    let (with_lines, standing) = processor
+        .put_back_stopped_changes(&registration, &job, config.project_id, None)
+        .await
+        .unwrap();
+    assert!(with_lines.is_none());
+    assert!(told.try_recv().is_err(), "nothing was put back");
+    let before = super::super::collect_git_status_porcelain(&workspace)
+        .await
+        .unwrap();
+
+    // The turn takes the column out, and its save takes the page.
+    fs::write(workspace.join(PAGE), format!("{SAVED}// my own note\n")).unwrap();
+    let (mut artifacts, mut sentences) = (Vec::new(), Vec::new());
+    standing.saved_with(
+        &saved(&[PAGE]),
+        Some(&before),
+        &mut artifacts,
+        &mut sentences,
+    );
+    assert_eq!(sentences, Vec::<String>::new());
+    assert_eq!(
+        artifacts,
+        vec![json!({
+            "kind": "stopped-turn/saved-later",
+            "metadata": { "changes": [{ "messageId": REPORT, "paths": [PAGE], "undoAsked": true }] },
+        })]
+    );
+
+    // A request to undo another message's change is no word about this one.
+    let job = test_lease_job(
+        Some("feature"),
+        json!({
+            "prompt_text": request,
+            "conversation_history": chat(
+                &registration.runtime_id,
+                left_as_stopped(),
+                vec![],
+                next_message(),
+            ),
+            "metadata": { "undoTargetMessageId": "message-other" },
+        }),
+    );
+    fs::write(workspace.join(PAGE), format!("{STOPPED}// my own note\n")).unwrap();
+    let (_, standing) = processor
+        .put_back_stopped_changes(&registration, &job, config.project_id, None)
+        .await
+        .unwrap();
+    let (mut artifacts, mut sentences) = (Vec::new(), Vec::new());
+    standing.saved_with(
+        &saved(&[PAGE]),
+        Some(&before),
+        &mut artifacts,
+        &mut sentences,
+    );
+    assert_eq!(sentences.len(), 1, "{sentences:?}");
+    assert_eq!(
+        artifacts[0]["metadata"]["changes"],
+        json!([{ "messageId": REPORT, "paths": [PAGE] }])
+    );
+}
+
+/// The fallback has fired: a turn's save took the stopped change with the
+/// person's edit, and its reply said so. The person then changes the file
+/// again and sends another change. Nothing of the stopped change is unsaved
+/// any more, so that turn puts nothing back and its reply does not say again
+/// that the stopped change was saved.
+#[tokio::test]
+async fn a_stopped_change_a_save_already_took_is_not_spoken_of_again() {
+    let root = tempfile::tempdir().unwrap();
+    let (config, mut told) = controller(root.path()).await;
+    let processor = JobProcessor::new(Arc::new(config.clone()));
+    let workspace = config.project_workspace_dir(&config.project_id);
+    fs::create_dir_all(&workspace).unwrap();
+    checkout(&workspace);
+    processor.set_unsaved_put_back(Some(origin_put_back(workspace.clone())));
+    let registration = test_registration_with_proxy();
+
+    // The saved version holds the page as the second turn saved it: the
+    // stopped column, the person's note and the battery column.
+    let saved_by_second =
+        "{ \"columns\": [\"Price\", \"Warranty\", \"Battery\"] }\n// my own note\n";
+    fs::write(workspace.join(PAGE), saved_by_second).unwrap();
+    git(&workspace, &["add", "sites"]);
+    git(
+        &workspace,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--quiet",
+            "-m",
+            "the second turn",
+        ],
+    );
+    // The person changes the file again, then sends a third change.
+    let edited_again = format!("{saved_by_second}// a second note\n");
+    fs::write(workspace.join(PAGE), &edited_again).unwrap();
+    let history = chat(
+        &registration.runtime_id,
+        left_as_stopped(),
+        vec![
+            next_message(),
+            saved_later_reply(json!([{ "messageId": REPORT, "paths": [PAGE] }])),
+        ],
+        third_message(),
+    );
+    let job = test_lease_job(
+        Some("feature"),
+        json!({ "prompt_text": "Make the header blue.", "conversation_history": history }),
+    );
+
+    let (with_lines, standing) = processor
+        .put_back_stopped_changes(&registration, &job, config.project_id, None)
+        .await
+        .unwrap();
+    assert!(with_lines.is_none());
+    assert!(told.try_recv().is_err(), "nothing was put back");
+    assert_eq!(
+        fs::read_to_string(workspace.join(PAGE)).unwrap(),
+        edited_again
+    );
+    assert!(standing.0.is_empty(), "{standing:?}");
+    let before = super::super::collect_git_status_porcelain(&workspace)
+        .await
+        .unwrap();
+    assert!(before.contains_key(PAGE));
+    let (mut artifacts, mut sentences) = (Vec::new(), Vec::new());
+    standing.saved_with(
+        &saved(&[PAGE]),
+        Some(&before),
+        &mut artifacts,
+        &mut sentences,
+    );
+    assert!(
+        artifacts.is_empty() && sentences.is_empty(),
+        "{artifacts:?} {sentences:?}"
     );
 }
 
@@ -562,7 +837,7 @@ async fn a_change_stays_where_its_own_undo_would_leave_it() {
         (artifacts.len(), sentences)
     };
     let said = vec![format!(
-        "This also saved the change that was stopped earlier (“{STOPPED_REQUEST}”)"
+        "This also saved what was left of the change that was stopped earlier (“{STOPPED_REQUEST}”)"
     )];
     let stopped_chat = || {
         chat(

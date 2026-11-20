@@ -856,10 +856,11 @@ export function describeUnsavedChanges(reason: ChatMessageUnsavedReason, placeme
 // A change a Stop left unsaved that a later turn's save took with its own:
 // that turn could not put it back first (the person had changed the file
 // since), or the person asked to go on with it. The row no longer reads Not
-// saved.
+// saved. A save takes the file as that turn left it, so the note promises
+// only what was left of the stopped change, as that turn's reply does.
 export const STOPPED_CHANGE_SAVED_LATER_LABEL = "Saved later";
 export const STOPPED_CHANGE_SAVED_LATER_MESSAGE =
-  "Stopped before these changes were saved. A later change saved them with its own.";
+  "Stopped before these changes were saved. A later change saved what was left of them with its own.";
 
 // Why one file of the turn was left out of the saved history.
 export function describeFileNotSaved(notSaved: ChatMessageFileNotSaved, placement: UnsavedWorkPlacement): string {

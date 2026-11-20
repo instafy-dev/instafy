@@ -20,7 +20,8 @@ import { extractAgentJobId } from "./chatMessagePresentation";
  * unsaved, that a later turn's save took with its own: that turn could not
  * put the change back first (the person had changed the file since), or the
  * person asked to go on with it. Its reply says which (`readSavedLater`), so
- * the row no longer reads Not saved. Null when no save took any of it.
+ * the row no longer reads Not saved once every file it still shows is among
+ * them. Null when no save took any of it.
  */
 export type ChatLaterChanges = ((messageId: string, paths: readonly string[]) => boolean) & {
   undone?: (messageId: string) => ReadonlySet<string> | null;
@@ -58,7 +59,9 @@ export const SAVED_LATER_ARTIFACT_KIND = "stopped-turn/saved-later";
 
 /**
  * The stopped changes a reply says its turn's save took: each one's row (its
- * message) and the files. Only an agent's reply says so.
+ * message) and the files. Only an agent's reply says so. A change that turn
+ * was asked to undo (`undoAsked`) is left out: its reply says what became of
+ * it, so the row is not told a later change saved it.
  */
 export function readSavedLater(message: ChatMessage): { messageId: string; paths: readonly string[] }[] {
   const metadata = message.metadata;
@@ -72,7 +75,8 @@ export function readSavedLater(message: ChatMessage): { messageId: string; paths
     const changes = details && typeof details === "object" ? (details as Record<string, unknown>).changes : null;
     for (const change of Array.isArray(changes) ? (changes as unknown[]) : []) {
       if (!change || typeof change !== "object") continue;
-      const { messageId, paths } = change as Record<string, unknown>;
+      const { messageId, paths, undoAsked } = change as Record<string, unknown>;
+      if (undoAsked === true) continue;
       const id = typeof messageId === "string" ? messageId.trim() : "";
       const files = (Array.isArray(paths) ? paths : [])
         .filter((path): path is string => typeof path === "string")
