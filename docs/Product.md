@@ -516,7 +516,9 @@ existing workspace draft store when switching resources or conversations. These 
 do not store copies of files, pages, cookies or browser credentials.
 
 Resource tabs use the workspace tab icon, dirty marker and close control, with a quieter
-underline to distinguish them from the outer workspace tabs. Reopening a file keeps its place;
+underline to distinguish them from the outer workspace tabs. With a mouse, a view's close control
+shows on the selected tab, and on another tab while it is hovered or holds keyboard focus; on a
+touch screen, which has no hover, it always shows. Reopening a file keeps its place;
 closing the selected file selects the next neighbor, then the previous one. Closing a background
 file keeps the current selection. Arrow keys, Home and End select views; Delete closes a focused
 file view and restores focus to the selected view. Duplicate filenames include their parent path,
