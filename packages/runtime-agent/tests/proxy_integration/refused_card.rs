@@ -6,6 +6,11 @@
 //! "Working…": the person gets the retry's card, which names its page, and never the first
 //! answer's line. A turn with a card left to post is not run again: it posts that card, and never
 //! the refused one.
+//!
+//! A retry's card that opens a page the turn found itself waits for the person, and the retry's
+//! words show above it: a return policy's retry handed over the shop's own page and wrote what a
+//! search result said, and the person read only the card (a local test, Nov 20). A retry's card
+//! refused too is left out, and its words, told to stand alone, are all the person reads.
 
 // The proxy fixtures of `tests/proxy_integration.rs`, as the evidence retry's own tests use them.
 use crate::*;
@@ -18,6 +23,19 @@ const FIRST_LINE: &str = "I've opened a browser check of the official results.";
 const NAMES_NO_PAGE: &str = "Check the official results for the team's game on November 18, 2026, and tell me who won and the final score.";
 const NAMES_ITS_PAGE: &str =
     "Open https://scores.example/2026-11-18 and read the team's final score.";
+/// A return policy asked beside the person's details, and the shop's own page a search found.
+const POLICY_REQUEST: &str = "My email is ana@example.com and my order is 123-4567. What is the shop's return policy for it?";
+const POLICY_NO_PAGE: &str = "Check the shop's return policy for my order.";
+const POLICY_PAGE: &str = "Open https://shop.example/help/returns and explain the return policy that may apply to my order. Do not use or submit my email address or order number.";
+const POLICY_WORDS: &str = "I found the shop's official returns page, but its site refused a direct read. A search result says unopened items can be returned within 365 days with proof of purchase; I couldn't check the full terms. The card opens the official page.";
+/// A hotel asked for dates, and the retry's own card naming no page either.
+const HOTEL_REQUEST: &str =
+    "Find a hotel in Prague for 15 to 17 January, 2 adults, under 140 euros a night.";
+const HOTEL_NO_PAGE: &str =
+    "Check hotel availability in Prague for 15 to 17 January for 2 adults under 140 euros a night.";
+const HOTEL_WORDS: &str = "One hotel's listing showed 139 euros a night in the search results, but its own page couldn't be read, so the dates and the price for two adults aren't confirmed.";
+const STAND_ALONE: &str =
+    "If this card is refused too, only your words show: make them stand alone.";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Case {
@@ -25,6 +43,10 @@ enum Case {
     TheOnlyCard,
     /// A card that names its page stands beside the refused one.
     ACardLeft,
+    /// The retry hands over a page the turn found itself, with what it read of it.
+    AWaitingCard,
+    /// The retry's card names no page either.
+    RefusedTwice,
 }
 
 impl Case {
@@ -36,23 +58,104 @@ impl Case {
             Self::ACardLeft => {
                 "evidence_retry::refused_card::a_turn_with_a_card_left_posts_it_and_never_the_refused_one_via_proxy"
             }
+            Self::AWaitingCard => {
+                "evidence_retry::refused_card::a_retrys_card_that_waits_for_the_person_shows_the_retrys_words_above_it_via_proxy"
+            }
+            Self::RefusedTwice => {
+                "evidence_retry::refused_card::a_retry_whose_card_is_refused_too_ends_in_its_words_alone_via_proxy"
+            }
+        }
+    }
+
+    /// The person's message.
+    fn request(self) -> &'static str {
+        match self {
+            Self::TheOnlyCard | Self::ACardLeft => {
+                "Who won the team's game last night, and what was the final score?"
+            }
+            Self::AWaitingCard => POLICY_REQUEST,
+            Self::RefusedTwice => HOTEL_REQUEST,
+        }
+    }
+
+    fn payload(self) -> Value {
+        let mut payload = json!({
+            "prompt_text":self.request(),
+            "metadata":{"execution_mode":"apply","agentRoutingPreflight":{},"runtimeExpectations":{
+                "workspaceFileChanges":false,"commandExecution":false,"genericMcpToolExecution":false
+            }}
+        });
+        // A chat of one person, as the controller leases its turn: the history ends with the
+        // message, and it is what a card may name for Studio to open it by itself.
+        if matches!(self, Self::AWaitingCard | Self::RefusedTwice) {
+            payload["conversation_history"] = json!([{"role":"user","content":self.request()}]);
+            payload["metadata"]["groupParticipation"] = json!({
+                "decision":"respond","reason":"single_human_conversation",
+                "participantCount":1,"enforcedBy":"runtime-controller"
+            });
+        }
+        payload
+    }
+
+    /// The retry's answer, told why the first one's card was refused.
+    fn retry_answer(self) -> Option<Value> {
+        let answer = |summary: &str, task: &str| {
+            json!({
+                "summary":summary,"code":"","suggestions":[],"files":[],
+                "actions":[{"type":"request_browser","task":task}],
+            })
+        };
+        match self {
+            // It hands over the page it read by its address.
+            Self::TheOnlyCard => Some(answer("", NAMES_ITS_PAGE)),
+            Self::ACardLeft => None,
+            Self::AWaitingCard => Some(answer(POLICY_WORDS, POLICY_PAGE)),
+            Self::RefusedTwice => Some(answer(HOTEL_WORDS, HOTEL_NO_PAGE)),
+        }
+    }
+
+    /// The cards the person gets, by their tasks.
+    fn cards(self) -> Vec<String> {
+        match self {
+            Self::TheOnlyCard | Self::ACardLeft => vec![NAMES_ITS_PAGE.to_string()],
+            Self::AWaitingCard => vec![POLICY_PAGE.to_string()],
+            Self::RefusedTwice => Vec::new(),
         }
     }
 
     fn first_answer(self) -> Value {
+        let no_page = match self {
+            Self::TheOnlyCard | Self::ACardLeft => NAMES_NO_PAGE,
+            Self::AWaitingCard => POLICY_NO_PAGE,
+            Self::RefusedTwice => HOTEL_NO_PAGE,
+        };
         let mut actions = vec![json!({
-            "type":"request_browser","task":NAMES_NO_PAGE,
+            "type":"request_browser","task":no_page,
             "browserLocation":"auto","continueBuilding":null
         })];
         if self == Self::ACardLeft {
             actions.push(json!({"type":"request_browser","task":NAMES_ITS_PAGE}));
         }
-        json!({
-            "summary":format!(
-                "I couldn't verify the result from the league's text-only score page. {FIRST_LINE}"
+        let (summary, files) = match self {
+            Self::TheOnlyCard | Self::ACardLeft => (
+                format!(
+                    "I couldn't verify the result from the league's text-only score page. {FIRST_LINE}"
+                ),
+                json!([{"change":"read","path":RESULTS_PAGE}]),
             ),
-            "code":"","suggestions":[],
-            "files":[{"change":"read","path":RESULTS_PAGE}],
+            Self::AWaitingCard => (
+                "I'll check the shop's return information for your order.".to_string(),
+                json!([]),
+            ),
+            Self::RefusedTwice => (
+                "I've opened a browser check for those dates; no reservation will be made."
+                    .to_string(),
+                json!([]),
+            ),
+        };
+        json!({
+            "summary":summary,"code":"","suggestions":[],
+            "files":files,
             "actions":actions,
         })
     }
@@ -67,6 +170,17 @@ fn a_turn_whose_only_card_is_refused_runs_once_more_and_posts_the_retrys_card_vi
 #[test]
 fn a_turn_with_a_card_left_posts_it_and_never_the_refused_one_via_proxy() -> Result<()> {
     run_isolated(Case::ACardLeft)
+}
+
+#[test]
+fn a_retrys_card_that_waits_for_the_person_shows_the_retrys_words_above_it_via_proxy() -> Result<()>
+{
+    run_isolated(Case::AWaitingCard)
+}
+
+#[test]
+fn a_retry_whose_card_is_refused_too_ends_in_its_words_alone_via_proxy() -> Result<()> {
+    run_isolated(Case::RefusedTwice)
 }
 
 fn run_isolated(case: Case) -> Result<()> {
@@ -128,11 +242,9 @@ async fn provider_request(
     };
     match (state.case, index) {
         (case, 0) => response(final_answer(&case.first_answer())),
-        // The retry, told why its card was refused, hands over the page it read by its address.
-        (Case::TheOnlyCard, 1) => response(final_answer(&json!({
-            "summary":"","code":"","suggestions":[],"files":[],
-            "actions":[{"type":"request_browser","task":NAMES_ITS_PAGE}],
-        }))),
+        (case, 1) if case.retry_answer().is_some() => {
+            response(final_answer(&case.retry_answer().unwrap()))
+        }
         (case, _) => panic!("unexpected extra provider request {index} for {case:?}"),
     }
 }
@@ -252,12 +364,7 @@ async fn run_case(case: Case) -> Result<()> {
         conversation_id: None,
         session_id: None,
         credential_id: None,
-        payload: json!({
-            "prompt_text":"Who won the team's game last night, and what was the final score?",
-            "metadata":{"execution_mode":"apply","agentRoutingPreflight":{},"runtimeExpectations":{
-                "workspaceFileChanges":false,"commandExecution":false,"genericMcpToolExecution":false
-            }}
-        }),
+        payload: case.payload(),
         proxy: None,
         controller_token: None,
         controller_token_scopes: None,
@@ -322,6 +429,37 @@ async fn run_case(case: Case) -> Result<()> {
         .collect();
     let requests = state.requests.lock().unwrap().clone();
     match case {
+        Case::AWaitingCard | Case::RefusedTwice => {
+            assert_eq!(
+                retries,
+                vec![(json!("refused_browser_card"), json!("Working"))]
+            );
+            assert_eq!(requests.len(), 2, "the first answer, then the retry's");
+            let retry_input = requests[1]["input"].to_string();
+            assert!(
+                retry_input.contains(STAND_ALONE),
+                "retry input: {retry_input}"
+            );
+            // What the retry found is the reply: above the card that waits for the person, or
+            // alone when its card was refused too. Never the first answer's words.
+            let words = if case == Case::AWaitingCard {
+                POLICY_WORDS
+            } else {
+                HOTEL_WORDS
+            };
+            assert_eq!(execution.summary, words);
+            // Alone, they never say a browser check was opened.
+            if case == Case::RefusedTwice {
+                assert!(
+                    !execution
+                        .summary
+                        .split(|c: char| !c.is_alphanumeric())
+                        .any(|word| word.eq_ignore_ascii_case("opened")),
+                    "{}",
+                    execution.summary
+                );
+            }
+        }
         Case::TheOnlyCard => {
             // Nothing failed that the person saw: the line reads "Working…".
             assert_eq!(
@@ -350,8 +488,8 @@ async fn run_case(case: Case) -> Result<()> {
             assert_eq!(requests.len(), 1, "one answer, not run again");
         }
     }
-    // Either way the one card posted names its page, and the refused one is never posted.
-    assert_eq!(cards, vec![NAMES_ITS_PAGE.to_string()]);
+    // A card posted names its page, and a refused one is never posted.
+    assert_eq!(cards, case.cards());
 
     drop(settings);
     drop(proxy_guard);

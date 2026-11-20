@@ -126,6 +126,21 @@ impl BrowserRequest {
         })
     }
 
+    /// Whether Studio leaves this card a button for the person to open, by what its task names,
+    /// as Studio checks a card's task before it opens it by itself
+    /// (`browserAutoStartAddressesSeen`): an address it can't check, or a host that no text of
+    /// `seen` names ([`named_hosts`]). `seen` is what the person could have read before the
+    /// card: their messages and the chat's earlier replies, never the card's own turn. A task
+    /// that names no host waits for nothing here.
+    pub(super) fn waits_for_the_person(&self, seen: &[&str]) -> bool {
+        let (wanted, uncheckable) = named_hosts(&self.task);
+        if uncheckable {
+            return true;
+        }
+        let seen: BTreeSet<String> = seen.iter().flat_map(|text| named_hosts(text).0).collect();
+        !wanted.is_subset(&seen)
+    }
+
     pub(super) fn message(&self) -> JobMessage {
         let mut request = json!({ "task": self.task, "location": self.location });
         if self.continue_building {
@@ -580,5 +595,46 @@ mod tests {
             })
             .collect();
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// A card waits for the person, as Studio decides it, when its task names a host nothing the
+    /// person could have read before it shows, or an address Studio can't check; one naming only
+    /// hosts the person or an earlier reply gave, or none, opens by itself. `www.` and letter case
+    /// are nobody's, and an e-mail address's domain is no host anyone gave.
+    #[test]
+    fn a_card_waits_for_the_person_when_its_task_names_a_host_nobody_showed_them() {
+        let card = |task: &str| {
+            BrowserRequest::parse(json!({ "task": task }).as_object().unwrap()).unwrap()
+        };
+        let policy = card(
+            "Open https://www.ikea.com/us/en/customer-service/returns-claims/return-policy/ and explain the return policy.",
+        );
+        // The person named the shop, not its site.
+        assert!(policy.waits_for_the_person(&["What is IKEA's return policy for it?"]));
+        assert!(policy.waits_for_the_person(&[]));
+        // They gave the site, or an earlier reply did.
+        assert!(!policy.waits_for_the_person(&["Check IKEA.com's returns page for me."]));
+        assert!(!policy.waits_for_the_person(&[
+            "What is IKEA's return policy?",
+            "IKEA's policy is at https://www.ikea.com/us/en/customer-service/returns-claims/.",
+        ]));
+        assert!(policy.waits_for_the_person(&["Write to help@ikea.com for me."]));
+        // Every host it names counts.
+        let two = card("Compare https://shop.example/a and https://other.example/b.");
+        assert!(two.waits_for_the_person(&["Look at shop.example."]));
+        assert!(!two.waits_for_the_person(&["Look at shop.example and other.example."]));
+        // An address Studio can't check always waits.
+        assert!(
+            card("Open http://localhost:3000/ and read it.")
+                .waits_for_the_person(&["Open http://localhost:3000/ and read it."])
+        );
+        // A building card that names no host waits for nothing here.
+        let building = BrowserRequest::parse(
+            json!({ "task": "Find the museum's opening hours.", "continueBuilding": true })
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!building.waits_for_the_person(&[]));
     }
 }

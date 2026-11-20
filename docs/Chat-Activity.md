@@ -295,7 +295,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
 - Cards (secrets, connections, action and preview cards, team plans) stay in the turn's default
   view, under the reply: what the turn says comes first, then what it made or asks for, also for a
   card the turn posted before it was done with its site. While the reply is written, its draft
-  grows in the reply's place, above the cards, in the turn's own row. A turn whose browser step
+  grows in the reply's place, above the cards, in the turn's own row. When the runtime asks for
+  the answer again (a retry), the answer shown stays until the retry's first words replace it
+  there; it is never taken away first. A turn whose browser step
   ended its run on the approval lane (a step the person said no to or left, or a page waiting for
   their input) shows no draft: the runtime replies with its own sentence ("You said no, so that
   step didn't happen, and nothing from it was sent. Tell Octo what to try instead."), never the
@@ -306,11 +308,14 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   turned it on, is its only ghost text. A thread started before this still holds the instruction
   to end a plain-text reply with them on its own line (2-3 quoted replies joined by ` · `), so that
   line leaves the reply and is kept nowhere (`without_offered_replies_line`, `jobs/mod.rs`).
-- A turn whose only action is a browser card posts the card and no reply of its own
-  (`post_only_the_card`, `jobs/mod.rs`): the card says where the browser goes, and the browser turn
-  says what it found. An empty reply shows nothing and notifies nobody. The browser rule tells Octo
-  so, and that a reply that does show beside a card never says a page opened before a browser tool
-  saw it, or what the browser will submit, send or buy.
+- A turn whose only action is a browser card that Studio opens by itself (every address it opens
+  is one the person's messages or Octo's earlier replies show) posts the card and no reply of its
+  own (`post_only_the_card`, `jobs/mod.rs`): the card says where the browser goes, and the browser
+  turn says what it found. An empty reply shows nothing and notifies nobody. A card that waits for
+  the person, such as one for a page Octo found itself, keeps the turn's reply above it: what it
+  found, what it didn't, and what the card opens. The browser rule tells Octo which, and that a
+  reply that does show beside a card never says a page opened before a browser tool saw it, or what
+  the browser will submit, send or buy.
 - A command on its own in the conversation is one row: its label (or "Ran a command"), its
   state and a chevron that shows the command and its output.
 - The typing row that shows before the turn's own line, or under a newer message while a turn

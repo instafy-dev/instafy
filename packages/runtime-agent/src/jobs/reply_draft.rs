@@ -16,6 +16,10 @@
 //!   draft with a `draft.reset` event (`claude_code::events`).
 //! - A summary that could still become the `NO_RESPONSE` decline sentinel is
 //!   held back until it can no longer be one.
+//! - An answer asked for again (the runtime runs the turn once more, Codex sends
+//!   its request again, or the attempt failed) stays in the draft until the new
+//!   answer's first words take its place: it is replaced where it is, never
+//!   taken away first.
 //! - A draft is never persisted. The controller publishes it to the
 //!   conversation's viewers, and the completed message replaces it.
 
@@ -32,7 +36,8 @@ const MAX_DRAFT_BYTES: usize = 128 * 1024;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReplyDraft {
     /// Changes whenever the text starts over (another answer item or another
-    /// attempt), so a viewer replaces its text instead of extending it.
+    /// attempt), with the new text's first words, so a viewer replaces its text
+    /// instead of extending it.
     pub segment: u64,
     pub text: String,
 }
@@ -54,17 +59,24 @@ pub(super) struct ReplyDraftStream {
     /// A browser turn's: its reply ends with finding lines, which the draft never shows.
     ends_at_finding_lines: bool,
     previous: String,
+    /// The draft still shows what it showed before this text started over: an earlier
+    /// attempt's answer, or the one a request sent again had begun. It stays until this text's
+    /// first words take its place, in a segment of their own ([`Self::publish`]).
+    replaces_shown: bool,
 }
 
 impl ReplyDraftStream {
-    /// Starts a draft segment of its own, so text from an earlier attempt is
-    /// replaced rather than extended.
+    /// Starts this run's draft: its first words replace, in a segment of their own, whatever an
+    /// earlier attempt's draft shows, which stays until they come. Cleared as the runtime's retry
+    /// began, a streamed answer ("I can't change … here because it was created in another
+    /// chat…") vanished for 2.6 s, "Thinking…" came back, and it returned rewritten (a local
+    /// test, Nov 20).
     pub(super) fn start(
         sender: ReplyDraftSender,
         allow_plain_text: bool,
         ends_at_finding_lines: bool,
     ) -> Self {
-        let mut stream = Self {
+        Self {
             sender,
             item_id: None,
             consumed: 0,
@@ -73,25 +85,30 @@ impl ReplyDraftStream {
             allow_plain_text,
             ends_at_finding_lines,
             previous: String::new(),
-        };
-        stream.restart();
-        stream
+            replaces_shown: true,
+        }
     }
 
     pub(super) fn observe(&mut self, event: &JsonValue) {
-        // Another attempt, or, in a local-engine turn, a text the draft showed that turned out
-        // to be commentary: a text block a tool call followed in the same message
-        // (`claude_code::events`). Codex never sends that reset.
-        if matches!(
-            event.get("type").and_then(JsonValue::as_str),
-            Some("stream.retry" | "turn.failed" | DRAFT_RESET_EVENT)
-        ) {
-            self.restart();
-            self.item_id = None;
-            return;
-        }
-        if event.get("type").and_then(JsonValue::as_str) != Some("item.updated") {
-            return;
+        match event.get("type").and_then(JsonValue::as_str) {
+            // The request goes again: Codex sends it again by itself, or the attempt failed and
+            // the runtime may run it once more. What the draft shows stays until the next words.
+            Some("stream.retry" | "turn.failed") => {
+                self.start_over(false);
+                self.item_id = None;
+                return;
+            }
+            // In a local-engine turn, a text the draft showed turned out to be commentary: a
+            // text block a tool call followed in the same message (`claude_code::events`). It
+            // was never the answer, so what this run showed goes now. Codex never sends this
+            // reset.
+            Some(DRAFT_RESET_EVENT) => {
+                self.start_over(!self.replaces_shown);
+                self.item_id = None;
+                return;
+            }
+            Some("item.updated") => {}
+            _ => return,
         }
         let Some(item) = event.get("item") else {
             return;
@@ -115,14 +132,16 @@ impl ReplyDraftStream {
             return;
         }
         // The adapter sends each item's text so far. Another item, or text that
-        // no longer extends what was read, is a new answer.
+        // no longer extends what was read, is a new answer. What this run showed
+        // of the one before goes now; an earlier attempt's answer still waits for
+        // the new one's words.
         if self.item_id.as_deref() != Some(id)
             || text.len() < self.consumed
             || !text.is_char_boundary(self.consumed)
             || !text.starts_with(&self.previous)
         {
             if self.item_id.is_some() {
-                self.restart();
+                self.start_over(!self.replaces_shown);
             }
             self.item_id = Some(id.to_string());
         }
@@ -150,15 +169,20 @@ impl ReplyDraftStream {
         self.publish(&visible);
     }
 
-    fn restart(&mut self) {
+    /// Starts the text over: reading begins again, and the next words replace what the draft
+    /// shows. With `at_once`, what it shows goes now, in a segment of its own.
+    fn start_over(&mut self, at_once: bool) {
         self.consumed = 0;
         self.reader = SummaryReader::default();
         self.published = 0;
         self.previous.clear();
-        self.sender.send_modify(|draft| {
-            draft.segment += 1;
-            draft.text.clear();
-        });
+        self.replaces_shown = !at_once;
+        if at_once {
+            self.sender.send_modify(|draft| {
+                draft.segment += 1;
+                draft.text.clear();
+            });
+        }
     }
 
     fn publish(&mut self, summary: &str) {
@@ -196,7 +220,15 @@ impl ReplyDraftStream {
             return;
         }
         let added = &visible[self.published..end];
-        self.sender.send_modify(|draft| draft.text.push_str(added));
+        // The first words after the text started over take the place of what the draft shows.
+        let replaces = std::mem::take(&mut self.replaces_shown);
+        self.sender.send_modify(|draft| {
+            if replaces {
+                draft.segment += 1;
+                draft.text.clear();
+            }
+            draft.text.push_str(added);
+        });
         self.published = end;
     }
 }
@@ -612,7 +644,8 @@ mod tests {
     fn a_stream_drafts_the_growing_summary_and_restarts_on_another_item() {
         let (sender, receiver) = watch::channel(ReplyDraft::default());
         let mut stream = ReplyDraftStream::start(sender, false, false);
-        let first_segment = receiver.borrow().segment;
+        // The first words come in a segment of their own.
+        let first_segment = receiver.borrow().segment + 1;
 
         stream.observe(&update("a", "{\"summary\":\" NO"));
         assert_eq!(receiver.borrow().text, "", "could still be a decline");
@@ -642,10 +675,92 @@ mod tests {
             }
         );
 
-        // Another attempt starts a segment of its own.
+        // Another attempt's words come in a segment of their own, in the earlier answer's
+        // place: until they do, that answer stays.
         let sender = stream.sender.clone();
-        let _retry = ReplyDraftStream::start(sender, false, false);
-        assert_eq!(receiver.borrow().segment, first_segment + 2);
+        let mut retry = ReplyDraftStream::start(sender, false, false);
+        assert_eq!(
+            *receiver.borrow(),
+            ReplyDraft {
+                segment: first_segment + 1,
+                text: "Second".to_string(),
+            }
+        );
+        retry.observe(&update("c", "{\"summ"));
+        assert_eq!(receiver.borrow().text, "Second");
+        retry.observe(&update("c", "{\"summary\":\"Third"));
+        assert_eq!(
+            *receiver.borrow(),
+            ReplyDraft {
+                segment: first_segment + 2,
+                text: "Third".to_string(),
+            }
+        );
+    }
+
+    /// An answer that streamed and that the runtime then asked for again stays where it is until
+    /// the retry's words replace it: never a moment with no answer and "Thinking…" back. A
+    /// message naming another chat's page streamed "I can't change … here because it was created
+    /// in another chat…", the runtime ran it once more for the files it didn't write, and the
+    /// draft emptied as the retry began: the row went for 2.6 s and came back rewritten (a local
+    /// test, Nov 20). A request Codex sends again by itself, and a failed attempt, keep it too;
+    /// text that turned out to be commentary still goes at once.
+    #[test]
+    fn an_answer_asked_for_again_is_replaced_in_place_never_taken_away_first() {
+        let first = "I can't change \u{201c}Cameras compared\u{201d} here because it was made in another chat.";
+        let (sender, mut receiver) = watch::channel(ReplyDraft::default());
+        let mut stream = ReplyDraftStream::start(sender.clone(), false, false);
+        stream.observe(&update("a", &format!("{{\"summary\":\"{first}\"")));
+        let shown = receiver.borrow_and_update().clone();
+        assert_eq!(shown.text, first);
+
+        // The runtime's retry: its run starts, its reasoning and steps come, and the draft is
+        // unchanged until its own words do.
+        let mut retry = ReplyDraftStream::start(sender.clone(), false, false);
+        assert!(
+            !receiver.has_changed().unwrap(),
+            "nothing is sent as it starts"
+        );
+        retry.observe(
+            &json!({"type":"item.started","item":{"id":"cmd","type":"command_execution"}}),
+        );
+        retry.observe(&update("b", "{\"summary\":\""));
+        retry.observe(&update("b", "{\"summary\":\" "));
+        assert!(!receiver.has_changed().unwrap());
+        assert_eq!(*receiver.borrow(), shown);
+        retry.observe(&update("b", "{\"summary\":\" I can't edit"));
+        assert_eq!(
+            *receiver.borrow_and_update(),
+            ReplyDraft {
+                segment: shown.segment + 1,
+                text: "I can't edit".to_string(),
+            }
+        );
+        retry.observe(&update(
+            "b",
+            "{\"summary\":\" I can't edit it from this chat.",
+        ));
+        assert_eq!(receiver.borrow().text, "I can't edit it from this chat.");
+
+        // A request sent again, or a failed attempt: the text shown stays until the next words,
+        // which replace it rather than extend it.
+        for event in ["stream.retry", "turn.failed"] {
+            let before = receiver.borrow_and_update().clone();
+            retry.observe(&json!({ "type": event }));
+            assert!(!receiver.has_changed().unwrap(), "{event}");
+            retry.observe(&update("c", "{\"summary\":\"Again."));
+            assert_eq!(
+                *receiver.borrow_and_update(),
+                ReplyDraft {
+                    segment: before.segment + 1,
+                    text: "Again.".to_string(),
+                },
+                "{event}"
+            );
+        }
+
+        // Commentary the draft showed goes at once.
+        retry.observe(&json!({ "type": DRAFT_RESET_EVENT }));
         assert_eq!(receiver.borrow().text, "");
     }
 
@@ -765,7 +880,8 @@ mod tests {
     fn a_draft_reset_clears_the_draft_and_starts_a_segment() {
         let (sender, receiver) = watch::channel(ReplyDraft::default());
         let mut stream = ReplyDraftStream::start(sender, true, false);
-        let segment = receiver.borrow().segment;
+        // The first words come in a segment of their own.
+        let segment = receiver.borrow().segment + 1;
         let drafted = |text: &str| json!({"type": "item.updated", "item": {"id": "msg_1:0", "type": "agent_message", "text": text, "phase": "final_answer"}});
         stream.observe(&drafted("I'll read the README"));
         assert_eq!(receiver.borrow().text, "I'll read the README");
@@ -802,7 +918,8 @@ mod tests {
         let mut adapter = EventAdapter::new(&folder, Some(std::path::Path::new(home)));
         let (sender, receiver) = watch::channel(ReplyDraft::default());
         let mut stream = ReplyDraftStream::start(sender, true, false);
-        let first = receiver.borrow().segment;
+        // The first words come in a segment of their own.
+        let first = receiver.borrow().segment + 1;
         let mut events = Vec::new();
         let mut drafts: Vec<ReplyDraft> = Vec::new();
         for line in scenario.lines().filter(|line| !line.starts_with("#!")) {
@@ -928,8 +1045,9 @@ mod tests {
         stream.observe(&update("a", r#"{"summary":"Other answer"#));
         assert!(receiver.borrow().segment > segment);
         assert_eq!(receiver.borrow().text, "Other answer");
+        // A request sent again leaves the answer shown until the next words replace it.
         stream.observe(&json!({"type":"stream.retry"}));
-        assert_eq!(receiver.borrow().text, "");
+        assert_eq!(receiver.borrow().text, "Other answer");
         for tail in ["N", "NO_", "NO_FILE_CHANGES"] {
             stream.observe(&update("b", &format!("{{\"summary\":\"Done.\\n{tail}")));
             assert_eq!(receiver.borrow().text, "Done.");

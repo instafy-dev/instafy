@@ -26,9 +26,14 @@
 //! breaks the first chat's page whatever it is told, and what its steps changed there goes back as
 //! the turn found it. What no step of the turn wrote there stays: a viewer's click the page's own
 //! server writes meanwhile. A scheduled run has no chat to ask in, and changes the page it names.
+//!
+//! A message that names only the first chat's page, by its title, asks for a change this chat
+//! can't make, though the routing step read it as a change required here: the turn's answer that
+//! says so is its result. Run again for the files it didn't write, that answer vanished while the
+//! retry began and came back rewritten (a local test, Nov 20).
 
 use super::*;
-use runtime_agent::jobs::JobExecution;
+use runtime_agent::jobs::{JobExecution, ReplyDraft};
 use std::sync::Mutex as StdMutex;
 
 const CHILD: &str = "INSTAFY_PAGES_OF_THEIR_OWN_CHATS_TEST_CHILD";
@@ -74,6 +79,9 @@ const PRICES_LINE: &str = "{\"Laptop 12\":\"1049 EUR\"}\n";
 /// The runtime's line when a turn changed the first chat's page.
 const NOT_CHANGED: &str =
     "I didn't change “Framework Laptop 12, 13 and 16”: it was made in another chat.";
+/// The new chat names the first chat's page by its title, and the stand-in model's answer.
+const NAMED: &str = "Add a battery life column to Framework Laptop 12, 13 and 16.";
+const NAMED_REPLY: &str = "I can't change “Framework Laptop 12, 13 and 16” here because it was made in another chat. Ask for the battery life column in that chat.";
 
 #[test]
 fn a_new_chat_builds_its_own_page_and_leaves_another_chats_page_as_it_is_via_proxy() -> Result<()> {
@@ -125,6 +133,33 @@ fn a_page_another_chat_made_stays_as_its_last_save_holds_it_via_proxy() -> Resul
         })?
         .join()
         .map_err(|_| anyhow::anyhow!("held pages fixture panicked"))?
+}
+
+const NAMED_CHILD: &str = "INSTAFY_PAGES_NAMED_FROM_ANOTHER_CHAT_TEST_CHILD";
+
+#[test]
+fn a_change_to_another_chats_page_is_answered_once_and_the_answer_stays_via_proxy() -> Result<()> {
+    if std::env::var(NAMED_CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            NAMED_CHILD,
+            "pages_of_their_own_chats::a_change_to_another_chats_page_is_answered_once_and_the_answer_stays_via_proxy",
+            "pages-named-from-another-chat",
+        );
+    }
+    const STACK: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("pages-named-proxy".to_string())
+        .stack_size(STACK)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_stack_size(STACK)
+                .build()?
+                .block_on(run_named_case())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("named page fixture panicked"))?
 }
 
 const SCHEDULED_CHILD: &str = "INSTAFY_PAGES_SCHEDULED_RUN_TEST_CHILD";
@@ -335,6 +370,12 @@ async fn provider_request(
             ),
             REMEMBERED,
         )
+    } else if asks(&body, NAMED) {
+        // Told the page is another chat's, read-only here, it changes nothing and says so.
+        return response(message(
+            &json!({"summary":NAMED_REPLY,"code":"","suggestions":[],"files":[],"actions":[]})
+                .to_string(),
+        ));
     } else if asks(&body, FILL_IN) {
         // The page this chat made; told nothing, the one comparison it had written.
         let folder = own_folder(&prompt).unwrap_or_else(|| THEIRS.to_string());
@@ -1113,6 +1154,91 @@ async fn run_scheduled_case() -> Result<()> {
         .context("the scheduled run's request")?;
     assert!(!prompt.contains("The space's pages"), "{prompt}");
     assert!(!prompt.contains("is read-only here"), "{prompt}");
+
+    space.finish().await
+}
+
+async fn run_named_case() -> Result<()> {
+    let _env = env_guard().await;
+    let space = Space::start(Provider::new(false)).await?;
+    let (project_id, workspace) = (space.project_id, space.workspace.clone());
+    let (first_chat, new_chat) = (Uuid::new_v4(), Uuid::new_v4());
+    // The first chat's comparison, and its card.
+    fs::create_dir_all(workspace.join(THEIRS))?;
+    fs::write(workspace.join(THEIRS).join("data.json"), THEIR_DATA)?;
+    record_card(&workspace, first_chat, THEIRS, THEIR_TITLE)?;
+
+    // A new chat names that page by its title, and the routing step reads it as a change
+    // required here.
+    let mut named = job(
+        project_id,
+        new_chat,
+        NAMED,
+        vec![person(NAMED, "run-1")],
+        None,
+    );
+    named.payload["metadata"] = json!({
+        "execution_mode":"apply",
+        "agentRoutingPreflight":{"route":"direct","workspaceFileChangeRequirement":"required"},
+        "runtimeExpectations":{
+            "workspaceFileChanges":true,"commandExecution":false,"genericMcpToolExecution":false
+        }
+    });
+    let (sender, mut progress) = tokio::sync::mpsc::unbounded_channel();
+    let (draft_sender, drafts) = tokio::sync::watch::channel(ReplyDraft::default());
+    let answered = tokio::time::timeout(
+        Duration::from_secs(60),
+        space.processor.run_apply_job(
+            &space.registration,
+            &named,
+            true,
+            Some(JobProgress {
+                sender,
+                status: Arc::new(AtomicBool::new(true)),
+                reply_draft: Some(draft_sender),
+            }),
+            None,
+            None,
+        ),
+    )
+    .await
+    .context("the named page's turn timed out")?
+    .context("the named page's turn failed")?;
+
+    // One answer: the model was asked once, and nothing said it tried again.
+    let asked = space
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| asks(request, NAMED))
+        .count();
+    assert_eq!(asked, 1, "the turn ran once");
+    let mut retries = Vec::new();
+    while let Ok(message) = progress.try_recv() {
+        if let Some(metadata) = message.metadata.as_ref()
+            && metadata.get("kind").and_then(Value::as_str) == Some("codex_retry")
+        {
+            retries.push(message.content.clone());
+        }
+    }
+    assert!(retries.is_empty(), "{retries:?}");
+    // The answer that streamed is the one that stays, with the runtime's line under it.
+    assert_eq!(drafts.borrow().text, NAMED_REPLY);
+    assert_eq!(
+        answered.summary,
+        format!("{NAMED_REPLY}\n\nNothing was changed.")
+    );
+    assert!(answered.artifacts.iter().any(|artifact| {
+        artifact["kind"] == "codex/required-changes-not-made"
+            && artifact["metadata"]["reason"] == "another_chats_page"
+    }));
+    // The first chat's page is as it was.
+    assert_eq!(
+        fs::read(workspace.join(THEIRS).join("data.json"))?,
+        THEIR_DATA.as_bytes()
+    );
 
     space.finish().await
 }
