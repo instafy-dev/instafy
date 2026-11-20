@@ -11,8 +11,8 @@
 //   the turn has a time limit, else while the turn's own folder is there), never a published app, a person's own
 //   code, a terminal command or a process left over from an earlier turn;
 // - a chain's providers are tried in order and one whose key (`key_env`) is not set is skipped. With none left the
-//   answer is `no_provider`, with a secret-request card for the first one's key, only for a person who asks to set up
-//   search;
+//   answer is `no_provider`, which says how to go on without a key and carries no card: a key's card comes only from a
+//   person who asks to set up search (the web-research skill);
 // - a key goes only, over https, to the host of its own entry's `url`, in the header the entry names. It is never
 //   printed or written: not in the output, not in errors, not in the turn's state. Nothing is cached, and no result
 //   list is written anywhere;
@@ -152,6 +152,7 @@ export type SearchProvider = {
   body: Json | null;
   auth: { header: string; prefix: string } | null;
   keyEnv: string | null;
+  /** the words of the key's card, which a turn writes only for a person who asks to set up search; checked here */
   keyRequest: { description: string } | null;
   results: {
     list: FieldPath;
@@ -948,8 +949,6 @@ function turnFolderIsThere(env: NodeJS.ProcessEnv): boolean {
 // ---------------------------------------------------------------------------------------------------------------
 // The search
 
-export type SecretRequestAction = { type: "request_secret"; name: string; description: string; agentHandles: string[] };
-
 export type WebSearchReport = {
   ok: true;
   status: SearchStatus;
@@ -976,8 +975,6 @@ export type WebSearchReport = {
   results: SearchResult[];
   tell: string;
   notice: string;
-  /** with `no_provider`: the card that asks for a search key, only for a person who asks to set up search */
-  offer?: SecretRequestAction;
   budget: { scope: string; searchesUsed: number; searchesLeft: number; searchesPerTurn: number };
   warnings: string[];
 };
@@ -999,7 +996,7 @@ export type WebSearchDeps = {
   /** replaces the network after the address check (tests) */
   transport?: SearchTransport;
   now?: () => number;
-  /** turn, day and offer state (default: the space's $INSTAFY_CACHE_DIR on a runtime, else $XDG_STATE_HOME or ~/.local/state; under instafy/web-search) */
+  /** turn and day state (default: the space's $INSTAFY_CACHE_DIR on a runtime, else $XDG_STATE_HOME or ~/.local/state; under instafy/web-search) */
   stateDir?: string;
   skillRoots?: string[];
   bundledLinkOnly?: unknown;
@@ -1040,9 +1037,6 @@ function tellFor(status: SearchStatus, chain: string): string {
       return `This space has no search key. ${keyless(chain)}`;
   }
 }
-const offerTell = (chain: string) =>
-  `This space has no search key. ${keyless(chain)} The card in \`offer\` (a \`request_secret\` action) is only for a ` +
-  "person who asks to set up search; never ask for the key in chat, and never wait for it.";
 const CODE_TELL: Partial<Record<SearchCode, string>> = {
   turn_limit: `This turn has used its ${SEARCH_LIMITS.searchesPerTurn} searches.`,
   day_limit: "This space's key has made its searches for today.",
@@ -1163,7 +1157,6 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
       results,
       tell: extra.tell ?? [codeTell, tellFor(status, chainName)].filter(Boolean).join(" "),
       notice: SEARCH_NOTICE,
-      ...(extra.offer ? { offer: extra.offer } : {}),
       budget: {
         scope: scope.label,
         searchesUsed: used,
@@ -1175,16 +1168,10 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
   };
 
   if (!usable.length) {
-    const first = members.find((provider) => provider.keyEnv && provider.keyRequest);
-    if (first) {
-      const offer: SecretRequestAction = {
-        type: "request_secret",
-        name: first.keyEnv!,
-        description: first.keyRequest!.description.split("{daily}").join(String(first.dailyLimit)),
-        agentHandles: ["octo"],
-      };
-      return report("no_provider", { offer, tell: offerTell(chainName) });
-    }
+    // No key card here: a turn copied the one this answer carried into its reply, and a person who asked for a score
+    // got a card asking for a search key. Only a person who asks to set up search gets that card, which the turn
+    // writes from the entry's `key_env` and `key_request`, as the web-research skill says.
+    if (members.some((provider) => provider.keyEnv)) return report("no_provider");
     return report("no_provider", { tell: `Every provider of ${chainName} is switched off in this space. ${tellFor("unavailable", chainName)}` });
   }
 
@@ -1347,7 +1334,6 @@ export function formatWebSearch(report: WebSearchReport): string {
     if (result.text) out.push(result.text);
   }
   for (const attempt of report.tried ?? []) out.push(`not used: ${attempt.id} (${attempt.code}): ${attempt.message}`);
-  if (report.offer) out.push(`offer: ${JSON.stringify(report.offer)}`);
   out.push(report.tell);
   out.push(`${report.budget.searchesUsed} of ${report.budget.searchesPerTurn} searches used in ${report.budget.scope}.`);
   for (const warning of report.warnings) out.push(`warning: ${warning}`);

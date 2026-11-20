@@ -1005,14 +1005,14 @@ instafy web search "Belém Tower" --chain reference-search --lang pt --json
 ```
 
 The answer is `{status, code?, activity, query, queryRedacted?, chain, provider?, providers?, tried?, searchedAt, viewer,
-count, results, tell, notice, offer?, budget, warnings}`:
+count, results, tell, notice, budget, warnings}`:
 
 | `status` | Meaning |
 |---|---|
 | `ok` | Results came back (`repeat: true` when the same search already ran in this turn: it is not sent again) |
 | `not_found` | The provider found nothing |
 | `unavailable` | No provider could answer: `code` is `turn_limit`, `day_limit`, `time_limit`, `rate_limited`, `key_refused`, `provider_error`, `unreachable` or `timeout`, and `tried` lists each provider that did not answer |
-| `no_provider` | No provider in the chain has its key in this space. `offer` is the `request_secret` action for the first provider's key (`BRAVE_SEARCH_API_KEY`), only for a person who asks to set up search; its card says: "Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner." |
+| `no_provider` | No provider in the chain has its key in this space. `tell` says how to go on without one, and the answer carries no key card: Octo writes that card, for the first provider's key (`BRAVE_SEARCH_API_KEY`) with its entry's `key_request` ("Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner."), only for a person who asks to set up search |
 
 Each result is `{rank, url, site, text?, linkOnly?, noReuse?, source?, provider?, attribution?}`. `text` holds the title and snippet, redacted and
 wrapped in `<untrusted_page_content url=… read_at=… viewer="search result">` like page text. A result restricted by an explicit `no-agents`

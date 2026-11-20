@@ -583,40 +583,54 @@ describe("the person's own key (secret-request card)", () => {
     expect(report).toMatchObject({ status: "ok", provider: { id: "brave-own-key" } });
   });
 
-  // A news question with no key got a card asking for a search key and no news (a local test, Nov 19). The card is
-  // only for a person who asks to set up search: the answer carries it each time and says so, and nothing records that
-  // it was offered, so a later turn where the person asks for it still has it.
-  it("without a key answers no_provider, with the card for BRAVE_SEARCH_API_KEY only for a person who asks to set up search", async () => {
+  // A score question with no key got a card asking for a search key and no score: the turn copied the card this answer
+  // carried into its reply, beside a sentence saying the card was only for a person who asks to set up search (a
+  // local test, Nov 20). The answer carries no card and no word of one, in every turn; a person who asks to set up
+  // search gets the card from the turn, which writes it from the provider list (the web-research skill).
+  it("without a key answers no_provider with how to go on, and no key card or word of one", async () => {
     const out: string[] = [];
     const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
     const { requests, transport } = recorder(() => ({ status: 200, body: {} }));
     const code = await runWebSearchCli(["ramen"], { json: true }, io, transportDeps(turnEnv(caseNo), transport));
     expect(code).toBe(WEB_SEARCH_EXIT_NONE);
-    const first = JSON.parse(out.pop()!) as WebSearchReport;
+    const json = out.pop()!;
+    const first = JSON.parse(json) as WebSearchReport;
     expect(first.status).toBe("no_provider");
-    const card = {
-      type: "request_secret",
-      name: "BRAVE_SEARCH_API_KEY",
-      description:
-        "Brave Search API key for Octo's web searches. Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner.",
-      agentHandles: ["octo"],
-    };
-    expect(first.offer).toEqual(card);
-    // No key never ends the task: the open routes first, a page with what was read, and the card only when asked for.
+    expect(Object.keys(first)).not.toContain("offer");
+    // No key never ends the task: the open routes first, then a page or answer with what was read.
     const tell =
       "This space has no search key. Go on without it: find official sites with `instafy web search \"<name>\" --chain reference-search` (no key) and read them, " +
       "and for reviews a reviewer's home page and the pages it links, with `instafy web read`. Then answer or build the page with what you read, each missing fact " +
-      "marked unknown with why. The person may send more pages with Send page to Octo. The card in `offer` (a `request_secret` action) is only for a person " +
-      "who asks to set up search; never ask for the key in chat, and never wait for it.";
+      "marked unknown with why. The person may send more pages with Send page to Octo.";
     expect(first.tell).toBe(tell);
-    // A later turn in the same space: the same card and words, for the turn where the person asks for it.
-    await runWebSearchCli(["noodles"], { json: true }, io, transportDeps(turnEnv(caseNo + 1), transport));
-    const later = JSON.parse(out.pop()!) as WebSearchReport;
-    expect(later.status).toBe("no_provider");
-    expect(later.offer).toEqual(card);
-    expect(later.tell).toBe(tell);
-    expect(later.tell).not.toMatch(/already offered|Ask the person to search/);
+    for (const card of ["request_secret", "BRAVE_SEARCH_API_KEY", "KAGI_API_KEY", "offer", "card", "set up search"]) {
+      expect(json, card).not.toContain(card);
+    }
+    // The text answer too, in a later turn of the same space.
+    await runWebSearchCli(["noodles"], {}, io, transportDeps(turnEnv(caseNo + 1), transport));
+    const text = out.pop()!;
+    expect(text.split("\n")).toContain(tell);
+    for (const card of ["request_secret", "BRAVE_SEARCH_API_KEY", "offer", "card", "set up search"]) {
+      expect(text, card).not.toContain(card);
+    }
     expect(requests).toHaveLength(0);
+  });
+
+  // The words a person who asks to set up search gets on the key's card: the provider list's own, with the day's
+  // searches it names those its entry allows (the answer above no longer writes the card, so nothing fills them in).
+  it("keeps each key's card words in the provider list, whole", () => {
+    const providers = JSON.parse(fs.readFileSync(PROVIDERS_PATH, "utf8")) as {
+      providers: Record<string, { key_env?: string; daily_limit?: number; key_request?: { description: string } }>;
+      chains: Record<string, unknown>;
+    };
+    const keyed = (providers.chains["web-search"] as string[]).map((id) => providers.providers[id]!);
+    expect(keyed[0]!.key_env).toBe("BRAVE_SEARCH_API_KEY");
+    for (const entry of keyed) {
+      expect(entry.key_env).toMatch(/^[A-Z][A-Z0-9_]+$/);
+      expect(entry.key_request!.description).not.toMatch(/[{}]/);
+      expect(entry.key_request!.description).toContain(`up to ${entry.daily_limit} searches a day`);
+    }
+    expect(loadSearchProviders(BUNDLED_SEARCH_PROVIDERS).warnings).toEqual([]);
   });
 
   it("refuses the 101st search of the day on a space's key", async () => {

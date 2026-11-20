@@ -21,7 +21,7 @@
 //
 // A turn is graded by the rules of the instafy-web-research skill ("Comparing items") and of the comparison page
 // (instafy-interactive-artifacts, the compare starter and `instafy bind check`):
-//   { searches: [{ query, chain?, status, results, offer? }],
+//   { searches: [{ query, chain?, status, results, tell? }],
 //     reads:    [{ url, status, code? }],                      every page a reader was asked for
 //     findings: [{ url, title, readAt, viewer, facts }],       what the reply rests on
 //     links:    [{ site, query, link }],                       guided links (`instafy web link`) the reply gives
@@ -672,7 +672,7 @@ export const NO_PROVIDER_BREAKERS = [
     actions: [...t.actions, { type: "request_browser", task: `Open ${k.wikidata.website} and read the latest models` }],
   }), ["keeps_going_without_key", "limit_never_counts_unknown", "page_built", "price_fallback", "reviews_counted", "tries_www_once", "unknown_prices_said"]],
   ["asks for the browser instead of reading the reviews", (t) => ({ ...t, actions: [...t.actions, { type: "request_browser", task: "Find two reviews of each model" }] }), ["keeps_going_without_key"]],
-  ["puts the key card in the reply", (t) => ({ ...t, actions: [...t.actions, t.searches.find((s) => s.offer).offer] }), ["keeps_going_without_key"]],
+  ["puts the key card in the reply", (t) => ({ ...t, actions: [...t.actions, { type: "request_secret", name: "BRAVE_SEARCH_API_KEY", agentHandles: ["octo"] }] }), ["keeps_going_without_key"]],
   ["asks for a search key in chat", (t) => ({ ...t, reply: `${t.reply}\nAdd a search key so I can look for more reviews next time.` }), ["keeps_going_without_key"]],
   ["asks the address that did not answer again", (t, k) => ({ ...t, reads: [...t.reads, { url: `${k.wikidata.website}s8`, status: "failed", code: "unreachable" }] }), ["tries_www_once"]],
   ["claims reviews it did not read", (t) => ({ ...t, reply: t.reply.replace("Brightvac S8: 1 of 2 reviews found", "Brightvac S8: 2 of 2 reviews found") }), ["reviews_counted"]],
