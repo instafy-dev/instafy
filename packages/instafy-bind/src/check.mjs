@@ -15,9 +15,13 @@
 // share once gave its sources as two lines nobody could open, where site.trust(fact) would have linked each. So does a
 // fact site.trust draws: one with its source and no page draws a line that links nothing. The check names only a line
 // it can tell links nothing: one with something in it the check cannot read (a name, a function of the page's own) may
-// link its page, and one that only says a value is unknown names no source. A page is served from its own folder, so
-// the check also fails a page that loads a file from outside it ("../another-page/site.js"), and names the command that
-// gives the page its own files. Pure helpers are exported for the tests.
+// link its page, and one that only says a value is unknown names no source. "checked <date>" and "seen <date>" are the
+// words site.trust and site.cite write themselves, from how a fact's page was read (its "viewer"): typed into a page's
+// text they say so of anything, and a page captioned a journey planner whose form was never sent "<planner> · checked
+// 20 Nov 2026; no connection result", inside a link, so the line passed. The check names each line that types them,
+// linked or not (typedReads). A page is served from its own folder, so the check also fails a page that loads a file
+// from outside it ("../another-page/site.js"), and names the command that gives the page its own files. Pure helpers
+// are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
@@ -86,9 +90,8 @@ export const UNAVAILABLE_RE = /^\s*(not found( yet)?|(still )?missing|not on the
  *  and names of its lists of that. */
 export const UNAVAILABLE_KEYS = new Set(["expect", "missing", "notfound", "not_found", "unavailable", "unplaced"]);
 
-/** The visible text of an HTML page as lines (block ends and <br> break them), without lines that only say an item is
- *  unavailable. */
-export function htmlLines(html) {
+/** The visible text of an HTML page as lines (block ends and <br> break them). */
+function htmlAllLines(html) {
   const blocks = String(html ?? "")
     .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<(script|style|template)\b[\s\S]*?<\/\1\s*>/gi, " ")
@@ -96,7 +99,12 @@ export function htmlLines(html) {
   return htmlText(blocks.replace(/\n/g, " \u0000 "))
     .split("\u0000")
     .map((line) => line.trim())
-    .filter((line) => line && !UNAVAILABLE_RE.test(line));
+    .filter(Boolean);
+}
+
+/** The visible text of an HTML page as lines, without lines that only say an item is unavailable. */
+export function htmlLines(html) {
+  return htmlAllLines(html).filter((line) => !UNAVAILABLE_RE.test(line));
 }
 
 /** The source lines an HTML page draws by hand, each element whose class names "trust": [{ line, linked }], its words
@@ -134,6 +142,34 @@ export function htmlSourceLines(html) {
 /** A source line that needs no link: it says nothing on it was checked ("…, not checked", "From what Octo knows"), or
  *  only that a value is unknown, in site.js's words ("Unknown", "Price unknown · why", "To confirm"). */
 export const SAYS_UNCHECKED = /\bnot checked\b|\bfrom what octo knows\b|^(?:[\p{L} ]+ )?(?:unknown|to confirm)(?: · .*)?$/iu;
+
+const MONTH = "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+const DAY = `(?:\\d{1,2}(?:st|nd|rd|th)?\\.?\\s+${MONTH}\\b|${MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b|\\d{4}-\\d{1,2}-\\d{1,2}\\b|\\d{1,2}[./]\\d{1,2}[./]\\d{2,4}\\b)`;
+/** "checked 20 Nov 2026", "seen 5 Aug", "Checked on November 8, 2026", "checked 2026-11-20": the caption site.trust and
+ *  site.cite write from how a fact's page was read, here as typed words. Never "not checked 20 Nov", which says the
+ *  opposite, nor words put together while the page runs ("checked " + day), which the check cannot read. */
+export const TYPED_READ = new RegExp(`(?<!\\bnot\\s)\\b(?:checked|seen)\\s+(?:on\\s+)?${DAY}`, "i");
+
+/** The texts that say "checked <date>" or "seen <date>" in typed words, each once, as one line of at most 160
+ *  characters. */
+export function typedReads(texts) {
+  const out = [];
+  for (const text of texts) {
+    const line = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (!TYPED_READ.test(line)) continue;
+    const short = line.length > 160 ? `${line.slice(0, 159).trimEnd()}…` : line;
+    if (!out.includes(short)) out.push(short);
+  }
+  return out;
+}
+
+/** Every string a data file holds, whatever its key says of it, except its "expect" list (never shown). */
+function everyString(value, out = []) {
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const v of value) everyString(v, out);
+  else if (value && typeof value === "object") for (const [k, v] of Object.entries(value)) if (k.toLowerCase() !== "expect") everyString(v, out);
+  return out;
+}
 
 /** Every string value in a JSON value (keys are not shown, values are), except the "expect" list, lists of what is
  *  unavailable, and strings that only say an item is. */
@@ -462,7 +498,9 @@ const before = (version, [major, minor]) => !!version && (version[0] < major || 
  *  "script"), the "expect" list of data.json, its own scripts ([{ file, other, loads }]: a script file, or the
  *  scripts an HTML page carries; `other`, the words they hold where the check cannot place them, and `loads`, whether
  *  they fetch text from another site), the source lines its pages and scripts draw by hand ([{ file, line, linked }]),
- *  the lines that set HTML from a string (`markup`), what it loads from outside its folder (`outside`) and the starter
+ *  the lines that say "checked <date>" or "seen <date>" in typed words (`typed`: [{ file, line }], from what the build
+ *  writes by hand: its HTML pages, its own scripts and data.json; never a file a command writes, such as a check's
+ *  records or a map's layers, which may quote a page's own words), the lines that set HTML from a string (`markup`), what it loads from outside its folder (`outside`) and the starter
  *  whose files those are (`starter`). */
 export function readSite(dir) {
   const root = path.resolve(dir);
@@ -470,9 +508,14 @@ export function readSite(dir) {
   const parts = [];
   const scripts = [];
   const trust = [];
+  const typed = [];
   const markup = [];
   let declared = [];
   const files = [];
+  const typedIn = (file, texts) => {
+    for (const line of typedReads(texts)) if (!typed.some((t) => t.file === file && t.line === line)) typed.push({ file, line });
+  };
+  const allText = (script) => [...script.lines, ...script.data, ...script.other];
   for (const file of siteFiles(root)) {
     try {
       if (fs.statSync(file).size > MAX_FILE_BYTES) continue;
@@ -508,6 +551,7 @@ export function readSite(dir) {
       // a comparison's stored lede is not drawn: only the words the page shows count
       if (rel === "data.json" && ownLede && value && typeof value === "object" && "lede" in value) value = { ...value, lede: undefined };
       parts.push({ file: rel, kind: "data", text: jsonStrings(value).join("\n") });
+      if (rel === "data.json") typedIn(rel, everyString(value));
     } else if (SOURCE.test(file)) {
       scripts.push({ file: rel, other: raw, loads: SOURCE_LOADS.test(raw) });
     } else if (/\.m?js$/i.test(file)) {
@@ -516,6 +560,7 @@ export function readSite(dir) {
       parts.push({ file: rel, kind: "script", text: shownText(script).join("\n") });
       scripts.push({ file: rel, other: otherText(script).join("\n"), loads: script.loads });
       for (const line of script.trust) trust.push({ file: rel, ...line });
+      typedIn(rel, allText(script));
     } else {
       const inline = [...raw.matchAll(INLINE_SCRIPTS)]
         .filter(([, attrs, source]) => JS_TYPE.test(SCRIPT_TYPE.exec(attrs)?.[1] ?? "") && source.trim() && !DEFINES_SITE.test(source))
@@ -523,10 +568,11 @@ export function readSite(dir) {
       parts.push({ file: rel, kind: "html", text: [...htmlLines(raw), ...inline.flatMap(shownText)].join("\n") });
       if (inline.length) scripts.push({ file: rel, other: inline.flatMap(otherText).join("\n"), loads: inline.some((s) => s.loads) });
       for (const line of [...htmlSourceLines(raw), ...inline.flatMap((s) => s.trust)]) trust.push({ file: rel, ...line });
+      typedIn(rel, [...htmlAllLines(raw), ...inline.flatMap(allText)]);
     }
   }
   const { outside, targets } = outsideLoads(files, root);
-  return { root, parts, declared, scripts, trust, markup, outside, starter: outside.length ? borrowedStarter(targets) : null };
+  return { root, parts, declared, scripts, trust, typed, markup, outside, starter: outside.length ? borrowedStarter(targets) : null };
 }
 
 /** Which expected items the site shows, and where; which it leaves out; and which it cannot tell about (`unknown`):
@@ -536,6 +582,7 @@ export function readSite(dir) {
  *  the starter whose files those are (`starter`). `unlinked`: the source lines that link no page ([{ file, line }]):
  *  each drawn by hand with nothing in it that links (or that the check cannot read), and each fact site.trust would
  *  draw with its source and no page; never one that says it is not checked, or only that a value is unknown.
+ *  `typed`: the lines that say "checked <date>" or "seen <date>" in typed words ([{ file, line }]), linked or not.
  *  `markup`: the lines that set HTML from a string ([{ file, line, code }]). */
 export function checkSite(dir, expect = []) {
   const site = readSite(dir);
@@ -560,7 +607,7 @@ export function checkSite(dir, expect = []) {
     }
   }
   const unlinked = site.trust.filter((t) => t.line && !t.linked && !t.unread && !SAYS_UNCHECKED.test(t.line)).map(({ file, line }) => ({ file, line }));
-  return { items, shown, missing, unknown, unread: [...unread], unlinked, markup: site.markup, files: site.parts.map((p) => p.file), outside: site.outside, starter: site.starter };
+  return { items, shown, missing, unknown, unread: [...unread], unlinked, typed: site.typed, markup: site.markup, files: site.parts.map((p) => p.file), outside: site.outside, starter: site.starter };
 }
 
 // ---------- the values of a page of options (the compare and ranked starters' data.json) ----------
@@ -1057,8 +1104,9 @@ function answeredPort(output) {
 }
 
 /** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing, a value to fix, a source
- *  line that links no page, a file loaded from outside the site's folder or an error on the page as drawn, 2 nothing to
- *  check, or items it could tell about neither from the files nor from the page as drawn. `card`: the command that
+ *  line that links no page, a typed "checked <date>" or "seen <date>", a file loaded from outside the site's folder or
+ *  an error on the page as drawn, 2 nothing to check, or items it could tell about neither from the files nor from the
+ *  page as drawn. `card`: the command that
  *  serves the site and posts its card, while no preview shows it. A check that passes takes that step itself with
  *  `post` (which runs the command and says what it answered); any other answer ends with the command, since a failing
  *  check never holds the card back, except for a page that loads files from outside its folder: served on its own it
@@ -1070,19 +1118,19 @@ function answeredPort(output) {
 export function checkReport(dir, expect, { json = false, card = null, post = null, look = null, served = null } = {}) {
   const { starter, ...result } = checkSite(dir, expect);
   const values = checkValues(dir);
-  const { missing, unknown, unlinked, outside, markup } = result;
+  const { missing, unknown, unlinked, typed, outside, markup } = result;
   const fix = outside.length ? outsideLines(dir, outside, starter) : null;
   const next = card && !fix ? `post its card: ${card}` : null;
   const nextLines = next ? [`next: ${next}`] : [];
   const markupNotes = markup.slice(0, 5).map((m) => `NOTE: ${m.file}:${m.line} sets HTML from a string (${m.code}): draw its text with site.h, which sets text as text, and each fact with site.trust(fact), which links its page.`);
   if (markup.length > 5) markupNotes.push(`NOTE: ${markup.length - 5} more line(s) set HTML from a string: draw them the same way.`);
-  if (!result.items.length && !values.problems.length && !unlinked.length) {
+  if (!result.items.length && !values.problems.length && !unlinked.length && !typed.length) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';
     const exit = fix ? 1 : 2;
     if (json) return { exit, lines: [JSON.stringify({ ok: false, error: message, values, markup, ...(fix ? { outside, init: fix.init } : {}), ...(next ? { next } : {}) })] };
     return { exit, lines: [...(fix ? fix.lines : []), message, ...values.notes.map((n) => `NOTE: ${n}`), ...markupNotes, ...nextLines] };
   }
-  const failing = missing.length || values.problems.length || unlinked.length || fix;
+  const failing = missing.length || values.problems.length || unlinked.length || typed.length || fix;
   // the check that passes posts the card itself, while no preview shows the site; so does one that can't read an item
   // in the files, which then looks for it on the page as drawn, served for that card or for one already showing it
   const posted = !failing && card && post ? post() : null;
@@ -1114,6 +1162,11 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   if (unlinked.length) {
     lines.push(`UNLINKED: ${unlinked.length} source line(s) link no page: ${unlinked.map((u) => `"${u.line}" (${u.file})`).join(", ")}.`);
     lines.push('Draw each fact with site.trust({"v", "src", "url", "date", "viewer"}), which links the page it was read on ("checked 8 Nov on maker.com ↗"), or link that page in the line. Something no page gave says "not checked".');
+  }
+  if (typed.length) {
+    const named = typed.slice(0, 8).map((t) => `"${t.line}" (${t.file})`).join(", ");
+    lines.push(`TYPED: ${typed.length} line(s) say "checked <date>" or "seen <date>" in typed words: ${named}${typed.length > 8 ? ` and ${typed.length - 8} more` : ""}.`);
+    lines.push('Those words are site.trust\'s and site.cite\'s, written from how a fact\'s page was read: draw the fact ({"v", "src", "url", "date", "viewer"}) with one of them ("checked 8 Nov on maker.com ↗") and take the typed words out. A page nobody read, or a form that was never sent, was not checked: link it by its name alone, with no day.');
   }
   for (const note of values.notes) lines.push(`NOTE: ${note}`);
   lines.push(...markupNotes);

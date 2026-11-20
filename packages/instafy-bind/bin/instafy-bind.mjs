@@ -69,7 +69,9 @@ check      Does the site show every item the request named (each product, stop o
            data.json) it also lists values that only say nothing ("—", "n/a"), values without the page and day
            they were read, and a filter that would count a row whose value is unknown; and it notes the rows a
            filter lists apart. On any page it lists a source line drawn by hand (class "trust") that links no
-           page, unless it says "not checked", and a fact with its source and no page. Exit 1 when an item is
+           page, unless it says "not checked", and a fact with its source and no page; and each line that says
+           "checked <date>" or "seen <date>" in typed words, linked or not: site.trust and site.cite write those
+           from how a fact's page was read ("viewer"). Exit 1 when an item is
            missing, a value or a source line needs fixing; 2 when there is nothing to check. It also fails a page
            that loads a file from outside its folder (a page is served from its own folder) and names the init
            command that gives it its own files. Items: --expect, plus an "expect" array in data.json. Run it

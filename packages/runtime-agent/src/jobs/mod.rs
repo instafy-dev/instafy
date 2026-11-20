@@ -4701,6 +4701,9 @@ const WORKSPACE_IS_CURRENT_RULE: &str = "\
 /// page can't load them, and nobody could open it (a local test, Nov 17). That build never opened
 /// the page skill, so this says it: a new page copies what it uses from another page. It rides in
 /// a restored thread's compact reminder too, which has little room: hence so few words.
+/// Two new chats that asked for a page read the list's "made in another chat, read-only here" as
+/// an answer to their message and made none (a local test, Nov 20). What a message asking for a
+/// page does is the page skill's to say (it gets this chat's own page); this line keeps the fact.
 const PAGE_OF_ITS_OWN_CHAT_RULE: &str = "- A request for a new page starts a new folder, even on the same subject. Copy into it any file you use from another page. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n";
 
 /// True when a person in this conversation opened a skill setup with

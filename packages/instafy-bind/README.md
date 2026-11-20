@@ -231,7 +231,10 @@ On any page, a source line drawn by hand (an element with the class `trust`) fai
 it links a page or says "not checked" or "From what Octo knows" (or only that a value is unknown: "Unknown", "To
 confirm"): `site.trust(fact)` draws one that links the page its fact was read on, and a fact with its `src` and no
 https `url` (not an estimate) fails the same way, since that line links nothing. A line with something in it the check
-cannot read (a name, a function of the page's own) may link its page, so the check never names it. In a space's
+cannot read (a name, a function of the page's own) may link its page, so the check never names it. A line that says
+"checked <date>" or "seen <date>" in typed words fails the check too, linked or not, in a page's HTML, its own scripts
+or `data.json`: `site.trust` and `site.cite` write those words themselves, from how a fact's page was read (its
+`viewer`), so a page nobody read, or a form that was never sent, is linked by its name alone. In a space's
 workspace, `init`'s next step for a starter is the check; for a folder with no starter
 content, until the CLI has recorded a preview of that space opened from the folder, it is the command that serves the
 page and posts its card in Studio (`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview'
