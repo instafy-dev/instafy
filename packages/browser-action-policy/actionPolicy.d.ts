@@ -113,16 +113,20 @@ export type UnnamedControlHints = {
   nearby?: string | null;
   /** The first words of the row or card it sits in (controlNameRulesInPage's rowTextOf). */
   row?: string | null;
+  /** The heading of the card it sits in, used when it has no row's words (controlNameRulesInPage's cardHeadingOf). */
+  card?: string | null;
   /** Its own name when that is only marks ("+", "−", "×"), which name it before its row does. */
   marks?: string | null;
 };
-/** A short generic name such as "profile picture button in the top right" or "+ beside “Adult”"; never "button 5". */
+/** A short generic name such as "profile picture button in the top right", "+ beside “Adult”" or "button in “Entree museum”"; never "button 5". */
 export declare function unnamedControlName(hints: UnnamedControlHints): string;
-/** Run inside the page from its source: the text a control draws, the text right beside it, and the first words of its row or card. */
+/** Run inside the page from its source: the text a control draws, the text right beside it, the first words of its row or card, and its card's heading. */
 export declare function controlNameRulesInPage(): {
   shownTextOf(element: Element, max?: number): string;
   nearbyTextOf(element: Element, max?: number): string;
   rowTextOf(element: Element, max?: number): string;
+  /** `pass`: a Map one reading shares between its controls, so each part of the page around them is worked out once. */
+  cardHeadingOf(element: Element, max?: number, pass?: Map<Element, unknown> | null): string;
 };
 /** True for text that names nothing, such as a bare media type ("image/svg+xml"). */
 export declare function isPlaceholderName(value: unknown): boolean;

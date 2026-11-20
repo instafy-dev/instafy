@@ -1285,7 +1285,7 @@ function shownTextInPage(rule, request) {
 // person cannot see is reported only as `shown: false` with its name, which
 // the secret-screen check still reads; `mode: "name"` asks for that name alone,
 // for a control the list leaves out (listInPage).
-function describeInPage(rule, forms, names, element, sources, mode) {
+function describeInPage(rule, forms, names, element, sources, mode, pass) {
   const bounded = (value, max = 2_000) =>
     typeof value === "string"
       ? value.replace(/\s+/g, " ").trim().slice(0, max)
@@ -1330,6 +1330,25 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       .map((id) => ownWords(element.ownerDocument?.getElementById(id)))
       .join(" "),
   );
+  // The words a web component slots into the control (a button drawn in its
+  // shadow root around the component's own text), which its text does not
+  // hold: a person reads them on the control, so a step's checks read them
+  // as its text, and the secret-screen check as one of its names. Its shown
+  // name stays the reading's own (a card's heading names one with none). A
+  // click lands on such a button through them, so its risk words must count.
+  const slottedWords = () => {
+    try {
+      if (element instanceof HTMLTextAreaElement || typeof element.querySelectorAll !== "function") return "";
+      return Array.from(element.querySelectorAll("slot"))
+        .slice(0, 16)
+        .map((slot) => typeof slot.assignedNodes === "function"
+          ? slot.assignedNodes({ flatten: true }).map((node) => node.textContent || "").join(" ")
+          : "")
+        .join(" ");
+    } catch (_) {
+      return "";
+    }
+  };
   // Every name the control may be known by, its text included, for the
   // secret-screen check alone.
   const checkedName = () => {
@@ -1338,7 +1357,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       [
         element.getAttribute("aria-label"), ariaLabelledByText, labels,
         element.getAttribute("placeholder"), element.getAttribute("title"),
-        element.textContent, element.getAttribute("name"),
+        element.textContent, slottedWords(), element.getAttribute("name"),
         element.getAttribute("data-bs-original-title"), element.getAttribute("data-original-title"),
         element.getAttribute("data-tippy-content"), element.getAttribute("data-tooltip"),
         image ? image.getAttribute("alt") : "",
@@ -1796,6 +1815,12 @@ function describeInPage(rule, forms, names, element, sources, mode) {
         return true;
       }
     })();
+    // With no row's words, the heading of its card names it ("button in
+    // “Entree museum”"): a guided ticket page's reading listed its product
+    // cards' controls as "unnamed button"s, as a button whose words sit
+    // across a shadow root from them reads, and the turn pressed the basket's
+    // button for a card's.
+    let card = "";
     if (
       !withheld &&
       ![ownText, ownName, read(element, "aria-label"), read(element, "title"), read(element, "placeholder"), labelWords]
@@ -1805,6 +1830,13 @@ function describeInPage(rule, forms, names, element, sources, mode) {
         row = names.rowTextOf(element);
       } catch (_) {
         row = "";
+      }
+      if (!row) {
+        try {
+          card = names.cardHeadingOf(element, 60, pass);
+        } catch (_) {
+          card = "";
+        }
       }
     }
     nameHints = {
@@ -1821,6 +1853,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       sprite: bounded(read(sprite, "href") || read(sprite, "xlink:href") || "", 160),
       nearby: bounded(nearby, 40),
       row: bounded(row, 40),
+      card: bounded(card, 60),
       hasImage:
         Boolean(element.querySelector("img, picture, [role='img']")) ||
         /url\(/.test(view?.getComputedStyle(element).backgroundImage || ""),
@@ -1977,7 +2010,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       : "",
     labels,
     // A text area's text is what it holds, a value, never its name.
-    text: element instanceof HTMLTextAreaElement ? "" : bounded(element.textContent || ""),
+    text: element instanceof HTMLTextAreaElement ? "" : bounded([element.textContent || "", slottedWords()].join(" ")),
     // The text the control draws: what textContent holds, less scripts,
     // styles, an svg's metadata, title and defs, and hidden parts.
     shownText: (() => {
@@ -2009,6 +2042,7 @@ function nameHintsOf(raw) {
     sprite: text(raw?.sprite, 160),
     nearby: text(raw?.nearby, 40),
     row: text(raw?.row, 40),
+    card: text(raw?.card, 60),
     hasImage: valid && raw.hasImage === true,
     position: valid && NAME_POSITIONS.has(raw.position) ? raw.position : "",
   };
@@ -2097,9 +2131,12 @@ function listInPage(rule, rules, describe, request) {
     kept = [...first.slice(0, request.limit), ...rest.slice(0, room)].sort((a, b) => a - b);
   }
   const listed = new Set(kept.slice(0, request.limit));
+  // What the parts of the page around the listed controls answer for a
+  // card's heading, shared between them for this one list (cardHeadingOf).
+  const pass = new Map();
   return elements.map((element, ordinal) => {
     try {
-      if (listed.has(ordinal)) return describe(element, request.sources);
+      if (listed.has(ordinal)) return describe(element, request.sources, undefined, pass);
       const { name } = describe(element, request.sources, "name");
       return glances[ordinal].shown ? { shown: true, left: true, name } : { shown: false, name };
     } catch (_) {
@@ -2158,16 +2195,37 @@ function clickLandingInPage(element, request) {
   }
   if (!hit) return { other: false };
   const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
-  let inside = false;
-  for (let node = hit, depth = 0; node && node.nodeType === 1 && depth < 512; depth += 1) {
-    if (node === element) return { other: inside };
-    const tag = String(node.tagName).toUpperCase();
-    if (tag === "LABEL" && node.control === element) return { other: false };
-    if (node.matches(request.selector) || ["IFRAME", "FRAME", "OBJECT", "EMBED"].includes(tag) || (tag === "LABEL" && node.control)) {
-      inside = true;
+  // Whether a press that starts at `from` reaches the control, and whether
+  // it passes another control, a frame or another control's label inside it
+  // on the way (`other`); null when it never reaches the control.
+  const reaches = (from) => {
+    let inside = false;
+    for (let node = from, depth = 0; node && node.nodeType === 1 && depth < 512; node = up(node), depth += 1) {
+      if (node === element) return { other: inside };
+      const tag = String(node.tagName).toUpperCase();
+      if (tag === "LABEL" && node.control === element) return { other: false };
+      if (node.matches(request.selector) || ["IFRAME", "FRAME", "OBJECT", "EMBED"].includes(tag) || (tag === "LABEL" && node.control)) {
+        inside = true;
+      }
     }
-    node = up(node);
+    return null;
+  };
+  // A point over words a web component slots into the control (a button
+  // drawn in the component's shadow root around the component's own text)
+  // hits the component, the words' own element, and the press reaches the
+  // control through the slot that draws them: a ticket card's "Tickets"
+  // button read as covered by its own component. That way in is judged as
+  // any other: a card that is a control around a button whose words are
+  // slotted would take the press on that button, which the step was not
+  // judged for.
+  if (hit.shadowRoot && element.getRootNode() !== doc && typeof doc.caretRangeFromPoint === "function") {
+    const range = doc.caretRangeFromPoint(point.x, point.y);
+    const text = range && range.startContainer && range.startContainer.nodeType === 3 ? range.startContainer : null;
+    const slotted = text && text.parentNode === hit ? reaches(text.assignedSlot) : null;
+    if (slotted) return slotted;
   }
+  const landed = reaches(hit);
+  if (landed) return landed;
   const names = new RegExp(request.consent, "i");
   const roots = [doc.body, doc.documentElement];
   let consent = false;
@@ -2298,16 +2356,18 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     iconHint: [policy ? policy.iconHint : "", nameHints.sprite].filter(Boolean).join(" "),
   };
   // `label` is the name a step's checks read (its risk words, a cookie
-  // notice's own choices, a pause's fields): its own hints, never its row.
-  const label = (named || actionPolicy.unnamedControlName({ ...unnamed, row: "" })).slice(0, MAX_LABEL_CHARS);
+  // notice's own choices, a pause's fields): its own hints, never its row or
+  // its card's heading.
+  const label = (named || actionPolicy.unnamedControlName({ ...unnamed, row: "", card: "" })).slice(0, MAX_LABEL_CHARS);
   // Where it is shown (a reading, a prompt, a step's result), one with no
   // words of its own is told apart from the alike controls of its list by
-  // its row or card, and one named only by marks ("+", "−") keeps them ("+
-  // beside “Adult”"). The row's words never change what a step does: a "+"
-  // beside "How do I delete my account?" and a "×" over "Save 10%" asked
-  // under routine browsing when its checks read them, and a booking's icon
-  // button in a part that speaks of cookies was paused on as a cookie
-  // notice's.
+  // its row or card, or by its card's heading when the card has no first
+  // words to use ("button in “Entree museum”"), and one named only by marks
+  // ("+", "−") keeps them ("+ beside “Adult”"). Neither changes what a step
+  // does: a "+" beside "How do I delete my account?" and a "×" over "Save
+  // 10%" asked under routine browsing when its checks read them, and a
+  // booking's icon button in a part that speaks of cookies was paused on as
+  // a cookie notice's.
   const marks = named && !/[\p{L}\p{N}]/u.test(named) ? named : "";
   const displayLabel = ((marks ? "" : named) || actionPolicy.unnamedControlName({ ...unnamed, marks }))
     .slice(0, MAX_LABEL_CHARS);
@@ -3070,6 +3130,240 @@ async function checkedLine(description, locator) {
   const checked = await within(FIELD_READ_MS, locator.isChecked().catch(() => null), null);
   if (typeof checked !== "boolean") return null;
   return `Clicked ${quotedControlLabel(description)}, and it is ${checked ? "" : "not "}checked now.`;
+}
+
+// What a click did, in its result's `done`, as a type step's and a choice's
+// results say: the control it hit, by the name its reading gave it, cut short,
+// and what changed. A click said only "Clicked the control." for every
+// control: a turn that clicked a planner's map after typing a stop wrote that
+// it had chosen the stop and sent the journey, and one that pressed a shop's
+// basket for its ticket button wrote that the ticket button opened an empty
+// basket. A withheld page's control is named by its own hints only.
+const CLICKED_NAME_CHARS = 60;
+
+function clickedName(description, withheld = false) {
+  const raw = withheld ? strictlyMasked(description.label) : maskedDisplayText(description.displayLabel || description.label);
+  const characters = Array.from(String(raw || "").replace(/\s+/g, " ").trim());
+  if (characters.length <= CLICKED_NAME_CHARS) return `"${characters.join("")}"`;
+  const cut = characters.slice(0, CLICKED_NAME_CHARS).join("");
+  const end = cut.lastIndexOf(" ");
+  return `"${(end >= CLICKED_NAME_CHARS / 2 ? cut.slice(0, end) : cut).trimEnd()}…"`;
+}
+
+// Runs inside the page (withShownRule). How many dialogs, open lists and
+// menus, and options or menu items a person can see, open shadow roots
+// included, a few hundred of each at most: compared before and after a
+// click, they say a dialog or a list opened (clickedLine).
+function shownPartsInPage(rule, request) {
+  const limit = Number.isSafeInteger(request && request.limit) ? request.limit : 400;
+  const parts = { kind: "shown-parts", dialogs: 0, lists: 0, items: 0 };
+  const dialog = "dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true]";
+  const list = "[role=listbox], [role=menu], [role=tree], [role=grid]";
+  const item = "[role=option], [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=treeitem]";
+  try {
+    const roots = [document];
+    let seen = 0;
+    while (roots.length && seen < 50_000) {
+      const root = roots.shift();
+      const walker = document.createTreeWalker(root, 1);
+      for (let node = walker.nextNode(); node && seen < 50_000; node = walker.nextNode()) {
+        seen += 1;
+        if (node.shadowRoot) roots.push(node.shadowRoot);
+        for (const [key, selector] of [["dialogs", dialog], ["lists", list], ["items", item]]) {
+          if (parts[key] < limit && node.matches(selector) && rule.elementShown(node)) parts[key] += 1;
+        }
+      }
+    }
+  } catch (_) {
+    return null;
+  }
+  return parts;
+}
+const SHOWN_PARTS_IN_PAGE = withShownRule(shownPartsInPage);
+
+// What shownPartsInPage counts on the page now, or null when the page cannot
+// say in time.
+async function shownPartsOf(page) {
+  const parts = await within(
+    FIELD_READ_MS,
+    page.evaluate(SHOWN_PARTS_IN_PAGE, { kind: "shown-parts", limit: 400 }).catch(() => null),
+    null,
+  );
+  return parts && parts.kind === "shown-parts" &&
+    ["dialogs", "lists", "items"].every((key) => Number.isSafeInteger(parts[key])) ? parts : null;
+}
+
+// The line of a click whose page did not read as before: "Clicked "button in
+// “Entree museum”": a list opened." Each thing it says changed was seen to:
+// another document at another address is a new page, one at the same address
+// the page loaded again; on the same document, another address is the page
+// changing with its address (a script that writes it), another fragment the
+// part or view of the page it names, masked as the reading's address is, and
+// a dialog or a list a person can see now and could not before opened, a
+// dialog gone closed. "The page changed" is said of a page read before the
+// click and now that reads differently, and never of one that could not be
+// read then or now (a page too busy to answer in time): a button that did
+// nothing on such a page read as one that changed it. With nothing seen to
+// change the line names the control alone. A page that reads as before says
+// so instead (PAGE_UNCHANGED).
+async function clickedLine(page, description, { before, beforeUrl, partsBefore, partsAfter, withheld }) {
+  const name = clickedName(description, withheld);
+  const url = page.url();
+  let what = null;
+  const documentNow = before && before.documentId !== null ? await documentOf(page) : null;
+  const sameDocument = documentNow !== null && documentNow === before.documentId;
+  if (addressWithoutFragment(url) !== addressWithoutFragment(beforeUrl)) {
+    what = sameDocument
+      ? "the page changed, and so did its address"
+      : documentNow !== null ? "a new page opened" : "the page's address changed";
+  } else if (documentNow !== null && !sameDocument) {
+    what = "the page loaded again";
+  } else if (url !== beforeUrl) {
+    // The fragment as the reading's own address shows it (maskedUrl), then
+    // masked as any shown text is: a pass in it ("#access_token=…") was
+    // masked in the reading's address and written out here.
+    const address = maskedUrl(url) || "";
+    const fragment = address.includes("#") ? address.slice(address.indexOf("#")) : "";
+    const shown = Array.from(strictlyMasked(fragment)).slice(0, CLICKED_NAME_CHARS).join("");
+    what = shown.length > 1 ? `the page went to "${shown}"` : null;
+  } else if (partsBefore && partsAfter) {
+    if (partsAfter.dialogs > partsBefore.dialogs) what = "a dialog opened";
+    else if (partsAfter.lists > partsBefore.lists || partsAfter.items > partsBefore.items) what = "a list opened";
+    else if (partsAfter.dialogs < partsBefore.dialogs) what = "a dialog closed";
+  }
+  if (what === null) {
+    const now = before ? await readingOf(page) : null;
+    what = now !== null && now !== before.reading ? "the page changed" : null;
+  }
+  return what ? `Clicked ${name}: ${what}.` : `Clicked ${name}.`;
+}
+
+// The mark a type step leaves on a field that showed suggestions under it as
+// it was typed into (the ones its result names): a digest of what the field
+// held then, never the text (typedListMarkInPage). The next click, when it is
+// on none of them, on no option and sends no search, chooses none of them,
+// and its result says the field still holds what was typed
+// (typedFieldsLeftLine). A field that only says it opens something (a date
+// field's calendar, a search box that suggested nothing) is not marked: it
+// was said to have suggestions it never showed. The mark is taken off by any
+// click, by a key pressed in the field and by typing into it again, so the
+// words are said once, and never of a field whose suggestion was chosen: one
+// whose stop read as it was typed was said to hold no chosen stop on every
+// later click.
+const TYPED_LIST_KEY = "instafy.sharedBrowser.typedList";
+
+function heldDigest(text) {
+  return crypto.createHash("sha256").update(`typed-list:${text}`).digest("hex").slice(0, 32);
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Sets, or with no digest takes off, the mark of a field a
+// type step left with suggestions. The page may read it: a digest of what
+// its own field holds is no more than the field shows it.
+function typedListMarkInPage(element, request) {
+  try {
+    const key = Symbol.for(request.key);
+    if (typeof request.digest === "string") {
+      Object.defineProperty(element, key, { value: request.digest, configurable: true });
+    } else if (Object.getOwnPropertyDescriptor(element, key) !== undefined) {
+      delete element[key];
+    }
+  } catch (_) {
+    // A field the page froze is not marked.
+  }
+  return true;
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Takes the mark off a field (typedListMarkInPage) and
+// answers the digest it was marked with, or null for a field with none.
+function typedListMarkTakenInPage(element, request) {
+  try {
+    const key = Symbol.for(request.key);
+    const mark = Object.getOwnPropertyDescriptor(element, key);
+    if (mark === undefined) return null;
+    delete element[key];
+    return typeof mark.value === "string" ? mark.value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. The fields a type step marked (typedListMarkInPage), in
+// tree order, open shadow roots too: at most 8, among the page's first
+// 50,000 elements.
+function typedListFieldsInPage(request) {
+  const found = [];
+  try {
+    const key = Symbol.for(request.key);
+    const roots = [document];
+    let seen = 0;
+    while (roots.length && found.length < 8 && seen < 50_000) {
+      const walker = document.createTreeWalker(roots.shift(), 1);
+      for (let node = walker.nextNode(); node && found.length < 8 && seen < 50_000; node = walker.nextNode()) {
+        seen += 1;
+        const mark = Object.getOwnPropertyDescriptor(node, key);
+        if (mark && typeof mark.value === "string") found.push(node);
+        if (node.shadowRoot) roots.push(node.shadowRoot);
+      }
+    }
+  } catch (_) {
+    return found;
+  }
+  return found;
+}
+
+// Marks the field of a step with a digest of what it holds now (`held`), when
+// suggestions came under it as the step typed (`suggested`); takes its mark
+// off otherwise: a type step that sent the field, one no suggestions came
+// for, or a key pressed in it, which may choose one or send it.
+async function markTypedList(target, held, suggested) {
+  const digest = suggested && typeof held === "string" && held !== "" ? heldDigest(held) : null;
+  await within(
+    FIELD_READ_MS,
+    target.locator.evaluate(typedListMarkInPage, { kind: "typed-list-mark", key: TYPED_LIST_KEY, digest }),
+    null,
+  ).catch(() => {});
+}
+
+// After a click, the fields a type step left with suggestions that still hold
+// what it typed, by their names: ""From" still holds what was typed: none of
+// its suggestions is chosen." Never a field the page emptied, changed or drew
+// anew. Every click takes the marks off, so this is said once. A click on one
+// of a field's own suggestions (an option, or a row of the list it opened),
+// on any other option, which may be a suggestion the page does not tie to its
+// field, or one that sent the page's own search (`say` false) says nothing
+// and only takes them off. Null when there is nothing to say.
+async function typedFieldsLeftLine(page, withheld, say) {
+  return await within(FIELD_READ_MS * 3, (async () => {
+    const list = await page.evaluateHandle(typedListFieldsInPage, { kind: "typed-list-fields", key: TYPED_LIST_KEY });
+    const names = [];
+    try {
+      for (const property of (await list.getProperties()).values()) {
+        const field = property.asElement();
+        if (!field) {
+          await property.dispose().catch(() => {});
+          continue;
+        }
+        const digest = await field
+          .evaluate(typedListMarkTakenInPage, { kind: "typed-list-taken", key: TYPED_LIST_KEY })
+          .catch(() => null);
+        const held = !say || typeof digest !== "string" ? null : await heldText(field);
+        if (typeof held === "string" && held !== "" && heldDigest(held) === digest) {
+          const description = await describeElement(field, -1, null).catch(() => null);
+          if (description && names.length < 3) names.push(clickedName(description, withheld));
+        }
+      }
+    } finally {
+      await list.dispose().catch(() => {});
+    }
+    if (!names.length) return null;
+    const fields = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+    return names.length === 1
+      ? `${fields} still holds what was typed: none of its suggestions is chosen.`
+      : `${fields} still hold what was typed: none of their suggestions is chosen.`;
+  })().catch(() => null), null);
 }
 
 // A prompt's label, with its category and tab, fits the approval's label
@@ -7654,6 +7948,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // at before the pointer moves, which may redraw the list.
     const suggestionField = await suggestionFieldOf(target);
     const keepFocus = { keepFocus: suggestionField !== null };
+    // The dialogs and lists a person sees before the click, for what its
+    // result says opened (clickedLine).
+    const partsBefore = await shownPartsOf(page);
     let before;
     try {
       before = await clickControlItself(page, target, linkWait, keepFocus);
@@ -7692,16 +7989,31 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (moved) {
       await emitNavigationResult(page);
     }
+    // Read before the reading, whose look may decline a cookie notice the
+    // click never touched.
+    const partsAfter = moved ? null : await shownPartsOf(page);
     const checked = moved ? null : await checkedLine(target.description, target.locator);
     // A click that checks or unchecks a box, a radio button or a switch on the
     // page it was on chooses an option: Details name it with the form's typing.
     const chose = !moved && isCheckableDescription(target.description);
     const reading = await snapshotAfterStep(page, withholding);
-    const done = (await stillAsBefore(page, before, unchanged))
-      ? `${checked || `Clicked ${quotedControlLabel(target.description)}.`} ${PAGE_UNCHANGED}`
-      : checked;
+    const withheld = reading.secretScreen === true;
+    // Every click says what it hit and what it was seen to change
+    // (clickedLine), or that the page reads as before, and names a field it
+    // left holding what a type step typed into it, with none of its
+    // suggestions chosen: never a click on one of a field's own suggestions
+    // or on any other option, nor one that sent the page's own search.
+    const still = await stillAsBefore(page, before, unchanged);
+    const choseOption = suggestionField !== null || String(target.description.role || "").toLowerCase() === "option";
+    const done = [
+      checked || (still
+        ? `Clicked ${clickedName(target.description, withheld)}.`
+        : await clickedLine(page, target.description, { before, beforeUrl, partsBefore, partsAfter, withheld })),
+      still ? PAGE_UNCHANGED : null,
+      await typedFieldsLeftLine(page, withheld, !freeSearch && !choseOption),
+    ].filter(Boolean).join(" ");
     return withActivity(
-      { ...reading, ...(done ? { done } : {}) },
+      { ...reading, done },
       freeSearch ? stepActivity(page, "search", "free") : stepActivity(page, chose ? "choose" : "click", stepApproval()),
     );
   }
@@ -7845,6 +8157,12 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     const wentOn = typedOn !== null && (page.url() !== typedOn.url ||
       (typedOn.documentId !== null && (await documentOf(page)) !== typedOn.documentId));
     const held = submitting ? null : await heldText(target.locator);
+    // A field a list of suggestions came under keeps a mark of what it holds
+    // now, so the next click, on anything but an option, says it still holds
+    // what was typed and none of them is chosen (typedFieldsLeftLine). One
+    // that was sent, that no suggestions came for or whose page went on by
+    // itself keeps none.
+    await markTypedList(target, held, !submitting && listed !== null && !wentOn);
     // Text typed into a site's own search box searched nothing yet: a turn
     // read the list the page still showed as no result. Only where Enter in
     // the box, as it holds the text now, goes without a prompt (the press
@@ -8101,6 +8419,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       url: page.url(),
     });
     await pointAtControl(target, { hover: false });
+    // A key pressed in a field may choose one of its suggestions or send it:
+    // a later click says nothing of what a type step left in it.
+    await markTypedList(target, null, false);
     const before = await readingBefore(page);
     await target.locator.press(pressKey);
     const unchanged = await settleAfterAction(page, before);
