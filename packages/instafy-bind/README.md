@@ -234,7 +234,10 @@ https `url` (not an estimate) fails the same way, since that line links nothing.
 cannot read (a name, a function of the page's own) may link its page, so the check never names it. A line that says
 "checked <date>" or "seen <date>" in typed words fails the check too, linked or not, in a page's HTML, its own scripts
 or `data.json`: `site.trust` and `site.cite` write those words themselves, from how a fact's page was read (its
-`viewer`), so a page nobody read, or a form that was never sent, is linked by its name alone. In a space's
+`viewer`), so a page nobody read, or a form that was never sent, is linked by its name alone. The date is a day and a
+month by name, or a whole date in numbers, with or without a colon or a weekday before it ("Last checked: Thu 20 Nov").
+A fact `site.trust` or `site.cite` draws is never named, whatever its value says, nor a line that says the opposite
+("never checked 20 Nov") or tells a visitor when ("can be seen 3 Oct to 15 Jan", "bags must be checked"). In a space's
 workspace, `init`'s next step for a starter is the check; for a folder with no starter
 content, until the CLI has recorded a preview of that space opened from the folder, it is the command that serves the
 page and posts its card in Studio (`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview'

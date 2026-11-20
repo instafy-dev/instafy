@@ -465,6 +465,86 @@ test("typed \"checked <date>\" is read from a page's HTML, its scripts and data.
   }
 });
 
+// A page drew each fact with site.trust or site.cite, as the check asks, and still failed it: an inline fact's "date"
+// sits after its value in the script, so a value that ends "… must be checked" read as a typed "checked 2026-11-20", and
+// the advice ("draw the fact with site.trust") was what the page already did. A fact's own fields are no words of the
+// line around them: each is read on its own, so a fact whose value itself types the caption is still named.
+test("a fact site.trust or site.cite draws is never a typed \"checked <date>\", whatever its value ends with", () => {
+  const app = (children) => `(function () {
+  "use strict";
+  var museum = "https://museum.example/visit";
+  var cite = site.cite;
+  site.start({ data: null, render: function () {
+    site.head({ title: "A visit to the museum", lede: "Opening hours and what to bring." });
+    document.getElementById("list").replaceChildren(
+      site.h("h2", { text: "Opening hours" }),
+${children}
+    );
+  } });
+})();
+`;
+  const drawn = app(`      site.h("p", null, site.trust({ v: "Backpacks and large bags must be checked", src: "Museum", url: museum, date: "2026-11-20", viewer: "shared browser" })),
+      site.h("p", null, window.site.trust({ v: "The comet over the tower, last seen", src: "Museum", url: museum, asof: "2026-11-20", viewer: "shared browser" }, { label: "Sighting" })),
+      site.h("p", { "class": "trust" }, "Bags are checked ", cite({ src: "Museum", url: museum, date: "2026-11-20", viewer: "shared browser" }), " at the door")`);
+  const dir = blankSite(drawn);
+  try {
+    const out = run("check", dir, "--expect", "Opening hours,Backpacks and large bags must be checked");
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.doesNotMatch(out.stdout, /TYPED|UNLINKED/);
+    assert.match(out.stdout, /2 of 2 expected item\(s\) shown/);
+    assert.deepEqual(checkSite(dir).typed, []);
+    // the fact's value is still a line of the page, with its date, for the items the check looks for
+    assert.ok(readScript(drawn).lines.includes("Backpacks and large bags must be checked 2026-11-20 shared browser"));
+    assert.deepEqual(readScript(drawn, { apart: true }).lines.slice(3), ["Backpacks and large bags must be checked", "2026-11-20", "shared browser",
+      "The comet over the tower, last seen", "2026-11-20", "shared browser", "Sighting", "Bags are checked", "2026-11-20", "shared browser", "at the door"]);
+
+    // words typed around a fact, and a fact whose own value types them, are still named
+    fs.writeFileSync(path.join(dir, "app.js"), app(`      site.h("p", null, site.trust({ v: "Open daily · checked 20 Nov 2026", src: "Museum", url: museum, date: "2026-11-20", viewer: "shared browser" })),
+      site.h("p", { "class": "trust" }, cite({ src: "Museum", url: museum, date: "2026-11-20" }), " · seen ", "20 Nov")`));
+    assert.deepEqual(checkSite(dir).typed, ["Open daily · checked 20 Nov 2026", "· seen 20 Nov"].map((line) => ({ file: "app.js", line })));
+    assert.equal(run("check", dir, "--expect", "Opening hours").status, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The check named sentences written for a visitor ("The special exhibition can be seen 3 Oct 2026 to 15 Jan 2027.")
+// and lines that say the opposite in other words ("The planner was never checked 20 Nov."), and told the build to
+// draw a source caption for them. It passed the same caption typed with a colon or a weekday ("Last checked: 20 Nov
+// 2026"). And the line it quoted from a long paragraph was the paragraph's start, without the words it had found.
+test("the typed words are a caption's: not a sentence for a visitor or one that says the opposite; a colon or a weekday changes nothing; the line named holds them", () => {
+  for (const said of ["Last checked: 20 Nov 2026", "Checked: 2026-11-20", "checked Thu 20 Nov", "seen on Thursday, 20 November", "checked on the 20th of November",
+    "checked 20-Nov-2026", "Prices were checked 20 Nov", "Museum · checked 20 Nov 2026 – no result", "Journey planner · checked 20 Nov 2026; no connection result",
+    "Hours double-checked 20 Nov", "not found · seen 5 Aug"]) assert.match(said, TYPED_READ, said);
+  for (const unsaid of ["The special exhibition can be seen 3 Oct 2026 to 15 Jan 2027.", "The parade can be seen on 12 June from the bridge.",
+    "The comet is best seen 12 Aug after midnight.", "Bags are checked 24 Dec to 6 Jan at the door.", "Coats are checked 24 Dec – 6 Jan", "Tickets are checked 2026-12-24 until 2027-01-06",
+    "The planner was never checked 20 Nov.", "Route: couldn't be checked 20 Nov, the form was not sent", "The route wasn't checked 20 Nov", "Prices not yet checked 20 Nov",
+    "The price hasn't been checked 20 Nov", "Large bags must be checked 20 Nov and after", "checked 20/11", "checked 2/3 of the rooms", "Checked: 3 of 5 rooms", "seen Sunday morning"]) {
+    assert.doesNotMatch(unsaid, TYPED_READ, unsaid);
+  }
+
+  const long = `The museum sits on an island in the river, a short walk from the old town, and opens every day of the week; its main hall, the mining level and the planetarium each take about an hour, and the tower closes in high wind, so ask at the desk before you climb it (hours checked 20 Nov 2026 on museum.example), and the café on the top floor stays open an hour longer than the halls on Fridays and Saturdays`;
+  const [named] = typedReads([long]);
+  assert.equal(named, "…in high wind, so ask at the desk before you climb it (hours checked 20 Nov 2026 on museum.example), and the café on the top floor stays open an hour longer th…");
+  assert.equal(named.length, 160);
+  // the words near a long line's start, or its end, are named with the cut on the other side only
+  assert.equal(typedReads([`Prices seen 5 Aug ${"x".repeat(200)}`])[0], `Prices seen 5 Aug ${"x".repeat(141)}…`);
+  assert.equal(typedReads([`${"x ".repeat(100)}hours checked 20 Nov 2026 on museum.example`])[0], `…${"x ".repeat(27)}hours checked 20 Nov 2026 on museum.example`);
+
+  const html = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-typed-"));
+  try {
+    fs.writeFileSync(path.join(html, "index.html"), `<!doctype html><title>Visit</title><main><h1>Visit</h1>
+<p>The special exhibition can be seen 3 Oct 2026 to 15 Jan 2027.</p><p>Route: couldn't be checked 20 Nov, the form was not sent</p>
+<p>${long}</p><p><a href="https://museum.example/">Museum</a> · checked: 20 Nov 2026</p></main>`);
+    assert.deepEqual(checkSite(html).typed, [named, "Museum · checked: 20 Nov 2026"].map((line) => ({ file: "index.html", line })));
+    const out = run("check", html);
+    assert.equal(out.status, 1, out.stdout);
+    assert.match(out.stdout, /^TYPED: 2 line\(s\) say "checked <date>" or "seen <date>" in typed words: "…in high wind, .* \(hours checked 20 Nov 2026 on museum\.example\), .*…" \(index\.html\), "Museum · checked: 20 Nov 2026" \(index\.html\)\.$/m);
+  } finally {
+    fs.rmSync(html, { recursive: true, force: true });
+  }
+});
+
 test("site.js helpers' text is read from the source, through any name the script gives them, never by running it", () => {
   const read = readScript(`
     const { h: el, head } = window.site;

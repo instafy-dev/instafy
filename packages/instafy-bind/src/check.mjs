@@ -19,9 +19,10 @@
 // words site.trust and site.cite write themselves, from how a fact's page was read (its "viewer"): typed into a page's
 // text they say so of anything, and a page captioned a journey planner whose form was never sent "<planner> · checked
 // 20 Nov 2026; no connection result", inside a link, so the line passed. The check names each line that types them,
-// linked or not (typedReads). A page is served from its own folder, so the check also fails a page that loads a file
-// from outside it ("../another-page/site.js"), and names the command that gives the page its own files. Pure helpers
-// are exported for the tests.
+// linked or not (typedReads): a caption, never a fact site.trust or site.cite draws (its own "date" is no typed word),
+// a line that says the opposite or a sentence for a visitor. A page is served from its own folder, so the check also
+// fails a page that loads a file from outside it ("../another-page/site.js"), and names the command that gives the
+// page its own files. Pure helpers are exported for the tests.
 // SPDX-License-Identifier: AGPL-3.0-only
 import fs from "node:fs";
 import path from "node:path";
@@ -144,20 +145,38 @@ export function htmlSourceLines(html) {
 export const SAYS_UNCHECKED = /\bnot checked\b|\bfrom what octo knows\b|^(?:[\p{L} ]+ )?(?:unknown|to confirm)(?: · .*)?$/iu;
 
 const MONTH = "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
-const DAY = `(?:\\d{1,2}(?:st|nd|rd|th)?\\.?\\s+${MONTH}\\b|${MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b|\\d{4}-\\d{1,2}-\\d{1,2}\\b|\\d{1,2}[./]\\d{1,2}[./]\\d{2,4}\\b)`;
-/** "checked 20 Nov 2026", "seen 5 Aug", "Checked on November 8, 2026", "checked 2026-11-20": the caption site.trust and
- *  site.cite write from how a fact's page was read, here as typed words. Never "not checked 20 Nov", which says the
- *  opposite, nor words put together while the page runs ("checked " + day), which the check cannot read. */
-export const TYPED_READ = new RegExp(`(?<!\\bnot\\s)\\b(?:checked|seen)\\s+(?:on\\s+)?${DAY}`, "i");
+const WEEKDAY = "(?:mon|tue(?:s)?|wed(?:nes)?|thu(?:r(?:s)?)?|fri|sat(?:ur)?|sun)(?:day)?";
+const DAY = `(?:\\d{1,2}(?:st|nd|rd|th)?\\.?(?:\\s+(?:of\\s+)?|-)${MONTH}\\b|${MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b|\\d{4}-\\d{1,2}-\\d{1,2}\\b|\\d{1,2}[./]\\d{1,2}[./]\\d{2,4}\\b)`;
+// What makes the words a sentence, not a caption: before them, a word that says the opposite ("not checked 20 Nov",
+// "never checked", "wasn't checked", "not yet checked") or a sentence for a visitor ("can be seen 3 Oct", "must be
+// checked", "couldn't be checked", "best seen 12 Aug"); after them, the rest of a span of days ("3 Oct to 15 Jan").
+const NO_CAPTION_BEFORE = "(?<!(?:\\b(?:not|never|yet|be|been|being|best)|n['’]t)\\s+)";
+const NO_SPAN_AFTER = `(?!(?:,?\\s*\\d{4})?\\s*(?:to|until|till|through|[–—-])\\s*(?:${WEEKDAY}\\.?,?\\s+)?${DAY})`;
+/** "checked 20 Nov 2026", "seen 5 Aug", "Checked on November 8, 2026", "checked 2026-11-20", "Last checked: 20 Nov",
+ *  "checked Thu 20 Nov": the caption site.trust and site.cite write from how a fact's page was read, here as typed
+ *  words. A day is a day and a month by name, either way round, or a whole date in numbers (never "20/11", which
+ *  "checked 2/3 of the rooms" would read as). Never a line that says the opposite or a sentence for a visitor (above),
+ *  nor words put together while the page runs ("checked " + day), which the check cannot read. */
+export const TYPED_READ = new RegExp(`${NO_CAPTION_BEFORE}\\b(?:checked|seen)(?:\\s*:)?\\s+(?:on\\s+)?(?:${WEEKDAY}\\.?,?\\s+)?(?:the\\s+)?${DAY}${NO_SPAN_AFTER}`, "i");
+
+/** A line of at most 160 characters that holds the words found in it at [at, end): the whole line when it is that
+ *  short, its start when they are there, else from 60 characters before them, with "…" where it is cut. */
+function around(line, at, end) {
+  if (line.length <= 160) return line;
+  const from = end <= 159 ? 0 : Math.max(0, at - 60);
+  const cut = line.slice(from, from + (from ? 158 : 159));
+  return `${from ? "…" : ""}${cut.trim()}${from + cut.length < line.length ? "…" : ""}`;
+}
 
 /** The texts that say "checked <date>" or "seen <date>" in typed words, each once, as one line of at most 160
- *  characters. */
+ *  characters with those words in it. */
 export function typedReads(texts) {
   const out = [];
   for (const text of texts) {
     const line = String(text ?? "").replace(/\s+/g, " ").trim();
-    if (!TYPED_READ.test(line)) continue;
-    const short = line.length > 160 ? `${line.slice(0, 159).trimEnd()}…` : line;
+    const found = TYPED_READ.exec(line);
+    if (!found) continue;
+    const short = around(line, found.index, found.index + found[0].length);
     if (!out.includes(short)) out.push(short);
   }
   return out;
@@ -515,7 +534,6 @@ export function readSite(dir) {
   const typedIn = (file, texts) => {
     for (const line of typedReads(texts)) if (!typed.some((t) => t.file === file && t.line === line)) typed.push({ file, line });
   };
-  const allText = (script) => [...script.lines, ...script.data, ...script.other];
   for (const file of siteFiles(root)) {
     try {
       if (fs.statSync(file).size > MAX_FILE_BYTES) continue;
@@ -526,7 +544,12 @@ export function readSite(dir) {
   }
   // site.js before 1.7.0 draws nothing for a second argument to site.h that is not its props (h("p", "text"))
   const childArg = !files.some(({ file, raw }) => /\.m?js$/i.test(file) && DEFINES_SITE.test(raw) && before(siteVersion(raw), [1, 7]));
-  const read = (source) => readScript(source, { childArg, lists: UNAVAILABLE_KEYS });
+  // `typed`, what a script types: its lines with each fact's own fields apart (the "date" after a value that ends
+  // "… must be checked" is no "checked <date>": site.trust writes that fact's caption), and every other string it holds
+  const read = (source) => {
+    const script = readScript(source, { childArg, lists: UNAVAILABLE_KEYS });
+    return { ...script, typed: [...readScript(source, { childArg, lists: UNAVAILABLE_KEYS, apart: true }).lines, ...script.data, ...script.other] };
+  };
   const ownLede = files.some(({ rel, raw }) => rel === "app.js" && OWN_LEDE.test(raw));
   const shownText = (script) => [...script.lines, ...script.data].filter((text) => !UNAVAILABLE_RE.test(text));
   const otherText = (script) => script.other.filter((text) => !UNAVAILABLE_RE.test(text));
@@ -560,7 +583,7 @@ export function readSite(dir) {
       parts.push({ file: rel, kind: "script", text: shownText(script).join("\n") });
       scripts.push({ file: rel, other: otherText(script).join("\n"), loads: script.loads });
       for (const line of script.trust) trust.push({ file: rel, ...line });
-      typedIn(rel, allText(script));
+      typedIn(rel, script.typed);
     } else {
       const inline = [...raw.matchAll(INLINE_SCRIPTS)]
         .filter(([, attrs, source]) => JS_TYPE.test(SCRIPT_TYPE.exec(attrs)?.[1] ?? "") && source.trim() && !DEFINES_SITE.test(source))
@@ -568,7 +591,7 @@ export function readSite(dir) {
       parts.push({ file: rel, kind: "html", text: [...htmlLines(raw), ...inline.flatMap(shownText)].join("\n") });
       if (inline.length) scripts.push({ file: rel, other: inline.flatMap(otherText).join("\n"), loads: inline.some((s) => s.loads) });
       for (const line of [...htmlSourceLines(raw), ...inline.flatMap((s) => s.trust)]) trust.push({ file: rel, ...line });
-      typedIn(rel, [...htmlAllLines(raw), ...inline.flatMap(allText)]);
+      typedIn(rel, [...htmlAllLines(raw), ...inline.flatMap((script) => script.typed)]);
     }
   }
   const { outside, targets } = outsideLoads(files, root);
