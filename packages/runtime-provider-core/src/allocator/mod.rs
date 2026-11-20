@@ -86,6 +86,43 @@ pub(crate) fn canonical_managed_runtime_env_value(value: &JsonValue) -> Option<J
     Some(JsonValue::String(rendered))
 }
 
+/// Managed launch keys that, for a provider other than exact instafy_cloud, only the provider's
+/// operator sets, in the provider service's own environment or its user-data template: the
+/// Shared Browser's egress policy, the host the origin reaches its VNC server at, and the
+/// display's colour depth. For exact instafy_cloud the controller strips a client's value of
+/// each before the provider row adds its own; for any other provider a client's value would
+/// arrive with the row's and win over it.
+const EXACT_ONLY_LAUNCH_ENV_KEYS: &[&str] = &[
+    "INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS",
+    "INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV",
+    "INSTAFY_BROWSER_EGRESS_ISOLATION",
+    "INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS",
+    "INSTAFY_BROWSER_EGRESS_PROXY_BIND",
+    "INSTAFY_VNC_DEPTH",
+    "INSTAFY_VNC_HOST",
+];
+
+/// Whether a launch request's `metadata.env` entry sets a runtime variable, for every allocator
+/// that takes one: the environment the Docker allocator runs `docker compose` with and the env
+/// the Hetzner allocator writes into user-data follow the same rule. Exact instafy_cloud takes
+/// the managed launch keys, with scalar values. Any other provider takes them but the operator's
+/// browser policy (EXACT_ONLY_LAUNCH_ENV_KEYS), and takes the WebRTC switch only as a string: the
+/// controller applies its relay policy to the string "1" alone, while a `true` would turn WebRTC
+/// on past it.
+pub(crate) fn request_may_set_runtime_env(
+    exact_managed_provider: bool,
+    key: &str,
+    value: &JsonValue,
+) -> bool {
+    if exact_managed_provider {
+        return is_allowed_managed_runtime_env_key(key)
+            && canonical_managed_runtime_env_value(value).is_some();
+    }
+    is_allowed_managed_runtime_env_key(key)
+        && !EXACT_ONLY_LAUNCH_ENV_KEYS.contains(&key)
+        && (key != "INSTAFY_BROWSER_WEBRTC_ENABLED" || value.is_string())
+}
+
 /// Whether `provider` names exact instafy_cloud, read as the controller reads a provider id
 /// (`normalize_identifier` in runtime-controller's provider_identifiers.rs): trimmed, ASCII
 /// lowercased, with each run of `-`, `_` and ASCII whitespace one separator. Another whitespace
@@ -125,11 +162,38 @@ pub(crate) fn managed_webdev_generation_matches(
             == Some(lease_id)
 }
 
+/// The allocator settings [`apply_provider_overrides`] reads from a provider's
+/// metadata, the Hetzner API token among them. They configure the allocator
+/// and nothing else, yet launch metadata can carry them, from a controller
+/// that copies a provider row's metadata in whole or from the caller. A
+/// runtime would then get them in `RUNTIME_METADATA` and, on Hetzner, in the
+/// server's user-data, which every process on the server can read, so
+/// [`runtime_metadata_for_process`] removes them.
+pub(crate) const PROVIDER_CONFIG_METADATA_KEYS: [&str; 12] = [
+    "dockerComposeFile",
+    "dockerService",
+    "dockerProjectPrefix",
+    "dockerRepoHost",
+    "dockerCodexRoot",
+    "hetznerToken",
+    "hetznerServerType",
+    "hetznerImage",
+    "hetznerLocation",
+    "hetznerNetworkId",
+    "hetznerFirewallId",
+    "hetznerUserData",
+];
+
 pub(crate) fn runtime_metadata_for_process(
     provider: &str,
     metadata: Option<&JsonValue>,
 ) -> Option<JsonValue> {
     let mut metadata = metadata?.clone();
+    if let Some(root) = metadata.as_object_mut() {
+        for key in PROVIDER_CONFIG_METADATA_KEYS {
+            root.remove(key);
+        }
+    }
     if !is_exact_managed_provider(provider) {
         return Some(metadata);
     }
@@ -311,6 +375,8 @@ pub fn build_runtime_allocator(config: &ProviderConfig) -> anyhow::Result<DynRun
     build_runtime_allocator_for_kind(config, &provider)
 }
 
+/// Every metadata key read here is provider configuration and must be in
+/// [`PROVIDER_CONFIG_METADATA_KEYS`], so that no runtime receives it.
 fn apply_provider_overrides(
     config: &ProviderConfig,
     provider: &RuntimeProviderConfig,
@@ -525,6 +591,64 @@ mod tests {
             cfg.hetzner_runtime_user_data.as_deref(),
             Some("#cloud-config\nruncmd: []\n")
         );
+    }
+
+    /// The keys `apply_provider_overrides` reads, taken from its source, are exactly the ones
+    /// a runtime never receives.
+    #[test]
+    fn provider_config_metadata_keys_are_every_override_the_allocator_reads() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("fn apply_provider_overrides(")
+            .expect("apply_provider_overrides");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("end of apply_provider_overrides")];
+        let mut read = Vec::new();
+        for call in ["string(\"", "meta.get(\""] {
+            let mut rest = body;
+            while let Some(found) = rest.find(call) {
+                let key = &rest[found + call.len()..];
+                let end = key.find('"').expect("closing quote");
+                read.push(&key[..end]);
+                rest = &key[end..];
+            }
+        }
+        read.sort_unstable();
+        read.dedup();
+        let mut listed = PROVIDER_CONFIG_METADATA_KEYS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(read, listed);
+    }
+
+    #[test]
+    fn a_runtime_never_receives_provider_configuration() {
+        // Launch metadata can carry them, from a controller that copies a provider row's
+        // metadata in whole or from the caller.
+        let mut metadata = serde_json::Map::new();
+        for key in PROVIDER_CONFIG_METADATA_KEYS {
+            metadata.insert(key.to_string(), json!(format!("provider-{key}")));
+        }
+        metadata.insert("source".to_string(), json!("ui"));
+        metadata.insert(
+            "env".to_string(),
+            json!({ "INSTAFY_ENABLE_BROWSER_SESSION": "1" }),
+        );
+        let metadata = JsonValue::Object(metadata);
+
+        for provider in ["hetzner", "external-http", "instafy-cloud"] {
+            let process =
+                runtime_metadata_for_process(provider, Some(&metadata)).expect("process metadata");
+            let root = process.as_object().expect("object");
+            for key in PROVIDER_CONFIG_METADATA_KEYS {
+                assert!(!root.contains_key(key), "{provider} kept {key}");
+            }
+            assert_eq!(root.get("source"), Some(&json!("ui")), "{provider}");
+            assert_eq!(
+                process["env"]["INSTAFY_ENABLE_BROWSER_SESSION"],
+                json!("1"),
+                "{provider}"
+            );
+        }
     }
 
     #[tokio::test]

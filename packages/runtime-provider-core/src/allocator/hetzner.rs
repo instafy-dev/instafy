@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,10 +10,9 @@ use tracing::info;
 use uuid::Uuid;
 
 use super::{
-    canonical_managed_runtime_env_value, is_allowed_managed_runtime_env_key,
-    is_exact_managed_provider, managed_webdev_generation_matches, runtime_metadata_for_process,
-    EnsureRuntimeOutcome, EnsureRuntimeRequest, RuntimeAllocator, MANAGED_RUNTIME_FLAVOR_KEY,
-    MANAGED_RUNTIME_LAUNCH_ATTESTATION, MANAGED_RUNTIME_WEBDEV_FLAVOR,
+    is_exact_managed_provider, managed_webdev_generation_matches, request_may_set_runtime_env,
+    runtime_metadata_for_process, EnsureRuntimeOutcome, EnsureRuntimeRequest, RuntimeAllocator,
+    MANAGED_RUNTIME_FLAVOR_KEY, MANAGED_RUNTIME_LAUNCH_ATTESTATION, MANAGED_RUNTIME_WEBDEV_FLAVOR,
 };
 use crate::config::ProviderConfig;
 
@@ -205,6 +205,67 @@ impl HetznerRuntimeAllocator {
     }
 }
 
+/// The placeholders a user-data template may hold.
+#[derive(Clone, Copy)]
+enum UserDataPlaceholder {
+    ProjectId,
+    RuntimeId,
+    LeaseId,
+    RuntimeToken,
+    RuntimeAgentImage,
+    OriginInstanceId,
+    OriginMode,
+    OriginProtocols,
+    OriginMetadataJson,
+    RuntimeMetadataJson,
+    RuntimeEnvFlags,
+    RuntimeEnvExports,
+}
+
+const USER_DATA_PLACEHOLDERS: [(&str, UserDataPlaceholder); 12] = [
+    ("{{PROJECT_ID}}", UserDataPlaceholder::ProjectId),
+    ("{{RUNTIME_ID}}", UserDataPlaceholder::RuntimeId),
+    ("{{LEASE_ID}}", UserDataPlaceholder::LeaseId),
+    ("{{RUNTIME_TOKEN}}", UserDataPlaceholder::RuntimeToken),
+    (
+        "{{RUNTIME_AGENT_IMAGE}}",
+        UserDataPlaceholder::RuntimeAgentImage,
+    ),
+    (
+        "{{ORIGIN_INSTANCE_ID}}",
+        UserDataPlaceholder::OriginInstanceId,
+    ),
+    ("{{ORIGIN_MODE}}", UserDataPlaceholder::OriginMode),
+    ("{{ORIGIN_PROTOCOLS}}", UserDataPlaceholder::OriginProtocols),
+    (
+        "{{ORIGIN_METADATA_JSON}}",
+        UserDataPlaceholder::OriginMetadataJson,
+    ),
+    (
+        "{{RUNTIME_METADATA_JSON}}",
+        UserDataPlaceholder::RuntimeMetadataJson,
+    ),
+    (
+        "{{RUNTIME_ENV_FLAGS}}",
+        UserDataPlaceholder::RuntimeEnvFlags,
+    ),
+    (
+        "{{RUNTIME_ENV_EXPORTS}}",
+        UserDataPlaceholder::RuntimeEnvExports,
+    ),
+];
+
+/// Fills the operator's user-data template for one launch.
+///
+/// cloud-init runs a `#!` user-data as a shell script and parses a
+/// `#cloud-config` one as YAML (rendering it with Jinja first when it starts
+/// with `## template: jinja`), and much of what fills the placeholders comes
+/// from the launch request. So the template is filled in a single pass, which
+/// never reads a value as another placeholder, and every value is rendered to
+/// read back unchanged in a shell command, in a YAML plain or block scalar and
+/// under Jinja: see [`shell_quote`], [`user_data_json`], [`user_data_word`]
+/// and [`is_user_data_image_reference`]. A launch whose value cannot be
+/// rendered that way fails instead.
 fn render_runtime_user_data_template(
     template: &str,
     request: &EnsureRuntimeRequest,
@@ -216,64 +277,76 @@ fn render_runtime_user_data_template(
         provider_runtime_image,
         provider_webdev_image,
     )?;
+    anyhow::ensure!(
+        is_user_data_image_reference(&runtime_image),
+        "Hetzner runtime image reference must start with a letter or digit and hold only letters, digits and . _ / : @ + -"
+    );
 
-    let runtime_env = build_runtime_env(request);
-    let runtime_env_flags = build_shell_env_flags(&runtime_env);
-    let runtime_env_exports = build_shell_env_exports(&runtime_env);
     let process_metadata =
         runtime_metadata_for_process(&request.provider, request.metadata.as_ref());
+    let runtime_env = build_runtime_env(request, process_metadata.as_ref())?;
+    let runtime_env_flags = build_shell_env_flags(&runtime_env);
+    // Backward-compatible fallback: a template without `{{RUNTIME_ENV_FLAGS}}`
+    // gets the runtime env flags just before each space-preceded
+    // `{{RUNTIME_AGENT_IMAGE}}`.
+    let flags_before_image = !template.contains("{{RUNTIME_ENV_FLAGS}}");
 
-    let mut data = template.to_string();
-    if !runtime_env_flags.is_empty() && !template.contains("{{RUNTIME_ENV_FLAGS}}") {
-        // Backward-compatible fallback: if the user-data template does not include
-        // `{{RUNTIME_ENV_FLAGS}}`, inject runtime env flags just before the runtime image token.
-        let image_token = " {{RUNTIME_AGENT_IMAGE}}";
-        let replacement = format!(" {} {{RUNTIME_AGENT_IMAGE}}", runtime_env_flags);
-        data = data.replace(image_token, &replacement);
-    }
-
-    let replacements = vec![
-        ("{{PROJECT_ID}}", request.project_id.to_string()),
-        ("{{RUNTIME_ID}}", request.runtime_id.to_string()),
-        ("{{LEASE_ID}}", request.lease_id.to_string()),
-        ("{{RUNTIME_TOKEN}}", request.runtime_token.clone()),
-        ("{{RUNTIME_AGENT_IMAGE}}", runtime_image),
-        (
-            "{{ORIGIN_INSTANCE_ID}}",
-            request
+    let mut rendered = String::with_capacity(template.len());
+    let mut offset = 0;
+    while let Some(found) = template[offset..].find("{{") {
+        let start = offset + found;
+        rendered.push_str(&template[offset..start]);
+        let Some((token, placeholder)) = USER_DATA_PLACEHOLDERS
+            .iter()
+            .find(|(token, _)| template[start..].starts_with(token))
+        else {
+            rendered.push('{');
+            offset = start + 1;
+            continue;
+        };
+        let value = match placeholder {
+            UserDataPlaceholder::ProjectId => request.project_id.to_string(),
+            UserDataPlaceholder::RuntimeId => request.runtime_id.to_string(),
+            UserDataPlaceholder::LeaseId => request.lease_id.to_string(),
+            UserDataPlaceholder::RuntimeToken => user_data_word(token, &request.runtime_token)?,
+            UserDataPlaceholder::RuntimeAgentImage
+                if flags_before_image && template[..start].ends_with(' ') =>
+            {
+                format!("{runtime_env_flags} {runtime_image}")
+            }
+            UserDataPlaceholder::RuntimeAgentImage => runtime_image.clone(),
+            UserDataPlaceholder::OriginInstanceId => request
                 .origin_instance_id
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
-        ),
-        (
-            "{{ORIGIN_MODE}}",
-            request.origin_mode.clone().unwrap_or_default(),
-        ),
-        ("{{ORIGIN_PROTOCOLS}}", request.origin_protocols.join(",")),
-        (
-            "{{ORIGIN_METADATA_JSON}}",
-            request
+            UserDataPlaceholder::OriginMode => {
+                user_data_word(token, request.origin_mode.as_deref().unwrap_or_default())?
+            }
+            UserDataPlaceholder::OriginProtocols => request
+                .origin_protocols
+                .iter()
+                .map(|protocol| user_data_word(token, protocol))
+                .collect::<anyhow::Result<Vec<_>>>()?
+                .join(","),
+            UserDataPlaceholder::OriginMetadataJson => request
                 .origin_metadata
                 .as_ref()
-                .map(JsonValue::to_string)
+                .map(user_data_json)
                 .unwrap_or_default(),
-        ),
-        (
-            "{{RUNTIME_METADATA_JSON}}",
-            process_metadata
+            UserDataPlaceholder::RuntimeMetadataJson => process_metadata
                 .as_ref()
-                .map(JsonValue::to_string)
+                .map(user_data_json)
                 .unwrap_or_default(),
-        ),
-        ("{{RUNTIME_ENV_FLAGS}}", runtime_env_flags.clone()),
-        ("{{RUNTIME_ENV_EXPORTS}}", runtime_env_exports),
-    ];
-
-    for (k, v) in replacements {
-        data = data.replace(k, &v);
+            UserDataPlaceholder::RuntimeEnvFlags => runtime_env_flags.clone(),
+            UserDataPlaceholder::RuntimeEnvExports => {
+                build_shell_env_exports(&runtime_env, line_indent(template, start))
+            }
+        };
+        rendered.push_str(&value);
+        offset = start + token.len();
     }
-
-    Ok(data)
+    rendered.push_str(&template[offset..]);
+    Ok(rendered)
 }
 
 fn resolve_runtime_agent_image_for_request(
@@ -327,7 +400,10 @@ fn resolve_runtime_agent_image_for_request(
     }
 }
 
-fn build_runtime_env(request: &EnsureRuntimeRequest) -> Vec<(String, String)> {
+fn build_runtime_env(
+    request: &EnsureRuntimeRequest,
+    process_metadata: Option<&JsonValue>,
+) -> anyhow::Result<Vec<(String, String)>> {
     let mut env = Vec::new();
     env.push(("SPACE_ID".to_string(), request.project_id.to_string()));
     env.push(("RUNTIME_ID".to_string(), request.runtime_id.to_string()));
@@ -361,22 +437,44 @@ fn build_runtime_env(request: &EnsureRuntimeRequest) -> Vec<(String, String)> {
         ));
     }
     if let Some(origin_metadata) = request.origin_metadata.as_ref() {
-        env.push(("ORIGIN_METADATA".to_string(), origin_metadata.to_string()));
+        env.push((
+            "ORIGIN_METADATA".to_string(),
+            user_data_json(origin_metadata),
+        ));
     }
-    let process_metadata =
-        runtime_metadata_for_process(&request.provider, request.metadata.as_ref());
-    if let Some(metadata) = process_metadata.as_ref() {
-        env.push(("RUNTIME_METADATA".to_string(), metadata.to_string()));
+    if let Some(metadata) = process_metadata {
+        env.push(("RUNTIME_METADATA".to_string(), user_data_json(metadata)));
+        // What the allocator set above (the runtime's ids, its token, its lease and origin
+        // settings) stays as the allocator set it.
+        let allocator_set: HashSet<String> = env.iter().map(|(key, _)| key.clone()).collect();
         env.extend(metadata_env_pairs(
             metadata,
             is_exact_managed_provider(&request.provider),
+            &allocator_set,
         ));
     }
 
-    env
+    if let Some((key, _)) = env.iter().find(|(_, value)| !is_user_data_text(value)) {
+        anyhow::bail!(
+            "Hetzner user-data cannot carry {key}: a launch value must be one line of printable text"
+        );
+    }
+    Ok(env)
 }
 
-fn metadata_env_pairs(metadata: &JsonValue, exact_managed_provider: bool) -> Vec<(String, String)> {
+/// The request's `metadata.env` entries that reach user-data, rendered and sorted by name: the
+/// ones [`request_may_set_runtime_env`] lets a launch set on this provider, as on the Docker
+/// allocator, and none the allocator sets itself (`allocator_set`). The runtime's model
+/// routing, its agent's switches, `ORIGIN_SKIP_AUTH` and the other operator settings belong in
+/// the operator's template. `{{RUNTIME_ENV_EXPORTS}}` exports these entries in the server's
+/// boot shell, ahead of the commands the template runs there; the managed launch keys are all
+/// the runtime's own names, none a setting Docker tools, the shell, the dynamic loader or an
+/// HTTP proxy client reads (scripts/check-self-host-compose.test.mjs keeps them so).
+fn metadata_env_pairs(
+    metadata: &JsonValue,
+    exact_managed_provider: bool,
+    allocator_set: &HashSet<String>,
+) -> Vec<(String, String)> {
     let env_map = metadata
         .as_object()
         .and_then(|obj| obj.get("env"))
@@ -387,13 +485,10 @@ fn metadata_env_pairs(metadata: &JsonValue, exact_managed_provider: bool) -> Vec
 
     let mut entries = Vec::new();
     for (key, value) in env_map {
-        if exact_managed_provider
-            && (!is_allowed_managed_runtime_env_key(key)
-                || canonical_managed_runtime_env_value(value).is_none())
+        if allocator_set.contains(key)
+            || !request_may_set_runtime_env(exact_managed_provider, key, value)
+            || !is_valid_env_key(key)
         {
-            continue;
-        }
-        if !is_valid_env_key(key) {
             continue;
         }
         let rendered = match value {
@@ -407,7 +502,7 @@ fn metadata_env_pairs(metadata: &JsonValue, exact_managed_provider: bool) -> Vec
                 }
             }
             JsonValue::Null => continue,
-            other => other.to_string(),
+            other => user_data_json(other),
         };
         if rendered.is_empty() {
             continue;
@@ -430,11 +525,141 @@ fn is_valid_env_key(key: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+/// Whether `value` is one line of printable text, the only kind user-data can
+/// carry. cloud-init reads a cloud-config template as YAML 1.1, where `\n`,
+/// `\r`, U+0085, U+2028 and U+2029 all end a line, and where any other control
+/// character, a byte order mark, U+FFFE or U+FFFF makes the document
+/// unreadable.
+fn is_user_data_text(value: &str) -> bool {
+    !value.chars().any(|ch| {
+        ch.is_control()
+            || matches!(
+                ch,
+                '\u{2028}' | '\u{2029}' | '\u{feff}' | '\u{fffe}' | '\u{ffff}'
+            )
+    })
+}
+
+/// One POSIX shell word that the shell reads back as exactly `value`, which
+/// must be user-data text ([`is_user_data_text`]).
+///
+/// A cloud-config template puts the word inside a YAML scalar, and a
+/// `## template: jinja` user-data is rendered by Jinja first, so the word never
+/// holds a pair of characters that either would read: `: ` and ` #` end a YAML
+/// plain scalar, and `{{`, `{%` and `{#` open a Jinja tag. Between the two
+/// characters of such a pair the quote is closed and opened again, which the
+/// shell joins back into the same word.
 fn shell_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    let mut previous = None;
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\"'\"'");
+            previous = None;
+            continue;
+        }
+        if previous.is_some_and(|previous| {
+            matches!(
+                (previous, ch),
+                (' ', '#') | (':', ' ') | ('{', '{' | '%' | '#')
+            )
+        }) {
+            quoted.push_str("''");
+        }
+        quoted.push(ch);
+        previous = Some(ch);
     }
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+    quoted.push('\'');
+    quoted
+}
+
+/// Compact JSON that parses back to `value`, with every string character other
+/// than an ASCII letter, digit, space or one of `_ . , / @ + = -` written as a
+/// `\uXXXX` escape. So the text holds no line break, no quote but JSON's own
+/// double quotes, no `#`, `$` or backslash outside an escape, no `:` but the
+/// ones after keys and no `{{`, `{%` or `{#`. Inside a single-quoted shell
+/// word, a YAML plain or block scalar, or Jinja input, it stays one inert piece
+/// of text.
+fn user_data_json(value: &JsonValue) -> String {
+    let mut json = String::new();
+    write_user_data_json(value, &mut json);
+    json
+}
+
+fn write_user_data_json(value: &JsonValue, json: &mut String) {
+    match value {
+        JsonValue::Null => json.push_str("null"),
+        JsonValue::Bool(flag) => json.push_str(if *flag { "true" } else { "false" }),
+        JsonValue::Number(number) => json.push_str(&number.to_string()),
+        JsonValue::String(text) => write_user_data_json_string(text, json),
+        JsonValue::Array(items) => {
+            json.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    json.push(',');
+                }
+                write_user_data_json(item, json);
+            }
+            json.push(']');
+        }
+        JsonValue::Object(entries) => {
+            json.push('{');
+            for (index, (key, item)) in entries.iter().enumerate() {
+                if index > 0 {
+                    json.push(',');
+                }
+                write_user_data_json_string(key, json);
+                json.push(':');
+                write_user_data_json(item, json);
+            }
+            json.push('}');
+        }
+    }
+}
+
+fn write_user_data_json_string(text: &str, json: &mut String) {
+    json.push('"');
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric()
+            || matches!(ch, ' ' | '_' | '.' | ',' | '/' | '@' | '+' | '=' | '-')
+        {
+            json.push(ch);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in ch.encode_utf16(&mut units) {
+                let _ = write!(json, "\\u{unit:04x}");
+            }
+        }
+    }
+    json.push('"');
+}
+
+/// A placeholder value the template takes as is: empty, or a letter or digit
+/// followed by letters, digits and `. _ + -`.
+fn user_data_word(placeholder: &str, value: &str) -> anyhow::Result<String> {
+    let word = value.is_empty()
+        || (value.starts_with(|ch: char| ch.is_ascii_alphanumeric())
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '+' | '-')));
+    anyhow::ensure!(
+        word,
+        "Hetzner user-data cannot carry {placeholder}: its value must be letters, digits and . _ + - only"
+    );
+    Ok(value.to_string())
+}
+
+/// An image reference the template can take as is: at most 512 characters, a
+/// letter or digit and then letters, digits and `. _ / : @ + -`, not ending in
+/// `:`.
+fn is_user_data_image_reference(value: &str) -> bool {
+    value.len() <= 512
+        && value.starts_with(|ch: char| ch.is_ascii_alphanumeric())
+        && !value.ends_with(':')
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '/' | ':' | '@' | '+' | '-')
+        })
 }
 
 fn build_shell_env_flags(values: &[(String, String)]) -> String {
@@ -445,12 +670,27 @@ fn build_shell_env_flags(values: &[(String, String)]) -> String {
         .join(" ")
 }
 
-fn build_shell_env_exports(values: &[(String, String)]) -> String {
+/// `export KEY='value'` lines. Each line after the first starts with `indent`,
+/// the placeholder's own indentation, so that all of them stay in a YAML block
+/// scalar the placeholder sits in.
+fn build_shell_env_exports(values: &[(String, String)], indent: &str) -> String {
     values
         .iter()
         .map(|(key, value)| format!("export {}={}", key, shell_quote(value)))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(&format!("\n{indent}"))
+}
+
+/// The spaces and tabs before `start` on its line, when nothing else comes
+/// before it there.
+fn line_indent(template: &str, start: usize) -> &str {
+    let line_start = template[..start].rfind('\n').map_or(0, |index| index + 1);
+    let indent = &template[line_start..start];
+    if indent.chars().all(|ch| ch == ' ' || ch == '\t') {
+        indent
+    } else {
+        ""
+    }
 }
 
 fn resolve_runtime_agent_image(metadata: &serde_json::Value) -> Option<String> {
@@ -462,25 +702,13 @@ fn resolve_runtime_agent_image(metadata: &serde_json::Value) -> Option<String> {
         .and_then(|value| value.as_str())?;
 
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.len() > 512 {
-        return None;
-    }
-    if trimmed
-        .chars()
-        .any(|ch| ch.is_whitespace() || ch == '"' || ch == '\'' || ch == '\\')
-    {
-        return None;
-    }
-
-    Some(trimmed.to_string())
+    is_user_data_image_reference(trimmed).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::allocator::EXACT_ONLY_LAUNCH_ENV_KEYS;
     use serde_json::json;
 
     fn sample_request() -> EnsureRuntimeRequest {
@@ -508,19 +736,99 @@ mod tests {
         }
     }
 
+    const PROVIDER_IMAGE: &str = "registry.example/runtime@sha256:0123abcd";
+
+    /// Runs `script` with /bin/sh, as cloud-init runs a runcmd item, and returns what it
+    /// printed. The scripts only print; a value that escaped its quoting would print
+    /// something else, not run.
+    fn sh(script: &str) -> String {
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run /bin/sh");
+        assert!(
+            output.status.success(),
+            "sh failed: {}\n{script}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("utf-8 output")
+    }
+
+    /// The runcmd items of rendered cloud-config, read as cloud-init reads them: a YAML 1.1
+    /// document whose only key is `runcmd` and whose items are all strings.
+    fn runcmd(rendered: &str) -> Vec<String> {
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(rendered).unwrap_or_else(|error| panic!("{error}\n{rendered}"));
+        let keys: Vec<_> = document
+            .as_mapping()
+            .unwrap_or_else(|| panic!("not a mapping:\n{rendered}"))
+            .keys()
+            .collect();
+        assert_eq!(keys, [&serde_yaml::Value::from("runcmd")], "{rendered}");
+        document["runcmd"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("runcmd is not a list:\n{rendered}"))
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .unwrap_or_else(|| panic!("runcmd item {item:?} is not a string:\n{rendered}"))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The `KEY=value` words `printf '%s\n'` prints for each `-e` of rendered env flags.
+    fn printed_flags(printed: &str) -> Vec<(String, String)> {
+        let lines: Vec<&str> = printed.lines().collect();
+        assert_eq!(lines.len() % 2, 0, "{printed}");
+        lines
+            .chunks(2)
+            .map(|pair| {
+                assert_eq!(pair[0], "-e", "{printed}");
+                let (key, value) = pair[1].split_once('=').expect("KEY=value");
+                (key.to_string(), value.to_string())
+            })
+            .collect()
+    }
+
+    fn flag<'a>(flags: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        let mut values = flags
+            .iter()
+            .filter(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str());
+        let value = values.next();
+        assert_eq!(values.next(), None, "{key} is set more than once");
+        value
+    }
+
+    /// A template without `{{RUNTIME_ENV_FLAGS}}` gets the flags just before the image, and
+    /// still gets the image.
     #[test]
-    fn render_injects_env_flags_before_runtime_image_placeholder() {
-        let template = r#"#cloud-config
-runcmd:
-  - docker run -d --name instafy-runtime --restart unless-stopped {{RUNTIME_AGENT_IMAGE}}
-"#;
-        let rendered = render_runtime_user_data_template(template, &sample_request(), None, None)
-            .expect("rendered user data");
-        assert!(rendered.contains("-e INSTAFY_ENABLE_BROWSER_SESSION='1'"));
-        assert!(rendered.contains("-e INSTAFY_VNC_PORT='5900'"));
-        assert!(rendered.contains("-e DOCKER_HOST='tcp://custom-docker.test:2375'"));
-        assert!(rendered.contains("-e CUSTOM_RUNTIME_SETTING='preserved'"));
-        assert!(rendered.contains("ghcr.io/instafy-dev/instafy-runtime-agent:webdev"));
+    fn a_template_without_env_flags_gets_them_before_the_image() {
+        let template = "#cloud-config\nruncmd:\n  - printf '%s\\n' {{RUNTIME_AGENT_IMAGE}}\n";
+        let mut request = sample_request();
+        request.metadata = Some(json!({ "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" } }));
+        let rendered =
+            render_runtime_user_data_template(template, &request, Some(PROVIDER_IMAGE), None)
+                .expect("rendered user data");
+        assert!(!rendered.contains("RUNTIME_AGENT_IMAGE"), "{rendered}");
+
+        let printed = sh(&runcmd(&rendered)[0]);
+        let (flags, image) = printed
+            .trim_end_matches('\n')
+            .rsplit_once('\n')
+            .expect("flags and image");
+        assert_eq!(image, PROVIDER_IMAGE);
+        let flags = printed_flags(flags);
+        assert_eq!(
+            flag(&flags, "SPACE_ID"),
+            Some(request.project_id.to_string().as_str())
+        );
+        assert_eq!(flag(&flags, "RUNTIME_ACCESS_TOKEN"), Some("token-123"));
+        assert_eq!(flag(&flags, "INSTAFY_ENABLE_BROWSER_SESSION"), Some("1"));
     }
 
     #[test]
@@ -661,6 +969,491 @@ runcmd:
             .expect("provider image"),
             "registry.example/runtime@sha256:abc",
         );
+    }
+
+    /// Each placeholder kind, in the places a cloud-config template puts it: env flags and
+    /// JSON in a runcmd plain scalar, exports in a block scalar.
+    const ROUND_TRIP_TEMPLATE: &str = r#"#cloud-config
+runcmd:
+  - printf '%s\n' {{RUNTIME_ENV_FLAGS}}
+  - printf '%s\n' '{{RUNTIME_METADATA_JSON}}' '{{ORIGIN_METADATA_JSON}}'
+  - |
+    {{RUNTIME_ENV_EXPORTS}}
+    printf '%s\n' "$INSTAFY_VNC_GEOMETRY"
+"#;
+
+    /// A request value comes back unchanged through YAML and the shell, whatever it holds,
+    /// and never changes the document around it: not with YAML (`: `, ` #`, quotes,
+    /// indicators), not with the shell (quotes, `$( )`, backquotes, operators), not with
+    /// Jinja (`{{`, `{%`, `{#`) and not with another placeholder.
+    #[test]
+    fn request_values_read_back_unchanged_through_yaml_and_the_shell() {
+        let values = [
+            "a: b",
+            "a:",
+            "key: value # comment",
+            "a #b",
+            "#a",
+            "a\u{a0}#b",
+            "{{RUNTIME_ENV_EXPORTS}}",
+            "{{RUNTIME_TOKEN}}",
+            "{% if true %}x{% endif %}",
+            "{# note #}",
+            "it's",
+            "'",
+            "''",
+            "\"quoted\"",
+            "back\\slash \\n",
+            "$(echo INJECTED)",
+            "`echo INJECTED`",
+            "${HOME}",
+            ";echo INJECTED;",
+            "&& echo INJECTED || echo INJECTED",
+            "| echo INJECTED > /dev/null",
+            "* ? [a] ~",
+            "- item",
+            "? key",
+            "&anchor *alias !tag @at `tick",
+            "%YAML 1.1",
+            "---",
+            "...",
+            "ünïcødé ✓ 🚀",
+            "trailing space ",
+            " leading space",
+            "--privileged",
+        ];
+        for value in values {
+            let mut request = sample_request();
+            request.metadata = Some(json!({
+                "source": value,
+                "env": { "INSTAFY_VNC_GEOMETRY": value }
+            }));
+            request.origin_metadata = Some(json!({ "label": value }));
+            let rendered = render_runtime_user_data_template(
+                ROUND_TRIP_TEMPLATE,
+                &request,
+                Some(PROVIDER_IMAGE),
+                None,
+            )
+            .expect("rendered user data");
+            for jinja in ["{{", "{%", "{#"] {
+                assert!(
+                    !rendered.contains(jinja),
+                    "{value:?} left {jinja}:\n{rendered}"
+                );
+            }
+            let commands = runcmd(&rendered);
+            assert_eq!(commands.len(), 3, "{value:?}:\n{rendered}");
+
+            let flags = printed_flags(&sh(&commands[0]));
+            assert_eq!(
+                flag(&flags, "INSTAFY_VNC_GEOMETRY"),
+                Some(value),
+                "{rendered}"
+            );
+            let metadata: JsonValue =
+                serde_json::from_str(flag(&flags, "RUNTIME_METADATA").expect("metadata"))
+                    .expect("RUNTIME_METADATA is JSON");
+            assert_eq!(Some(&metadata), request.metadata.as_ref());
+            let origin_metadata: JsonValue =
+                serde_json::from_str(flag(&flags, "ORIGIN_METADATA").expect("origin metadata"))
+                    .expect("ORIGIN_METADATA is JSON");
+            assert_eq!(Some(&origin_metadata), request.origin_metadata.as_ref());
+
+            let printed = sh(&commands[1]);
+            let json: Vec<JsonValue> = printed
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("JSON placeholder"))
+                .collect();
+            assert_eq!(
+                json,
+                [
+                    request.metadata.clone().unwrap(),
+                    request.origin_metadata.clone().unwrap()
+                ]
+            );
+
+            assert_eq!(sh(&commands[2]), format!("{value}\n"), "{rendered}");
+        }
+    }
+
+    /// cloud-init reads a cloud-config template as YAML 1.1, where `\n`, `\r`, U+0085, U+2028
+    /// and U+2029 all end a line. JSON keeps such characters escaped, but an env value is
+    /// passed as it is, so a launch whose env value has one, or any control character,
+    /// fails instead of rendering.
+    #[test]
+    fn a_line_break_or_control_character_in_an_env_value_fails_the_launch() {
+        for value in [
+            "a\nb",
+            "a\rb",
+            "a\u{85}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            "a\tb",
+            "a\u{0}b",
+            "\u{1b}[31m",
+            "a\u{7f}",
+            "\u{feff}a",
+            "a\u{fffe}",
+        ] {
+            let mut request = sample_request();
+            request.metadata = Some(json!({ "env": { "INSTAFY_VNC_GEOMETRY": value } }));
+            let error = render_runtime_user_data_template(
+                ROUND_TRIP_TEMPLATE,
+                &request,
+                Some(PROVIDER_IMAGE),
+                None,
+            )
+            .expect_err("a value with a line break must not render");
+            assert!(
+                error.to_string().contains("INSTAFY_VNC_GEOMETRY"),
+                "{error}"
+            );
+
+            let mut request = sample_request();
+            request.origin_mode = Some(value.to_string());
+            let error = render_runtime_user_data_template(
+                ROUND_TRIP_TEMPLATE,
+                &request,
+                Some(PROVIDER_IMAGE),
+                None,
+            )
+            .expect_err("an origin mode with a line break must not render");
+            assert!(error.to_string().contains("ORIGIN_MODE"), "{error}");
+        }
+
+        // Inside launch metadata the same characters are JSON escapes, which keep the
+        // document as it was.
+        let mut request = sample_request();
+        request.metadata = Some(json!({
+            "source": "x\nbootcmd:\n  - echo INJECTED\n#",
+            "label": "x\u{2028}bootcmd:\u{2028}- echo INJECTED\u{85}\u{2029}",
+            "env": { "INSTAFY_ENABLE_BROWSER_SESSION": "1" }
+        }));
+        let rendered = render_runtime_user_data_template(
+            ROUND_TRIP_TEMPLATE,
+            &request,
+            Some(PROVIDER_IMAGE),
+            None,
+        )
+        .expect("rendered user data");
+        let commands = runcmd(&rendered);
+        let flags = printed_flags(&sh(&commands[0]));
+        let metadata: JsonValue =
+            serde_json::from_str(flag(&flags, "RUNTIME_METADATA").expect("metadata"))
+                .expect("RUNTIME_METADATA is JSON");
+        assert_eq!(Some(&metadata), request.metadata.as_ref());
+    }
+
+    /// The token, origin mode, origin protocols and image go into a template as they are, so
+    /// they must be plain words; a launch whose word is not fails instead of rendering.
+    #[test]
+    fn placeholders_taken_as_is_hold_only_plain_words() {
+        let render = |template: &str, request: &EnsureRuntimeRequest, image: Option<&str>| {
+            render_runtime_user_data_template(template, request, image, None)
+        };
+        let mut request = sample_request();
+        request.metadata = None;
+        // A JWT's shape, with every character a word may hold.
+        request.runtime_token = "header.payload.sig-_+0".to_string();
+        request.origin_protocols = vec!["http".to_string(), "ws".to_string()];
+        // No space before the image, which would take the env flags there.
+        assert_eq!(
+            render(
+                "{{RUNTIME_TOKEN}}|{{ORIGIN_MODE}}|{{ORIGIN_PROTOCOLS}}|{{RUNTIME_AGENT_IMAGE}}",
+                &request,
+                Some(PROVIDER_IMAGE),
+            )
+            .expect("plain words"),
+            format!("header.payload.sig-_+0|hosted|http,ws|{PROVIDER_IMAGE}")
+        );
+
+        let mut mode = request.clone();
+        mode.origin_mode = Some("hosted;echo INJECTED".to_string());
+        assert!(render("{{ORIGIN_MODE}}", &mode, Some(PROVIDER_IMAGE)).is_err());
+        // Quoted in an env flag, the same mode is only text.
+        let flags = render(
+            "printf '%s\\n' {{RUNTIME_ENV_FLAGS}}",
+            &mode,
+            Some(PROVIDER_IMAGE),
+        )
+        .expect("flags");
+        assert_eq!(
+            flag(&printed_flags(&sh(&flags)), "ORIGIN_MODE"),
+            Some("hosted;echo INJECTED")
+        );
+
+        let mut protocols = request.clone();
+        protocols.origin_protocols = vec!["http".to_string(), "$(echo INJECTED)".to_string()];
+        assert!(render("{{ORIGIN_PROTOCOLS}}", &protocols, Some(PROVIDER_IMAGE)).is_err());
+
+        let mut token = request.clone();
+        token.runtime_token = "token$(echo INJECTED)".to_string();
+        assert!(render("{{RUNTIME_TOKEN}}", &token, Some(PROVIDER_IMAGE)).is_err());
+
+        // A request image that is not a plain reference is not used, as one with whitespace
+        // never was: the provider's image applies, and without one the launch fails.
+        for image in [
+            "alpine;echo INJECTED",
+            "alpine$(echo INJECTED)",
+            "alpine|sh",
+            "alpine:{{RUNTIME_TOKEN}}",
+            "-v/:/host",
+            "alpine:",
+        ] {
+            let mut requested = request.clone();
+            requested.metadata = Some(json!({ "runtimeAgentImage": image }));
+            assert_eq!(
+                render("{{RUNTIME_AGENT_IMAGE}}", &requested, Some(PROVIDER_IMAGE))
+                    .expect("provider image"),
+                PROVIDER_IMAGE,
+                "{image}"
+            );
+            assert!(render("{{RUNTIME_AGENT_IMAGE}}", &requested, None).is_err());
+            // The provider's own image is checked the same way.
+            assert!(render("{{RUNTIME_AGENT_IMAGE}}", &request, Some(image)).is_err());
+        }
+        let mut requested = request.clone();
+        requested.metadata = Some(json!({
+            "runtimeAgentImage": "registry.example:5000/team/runtime-agent:v1.2_3@sha256:abc"
+        }));
+        assert_eq!(
+            render("{{RUNTIME_AGENT_IMAGE}}", &requested, Some(PROVIDER_IMAGE)).expect("image"),
+            "registry.example:5000/team/runtime-agent:v1.2_3@sha256:abc"
+        );
+    }
+
+    /// `{{RUNTIME_ENV_EXPORTS}}` runs in the server's boot shell, before the commands the
+    /// template runs there. A request sets only the launch keys its provider takes, by the
+    /// Docker allocator's rule (request_may_set_runtime_env), and never one the allocator sets
+    /// itself: for a provider other than exact instafy_cloud, not the operator's settings, the
+    /// Shared Browser's egress policy or its VNC host and depth, nor the WebRTC switch as
+    /// anything but a string.
+    #[test]
+    fn a_request_sets_only_the_launch_keys_its_provider_takes() {
+        let host_settings = [
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "DOCKER_CERT_PATH",
+            "COMPOSE_FILE",
+            "BUILDKIT_HOST",
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "IFS",
+            "ENV",
+            "BASH_ENV",
+            "SHELLOPTS",
+            "PS4",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "SSL_CERT_FILE",
+            "GIT_DIR",
+            "GIT_SSH_COMMAND",
+            "RUNTIME_AGENT_IMAGE",
+            "RUNTIME_AGENT_BUILD_TARGET",
+            "INSTAFY_SHARED_BROWSER_APPROVAL_DIR",
+            "CUSTOM_RUNTIME_SETTING",
+        ];
+        // What the operator sets in the template: the runtime's model routing, its agent's
+        // switches, its access check and its timings.
+        let operator_settings = [
+            "CODEX_MODEL",
+            "CODEX_SANDBOX_MODE",
+            "OPENAI_BASE_URL",
+            "PROXY_BASE_URL",
+            "ORIGIN_SKIP_AUTH",
+            "INSTAFY_HOLD_PAGES",
+            "INSTAFY_RESEARCH_PAGES_SEARCH_FIRST",
+            "RUNTIME_HEARTBEAT_SECONDS",
+        ];
+        let allocator_set = [
+            "SPACE_ID",
+            "RUNTIME_ID",
+            "RUNTIME_LEASE_ID",
+            "RUNTIME_PROVIDER",
+            "RUNTIME_ACCESS_TOKEN",
+            "ORIGIN_INTERNAL_TOKEN",
+            "ORIGIN_ID",
+            "ORIGIN_LEASE_ID",
+            "ORIGIN_MODE",
+            "ORIGIN_PROTOCOLS",
+            "ORIGIN_METADATA",
+            "RUNTIME_METADATA",
+        ];
+        let mut env = serde_json::Map::new();
+        for key in host_settings
+            .iter()
+            .chain(&operator_settings)
+            .chain(&allocator_set)
+            .chain(EXACT_ONLY_LAUNCH_ENV_KEYS)
+        {
+            env.insert(key.to_string(), json!("chosen"));
+        }
+        env.insert("INSTAFY_ENABLE_BROWSER_SESSION".to_string(), json!(true));
+        env.insert("INSTAFY_BROWSER_WEBRTC_ENABLED".to_string(), json!(true));
+        env.insert(
+            "ORIGIN_GIT_REMOTE_URL".to_string(),
+            json!("https://git.example.test/space.git"),
+        );
+        env.insert("RUNTIME_CPU_LIMIT".to_string(), json!(2));
+
+        for provider in [
+            "hetzner",
+            "external-http",
+            "instafy-cloud-custom",
+            "self-hosted",
+            "instafy-cloud",
+        ] {
+            let exact = is_exact_managed_provider(provider);
+            let mut request = sample_request();
+            request.provider = provider.to_string();
+            request.metadata = Some(json!({ "env": env }));
+            let rendered = render_runtime_user_data_template(
+                ROUND_TRIP_TEMPLATE,
+                &request,
+                Some(PROVIDER_IMAGE),
+                None,
+            )
+            .expect("rendered user data");
+            let commands = runcmd(&rendered);
+
+            let flags = printed_flags(&sh(&commands[0]));
+            let mut keys: Vec<&str> = flags.iter().map(|(key, _)| key.as_str()).collect();
+            keys.sort_unstable();
+            let mut expected = allocator_set.to_vec();
+            expected.extend([
+                "INSTAFY_ENABLE_BROWSER_SESSION",
+                "ORIGIN_GIT_REMOTE_URL",
+                "RUNTIME_CPU_LIMIT",
+            ]);
+            // Exact instafy_cloud's controller strips a client's browser policy and puts the
+            // WebRTC switch in the form its relay policy reads before the request comes here.
+            if exact {
+                expected.push("INSTAFY_BROWSER_WEBRTC_ENABLED");
+                expected.extend(EXACT_ONLY_LAUNCH_ENV_KEYS);
+            }
+            expected.sort_unstable();
+            assert_eq!(keys, expected, "{provider}");
+            for key in allocator_set {
+                assert_ne!(flag(&flags, key), Some("chosen"), "{provider} {key}");
+            }
+            assert_eq!(flag(&flags, "INSTAFY_ENABLE_BROWSER_SESSION"), Some("1"));
+            assert_eq!(flag(&flags, "RUNTIME_CPU_LIMIT"), Some("2"));
+
+            let mut exported: Vec<&str> = commands[2]
+                .lines()
+                .filter_map(|line| line.strip_prefix("export "))
+                .map(|line| line.split_once('=').expect("KEY=value").0)
+                .collect();
+            exported.sort_unstable();
+            assert_eq!(exported, expected, "{provider}");
+        }
+
+        // A provider other than exact instafy_cloud takes the WebRTC switch as a string, the
+        // form the controller's relay policy reads.
+        let mut request = sample_request();
+        request.metadata = Some(json!({ "env": { "INSTAFY_BROWSER_WEBRTC_ENABLED": "1" } }));
+        let rendered = render_runtime_user_data_template(
+            ROUND_TRIP_TEMPLATE,
+            &request,
+            Some(PROVIDER_IMAGE),
+            None,
+        )
+        .expect("rendered user data");
+        let flags = printed_flags(&sh(&runcmd(&rendered)[0]));
+        assert_eq!(flag(&flags, "INSTAFY_BROWSER_WEBRTC_ENABLED"), Some("1"));
+    }
+
+    /// Launch metadata can carry allocator settings such as the Hetzner API token, from a
+    /// controller that copies a provider row's metadata in whole or from the caller. They must
+    /// not ride along into user-data, which every process on the server can read from the
+    /// metadata service.
+    #[test]
+    fn provider_configuration_in_a_launch_never_reaches_user_data() {
+        let template = r#"#cloud-config
+runcmd:
+  - printf '%s\n' {{RUNTIME_ENV_FLAGS}}
+  - printf '%s\n' '{{RUNTIME_METADATA_JSON}}'
+  - |
+    {{RUNTIME_ENV_EXPORTS}}
+"#;
+        for provider in ["hetzner", "instafy-cloud"] {
+            let mut metadata = serde_json::Map::new();
+            for key in crate::allocator::PROVIDER_CONFIG_METADATA_KEYS {
+                metadata.insert(key.to_string(), json!(format!("provider-secret-{key}")));
+            }
+            metadata.insert(
+                "env".to_string(),
+                json!({ "INSTAFY_ENABLE_BROWSER_SESSION": "1" }),
+            );
+            let mut request = sample_request();
+            request.provider = provider.to_string();
+            request.metadata = Some(JsonValue::Object(metadata));
+            let rendered =
+                render_runtime_user_data_template(template, &request, Some(PROVIDER_IMAGE), None)
+                    .expect("rendered user data");
+            assert!(
+                !rendered.contains("provider-secret"),
+                "{provider}:\n{rendered}"
+            );
+            for key in crate::allocator::PROVIDER_CONFIG_METADATA_KEYS {
+                assert!(!rendered.contains(key), "{provider} kept {key}");
+            }
+            let flags = printed_flags(&sh(&runcmd(&rendered)[0]));
+            assert_eq!(flag(&flags, "INSTAFY_ENABLE_BROWSER_SESSION"), Some("1"));
+        }
+    }
+
+    #[test]
+    fn shell_quote_splits_pairs_yaml_or_jinja_would_read() {
+        assert_eq!(
+            shell_quote("a: b #c {{d}} {%e {#f it's"),
+            "'a:'' b ''#c {''{d}} {''%e {''#f it'\"'\"'s'"
+        );
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("plain"), "'plain'");
+    }
+
+    #[test]
+    fn user_data_json_reads_back_as_the_same_value_in_inert_characters() {
+        let every_ascii: String = (0u8..=0x7f).map(char::from).collect();
+        let mut object = serde_json::Map::new();
+        object.insert(
+            every_ascii.clone(),
+            json!([
+                every_ascii,
+                "\u{85}\u{2028}\u{2029}\u{feff}\u{fffe}\u{ffff}",
+                "ünïcødé ✓ 🚀",
+                1,
+                -2.5,
+                1e300,
+                true,
+                null,
+                { "": {} },
+                []
+            ]),
+        );
+        let value = JsonValue::Object(object);
+        let json = user_data_json(&value);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&json).expect("JSON"),
+            value
+        );
+        assert!(
+            json.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || " _.,/@+=-\\\"{}[]:".contains(ch)),
+            "{json}"
+        );
+        for pair in [": ", " #", "{{", "{%", "{#", "'"] {
+            assert!(!json.contains(pair), "{pair} in {json}");
+        }
     }
 }
 
