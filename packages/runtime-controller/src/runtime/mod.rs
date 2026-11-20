@@ -83,7 +83,7 @@ pub(crate) use token::{
 };
 
 #[cfg(test)]
-pub(crate) use db::fetch_runtime_for_update;
+pub(crate) use db::{fetch_runtime_for_update, release_origin_instances_for_runtime};
 #[cfg(test)]
 pub(crate) use status::determine_runtime_health;
 #[cfg(test)]
