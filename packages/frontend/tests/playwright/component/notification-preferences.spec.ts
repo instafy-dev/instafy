@@ -39,7 +39,9 @@ async function mountPreferences(page: Page) {
     body: `export const runtimeControllerEnabled=true;
       export const controllerBaseUrl=location.origin+${JSON.stringify(API)};
       export const resolveControllerRequestContext=async(accessToken)=>({baseUrl:controllerBaseUrl,accessToken});
-      export const readControllerError=async(response,fallback)=>(await response.json().catch(()=>null))?.error??fallback;`,
+      export const readControllerError=async(response,fallback)=>(await response.json().catch(()=>null))?.error??fallback;
+      export const readControllerApiError=async(response,fallback)=>{const body=await response.json().catch(()=>null);
+        return {status:response.status,message:body?.error??fallback,code:body?.code??null,details:body?.details??null,url:response.url};};`,
   }));
   await page.route("**/src/sdk/instafy/index.ts*", route => route.fulfill({
     contentType: "application/javascript",
