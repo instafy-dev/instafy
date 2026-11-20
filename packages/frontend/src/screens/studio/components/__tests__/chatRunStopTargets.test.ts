@@ -285,4 +285,13 @@ describe("where the chat offers Stop", () => {
     }
     expect(chatPanel.slice(chatPanel.indexOf("const chatSurface = ("), composer)).not.toContain("composerRunStopController");
   });
+
+  // A Stop during a pause on the person's fields ends that pause: the
+  // Browser view learns of the Stop from the chat's own record of it.
+  it("gives the chat's Browser view the runs a Stop ended, from the chat's latest messages", () => {
+    const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
+    const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
+    expect(chatPanel).toContain("const browserHumanInputStoppedRunIds = useMemo(() => runIdsEndedByStop(recentMessages), [recentMessages]);");
+    expect(chatPanel).toContain("humanInputStoppedRunIds={browserHumanInputStoppedRunIds}");
+  });
 });
