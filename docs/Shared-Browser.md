@@ -1521,11 +1521,17 @@ research: told only that such research searches first, the routing step read it
 as research to do first, in the browser, and sent news, a comparison and a page
 of places, and trips and events on a map, to the browser before the turn that
 could search (a local test, Nov 20). Without the first line, on every AI
-with no web search of its own, the routing input is as it was, and without the
-second, which is every runtime while the setting is off, research that ends in
-a page goes to the browser first, availability for dates put on a page among
-it: a building turn that makes a page can't ask for the browser for what
-search didn't reach, so nothing would check the dates. These are the section's
+with no web search of its own, the routing input is as it was. With the first
+line and the setting off, which is every message on a person's own ChatGPT
+login until it is on, the second line says instead that research that ends in
+a page doesn't search first for this message, and such research goes to the
+browser first, availability for dates put on a page among it: a building turn
+that makes a page can't ask for the browser for what search didn't reach, so
+nothing would check the dates. Left unsaid, the routing step answered "unless
+it searches first" from the request (for news put on a page: "This requires
+searching first, then creating a page", a local test, Nov 20), which kept the
+browser first only while searching first read as a browser step. These are the
+section's
 first rule, ahead of the routes: as an exception in the middle of the
 `browser_then_build` line, a comparison page went to the browser though its
 routing input said Octo could search (a local test, Nov 17). Its exception is
@@ -1542,7 +1548,9 @@ what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,
 Nov 7). A map ("on a map") stays with Octo, its research too, since a map's
-skill finds and cites its places itself, and so do a change in the person's own words to a page
+skill finds and cites its places itself (a map of what a site the person names
+in the browser says still goes to the browser first, as all work they name the
+browser for does), and so do a change in the person's own words to a page
 or map here (a note, a name, a color) and a page or change made only from what
 the chat already found and confirmed, each a change of files, in a line of
 their own: as the last sentences of the `browser_then_build` line they read as

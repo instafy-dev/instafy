@@ -181,9 +181,19 @@ const ROUTING_SEARCH_FACT: &str =
 /// What the routing step reads after [`ROUTING_SEARCH_FACT`] when this runtime also has
 /// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] on: research that ends in a page then stays with Octo too.
 /// Without it, such research goes to the browser first, as it did before Octo could search, also
-/// where Octo can search for a reply.
+/// where Octo can search for a reply ([`ROUTING_NO_SEARCH_FIRST_FACT`]).
 const ROUTING_SEARCH_FIRST_FACT: &str =
     "Research that ends in a page searches first for this message.\n";
+/// What the routing step reads after [`ROUTING_SEARCH_FACT`] instead, where Octo can search but
+/// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] is off, which is every message on a person's own ChatGPT
+/// login until it is on: the same fact, said of the other state, so the section's "unless it
+/// searches first" is answered either way. Left unsaid, the routing step answers it from the
+/// request ("This requires searching first, then creating a page", a local test, Nov 20), and that
+/// kept such research in the browser only while searching first read as a browser step, which
+/// [`ROUTING_SEARCH_FACT`] and the section now rule out. With search off the routing step reads
+/// none of the three.
+const ROUTING_NO_SEARCH_FIRST_FACT: &str =
+    "Research that ends in a page doesn't search first for this message.\n";
 /// The runtime setting that lets research whose answer ends in a page search before the browser
 /// ([`ROUTING_SEARCH_FIRST_FACT`]): on only when set to `1`, `true`, `on` or `yes`. Off by default,
 /// so such routes stay as they were on release, a person's own ChatGPT login's too, until the
@@ -19153,7 +19163,8 @@ pub(crate) struct RoutingPreflightRequest {
 
 /// `searches`: Octo's turn for this message can search the web, which the routing step then reads
 /// after the browser skill's routing section ([`ROUTING_SEARCH_FACT`]), and `pages_search_first`:
-/// research that ends in a page searches first there too ([`ROUTING_SEARCH_FIRST_FACT`]). With the
+/// research that ends in a page searches first there too ([`ROUTING_SEARCH_FIRST_FACT`]), or
+/// doesn't ([`ROUTING_NO_SEARCH_FIRST_FACT`]), which the line after it says either way. With the
 /// browser routes, the routing step also reads the space's pages as a turn that may write files
 /// reads them, each made in this chat or in another and read-only here
 /// ([`space_pages::space_pages_lines`]), after the part every chat shares: a change to another
@@ -19173,7 +19184,9 @@ fn routing_preflight_request(
         .flatten()
         .map(|routes| match (searches, pages_search_first) {
             (false, _) => routes,
-            (true, false) => format!("{routes}{ROUTING_SEARCH_FACT}"),
+            (true, false) => {
+                format!("{routes}{ROUTING_SEARCH_FACT}{ROUTING_NO_SEARCH_FIRST_FACT}")
+            }
             (true, true) => format!("{routes}{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}"),
         });
     let pages = if browser_routes.is_some() {

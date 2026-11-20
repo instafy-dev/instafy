@@ -3611,7 +3611,8 @@ fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
 /// When Octo can search the web for the message, which its routing input then says in one line
 /// after the section, availability for dates at places nobody named is research answered in a
 /// reply, which stays `direct` and searches first; put on a page, it is research that ends in a
-/// page, which stays `direct` only where it searches first, a second line. A site that must be
+/// page, which stays `direct` only where it searches first, which a second line says, or that it
+/// doesn't. A site that must be
 /// used first (availability at a place named, a sign-in or their account, an order's own status
 /// or items, a form or a planner) keeps each of them out of it, with search or without: the rule
 /// comes first, so its exception is the whole rule's, and a rule or policy beside an order
@@ -3669,7 +3670,7 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
         assert_the_routing_step_reads(section, request);
         // The routing input says whether Octo can search the web for the message, once, right
         // after the section, and only when it can; whether research that ends in a page searches
-        // first is the line after it, only with the first.
+        // first is the line after it, only with the first: that it does, or that it doesn't.
         let tmp = scaffolded_space();
         let job = test_lease_job(
             Some("feature"),
@@ -3700,6 +3701,18 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
                     "```\n{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}"
                 )),
                 searches && pages_first,
+                "{request}"
+            );
+            assert_eq!(
+                prompt.matches(ROUTING_NO_SEARCH_FIRST_FACT).count(),
+                usize::from(searches && !pages_first),
+                "{request}"
+            );
+            assert_eq!(
+                prompt.contains(&format!(
+                    "```\n{ROUTING_SEARCH_FACT}{ROUTING_NO_SEARCH_FIRST_FACT}"
+                )),
+                searches && !pages_first,
                 "{request}"
             );
         }
@@ -3743,8 +3756,9 @@ fn research_pages_search_first_only_where_the_runtime_setting_is_on() {
 /// days or no pins (a local test, Nov 20). The first line now says that Instafy's browser can't
 /// search, the build line's sentence on research that ends in a page says where it searches and
 /// that a map isn't such research, and the line that keeps a map `direct` keeps its research
-/// there too. The second line is as it was, so with the first line alone such research still
-/// browses first. The routing step reads the whole section, then the lines, for each message.
+/// there too. The second line is as it was where such research searches first, and where it
+/// doesn't, the line in its place says so. The routing step reads the whole section, then the
+/// lines, for each message.
 #[test]
 fn with_search_research_pages_and_maps_search_in_octos_own_turn() {
     assert_eq!(
@@ -3791,7 +3805,10 @@ fn with_search_research_pages_and_maps_search_in_octos_own_turn() {
             json!({ "prompt_text": request, "metadata": {} }),
         );
         for (pages_first, lines) in [
-            (false, ROUTING_SEARCH_FACT.to_string()),
+            (
+                false,
+                format!("{ROUTING_SEARCH_FACT}{ROUTING_NO_SEARCH_FIRST_FACT}"),
+            ),
             (
                 true,
                 format!("{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}"),
@@ -3812,6 +3829,75 @@ fn with_search_research_pages_and_maps_search_in_octos_own_turn() {
                 pages_first,
                 "{request}"
             );
+        }
+    }
+}
+
+/// Where Octo can search the web for a message but research that ends in a page doesn't search
+/// first, which is every message on a person's own ChatGPT login while
+/// `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` is off, the routing step reads that it doesn't, in the
+/// line after the one that says Octo can search. The section sends such research to the browser
+/// first "unless it searches first", and left to answer that from the request, the routing step
+/// answered it itself: for news put on a page it wrote "This requires searching first, then
+/// creating a page from the findings, so route to browser_then_build" (a local test, Nov 20),
+/// which kept the browser first only while searching first read as a step of the browser's. The
+/// section and the first line now say the browser can't search, so the same reading would keep
+/// such research with Octo on a runtime whose setting says it must not: the route is now the
+/// line's, not the reading's. With search off the routing step reads none of the lines, as before,
+/// and where such research searches first, only that it does.
+#[test]
+fn where_research_pages_do_not_search_first_the_routing_step_reads_so() {
+    const SAYS_NOT: &str = "Research that ends in a page doesn't search first for this message.\n";
+    const SAYS_SO: &str = "Research that ends in a page searches first for this message.\n";
+    const CAN_SEARCH: &str = "Octo can search the web for this message; Instafy's browser can't.\n";
+    let section = routing_section(BROWSER_SKILL);
+    // The exception each of the two lines answers, and the only place the section states it for
+    // the route that browses first.
+    assert_eq!(
+        section
+            .matches("unless it searches first (in Octo's own turn: the browser can't).")
+            .count(),
+        1,
+        "{section}"
+    );
+    let tmp = scaffolded_space();
+    for request in [
+        "What's the news about Airbus today? Put it on a small page I can share.",
+        "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+        "Plan 2 days in Lyon for a first visit: where to stay, what to see each day, on a map.",
+    ] {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({ "prompt_text": request, "metadata": {} }),
+        );
+        for (searches, pages_first, lines) in [
+            (false, false, String::new()),
+            (false, true, String::new()),
+            (true, false, format!("{CAN_SEARCH}{SAYS_NOT}")),
+            (true, true, format!("{CAN_SEARCH}{SAYS_SO}")),
+        ] {
+            let prompt =
+                routing_preflight_request(&job, tmp.path(), request, None, searches, pages_first)
+                    .prompt;
+            let at = prompt.find(section).expect("the routing section, whole");
+            let after = prompt[at + section.len()..].trim_start_matches('\n');
+            let after = after.strip_prefix("```\n").expect("the section's end");
+            assert!(
+                after.starts_with(&lines),
+                "search {searches}, research pages searching first {pages_first}: {after}"
+            );
+            // Each line is read once, in its own state, and never both of the last two.
+            for (line, read) in [
+                (CAN_SEARCH, searches),
+                (SAYS_NOT, searches && !pages_first),
+                (SAYS_SO, searches && pages_first),
+            ] {
+                assert_eq!(
+                    prompt.matches(line).count(),
+                    usize::from(read),
+                    "search {searches}, research pages searching first {pages_first}: {line}"
+                );
+            }
         }
     }
 }

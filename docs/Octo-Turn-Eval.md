@@ -220,8 +220,8 @@ Instafy's browser can't, after the browser skill's routing section, and availabi
 named, answered in a reply, stays `direct` as other research answered in a reply does, unless a site must be used
 first. With `"researchPagesSearchFirst": true`
 as well, it is sent on a runtime with `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on: a second line says research that ends
-in a page searches first, and such research stays `direct` too; without it, research that ends in a page goes to the
-browser first. A case's `pages`
+in a page searches first, and such research stays `direct` too; without it, that line says such research doesn't
+search first, and it goes to the browser first. A case's `pages`
 are the space's pages as the controller gives a job them, each `"madeIn": "this chat"` or `"another chat"`: the routing
 input names them as a turn that may write files reads them. A case can also list words its routing answer's `summary`
 must name where a routed browser turn reads it (`"summaryNames"`, in the card's task after the person's words), such as

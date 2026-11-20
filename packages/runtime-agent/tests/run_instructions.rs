@@ -2161,7 +2161,10 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
         ensure!(
             !routing.contains("Octo can search the web for this message")
                 && !routing
-                    .contains("Research that ends in a page searches first for this message."),
+                    .contains("Research that ends in a page searches first for this message.")
+                && !routing.contains(
+                    "Research that ends in a page doesn't search first for this message."
+                ),
             "{label}'s routing call read that Octo can search the web, though its job can't"
         );
     }
