@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationSurfaceTabs } from "../ConversationSurfaceLayout";
@@ -99,6 +99,91 @@ describe("ConversationSurfaceTabs", () => {
     expect(container.querySelector('[data-testid="shared-browser-approval-attention"]')?.textContent).toBe(
       "Approve",
     );
+  });
+
+  describe("closing the Browser view", () => {
+    // What a chat does with the Browser tab's close: the view goes, Chat comes forward.
+    function Strip({ onClose, busy = false, split = false }: { onClose: () => void; busy?: boolean; split?: boolean }) {
+      const [open, setOpen] = useState(true);
+      const [activeId, setActiveId] = useState("browser");
+      const browser = { id: "browser", label: "Browser", panelId: "browser-panel",
+        busyLabel: busy ? "Octo is using the browser" : undefined,
+        onClose: () => { onClose(); setOpen(false); setActiveId("chat"); } };
+      const file = { id: "file:a.md", label: "a.md", panelId: "file-panel", onClose: vi.fn() };
+      return <ConversationSurfaceTabs chatPanelId="chat-panel" split={split} wide={split} ratio={.55} onSplitChange={() => {}}
+        resources={open ? [browser, file] : [file]} activeId={activeId} resourceId={open ? "browser" : "file:a.md"} onSelect={setActiveId} />;
+    }
+    const browserTab = () => container.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-browser"]');
+    const closeButton = () => container.querySelector<HTMLButtonElement>('[aria-label="Close Browser view"]');
+
+    it("shows a close button on the Browser tab only when the chat can close it", async () => {
+      await act(async () => root.render(<Strip onClose={vi.fn()} />));
+      expect(closeButton()).not.toBeNull();
+      expect(closeButton()?.type).toBe("button");
+      expect(closeButton()?.closest('[data-tab-id="browser"]')).not.toBeNull();
+      await act(async () => root.render(
+        <ConversationSurfaceTabs chatPanelId="chat-panel" split={false} wide={false} ratio={.55} onSplitChange={() => {}} onSelect={vi.fn()}
+          resources={[{ id: "browser", label: "Browser", panelId: "browser-panel" }]} activeId="browser" resourceId="browser" />,
+      ));
+      expect(browserTab()).not.toBeNull();
+      expect(closeButton()).toBeNull();
+    });
+
+    it("closes from its button, hides the tab and moves focus to Chat", async () => {
+      const onClose = vi.fn();
+      await act(async () => root.render(<Strip onClose={onClose} />));
+      await act(async () => closeButton()!.click());
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(browserTab()).toBeNull();
+      const chatTab = container.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-chat"]')!;
+      expect(chatTab.getAttribute("aria-selected")).toBe("true");
+      expect(document.activeElement).toBe(chatTab);
+    });
+
+    it("closes from the keyboard with Delete", async () => {
+      const onClose = vi.fn();
+      await act(async () => root.render(<Strip onClose={onClose} />));
+      browserTab()!.focus();
+      await act(async () => { browserTab()!.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Delete" })); });
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(browserTab()).toBeNull();
+      expect(document.activeElement).toBe(container.querySelector('[data-testid="conversation-subtab-chat"]'));
+    });
+
+    it("closes at once while Octo is using the browser: the view goes, the turn is not asked about", async () => {
+      const onClose = vi.fn();
+      await act(async () => root.render(<Strip onClose={onClose} busy />));
+      expect(browserTab()?.getAttribute("aria-label")).toBe("Browser, Octo is using the browser");
+      await act(async () => closeButton()!.click());
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(document.querySelector('[role="dialog"], [role="alertdialog"]')).toBeNull();
+      expect(browserTab()).toBeNull();
+    });
+
+    it("moves focus to Chat itself when Browser was the only view and the tab list hides", async () => {
+      const chatPanel = Object.assign(document.createElement("div"), { id: "chat-panel", tabIndex: -1 });
+      document.body.appendChild(chatPanel);
+      function Only() {
+        const [open, setOpen] = useState(true);
+        return <ConversationSurfaceTabs chatPanelId="chat-panel" split={false} wide={false} ratio={.55} onSplitChange={() => {}} onSelect={vi.fn()}
+          chatActions={<span>Participants</span>} activeId={open ? "browser" : "chat"} resourceId="browser"
+          resources={open ? [{ id: "browser", label: "Browser", panelId: "browser-panel", onClose: () => setOpen(false) }] : []} />;
+      }
+      await act(async () => root.render(<Only />));
+      await act(async () => closeButton()!.click());
+      expect(container.querySelector('[role="tablist"]')?.hasAttribute("hidden")).toBe(true);
+      expect(document.activeElement).toBe(chatPanel);
+      chatPanel.remove();
+    });
+
+    it("hands its place beside Chat to the next view in a split", async () => {
+      await act(async () => root.render(<Strip onClose={vi.fn()} split />));
+      expect(container.querySelector('[data-testid="conversation-subtab-chat"]')).toBeNull();
+      await act(async () => closeButton()!.click());
+      const file = container.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-file:a.md"]')!;
+      expect(file.getAttribute("aria-selected")).toBe("true");
+      expect(document.activeElement).toBe(file);
+    });
   });
 
   it("names what a tab's marker means when it is not an approval", async () => {
