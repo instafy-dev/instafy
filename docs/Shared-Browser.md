@@ -2407,10 +2407,11 @@ it had chosen the stop and sent the journey, and one that pressed a shop's
 basket for its ticket button wrote that the ticket button opened an empty
 basket. A type step that types into a field without sending it marks the field
 when suggestions came under it, the ones its result names, with a digest of
-what it holds, never the text. The next click, when it is on no option and
-sends no search of the page's own, adds for each such field that still holds
-what was typed, ""Origin" still holds what was typed: none of its suggestions
-is chosen." It is said once: every click takes the marks off, and so do a key
+what it holds, never the text. The next click, when it is on none of a
+field's own suggestions (an option, or a row of the list it opened), on no
+other option and sends no search of the page's own, adds for each such field
+that still holds what was typed, ""Origin" still holds what was typed: none of
+its suggestions is chosen." It is said once: every click takes the marks off, and so do a key
 pressed in the field and typing into it again. So a field whose suggestion was
 chosen says nothing, a stop that reads as it was typed too, which every later
 click said held no chosen stop; nor does a field that only says it opens

@@ -3241,14 +3241,15 @@ async function clickedLine(page, description, { before, beforeUrl, partsBefore, 
 // The mark a type step leaves on a field that showed suggestions under it as
 // it was typed into (the ones its result names): a digest of what the field
 // held then, never the text (typedListMarkInPage). The next click, when it is
-// on no option and sends no search, chooses none of them, and its result says
-// the field still holds what was typed (typedFieldsLeftLine). A field that
-// only says it opens something (a date field's calendar, a search box that
-// suggested nothing) is not marked: it was said to have suggestions it never
-// showed. The mark is taken off by that click, by any click, by a key pressed
-// in the field and by typing into it again, so the words are said once, and
-// never of a field whose suggestion was chosen: one whose stop read as it was
-// typed was said to hold no chosen stop on every later click.
+// on none of them, on no option and sends no search, chooses none of them,
+// and its result says the field still holds what was typed
+// (typedFieldsLeftLine). A field that only says it opens something (a date
+// field's calendar, a search box that suggested nothing) is not marked: it
+// was said to have suggestions it never showed. The mark is taken off by any
+// click, by a key pressed in the field and by typing into it again, so the
+// words are said once, and never of a field whose suggestion was chosen: one
+// whose stop read as it was typed was said to hold no chosen stop on every
+// later click.
 const TYPED_LIST_KEY = "instafy.sharedBrowser.typedList";
 
 function heldDigest(text) {
@@ -3329,11 +3330,11 @@ async function markTypedList(target, held, suggested) {
 // After a click, the fields a type step left with suggestions that still hold
 // what it typed, by their names: ""From" still holds what was typed: none of
 // its suggestions is chosen." Never a field the page emptied, changed or drew
-// anew. Every click takes the marks off, so this is said once. A click on an
-// option, which may be one of a field's suggestions whether or not the page
-// ties the list to its field, or one that sent the page's own search (`say`
-// false) says nothing and only takes them off. Null when there is nothing to
-// say.
+// anew. Every click takes the marks off, so this is said once. A click on one
+// of a field's own suggestions (an option, or a row of the list it opened),
+// on any other option, which may be a suggestion the page does not tie to its
+// field, or one that sent the page's own search (`say` false) says nothing
+// and only takes them off. Null when there is nothing to say.
 async function typedFieldsLeftLine(page, withheld, say) {
   return await within(FIELD_READ_MS * 3, (async () => {
     const list = await page.evaluateHandle(typedListFieldsInPage, { kind: "typed-list-fields", key: TYPED_LIST_KEY });
@@ -8000,8 +8001,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // Every click says what it hit and what it was seen to change
     // (clickedLine), or that the page reads as before, and names a field it
     // left holding what a type step typed into it, with none of its
-    // suggestions chosen: never a click on an option, nor one that sent the
-    // page's own search.
+    // suggestions chosen: never a click on one of a field's own suggestions
+    // or on any other option, nor one that sent the page's own search.
     const still = await stillAsBefore(page, before, unchanged);
     const choseOption = suggestionField !== null || String(target.description.role || "").toLowerCase() === "option";
     const done = [
