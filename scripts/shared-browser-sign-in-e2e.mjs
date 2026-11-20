@@ -156,6 +156,63 @@ function fixtureSite(requests, heldControls) {
       });
       return;
     }
+    // A planner whose fields are marked against autofill only, as some sites
+    // mark a planner's stops: a start that opens its list as a person types,
+    // and a destination that says nothing of a list.
+    if (request.method === "GET" && url.pathname === "/planner") {
+      send(page("Journey planner", {
+        main: `<form method="get" action="/planner/journey">
+<label>Start <input name="start" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="start-stops" autocomplete="one-time-code"></label>
+<ul id="start-stops" role="listbox"></ul>
+<label>Destination <input name="destination" autocomplete="one-time-code"></label>
+<button type="submit">Find a connection</button></form>`,
+      }));
+      return;
+    }
+    // A sign-in's second step, with no password field in its form: a numeric
+    // "Code" field, one that holds 6 characters and one that takes digits,
+    // each marked as a one-time code.
+    if (request.method === "GET" && url.pathname === "/two-factor") {
+      send(page("Two-factor authentication", {
+        main: `<form method="post" action="/two-factor">
+<label>Code <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
+<label>Enter what we sent you <input type="text" name="sent" maxlength="6" autocomplete="one-time-code"></label>
+<label>Enter the number from your app <input type="text" name="app" inputmode="numeric" autocomplete="one-time-code"></label>
+<button type="submit">Verify</button></form>`,
+      }));
+      return;
+    }
+    // A code's step labelled in a language whose words for a code the rules
+    // do not know, taking letters and holding any number of them: the only
+    // field of its form a person sees (beside one placed off the page, which
+    // forms keep for bots), under the site's search in a form of its own.
+    if (request.method === "GET" && url.pathname === "/kod") {
+      send(page("Weryfikacja dwuetapowa", {
+        main: `<form method="get" action="/szukaj" role="search"><label>Szukaj <input type="search" name="q"></label></form>
+<form method="post" action="/kod">
+<label>Kod weryfikacyjny <input type="text" name="k" autocomplete="one-time-code"></label>
+<input type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px">
+<label><input type="checkbox" name="trust"> Zaufaj temu urządzeniu</label>
+<button type="submit">Zweryfikuj</button></form>`,
+      }));
+      return;
+    }
+    // Code fields that name a list: one a list of hints (no list a person
+    // picks from), and one that says it opens a list, takes digits and holds
+    // 6 characters. A code's own signs count whatever its field names.
+    if (request.method === "GET" && url.pathname === "/code-hints") {
+      send(page("Check your phone", {
+        main: `<form method="post" action="/code-hints">
+<label>Enter what we sent you <input type="text" name="sent" aria-controls="sent-hints" autocomplete="one-time-code"></label>
+<ul id="sent-hints"><li>We sent it to your phone.</li><li>It is valid for 10 minutes.</li></ul></form>
+<form method="post" action="/code-hints">
+<label>Enter the number from your app <input type="text" name="app" role="combobox" aria-controls="app-numbers" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>
+<ul id="app-numbers" role="listbox"></ul>
+<label>Device name <input type="text" name="device"></label>
+<button type="submit">Verify</button></form>`,
+      }));
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/") {
       send(page("Example code host", { main: '<p><a href="/fixture/repository">fixture/repository</a></p>' }));
       return;
@@ -387,6 +444,64 @@ export async function runSharedBrowserSignInFixture() {
     assert.equal(await personPage.locator("#stars").textContent(), "Starred");
     assert.equal(prompts.length, 3, "One site prompt per run and one for the form post");
 
+    // A field a site marks against autofill alone (autocomplete="one-time-code")
+    // is no secret: a planner's start that opens its list as a person types, and
+    // its destination, are typed into, digits too into the start, and the page
+    // names no sign-in. A code's field stays the person's: digits, or a word
+    // of letters and digits, typed into the destination, a numeric "Code"
+    // field, one that holds 6 characters and
+    // one that takes digits are refused before any prompt, and the code page
+    // names its fields as a sign-in's, for the pause.
+    observed = await ok("POST", "/v1/navigate", { url: `${origin}/planner` });
+    assert.equal(observed.signIn, undefined, `A planner's fields are no sign-in: ${JSON.stringify(observed.signIn)}`);
+    for (const [label, text] of [["Start", "Central Station"], ["Start", "20500"], ["Destination", "Old Town"]]) {
+      observed = await ok("POST", "/v1/type", { ...control(observed, label), text });
+      assert.match(observed.done, new RegExp(`^Typed ${Array.from(text).length} characters into "${label}"`, "u"), observed.done);
+    }
+    assert.deepEqual(
+      [await personPage.locator('input[name="start"]').inputValue(), await personPage.locator('input[name="destination"]').inputValue()],
+      ["20500", "Old Town"],
+    );
+    for (const text of ["20500", "K7X2QP"]) {
+      const code = await runTool("POST", "/v1/type", { ...control(observed, "Destination"), text });
+      assert.equal(code.code, 1, `${text}: digits alone, or a word of letters and digits, in a field marked as a one-time code are a code`);
+      assert.match(code.stderr, /refuses to type authentication, payment, or identity secrets/u);
+    }
+    assert.equal(await personPage.locator('input[name="destination"]').inputValue(), "Old Town");
+    // A code's step keeps its pause however it is labelled or built: the
+    // only field of its form, labelled in words the rules do not know and
+    // taking letters; a field that names a list of hints; and one that says
+    // it opens a list while it takes digits and holds 6 characters. Each is
+    // named as a sign-in's and refuses letters and digits alike.
+    for (const [pathname, codeFields, names] of [
+      ["/two-factor", ["Code", "Enter what we sent you", "Enter the number from your app"], ["code", "sent", "app"]],
+      ["/kod", ["Kod weryfikacyjny"], ["k"]],
+      ["/code-hints", ["Enter what we sent you", "Enter the number from your app"], ["sent", "app"]],
+    ]) {
+      observed = await ok("POST", "/v1/navigate", { url: `${origin}${pathname}` });
+      assert.ok(observed.signIn, `${pathname}: the code page names its fields: ${JSON.stringify(observed.interactiveElements)}`);
+      assert.deepEqual(
+        observed.signIn.fields.map((index) => observed.interactiveElements.find((element) => element.index === index)?.label),
+        codeFields,
+        pathname,
+      );
+      for (const label of codeFields) {
+        for (const text of ["AB12CD", "482910"]) {
+          const refused = await runTool("POST", "/v1/type", { ...control(observed, label), text });
+          assert.equal(refused.code, 1, `${pathname} ${label}: typing into a code's field is refused`);
+          assert.match(refused.stderr, /refuses to type authentication, payment, or identity secrets/u, `${pathname} ${label}`);
+        }
+      }
+      for (const name of names) {
+        assert.equal(await personPage.locator(`input[name="${name}"]`).inputValue(), "", `${pathname}: ${name} holds nothing`);
+      }
+    }
+    assert.equal(prompts.length, 3, "The planner and the code pages asked nothing");
+    assert.ok(
+      !requests.some((entry) => entry.includes("/planner/journey") || /^POST \/(?:two-factor|kod|code-hints)$/u.test(entry)),
+      "Nothing was sent",
+    );
+
     // The person's values never reached a tool or the action feed.
     const feed = fs.readFileSync(actionsPath, "utf8");
     for (const value of [PERSON_LOGIN, PERSON_PASSWORD]) {
@@ -396,7 +511,7 @@ export async function runSharedBrowserSignInFixture() {
 
     const result = {
       status: "passed",
-      fixtureVersion: 4,
+      fixtureVersion: 5,
       checks: [
         "a signed-out page with no sign-in fields names its Sign in link, which opens the sign-in page without a prompt",
         "a product card whose heading names a secret, beside project names that look random, does not make that page a secret screen",
@@ -405,6 +520,7 @@ export async function runSharedBrowserSignInFixture() {
         "the pause highlights exactly those fields, asks the run's person and ends the turn, with nothing sent",
         "buttons the sign-in page draws under its form after the step that opened it read it do not stop the pause on its fields in that turn",
         "after the person signs in, the next run on the same page goes on with the task: the form post asks once, then stars the repository",
+        "a planner's fields a site marks against autofill alone are typed into, a start that opens its list as a person types with digits too, and the page names no sign-in; digits, or a word of letters and digits, typed into its destination, a numeric Code field, one that holds 6 characters and one that takes digits are refused before any prompt, and the code page names them as a sign-in's; so are the only field of a form labelled in words the rules do not know, a code field that names a list of hints and one that says it opens a list while it takes digits",
         "the person's values never reach a tool's output or the action feed",
       ],
       limitations: ["No model, Studio UI, origin or runtime shutdown guard; the turn's steps are played as the result says, and Studio's part is unit-tested."],
@@ -426,7 +542,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(JSON.stringify(result, null, 2));
   }).catch((error) => {
     fs.mkdirSync(resultDirectory, { recursive: true });
-    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 4 })}\n`);
+    fs.writeFileSync(resultFile, `${JSON.stringify({ status: "failed", fixtureVersion: 5 })}\n`);
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });

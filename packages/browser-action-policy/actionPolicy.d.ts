@@ -139,6 +139,46 @@ export declare function isSearchField(target: PersonalBrowserStepTarget): boolea
  */
 export declare function isSignInField(target: PersonalBrowserStepTarget): boolean;
 /**
+ * The shape a host reads of a field, for isOneTimeCodeField: its maxlength
+ * and size (null when absent), its pattern, whether it opens a list as a
+ * person types (a combobox, aria-autocomplete list or both, a datalist, or a
+ * list it names), whether another field of its form is a sign-in's (marked
+ * username, webauthn, current-password or new-password), and, for a field
+ * the mark marks, whether it is the only field a person types into in its
+ * form (or, in no form, on the page).
+ */
+export type FieldShape = {
+  maxLength: number | null;
+  size: number | null;
+  pattern: string;
+  opensList: boolean;
+  formSignIn: boolean;
+  alone: boolean;
+};
+/**
+ * Whether a field `autocomplete="one-time-code"` marks holds a one-time
+ * code. It does with a sign of one of its own: its names name a code, a
+ * credential, a password or a code's step, it sits in a credential context,
+ * it takes digits, it holds at most 10 characters, or its form holds a
+ * password or sign-in field. A field with none of these that opens a list
+ * holds no code; any other does when it is the only field of its form (or
+ * page), or when `ctx.typed` reads as a code (digits alone, or one word that
+ * mixes letters and digits). Without `target.fieldShape` the mark is the
+ * sign, as it was.
+ */
+export declare function isOneTimeCodeField(
+  target: PersonalBrowserStepTarget,
+  ctx?: { typed?: string },
+): boolean;
+/**
+ * Run inside the page from its source, with the redaction module's
+ * CODE_WORD_SOURCE and CREDENTIAL_CONTEXT_SOURCE: isOneTimeCodeField's rule.
+ * Made without either, the mark is the sign.
+ */
+export declare function oneTimeCodeRulesInPage(codeWordSource: string, credentialWordSource: string): {
+  isOneTimeCodeField(target: PersonalBrowserStepTarget, ctx?: { typed?: string }): boolean;
+};
+/**
  * A link or button that only opens a site's sign-in page ("Sign in", "Log in"
  * outside any form with a password field, never a form's submit button).
  * Hosts name it on a page with no sign-in fields yet, so a sign-in the person

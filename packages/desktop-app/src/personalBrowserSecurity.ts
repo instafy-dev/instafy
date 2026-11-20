@@ -8,8 +8,10 @@ import { checkPublicUrl, isLocalHostName, isPrivateAddress } from "@instafy/bind
 import {
   classifyStep,
   isEditable as isPolicyEditable,
+  isOneTimeCodeField,
   isSearchField as isPolicySearchField,
   stepSubmission,
+  type FieldShape,
   type PersonalBrowserStep,
   type PersonalBrowserStepClassification,
   type PersonalBrowserStepContext,
@@ -75,6 +77,14 @@ export type PersonalBrowserEditableDescriptor = {
   ariaLabel?: string | null;
   placeholder?: string | null;
   inputMode?: string | null;
+  title?: string | null;
+  formHasPassword?: boolean;
+  /**
+   * The field's shape, for its one-time-code mark (the action policy's
+   * isOneTimeCodeField); absent when the page did not report it, and then
+   * the mark alone makes a code's field, as before.
+   */
+  fieldShape?: FieldShape | null;
 };
 
 export type PersonalBrowserActionDescriptor = {
@@ -176,6 +186,7 @@ export const PERSONAL_BROWSER_SECURITY_FINGERPRINT_FIELDS = [
   "formSubmission",
   "formHasPassword",
   "formFieldCount",
+  "fieldShape",
   "areas",
   "menuOpener",
   "credentialContext",
@@ -186,10 +197,12 @@ export const PERSONAL_BROWSER_SECURITY_FINGERPRINT_FIELDS = [
 const SENSITIVE_EDITABLE_PATTERN =
   /(?:\bpass(?:word|code|phrase)?\b|\bpin\b|\bone[\s_-]*time\b|\botp\b|\b2fa\b|\bmfa\b|\bverification[\s_-]*code\b|\bsecurity[\s_-]*code\b|\bcvv\b|\bcvc\b|\bcard[\s_-]*(?:number|code)\b|\bcredit[\s_-]*card\b|\bdebit[\s_-]*card\b|\bpayment\b)/i;
 
+// A one-time-code mark makes a code's field only with a sign of a code
+// (isOneTimeCodeField): sites put it on a planner's stops too, to keep
+// autofill out of them.
 const SENSITIVE_AUTOCOMPLETE_TOKENS = new Set([
   "current-password",
   "new-password",
-  "one-time-code",
   "cc-number",
   "cc-csc",
   "cc-exp",
@@ -505,11 +518,19 @@ function descriptorText(value: PersonalBrowserEditableDescriptor): string {
     .join(" ");
 }
 
+/**
+ * `typed`: the text a type step puts in the field, when there is one; text
+ * that is digits alone is a sign of a code for a one-time-code mark.
+ */
 export function isSensitivePersonalBrowserEditable(
   value: PersonalBrowserEditableDescriptor,
+  typed?: string,
 ): boolean {
   const type = value.type?.trim().toLowerCase();
   if (type === "password") {
+    return true;
+  }
+  if (isOneTimeCodeField(value, typeof typed === "string" ? { typed } : {})) {
     return true;
   }
   const autocomplete = value.autocomplete?.trim().toLowerCase() ?? "";

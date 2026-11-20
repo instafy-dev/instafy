@@ -126,6 +126,23 @@ impl BrowserRequest {
         })
     }
 
+    /// Whether Studio leaves this card a button for the person to open, by what its task names,
+    /// as Studio checks a card's task before it opens it by itself
+    /// (`browserAutoStartAddressesSeen`): an address it can't check ([`studio_cannot_check`]),
+    /// or a host that no text of `seen` names ([`hosts_studio_reads`]). `seen` is what the
+    /// person could have read before the card: their messages and the chat's earlier replies,
+    /// never the card's own turn. A task that names no host waits for nothing here.
+    pub(super) fn waits_for_the_person(&self, seen: &[&str]) -> bool {
+        if studio_cannot_check(&self.task) {
+            return true;
+        }
+        let seen: BTreeSet<String> = seen
+            .iter()
+            .flat_map(|text| hosts_studio_reads(text))
+            .collect();
+        !hosts_studio_reads(&self.task).is_subset(&seen)
+    }
+
     pub(super) fn message(&self) -> JobMessage {
         let mut request = json!({ "task": self.task, "location": self.location });
         if self.continue_building {
@@ -200,9 +217,10 @@ pub(super) fn routed_task_words(task: &str) -> &str {
 }
 
 /// Every host `text` names, lowercased and without a leading `www.` (in an address, as a bare
-/// domain or as an IPv4 address), as Studio reads a card's task before it opens it by itself,
-/// and whether it names one that can't be compared with what the person read: localhost, an
-/// IPv6 literal, or a punycode or non-ASCII host.
+/// domain or as an IPv4 address): where its addresses go, and whether it names one that can't be
+/// compared with what the person read: localhost, an IPv6 literal, or a punycode or non-ASCII
+/// host. Whether Studio holds a card is read as Studio reads it, name for name
+/// ([`hosts_studio_reads`]).
 fn named_hosts(text: &str) -> (BTreeSet<String>, bool) {
     let mut hosts = BTreeSet::new();
     let mut uncheckable = false;
@@ -338,6 +356,306 @@ fn names_unicode_host(text: &str) -> bool {
         }
     }
     false
+}
+
+/// Every host `text` names as Studio's `hostsNamedIn` reads them (`browserAutoStart.ts`), by
+/// which it decides whether a card opens by itself: the host of each http(s) address, each bare
+/// host wherever it stands, and each IPv4 address, lowercased, without a dot at the end or a
+/// leading `www.`. To Studio a page's file name (`…/connections.html`) and a host in a query's
+/// value are hosts like the site's own, so it holds a card for such a page on a site the person
+/// gave unless they gave that very address. [`named_hosts`] reads only where an address goes:
+/// read that way, such a card was taken to open by itself and lost its turn's words, while
+/// Studio left it a button. This reader and Studio's are pinned to one list of cases,
+/// `card_hosts_fixtures.json`, which Studio's test reads too.
+fn hosts_studio_reads(text: &str) -> BTreeSet<String> {
+    let of_addresses = addresses_in(text).into_iter().filter_map(|address| {
+        reqwest::Url::parse(address)
+            .ok()?
+            .host_str()
+            .map(str::to_owned)
+    });
+    let bare = bare_hosts_in(text)
+        .into_iter()
+        .chain(ipv4_addresses_in(text))
+        .map(str::to_owned);
+    of_addresses
+        .chain(bare)
+        .filter_map(|host| {
+            let host = host.trim().to_lowercase();
+            let host = host.strip_suffix('.').unwrap_or(&host);
+            let host = host.strip_prefix("www.").unwrap_or(host);
+            (!host.is_empty()).then(|| host.to_owned())
+        })
+        .collect()
+}
+
+/// Whether `text` names an address Studio can't compare with what the person read, as its
+/// `namesUncheckableAddress` reads one: localhost, also among a host's labels (`app.localhost`),
+/// an IPv6 literal, a host with letters beyond ASCII or written in punycode, or an http(s)
+/// address that doesn't parse. A card whose task names one always waits for the person.
+fn studio_cannot_check(text: &str) -> bool {
+    names_localhost(text)
+        || names_ipv6_literal(text)
+        || names_unicode_host(text)
+        || names_punycode_label(text)
+        || addresses_in(text).into_iter().any(|address| {
+            let authority = address
+                .split_once("://")
+                .map_or(address, |(_, rest)| rest)
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or_default();
+            let punycode = |url: reqwest::Url| {
+                url.host_str()
+                    .map(|host| host.split('.').any(|label| label.starts_with("xn--")))
+            };
+            !authority.is_ascii()
+                || reqwest::Url::parse(address)
+                    .ok()
+                    .and_then(punycode)
+                    .unwrap_or(true)
+        })
+}
+
+/// Each http(s) address in `text`, as Studio's `URL_PATTERN` finds them: `http://` or `https://`
+/// in any letter case, not right after a letter, a digit or `_`, up to the next white space or
+/// `<`, `>`, a quote, a backtick, `)` or `]`.
+fn addresses_in(text: &str) -> Vec<&str> {
+    // White space as a JavaScript pattern's `\s` counts it.
+    let space = |c: char| {
+        "\t\n\u{b}\u{c}\r \u{a0}\u{1680}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}"
+            .contains(c)
+            || ('\u{2000}'..='\u{200a}').contains(&c)
+    };
+    let bytes = text.as_bytes();
+    let starts = |at: usize, scheme: &str| {
+        bytes
+            .get(at..at + scheme.len())
+            .is_some_and(|found| found.eq_ignore_ascii_case(scheme.as_bytes()))
+    };
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let scheme = if starts(at, "https://") {
+            8
+        } else if starts(at, "http://") {
+            7
+        } else {
+            0
+        };
+        let in_a_word = at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        let rest: usize = if scheme == 0 || in_a_word {
+            0
+        } else {
+            text[at + scheme..]
+                .chars()
+                .take_while(|c| !space(*c) && !"<>\"'`)]".contains(*c))
+                .map(char::len_utf8)
+                .sum()
+        };
+        if rest == 0 {
+            at += 1;
+            continue;
+        }
+        found.push(&text[at..at + scheme + rest]);
+        at += scheme + rest;
+    }
+    found
+}
+
+/// Each bare host in `text`, as Studio's `BARE_HOST_PATTERN` finds them: labels of ASCII letters,
+/// digits and inner dashes joined by dots, ending in 2 to 63 letters, not right after a letter, a
+/// digit, `@`, `.`, `_` or `-`, and not followed by a letter, a digit, a dash or a further label.
+/// It finds one wherever it stands: in a path (`…/connections.html`) or a query's value too.
+fn bare_hosts_in(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let joins = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'@' | b'.' | b'_' | b'-');
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if (at == 0 || !joins(bytes[at - 1]))
+            && let Some(end) = bare_host_end(bytes, at)
+        {
+            found.push(&text[at..end]);
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    found
+}
+
+/// Where the bare host that starts at `start` ends, if one does.
+fn bare_host_end(bytes: &[u8], start: usize) -> Option<usize> {
+    // Where each label that a dot follows ends, after its dot.
+    let mut after_dots = Vec::new();
+    let mut at = start;
+    loop {
+        let label = at;
+        while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'-') {
+            at += 1;
+        }
+        let whole = at > label
+            && bytes[label].is_ascii_alphanumeric()
+            && bytes[at - 1].is_ascii_alphanumeric();
+        if !whole || bytes.get(at) != Some(&b'.') {
+            break;
+        }
+        at += 1;
+        after_dots.push(at);
+    }
+    // The longest run of labels whose next is an ending: letters only, with nothing after it
+    // that would carry the name on.
+    after_dots.into_iter().rev().find_map(|ending| {
+        let letters = bytes[ending..]
+            .iter()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .count();
+        let end = ending + letters;
+        let carries_on = match bytes.get(end) {
+            None => false,
+            Some(b'.') => bytes.get(end + 1).is_some_and(u8::is_ascii_alphanumeric),
+            Some(c) => c.is_ascii_alphanumeric() || *c == b'-',
+        };
+        ((2..=63).contains(&letters) && !carries_on).then_some(end)
+    })
+}
+
+/// Each IPv4 address in `text`, as Studio's `IPV4_PATTERN` finds them: four runs of one to three
+/// digits joined by dots, not right after a digit or a dot, and not followed by a digit or a
+/// further run.
+fn ipv4_addresses_in(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let digits = |at: usize| {
+        bytes[at..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count()
+    };
+    let end_of = |start: usize| {
+        let mut at = start;
+        for run in 0..4 {
+            let count = digits(at);
+            if !(1..=3).contains(&count) {
+                return None;
+            }
+            at += count;
+            if run < 3 {
+                if bytes.get(at) != Some(&b'.') {
+                    return None;
+                }
+                at += 1;
+            }
+        }
+        let carries_on = match bytes.get(at) {
+            Some(b'.') => bytes.get(at + 1).is_some_and(u8::is_ascii_digit),
+            _ => false,
+        };
+        (!carries_on).then_some(at)
+    };
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if (at == 0 || !(bytes[at - 1].is_ascii_digit() || bytes[at - 1] == b'.'))
+            && let Some(end) = end_of(at)
+        {
+            found.push(&text[at..end]);
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    found
+}
+
+/// Whether `text` names `localhost`, alone or among a host's labels, as Studio's
+/// `LOCALHOST_PATTERN` reads it: not right after or before a letter, a digit or a dash.
+fn names_localhost(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let joins = |c: &u8| c.is_ascii_alphanumeric() || *c == b'-';
+    (0..bytes.len()).any(|at| {
+        bytes
+            .get(at..at + 9)
+            .is_some_and(|word| word.eq_ignore_ascii_case(b"localhost"))
+            && !(at > 0 && joins(&bytes[at - 1]))
+            && !bytes.get(at + 9).is_some_and(joins)
+    })
+}
+
+/// Whether `text` names an IPv6 literal, as Studio's three patterns read one: in brackets, with a
+/// `::`, or as eight groups.
+fn names_ipv6_literal(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let hex = |at: usize| {
+        bytes
+            .get(at..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .count()
+    };
+    let is = |at: usize, c: u8| bytes.get(at) == Some(&c);
+    // `[`, hexadecimal digits, a colon, then letters, digits, colons, dots and `%` up to `]`.
+    let bracketed = |at: usize| {
+        if !is(at, b'[') {
+            return false;
+        }
+        let colon = at + 1 + hex(at + 1);
+        if !is(colon, b':') {
+            return false;
+        }
+        let rest = bytes[colon + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b':' | b'.' | b'%'))
+            .count();
+        is(colon + 1 + rest, b']')
+    };
+    // Groups of one to four hexadecimal digits, each with a colon after it, at most `most` of
+    // them: where they stop, and how many there were.
+    let groups = |start: usize, most: usize| {
+        let (mut at, mut count) = (start, 0);
+        while count < most {
+            let digits = hex(at);
+            if !(1..=4).contains(&digits) || !is(at + digits, b':') {
+                break;
+            }
+            at += digits + 1;
+            count += 1;
+        }
+        (at, count)
+    };
+    // Groups that end in `::`, or `::` and a group.
+    let compressed = |at: usize| {
+        let (end, count) = groups(at, usize::MAX);
+        (count > 0 && is(end, b':')) || (is(at, b':') && is(at + 1, b':') && hex(at + 2) > 0)
+    };
+    // Seven groups and an eighth.
+    let full = |at: usize| {
+        let (end, count) = groups(at, 7);
+        count == 7 && hex(end) > 0
+    };
+    (0..bytes.len()).any(|at| {
+        let apart = at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b':');
+        bracketed(at) || (apart && (compressed(at) || full(at)))
+    })
+}
+
+/// Whether `text` names a punycode label outside an address, as Studio's last pattern reads one:
+/// `xn--`, not right after a letter, a digit or a dash, then letters, digits or dashes and a dot.
+fn names_punycode_label(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let joins = |c: &u8| c.is_ascii_alphanumeric() || *c == b'-';
+    (0..bytes.len()).any(|at| {
+        let rest = at + 4;
+        bytes
+            .get(at..rest)
+            .is_some_and(|word| word.eq_ignore_ascii_case(b"xn--"))
+            && !(at > 0 && joins(&bytes[at - 1]))
+            && {
+                let label = bytes[rest..].iter().take_while(|c| joins(c)).count();
+                label > 0 && bytes.get(rest + label) == Some(&b'.')
+            }
+    })
 }
 
 #[cfg(test)]
@@ -577,6 +895,82 @@ mod tests {
             .filter_map(|(card, expected)| {
                 let parsed = BrowserRequest::parse(card.as_object().unwrap()).map(|_| ());
                 (parsed != *expected).then(|| format!("{card}: {parsed:?}, not {expected:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// A card waits for the person, as Studio decides it, when its task names a host nothing the
+    /// person could have read before it shows, or an address Studio can't check; one naming only
+    /// hosts the person or an earlier reply gave, or none, opens by itself. `www.` and letter case
+    /// are nobody's, and an e-mail address's domain is no host anyone gave.
+    #[test]
+    fn a_card_waits_for_the_person_when_its_task_names_a_host_nobody_showed_them() {
+        let card = |task: &str| {
+            BrowserRequest::parse(json!({ "task": task }).as_object().unwrap()).unwrap()
+        };
+        let policy = card(
+            "Open https://www.shop.example/us/help/returns/policy/ and explain the return policy.",
+        );
+        // The person named the shop, not its site.
+        assert!(policy.waits_for_the_person(&["What is the shop's return policy for it?"]));
+        assert!(policy.waits_for_the_person(&[]));
+        // They gave the site, or an earlier reply did.
+        assert!(!policy.waits_for_the_person(&["Check Shop.example's returns page for me."]));
+        assert!(!policy.waits_for_the_person(&[
+            "What is the shop's return policy?",
+            "Its policy is at https://www.shop.example/us/help/returns/.",
+        ]));
+        assert!(policy.waits_for_the_person(&["Write to help@shop.example for me."]));
+        // Every host it names counts.
+        let two = card("Compare https://shop.example/a and https://other.example/b.");
+        assert!(two.waits_for_the_person(&["Look at shop.example."]));
+        assert!(!two.waits_for_the_person(&["Look at shop.example and other.example."]));
+        // An address Studio can't check always waits.
+        assert!(
+            card("Open http://localhost:3000/ and read it.")
+                .waits_for_the_person(&["Open http://localhost:3000/ and read it."])
+        );
+        // A page's file name is one more host to Studio: the site alone doesn't open it, the
+        // very address does.
+        let page = card("Open https://www.transit.example/connections.html and find a connection.");
+        assert!(page.waits_for_the_person(&["Use transit.example for the connection."]));
+        assert!(!page.waits_for_the_person(&[
+            "Read https://transit.example/connections.html for the connection."
+        ]));
+        // A building card that names no host waits for nothing here.
+        let building = BrowserRequest::parse(
+            json!({ "task": "Find the museum's opening hours.", "continueBuilding": true })
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!building.waits_for_the_person(&[]));
+    }
+
+    /// Whether a card waits is read as Studio reads it, name for name: the hosts a text names,
+    /// and whether it names an address Studio can't check. Both readers are pinned to one list
+    /// of cases, which Studio's own test reads too (`browserAutoStart.test.ts`): a rule changed
+    /// on one side and not the other fails here and there at once.
+    #[test]
+    fn a_texts_hosts_are_read_as_studio_reads_them() {
+        let fixtures: Value = serde_json::from_str(include_str!("card_hosts_fixtures.json"))
+            .expect("the list of cases");
+        let cases = fixtures["cases"].as_array().expect("cases");
+        assert!(cases.len() >= 40, "{}", cases.len());
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|case| {
+                let text = case["text"].as_str().expect("text");
+                let hosts: BTreeSet<String> = case["hosts"]
+                    .as_array()
+                    .expect("hosts")
+                    .iter()
+                    .map(|host| host.as_str().expect("host").to_owned())
+                    .collect();
+                let read = (hosts_studio_reads(text), studio_cannot_check(text));
+                (read != (hosts, case["uncheckable"] == true))
+                    .then(|| format!("{}: {text:?} read as {read:?}", case["name"]))
             })
             .collect();
         assert!(wrong.is_empty(), "{wrong:#?}");

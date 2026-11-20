@@ -2131,11 +2131,11 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "browser work goes on whether or not it found its answer",
             ),
             (
-                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map,",
+                "So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map (its research too),",
                 "a bare \"keep going\" carries on what a page here left open, and a change that needs a web page browses first",
             ),
             (
-                "So is research that ends in a page (a comparison, prices, a route), unless it searches first.",
+                "So is research that ends in a page (a comparison, prices, a route; not a map), unless it searches first (in Octo's own turn: the browser can't).",
                 "research ending in a page goes to the browser first unless it searches first",
             ),
             (
@@ -2147,7 +2147,7 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
                 "a page, or a change to one, asked for with values the chat's replies didn't confirm goes to the browser first",
             ),
             (
-                "- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color), and for a page or change made only from what this chat found and confirmed; (`none`) for a change to another chat's page.",
+                "- Stay `direct` (`required`) for a map (its research too), for a change in the person's own words to a page or map here (a note, a name, a color), and for a page or change made only from what this chat found and confirmed; (`none`) for a change to another chat's page.",
                 "a map, a change in the person's own words and a page or change made only from what the chat found and confirmed stay direct",
             ),
         ] {
@@ -2159,9 +2159,12 @@ fn check_follow_ups_from_the_chat(harness: &Harness) -> Result<()> {
         // These jobs' grants let no turn search the web, so the routing call reads nothing of
         // it: research that ends in a page goes to the browser first, as it did.
         ensure!(
-            !routing.contains("Octo can search the web for this message.")
+            !routing.contains("Octo can search the web for this message")
                 && !routing
-                    .contains("Research that ends in a page searches first for this message."),
+                    .contains("Research that ends in a page searches first for this message.")
+                && !routing.contains(
+                    "Research that ends in a page doesn't search first for this message."
+                ),
             "{label}'s routing call read that Octo can search the web, though its job can't"
         );
     }

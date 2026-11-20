@@ -434,7 +434,30 @@ The default-focused action is **Deny**. Only the initiating user with live
 expired request, or a replay cannot satisfy it. Scroll is allowed only after
 the page origin has been approved because it changes no remote state. Typing
 authentication, payment, or identity secrets remains blocked outright and is
-not made possible by approval.
+not made possible by approval. A secret's field is a password field, one marked
+for a password or a card (`autocomplete` `current-password`, `new-password` or
+`cc-*`), or one whose names or form hold a secret's words. A field marked
+`autocomplete="one-time-code"` is a code's only with a sign of a code (the
+shared policy's `isOneTimeCodeField`), since sites put the mark on a journey
+planner's stops too, only to keep autofill out of them, and those are typed
+into. A sign of the field's own always counts: its label, name, id,
+placeholder or title names a code (the redaction module's code words, never
+"Postcode"; a camel-cased name such as `otpCode` reads as its words), a
+credential, a password or a code's step; it sits under a heading, dialog or
+row that names a credential; it takes digits (input mode numeric, decimal or
+tel, a `tel` or `number` field, or a pattern of digits alone); it holds at
+most 10 characters (`maxlength` or `size`); or its form holds a password or
+sign-in field. A field with none of these that opens a list as a person types
+(a combobox, `aria-autocomplete` list or both, a datalist, or a list it names
+that has a list's role or options, never a plain list of hints) is no code's,
+whatever is typed. Any other is a code's when it is the only field a person
+types into in its form (in no form, on the page): a code's step asks for
+nothing else, in whatever language it is labelled, while a planner asks for
+two stops; or when the text typed into it reads as a code: digits alone, or
+one word that mixes letters and digits. A field the page
+reports no shape for keeps the mark alone as the sign, and the same rule
+names a page's sign-in fields (`isSignInField`). The Personal Browser judges
+the mark the same way.
 
 Two steps never ask, in Ask too:
 
@@ -1547,7 +1570,8 @@ building turn that must make a page can't ask for the browser and, on an AI
 with no web search of its own, reads only pages whose addresses it already
 knows. When Octo can search the web for the message (the job's grant lets its
 turn use the AI's own web search), the routing step reads one line that says
-so, after the section: availability for dates where nobody named the places,
+so, and that Instafy's browser can't, after the section: availability for
+dates where nobody named the places,
 answered in a reply, then stays with Octo, as other research answered in a
 reply does, and searches first (search finds the places, then at most one card
 checks their pages). On a runtime with `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST`
@@ -1555,12 +1579,23 @@ on, a second line says research that ends in a page searches first too, and
 such research stays with Octo as well; the `browser_then_build` line says so
 too ("unless it searches first"), since while it said "from the first message"
 news, a comparison and a page of places whose routing input had both lines
-still went to the browser first (a local test, Nov 19). Without the first line, on every AI
-with no web search of its own, the routing input is as it was, and without the
-second, which is every runtime while the setting is off, research that ends in
-a page goes to the browser first, availability for dates put on a page among
-it: a building turn that makes a page can't ask for the browser for what
-search didn't reach, so nothing would check the dates. These are the section's
+still went to the browser first (a local test, Nov 19). It also says where that
+search runs ("in Octo's own turn: the browser can't") and that a map isn't such
+research: told only that such research searches first, the routing step read it
+as research to do first, in the browser, and sent news, a comparison and a page
+of places, and trips and events on a map, to the browser before the turn that
+could search (a local test, Nov 20). Without the first line, on every AI
+with no web search of its own, the routing input is as it was. With the first
+line and the setting off, which is every message on a person's own ChatGPT
+login until it is on, the second line says instead that research that ends in
+a page doesn't search first for this message, and such research goes to the
+browser first, availability for dates put on a page among it: a building turn
+that makes a page can't ask for the browser for what search didn't reach, so
+nothing would check the dates. Left unsaid, the routing step answered "unless
+it searches first" from the request (for news put on a page: "This requires
+searching first, then creating a page", a local test, Nov 20), which kept the
+browser first only while searching first read as a browser step. These are the
+section's
 first rule, ahead of the routes: as an exception in the middle of the
 `browser_then_build` line, a comparison page went to the browser though its
 routing input said Octo could search (a local test, Nov 17). Its exception is
@@ -1576,8 +1611,10 @@ input every chat shares. A change that needs
 what a web page says is `browser_then_build` too:
 a change's building turn opens no browser, and one asked to add each laptop's
 warranty "from its own page" asked the person to send the pages (a local test,
-Nov 7). A map ("on a map") stays with Octo, since a map's skill finds and
-cites its places itself, and so do a change in the person's own words to a page
+Nov 7). A map ("on a map") stays with Octo, its research too, since a map's
+skill finds and cites its places itself (a map of what a site the person names
+in the browser says still goes to the browser first, as all work they name the
+browser for does), and so do a change in the person's own words to a page
 or map here (a note, a name, a color) and a page or change made only from what
 the chat already found and confirmed, each a change of files, in a line of
 their own: as the last sentences of the `browser_then_build` line they read as
@@ -2463,7 +2500,26 @@ out of order. The step then looks for the list its field opens: the options
 its own (`aria-controls`, `aria-owns`, the list its active option is in) or
 holds, all of them once they differ from what that list showed before the
 step (a list the text narrowed is named whole); else, for a field that names
-no list, options shown that were not before it typed. Another list on the
+no list, options shown that were not before it typed. A planner that draws
+its stops as plain rows with no role has them named too: a list that holds no
+option gives its items (`li`), else the most children it holds drawn alike,
+one under another. Such rows count only in a list that pops up at the field:
+one it names that has a list's role or is drawn over the page, or, for a
+field that names none, the one drawn against it (just under or over it, over
+the page and holding neither the field nor what is around it); only when a
+row there shares the start of a word with what the field holds; and only for
+a field a person types text into. So a calendar a date field opens or names
+is none, and neither is a list of the page's own that a search box filters or
+a ticked box names. A row that holds controls is named by the first of them
+whose words share the start of a word with what the field holds (a stop's
+link beside a button that saves it), else the first that draws words. A reading
+lists plain rows after the page's controls, and on a page with more controls
+than it holds (200) it keeps the focused field's open options first, so the
+indices the step names are the ones the next click takes, and a click on a
+row leaves the focus in the field as a click on an option does. Rows that no
+control of the reading stands for are counted, never named ("2 suggestions
+came under "From", but this reading doesn't list them, so none can be clicked
+here."): only a reading masks a page's words. Another list on the
 page is never the field's: a field's options were named under another field,
 and a page's "Sort by" under a search. An option turned off (a list's
 "Searching…" or "No matching stops" row) is none, and the step keeps looking
@@ -2653,8 +2709,8 @@ Canceling leaves control unchanged; confirming starts the existing handoff.
 **Let Octo continue** then appears in a row under the toolbar. Reduced-motion
 preferences use a static edge glow. Agent-requested handoff
 uses `request_human_input` with one to eight indices from a fresh snapshot: a
-step only the person may do (a sign-in or one-time code, a payment or the final
-button that books or buys, a cookie choice, a part of a page Octo can't reach),
+step only the person may do (a sign-in or one-time code, the final button that
+pays or books, a cookie choice, a part of a page Octo can't reach),
 its fields and its buttons. It checks only what it highlights: each field must
 still be at its index with the same label and kind, in a form that sends to the
 same place, on the same address, and each button as a step's own control is
@@ -3297,11 +3353,18 @@ unless the policy is `"covered"`.
 - **Cards after a press.** A card says what it is for ("Continue in
   Instafy's browser", and the site it is headed for), never what pressing it
   does: older cards carry a line about that, which is not shown. A turn whose
-  only action is the card posts the card and no reply of its own, except in a
-  skill setup, whose reply carries its walk, and on a turn that decides whether
-  to answer at all. A reply that does show beside a card never says a page
+  only action is a card that opens by itself posts the card and no reply of its
+  own, except in a skill setup, whose reply carries its walk, and on a turn that
+  decides whether to answer at all. A card that waits for the person, because
+  its task names an address neither the person's messages nor Octo's earlier
+  replies show (the runtime reads the chat's history and each text's hosts as
+  Studio does, a page's file name and a query's value included, and in a
+  shared chat counts only the turn's own message of the person's), keeps the
+  turn's reply above it. A reply that does show beside a card never says a page
   opened before a browser tool saw it, or what the browser will submit, send or
-  buy. A card shows only while it needs the person. While Studio opens it by
+  buy. A refused card's words leave the reply being written as its retry begins,
+  and the retry is told that if its own card is refused too, only its words
+  show, so they stand alone. A card shows only while it needs the person. While Studio opens it by
   itself, the turn's one line **Opening Instafy's browser…** takes its place,
   with no box. Once it was continued, by Studio or by the person's press, it
   leaves the chat, also after a reload, so it is never offered again: the

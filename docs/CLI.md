@@ -685,7 +685,9 @@ well ("I changed … and couldn't put it back as it was"), and such a reply neve
 whose every file went back counts for nothing on the turn's line, as a declined step, and one that also changed a file
 the turn kept counts only that file: the line names only changes the turn kept, never "Edited a file" for a page that is
 as it was, and the row in Details of a step that kept nothing reads "Tried editing files". The routing step before the
-turn reads the same pages, so a change asked for to another chat's page is one building turn that changes nothing. A
+turn reads the same pages, so a change asked for to another chat's page is one building turn that changes nothing; in a
+chat that has a page of its own, a turn whose message names only such pages, by title or folder, is never run again for
+the files it didn't write (a chat that has made no page may be asking for its first, and keeps that second pass). A
 page reads with no chat, and is held from nobody, when its chat is gone for the person the
 turn runs for: the chat no longer exists, they moved it to Trash, or it is a thread nobody asks in (an automation's, a
 bound site's). A scheduled run has no chat to ask in, so nothing holds a page for it. A runtime started with
