@@ -607,18 +607,18 @@ mod tests {
             BrowserRequest::parse(json!({ "task": task }).as_object().unwrap()).unwrap()
         };
         let policy = card(
-            "Open https://www.ikea.com/us/en/customer-service/returns-claims/return-policy/ and explain the return policy.",
+            "Open https://www.shop.example/us/help/returns/policy/ and explain the return policy.",
         );
         // The person named the shop, not its site.
-        assert!(policy.waits_for_the_person(&["What is IKEA's return policy for it?"]));
+        assert!(policy.waits_for_the_person(&["What is the shop's return policy for it?"]));
         assert!(policy.waits_for_the_person(&[]));
         // They gave the site, or an earlier reply did.
-        assert!(!policy.waits_for_the_person(&["Check IKEA.com's returns page for me."]));
+        assert!(!policy.waits_for_the_person(&["Check Shop.example's returns page for me."]));
         assert!(!policy.waits_for_the_person(&[
-            "What is IKEA's return policy?",
-            "IKEA's policy is at https://www.ikea.com/us/en/customer-service/returns-claims/.",
+            "What is the shop's return policy?",
+            "Its policy is at https://www.shop.example/us/help/returns/.",
         ]));
-        assert!(policy.waits_for_the_person(&["Write to help@ikea.com for me."]));
+        assert!(policy.waits_for_the_person(&["Write to help@shop.example for me."]));
         // Every host it names counts.
         let two = card("Compare https://shop.example/a and https://other.example/b.");
         assert!(two.waits_for_the_person(&["Look at shop.example."]));

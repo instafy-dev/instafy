@@ -1971,7 +1971,7 @@ fn page_folder(site_dir: &str) -> Option<String> {
 }
 
 /// A text as its words: lowercase letters and digits with one space between each, so a title or a
-/// folder (`sites/gopro-cameras`) reads the same in a message whatever its quotes, dashes, slashes
+/// folder (`sites/action-cameras`) reads the same in a message whatever its quotes, dashes, slashes
 /// or letter case.
 fn words_of(text: &str) -> String {
     text.chars()
@@ -3619,7 +3619,7 @@ mod tests {
 
     /// A message names a page by its whole title or its folder, whatever its quotes, dashes or
     /// letter case, and it names only pages another chat made when every page it names is one.
-    /// "Add a waterproof depth column to GoPro HERO cameras compared." in a chat that made a page
+    /// "Add a waterproof depth column to Action cameras compared." in a chat that made a page
     /// of its own names only the other chat's comparison. A page of this chat it names, a page
     /// whose chat isn't recorded, no page at all, or a title that is one word, leaves it to the
     /// turn as before; a title inside a longer one the message names is the longer one's.
@@ -3628,9 +3628,9 @@ mod tests {
         let (this, other) = (Uuid::new_v4(), Uuid::new_v4());
         let workspace = tempfile::tempdir().unwrap();
         for folder in [
-            "sites/gopro-cameras",
-            "sites/gopro-hero13-vs-hero-2024",
-            "sites/gopro-cameras-again",
+            "sites/action-cameras",
+            "sites/camera-a-vs-camera-b",
+            "sites/action-cameras-again",
             "sites/map",
             "seville-3-days",
         ] {
@@ -3640,20 +3640,20 @@ mod tests {
             workspace.path(),
             vec![
                 page(
-                    "sites/gopro-cameras",
-                    "GoPro HERO cameras compared",
+                    "sites/action-cameras",
+                    "Action cameras compared",
                     Some(&other),
                     &PAGE_SERVER,
                 ),
                 page(
-                    "sites/gopro-hero13-vs-hero-2024",
-                    "GoPro HERO13 Black vs HERO (2024)",
+                    "sites/camera-a-vs-camera-b",
+                    "Camera A vs Camera B (2024)",
                     Some(&this),
                     &PAGE_SERVER,
                 ),
                 page(
-                    "sites/gopro-cameras-again",
-                    "GoPro HERO cameras compared again",
+                    "sites/action-cameras-again",
+                    "Action cameras compared again",
                     Some(&this),
                     &PAGE_SERVER,
                 ),
@@ -3663,37 +3663,38 @@ mod tests {
         );
         let held = HeldPages::of_turn(workspace.path(), Some(&this), &[], None);
         for message in [
-            "Add a waterproof depth column to GoPro HERO cameras compared.",
-            "Add a waterproof depth column to \u{201c}GoPro HERO cameras compared\u{201d}.",
-            "add a price row to gopro hero cameras compared, please",
-            "Put a weight row on sites/gopro-cameras.",
+            "Add a waterproof depth column to Action cameras compared.",
+            "Add a waterproof depth column to \u{201c}Action cameras compared\u{201d}.",
+            "add a price row to action cameras compared, please",
+            "Put a weight row on sites/action-cameras.",
         ] {
             assert!(held.names_only_held_pages(message), "{message}");
         }
         for message in [
             // This chat's own page, alone or beside the other chat's.
-            "Add a waterproof column to GoPro HERO13 Black vs HERO (2024).",
-            "Copy GoPro HERO cameras compared's prices into GoPro HERO13 Black vs HERO (2024).",
+            "Add a waterproof column to Camera A vs Camera B (2024).",
+            "Copy Action cameras compared's prices into Camera A vs Camera B (2024).",
             // A longer title of this chat's holds the other chat's: it names this chat's page.
-            "Add a waterproof column to GoPro HERO cameras compared again.",
+            "Add a waterproof column to Action cameras compared again.",
             // A page whose chat isn't recorded is nobody's to hold.
             "Add a day to Seville in 3 days.",
             // A one-word title is a word of the message, and no page is named.
             "Make a map of Lisbon.",
-            "Add a waterproof depth column to the GoPro comparison.",
+            "Add a waterproof depth column to the camera comparison.",
             "",
         ] {
             assert!(!held.names_only_held_pages(message), "{message}");
         }
         // In the chat that made it, nothing is held.
         let theirs = HeldPages::of_turn(workspace.path(), Some(&other), &[], None);
-        assert!(!theirs.names_only_held_pages(
-            "Add a waterproof depth column to GoPro HERO cameras compared."
-        ));
+        assert!(
+            !theirs
+                .names_only_held_pages("Add a waterproof depth column to Action cameras compared.")
+        );
         // Holding switched off holds nothing.
         let off = HeldPages::of_turn_when(false, workspace.path(), Some(&this), &[], None);
-        assert!(!off.names_only_held_pages(
-            "Add a waterproof depth column to GoPro HERO cameras compared."
-        ));
+        assert!(
+            !off.names_only_held_pages("Add a waterproof depth column to Action cameras compared.")
+        );
     }
 }

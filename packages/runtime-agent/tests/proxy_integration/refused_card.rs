@@ -30,9 +30,8 @@ const POLICY_PAGE: &str = "Open https://shop.example/help/returns and explain th
 const POLICY_WORDS: &str = "I found the shop's official returns page, but its site refused a direct read. A search result says unopened items can be returned within 365 days with proof of purchase; I couldn't check the full terms. The card opens the official page.";
 /// A hotel asked for dates, and the retry's own card naming no page either.
 const HOTEL_REQUEST: &str =
-    "Find a hotel in Prague for 15 to 17 January, 2 adults, under 140 euros a night.";
-const HOTEL_NO_PAGE: &str =
-    "Check hotel availability in Prague for 15 to 17 January for 2 adults under 140 euros a night.";
+    "Find a hotel in the old town for 15 to 17 January, 2 adults, under 140 euros a night.";
+const HOTEL_NO_PAGE: &str = "Check hotel availability in the old town for 15 to 17 January for 2 adults under 140 euros a night.";
 const HOTEL_WORDS: &str = "One hotel's listing showed 139 euros a night in the search results, but its own page couldn't be read, so the dates and the price for two adults aren't confirmed.";
 const STAND_ALONE: &str =
     "If this card is refused too, only your words show: make them stand alone.";

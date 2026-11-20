@@ -31835,24 +31835,24 @@ mod tests {
             })
         };
         // The return policy, with search on: the card opens the shop's page a search found.
-        let policy = "I found IKEA's official U.S. return-policy page, but IKEA's site refused a direct read. The search result says unopened items can be returned within 365 days with proof of purchase, but I couldn't verify the full terms. The card opens the official page; I won't use your email or order number.";
-        let policy_card = "Open IKEA's official return-policy page at https://www.ikea.com/us/en/customer-service/returns-claims/return-policy/ and explain the policy that may apply to my order. Do not use or submit my email address or order number.";
-        let asked = "My email is ana@example.com and my order is 123-4567. What is IKEA's return policy for it?";
+        let policy = "I found the shop's official return-policy page, but its site refused a direct read. The search result says unopened items can be returned within 365 days with proof of purchase, but I couldn't verify the full terms. The card opens the official page; I won't use your email or order number.";
+        let policy_card = "Open the shop's official return-policy page at https://www.shop.example/us/help/returns/policy/ and explain the policy that may apply to my order. Do not use or submit my email address or order number.";
+        let asked = "My email is ana@example.com and my order is 123-4567. What is the shop's return policy for it?";
         assert_eq!(
             posted(&chat_turn(json!([]), asked, 1), answer(policy, policy_card)),
             policy
         );
         // The opening hours, with search off: the card opens the museum's own page.
-        let hours = "I couldn't confirm whether the British Museum is open this Sunday, or its hours: its official visit page is blocked to my page reader. The browser can check that page for the Sunday hours.";
-        let hours_card = "Check https://www.britishmuseum.org/visit for the British Museum's opening hours and whether it is open this Sunday.";
-        let asked = "Is the British Museum open this Sunday, and what are its hours?";
+        let hours = "I couldn't confirm whether the city museum is open this Sunday, or its hours: its official visit page is blocked to my page reader. The browser can check that page for the Sunday hours.";
+        let hours_card = "Check https://www.museum.example/visit for the city museum's opening hours and whether it is open this Sunday.";
+        let asked = "Is the city museum open this Sunday, and what are its hours?";
         assert_eq!(
             posted(&chat_turn(json!([]), asked, 1), answer(hours, hours_card)),
             hours
         );
         // Words that name the page themselves are the card's own turn's: still not seen.
         let named =
-            "Its official page, https://www.britishmuseum.org/visit, is blocked to my page reader.";
+            "Its official page, https://www.museum.example/visit, is blocked to my page reader.";
         assert_eq!(
             posted(&chat_turn(json!([]), asked, 1), answer(named, hours_card)),
             named
@@ -31867,8 +31867,8 @@ mod tests {
         );
         // So does one naming an address an earlier reply gave.
         let earlier = json!([
-            { "role": "user", "content": "Where are the British Museum's opening hours?" },
-            { "role": "assistant", "content": "They are on https://www.britishmuseum.org/visit." },
+            { "role": "user", "content": "Where are the city museum's opening hours?" },
+            { "role": "assistant", "content": "They are on https://www.museum.example/visit." },
         ]);
         let asked = "Check them for this Sunday.";
         assert_eq!(
@@ -31880,8 +31880,8 @@ mod tests {
         );
         // Never one a step, a status line or a card gave.
         let not_read = json!([
-            { "role": "user", "content": "Where are the British Museum's opening hours?" },
-            { "role": "assistant", "content": "instafy web read https://www.britishmuseum.org/visit",
+            { "role": "user", "content": "Where are the city museum's opening hours?" },
+            { "role": "assistant", "content": "instafy web read https://www.museum.example/visit",
               "metadata": { "kind": "update", "source": "agent" } },
             { "role": "assistant", "content": "Continue this task in Instafy's browser.",
               "metadata": { "messageType": "action_request",
@@ -31894,7 +31894,7 @@ mod tests {
         // In a chat with others, an address an earlier message gave may be a teammate's: Studio
         // holds the card for any other person, so the words stay. The turn's own message counts.
         let teammate = json!([
-            { "role": "user", "content": "The hours are on www.britishmuseum.org/visit." },
+            { "role": "user", "content": "The hours are on www.museum.example/visit." },
         ]);
         assert_eq!(
             posted(
@@ -32414,7 +32414,7 @@ mod tests {
     #[test]
     fn a_retry_whose_card_is_refused_too_ends_in_words_that_stand_alone() {
         let retry = codex_fallback_retry_prompt(
-            "Latest user request: a hotel in Prague for 15 to 17 January",
+            "Latest user request: a hotel in the old town for 15 to 17 January",
             CodexFallbackSummaryKind::RefusedBrowserCard,
         );
         assert!(
@@ -32423,18 +32423,18 @@ mod tests {
             ),
             "{retry}"
         );
-        let words = "Clarion Hotel Prague City showed EUR 139 a night in the search results, but its own page couldn't be read, so the dates and the price for two adults aren't confirmed.";
+        let words = "One hotel's listing showed EUR 139 a night in the search results, but its own page couldn't be read, so the dates and the price for two adults aren't confirmed.";
         let raw = json!({
             "summary": words,
             "files": [],
             "actions": [{
                 "type": "request_browser",
-                "task": "Check hotel availability in Prague for 15 to 17 January for 2 adults under 140 euros a night.",
+                "task": "Check hotel availability in the old town for 15 to 17 January for 2 adults under 140 euros a night.",
             }],
         });
         let job = chat_turn(
             json!([]),
-            "Find a hotel in Prague for 15 to 17 January, 2 adults, under 140 euros a night.",
+            "Find a hotel in the old town for 15 to 17 January, 2 adults, under 140 euros a night.",
             1,
         );
         let mut outcome = extract_codex_outcome(&raw).expect("extract outcome");
