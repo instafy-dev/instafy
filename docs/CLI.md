@@ -1005,14 +1005,14 @@ instafy web search "Belém Tower" --chain reference-search --lang pt --json
 ```
 
 The answer is `{status, code?, activity, query, queryRedacted?, chain, provider?, providers?, tried?, searchedAt, viewer,
-count, results, tell, notice, offer?, budget, warnings}`:
+count, results, tell, notice, budget, warnings}`:
 
 | `status` | Meaning |
 |---|---|
 | `ok` | Results came back (`repeat: true` when the same search already ran in this turn: it is not sent again) |
 | `not_found` | The provider found nothing |
 | `unavailable` | No provider could answer: `code` is `turn_limit`, `day_limit`, `time_limit`, `rate_limited`, `key_refused`, `provider_error`, `unreachable` or `timeout`, and `tried` lists each provider that did not answer |
-| `no_provider` | No provider in the chain has its key in this space. `offer` is the `request_secret` action for the first provider's key (`BRAVE_SEARCH_API_KEY`), only for a person who asks to set up search; its card says: "Everyone in this space can search with this key, up to 100 searches a day. Brave bills the key's owner." |
+| `no_provider` | No provider in the chain has its key in this space. `tell` says how to go on without one, and the answer carries no key card: that card comes from `instafy web search-key`, only for a person who asks to set up search |
 
 Each result is `{rank, url, site, text?, linkOnly?, noReuse?, source?, provider?, attribution?}`. `text` holds the title and snippet, redacted and
 wrapped in `<untrusted_page_content url=… read_at=… viewer="search result">` like page text. A result restricted by an explicit `no-agents`
@@ -1083,6 +1083,15 @@ the last line of the text. Offline fixtures apply as for `instafy web read` (`vi
 | 2 | `not_found`, `unavailable` or `no_provider` |
 | 64 | Bad options, a refused query, or not in Octo's turn |
 | 70 | The command itself failed (provider or link-only list, fixtures), so nothing was searched |
+
+**The search key's card.** `instafy web search-key --json` gives the card that asks the person for the space's search
+key, only for a person who asks to set up search: `{ok, card, tell, warnings}`, where `card` is the `request_secret`
+action for the key a search of `web-search` tries first (`BRAVE_SEARCH_API_KEY`, or the next provider's when a space
+switched that one off), with its entry's `key_request` and the searches a day its entry allows ("Everyone in this space
+can search with this key, up to 100 searches a day. Brave bills the key's owner."). It reads the list built into the
+CLI, as a search does, so it needs no copy of the list in the space and a copy's own words are never used. It sends
+nothing, reads no key and runs outside a turn too. With every provider that takes a key switched off, `card` is `null`
+(exit 2).
 
 **Eval.** `packages/instafy-cli/test/web-search-eval.mjs` holds 15 asks on hand-written fixtures (5 trips, 5 maps, 5
 shopping), each with an explicit fixture site policy and a search answer that lists a restricted hit, a poisoned snippet, a page behind a sign-in and a dead

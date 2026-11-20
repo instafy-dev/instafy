@@ -12742,6 +12742,7 @@ required = true
             "instafy web read https://example.org/search",
             "instafy conversation search ramen",
             "instafy web link booking.com query=ramen",
+            "instafy web search-key --json",
             "grep -r 'web search' docs",
             "myinstafy web search",
         ] {

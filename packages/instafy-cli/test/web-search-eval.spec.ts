@@ -69,7 +69,9 @@ async function referenceTurn(kase: Kase, n: number, { key }: { key: boolean }): 
   };
   const common = { now: () => clock, skillRoots: [], bundledLinkOnly: TEST_SITE_POLICY, env, cwd: tmp };
   const search = await webSearch({ query: kase.query }, { ...common, stateDir: path.join(tmp, "state", kase.id, String(key)) });
-  const searches = [{ query: search.query, status: search.status, results: search.results, ...(search.offer ? { offer: search.offer } : {}) }];
+  // With no key the answer carries no key card, so the turn has none to put in its reply.
+  expect(Object.keys(search)).not.toContain("offer");
+  const searches = [{ query: search.query, status: search.status, results: search.results }];
   const readDeps = {
     ...common,
     stateDir: path.join(tmp, "read-state", `${kase.id}-${key}`),
@@ -159,7 +161,6 @@ describe("the web search eval (fixtures)", () => {
     it(`${kase.id}: without a search key, the turn reads the official page through reference search, answers with it, and puts no key card in its reply`, async () => {
       const reference = await referenceTurn(kase, n + 100, { key: false });
       expect(reference.searches[0].status).toBe("no_provider");
-      expect(reference.searches[0].offer).toMatchObject({ type: "request_secret", name: "BRAVE_SEARCH_API_KEY" });
       const checks = gradeTranscript(reference, kase);
       expect(failedIds(checks), JSON.stringify(checks.filter((c) => !c.pass))).toEqual([]);
       for (const [what, breakIt, expected] of NO_PROVIDER_BREAKERS) {
@@ -181,7 +182,7 @@ describe("the web search eval (fixtures)", () => {
       "Nothing from a search's result list is kept: no title or snippet",
       "A source blocked by an explicit workspace policy may be offered as a link without claiming its content was read.",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
-      "Its `offer` (the key card, a `request_secret` action) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
+      "The key card (`instafy web search-key --json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
       "never ask for a key in chat or wait for it",
       "The person's own search: they open the pages they pick and press **Send page to Octo**",
     ]) {

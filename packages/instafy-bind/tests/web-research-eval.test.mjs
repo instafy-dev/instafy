@@ -277,7 +277,7 @@ test("research and browser policy checks match the current skills", () => {
     key_facts_supported: ["need two independent sources, or one official source"],
     cites_checked_on: ['From a page read: "checked 26 Oct on <host>", linked to it.'],
     // "seen" for a price a page read showed; one a web search gave has the search's label
-    prices_seen: ['A price read on a page is the amount and currency, "seen 26 Oct"', 'say a fact from it as "a web search on <date> found: …" with its link and the article\'s date, or read the page first', 'Prices are stored with "seen <date>"'],
+    prices_seen: ['A price read on a page is the amount and currency, "seen 26 Oct"', 'say a fact from it as "a web search on <date> found, on <that result\'s site>: …" with that result\'s link and date, or read the page first', 'Prices are stored with "seen <date>"'],
     prices_link_out: ["Shopping and trip items link to the shop's or operator's page."],
     not_read_listed: ['"not read: <page> (<why, in plain words>)"'],
     no_copied_listing: ["Link out instead of copying listings, reviews, photos or descriptions"],
@@ -380,8 +380,7 @@ test("guided mode follows explicit workspace policy and the fixture's requested 
     "(Instafy supplies no built-in site templates).",
     "They can open it and press **Send page to Octo**",
     "cite what they send and respect the workspace's reuse policy",
-    "If a workspace policy restricts reuse, keep only the permitted name and link in published output.",
-    "A user-sent page does not waive that policy.",
+    "`no-reuse`: the site may be read; summarize and cite it, and publish only its name and link, from a page the person sent too.",
   ]) {
     assert.ok(skill.includes(needle), needle);
   }

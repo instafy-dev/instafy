@@ -2185,6 +2185,9 @@ mod tests {
         .unwrap();
         assert_eq!(twice["count"], json!(2));
         assert_eq!(twice["done"]["other"], json!("searched the web {n} times"));
+        // The command that gives the search key's card searches nothing, so it never reads as a search.
+        let card = label(&[], "instafy web search-key --json");
+        assert!(card.is_none_or(|activity| activity["key"] != json!("instafy/web-search")));
     }
 
     /// Every web search is one label, `instafy web search` and the AI's own search alike: Studio
