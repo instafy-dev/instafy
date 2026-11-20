@@ -5515,11 +5515,7 @@ fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
             Some("Clicked \"Extra Cheese\", and it is checked now."),
             "choose",
         ),
-        (
-            "plain-button",
-            Some("Clicked \"Show details\"."),
-            "click",
-        ),
+        ("plain-button", Some("Clicked \"Show details\"."), "click"),
     ] {
         let fixture = EmbeddedControllerFixture::new();
         fixture.prepare_routine_start("page-target");
