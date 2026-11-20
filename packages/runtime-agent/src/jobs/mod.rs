@@ -4583,7 +4583,7 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - Open Instafy's browser yourself when a page needs it (`instafy web read` says `needs_browser`, the person wants to see it, or you walk the person through a provider's screens), without asking in chat first or waiting for them to mention a browser; this replaces any earlier instruction to offer it first.\n\
 - It opens public web addresses only; its safety policy blocks this space's own addresses (localhost, 127.0.0.1, private addresses, ports here). A site running in this space is shown to people with a private Studio preview card (`instafy preview open`), not this browser.\n\
-- With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do. An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.\n\
+- With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do on each page it opens, named by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named. A card naming none is refused: search first, then hand over what it found. Never put the person's details, such as an order number or an e-mail address, in it.\n\
 - `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
 - A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n\
@@ -4982,6 +4982,35 @@ fn declined_a_turn_that_needs_an_answer(
 ) -> Option<CodexFallbackSummaryKind> {
     (participation_decline_sentinel(summary) && !controller_lets_the_turn_decline(job))
         .then_some(CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer)
+}
+
+/// An answer that asked for the browser with a `request_browser` card refused for what its task
+/// says ([`browser_request::REFUSED_FOR_ITS_TASK`]: a question's card that named no page it
+/// opens, or a card that held an e-mail address), with no card left to post, on a turn that may
+/// ask for the browser. Its words were written for that card ("I'm checking hotel
+/// availability…"), so the turn runs once more, told why: it searches first, then hands over
+/// what it found or answers from it ([`codex_fallback_retry_prompt`]). What else the answer
+/// holds doesn't keep it: kept beside a page it read, a score question's "I've opened a browser
+/// check of the official results." stood with no card and no browser behind it (a local test,
+/// Nov 19), and a key's card or a skill setup's words say where the browser goes just the same.
+/// A turn that changed files (`changed_files`) keeps its answer, which says what it made: run
+/// again, a build starts over from the person's request. A card that retry writes is checked the
+/// same way, and is not tried again.
+fn refused_browser_card(
+    job: &LeaseJob,
+    reply: &JsonValue,
+    outcome: &CodexOutcome,
+    changed_files: bool,
+) -> Option<CodexFallbackSummaryKind> {
+    let refused = browser_request::dropped_requests(reply)
+        .iter()
+        .any(|reason| browser_request::REFUSED_FOR_ITS_TASK.contains(reason));
+    let card_left = outcome
+        .actions
+        .iter()
+        .any(|action| matches!(action, CodexAction::RequestBrowser(_)));
+    (refused && !card_left && !changed_files && !browser_request_unsupported(job))
+        .then_some(CodexFallbackSummaryKind::RefusedBrowserCard)
 }
 
 fn clean_decline_final_json(value: &JsonValue) -> bool {
@@ -9584,6 +9613,12 @@ impl JobProcessor {
         )
         .await?
             == 0;
+        // An answer whose card was refused for what its task says was written for that card: the
+        // turn runs once more, unless it changed files of its own ([`refused_browser_card`]).
+        if codex_fallback_summary_kind.is_none() {
+            codex_fallback_summary_kind =
+                refused_browser_card(job, &output.final_json, &outcome, !own_files_empty);
+        }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -9930,7 +9965,8 @@ impl JobProcessor {
                         }
                     }
                     CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
-                    | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
+                    | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer
+                    | CodexFallbackSummaryKind::RefusedBrowserCard => {
                         codex_fallback_retry_prompt(&prompt, kind)
                     }
                 }
@@ -12472,11 +12508,6 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             "- If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
               - If you emit `request_secret`, keep `summary` short: what is blocked, and that the value goes in the card on this message. Do not write a retry phrase or any instruction to reply: the card saves the value and continues the run itself. Do not name the environment variable in `summary`; call the value what the provider calls it on screen. Assume the person has never made an API token and has never seen the provider's developer screens. Teaching them is not `summary`'s job: carry the skill's own \"## Getting started\" walkthrough in the conversation beside the card, a step or two at a time, waiting for each answer, and naming the screens the skill declares. While a value's card is unanswered, carry on in words and do not emit `request_secret` for it again; a value the service or the skill's check rejected is a new ask, not a repeat. Write to the person in plain sentences: no \"please\", no em dashes, no exclamation marks.\n\
               - In a skill setup and its `request_secret` cards, addresses come only from the skill. If the skill declares an address, use that exact one and no other. If it declares none, name the screen in words and ask the person what they see. Never write a host or a link you did not read in the skill, and never offer two candidate addresses: a guessed address is a link the person will trust because it is yours.",
-            if offers_browser_card {
-                " Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content."
-            } else {
-                ""
-            },
             "\n\
               - If you emit `request_location`, keep `summary` focused on why location is needed and whether approximate or precise location is enough. Do not mention action cards, UI steps, or retry phrases for location; the app handles that.\n\
             - Use `request_location` when the user wants nearby/current-location recommendations or routes and they have not already provided a place/city. Prefer `approximate` unless exact turn-by-turn or meter-level precision is clearly necessary.\n\
@@ -15768,7 +15799,9 @@ fn retry_status_activity(retry_reason: &str) -> Option<JsonValue> {
         "missing_command_execution"
         | "missing_command_observation"
         | "missing_context_retrieval"
-        | "missing_context_and_observation" => activity_labels::evidence_retry_activity(),
+        | "missing_context_and_observation"
+        // The card was never posted: to the person the turn is still at work.
+        | "refused_browser_card" => activity_labels::evidence_retry_activity(),
         _ => activity_labels::runtime_status_activity("codex_retry"),
     }
 }
@@ -15782,6 +15815,7 @@ fn codex_fallback_retry_reason(kind: CodexFallbackSummaryKind) -> &'static str {
         CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
             "declined_a_turn_that_needs_an_answer"
         }
+        CodexFallbackSummaryKind::RefusedBrowserCard => "refused_browser_card",
     }
 }
 
@@ -15797,6 +15831,9 @@ fn codex_fallback_retry_message(kind: CodexFallbackSummaryKind) -> &'static str 
         CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
             "Retrying: Codex declined a turn that needs an answer."
         }
+        CodexFallbackSummaryKind::RefusedBrowserCard => {
+            "Retrying: the browser card named no page it opens or held an e-mail address."
+        }
     }
 }
 
@@ -15811,13 +15848,17 @@ fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> 
         CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
             "Your previous answer was only `NO_RESPONSE`. That word declines an ambient group turn that Instafy marks for a participation decision, and this turn is not one: the person is talking to you, so answer them. Do not answer `NO_RESPONSE`."
         }
+        CodexFallbackSummaryKind::RefusedBrowserCard => {
+            "Your previous answer's `request_browser` card was refused: a card names each page it opens by its address, and never the person's details. For a page you have no address for, search first, then hand over what it found: answer from the pages you read, or end with one card naming each page it opens by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named, and what to do there. Never put the person's details, such as an order number or an e-mail address, in a card."
+        }
     };
     let observation_requirement = match kind {
         CodexFallbackSummaryKind::MissingFinalAssistantMessage => {
             "\n        - If the latest request depends on workspace, project, repository, or runtime facts and the user did not forbid tool use, make at least one concrete observation with an available tool/command before the final response."
         }
         CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
-        | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => "",
+        | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer
+        | CodexFallbackSummaryKind::RefusedBrowserCard => "",
     };
     format!(
         "{prompt}\n\nIMPORTANT RETRY REQUIREMENT:\n\
@@ -16370,6 +16411,12 @@ fn codex_fallback_failure_message(kind: CodexFallbackSummaryKind, summary: &str)
         // Never the word itself as the turn's reply: on this turn the controller would post it.
         CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
             "Codex declined to answer (NO_RESPONSE) again after retry, on a turn that needs an answer."
+                .to_string()
+        }
+        // Never a retry's own kind (`refused_browser_card` reads the first answer only): its card
+        // is left out, and its words stand.
+        CodexFallbackSummaryKind::RefusedBrowserCard => {
+            "Codex's browser card named no page it opens, or held an e-mail address, again after retry."
                 .to_string()
         }
     }
@@ -17763,7 +17810,8 @@ pub async fn end_browser_turn_answer(
         let from_the_pass = lines.is_some();
         match lines.or_else(|| browser_hand_back::finding_lines_from_pages(&opened)) {
             Some(lines) => {
-                browser_hand_back::add_finding_lines(summary, &lines);
+                // They stand in place of what the turn's own answer wrote for Octo.
+                browser_hand_back::add_finding_lines_in_place_of_the_first(summary, &lines);
                 tracing::info!(
                     job_id = %job.id,
                     from_the_pass,
@@ -30217,10 +30265,12 @@ mod tests {
         // Since Oct 31 it says that a card which continues building asks only
         // what to find or check, and that a turn with only the card may not
         // show its reply, while a reply beside a card still never promises a
-        // page or a submit.
+        // page or a submit. Since Nov 19 it says a card names each page it
+        // opens by its address, never the person's details, and that one
+        // naming none is refused.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 560,
+            browser_choice <= 610,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -31527,27 +31577,34 @@ mod tests {
             if restored {
                 assert_eq!(metrics["promptMode"], "stateful_compact", "{lane}");
             }
-            if lane == "full" {
-                // Outside a skill setup an address read only from a page or a
-                // tool never goes into a card Studio may open by itself.
-                assert!(prompt.contains(
-                    "Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content."
-                ));
-            }
+            // The card's one rule for its addresses is the browser rule's: no line of the lane's
+            // contract says another.
+            assert!(
+                !prompt.contains("never carries an address read only from page or tool content"),
+                "{lane}"
+            );
         }
     }
 
     /// Octo opens the browser without a press, but the rule changes no
     /// approval: the browser's own site and action prompts and the ask before
-    /// a high-impact step stay authoritative. Studio opens a card by itself
-    /// only for an address the person could have seen, so the task never
-    /// carries one read only from a page or a tool.
+    /// a high-impact step stay authoritative. A card names each page it opens
+    /// by its address, so what a search found reaches the browser as pages
+    /// to use, never as a search to run there: cards that named none ("Find
+    /// available hotels in <city>…", a shop's
+    /// policy "for order <number> associated with <e-mail>") sent the browser
+    /// to find the pages itself, into a booking site's search and a shop's
+    /// sign-in (a local test, Nov 19). An address only Octo read, a search
+    /// result's among them, still leaves the card a button until the person
+    /// opens it (Studio `browserAutoStartAddressesSeen`).
     #[test]
     fn browser_choice_keeps_every_approval_and_names_where_addresses_come_from() {
         for phrase in [
             "It changes no approval: the browser's own site and action prompts still apply",
             "asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step",
-            "An address in it comes from a skill, the person or your earlier replies, never a guess or page or tool output such as a search result.",
+            "Write `task` as the person's request: what to do on each page it opens, named by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named.",
+            "A card naming none is refused: search first, then hand over what it found.",
+            "Never put the person's details, such as an order number or an e-mail address, in it.",
             "without asking in chat first",
         ] {
             assert!(BROWSER_CHOICE_CONTRACT.contains(phrase), "{phrase}");
@@ -31556,6 +31613,7 @@ mod tests {
             "this replaces any earlier instruction to ask or offer.",
             "an address you read",
             "Do not ask first",
+            "never a guess or page or tool output",
         ] {
             assert!(!BROWSER_CHOICE_CONTRACT.contains(phrase), "{phrase}");
         }
@@ -31907,7 +31965,6 @@ mod tests {
         for offer in [
             "- Use `actions` for interactive UI help: secrets, integrations, location, and opening Instafy's browser. Supported actions:\n",
             "- { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }\n",
-            "Outside a skill setup, a `request_browser` task never carries an address read only from page or tool content.\n",
             "Without them, emit `request_browser`: it is a handoff to Instafy's browser, not evidence that a page was opened or a task completed.\n",
         ] {
             assert!(building.contains(offer), "{offer}");
@@ -32044,6 +32101,173 @@ mod tests {
             suppress_browser_requests_where_unsupported(&job, &mut outcome);
             assert_eq!(outcome.actions.len(), 1, "{metadata}");
         }
+    }
+
+    /// A turn whose card was refused for what its task says (a question's card named no page it
+    /// opens, or a card held an e-mail address) runs once more, told why: it searches first, then
+    /// hands over what it found or answers from it. Its words were written for a card that no
+    /// longer comes ("I'll check the shop's return information for your order."). A turn with a
+    /// card left to post keeps its answer, and so do a turn that changed files, whose answer says
+    /// what it made, one that may not ask for the browser, and one whose only card continues
+    /// building and names no page, which is no refusal.
+    #[test]
+    fn a_turn_whose_card_is_refused_searches_first_and_hands_over_what_it_found() {
+        let ordinary = test_lease_job(Some("feature"), json!({}));
+        let kind = |job: &LeaseJob, raw: &JsonValue, changed_files: bool| {
+            let outcome = extract_codex_outcome(raw).expect("extract outcome");
+            refused_browser_card(job, raw, &outcome, changed_files)
+        };
+        let card = |task: &str| json!({"type": "request_browser", "task": task});
+        let answer = |task: &str| {
+            json!({
+                "summary": "I'll check the shop's return information for your order.",
+                "files": [],
+                "actions": [card(task)],
+            })
+        };
+        let no_page = answer(
+            "Check the shop's return policy for order 123-4567 associated with ana@example.com.",
+        );
+        let refused = Some(CodexFallbackSummaryKind::RefusedBrowserCard);
+        assert_eq!(kind(&ordinary, &no_page, false), refused);
+        assert_eq!(
+            kind(
+                &ordinary,
+                &answer(
+                    "Open https://shop.example/help/returns and check the policy for ana@example.com."
+                ),
+                false
+            ),
+            refused
+        );
+        // Hotel pages a search found, by their addresses: the card is posted.
+        let hotels = answer(
+            "Open https://www.harbour-hotel.example/rooms and https://old-town-inn.example/book, set 12 to 14 December and 2 adults, and read each room's price.",
+        );
+        assert_eq!(kind(&ordinary, &hotels, false), None);
+        // A card naming its pages beside the refused one is posted, and the answer stands.
+        let mut a_card_left = no_page.clone();
+        a_card_left["actions"]
+            .as_array_mut()
+            .unwrap()
+            .push(hotels["actions"][0].clone());
+        assert_eq!(kind(&ordinary, &a_card_left, false), None);
+        // A turn that changed files keeps the answer that says what it made.
+        let mut with_file = no_page.clone();
+        with_file["files"] = json!([{
+            "path": "notes.md",
+            "workspacePath": "notes.md",
+            "change": {"type": "created"},
+            "content": "Returns\n",
+        }]);
+        assert_eq!(kind(&ordinary, &with_file, true), None);
+        assert_eq!(kind(&ordinary, &no_page, true), None);
+        assert_eq!(
+            kind(
+                &test_lease_job(
+                    Some("feature"),
+                    json!({"metadata": {"browserTransport": "shared"}}),
+                ),
+                &no_page,
+                false
+            ),
+            None
+        );
+        let building = json!({
+            "summary": "I'm checking the key places in the browser, then I'll put them on the map.",
+            "files": [],
+            "actions": [{
+                "type": "request_browser",
+                "task": "Find a first-visit three-day itinerary for the city and verify the key places from public sources.",
+                "continueBuilding": true,
+            }],
+        });
+        assert_eq!(kind(&ordinary, &building, false), None);
+        assert_eq!(extract_codex_outcome(&building).unwrap().actions.len(), 1);
+        // The retry is told why, and the person's line reads as a turn still at work.
+        let refused = CodexFallbackSummaryKind::RefusedBrowserCard;
+        let retry = codex_fallback_retry_prompt("Latest user request: the return policy", refused);
+        for phrase in [
+            "For a page you have no address for, search first, then hand over what it found",
+            "by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named",
+            "Never put the person's details, such as an order number or an e-mail address, in a card.",
+        ] {
+            assert!(retry.contains(phrase), "{phrase}");
+        }
+        assert_eq!(
+            retry_status_activity(codex_fallback_retry_reason(refused)),
+            activity_labels::evidence_retry_activity()
+        );
+    }
+
+    /// A refused card leaves the words written for it with nothing behind them, whatever else
+    /// the answer holds. A score question's answer read the league's text-only page, said "I've
+    /// opened a browser check of the official results." and wrote a card naming no page: with
+    /// that card refused and no retry, the line promised a browser that never came, and the
+    /// person got no result (a local test, Nov 19). A page it read is no way on, and neither is
+    /// another card beside it (a key's: "Instafy's browser opens the provider's settings", or a
+    /// location's) nor a skill setup's words.
+    #[test]
+    fn a_refused_card_beside_a_page_read_another_card_or_a_setup_runs_the_turn_again() {
+        let ordinary = test_lease_job(Some("feature"), json!({}));
+        let kind = |job: &LeaseJob, raw: &JsonValue| {
+            let outcome = extract_codex_outcome(raw).expect("extract outcome");
+            refused_browser_card(job, raw, &outcome, false)
+        };
+        let refused = Some(CodexFallbackSummaryKind::RefusedBrowserCard);
+        let read_a_page = json!({
+            "summary": "I couldn't verify the result from the league's text-only score page. I've opened a browser check of the official results.",
+            "code": null,
+            "files": [{"change": "read", "path": "https://scores.example/2026-11-18", "content": null}],
+            "actions": [{
+                "type": "request_browser",
+                "task": "Check the official results for the team's game on November 18, 2026, and tell me who won and the final score.",
+                "browserLocation": "auto",
+                "continueBuilding": null,
+            }],
+        });
+        assert_eq!(
+            extract_codex_outcome(&read_a_page)
+                .unwrap()
+                .read_files
+                .len(),
+            1
+        );
+        let with_a_key = json!({
+            "summary": "The provider's key goes in the card on this message. Instafy's browser opens the provider's settings, where you sign in yourself.",
+            "files": [],
+            "actions": [
+                {"type": "request_secret", "name": "PROVIDER_API_KEY"},
+                {"type": "request_browser", "task": "Take me to the provider's developer settings and stop on the list of keys."},
+            ],
+        });
+        let setup = json!({
+            "summary": "Instafy's browser opens the provider's sign-in. Sign in there yourself, then choose Let Octo continue.",
+            "files": [],
+            "actions": [{"type": "request_browser", "task": "Open the provider's dashboard for ana@example.com and take me to its keys."}],
+        });
+        let with_location = json!({
+            "summary": "I'm checking the opening hours near you in the browser.",
+            "files": [],
+            "actions": [
+                {"type": "request_browser", "task": "Check which pharmacies near me are open now."},
+                {"type": "request_location", "precision": "approximate"},
+            ],
+        });
+        let setup_job = skill_setup_test_job(SKILL_SETUP_TEST_OPENER);
+        let wrong: Vec<String> = [
+            ("a page read", &ordinary, &read_a_page),
+            ("a key's card", &ordinary, &with_a_key),
+            ("a location's card", &ordinary, &with_location),
+            ("a skill setup", &setup_job, &setup),
+        ]
+        .into_iter()
+        .filter_map(|(case, job, raw)| {
+            let got = kind(job, raw);
+            (got != refused).then(|| format!("{case}: {got:?}"))
+        })
+        .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// The router weighs a word by how few skills use it, so "browser" and
@@ -42159,8 +42383,8 @@ mod tests {
     #[test]
     fn browser_request_actions_emit_one_handoff_and_defer_work_until_tools_are_attached() {
         let actions = parse_codex_actions(&json!({"actions": [
-            {"type": "request_browser", "task": "Continue comparing the saved items"},
-            {"type": "request_browser", "task": "Repeated request", "browserLocation": "device"},
+            {"type": "request_browser", "task": "Continue comparing the saved items on https://shop.example/compare"},
+            {"type": "request_browser", "task": "Repeated request on https://shop.example/compare", "browserLocation": "device"},
             {"type": "request_browser", "task": "", "browserLocation": "auto"}
         ]}));
         assert_eq!(actions.len(), 2);
@@ -42172,7 +42396,7 @@ mod tests {
         // knows about the browsers it can open.
         assert_eq!(
             messages[0].metadata.as_ref().unwrap()["details"]["browserRequest"],
-            json!({ "task": "Continue comparing the saved items", "location": "auto" })
+            json!({ "task": "Continue comparing the saved items on https://shop.example/compare", "location": "auto" })
         );
         let mut outcome = CodexOutcome {
             summary: String::new(),
