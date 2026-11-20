@@ -50,7 +50,7 @@ pub(super) const SERVICE_ROLE: &str = "service-role-token";
 pub(super) const STALE_GENERATION: &str = "runtime token generation is no longer current";
 
 /// A request running on a task of its own.
-type PendingCall = JoinHandle<anyhow::Result<(StatusCode, JsonValue)>>;
+pub(super) type PendingCall = JoinHandle<anyhow::Result<(StatusCode, JsonValue)>>;
 
 #[derive(Clone, Copy)]
 pub(super) struct People {
@@ -104,7 +104,7 @@ impl Space {
 
     /// [`Self::call`] on a task of its own, to race a transaction the test
     /// holds open.
-    fn spawn_call(
+    pub(super) fn spawn_call(
         &self,
         method: &'static str,
         uri: String,
@@ -401,7 +401,7 @@ async fn waiting_on_owner_lock(pool: &PgPool, owner: Uuid) -> anyhow::Result<i64
 /// Waits until each of `requests` waits for `owner`'s owner lock or has
 /// finished, for at most ten seconds. A request that never waits is left to
 /// fail its test's assertions, not this wait.
-async fn until_waiting_or_done(
+pub(super) async fn until_waiting_or_done(
     pool: &PgPool,
     owner: Uuid,
     requests: &[&PendingCall],

@@ -59,6 +59,7 @@ describe("settings sections in all scopes", () => {
     ["profile", "account", "notifications"],
     ["profile", "account", "appearance"],
     ["profile", "account", "location"],
+    ["profile", "account", "machines"],
     ["profile", "account", "advanced"],
   ] as const)("round trips %s categories and defaults", (tab, defaultCategory, category) => {
     const search = buildSettingsSectionSearch("?projectId=space&filter=local", tab, category);

@@ -25,6 +25,8 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
   - A private local start receives a controller-assigned runtime/origin ID, registers without the hosted allocator, and requests its tunnel after registration with no runtime lease.
 - `instafy runtime status` — show health of the last started runtime.
 - `instafy runtime stop` — stop the last started runtime.
+- `instafy runtime machines` — list your own machines in every space, and tokens minted for machines that have not connected yet.
+- `instafy runtime revoke <id-or-prefix…>` — end those machines' runtime tokens and stop the ones running; `--all` revokes all of them. It asks first unless you pass `--yes`, which `--json` also needs.
 - `instafy space invite <email>` — invite a teammate to the linked space by email.
   - Optional: `--role viewer|builder|admin|owner`
 - `instafy space role <email> <role>` — update a teammate's access in the linked space by email.

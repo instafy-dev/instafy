@@ -432,6 +432,26 @@ Shows health information for the last started runtime (server/proxy/origin).
 
 Stops the last started runtime recorded in `~/.instafy/cli-runtime-state.json`.
 
+### `instafy runtime machines`
+
+Lists your own machines in every space: each private runtime the server attested as yours (Instafy
+Desktop, its Personal Browser, and `instafy runtime start` on any computer), with its space, status
+and when it was last seen, and each runtime token you minted for a machine that has not connected
+yet. A computer you use in several spaces is listed once for each space. A machine you revoked is
+listed as `revoked` until it is started again. A space you can no longer open is listed without its
+name. `--json` prints the list.
+
+### `instafy runtime revoke`
+
+Ends the runtime, agent and job tokens of the machines you name by id or unique id prefix
+(`instafy runtime revoke 3f2a91c4`), each in its own space, or of all your machines in every space
+with `--all`, and stops the ones still running. A machine already revoked is skipped. It asks
+first; `--yes` skips the question and is required with `--json` or when not running in a terminal,
+as in a script or CI. To use a revoked machine again, start it again with your sign-in. Revoking does not sign you out on
+the machine: one that still has your sign-in, such as a computer where you ran `instafy login`,
+can mint itself a new token. See
+[Revoking your own machines](Self-Hosted-Runtime-Security.md#revoking-your-own-machines).
+
 ## Local Hardware
 
 The CLI is the first headless entrypoint for host-native hardware capabilities. Desktop should use

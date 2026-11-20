@@ -12,6 +12,7 @@ mod gone_space_runtimes;
 mod lease;
 mod limit_waits;
 mod managed;
+mod my_machines;
 mod pre_stop_flush;
 mod provider;
 mod register;
@@ -120,6 +121,8 @@ pub(crate) fn router() -> Router<AppState> {
             post(token::mint_runtime_access_token),
         )
         .route("/runtime/remove", post(stop::runtime_remove))
+        .route("/me/runtimes", get(my_machines::list_my_runtimes))
+        .route("/me/runtimes/revoke", post(my_machines::revoke_my_runtimes))
         .route(
             "/projects/:project_id/runtime/activity",
             post(status::runtime_activity),

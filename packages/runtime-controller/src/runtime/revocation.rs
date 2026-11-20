@@ -16,13 +16,17 @@
 //!   and the CLI then mint again with the person's sign-in, which checks
 //!   their access again, and start the machine anew.
 //! - The runtime's token generation is rotated when it is removed, when its
-//!   owner stops it with their own sign-in, and when a member or team change
-//!   made through the controller leaves its owner unable to write the space.
+//!   owner stops it with their own sign-in, when its owner revokes it from
+//!   their own machines ([`end_machines_of_their_owner`]), and when a member
+//!   or team change made through the controller leaves its owner unable to
+//!   write the space.
 //!   The routes that check the generation (registration, the agent lease,
 //!   heartbeat and job routes, tunnels, origin capabilities) then refuse its
 //!   runtime, agent and job tokens with 401 "runtime token generation is no
 //!   longer current"; only a fresh mint by a person who can write the space
-//!   names the new one.
+//!   names the new one. A revocation by the owner also records the generation
+//!   it gave ([`OWNER_REVOCATION_CAPABILITY`]), so the runtime reads as
+//!   revoked until something rotates it again.
 //! - The owner must still be able to write the space. Registration (the
 //!   renewal) and every origin capability (register and presence, applies
 //!   and commit receipts, workspace lease reads, Git token mints) check it,
@@ -32,8 +36,8 @@
 //!
 //! Every path that admits a machine for a person (the runtime token mint,
 //! `/agent/login`, registration) holds that person's owner lock shared, and
-//! every membership fence holds it exclusively, so a removal and an admission
-//! never both miss each other. A mint for a new machine has no runtime row
+//! every membership fence and every revocation by the owner holds it
+//! exclusively, so a removal and an admission never both miss each other. A mint for a new machine has no runtime row
 //! for a fence to rotate, so it records a pending mint
 //! ([`record_pending_machine_mint`]); the fence deletes the person's pending
 //! mints where they can no longer write, and the machine's first
@@ -44,6 +48,7 @@
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
+use serde_json::Value as JsonValue;
 use tokio_postgres::Transaction;
 use tracing::info;
 use uuid::Uuid;
@@ -53,7 +58,10 @@ use crate::{internal_error, ApiError, AppState};
 
 use super::access::{runtime_is_private_self_hosted, self_hosted_owner_user_id};
 use super::register::RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS;
-use super::token::{MAX_RUNTIME_TOKEN_TTL_SECONDS, RUNTIME_TOKEN_GENERATION_CAPABILITY};
+use super::token::{
+    runtime_generation_from_capabilities, MAX_RUNTIME_TOKEN_TTL_SECONDS,
+    RUNTIME_TOKEN_GENERATION_CAPABILITY,
+};
 
 /// The code of the refusal a private self-hosted runtime gets once the person
 /// it acts for can no longer write its space.
@@ -326,7 +334,7 @@ pub(crate) async fn prune_expired_pending_machine_mints(
 /// most max(`AGENT_TOKEN_TTL_SECONDS`, an hour) and an agent token at most
 /// `AGENT_TOKEN_TTL_SECONDS`; the rest covers verification leeway and clock
 /// skew.
-fn generation_token_lifetime_bound(state: &AppState) -> f64 {
+pub(super) fn generation_token_lifetime_bound(state: &AppState) -> f64 {
     let longest = state
         .config
         .agent_token_ttl_seconds
@@ -378,8 +386,7 @@ pub(crate) async fn fence_runtimes_of_a_lost_writer(
         MembershipChangeScope::Project(project_id) => ("p.id = $1", project_id),
         MembershipChangeScope::Org(org_id) => ("p.org_id = $1", org_id),
     };
-    // A prefilter on every spelling of the attested owner that
-    // `self_hosted_owner_user_id` reads; the exact check runs below.
+    // A prefilter on the attested owner; the exact check runs below.
     let query = format!(
         "select r.id, r.project_id, r.provider, r.capabilities
          from runtimes r
@@ -388,17 +395,9 @@ pub(crate) async fn fence_runtimes_of_a_lost_writer(
            and lower(coalesce(p.status, '')) <> 'deleted'
            and (r.status <> 'removed'
                 or r.updated_at > now() - make_interval(secs => $3))
-           and $2::text in (
-               r.capabilities #>> '{{_instafySelfHostedAccess,ownerUserId}}',
-               r.capabilities #>> '{{_instafySelfHostedAccess,owner_user_id}}',
-               r.capabilities #>> '{{_instafy_self_hosted_access,ownerUserId}}',
-               r.capabilities #>> '{{_instafy_self_hosted_access,owner_user_id}}',
-               r.capabilities #>> '{{personalBrowser,ownerUserId}}',
-               r.capabilities #>> '{{personalBrowser,owner_user_id}}',
-               r.capabilities #>> '{{personal_browser,ownerUserId}}',
-               r.capabilities #>> '{{personal_browser,owner_user_id}}'
-           )
-         order by r.id"
+           and {owner_clause}
+         order by r.id",
+        owner_clause = attested_owner_is("$2"),
     );
     let rows = transaction
         .query(
@@ -501,6 +500,250 @@ pub(crate) async fn fence_runtimes_of_a_lost_writer(
     Ok(rotated)
 }
 
+/// The SQL condition that a runtime `r`'s attested owner is the text
+/// parameter `param`, on every spelling of the owner that
+/// [`self_hosted_owner_user_id`] reads. A prefilter only: callers check each
+/// row with [`runtime_is_private_self_hosted`] and that function.
+pub(super) fn attested_owner_is(param: &str) -> String {
+    format!(
+        "{param}::text in (
+             r.capabilities #>> '{{_instafySelfHostedAccess,ownerUserId}}',
+             r.capabilities #>> '{{_instafySelfHostedAccess,owner_user_id}}',
+             r.capabilities #>> '{{_instafy_self_hosted_access,ownerUserId}}',
+             r.capabilities #>> '{{_instafy_self_hosted_access,owner_user_id}}',
+             r.capabilities #>> '{{personalBrowser,ownerUserId}}',
+             r.capabilities #>> '{{personalBrowser,owner_user_id}}',
+             r.capabilities #>> '{{personal_browser,ownerUserId}}',
+             r.capabilities #>> '{{personal_browser,owner_user_id}}'
+         )"
+    )
+}
+
+/// The controller-owned capability in which [`end_machines_of_their_owner`]
+/// records a revocation by the runtime's owner:
+/// `{"generation": "<uuid>", "revokedAt": "<rfc3339>"}`, the token generation
+/// that revocation gave the runtime, and when. Registration strips it from what
+/// a runtime reports (`super::register`), so a machine cannot mark itself
+/// revoked to hide from its owner's list and from their Revoke all.
+pub(crate) const OWNER_REVOCATION_CAPABILITY: &str = "_instafyOwnerRevocation";
+
+/// When the runtime's owner revoked it, while that revocation still holds: the
+/// [`OWNER_REVOCATION_CAPABILITY`] names the runtime's current token
+/// generation. Any later rotation (a fresh mint's successor generation, a
+/// person's stop or removal, a membership fence) changes the generation, and
+/// the runtime no longer reads as revoked. A machine can work again only after
+/// a fresh mint, so a live machine never reads as revoked.
+pub(crate) fn owner_revoked_at(capabilities: &JsonValue) -> Option<DateTime<Utc>> {
+    let revocation = capabilities.get(OWNER_REVOCATION_CAPABILITY)?;
+    let revoked_generation = revocation
+        .get("generation")
+        .and_then(JsonValue::as_str)
+        .and_then(|generation| Uuid::parse_str(generation.trim()).ok())?;
+    let current = runtime_generation_from_capabilities(capabilities).ok()??;
+    if revoked_generation != current {
+        return None;
+    }
+    let revoked_at = revocation.get("revokedAt").and_then(JsonValue::as_str)?;
+    DateTime::parse_from_rfc3339(revoked_at)
+        .ok()
+        .map(|revoked_at| revoked_at.with_timezone(&Utc))
+}
+
+/// Record that the runtime's owner revoked it with `generation`, the one
+/// [`rotate_runtime_token_generation`] just gave it, at the transaction's time
+/// ([`OWNER_REVOCATION_CAPABILITY`]). Runs right after that rotation, under
+/// the row lock it holds.
+async fn record_owner_revocation(
+    transaction: &Transaction<'_>,
+    runtime_id: &Uuid,
+    generation: Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    transaction
+        .execute(
+            "update runtimes
+             set capabilities = jsonb_set(
+                     capabilities,
+                     array[$2::text],
+                     jsonb_build_object('generation', $3::text, 'revokedAt', to_jsonb(now()))
+                 )
+             where id = $1",
+            &[
+                runtime_id,
+                &OWNER_REVOCATION_CAPABILITY,
+                &generation.to_string(),
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to record the owner's revocation: {error}"))
+        })?;
+    Ok(())
+}
+
+/// Which of a person's own machines their revocation ends.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OwnMachines<'a> {
+    All,
+    Ids(&'a [Uuid]),
+}
+
+/// A runtime a person's revocation rotated.
+#[derive(Debug)]
+pub(crate) struct EndedRuntime {
+    pub(crate) runtime_id: Uuid,
+    pub(crate) project_id: Uuid,
+    /// Its status before the revocation.
+    pub(crate) status: String,
+}
+
+/// What a person's revocation ended.
+#[derive(Debug, Default)]
+pub(crate) struct EndedMachines {
+    /// The runtimes whose tokens it ended, not those an earlier revocation
+    /// had ended already.
+    pub(crate) runtimes: Vec<EndedRuntime>,
+    /// The runtime ids of the pending mints it deleted.
+    pub(crate) pending: Vec<Uuid>,
+}
+
+/// End `owner`'s own private self-hosted machines, as they asked with their
+/// own sign-in: rotate the token generation of each selected runtime the
+/// controller attested as theirs, in any space and whatever its status, record
+/// that generation as revoked by them ([`OWNER_REVOCATION_CAPABILITY`]), and
+/// delete each selected pending mint of theirs. A runtime terminal cleanup
+/// marked `removed` is included while a token it was issued may still be
+/// alive, as in [`fence_runtimes_of_a_lost_writer`]; older removed rows hold
+/// none and are left alone. A runtime still revoked ([`owner_revoked_at`]) is
+/// skipped: not rotated again and not returned.
+///
+/// Holds `owner`'s owner lock exclusively first, as a membership fence does,
+/// so a mint, agent login or registration admitted for them at the same
+/// moment either committed first and is rotated or deleted here, or waits and
+/// then meets the new generation or a missing pending mint. Then locks only
+/// their runtime rows, one at a time in id order, and no project row. Each row
+/// is read again under its lock, which a mint and a registration take too,
+/// before the check that skips it, so no new generation lands between the
+/// check and the rotation.
+///
+/// With ids, each must be a runtime or a pending mint of theirs, or the
+/// revocation is refused as not found and changes nothing once the caller
+/// drops the transaction; the refusal never says whether another person's
+/// machine has that id. A runtime of theirs that is still revoked counts as
+/// theirs. The caller commits.
+pub(crate) async fn end_machines_of_their_owner(
+    state: &AppState,
+    transaction: &Transaction<'_>,
+    owner: Uuid,
+    selection: OwnMachines<'_>,
+) -> Result<EndedMachines, (StatusCode, Json<ApiError>)> {
+    hold_runtime_owner_lock(transaction, owner).await?;
+    let ids: Option<Vec<Uuid>> = match selection {
+        OwnMachines::All => None,
+        OwnMachines::Ids(ids) => Some(ids.to_vec()),
+    };
+    // Every space at once, so no index narrows it: a revocation is rare and
+    // asked for by a person.
+    let query = format!(
+        "select r.id, r.project_id, r.provider, r.capabilities
+         from runtimes r
+         where ($2::uuid[] is null or r.id = any($2::uuid[]))
+           and (r.status <> 'removed'
+                or r.updated_at > now() - make_interval(secs => $3))
+           and {owner_clause}
+         order by r.id",
+        owner_clause = attested_owner_is("$1"),
+    );
+    let rows = transaction
+        .query(
+            &query,
+            &[
+                &owner.to_string(),
+                &ids,
+                &generation_token_lifetime_bound(state),
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to load the person's machines: {error}"))
+        })?;
+    let mut ended = EndedMachines::default();
+    // Runtimes of theirs an earlier revocation ended, which this one skips.
+    let mut still_revoked = Vec::new();
+    for row in rows {
+        let provider: String = row.get("provider");
+        let capabilities: JsonValue = row.get("capabilities");
+        if !runtime_is_private_self_hosted(state, &provider, &capabilities)
+            || self_hosted_owner_user_id(&capabilities) != Some(owner)
+        {
+            continue;
+        }
+        let runtime_id: Uuid = row.get("id");
+        // The lock the rotation would take, so the row read here is the one
+        // the rotation changes.
+        let Some(locked) = transaction
+            .query_opt(
+                "select capabilities, status from runtimes where id = $1 for no key update",
+                &[&runtime_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to lock the person's machine: {error}"))
+            })?
+        else {
+            continue;
+        };
+        if owner_revoked_at(&locked.get("capabilities")).is_some() {
+            still_revoked.push(runtime_id);
+            continue;
+        }
+        let generation = rotate_runtime_token_generation(transaction, &runtime_id).await?;
+        record_owner_revocation(transaction, &runtime_id, generation).await?;
+        ended.runtimes.push(EndedRuntime {
+            runtime_id,
+            project_id: row.get("project_id"),
+            status: locked.get("status"),
+        });
+    }
+    ended.pending = transaction
+        .query(
+            "delete from runtime_pending_machine_mints
+             where owner_user_id = $1
+               and ($2::uuid[] is null or runtime_id = any($2::uuid[]))
+             returning runtime_id",
+            &[&owner, &ids],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to end the person's pending mints: {error}"))
+        })?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    ended.pending.sort();
+    if let Some(ids) = &ids {
+        let theirs = |id: &Uuid| {
+            ended
+                .runtimes
+                .iter()
+                .any(|runtime| runtime.runtime_id == *id)
+                || still_revoked.contains(id)
+                || ended.pending.contains(id)
+        };
+        if !ids.iter().all(theirs) {
+            return Err(crate::not_found("No machine of yours has that id."));
+        }
+    }
+    if !ended.runtimes.is_empty() || !ended.pending.is_empty() {
+        info!(
+            %owner,
+            runtimes = ?ended.runtimes.iter().map(|runtime| runtime.runtime_id).collect::<Vec<_>>(),
+            pending_mints = ?ended.pending,
+            "a person revoked their own machines"
+        );
+    }
+    Ok(ended)
+}
+
 /// Whether `user_id` may still write `project_id`, or `None` when the space is
 /// gone or deleted: its delete stops its runtimes, and every route refuses
 /// them, so there is nothing to fence and no reason to fail the change.
@@ -533,3 +776,7 @@ mod tests;
 #[cfg(test)]
 #[path = "machine_lifetime_tests.rs"]
 mod machine_lifetime_tests;
+
+#[cfg(test)]
+#[path = "my_machines_tests.rs"]
+mod my_machines_tests;

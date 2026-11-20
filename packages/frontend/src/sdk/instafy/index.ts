@@ -30,6 +30,7 @@ export {
 export type * from "../../services/runtimeControllerService";
 export type * from "../../services/runtimeController/browserSession";
 export type * from "../../services/runtimeController/browserApproval";
+export type * from "../../services/runtimeController/myMachines";
 export type { ControllerAuthErrorDetail } from "../../services/runtimeController/core";
 export {
   controllerBaseUrl,

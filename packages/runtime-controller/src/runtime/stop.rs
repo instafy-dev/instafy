@@ -1190,28 +1190,56 @@ fn a_persons_stop_ends_its_tokens(
 }
 
 /// What `/runtime/stop` and `/runtime/remove` tell open tabs once their stop
-/// has committed, before any provider release, which can take a minute. A
-/// person's stop ([`is_a_persons_stop`]) that stopped the runtime publishes
-/// `runtime.stopped` with its reason, as the platform's stops do, so a tab
-/// that did not make it holds the space instead of starting the machine
-/// again. Then the turns the stop interrupted are announced
-/// ([`super::run_interruptions::announce_interrupted_runs`]). Best effort;
-/// the caller has given its connection back to the pool.
-///
-/// `skip_reason` is the committed stop's own; a quarantine has none, since it
-/// always takes the runtime out of service. A skipped stop requeued nothing
-/// and tells nothing, and a repeat that found the runtime already stopped
-/// only announces the same runs again.
+/// has committed, before any provider release, which can take a minute:
+/// [`announce_committed_stop_of`], as a person's stop ([`is_a_persons_stop`])
+/// with its reason, or for any other stop only the turns it interrupted.
 async fn announce_committed_stop(
     state: &AppState,
     runtime: &RuntimeDetails,
     options: &StopOptions,
     skip_reason: Option<&str>,
 ) {
+    let persons_stop = is_a_persons_stop(options).then(|| {
+        (
+            options.reason.as_deref().unwrap_or(options.source),
+            options.source,
+        )
+    });
+    announce_committed_stop_of(
+        state,
+        runtime.project_id,
+        runtime.id,
+        persons_stop,
+        skip_reason,
+    )
+    .await;
+}
+
+/// What open tabs are told once a stop of `runtime_id` has committed. A
+/// person's stop (`persons_stop`, its reason and source) that stopped the
+/// runtime publishes `runtime.stopped` with that reason, as the platform's
+/// stops do, so a tab that did not make it holds the space instead of
+/// starting the machine again. Then the turns the stop interrupted are
+/// announced ([`super::run_interruptions::announce_interrupted_runs`]).
+/// [`announce_committed_stop`] uses it, and so does an owner's revocation of
+/// their own machine for the stop that follows it (`super::my_machines`).
+/// Best effort; the caller has given its connection back to the pool.
+///
+/// `skip_reason` is the committed stop's own; a quarantine has none, since it
+/// always takes the runtime out of service. A skipped stop requeued nothing
+/// and tells nothing, and a repeat that found the runtime already stopped
+/// only announces the same runs again.
+pub(super) async fn announce_committed_stop_of(
+    state: &AppState,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    persons_stop: Option<(&str, &str)>,
+    skip_reason: Option<&str>,
+) {
     match skip_reason {
         None => {}
         Some("already_stopped") => {
-            super::run_interruptions::announce_interrupted_runs(state, &runtime.id).await;
+            super::run_interruptions::announce_interrupted_runs(state, &runtime_id).await;
             return;
         }
         Some(_) => return,
@@ -1222,18 +1250,18 @@ async fn announce_committed_stop(
         Ok(connection) => Some(connection),
         Err(error) => {
             warn!(
-                runtime_id = %runtime.id,
+                runtime_id = %runtime_id,
                 %error,
                 "failed to get a connection to announce a committed stop"
             );
             None
         }
     };
-    if is_a_persons_stop(options) {
+    if let Some((reason, source)) = persons_stop {
         let queued_job_count = match connection.as_deref() {
             Some(connection) => {
-                count_queued_jobs_left(runtime, || {
-                    super::limit_waits::count_waiting_jobs_on(connection, &runtime.project_id)
+                count_queued_jobs_left(project_id, runtime_id, || {
+                    super::limit_waits::count_waiting_jobs_on(connection, &project_id)
                 })
                 .await
             }
@@ -1241,14 +1269,15 @@ async fn announce_committed_stop(
         };
         notify_a_persons_stop_with_count(
             state,
-            runtime,
-            options.reason.as_deref().unwrap_or(options.source),
-            options.source,
+            project_id,
+            runtime_id,
+            reason,
+            source,
             queued_job_count,
         );
     }
     if let Some(connection) = connection.as_deref() {
-        super::run_interruptions::announce_interrupted_runs_on(state, connection, &runtime.id)
+        super::run_interruptions::announce_interrupted_runs_on(state, connection, &runtime_id)
             .await;
     }
 }
@@ -1263,16 +1292,23 @@ pub(super) async fn notify_a_persons_stop(
     reason: &str,
     source: &str,
 ) {
-    let queued_job_count = count_queued_jobs_left(runtime, || {
+    let queued_job_count = count_queued_jobs_left(runtime.project_id, runtime.id, || {
         super::limit_waits::count_waiting_jobs(state, &runtime.project_id)
     })
     .await;
-    notify_a_persons_stop_with_count(state, runtime, reason, source, queued_job_count);
+    notify_a_persons_stop_with_count(
+        state,
+        runtime.project_id,
+        runtime.id,
+        reason,
+        source,
+        queued_job_count,
+    );
 }
 
 /// The work left queued in the stopped runtime's space, or 0 when it cannot
 /// be counted: the stop is announced either way.
-async fn count_queued_jobs_left<F, Fut>(runtime: &RuntimeDetails, count: F) -> i64
+async fn count_queued_jobs_left<F, Fut>(project_id: Uuid, runtime_id: Uuid, count: F) -> i64
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<i64>>,
@@ -1281,8 +1317,8 @@ where
         Ok(count) => count,
         Err(error) => {
             warn!(
-                runtime_id = %runtime.id,
-                project_id = %runtime.project_id,
+                runtime_id = %runtime_id,
+                project_id = %project_id,
                 ?error,
                 "could not count work left queued by a person's stop"
             );
@@ -1293,15 +1329,16 @@ where
 
 fn notify_a_persons_stop_with_count(
     state: &AppState,
-    runtime: &RuntimeDetails,
+    project_id: Uuid,
+    runtime_id: Uuid,
     reason: &str,
     source: &str,
     queued_job_count: i64,
 ) {
     super::sweeps::notify_runtime_stopped_with_extra(
         state,
-        runtime.project_id,
-        runtime.id,
+        project_id,
+        runtime_id,
         reason,
         source,
         json!({ "queuedJobCount": queued_job_count }),
