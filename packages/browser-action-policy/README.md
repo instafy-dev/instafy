@@ -41,6 +41,12 @@ load `redaction.js` first.
   items, tabs, tree items, disclosure and menu openers, navigation-area items,
   lists (a select, combobox or listbox) and their options never carry it, and a
   menu item named for a list ("Buchungen", "Stornobuchung") stays navigation.
+  The words at the end of a name that only say where it opens ("in a new tab",
+  "(opens in a new window)") are no commit words for a control with no address
+  outside a form, a dialog, a row, a credential context and a consent notice:
+  a card named "Open Winter Market in a new tab" asks as a plain change. A
+  name that says it opens something never makes a button with no address
+  navigation: "Open Long" opens a trade and "View PIN" shows a code.
   `stepLabels` names a list by its own label, or by the option it shows when it
   has none, never by its options; the in-page rules read what a select or a
   listbox shows as its chosen option.
@@ -53,7 +59,10 @@ load `redaction.js` first.
   to the necessary cookies or to a selection ("Accept only necessary",
   "Accept selection") saves a refusal, so it asks with `commit: true` instead.
   `unnamedControlName(hints)` names a control the page left unnamed from its
-  tooltip attribute, image text, icon and position, so a prompt never shows an
+  tooltip attribute, image text, icon and position, the text beside it, its
+  row's first words or, with none, its card's heading ("button in “Entree
+  museum”", `controlNameRulesInPage`'s `cardHeadingOf`, which reads the page
+  as drawn, through slots and open shadow roots), so a prompt never shows an
   index such as "button 5".
   `isFreeSiteSearch(target, pageUrl, submittedEntries)` is the stricter test
   the Shared Browser applies before it lets Enter in a site's own search box

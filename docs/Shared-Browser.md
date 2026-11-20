@@ -769,6 +769,22 @@ An icon-only control whose icon is a trash can, a paper plane, a cart or card,
 a share or add-user, a download or a sign-out asks in that category, and one
 whose icon is a floppy disk, pencil or plus asks as a commit button.
 
+The words at the end of a name that only say where it opens ("in a new tab",
+"(opens in a new window)", "in neuem Tab öffnen") commit nothing: an events
+page's cards were buttons named "Open Winter Market on the Old Square in a new
+tab", and each click asked as a commit button, since the "new" of "a new tab"
+read as a commit word. The commit words are read in the name without them,
+for a control with no address outside a form, a dialog, a row, a credential
+context and a consent notice; anywhere else the name is read whole. The click
+still asks as a change, which routine browsing takes without a prompt as it
+takes any button with no risk word, and a risk or commit word anywhere else in
+the name asks as before ("New invoice (opens in a new window)", "Pay your
+invoice in a new tab"). A name that says it opens something never makes a
+script's button navigation: "Open …" and "View …" also name a trade, a door
+and a code, so the Personal Browser's owner tier asks for each as it did. A
+click that opens another window is still stopped and closed, and the step
+says so (below).
+
 A control is named by its accessible name or the text it draws. The text it
 draws leaves out what never draws: scripts and styles, parts the page's CSS
 hides (`display: none`, as the `hidden` attribute does unless the page's own
@@ -825,13 +841,38 @@ has some, when that element holds at most 400 characters, never a field's
 value. A control whose own name is only marks ("+", "−", "×") keeps them and
 is told apart the same way ("+ beside “Adult”"). A ticket page's reading listed
 its rows' buttons as "unnamed button", none told apart, so the turn could
-neither highlight the one for a ticket nor name it. The row's words only tell
-it apart where it is named (a reading, a prompt, a step's result, the action
+neither highlight the one for a ticket nor name it. With no row's words, the
+heading of the card it sits in names it instead ("button in “Entree
+museum”", "+ in “Entree museum”"): the one heading (`h2` to `h6`, or a
+heading role below level one) of the nearest element around it that holds
+any, read in the tree as the page draws it, through slots and open shadow
+roots, at most 60 characters cut between words, and of an icon inside the
+heading only the text it draws, never an svg's metadata, title or
+description. None when that element holds
+more than one heading (a list of cards), is the page's `main` part or holds
+more than 2,000 characters, and never a hidden heading or the page's title. A
+guided ticket page's reading listed its product cards' controls as "unnamed
+button"s beside the basket's, with the cards' words in its text and no frame
+mark, as buttons whose words sit across a shadow root read (a web component's
+button with its words slotted into it, or a button slotted into a card a web
+component draws), and a card larger than a row has no first words to use
+either. A click lands on such a button through the words slotted into it,
+which the page reports as the component's own, and a step's checks read those
+words as the button's text, and the secret-screen check as one of its names:
+a person reads them on it, so a slotted "Delete booking" still asks. That way
+in is judged as any other: a card that is a control around a button whose
+words are slotted would take the press on that button, so a click on the card
+is refused as one that lands on another control inside it. The headings a
+reading's controls are named by are worked out once for each part of the page
+around them, shared between the controls of that one reading: a seat map's
+hundreds of unnamed seats each walked the same parts again. The row's
+words only tell it apart where it is named (a reading, a prompt, a step's result, the action
 log): a step's checks read its name without them, so they never make a step
 ask, refuse it in Octo's own tab or make a pause a cookie notice's (a "+"
 beside "How do I delete my account?", a "×" over "Save 10% on your first
-order", a booking's icon button under a line about cookies). A withheld page's
-controls are named without them: they are the page's text. The text beside it
+order", a booking's icon button under a line about cookies), and nor does a
+card's heading. A withheld page's controls are named without either: they are
+the page's text. The text beside it
 and a row's words are used whole or not at all, never cut inside a word, and
 never when they are an address or hold a value the redaction rules mask: a key
 beside an icon button, which the page's text masks by the words around it,
@@ -2344,6 +2385,41 @@ now: "The page still reads as it did before this step, 6 seconds after it:
 this result is the page as it is now." A list that came between the look and
 that reading was in the result while its answer said the page read as
 before, so the words go only with a reading that reads so too.
+Every click says in its `done` which control it hit, by the name its reading
+gave it cut to 60 characters, and what it was seen to change, as a type step
+and a choice do: "Clicked "Plan your visit": a new page opened." Another
+document at another address is a new page, one at the same address "the page
+loaded again"; on the same document another address is "the page changed, and
+so did its address", another fragment "the page went to "#weekend"", with the
+fragment masked as the reading's own address masks it (a pass in it,
+"#access_token=…", was written out whole), a dialog or a list a person can
+see now and could not before "a dialog opened" or "a list opened", a dialog
+gone "a dialog closed". "The page changed" is said of a
+page read before the click and after it that reads differently, and of no
+other: a page too busy to be read in time, then or now, was compared with
+nothing, and a button that did nothing on one read as a click that changed the
+page. Such a click names its control alone ("Clicked "Check for delays"."),
+and an address that changed on a document the browser could not name is "the
+page's address changed". A page that reads as before says "Clicked "Check for
+delays"." and the words above. Before, a click said only "Clicked the
+control.": a turn that clicked a planner's map after typing a stop wrote that
+it had chosen the stop and sent the journey, and one that pressed a shop's
+basket for its ticket button wrote that the ticket button opened an empty
+basket. A type step that types into a field without sending it marks the field
+when suggestions came under it, the ones its result names, with a digest of
+what it holds, never the text. The next click, when it is on none of a
+field's own suggestions (an option, or a row of the list it opened), on no
+other option and sends no search of the page's own, adds for each such field
+that still holds what was typed, ""Origin" still holds what was typed: none of
+its suggestions is chosen." It is said once: every click takes the marks off, and so do a key
+pressed in the field and typing into it again. So a field whose suggestion was
+chosen says nothing, a stop that reads as it was typed too, which every later
+click said held no chosen stop; nor does a field that only says it opens
+something and showed no suggestions (a date field's calendar, a search box
+whose list stayed empty), a field the page emptied or changed, or a new page.
+A click on an option says nothing of any field: it may be a field's
+suggestion whether or not the page ties the list to the field. A withheld
+page's control and fields are named by their own hints only.
 `omittedControls` counts
 the controls left out, so a list cut short by a closed menu, or by a box the
 page scrolls itself, does not read as the whole page; it counts the controls

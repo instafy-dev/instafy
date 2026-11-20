@@ -413,6 +413,21 @@
   ]);
   const VALUE_INPUT_TYPES = new Set(["range", "number", "radio", "checkbox", "date", "time", "datetime-local", "month", "week", "color"]);
   const NAVIGATION_AREAS = ["nav", "menu", "menubar", "tree", "tablist"];
+  // The words at the end of a name that only say where it opens: "in a new
+  // tab" or "(opens in a new window)", in English and German. Their "new" and
+  // "neuen" are no commit words (withoutNewTabWords). They read a name whose
+  // spaces cleanText made single, with no run of repeated characters for a
+  // match to retry from, and what they leave is trimmed one character at a
+  // time (withoutSeparators).
+  const OPENS_NEW_TAB = new RegExp(
+    `(?<![\\p{L}\\p{N}])\\(?(?:${[
+      "(?:opens?\\s)?in\\s(?:a\\s)?new\\s(?:tab|window)",
+      "(?:öffnet\\s(?:sich\\s)?)?in\\s(?:einem\\s)?neuen\\s(?:tab|fenster)(?:\\söffnen)?",
+      "(?:öffnet\\s(?:sich\\s)?)?in\\sneuem\\s(?:tab|fenster)(?:\\söffnen)?",
+    ].join("|")})\\)?[.!]?$`,
+    "iu",
+  );
+  const SEPARATORS = new Set([" ", ",", ":", ";", "\u2013", "\u2014", "-"]);
 
   // Risky addresses are judged by the address only.
   const RISKY_SIGN_OUT = /^(?:log-?out|sign-?out|sign_out|log_out|abmelden|unsubscribe|abbestellen|austragen|newsletter-abmelden)$/i;
@@ -727,6 +742,32 @@
     return !label && TOGGLE_ICON.test(cleanText(target.iconHint));
   }
 
+  // The name without the words at its end that only say where it opens:
+  // "Open Winter Market in a new tab" is "Open Winter Market", and "Programme
+  // (opens in a new window)" is "Programme".
+  function withoutNewTabWords(name) {
+    const text = cleanText(name);
+    return OPENS_NEW_TAB.test(text) ? withoutSeparators(text.replace(OPENS_NEW_TAB, "")) : text;
+  }
+
+  // The text without the spaces, commas, colons and dashes at its ends, one
+  // character at a time.
+  function withoutSeparators(text) {
+    let start = 0;
+    let end = text.length;
+    while (start < end && SEPARATORS.has(text[start])) start += 1;
+    while (end > start && SEPARATORS.has(text[end - 1])) end -= 1;
+    return text.slice(start, end);
+  }
+
+  // Whether the control sits in a form, by any of the facts a host gives of
+  // one: its form's owner, name or address, its submit labels or fields.
+  function inForm(target) {
+    return Boolean(cleanText(target.formOwnerIdentity) || cleanText(target.formActionText) ||
+      cleanText(target.formActionUrl) || cleanText(target.formSubmitLabels) || target.formSubmits === true ||
+      Number(target.formFieldCount || 0) > 0);
+  }
+
   function controlKind(hints) {
     const tag = lower(hints.tag);
     const role = lower(hints.role);
@@ -749,11 +790,13 @@
    * right"), or, in a row or a card, the first words of that row or card
    * ("button beside “Adult”"), so the alike controls of a list are told
    * apart. A control whose own name is only marks (`marks`: "+", "−", "×")
-   * is named by them, told apart the same way ("+ beside “Adult”"). Never
-   * field values. An image text that is an address or an email address is
-   * replaced by the icon noun, and words beside it or in its row that are
-   * one, hold a value the redaction rules mask or are longer than 40
-   * characters are not used.
+   * is named by them, told apart the same way ("+ beside “Adult”"). With
+   * no row's words, the heading of the card it sits in (`card`) tells it
+   * apart instead ("button in “Entree museum”"). Never field values. An
+   * image text that is an address or an email address is replaced by the
+   * icon noun, and words beside it or in its row that are one, hold a value
+   * the redaction rules mask or are longer than 40 characters are not used,
+   * nor a card's heading longer than 60.
    */
   function unnamedControlName(hints) {
     const source = hints && typeof hints === "object" ? hints : {};
@@ -770,19 +813,23 @@
     // are an address, or that hold a value the redaction rules mask (a key, a
     // code): the page's text masks one by the words around it ("Deploy
     // key"), which a name quoting it does not carry.
-    const words = (value) => {
+    const words = (value, max = 40) => {
       const text = nameText(value);
-      return text && Array.from(text).length <= 40 && /\p{L}/u.test(text) &&
+      return text && Array.from(text).length <= max && /\p{L}/u.test(text) &&
         !/@|:\/\/|^www\./i.test(text) && !looksKeyLike(text) ? text : "";
     };
     const nearby = words(source.nearby);
     const row = words(source.row);
+    const card = row ? "" : words(source.card, 60);
     const marks = short(source.marks, 8);
     if (marks && !/[\p{L}\p{N}]/u.test(marks)) {
       if (nearby) return `${marks} next to \u201c${nearby}\u201d`;
-      return row ? `${marks} beside \u201c${row}\u201d` : marks;
+      if (row) return `${marks} beside \u201c${row}\u201d`;
+      return card ? `${marks} in \u201c${card}\u201d` : marks;
     }
-    const beside = (base) => (row ? `${base} beside \u201c${row}\u201d` : placed(base));
+    const beside = (base) => (row
+      ? `${base} beside \u201c${row}\u201d`
+      : card ? `${base} in \u201c${card}\u201d` : placed(base));
     const image = short(source.image);
     if (image && !/@|:\/\/|^www\./i.test(image)) return beside(`${image} ${kind}`);
     const hint = cleanText(source.iconHint);
@@ -790,7 +837,8 @@
     if (noun === "profile") return placed(`${source.hasImage === true ? "profile picture" : "account"} ${kind}`);
     if (noun) return beside(`${noun} ${kind}`);
     if (nearby) return placed(`${kind} next to \u201c${nearby}\u201d`);
-    return row ? `${kind} beside \u201c${row}\u201d` : placed(`unnamed ${kind}`);
+    if (row) return `${kind} beside \u201c${row}\u201d`;
+    return card ? `${kind} in \u201c${card}\u201d` : placed(`unnamed ${kind}`);
   }
 
   // Runs inside the page: it uses nothing from this file's scope, so a host
@@ -931,7 +979,130 @@
       }
       return "";
     };
-    return { shownTextOf, nearbyTextOf, rowTextOf };
+    // The heading of the card an unnamed control sits in ("Entree museum"),
+    // for a card whose first words name nothing the reading can use: one
+    // larger than a row, one whose words sit across a shadow root (a card
+    // drawn by a web component, or a button inside one), or one whose first
+    // words are no words at all. It is the one heading (h2 to h6, or a
+    // heading role below level one) of the nearest element around the
+    // control, in the tree as it is drawn (through slots and open shadow
+    // roots), that holds any: none when that element holds more than one (a
+    // list of cards) or is as big as a page part. Never a heading inside the
+    // control, a hidden one, or the page's own title. At most `max`
+    // characters, cut between words.
+    const CARD_MAX_CHARS = 2_000;
+    const MAX_CARD_NODES = 2_000;
+    const flatParentOf = (node) => {
+      if (!node) return null;
+      if (node.assignedSlot) return node.assignedSlot;
+      if (node.parentElement) return node.parentElement;
+      const root = node.parentNode;
+      return root && root.nodeType === 11 && isElement(root.host) ? root.host : null;
+    };
+    const isHeading = (node) => {
+      if (/^H[2-6]$/.test(String(node.tagName).toUpperCase())) return true;
+      const role = String(node.getAttribute("role") || "").trim().toLowerCase().split(/\s+/)[0];
+      return role === "heading" && String(node.getAttribute("aria-level") || "").trim() !== "1";
+    };
+    // The shown headings in `container`, as drawn, outside `element`: at
+    // most two, enough to tell one from many.
+    const headingsIn = (container, element) => {
+      const found = [];
+      let visited = 0;
+      const walk = (node) => {
+        if (found.length > 1 || visited > MAX_CARD_NODES || !isElement(node) || node === element) return;
+        visited += 1;
+        if (node.namespaceURI === SVG || NEVER_DRAWN.has(String(node.tagName).toUpperCase()) || hidden(node)) return;
+        if (isHeading(node)) {
+          found.push(node);
+          return;
+        }
+        if (node.shadowRoot) for (const child of node.shadowRoot.children) walk(child);
+        for (const child of node.children) walk(child);
+      };
+      if (container.shadowRoot) for (const child of container.shadowRoot.children) walk(child);
+      for (const child of container.children) walk(child);
+      return found;
+    };
+    // A heading's words, read as drawn: slotted words too, and of an icon
+    // inside it only the text an svg draws, never its metadata, title or
+    // description ("image/svg+xml").
+    const headingWordsOf = (heading, max) => {
+      let text = "";
+      let visited = 0;
+      const walk = (node) => {
+        if (visited > MAX_NODES || text.length > max * 4) return;
+        visited += 1;
+        if (node.nodeType === 3) {
+          text += node.nodeValue || "";
+          return;
+        }
+        if (!isElement(node)) return;
+        if (node.namespaceURI === SVG) {
+          if (!SVG_TEXT.has(node.localName)) return;
+        } else if (NEVER_DRAWN.has(String(node.tagName).toUpperCase())) {
+          return;
+        }
+        if (hidden(node)) return;
+        if (String(node.localName).toLowerCase() === "slot" && typeof node.assignedNodes === "function") {
+          const assigned = node.assignedNodes({ flatten: true });
+          if (assigned.length) {
+            for (const child of assigned) walk(child);
+            return;
+          }
+        }
+        const children = node.shadowRoot ? node.shadowRoot.childNodes : node.childNodes;
+        for (const child of children) walk(child);
+      };
+      walk(heading);
+      return clean(text, max * 4);
+    };
+    // `pass`, when given, is a Map that one pass over a page shares between
+    // the controls it names (a reading, made in one go while the page stands
+    // still): what each element around them answers, too big for a card or
+    // the headings it holds, is worked out once. A seat map's hundreds of
+    // unnamed seats each walked the same parts of the page again, and its
+    // reading took twice as long.
+    const cardHeadingOf = (element, max = 60, pass = null) => {
+      if (!isElement(element)) return "";
+      const doc = element.ownerDocument;
+      const shared = pass && typeof pass.get === "function" && typeof pass.set === "function" ? pass : null;
+      const partOf = (node) => {
+        let part = shared.get(node);
+        if (part === undefined) {
+          const big = shownTextOf(node, CARD_MAX_CHARS + 1).length > CARD_MAX_CHARS;
+          part = { big, headings: big ? [] : headingsIn(node, null) };
+          shared.set(node, part);
+        }
+        return part;
+      };
+      // A heading inside the control is never its card's: a part's shared
+      // headings are used only when none of them is.
+      const inControl = (heading) => {
+        for (let node = heading, depth = 0; isElement(node) && depth < 64; node = flatParentOf(node), depth += 1) {
+          if (node === element) return true;
+        }
+        return false;
+      };
+      for (let node = flatParentOf(element), depth = 0; isElement(node) && depth < 12; node = flatParentOf(node), depth += 1) {
+        if (node === doc.body || node === doc.documentElement) return "";
+        const role = String(node.getAttribute("role") || "").trim().toLowerCase();
+        if (String(node.tagName).toUpperCase() === "MAIN" || role === "main") return "";
+        if (String(node.localName).toLowerCase() === "slot") continue;
+        const part = shared ? partOf(node) : null;
+        if (part ? part.big : shownTextOf(node, CARD_MAX_CHARS + 1).length > CARD_MAX_CHARS) return "";
+        const headings = part && !part.headings.some(inControl) ? part.headings : headingsIn(node, element);
+        if (headings.length > 1) return "";
+        if (headings.length === 0) continue;
+        const words = headingWordsOf(headings[0], max);
+        if (!words || !/\p{L}/u.test(words)) return "";
+        if (words.length <= max) return words;
+        const end = words.slice(0, max + 1).lastIndexOf(" ");
+        return end > 0 ? words.slice(0, end) : "";
+      }
+      return "";
+    };
+    return { shownTextOf, nearbyTextOf, rowTextOf, cardHeadingOf };
   }
 
   function idLike(segment) {
@@ -1269,7 +1440,22 @@
       tag === "summary" ||
       target.menuOpener === true ||
       areas.some((area) => NAVIGATION_AREAS.includes(area));
-    if (!structural && (isCommitLabel(label, names) || COMMIT_NOUN.test(label) || iconCategory === "commit")) {
+    // The words at the end of a name that only say where it opens ("in a new
+    // tab", "(opens in a new window)") commit nothing: an events page's
+    // cards, buttons named "Open Winter Market on the Old Square in a new
+    // tab", each asked as a commit button, by the "new" of "a new tab". The
+    // commit words are read in the name without them, for a control with no
+    // address outside a form, a dialog, a row, a credential context and a
+    // consent notice; anywhere else the name is read whole, as before. The
+    // click still asks as a change, and a risk word anywhere in the name
+    // asks as it did. A name that says it opens something never makes a
+    // script's button navigation: "Open …" and "View …" also name a trade, a
+    // door and a code.
+    const readsWhole = inDialog || inForm(target) || rowTarget || Boolean(href) || target.download === true ||
+      target.consentContext === true || credentialish(target, label);
+    const commitNames = readsWhole ? names : names.map(withoutNewTabWords);
+    const commitLabel = readsWhole ? label : commitNames.join(" ");
+    if (!structural && (isCommitLabel(commitLabel, commitNames) || COMMIT_NOUN.test(label) || iconCategory === "commit")) {
       return { ...ask("change", "control"), commit: true };
     }
     return ask("change", "control");
