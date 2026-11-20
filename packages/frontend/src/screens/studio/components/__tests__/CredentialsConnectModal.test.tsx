@@ -604,6 +604,16 @@ describe("CredentialsConnectModal", () => {
           />,
         );
       });
+      // The dialog focuses itself as it opens (react-aria's useDialog). After an
+      // earlier test's click leaves react-aria's input mode "virtual", that focus
+      // waits one animation frame, and jsdom's focus() collapses the page's
+      // selection (browsers keep it), so a copy made before that frame lost its
+      // selected text: this test failed now and then. A person cannot press
+      // Copy before the dialog has opened, so the test lets it open first.
+      await act(async () => {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      });
+      expect(document.querySelector('[role="dialog"]')?.contains(document.activeElement)).toBe(true);
       const copyLink = document.querySelector<HTMLButtonElement>('button[aria-label="Copy login link"]');
       const copyCode = document.querySelector<HTMLButtonElement>('button[aria-label="Copy device code"]');
       expect(copyLink?.textContent).toBe("Copy");
