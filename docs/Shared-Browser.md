@@ -3236,11 +3236,18 @@ unless the policy is `"covered"`.
 - **Cards after a press.** A card says what it is for ("Continue in
   Instafy's browser", and the site it is headed for), never what pressing it
   does: older cards carry a line about that, which is not shown. A turn whose
-  only action is the card posts the card and no reply of its own, except in a
-  skill setup, whose reply carries its walk, and on a turn that decides whether
-  to answer at all. A reply that does show beside a card never says a page
+  only action is a card that opens by itself posts the card and no reply of its
+  own, except in a skill setup, whose reply carries its walk, and on a turn that
+  decides whether to answer at all. A card that waits for the person, because
+  its task names an address neither the person's messages nor Octo's earlier
+  replies show (the runtime reads the chat's history and each text's hosts as
+  Studio does, a page's file name and a query's value included, and in a
+  shared chat counts only the turn's own message of the person's), keeps the
+  turn's reply above it. A reply that does show beside a card never says a page
   opened before a browser tool saw it, or what the browser will submit, send or
-  buy. A card shows only while it needs the person. While Studio opens it by
+  buy. A refused card's words leave the reply being written as its retry begins,
+  and the retry is told that if its own card is refused too, only its words
+  show, so they stand alone. A card shows only while it needs the person. While Studio opens it by
   itself, the turn's one line **Opening Instafy's browser…** takes its place,
   with no box. Once it was continued, by Studio or by the person's press, it
   leaves the chat, also after a reload, so it is never offered again: the

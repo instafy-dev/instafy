@@ -655,8 +655,9 @@ export function useAgentJobThreadPreviewState({
         }
       }
     }
-    // An answer the runtime asked the model for again was replaced as soon as
-    // the retry began, so it is no note either, also in a turn stopped before
+    // An answer the runtime asked the model for again is replaced by the
+    // retry's, where it is, or taken away as the retry begins when the runtime
+    // found it untrue. So it is no note either, also in a turn stopped before
     // the retry answered.
     for (const replaced of answersReplacedByRetry(threadMessages)) {
       excludedIds.add(replaced.id);
