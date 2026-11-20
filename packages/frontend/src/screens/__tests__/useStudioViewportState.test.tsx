@@ -2,7 +2,10 @@
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useStudioViewportState } from "../useStudioViewportState";
+import { NATIVE_KEYBOARD_LEAD_MS, useStudioViewportState } from "../useStudioViewportState";
+
+const capacitor = vi.hoisted(() => ({ platform: "web" }));
+vi.mock("@capacitor/core", () => ({ Capacitor: { getPlatform: () => capacitor.platform } }));
 
 class TestViewport extends EventTarget {
   height = 800;
@@ -43,7 +46,17 @@ describe("Studio viewport and software-keyboard state", () => {
   const focus = async (element: HTMLElement = container.querySelector("input")!) => {
     element.focus(); await flush();
   };
+  // What @capacitor/keyboard sends from the iPhone app as the keyboard starts to move.
+  const keyboardWillShow = async (keyboardHeight: number) => {
+    window.dispatchEvent(Object.assign(new Event("keyboardWillShow"), { keyboardHeight }));
+    await flush();
+  };
+  const keyboardWillHide = async () => {
+    window.dispatchEvent(new Event("keyboardWillHide"));
+    await flush();
+  };
   beforeEach(() => {
+    capacitor.platform = "web";
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     mounted.mockClear(); unmounted.mockClear(); frames = new Map(); viewport = new TestViewport();
     vi.stubGlobal("visualViewport", viewport);
@@ -59,6 +72,7 @@ describe("Studio viewport and software-keyboard state", () => {
   });
   afterEach(async () => {
     await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+    vi.useRealTimers();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -233,5 +247,56 @@ describe("Studio viewport and software-keyboard state", () => {
     expect(remove.mock.calls.map(([event]) => event)).toEqual(["resize", "scroll"]);
     window.dispatchEvent(new Event("resize")); viewport.dispatchEvent(new Event("resize"));
     expect(frames.size).toBe(0);
+  });
+
+  it("moves to an iPhone keyboard as it starts to open, before the app's web view shrinks", async () => {
+    capacitor.platform = "ios";
+    await render(); await focus();
+    // The plugin shrinks the web view only after the keyboard's animation and
+    // another 0.2 s; the Studio takes the announced room at once, inside the
+    // event, without waiting for an animation frame WebKit may hold back.
+    await act(async () => {
+      window.dispatchEvent(Object.assign(new Event("keyboardWillShow"), { keyboardHeight: 336 }));
+    });
+    expect(frames.size).toBe(0);
+    expect(state).toEqual({ viewportHeightPx: 464, keyboardOpen: true });
+    await resize(464, 464); // the web view catches up: nothing moves again
+    expect(state).toEqual({ viewportHeightPx: 464, keyboardOpen: true });
+    await keyboardWillHide(); await resize(800, 800);
+    expect(state).toEqual({ viewportHeightPx: 800, keyboardOpen: false });
+  });
+
+  it("follows a keyboard that grows while open at once and one that shrinks with the web view", async () => {
+    capacitor.platform = "ios";
+    await render(); await focus();
+    await keyboardWillShow(336); await resize(464, 464);
+    await keyboardWillShow(380); // taller, e.g. the suggestion bar after a send
+    expect(state.viewportHeightPx).toBe(420);
+    await resize(420, 420);
+    await keyboardWillShow(300); // shorter: growing past the web view would cut the composer off
+    expect(state.viewportHeightPx).toBe(420);
+    await resize(500, 500);
+    expect(state).toEqual({ viewportHeightPx: 500, keyboardOpen: true });
+  });
+
+  it("hands back to measured geometry when the web view never resizes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    capacitor.platform = "ios";
+    await render(); await focus();
+    await keyboardWillShow(336);
+    expect(state.viewportHeightPx).toBe(464);
+    await act(async () => { vi.advanceTimersByTime(NATIVE_KEYBOARD_LEAD_MS); });
+    await flush();
+    expect(state).toEqual({ viewportHeightPx: 800, keyboardOpen: false });
+  });
+
+  it("ignores keyboard announcements outside the iPhone app and empty ones inside it", async () => {
+    await render(); await focus();
+    await keyboardWillShow(336); // web and Android resize with the keyboard on their own
+    expect(state).toEqual({ viewportHeightPx: 800, keyboardOpen: false });
+    capacitor.platform = "ios";
+    await render(false); await render(); await focus();
+    await keyboardWillShow(0); // a hardware keyboard's bar, which the plugin reports as 0
+    expect(state).toEqual({ viewportHeightPx: 800, keyboardOpen: false });
   });
 });
