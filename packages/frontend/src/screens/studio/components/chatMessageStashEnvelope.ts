@@ -1,8 +1,4 @@
 import type { SubmitConversationRuntimeOverride } from "../../../conversations/useConversation";
-import {
-  carriesTurnEngineClaim,
-  withoutTurnEngineClaim,
-} from "../../../features/frontendFeatureModule";
 import type { BrowserSessionPageTarget } from "./browserSessionPages";
 
 export type ChatMessageStashEnvelope = {
@@ -44,11 +40,7 @@ export function normalizeChatMessageStashEnvelope(
           label: browserTargetRecord.label as string,
         }
       : null;
-  // A turn-engine claim is for the message sent now, never a stashed draft:
-  // the draft keeps its words but not the claim, nor the runtime it pinned.
-  const metadata = readNullableRecord(record.metadata);
-  const claimed = carriesTurnEngineClaim(metadata);
-  const runtimeRecord = claimed ? null : readNullableRecord(record.runtimeOverride);
+  const runtimeRecord = readNullableRecord(record.runtimeOverride);
   const runtimeId =
     runtimeRecord && typeof runtimeRecord.runtimeId === "string"
       ? runtimeRecord.runtimeId.trim()
@@ -70,7 +62,7 @@ export function normalizeChatMessageStashEnvelope(
     targetAgentHandles,
     browserPageTarget,
     browserLaunchMode: record.browserLaunchMode === "new_page" ? "new_page" : null,
-    metadata: withoutTurnEngineClaim(metadata),
+    metadata: readNullableRecord(record.metadata),
     runtimeOverride,
   };
 }

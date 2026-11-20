@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Field } from "../../../../components/Field";
 import { ProviderMenuSelect } from "../ProviderMenuSelect";
 import { CredentialMenuSelect } from "../CredentialMenuSelect";
-import type { AiProviderId } from "../../../../utils/aiProviderModels";
 
 describe("form picker presentation", () => {
   let root: Root;
@@ -29,7 +28,7 @@ describe("form picker presentation", () => {
   it("connects a visible provider label and preserves controlled, disabled and selection behavior", async () => {
     const changed = vi.fn();
     function Provider() {
-      const [value, setValue] = useState<AiProviderId>("openai");
+      const [value, setValue] = useState<string>("openai");
       return <Field label="Provider" htmlFor="provider" labelId="provider-label">
         <ProviderMenuSelect id="provider" ariaLabel="AI provider" ariaLabelledBy="provider-label" value={value}
           options={[{ id: "openai", label: "OpenAI" }, { id: "deepseek", label: "DeepSeek" }, { id: "gemini", label: "Gemini", disabled: true }]}

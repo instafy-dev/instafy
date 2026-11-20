@@ -17,7 +17,6 @@ const JOB_ID = "0d4c9c1e-49af-4b1d-9a63-5b8f6f4f2f10";
 const STAMPED = { aiAccessMode: "claude-code", claudeCode: { version: 1 }, managedAiUsed: false };
 // What a client could send or record on its own.
 const NOT_THE_CONTROLLERS: Array<[string, Record<string, unknown>]> = [
-  ["the send's claim", { turnEngine: "claude-code" }],
   ["an access mode alone", { aiAccessMode: "claude-code" }],
   ["a stamp alone", { claudeCode: { version: 1 } }],
   ["another engine's access mode", { aiAccessMode: "byoc", claudeCode: { version: 1 } }],

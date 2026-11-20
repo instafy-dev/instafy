@@ -218,6 +218,19 @@ describe("unexpectedHostedRuntimeRecovery", () => {
     expect(hasPendingRunInProject(null, "project-1")).toBe(false);
   });
 
+  // docs/Local-Engine-Turns.md 11.7: a Claude Code turn waits for its
+  // person's own computer, which no hosted machine stands in for.
+  it("counts no turn a turn engine runs as a hosted machine's work, also while it waits", () => {
+    const waiting = {
+      ...run("waiting", "project-1", "queued"),
+      metadata: { aiAccessMode: "claude-code", claudeCode: { version: 1 } },
+    };
+    expect(hasPendingRunInProject({ waiting }, "project-1")).toBe(false);
+    expect(
+      hasPendingRunInProject({ waiting, open: run("open", "project-1", "queued") }, "project-1"),
+    ).toBe(true);
+  });
+
   it("holds a stop made elsewhere by who made it", () => {
     for (const reason of [
       "user_stop",

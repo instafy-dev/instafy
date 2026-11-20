@@ -95,6 +95,10 @@ async function mountCenter(page: Page): Promise<string[]> {
     export const controllerBaseUrl = location.origin + ${JSON.stringify(API_PATH)};
     export const resolveControllerRequestContext = async () => ({ baseUrl: controllerBaseUrl, accessToken: "notification-browser-fixture" });
     export const readControllerError = async (response, fallback) => (await response.json().catch(() => null))?.error ?? fallback;
+    export const readControllerApiError = async (response, fallback) => {
+      const body = await response.json().catch(() => null);
+      return { status: response.status, message: body?.error ?? fallback, code: body?.code ?? null, details: body?.details ?? null, url: response.url };
+    };
   `)));
   await page.route("**/src/sdk/instafy/index.ts*", (route) => route.fulfill(javascript(`
     import * as notifications from "/src/services/runtimeController/productNotifications.ts";
@@ -308,6 +312,7 @@ test("reads only source messages exposed in the real browser viewport", async ({
     export const controllerBaseUrl = location.origin + ${JSON.stringify(API_PATH)};
     export const resolveControllerRequestContext = async (accessToken) => ({ baseUrl: controllerBaseUrl, accessToken });
     export const readControllerError = async (_response, fallback) => fallback;
+    export const readControllerApiError = async (response, fallback) => ({ status: response.status, message: fallback, code: null, details: null, url: response.url });
   ` }));
   const main = `
     import ReactNS from ${JSON.stringify(deps.react)};

@@ -109,49 +109,52 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   raw text behind Details keeps them all (`runFailurePresentation.ts`), except the proxy's own
   address that Codex adds to its diagnostic (", url: http://proxy:…"): an AI that didn't answer
   keeps its status and what the service said.
-- A local-engine turn ([Local-engine turns](Local-Engine-Turns.md)), one message its sender had
-  their own Claude Code carry out on their own computer, follows the same rule. Its words name
-  Claude Code in plain text as the program that ran the turn, never as something Instafy offers.
-  Its failure block has no "Manage AI" and no "Try again", a stopped one offers no Continue, and
-  Instafy never sends such a turn again by itself: only its sender gets "Send again with Claude
-  Code", in Instafy Desktop, which puts the message back in the composer with Claude Code chosen.
-  The sender's Details keep the raw text; everyone else's keep the steps but not the raw text,
-  which can name the sender's own Claude sign-in or plan. A failure block in these words needs the
-  controller's own mark on the message: a message a member records with the same `aiAccessMode`
-  reads as an ordinary failure, still with no "Try again". Notes the turn writes itself are never
-  lines added to its reply: once the turn is done they show as plain lines under the reply and its
-  files, whether Details is open or not, and they never show in Details or count toward the line.
-  - Until its first step, the line, and the typing row before it, read "Starting Claude Code on
-    this computer…" for its sender, "Starting Claude Code on {Name}'s computer…" for everyone
-    else, and "Starting Claude Code…" when the chat can't tell who sent it.
-  - Under Octo's name on the reply, its sender reads "Ran on your own Claude Code, on your
+- A local-engine turn ([Local-engine turns](Local-Engine-Turns.md)), a turn of an agent whose AI
+  its owner set to Claude Code, which their own Claude Code carries out on their own computer,
+  follows the same rule. Its words name Claude Code in plain text as the program that ran the
+  turn, never as something Instafy offers. Its failure block has no "Manage AI", offers "Try
+  again" as any failure does (the resend goes to the same agent, so to Claude Code again), and a
+  stopped one offers Continue as any stopped turn does; Instafy never sends such a turn again by
+  itself. Its person's Details keep the raw text; everyone else's keep the steps but not the raw
+  text, which can name that person's own Claude sign-in or plan. A failure block in these words
+  needs the controller's own mark on the message: a message a member records with the same
+  `aiAccessMode` reads as an ordinary failure. Notes the turn writes itself are never lines added
+  to its reply: once the turn is done they show as plain lines under the reply and its files,
+  whether Details is open or not, and they never show in Details or count toward the line.
+  - While no computer has taken it, the line, and the typing row before it, read "Waiting for
+    your computer…" for the turn's person, "Waiting for {Name}'s computer…" for everyone else,
+    and "Waiting for the sender's computer…" when the chat can't tell whose turn it is. While the
+    person's Claude plan's limit holds their turns, they read "Waiting for your Claude plan's
+    limit to reset at {time}…", in the reader's own clock. Under the person's own typing row, what
+    makes it run: in Instafy Desktop "Start this space on this computer to run it." with a Start
+    button, or "Set up Claude Code on this computer in Your AI to run it here."; anywhere else
+    "It runs when Instafy Desktop runs this space on your computer."
+  - Once a computer took it, until its first step, they read "Starting Claude Code on this
+    computer…" for its person, "Starting Claude Code on {Name}'s computer…" for everyone else,
+    and "Starting Claude Code…" when the chat can't tell whose turn it is.
+  - Under the agent's name on the reply, its person reads "Ran on your own Claude Code, on your
     computer", and everyone else reads "Ran on {Name}'s own Claude Code, on their computer".
     That line shows even when the reply's header is hidden, and never on a failed turn.
-  - A send the controller refuses writes no message, so only its sender reads why, in place of
-    the error row, and the text goes back in the composer with Claude Code still chosen:
-    - `claude_code_turn_not_allowed`: "Claude Code turns aren't on for your account yet."
-    - `claude_code_turn_not_person`: "Claude Code takes only a message you send yourself."
-    - `claude_code_turn_not_plain`: "Claude Code takes only a plain message to Octo, of at most
-      100,000 characters, without attachments or a command."
-    - `claude_code_conversation_granted`: "In this chat, Octo takes turns only from the person who
-      started the chat, so Claude Code can't run your message here."
-    - `claude_code_turn_active`: "You already have a Claude Code turn running. Send this when it
-      ends.", or, when the earlier turn's start window has passed, "Your last Claude Code turn
-      didn't start in time. Send this again in a few seconds."
-    - `claude_code_machine_busy`: "Your computer is busy with another turn. Send this when it's
-      done."
-    - `claude_code_runtime_not_ready`, by the refusal's reason: when the computer is connected but
-      its Claude Code can't take a turn (`capability_missing`, `capability_not_ready`), "Claude
-      Code on this computer isn't ready to take turns. Check it in Your AI, then send your message
-      again."; for any other reason, "Your computer isn't connected to this space. Open this space
-      in Instafy Desktop, then send your message again."
-    - `dispatch_lane_busy`, for a send that chose Claude Code: "Octo is still working on another
-      message in this chat. Send this when it's done."
-    - any other `claude_code_*` code: "Claude Code couldn't take this message."
+  - A send the controller refuses because a turn it would start runs on Claude Code writes no
+    message, so only its sender reads why, in place of the error row, and the text goes back in
+    the composer:
+    - `claude_code_turn_not_allowed`: "Claude Code turns aren't on for your account. Choose
+      another AI for this agent in Your AI."
+    - `claude_code_turn_unsupported`, by its reason: `browser`, "Claude Code can't use Instafy's
+      browser. Ask an agent that uses another AI."; `team_plan`, "Claude Code agents can't take
+      part in a team plan yet."; `attachments`, "Claude Code can't take attachments yet. Send
+      your message without them."; `command`, "Claude Code reads a message that starts with / as
+      its own command, so it wasn't sent. Start your message another way."; `empty`, "There's
+      nothing to send."; `too_long`, "Claude Code takes messages of at most 100,000
+      characters."; `execution_mode`, "Claude Code can't take a turn that waits for your
+      approval."; `write_scope`, "Claude Code can't be held to part of the space's files while
+      other agents write, so it can't take this turn. Send it the message on its own."
+    - any other reason, or any other `claude_code_*` code: "Claude Code couldn't take this
+      message."
   - A Steer into the running turn (`claude_code_turn_takes_no_input`) tells whoever tried it:
     "This Claude Code turn can't take more words while it runs. Queue your message instead."
   - A failed turn reads "Claude Code couldn't finish this turn on {Name}'s computer." for everyone
-    but its sender, who reads the sentence for its code:
+    but its person, who reads the sentence for its code:
     - `not_signed_in`: "Claude Code isn't signed in on this computer. Open a terminal, run claude
       and sign in, then send your message again." On a Claude Code newer than the versions
       Instafy has checked, it adds "If you're signed in, this newer Claude Code may no longer let
@@ -189,15 +192,13 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
       "Instafy couldn't check this space's folder on this computer, so Claude Code didn't start."
     - `claude_code_machine_stopped`: "Instafy Desktop stopped on your computer while Claude Code
       was working, so the turn ended. Send it again to run it."
-    - `start_by_passed`: "This Claude Code turn didn't start in time, so it won't run. Send it
-      again."
     - `run_once_interrupted`: "This Claude Code turn stopped because Instafy on your computer
       stopped, and it won't run again. Send it again to start over."
     - anything else: "Claude Code stopped with an error.", with the failure's own first line after
       it only when that line passes the rule above.
 
     Copy message and Copy conversation carry the sentence the row shows whoever copies it: a
-    teammate's copy says only that it couldn't finish, never the sender's own sentence.
+    teammate's copy says only that it couldn't finish, never its person's own sentence.
   - Its notes, which everyone in the chat reads under the reply once the turn is done:
     - "Claude Code skipped N steps that need your OK, since nobody can give it here. You can allow
       them in your own Claude Code settings." The turn still succeeds.

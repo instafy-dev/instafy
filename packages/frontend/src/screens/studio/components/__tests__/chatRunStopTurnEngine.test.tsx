@@ -23,9 +23,10 @@ const notice: ChatMessage = {
   } },
 };
 
-// docs/Local-Engine-Turns.md 5.6: Continue goes out as an automatic send,
-// which never carries an engine, so under a Stop of a Claude Code turn it
-// would run the person's words as an ordinary turn.
+// docs/Local-Engine-Turns.md 11.14: version 1 hid Continue under a Stop of a
+// Claude Code turn, since its automatic send never carried the per-message
+// choice. In version 2 the agent's AI decides, so Continue carries a stopped
+// Claude Code turn on as it does any other, to the same agent.
 describe("Continue under a Stop of a turn-engine turn", () => {
   let root: Root;
   let container: HTMLDivElement;
@@ -52,22 +53,16 @@ describe("Continue under a Stop of a turn-engine turn", () => {
 
   const continueButton = () => container.querySelector('[data-testid="chat-run-stop-continue"]');
 
-  it("is hidden, and sends nothing, for the controller's stamped prompt and for the sender's own claimed copy", async () => {
-    for (const metadata of [
-      { aiAccessMode: "claude-code", claudeCode: { version: 1 }, prompt_metadata: { aiAccessMode: "claude-code" } },
-      { turnEngine: "claude-code" },
-    ]) {
-      await render([asked(metadata), notice]);
-      expect(controls.canContinue(notice)).toBe(false);
-      expect(continueButton()).toBeNull();
-      await act(async () => {
-        expect(await controls.onContinue(notice)).toBe(false);
-      });
-      expect(submit).not.toHaveBeenCalled();
-    }
+  it("is offered for the controller's stamped prompt, as for any other", async () => {
+    await render([
+      asked({ aiAccessMode: "claude-code", claudeCode: { version: 1 }, prompt_metadata: { aiAccessMode: "claude-code" } }),
+      notice,
+    ]);
+    expect(controls.canContinue(notice)).toBe(true);
+    expect(continueButton()).not.toBeNull();
   });
 
-  it("still offers Continue for the same Stop of an ordinary turn", async () => {
+  it("is offered for the same Stop of an ordinary turn", async () => {
     await render([asked({}), notice]);
     expect(controls.canContinue(notice)).toBe(true);
     expect(continueButton()).not.toBeNull();

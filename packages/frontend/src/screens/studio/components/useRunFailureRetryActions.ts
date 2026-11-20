@@ -3,11 +3,9 @@ import {
   buildRunFailureRetryMetadata,
   isRunFailureRetryQueued,
   isRunFailureRetrySuperseded,
-  resolveRunFailurePresentation,
   resolveRunFailureRetrySource,
   turnEngineTurnOwner,
   type TurnEngineTurnOwner,
-  usesTurnEngine,
 } from "../../../conversations/runFailurePresentation";
 import {
   claimAutoRetryForPromptSentFromThisPage,
@@ -15,8 +13,10 @@ import {
   readRetrySentFromThisPage,
 } from "../../../conversations/sentPromptRegistry";
 import type { StatusIntent } from "../../../status/StatusProvider";
+import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
 import { readBrowserHandBackOf } from "./browserHandBack";
+import { extractRunIdFromMetadata } from "./chatAssistantIdentity";
 import { readBrowserRequestOf } from "./browserRequest";
 import { isLetOctoContinuePrompt } from "./useBrowserHumanInput";
 import type { ChatSubmitOverride } from "./chatSubmitPlanning";
@@ -32,17 +32,6 @@ const NO_QUEUED_SENDS: ReadonlyArray<{ metadata?: Record<string, unknown> | null
  * send one.
  */
 const HAND_BACK_NOT_SENT_AGAIN = "Octo can't try this again from here. Ask Octo to continue instead.";
-
-/** The engine of a failed turn-engine turn, from its failure message, or null. */
-function failedTurnEngineOf(failureMessage: ChatMessage): string | null {
-  return (
-    resolveRunFailurePresentation({
-      metadata: failureMessage.metadata,
-      content: failureMessage.content,
-      assumeFailed: true,
-    })?.turnEngine?.engineId ?? null
-  );
-}
 
 /** How a resend asks the panel's submit to behave. */
 export type RunFailureResendOptions = {
@@ -72,10 +61,9 @@ export type RunFailureResendOptions = {
  * dispatch failed) retires nothing: its local copy keeps the link, but the
  * card keeps its "Try again".
  *
- * A failed turn of a turn engine is never sent again from its card, by hand
- * or automatically (docs/Local-Engine-Turns.md 5.6): its sender gets the
- * message back in the composer with the engine chosen
- * (`refillComposerWithTurnEngine`), and sends it themselves.
+ * A failed turn of a turn engine is sent again by hand as any failure is, to
+ * the same agent and so to that engine again, and never automatically
+ * (docs/Local-Engine-Turns.md 11.14, useRunFailureAutoRetry).
  */
 export function useRunFailureRetryActions({
   messages,
@@ -90,7 +78,7 @@ export function useRunFailureRetryActions({
   showStatus,
   onConnectAi,
   humanLabelByUserId,
-  refillComposerWithTurnEngine,
+  runs,
 }: {
   messages: ChatMessage[];
   /** Sends waiting in the local and controller send queues. */
@@ -126,11 +114,10 @@ export function useRunFailureRetryActions({
   /** The names the chat shows for people, by user id: what a turn-engine turn's teammates read. */
   humanLabelByUserId?: ReadonlyMap<string, string>;
   /**
-   * Puts `text` in the composer with the engine chosen for the next message,
-   * as the person's own draft. Without it, a failed turn-engine turn offers
-   * its sender nothing to press.
+   * The space's runs, by id: whose turn a turn-engine turn is, by the person
+   * its run names, also when no person wrote its prompt (an automation's).
    */
-  refillComposerWithTurnEngine?: (input: { text: string; turnEngine: string }) => void;
+  runs?: Readonly<Record<string, RunRecord>> | null;
 }): RunFailureRetryContextValue {
   const [pendingRetryKey, setPendingRetryKey] = useState<string | null>(null);
   const retryInFlightRef = useRef(false);
@@ -225,39 +212,11 @@ export function useRunFailureRetryActions({
     [messages, queuedSends, retriedFailureIds],
   );
 
-  /**
-   * Whether a failure belongs to a turn-engine turn: its own metadata says
-   * so, or its prompt's does, by a claim or by an `aiAccessMode` of another
-   * engine than the runtime's own ({@link usesTurnEngine}). That holds also
-   * for an engine this Studio was not built with, and for a failure without
-   * the controller's stamp, which reads as any other failure.
-   */
-  const isTurnEngineTurn = useCallback(
-    (failureMessage: ChatMessage) => {
-      if (usesTurnEngine(failureMessage.metadata)) {
-        return true;
-      }
-      const promptMessage = resolveRunFailureRetrySource({
-        conversationMessages: messages,
-        failureMessage,
-      });
-      return promptMessage !== null && usesTurnEngine(promptMessage.metadata);
-    },
-    [messages],
-  );
-
   const requestRetry = useCallback(
     async (failureMessage: ChatMessage) => {
       // A second press before the pending state renders, or on a card whose
       // prompt was already sent or queued again, must not send it twice.
       if (retryInFlightRef.current || isRetrySuperseded(failureMessage)) {
-        return;
-      }
-      // A turn-engine turn is one turn its sender started: a resend from its
-      // card would go out without the engine, and the controller refuses a
-      // resend that claims it. Its card offers no Try again, and a teammate
-      // never reruns its sender's words as a turn of their own (5.6).
-      if (usesTurnEngine(failureMessage.metadata)) {
         return;
       }
       const promptMessage = resolveRunFailureRetrySource({
@@ -266,9 +225,6 @@ export function useRunFailureRetryActions({
       });
       if (!promptMessage) {
         showStatus("Couldn't find the original message to send again.", "info", 4000);
-        return;
-      }
-      if (usesTurnEngine(promptMessage.metadata)) {
         return;
       }
       // A continuation of a browser card shows a one-line notice in place of
@@ -323,45 +279,27 @@ export function useRunFailureRetryActions({
   );
 
   /**
-   * Who sent the turn-engine turn a message belongs to: the sender of the
-   * prompt that started it, when that prompt is a turn-engine one (the
-   * sender's own copy, or the controller's stamped one), by
+   * Whose turn-engine turn a message belongs to: the person its run names,
+   * else the author of the prompt that started it, by
    * {@link turnEngineTurnOwner}. Null when the chat cannot tell, which every
    * card and line words for everyone else.
    */
   const turnEngineOwnerOf = useCallback(
-    (message: Pick<ChatMessage, "id" | "timestamp" | "metadata">): TurnEngineTurnOwner | null =>
-      turnEngineTurnOwner(
-        resolveRunFailureRetrySource({
-          conversationMessages: messages,
-          failureMessage: message,
-        }),
+    (message: Pick<ChatMessage, "id" | "timestamp" | "metadata">): TurnEngineTurnOwner | null => {
+      const runId = extractRunIdFromMetadata(message.metadata);
+      return turnEngineTurnOwner(
+        {
+          runMetadata: runId ? runs?.[runId]?.metadata ?? null : null,
+          prompt: resolveRunFailureRetrySource({
+            conversationMessages: messages,
+            failureMessage: message,
+          }),
+        },
         { currentUserId, nameOf: (userId) => humanLabelByUserId?.get(userId) },
-      ),
-    [currentUserId, humanLabelByUserId, messages],
+      );
+    },
+    [currentUserId, humanLabelByUserId, messages, runs],
   );
-
-  const resendWithTurnEngine = useMemo(() => {
-    if (!refillComposerWithTurnEngine) {
-      return undefined;
-    }
-    return (failureMessage: ChatMessage) => {
-      const turnEngine = failedTurnEngineOf(failureMessage);
-      // Only the turn's sender gets their own message back.
-      if (!turnEngine || turnEngineOwnerOf(failureMessage)?.isViewer !== true) {
-        return;
-      }
-      const promptMessage = resolveRunFailureRetrySource({
-        conversationMessages: messages,
-        failureMessage,
-      });
-      if (!promptMessage) {
-        showStatus("Couldn't find the original message to send again.", "info", 4000);
-        return;
-      }
-      refillComposerWithTurnEngine({ text: promptMessage.content, turnEngine });
-    };
-  }, [messages, refillComposerWithTurnEngine, showStatus, turnEngineOwnerOf]);
 
   // The automatic re-dispatch shares the resend but deliberately does NOT touch
   // pendingRetryKey; that state is the manual "Try again" in-flight signal, and
@@ -395,19 +333,15 @@ export function useRunFailureRetryActions({
       isRetryWithdrawn,
       onConnectAi,
       turnEngineOwnerOf,
-      resendWithTurnEngine,
-      isTurnEngineTurn,
     }),
     [
       autoRetryingKey,
       cancelScheduledAutoRetry,
       isRetrySuperseded,
       isRetryWithdrawn,
-      isTurnEngineTurn,
       onConnectAi,
       pendingRetryKey,
       requestRetry,
-      resendWithTurnEngine,
       scheduledAutoRetry,
       turnEngineOwnerOf,
     ],

@@ -10,12 +10,13 @@ import { RunFailureRetryProvider } from "../RunFailureNotice";
 import { useAgentJobThreadPreviewState } from "../useAgentJobThreadPreviewState";
 import { useRunFailureRetryActions } from "../useRunFailureRetryActions";
 
-// docs/Local-Engine-Turns.md 5.7: a Claude Code turn's row reads "Starting
-// Claude Code on this computer…" until its first step arrives, on its
-// sender's page. The sender's page knows it from the run's controller stamp;
-// a teammate's page has no metadata for another person's run while it runs,
-// and knows it from the stamped prompt. The turn starts on its sender's
-// computer, so a teammate reads that computer's owner, by name.
+// docs/Local-Engine-Turns.md 5.7, 11.14: a Claude Code turn's row reads
+// "Waiting for your computer…" while no computer has taken it, and "Starting
+// Claude Code on this computer…" once one did, until its first step arrives,
+// for its person. A page knows it from the run's controller stamp, or, while
+// it has no metadata for the run, from the stamped prompt. The turn waits for,
+// and starts on, its person's computer, so a teammate reads that person's
+// name.
 
 const JOB_ID = "6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
 const CONTROLLER_ID = "0c1d2e3f-4a5b-4c6d-8e9f-a0b1c2d3e4f5";
@@ -30,6 +31,7 @@ const NAMES: ReadonlyMap<string, string> = new Map([
 
 const live = vi.hoisted(() => ({
   runMetadata: null as Record<string, unknown> | null,
+  runStatus: "in_progress" as RunRecord["status"],
   conversationMessages: [] as ChatMessage[],
   viewerId: "user-sam",
 }));
@@ -43,7 +45,7 @@ function inProgressRun(): RunRecord {
     conversationId: CONTROLLER_ID,
     promptId: null,
     runType: "prompt",
-    status: "in_progress",
+    status: live.runStatus,
     progress: 0,
     progressStage: null,
     previewUrl: null,
@@ -171,6 +173,7 @@ describe("a turn row before its first step", () => {
     });
     container.remove();
     live.runMetadata = null;
+    live.runStatus = "in_progress";
     live.conversationMessages = [];
     live.viewerId = SAM;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
@@ -178,18 +181,34 @@ describe("a turn row before its first step", () => {
 
   const firstNote = () => [update("status-1", "status", "Connecting", base)];
 
-  it("reads the engine's words on the sender's page, from the run's stamp", async () => {
+  it("reads the engine's words on its person's page, from the run's stamp", async () => {
     live.viewerId = SAM;
     live.runMetadata = { jobId: JOB_ID, ...STAMP };
-    // The sender's own copy of the message, before the controller's arrives.
-    await render({ turnEngine: "claude-code" }, firstNote());
+    // The person's own copy of the message, before the controller's arrives.
+    await render({}, firstNote());
     expect(activityLine()).toBe(STARTING);
     // And from the controller's copy, after a reload.
     await render({ ...STAMP, runId: JOB_ID }, firstNote());
     expect(activityLine()).toBe(STARTING);
   });
 
-  it("reads them on a teammate's page, from the stamped prompt, naming the sender's computer", async () => {
+  it("waits for its person's computer while no computer has taken it", async () => {
+    live.runStatus = "queued";
+    live.runMetadata = { jobId: JOB_ID, ...STAMP, initiatingUserId: SAM };
+    live.viewerId = SAM;
+    await render({ ...STAMP, runId: JOB_ID }, firstNote());
+    expect(activityLine()).toBe("Waiting for your computer…");
+    // A teammate's page, mounted anew (the line holds a label it showed for a moment).
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    live.viewerId = ALEX;
+    await render({ ...STAMP, runId: JOB_ID }, firstNote());
+    expect(activityLine()).toBe("Waiting for Sam's computer…");
+  });
+
+  it("reads them on a teammate's page, from the stamped prompt, naming its person's computer", async () => {
     // A teammate's page has no metadata for another person's run.
     live.viewerId = ALEX;
     live.runMetadata = null;
@@ -197,7 +216,7 @@ describe("a turn row before its first step", () => {
     expect(activityLine()).toBe("Starting Claude Code on Sam's computer…");
   });
 
-  it("names no computer where the chat can't tell who sent the turn", async () => {
+  it("names no computer where the chat can't tell whose turn it is", async () => {
     // The read-only run trace has no RunFailureRetryProvider.
     live.runMetadata = { jobId: JOB_ID, ...STAMP };
     live.conversationMessages = [prompt({ ...STAMP, runId: JOB_ID }, base - 1_000), ...firstNote()];
@@ -220,7 +239,7 @@ describe("a turn row before its first step", () => {
 
   it("follows the steps from the first one on", async () => {
     live.runMetadata = { jobId: JOB_ID, ...STAMP };
-    await render({ turnEngine: "claude-code" }, [
+    await render({}, [
       ...firstNote(),
       update("command-1", "command_execution", "ls", base + 1_000, { status: "completed", command: "ls" }),
     ]);

@@ -3,16 +3,26 @@ import type {
   TurnEngineFailureInput,
   TurnEngineTurnOwner,
 } from "../frontendFeatureModule";
-import { usageLimitResetTimeForReader } from "../../conversations/usageLimitReset";
-import { CLAUDE_CODE_TURN_ENGINE_ID } from "./claudeCodeComposer";
+import type { ControllerRuntimeStatusEntry } from "../../services/runtimeController/runtimes";
+import {
+  formatUsageLimitResetTime,
+  usageLimitResetTimeForReader,
+} from "../../conversations/usageLimitReset";
 
 /**
  * How a Claude Code turn reads in the chat (docs/Local-Engine-Turns.md 5.5,
- * 5.7). Every sentence follows docs/Chat-Activity.md: none says "upstream",
- * "provider", "credential", "runtime", "switch", "Codex", "workspace" or
- * "request", and none promises anything about price. "Claude Code" is the
- * tool a turn ran, never the name of something Instafy offers (D28).
+ * 5.7, 11.14). Every sentence follows docs/Chat-Activity.md: none says
+ * "upstream", "provider", "credential", "runtime", "switch", "Codex",
+ * "workspace" or "request", and none promises anything about price. "Claude
+ * Code" is the tool a turn ran, never the name of something Instafy offers
+ * (D28).
  */
+
+/**
+ * The engine id: the `provider` of an agent whose AI is Claude Code, and the
+ * `aiAccessMode` the controller stamps on the turns it runs (11.3).
+ */
+export const CLAUDE_CODE_TURN_ENGINE_ID = "claude-code";
 
 /** The controller's stamp on a Claude Code turn's run and messages: `{ version: 1 }`. Only it writes the key. */
 export const CLAUDE_CODE_STAMP_KEY = "claudeCode";
@@ -20,10 +30,6 @@ export const CLAUDE_CODE_STAMP_KEY = "claudeCode";
 export const CLAUDE_CODE_FAILURE_KEY = "claudeCodeFailure";
 /** The refusal of a Steer into a Claude Code turn (2.8). */
 export const CLAUDE_CODE_STEER_REFUSED_CODE = "claude_code_turn_takes_no_input";
-/** A busy chat's refusal, which a send that claims Claude Code gets in place of a queue entry (2.2). */
-export const DISPATCH_LANE_BUSY_CODE = "dispatch_lane_busy";
-/** G8's `details.reason` when the blocking turn's start window has passed. */
-export const START_WINDOW_PASSED_REASON = "start_window_passed";
 
 /** Why a Claude Code turn failed, as the runtime or the controller records it. */
 export type ClaudeCodeFailureCode =
@@ -42,10 +48,9 @@ export type ClaudeCodeFailureCode =
   | "unsafe_link"
   | "preflight_failed"
   | "claude_code_machine_stopped"
-  | "start_by_passed"
   | "run_once_interrupted";
 
-/** What the person who sent a failed turn reads, by its code (5.5). */
+/** What the person whose turn failed reads, by its code (5.5). */
 export const CLAUDE_CODE_FAILURE_SENTENCES: Readonly<Record<ClaudeCodeFailureCode, string>> = Object.freeze({
   not_signed_in:
     "Claude Code isn't signed in on this computer. Open a terminal, run claude and sign in, then send your message again.",
@@ -76,7 +81,6 @@ export const CLAUDE_CODE_FAILURE_SENTENCES: Readonly<Record<ClaudeCodeFailureCod
     "Instafy couldn't check this space's folder on this computer, so Claude Code didn't start.",
   claude_code_machine_stopped:
     "Instafy Desktop stopped on your computer while Claude Code was working, so the turn ended. Send it again to run it.",
-  start_by_passed: "This Claude Code turn didn't start in time, so it won't run. Send it again.",
   run_once_interrupted:
     "This Claude Code turn stopped because Instafy on your computer stopped, and it won't run again. Send it again to start over.",
 });
@@ -89,64 +93,130 @@ const OTHER_FAILURE = "Claude Code stopped with an error.";
 // The same sentence when the failure's own first line reads plainly.
 const OTHER_FAILURE_BEFORE_LINE = "Claude Code stopped with an error:";
 
-/** What everyone but the sender reads for a failed turn (5.5). */
+/** What everyone but the person whose turn it was reads for a failed turn (5.5). */
 export function claudeCodeTeammateFailureSentence(ownerName: string | null): string {
   return `Claude Code couldn't finish this turn on ${possessive(ownerName)} computer.`;
 }
 
-/** A send the controller refused, by its code (5.5). */
+/** A send the controller refused because a turn it would start runs on Claude Code (11.4, 11.6). */
+export const CLAUDE_CODE_TURN_NOT_ALLOWED_CODE = "claude_code_turn_not_allowed";
+/** The refusal of a turn Claude Code can't take, whose `details.reason` says why (11.4). */
+export const CLAUDE_CODE_TURN_UNSUPPORTED_CODE = "claude_code_turn_unsupported";
+
+/** What the sender reads for a send the controller refused, by its code (11.6). */
 export const CLAUDE_CODE_SEND_REFUSAL_SENTENCES: Readonly<Record<string, string>> = Object.freeze({
-  claude_code_turn_not_allowed: "Claude Code turns aren't on for your account yet.",
-  claude_code_turn_not_person: "Claude Code takes only a message you send yourself.",
-  claude_code_turn_not_plain:
-    "Claude Code takes only a plain message to Octo, of at most 100,000 characters, without attachments or a command.",
-  claude_code_conversation_granted:
-    "In this chat, Octo takes turns only from the person who started the chat, so Claude Code can't run your message here.",
-  claude_code_turn_active: "You already have a Claude Code turn running. Send this when it ends.",
-  claude_code_machine_busy: "Your computer is busy with another turn. Send this when it's done.",
-  claude_code_runtime_not_ready:
-    "Your computer isn't connected to this space. Open this space in Instafy Desktop, then send your message again.",
-  [DISPATCH_LANE_BUSY_CODE]: "Octo is still working on another message in this chat. Send this when it's done.",
+  [CLAUDE_CODE_TURN_NOT_ALLOWED_CODE]:
+    "Claude Code turns aren't on for your account. Choose another AI for this agent in Your AI.",
 });
 
-const TURN_ACTIVE_START_WINDOW_PASSED =
-  "Your last Claude Code turn didn't start in time. Send this again in a few seconds.";
-/** The send refusal of a computer that isn't ready (G6), whose `details.reason` says why. */
-const RUNTIME_NOT_READY_CODE = "claude_code_runtime_not_ready";
-// G6's reasons when the computer is connected and Claude Code on it can't
-// take a turn: too old, signed out or not found, as its runtime last said.
-const CLAUDE_CODE_NOT_READY_REASONS: ReadonlySet<string> = new Set([
-  "capability_missing",
-  "capability_not_ready",
-]);
-const CLAUDE_CODE_NOT_READY_HERE =
-  "Claude Code on this computer isn't ready to take turns. Check it in Your AI, then send your message again.";
-// A refusal code the controller may add later: never its raw text, which
-// can name the plumbing.
+/** Why Claude Code can't take a turn, as `claude_code_turn_unsupported` names it in `details.reason` (11.4). */
+export type ClaudeCodeUnsupportedReason =
+  | "browser"
+  | "team_plan"
+  | "attachments"
+  | "command"
+  | "empty"
+  | "too_long"
+  | "execution_mode"
+  | "write_scope"
+  | "instafy_feature"
+  | "delegated";
+
+/** What the sender reads for a turn Claude Code can't take, by its reason (11.4). */
+export const CLAUDE_CODE_UNSUPPORTED_SENTENCES: Readonly<Record<ClaudeCodeUnsupportedReason, string>> = Object.freeze({
+  browser: "Claude Code can't use Instafy's browser. Ask an agent that uses another AI.",
+  team_plan: "Claude Code agents can't take part in a team plan yet.",
+  attachments: "Claude Code can't take attachments yet. Send your message without them.",
+  command:
+    "Claude Code reads a message that starts with / as its own command, so it wasn't sent. Start your message another way.",
+  empty: "There's nothing to send.",
+  too_long: "Claude Code takes messages of at most 100,000 characters.",
+  execution_mode: "Claude Code can't take a turn that waits for your approval.",
+  // A message to several agents that write at once: Claude Code can't be
+  // held to its part of the files. Without a write it runs read-only.
+  write_scope:
+    "Claude Code can't be held to part of the space's files while other agents write, so it can't take this turn. Send it the message on its own.",
+  // A turn that needs one of Instafy's own tools: a space review, a repo
+  // import, a preview it asks for.
+  instafy_feature: "Claude Code can't do this: it needs one of Instafy's own tools.",
+  // A send an agent's job makes: an agent reads what teammates wrote, so its
+  // words could be theirs (11.5).
+  delegated: "Claude Code takes turns only from its own person, never from another agent's job.",
+});
+
+// A refusal code or reason the controller may add later: never its raw text,
+// which can name the plumbing.
 const OTHER_SEND_REFUSAL = "Claude Code couldn't take this message.";
 
 /** A refused Steer into a running Claude Code turn (5.5). */
 export const CLAUDE_CODE_STEER_REFUSED =
   "This Claude Code turn can't take more words while it runs. Queue your message instead.";
 
-/** The sender's action on a failed turn: the composer gets the message back, with Claude Code chosen (5.6). */
-export const CLAUDE_CODE_RESEND_LABEL = "Send again with Claude Code";
-
-/** What the sender of a Claude Code turn reads from its send until its first step (5.7). */
+/** What the person whose turn it is reads once their computer took it, until its first step (5.7). */
 export const CLAUDE_CODE_STARTING_LINE = "Starting Claude Code on this computer…";
-/** The same when the chat cannot tell who sent the turn: it names no computer. */
+/** The same when the chat cannot tell whose turn it is: it names no computer. */
 const CLAUDE_CODE_STARTING_LINE_UNKNOWN_OWNER = "Starting Claude Code…";
 
 /**
- * What a Claude Code turn reads from its send until its first step (5.7), by
- * viewer: it starts on its sender's computer, never on a teammate's, as the
- * speaker line and the failure sentence say (5.5, D20).
+ * What a Claude Code turn reads once a computer took it, until its first
+ * step (5.7), by viewer: it starts on its person's computer, never on a
+ * teammate's, as the speaker line and the failure sentence say (5.5, D20).
  */
 export function claudeCodeStartingLine(owner: TurnEngineTurnOwner | null): string {
   if (!owner) {
     return CLAUDE_CODE_STARTING_LINE_UNKNOWN_OWNER;
   }
   return owner.isViewer ? CLAUDE_CODE_STARTING_LINE : `Starting Claude Code on ${possessive(owner.name)} computer…`;
+}
+
+/** What the person whose turn it is reads while it waits for one of their computers (11.14). */
+export const CLAUDE_CODE_WAITING_LINE = "Waiting for your computer…";
+
+/**
+ * When the viewer's own Claude Code holds their waiting turns until their
+ * plan's limit resets (11.11), as epoch ms: the earliest reset still ahead
+ * that one of their computers in this space reports. Null when none does, or
+ * when one of them is ready, so a turn waits only for its lease.
+ */
+export function claudeCodePlanLimitResetsAt(
+  runtimes: readonly ControllerRuntimeStatusEntry[],
+  now: number = Date.now(),
+): number | null {
+  let earliest: number | null = null;
+  for (const entry of runtimes) {
+    const capability = entry.claudeCode;
+    if (!capability) {
+      continue;
+    }
+    if (capability.ready) {
+      return null;
+    }
+    const resetsAt = capability.resetsAt ? Date.parse(capability.resetsAt) : Number.NaN;
+    if (Number.isFinite(resetsAt) && resetsAt > now && (earliest === null || resetsAt < earliest)) {
+      earliest = resetsAt;
+    }
+  }
+  return earliest;
+}
+
+/**
+ * What a Claude Code turn reads while it waits for a computer to take it
+ * (its run is queued, 11.14), by viewer: its person waits for their own
+ * computer, or for their Claude plan's limit while one of their computers
+ * holds it (11.11), and everyone else for that person's computer.
+ */
+export function claudeCodeWaitingLine(
+  owner: TurnEngineTurnOwner | null,
+  runtimes: readonly ControllerRuntimeStatusEntry[] = [],
+  now: number = Date.now(),
+): string {
+  if (!owner?.isViewer) {
+    return `Waiting for ${possessive(owner?.name ?? null)} computer…`;
+  }
+  const resetsAt = claudeCodePlanLimitResetsAt(runtimes, now);
+  return resetsAt === null
+    ? CLAUDE_CODE_WAITING_LINE
+    : `Waiting for your Claude plan's limit to reset at ${formatUsageLimitResetTime(resetsAt, now)}…`;
 }
 
 /** The plain-text line under a Claude Code reply's header (5.7, D20). */
@@ -205,7 +275,7 @@ export function readClaudeCodeResetTime(
   return time;
 }
 
-/** The sentence the sender of a failed turn reads (5.5). */
+/** The sentence the person whose turn failed reads (5.5). */
 export function describeClaudeCodeTurnFailure(failure: TurnEngineFailureInput): string {
   const code = readClaudeCodeFailureCode(failure.metadata);
   switch (code) {
@@ -232,18 +302,20 @@ export function describeClaudeCodeTurnFailure(failure: TurnEngineFailureInput): 
   }
 }
 
-/** The sentence for a send that claimed Claude Code and that the controller refused, or null. */
+function isUnsupportedReason(value: unknown): value is ClaudeCodeUnsupportedReason {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(CLAUDE_CODE_UNSUPPORTED_SENTENCES, value);
+}
+
+/**
+ * The sentence for a send the controller refused, before it recorded
+ * anything, because a turn it would start runs on Claude Code (11.4, 11.6),
+ * or null for a code that is not Claude Code's.
+ */
 export function describeClaudeCodeSendRefusal(refusal: { code: string; details: unknown }): string | null {
   const code = refusal.code.trim();
-  const reason = isRecord(refusal.details) ? refusal.details["reason"] : null;
-  if (code === "claude_code_turn_active") {
-    return reason === START_WINDOW_PASSED_REASON
-      ? TURN_ACTIVE_START_WINDOW_PASSED
-      : CLAUDE_CODE_SEND_REFUSAL_SENTENCES.claude_code_turn_active;
-  }
-  if (code === RUNTIME_NOT_READY_CODE && typeof reason === "string" && CLAUDE_CODE_NOT_READY_REASONS.has(reason)) {
-    // The computer is connected; Claude Code on it is what isn't ready.
-    return CLAUDE_CODE_NOT_READY_HERE;
+  if (code === CLAUDE_CODE_TURN_UNSUPPORTED_CODE) {
+    const reason = isRecord(refusal.details) ? refusal.details["reason"] : null;
+    return isUnsupportedReason(reason) ? CLAUDE_CODE_UNSUPPORTED_SENTENCES[reason] : OTHER_SEND_REFUSAL;
   }
   if (Object.prototype.hasOwnProperty.call(CLAUDE_CODE_SEND_REFUSAL_SENTENCES, code)) {
     return CLAUDE_CODE_SEND_REFUSAL_SENTENCES[code] ?? null;
@@ -264,11 +336,12 @@ export function isClaudeCodeControllerStamped(metadata: Record<string, unknown>)
 export const CLAUDE_CODE_TURN_PRESENTATION: FrontendTurnEnginePresentation = Object.freeze({
   isControllerStamped: isClaudeCodeControllerStamped,
   describeStart: claudeCodeStartingLine,
+  describeWaiting: (owner: TurnEngineTurnOwner | null, runtimes: readonly ControllerRuntimeStatusEntry[]) =>
+    claudeCodeWaitingLine(owner, runtimes),
   describeTurnFailure: describeClaudeCodeTurnFailure,
   describeTeammateTurnFailure: claudeCodeTeammateFailureSentence,
   describeSendRefusal: describeClaudeCodeSendRefusal,
   describeSteerRefusal: (code: string) =>
     code.trim() === CLAUDE_CODE_STEER_REFUSED_CODE ? CLAUDE_CODE_STEER_REFUSED : null,
   describeSpeaker: claudeCodeSpeakerLine,
-  resendLabel: CLAUDE_CODE_RESEND_LABEL,
 });

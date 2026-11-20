@@ -46,12 +46,20 @@ export interface CreateMyAgentResult {
   success: boolean;
   agent?: ControllerAgentProfile;
   error?: string;
+  /** The controller's error code, when it refused with one. */
+  code?: string | null;
+  /** The controller's error details, when it refused with any. */
+  details?: unknown;
 }
 
 export interface UpdateMyAgentResult {
   success: boolean;
   agent?: ControllerAgentProfile;
   error?: string;
+  /** The controller's error code, when it refused with one. */
+  code?: string | null;
+  /** The controller's error details, when it refused with any. */
+  details?: unknown;
 }
 
 export interface DeleteMyAgentResult {
@@ -126,7 +134,7 @@ export async function createMyAgent(
   });
 
   if (!response.success) {
-    return { success: false, error: response.error };
+    return { success: false, error: response.error, code: response.code ?? null, details: response.details ?? null };
   }
 
   const agent = mapAgentPayload(response.value);
@@ -156,7 +164,7 @@ export async function updateMyAgent(
   });
 
   if (!response.success) {
-    return { success: false, error: response.error };
+    return { success: false, error: response.error, code: response.code ?? null, details: response.details ?? null };
   }
 
   const agent = mapAgentPayload(response.value);

@@ -866,7 +866,18 @@ export function ParticipantsDrawer({
                               @{agent.handle}
                             </Text>
                             <AiTag />
-                            {isEditable && editing ? (
+                            {agent.aiLabel ? (
+                              // Its model and reasoning are its engine's own.
+                              <Text
+                                as="span"
+                                variant="caption"
+                                tone="muted"
+                                className="min-w-0 truncate text-xxs max-[899px]:text-xs pointer-coarse:text-xs"
+                                data-testid={`participants-agent-ai-${agent.handle}`}
+                              >
+                                {agent.aiLabel}
+                              </Text>
+                            ) : isEditable && editing ? (
                               <AgentInlineControls
                                 agent={agent}
                                 editing={editing}

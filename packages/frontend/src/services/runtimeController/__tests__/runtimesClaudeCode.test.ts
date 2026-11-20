@@ -33,11 +33,27 @@ describe("mapControllerRuntimeClaudeCode", () => {
       cli: "2.1.314",
       verified: true,
       planSignIn: true,
+      resetsAt: null,
     });
     // The status route sends the fields without a version.
     expect(
       mapControllerRuntimeClaudeCode({ ready: false, reason: "binary_unsafe", cli: null }),
-    ).toEqual({ ready: false, reason: "binary_unsafe", cli: null, verified: null, planSignIn: false });
+    ).toEqual({ ready: false, reason: "binary_unsafe", cli: null, verified: null, planSignIn: false, resetsAt: null });
+  });
+
+  // docs/Local-Engine-Turns.md 11.11: a runtime holds the person's turns
+  // until their Claude plan's limit resets, and says when.
+  it("keeps when a plan's limit resets, only while the runtime holds turns for it", () => {
+    const holding = { version: 1, ready: false, reason: "plan_limit", resetsAt: "2026-11-19T14:30:00Z" };
+    expect(mapControllerRuntimeClaudeCode(holding)?.resetsAt).toBe("2026-11-19T14:30:00Z");
+    expect(mapControllerRuntimeClaudeCode({ ...holding, resetsAt: "2026-11-19T15:30:00+01:00" })?.resetsAt).toBe(
+      "2026-11-19T15:30:00+01:00",
+    );
+    // Not a time, not a string, no hold, or another reason: no reset to wait for.
+    expect(mapControllerRuntimeClaudeCode({ ...holding, resetsAt: "soon" })?.resetsAt).toBeNull();
+    expect(mapControllerRuntimeClaudeCode({ ...holding, resetsAt: 1763562600000 })?.resetsAt).toBeNull();
+    expect(mapControllerRuntimeClaudeCode({ ...holding, ready: true })?.resetsAt).toBeNull();
+    expect(mapControllerRuntimeClaudeCode({ ...holding, reason: "binary_missing" })?.resetsAt).toBeNull();
   });
 
   it("reads another version, or a ready that is not a boolean, as no capability", () => {
@@ -59,7 +75,7 @@ describe("mapControllerRuntimeClaudeCode", () => {
       planSignIn: "true",
       path: "/home/someone/.local/bin/claude",
     });
-    expect(mapped).toEqual({ ready: false, reason: null, cli: null, verified: null, planSignIn: false });
+    expect(mapped).toEqual({ ready: false, reason: null, cli: null, verified: null, planSignIn: false, resetsAt: null });
     expect(mapped).not.toHaveProperty("path");
     // A reason means nothing on a ready capability.
     expect(mapControllerRuntimeClaudeCode({ ...READY, reason: "bare_default" })?.reason).toBeNull();
@@ -108,7 +124,7 @@ describe("fetchRuntimeStatus and the lane", () => {
     const result = await fetchRuntimeStatus({ projectId: "project-1" });
     expect(result?.claudeCodeLane).toBe(true);
     expect(result?.runtimes.map((entry) => entry.claudeCode ?? null)).toEqual([
-      { ready: true, reason: null, cli: "2.1.314", verified: true, planSignIn: false },
+      { ready: true, reason: null, cli: "2.1.314", verified: true, planSignIn: false, resetsAt: null },
       null,
       null,
     ]);

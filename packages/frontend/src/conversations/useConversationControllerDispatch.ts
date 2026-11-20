@@ -3,7 +3,6 @@ import {
   CONTROLLER_RUNTIME_IDLE_TTL_SECONDS_DEFAULT,
   controllerClient,
 } from "../sdk/instafy";
-import { readTurnEngineClaim } from "../features/frontendFeatureModule";
 import { runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { getDefaultRuntimeMetadata } from "../runtime/utils/webdevRuntime";
 import { ControllerApiError } from "../services/runtimeController/core";
@@ -25,7 +24,7 @@ import type {
   SubmitConversationRuntimeOverride,
   UseConversationSubmitFlowArgs,
 } from "./conversationSubmitTypes";
-import { turnEnginePresentation } from "./runFailurePresentation";
+import { describeTurnEngineSendRefusal } from "./runFailurePresentation";
 import type { TurnEngineSendRefusal } from "./turnEngineSendRefusal";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
@@ -36,20 +35,17 @@ export interface ConversationDispatchResult {
   turnEngineRefusal?: TurnEngineSendRefusal;
 }
 
-/** The refusal of a send that claimed a turn engine, as that engine words it, or null. */
-export function readTurnEngineSendRefusal(
-  metadata: Record<string, unknown> | null,
-  error: unknown,
-): TurnEngineSendRefusal | null {
+/**
+ * The controller's refusal of a send because a turn it would start runs on a
+ * turn engine that cannot take it (docs/Local-Engine-Turns.md 11.6), as that
+ * engine words it, or null for any other error.
+ */
+export function readTurnEngineSendRefusal(error: unknown): TurnEngineSendRefusal | null {
   if (!(error instanceof ControllerApiError) || !error.code) {
     return null;
   }
-  const engineId = readTurnEngineClaim(metadata);
-  const sentence = turnEnginePresentation(engineId)?.describeSendRefusal({
-    code: error.code,
-    details: error.details,
-  });
-  return engineId && sentence ? { engineId, code: error.code, sentence } : null;
+  const refusal = describeTurnEngineSendRefusal({ code: error.code, details: error.details });
+  return refusal ? { ...refusal, code: error.code } : null;
 }
 const {
   createBlank: createBlankControllerConversation,
@@ -477,10 +473,10 @@ export function useConversationControllerDispatch({
           jobIds: resolveIds(response.jobIds, response.jobId),
         };
       } catch (error) {
-        // A send that claimed a turn engine shows its engine's sentence for
-        // the refusal, never the controller's raw text, which can name the
-        // plumbing (docs/Local-Engine-Turns.md 5.5).
-        const turnEngineRefusal = readTurnEngineSendRefusal(metadata, error);
+        // A turn engine's refusal shows its engine's sentence, never the
+        // controller's raw text, which can name the plumbing
+        // (docs/Local-Engine-Turns.md 5.5, 11.6).
+        const turnEngineRefusal = readTurnEngineSendRefusal(error);
         const message = turnEngineRefusal
           ? turnEngineRefusal.sentence
           : error instanceof Error

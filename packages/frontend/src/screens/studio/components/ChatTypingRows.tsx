@@ -131,6 +131,7 @@ export function ChatTypingRows({
   latestDisplayedMessageId,
   latestDisplayedMessageEndsActiveTurn = false,
   typingStatusWraps = false,
+  typingStatusNote = null,
   renderAssistantAvatar,
 }: {
   identityLayout?: "solo" | "participants";
@@ -154,6 +155,12 @@ export function ChatTypingRows({
   latestDisplayedMessageEndsActiveTurn?: boolean;
   /** The label is the runtime-busy notice, which wraps instead of truncating. */
   typingStatusWraps?: boolean;
+  /**
+   * Under the label while the row shows: what the person can do for the turn
+   * it waits on, such as a turn engine's note on a turn that waits for their
+   * computer (docs/Local-Engine-Turns.md 11.14).
+   */
+  typingStatusNote?: ReactNode;
   renderAssistantAvatar: (
     metadata?: Record<string, unknown> | null,
     messageAgentIdentity?: AssistantAgentIdentity | null,
@@ -415,6 +422,11 @@ export function ChatTypingRows({
             hidden={!showAssistantStatus}
             onToggleThinkingLabel={onToggleThinkingLabel}
           />
+          {showAssistantStatus && typingStatusNote ? (
+            <div className="min-w-0 px-1 pb-1" data-testid="assistant-typing-note">
+              {typingStatusNote}
+            </div>
+          ) : null}
         </ChatBubbleRow>
       ) : null}
     </>

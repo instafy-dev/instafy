@@ -123,9 +123,9 @@ function foundPath(desktop: ClaudeCodeDesktopStatus): string | null {
 
 /**
  * While it is on: what the last Find or Locate turned up beside the copy in
- * use, which turns keep using until Use for my messages confirms another one,
- * or new login-shell settings for this one (docs/Local-Engine-Turns.md 4.1).
- * Null when it turned up nothing else.
+ * use, which turns keep using until Use Claude Code on this computer confirms
+ * another one, or new login-shell settings for this one
+ * (docs/Local-Engine-Turns.md 4.1). Null when it turned up nothing else.
  */
 function candidateReadings(desktop: ClaudeCodeDesktopStatus): {
   path: string | null;
@@ -139,8 +139,8 @@ function candidateReadings(desktop: ClaudeCodeDesktopStatus): {
   }
   // Desktop offers the copy in use itself, with no problem, when Find read
   // login-shell settings for it that Desktop can use in place of recorded ones
-  // it no longer can (D26). Use for my messages confirms those, as it would
-  // another copy.
+  // it no longer can (D26). Use Claude Code on this computer confirms those,
+  // as it would another copy.
   const renewsInUse = Boolean(desktop.candidatePath) && desktop.candidatePath === desktop.path;
   const path = desktop.candidatePath && !renewsInUse ? desktop.candidatePath : null;
   const problem = desktop.candidateProblem ?? null;
@@ -403,7 +403,7 @@ export function ClaudeCodeYourAiRow({ fetchRuntimeStatus, resolveControllerUrl }
               {problem ??
                 (desktop.consented
                   ? readinessSentence(readings, settling)
-                  : // Use for my messages consents to a program found: before one is, it can't be chosen.
+                  : // Use Claude Code on this computer consents to a program found: before one is, it can't be chosen.
                     desktop.found
                     ? COPY.off
                     : COPY.offNotFound)}

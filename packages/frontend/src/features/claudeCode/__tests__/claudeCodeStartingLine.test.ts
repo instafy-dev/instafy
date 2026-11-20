@@ -31,6 +31,20 @@ describe("a Claude Code turn's start", () => {
     expect(CLAUDE_CODE_TURN_PRESENTATION.describeStart(null)).toBe("Starting Claude Code…");
   });
 
+  // 11.14: while no computer has taken it yet.
+  it("waits for its person's own computer, worded for whoever views it", () => {
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting({ isViewer: true, name: "Sam" }, [])).toBe(
+      "Waiting for your computer…",
+    );
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting({ isViewer: false, name: "Sam" }, [])).toBe(
+      "Waiting for Sam's computer…",
+    );
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting({ isViewer: false, name: null }, [])).toBe(
+      "Waiting for the sender's computer…",
+    );
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting(null, [])).toBe("Waiting for the sender's computer…");
+  });
+
   it("never uses a word the banned-word fixture lists", () => {
     for (const owner of [{ isViewer: true, name: null }, { isViewer: false, name: "Sam" }, { isViewer: false, name: null }, null]) {
       expect(bannedWordIn(claudeCodeStartingLine(owner))).toBeNull();

@@ -47,6 +47,12 @@ export interface CreateMyAgentInput {
 
 export interface UpdateMyAgentInput {
   handle?: string;
+  /**
+   * An AI that is not a connection, such as `claude-code` (docs/Local-Engine-Turns.md 11.3):
+   * the controller clears the agent's credential, and refuses `credentialId` in the same body.
+   * Send `credentialId` instead to choose a connection, or null to go back to Instafy AI.
+   */
+  provider?: string;
   displayName?: string | null;
   description?: string | null;
   /** Omit to preserve the saved bio; send null to clear it. */

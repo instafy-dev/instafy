@@ -75,9 +75,10 @@ export function useChatSubmitDispatch({
   activeConversationIdRef.current = activeConversationId;
 
   // Nothing was sent (an attachment upload failed, or the controller refused
-  // a send that claimed a turn engine): the draft goes back into the composer
-  // it came from. Text the person has typed since is kept below it, and the
-  // staged attachments were never cleared.
+  // it because a turn engine can't take it): the draft goes back into the
+  // composer it came from. Text the person has typed since is kept below it.
+  // Staged attachments stay in the tray until they are stored, so a refused
+  // send's draft comes back without the ones it carried.
   const restoreUnsentDraft = useCallback(
     (conversationId: string, draft: string, editorState: string | null) => {
       if (activeConversationIdRef.current !== conversationId) {
@@ -126,9 +127,9 @@ export function useChatSubmitDispatch({
 
   /**
    * Sends one message. Resolves true once it went out, and false when an
-   * attachment upload failed or the controller refused a send that claimed a
-   * turn engine: then nothing was sent, the draft is back in its composer and
-   * the staged images are still there.
+   * attachment upload failed or the controller refused it because a turn
+   * engine can't take it (docs/Local-Engine-Turns.md 11.6): then nothing was
+   * sent, and the draft is back in its composer.
    */
   const performSubmit = useCallback(
     async (payload: ChatSubmitDispatchPayload): Promise<boolean> => {

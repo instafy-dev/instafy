@@ -19,11 +19,11 @@ import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import type { ControllerCredentialListItem } from "../../../sdk/instafy";
 import { normalizeCustomAgentAvatarSrc } from "../../../utils/agentAvatar";
 import { hatchlingSeed, type Hatchling } from "../../../utils/aiFace";
-import type { AiModelOption, AiProviderId } from "../../../utils/aiProviderModels";
+import type { AiModelOption } from "../../../utils/aiProviderModels";
 import { AgentFacePicker } from "./AgentFacePicker";
 import { CredentialMenuSelect } from "./CredentialMenuSelect";
 import { ModelMenuSelect } from "./ModelMenuSelect";
-import { ProviderMenuSelect } from "./ProviderMenuSelect";
+import { ProviderMenuSelect, type ProviderMenuOption } from "./ProviderMenuSelect";
 
 export type AgentProfileModalMode = "create" | "edit" | "octo";
 
@@ -43,9 +43,15 @@ type AgentProfileModalProps = {
   credentials?: ControllerCredentialListItem[];
   onCredentialChange?: (credentialId: string) => void;
   onConnectCredential?: () => void;
-  providerId?: AiProviderId;
-  providerOptions?: Array<{ id: AiProviderId; label: string; disabled?: boolean }>;
-  onProviderChange?: (providerId: AiProviderId) => void;
+  /** The agent's AI: an AI provider's id, or another AI it can use, such as a turn engine's. */
+  providerId?: string;
+  providerOptions?: ProviderMenuOption[];
+  onProviderChange?: (providerId: string) => void;
+  /**
+   * Under the AI choice: what the chosen AI is, for one that is not a
+   * connection, such as a turn engine (docs/Local-Engine-Turns.md 11.3).
+   */
+  aiNote?: ReactNode;
   modelId?: string | null;
   modelOptions?: AiModelOption[];
   onModelChange?: (modelId: string | null) => void;
@@ -92,6 +98,7 @@ export function AgentProfileModal({
   providerId,
   providerOptions,
   onProviderChange,
+  aiNote = null,
   modelId = null,
   modelOptions,
   onModelChange,
@@ -252,6 +259,11 @@ export function AgentProfileModal({
                   menuTestId="agent-profile-provider-menu"
                 />
               </Field>
+            ) : null}
+            {aiNote ? (
+              <div className="space-y-1" data-testid="agent-profile-ai-note">
+                {aiNote}
+              </div>
             ) : null}
 
             {showCredentialPicker ? (

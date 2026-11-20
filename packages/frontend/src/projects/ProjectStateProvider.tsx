@@ -106,3 +106,8 @@ export function useProjectState(): ProjectStateContextValue {
   }
   return context;
 }
+
+/** The space open in Studio, or null, also outside a ProjectStateProvider. */
+export function useOptionalActiveProjectId(): string | null {
+  return useContext(ProjectStateContext)?.activeProjectId ?? null;
+}

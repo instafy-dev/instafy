@@ -4,13 +4,18 @@ const resolveControllerAccessTokenMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../core", () => ({
   controllerBaseUrl: "http://controller.test",
-  readControllerError: vi.fn(async (response: Response, fallback: string) => {
+  readControllerApiError: vi.fn(async (response: Response, fallback: string) => {
     const payload = (await response.json().catch(() => null)) as
-      | { message?: unknown }
+      | { message?: unknown; code?: unknown; details?: unknown }
       | null;
-    return typeof payload?.message === "string"
-      ? payload.message
-      : `${fallback} (${response.status})`;
+    return {
+      status: response.status,
+      message: typeof payload?.message === "string"
+        ? payload.message
+        : `${fallback} (${response.status})`,
+      code: typeof payload?.code === "string" ? payload.code : null,
+      details: payload?.details ?? null,
+    };
   }),
   resolveControllerRequestContext: async (desired: string | null) => ({
     baseUrl: "http://controller.test",

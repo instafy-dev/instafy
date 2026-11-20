@@ -25,7 +25,7 @@ export interface ClaudeCodeDesktopStatus {
    * use itself (equal to `path`, with no `candidateProblem`) when Find read
    * login-shell values for it that Desktop can use in place of recorded ones
    * it no longer can (D26). Turns keep the binary and values in use until Use
-   * for my messages confirms this one.
+   * Claude Code on this computer confirms this one.
    */
   candidatePath?: string | null;
   /** While it is on: why Desktop won't use `candidatePath`, or that Find found nothing. */

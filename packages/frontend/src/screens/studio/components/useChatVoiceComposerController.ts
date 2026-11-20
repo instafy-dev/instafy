@@ -520,8 +520,8 @@ export function useChatVoiceComposerController({
     const activeTurn = voiceConversationTurnRef.current;
     if (manualSubmitOnly && activeTurn) {
       // Held once for the person's own Send, the turn never sends itself
-      // later, whatever then ends the hold: the choice used by that Send,
-      // dropped or lost, or the worker reply sent or cancelled.
+      // later, whatever then ends the hold, such as the worker reply sent
+      // or cancelled.
       activeTurn.autoSubmit = false;
     }
     if (

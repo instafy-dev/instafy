@@ -26,7 +26,6 @@
   ],
   "stopAndSweepFailureCodes": [
     "claude_code_machine_stopped",
-    "start_by_passed",
     "run_once_interrupted"
   ],
   "laneJobPayload": {
