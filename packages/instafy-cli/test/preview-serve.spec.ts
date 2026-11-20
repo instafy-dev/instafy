@@ -13,6 +13,7 @@ import {
   parseServeCommand,
   portIsFree,
   preferredSitePort,
+  pageServerFolder,
   previewClose,
   previewOpen,
   printPreviewOpen,
@@ -697,7 +698,7 @@ describe("instafy preview open --start picks the site's port, and close stops th
         return result;
       });
     // `instafy preview open --port <port>` of a site already running there: nothing is started.
-    const openOnly = (params: { port: number; title: string }) =>
+    const openOnly = (params: { port: number; title: string; cwd?: string; procRoot?: string }) =>
       withEnv(() =>
         previewOpen({
           project: ws.projectId,
@@ -706,7 +707,8 @@ describe("instafy preview open --start picks the site's port, and close stops th
           port: params.port,
           title: params.title,
           ratholeBin: rathole,
-          cwd: path.join(ws.root, "site"),
+          cwd: params.cwd ?? path.join(ws.root, "site"),
+          ...(params.procRoot ? { procRoot: params.procRoot } : {}),
           thumbnail: false,
         }),
       );
@@ -947,6 +949,92 @@ describe("instafy preview open --start picks the site's port, and close stops th
     expect(s.bodies[0]!["serve"]).toEqual({ argv: [process.execPath, "site.mjs", String(opened.port), "own"], cwd: "sites/hours" });
     expect(calls()).toEqual([]);
   }, 60000);
+
+  // A page to share went out saying a journey planner nobody ran was "checked 20 Nov 2026": its check had named that
+  // line, and the turn ran the check and this command joined by ";". Another page, written by hand with no starter,
+  // never met a check at all. The card's own command reads a page Instafy's page server serves as that check does.
+  it("posts no card for a page of Instafy's page server that says \"checked <date>\" in typed words, and answers with its check's lines", async () => {
+    const s = await space();
+    const calls = fakeInstafy();
+    const page = folderWith(s.ws.root, "sites/hours", ["index.html"]);
+    const html = (caption: string) =>
+      `<!doctype html>\n<title>Museum hours</title>\n<main><h1>Museum hours</h1><p>Thursday: 10 am–8 pm</p>\n<p><a href="https://transit.example/planner">City timetable</a>${caption}</p></main>\n`;
+    fs.writeFileSync(path.join(page, "index.html"), html(" · checked 20 Nov 2026; route details not confirmed"));
+    const record = path.join(s.ws.root, ".instafy", "pages", "pages.json");
+    const lines = [
+      "No card was posted for this page.",
+      'TYPED: 1 line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:',
+      '- index.html: delete "checked 20 Nov 2026", from "City timetable · checked 20 Nov 2026; route details not confirmed".',
+    ];
+    const waits = "next: delete the typed words named above, then check again: the page's card waits until they are gone";
+    const again = "The check before this one named typed words here too. Rewording a line never passes: only deleting those words does.";
+
+    // The card's command as a check names it, and as `--start` alone runs it in a page's folder.
+    const first = await failure(s.open({ cwd: page, serveCmd: "instafy bind serve . --port {port} --preview", title: "Museum hours" }));
+    expect(first.exitCode).toBe(1);
+    expect(first.message.split("\n").slice(0, 3)).toEqual(lines);
+    expect(first.message.split("\n").at(-1)).toBe(waits);
+    expect(first.message).not.toContain(again);
+    const second = await failure(s.open({ cwd: page, title: "Museum hours" }));
+    expect(second.exitCode).toBe(1);
+    expect(second.message.split("\n").slice(0, 3)).toEqual(lines);
+    expect(second.message.split("\n").slice(-2)).toEqual([again, waits]);
+    // Nothing was started, asked of the server or written down.
+    expect(calls()).toEqual([]);
+    expect(s.requests).toEqual([]);
+    expect(fs.existsSync(record)).toBe(false);
+    expect(fs.existsSync(path.join(s.home, ".instafy", "cli-preview-state.json"))).toBe(false);
+
+    // Another server's site is its own to check: the same page served by its own command opens.
+    fs.writeFileSync(path.join(page, "site.mjs"), SITE);
+    const own = await s.open({ cwd: page, serveCmd: `${node} site.mjs {port} own`, title: "Museum hours" });
+    expect(await (await fetch(`http://127.0.0.1:${own.port}/`)).text()).toBe("own");
+    await s.close(own.previewId);
+    fs.rmSync(record);
+
+    // With the words deleted and the planner linked by its name, the card is posted.
+    fs.writeFileSync(path.join(page, "index.html"), html(" · not run"));
+    const opened = await s.open({ cwd: page, serveCmd: "instafy bind serve . --port {port} --preview", title: "Museum hours" });
+    expect(calls()).toEqual([{ args: ["bind", "serve", ".", "--port", String(opened.port), "--preview"], cwd: page }]);
+    expect(JSON.parse(fs.readFileSync(record, "utf8")).pages).toEqual([expect.objectContaining({ folder: "sites/hours", title: "Museum hours" })]);
+  }, 60000);
+
+  it("reads a page server already running on the port the same way, from its process", async () => {
+    const s = await space();
+    const page = folderWith(s.ws.root, "sites/hours", ["index.html"]);
+    fs.writeFileSync(path.join(page, "index.html"), "<!doctype html>\n<title>Museum hours</title>\n<p>Hours · checked 20 Nov 2026 on museum.example</p>\n");
+    const port = await listenOn(http.createServer((_req, res) => res.end("page")));
+    const binder = [process.execPath, "/opt/instafy/dist/bind/bin/instafy-bind.mjs", "serve", ".", "--port", String(port), "--preview"];
+    const refused = await failure(s.openOnly({ port, title: "Museum hours", cwd: page, procRoot: fakeProc(port, binder, page) }));
+    expect(refused.exitCode).toBe(1);
+    expect(refused.message.split("\n").slice(0, 3)).toEqual([
+      "No card was posted for this page.",
+      'TYPED: 1 line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:',
+      '- index.html: delete "checked 20 Nov 2026 on museum.example", from "Hours · checked 20 Nov 2026 on museum.example".',
+    ]);
+    expect(s.requests).toEqual([]);
+    // Another command's site on the port opens as it did.
+    const other = await s.openOnly({ port, title: "Museum hours", cwd: page, procRoot: fakeProc(port, [process.execPath, "site.mjs", String(port)], page) });
+    expect(other.port).toBe(port);
+  }, 30000);
+
+  it("reads the folder Instafy's page server serves from its command, and no other command's", () => {
+    const root = tempDir("instafy-pages-");
+    fs.mkdirSync(path.join(root, "sites", "hours"), { recursive: true });
+    const folder = path.join(root, "sites", "hours");
+    expect(pageServerFolder(["instafy", "bind", "serve", ".", "--port", "{port}", "--preview"], folder)).toBe(folder);
+    expect(pageServerFolder(["/usr/local/bin/instafy", "bind", "serve", "--port", "4180", "--preview", "sites/hours"], root)).toBe(folder);
+    expect(pageServerFolder([process.execPath, "/opt/instafy/dist/bind/bin/instafy-bind.mjs", "serve", "sites/hours", "--preview"], root)).toBe(folder);
+    expect(pageServerFolder(["instafy-bind", "serve", "nowhere", "--preview"], root)).toBeNull();
+    for (const other of [
+      [process.execPath, "site.mjs", "4180"],
+      ["npm", "run", "serve"],
+      ["uw", "host", "serve", "."],
+      ["instafy", "preview", "serve", "."],
+    ]) {
+      expect(pageServerFolder(other, folder), other.join(" ")).toBeNull();
+    }
+  });
 
   it("asks the server to show the site in place of another one only with --replace", async () => {
     const s = await space();

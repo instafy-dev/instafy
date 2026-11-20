@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import kleur from "kleur";
 import { resolveRatholeBinaryForCli } from "./runtime.js";
-import { loadCredentialFreeEnv } from "./bind.js";
+import { loadCredentialFreeEnv, pageCardWaits } from "./bind.js";
 import { conversationIdFromEnvironment } from "./conversations.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
 import { extractControllerErrorMessage, formatAuthRejectedError } from "./errors.js";
@@ -51,6 +51,8 @@ import {
 
 export { PREVIEW_EXIT_NOT_LISTENING, PREVIEW_EXIT_PORT_NOT_ALLOWED, PreviewCommandError };
 export const PREVIEW_EXIT_UNAVAILABLE = 5;
+// A page Instafy's page server serves whose own check holds its card: the same exit as that check failing.
+export const PREVIEW_EXIT_PAGE_WAITS = 1;
 
 export const PREVIEWS_UNAVAILABLE_MESSAGE = "Previews are not available on this server";
 
@@ -910,6 +912,44 @@ export function parseExplicitServeCommand(raw: string): string[] {
 const PAGE_SERVE_COMMAND = `instafy bind serve . --port ${PORT_PLACEHOLDER} --preview`;
 
 /**
+ * The folder Instafy's page server serves in the command `argv`, run in `cwd`: `instafy bind serve <dir> …`, or the
+ * binder by its own name (`instafy-bind serve <dir> …`, as the process on a port reads). Null for any other command,
+ * and for one that names no folder there is.
+ */
+const isDirectory = (dir: string) => fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory() === true;
+
+export function pageServerFolder(argv: string[], cwd: string): string | null {
+  const program = (word: string | undefined) => path.basename(word ?? "");
+  const at = argv.findIndex(
+    (word, index) =>
+      word === "serve" &&
+      (/^instafy-bind(?:\.mjs)?$/.test(program(argv[index - 1])) ||
+        (argv[index - 1] === "bind" && program(argv[index - 2]) === "instafy")),
+  );
+  if (at < 0) return null;
+  const named = argv.slice(at + 1).filter((word) => !word.startsWith("-"));
+  return named.map((word) => path.resolve(cwd, word)).find(isDirectory) ?? null;
+}
+
+/**
+ * Refuses the card of a page Instafy's page server serves while the page says "checked <date>" or "seen <date>" in
+ * typed words: the answer is the lines the page's own check prints for them (exit 1), and nothing is started, asked
+ * for or posted. Those words say on a page to share that something was read, and a turn whose check had named them
+ * ran the check and this command joined by ";", so the card went out all the same. `sitePath` is the page the card
+ * opens: its folder is the one read. Any other site is its own to check.
+ */
+async function refusePageThatWaits(argv: string[], cwd: string, sitePath: string): Promise<void> {
+  const served = pageServerFolder(argv, cwd);
+  if (!served) return;
+  const opened = path.join(served, sitePath);
+  const folder = isDirectory(opened) ? opened : isDirectory(path.dirname(opened)) ? path.dirname(opened) : served;
+  const lines = await pageCardWaits(folder);
+  if (lines) {
+    throw new PreviewCommandError(["No card was posted for this page.", ...lines].join("\n"), PREVIEW_EXIT_PAGE_WAITS);
+  }
+}
+
+/**
  * What `--start` runs when no `--serve-cmd` is given: Instafy's page server, in a page's own folder (`sites/<name>` in
  * the space's workspace) that holds an `index.html` and no `package.json`. Null anywhere else: that site's command is
  * its own to give. Null too in a folder another command serves (an installed skill's host, say), which would get a
@@ -1556,6 +1596,8 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
       );
     }
   }
+  // A page of Instafy's page server that types "checked <date>" gets its check's lines, before anything is started.
+  if (serveArgv) await refusePageThatWaits(serveArgv, opts.cwd ?? process.cwd(), sitePath);
   const projectId = resolveProject({ project: opts.project });
   const retryCommand = `instafy preview open${explicitPort === null ? "" : ` --port ${explicitPort}`} --title ${shellQuote(title)}`;
   const { auth, controllerUrl } = resolveAuth(opts, retryCommand);
@@ -1611,6 +1653,11 @@ export async function previewOpen(opts: PreviewOpenOptions): Promise<PreviewOpen
         cwd: opts.cwd,
         procRoot: opts.procRoot,
       });
+      // The same for a page server already running on the port, read from its process.
+      if (!serveArgv && serve) {
+        const root = resolveWorkspaceRoot(process.env, projectId) ?? "";
+        await refusePageThatWaits(serve.argv, path.resolve(root, serve.cwd), sitePath);
+      }
       const create = (cardTitle: string) =>
         createAndStartClient({
           opts: { ...opts, summary },

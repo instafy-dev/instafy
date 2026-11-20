@@ -44,6 +44,8 @@ own kind of page.
   one's value on each row. Facts carry their trust: `checked 17 Oct on maker.com`, `€549 at Shop · seen 17 Oct`,
   `checked 4 min ago`, `Estimate`, `Unknown`, each drawn by the starter's `site.trust` or `site.cite` from the fact's
   `"viewer"` (how it was read), never typed. A tip no page gave is plain text, never styled like a source line.
+  A tool or step nobody ran (a planner whose form was never sent) gets a caption that links it by its name and says
+  "not run", with no day. A page says what it shows, never "I".
 - Options side by side: each value names the page it was read on and the day; one nobody found reads `Unknown` and
   why, as `instafy-comparing` says, never a blank or a dash. A note on the page never names the tools, searches or
   services you used. A value cites only a page that gives it: a count of
@@ -64,7 +66,9 @@ own kind of page.
   missing and why. Check with `instafy bind check <dir> --expect "<item>,<item>"` (it also lists blank values, values
   without their page or date, a source line with no link, and a filter applied without `site.byFilter`) and fix what
   it lists; a check that passes posts the card. A failing check never holds the card back: it names the card's
-  command. A site with no binder, such as a map a builder skill hosts: post the card first (step 3), then run that
+  command. Two findings are the exception, and the card's own command answers with them too: a typed "checked
+  <date>" or "seen <date>", which is always deleted, never reworded, and files loaded from outside the page's
+  folder. A site with no binder, such as a map a builder skill hosts: post the card first (step 3), then run that
   skill's own check.
 - Facts come from pages you opened this turn, never from memory unless asked (above): the builder skill's source or
   fetch command when it has one, else `instafy-web-research` (`instafy-comparing` for prices and reviews per item)
@@ -83,8 +87,8 @@ own kind of page.
    the phone screenshot.
 3. Never post preview, tunnel or localhost URLs. A public link only when the user asks for one:
    `instafy-frontend-previews`.
-4. After an edit no new card is needed: once your change is saved, every open view of the page loads it again by
-   itself. If the server stopped, rerun the same `instafy preview open`.
+4. After any edit, check again. No new card is needed: once your change is saved, every open view of the page loads
+   it again by itself. If the server stopped, rerun the same `instafy preview open`.
 
 ## 4. Reply
 

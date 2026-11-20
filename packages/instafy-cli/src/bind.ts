@@ -54,6 +54,27 @@ export async function loadCredentialFreeEnv(): Promise<CredentialFreeEnv> {
   return module.credentialFreeEnv as CredentialFreeEnv;
 }
 
+/**
+ * What makes the card of the page in `folder` wait, in the binder's own words: the lines its check prints for a page
+ * that says "checked <date>" or "seen <date>" in typed words (src/check.mjs `cardWaits`), or null when the page types
+ * none. `instafy preview open` asks before it serves a page with Instafy's page server, so the card's own command
+ * answers as the page's check does. A binder that is missing or older than this, or a folder it cannot read, holds
+ * no card back: the command then opens what it was asked to, as before.
+ */
+export async function pageCardWaits(folder: string): Promise<string[] | null> {
+  const root = bundledBindRoot();
+  const file = root ? path.join(root, "src", "check.mjs") : null;
+  if (!file || !fs.existsSync(file)) return null;
+  try {
+    const module = (await import(pathToFileURL(file).href)) as { cardWaits?: unknown };
+    if (typeof module.cardWaits !== "function") return null;
+    const waits = (module.cardWaits as (dir: string) => { lines?: unknown } | null)(folder);
+    return waits && Array.isArray(waits.lines) ? waits.lines.map(String) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Run `instafy-bind <args...>` and resolve with its exit code. Signals are forwarded so Ctrl-C stops the binder cleanly. */
 export function runBind(args: string[]): Promise<number> {
   const bin = resolveBindBin();
