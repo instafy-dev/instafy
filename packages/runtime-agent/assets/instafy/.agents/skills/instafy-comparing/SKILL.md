@@ -16,12 +16,15 @@ For every reader and browser. Pages are found as "Finding a page" in `instafy-br
 
 - List the models a page you read names, its menu included, then open each one's own page. Never names from memory, never placeholders such as "candidate 1".
 - Name: the exact model and generation its official page gives, else the page naming it. A product's official site is its maker's.
+- "The latest N": the maker's newest N in its own current lineup, from its own page. A review's guide ranks models; it doesn't date them.
 
 ## Values
 
 - A value is often on a tab or link of the item's own page (specs, warranty, support, FAQ): open the one for it before you call the value not found.
 - Price: the maker's or a shop's own page. Missing or refused: try an allowed shop. Still none: "price unknown", with a page the person can send to Octo. Never remember or guess a price.
 - A limit ("under €600"): an item with no price read this turn is listed as "price unknown", never as within it.
+- A value read on the item's own page stays. Another page's figure goes beside it under its own label ("<site> list price"), never in its place; where two pages you read disagree, the page shows both.
+- A price in a suggestion row or a listing is a lead: open the product page and cite it, "seen <date>". A price for dates comes from the place's own booking form with the dates and guests entered; the final button stays the person's.
 
 ## Reviews
 

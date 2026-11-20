@@ -430,7 +430,9 @@ fn direct_write_prompt(workspace: &Path, request: &str) -> String {
 /// own there, and that chat's page and card showed the new one. The turn, which loads no workspace
 /// memory, was hinted only the browser skill: "comparison" was no keyword of the hub (it folds apart
 /// from "compare"). The hub is hinted now. Whose page a request changes is said once, in every
-/// direct workspace-change turn's instructions, and the hub no longer repeats it.
+/// direct workspace-change turn's instructions, and the hub no longer repeats it: of another
+/// chat's page it says only that a message asking for a page still gets this chat's own
+/// (`a_page_asked_for_where_another_chat_has_one_is_made_and_the_rule_line_keeps_the_fact`).
 #[test]
 fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as_it_is() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -446,10 +448,12 @@ fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as
     let hub =
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     assert!(
-        flat(hub).contains("The page holds the detail; chat holds a short reply. One site per request. ## 1. Pick the builder"),
+        flat(hub).contains("The page holds the detail; chat holds a short reply. One site per request. A message that asks for a page gets this chat's own page,"),
         "{hub}"
     );
-    assert!(!hub.contains("another chat"), "{hub}");
+    for theirs in ["read-only", "in that chat", "A follow-up"] {
+        assert!(!hub.contains(theirs), "{theirs}: {hub}");
+    }
     let prompt = direct_write_prompt(tmp.path(), request);
     assert!(
         prompt.contains(".agents/skills/instafy-interactive-artifacts/SKILL.md"),
@@ -468,6 +472,68 @@ fn a_comparison_asked_in_a_new_chat_is_the_hubs_and_leaves_another_chats_site_as
         )
         .contains(PAGE_OF_ITS_OWN_CHAT_RULE)
     );
+}
+
+/// Two new chats that each asked for a page got none (a local test, Nov 20): "… as a comparison
+/// page." was answered "The comparison page already exists, but it's read-only in this workspace,
+/// so I left it unchanged", and a page of hotels "it's a page made in another chat, so I left it
+/// unchanged". Each build held the rule and the space's pages, with a page on its subject "made in
+/// another chat, read-only here", and read that as an answer to the message. What a message
+/// asking for a page does is the page skill's, which a page's build carries: it gets this chat's
+/// own page, and "made in another chat" answers only a request to change that page. The rule line
+/// is as it was: the fact, with the two things a build that reads no skill still needs (a new
+/// folder, and its own copy of any file it uses), and the list keeps its words, which the routing
+/// step reads too.
+#[test]
+fn a_page_asked_for_where_another_chat_has_one_is_made_and_the_rule_line_keeps_the_fact() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    assert!(
+        flat(hub).contains("A message that asks for a page gets this chat's own page, in its own folder, also when another chat has made one on the subject: build it. \"Made in another chat\" (the space's pages) answers only a request to change that page."),
+        "{hub}"
+    );
+    assert!(
+        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        hub.len()
+    );
+    assert_eq!(
+        PAGE_OF_ITS_OWN_CHAT_RULE,
+        "- A request for a new page starts a new folder, even on the same subject. Copy into it any file you use from another page. A page made for the person in another chat (a map, a comparison, a page to share) is read-only here: the person changes it in that chat.\n"
+    );
+
+    // The message of one of those chats, in a space where another chat has a page on its subject:
+    // its turn is hinted the page skill, and reads the rule, then that page as another chat's.
+    let tmp = tempdir().expect("tmp");
+    learn::ensure_project_memory_scaffold(tmp.path());
+    let (project, theirs, ours) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    fs::create_dir_all(tmp.path().join("sites/camera-comparison")).unwrap();
+    let request = "Compare the three latest cameras of one maker: video resolution, battery life, weight, price, with two independent reviews each, as a comparison page.";
+    let hinted = format_skill_hints(tmp.path(), request, DIRECT_WRITE_SKILL_HINTS_LEAD)
+        .map(|hints| hints.skills)
+        .unwrap_or_default();
+    assert!(hinted.iter().any(|id| id == HUB), "{hinted:?}");
+    let prompt = prompt_in_chat(
+        tmp.path(),
+        &[recorded_page(
+            "sites/camera-comparison",
+            "Cameras compared",
+            Some(theirs),
+        )],
+        project,
+        ours,
+        json!({ "runtimeExpectations": { "workspaceFileChanges": true } }),
+        None,
+        request,
+    );
+    let rule_and_page = [
+        PAGE_OF_ITS_OWN_CHAT_RULE,
+        "- The space's pages:\n",
+        "  - \"Cameras compared\", in `sites/camera-comparison/`: made in another chat, read-only here.\n",
+    ]
+    .concat();
+    assert!(prompt.contains(&rule_and_page), "{prompt}");
 }
 
 /// The prompt a turn of `conversation` with this job metadata gets for `request` in the space
@@ -884,6 +950,36 @@ fn a_pages_captions_come_from_the_starter_never_typed() {
         "`Estimate`, `Unknown`, each drawn by the starter's `site.trust` or `site.cite` from the fact's `\"viewer\"` (how it was read), never typed."
     ));
     assert!(hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+}
+
+/// A reply opened "The hotel comparison page covers location, reviewer feedback and prices for
+/// 15–17 January" over a page with neither prices nor reviews, and a comparison's three warranty
+/// cells each read "<maker>'s warranty support page builds its text with JavaScript, so the
+/// warranty details could not be read." (local tests, Nov 20). A reply's first line says what the
+/// page has; a value whose page couldn't be read is not checked, in plain words, and the reply
+/// names such values once and offers Instafy's browser.
+#[test]
+fn a_reply_leads_with_what_the_page_has_and_an_unread_value_is_not_checked() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hub =
+        include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
+    let reply = flat(hub.split("## 4. Reply").nth(1).expect("reply section"));
+    for needle in [
+        "2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. The first line says what the page has, never something it lacks (prices, reviews, a route it doesn't show).",
+        "Values whose page couldn't be read are named once, as not checked, with an offer to look in Instafy's browser.",
+    ] {
+        assert!(reply.contains(needle), "{needle}");
+    }
+    let build = flat(hub.split("## 4. Reply").next().expect("before the reply"));
+    assert!(
+        build.contains("A value whose page you couldn't read is not checked: only its `\"url\"` (where to check) and `\"note\": \"its page couldn't be read\"`, never a sentence about how that page is built."),
+        "{build}"
+    );
+    assert!(
+        hub.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
+        "{} bytes",
+        hub.len()
+    );
 }
 
 /// A comparison told what it didn't find three times: under its title, in each cell and under

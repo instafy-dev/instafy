@@ -309,7 +309,17 @@ function propsLike(toks, [s, e]) {
  *  line of its own. */
 function collect(toks, [s, e], ctx, words) {
   for (let k = s; k < e; k += 1) {
-    if (linkingCall(toks, k, ctx.linkers)) ctx.linked = true;
+    const fact = linkingCall(toks, k, ctx.linkers);
+    if (fact) ctx.linked = true;
+    if (fact && ctx.apart) {
+      // a fact's own fields are no words of the line around them: each is a text of its own
+      const close = Math.min(closing(toks, fact.open), e);
+      const fields = [];
+      collect(toks, [fact.open + 1, close], ctx, fields);
+      words.push(BREAK, ...fields.flatMap((field) => [field, BREAK]));
+      k = close;
+      continue;
+    }
     const call = helperCall(toks, k, ctx.names);
     if (call) {
       ctx.consumed.add(k);
@@ -517,10 +527,12 @@ function loadsElsewhere(toks) {
 
 /** What a script shows: { lines, data, other, loads, trust } (the top of this file). `childArg`: site.h takes a second
  *  argument that is not its props as its first child (site.js 1.7.0 and later; an older copy draws nothing for it).
- *  `lists`: the keys and names whose values list what the page could not show. */
-export function readScript(source, { childArg = true, lists = new Set() } = {}) {
+ *  `lists`: the keys and names whose values list what the page could not show. `apart`: the fields of a fact drawn in
+ *  a line (the arguments of site.cite and site.trust) are each a line of their own, and so are the words before and
+ *  after it: what the script types, where a fact's "date" is no word after its value (its caption is site.js's). */
+export function readScript(source, { childArg = true, lists = new Set(), apart = false } = {}) {
   const toks = tokens(String(source ?? ""));
-  const ctx = { names: helperNames(toks), linkers: helperNames(toks, LINKING), childArg, lines: [], consumed: new Set(), trust: [], linked: false, unread: false };
+  const ctx = { names: helperNames(toks), linkers: helperNames(toks, LINKING), childArg, apart, lines: [], consumed: new Set(), trust: [], linked: false, unread: false };
   // the calls read on their own (not as another element's child), outermost first: what the rest of the script is
   const skip = new Map();
   let outer = 0;

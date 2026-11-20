@@ -1610,6 +1610,33 @@ fn the_research_skill_compares_items_and_the_page_lists_unknown_prices_apart() {
     }
 }
 
+/// "The three latest" cameras of a maker came from a review site's "best of" guide, whose list price then replaced the
+/// maker's own prices on the page; shops were priced from their search-suggestion rows under "Prices checked on the
+/// retailers' sites"; and hotels' booking pages were opened with no dates entered (local tests, Nov 20). The comparing
+/// skill, which every turn whose words ask for a comparison carries, says where each comes from, in the room the two
+/// topic skills share.
+#[test]
+fn a_comparison_takes_the_latest_from_the_maker_and_a_price_from_the_items_own_page() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let comparing = flat(COMPARING_SKILL);
+    for needle in [
+        "- \"The latest N\": the maker's newest N in its own current lineup, from its own page. A review's guide ranks models; it doesn't date them.",
+        "- A value read on the item's own page stays. Another page's figure goes beside it under its own label (\"<site> list price\"), never in its place; where two pages you read disagree, the page shows both.",
+        "- A price in a suggestion row or a listing is a lead: open the product page and cite it, \"seen <date>\". A price for dates comes from the place's own booking form with the dates and guests entered; the final button stays the person's.",
+    ] {
+        assert!(comparing.contains(needle), "{needle}");
+    }
+    let getting_around = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/.agents/skills/instafy-getting-around/SKILL.md"
+    ));
+    assert!(
+        COMPARING_SKILL.len() + getting_around.len() <= TOPIC_SKILLS_MAX_BYTES,
+        "{} bytes",
+        COMPARING_SKILL.len() + getting_around.len()
+    );
+}
+
 /// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews and sorted by a value no
 /// row had. A count of what was found cites only what it counts, so none found cites no page, and no sort is by a value
 /// no row has. (Its headline, which said how many models that page names, is now the page's own, from its cells.)

@@ -533,6 +533,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_SHA256: &[&str] = &[
     // From before a page's captions came only from the starter's `site.trust` or `site.cite`,
     // never typed, and a fact kept how it was read (`viewer`).
     "820a5231a8084be210d1719ece8a61dfce1e22459ab46227fb227c1c1f19f491", // v22
+    // From before a message asking for a page made this chat's own, also when another chat has
+    // one on the subject (the hub said nothing of it), a reply's first line said only what the
+    // page has, and a value whose page couldn't be read said so in plain words.
+    "bd05f625780168ea3207457768eb115e10af54cd705d23676b4b4c582dbb0dd2", // v23
 ];
 const LEGACY_RESEARCH_TEAM_SHA256: &[&str] = &[
     "0855d10b442722d484f3c9fec42ba0f149fcf5102e55a6868170b0e0ab8d8fd2", // v1
@@ -850,6 +854,10 @@ const LEGACY_COMPARING_SHA256: &[&str] = &[
     // From before a comparison searched first with the AI's own web search, reviews included,
     // and used the browser only for what search can't reach.
     "2215129e58e85d635731d72fa527346f37e921f43b083ae0f519143f7cd62a6a", // v1
+    // From before "the latest" were the maker's newest in its own lineup, a value read on the
+    // item's own page stayed beside another page's figure, and a price came from the product
+    // page, or for dates from the place's own booking form.
+    "ce1087c66c678cb4fcf2c07693b7aaa02f0ec79f6a3d17ce5dcf8f999ce82143", // v2
 ];
 /// How Octo finds and gives a route between places, for every reader and browser. A topic of the
 /// browser, research and page skills, under them in the skills tree.

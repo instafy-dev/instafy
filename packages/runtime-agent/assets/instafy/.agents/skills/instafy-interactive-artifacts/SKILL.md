@@ -10,6 +10,9 @@ routing_keywords: interactive, map, maps, tap through, as a page, on a page, int
 
 The page holds the detail; chat holds a short reply. One site per request.
 
+A message that asks for a page gets this chat's own page, in its own folder, also when another chat has made one on
+the subject: build it. "Made in another chat" (the space's pages) answers only a request to change that page.
+
 ## 1. Pick the builder
 
 Read the Skills index first. Installed skills, including skill packs that ship with the runtime, can build their
@@ -50,7 +53,8 @@ own kind of page.
   candidate nothing could be read for is still a row, with `Unknown` in each cell: a page of options is never empty
   ("No options yet") while a page you read named what to compare. An item whose own page wasn't opened is "not
   checked (its own page wasn't opened)" in the reply, and each of its unknown values has `"note": "its own page wasn't
-  opened"`.
+  opened"`. A value whose page you couldn't read is not checked: only its `"url"` (where to check) and
+  `"note": "its page couldn't be read"`, never a sentence about how that page is built.
 - Options asked for from what you already know, with nothing looked up: the compare starter with `"from": "memory"`,
   each value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url`, `date`,
   store or filter (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and says
@@ -84,7 +88,9 @@ own kind of page.
 
 ## 4. Reply
 
-2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. An `Assumed:` line only
+2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. The first line says
+what the page has, never something it lacks (prices, reviews, a route it doesn't show). Values whose page couldn't be
+read are named once, as not checked, with an offer to look in Instafy's browser. An `Assumed:` line only
 for a default you chose that the person didn't give (dates, a currency, which models), and none when there is none. A
 page they want to share says in one line who can open it (people in this space) and how to get a link anyone can open
 (ask for a public link), not as an assumption. The card speaks for itself: never point them to it or say it opened. No
