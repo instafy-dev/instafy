@@ -18,8 +18,9 @@
 //!   held back until it can no longer be one.
 //! - An answer asked for again (the runtime runs the turn once more, Codex sends
 //!   its request again, or the attempt failed) stays in the draft until the new
-//!   answer's first words take its place: it is replaced where it is, never
-//!   taken away first.
+//!   answer's first words take its place: it is replaced where it is, not taken
+//!   away first. Only an answer the runtime found untrue goes as its retry
+//!   begins ([`ReplyDraftStream::withdraw_shown`]).
 //! - A draft is never persisted. The controller publishes it to the
 //!   conversation's viewers, and the completed message replaces it.
 
@@ -87,6 +88,15 @@ impl ReplyDraftStream {
             previous: String::new(),
             replaces_shown: true,
         }
+    }
+
+    /// Takes away now what the draft shows of an earlier attempt, before this run's first words:
+    /// for the retry of an answer the runtime found untrue, which would otherwise stand until the
+    /// retry's words replaced it. A refused card's "I've opened a browser check of the official
+    /// results." stood there with no card behind it for as long as the retry ran, and to its end
+    /// when the retry wrote no words of its own.
+    pub(super) fn withdraw_shown(&mut self) {
+        self.start_over(true);
     }
 
     pub(super) fn observe(&mut self, event: &JsonValue) {
@@ -762,6 +772,45 @@ mod tests {
         // Commentary the draft showed goes at once.
         retry.observe(&json!({ "type": DRAFT_RESET_EVENT }));
         assert_eq!(receiver.borrow().text, "");
+    }
+
+    /// An answer the runtime found untrue goes as its retry begins, not when the retry's words
+    /// come: a refused card's "I've opened a browser check of the official results." would stand
+    /// in the chat with no card behind it for as long as the retry ran, and to the turn's end
+    /// when the retry's whole answer was a card. The retry's words then grow where it was.
+    #[test]
+    fn an_answer_the_runtime_found_untrue_goes_as_its_retry_begins() {
+        let first = "I've opened a browser check of the official results.";
+        let (sender, mut receiver) = watch::channel(ReplyDraft::default());
+        let mut stream = ReplyDraftStream::start(sender.clone(), false, false);
+        stream.observe(&update("a", &format!("{{\"summary\":\"{first}\"")));
+        let shown = receiver.borrow_and_update().clone();
+        assert_eq!(shown.text, first);
+
+        let mut retry = ReplyDraftStream::start(sender, false, false);
+        retry.withdraw_shown();
+        assert_eq!(
+            *receiver.borrow_and_update(),
+            ReplyDraft {
+                segment: shown.segment + 1,
+                text: String::new(),
+            }
+        );
+        // Nothing of the first answer stays while the retry works, also when its whole answer
+        // turns out to be a card. Its words, when it writes any, grow there.
+        retry.observe(
+            &json!({"type":"item.started","item":{"id":"cmd","type":"command_execution"}}),
+        );
+        retry.observe(&update("b", "{\"summary\":\""));
+        assert_eq!(receiver.borrow().text, "");
+        retry.observe(&update("b", "{\"summary\":\"The home side won 3 to 1."));
+        assert_eq!(
+            *receiver.borrow(),
+            ReplyDraft {
+                segment: shown.segment + 1,
+                text: "The home side won 3 to 1.".to_string(),
+            }
+        );
     }
 
     /// A browser turn ends its reply with finding lines, which the runtime moves into a Details

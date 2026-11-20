@@ -295,6 +295,16 @@ const REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND: &str = "codex/required-changes-no
 /// The runtime's line under such a reply, whatever the reply says it did.
 const NOTHING_CHANGED_LINE: &str = "Nothing was changed.";
 
+/// Puts [`NOTHING_CHANGED_LINE`] under a reply that stood without the change read as required.
+/// Never under a decline: the controller keeps the bare decline word out of the chat, and with
+/// the line under it a group would read "NO_RESPONSE" and "Nothing was changed." where Octo had
+/// chosen to say nothing.
+fn append_nothing_changed(summary: &mut String) {
+    if !participation_decline_sentinel(summary) {
+        save_report::append_not_saved(summary, &[NOTHING_CHANGED_LINE.to_string()]);
+    }
+}
+
 /// The last line a reply that changed nothing was once asked to end with. A
 /// thread started before that ask was dropped still holds it, and a later turn
 /// there can keep adding the line: it leaves the reply before anyone reads it,
@@ -304,9 +314,10 @@ const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
 // A completion requirement, never permission to write. Conditional work may
 // legitimately finish after inspection without producing a patch. A required
 // change gets one recovery pass; a reply that still changes nothing is then
-// the turn's result, with [`NOTHING_CHANGED_LINE`] under it. A message that
-// names only pages another chat made gets none: the first reply is the result,
-// with that line under it (`space_pages::HeldPages::names_only_held_pages`).
+// the turn's result, with [`NOTHING_CHANGED_LINE`] under it. In a chat with a
+// page of its own, a message that names only pages another chat made gets
+// none: the first reply is the result, with that line under it
+// (`space_pages::HeldPages::names_only_held_pages`).
 // A reply that lists a file missing from disk fails the turn, and so does a
 // recovery pass that stops with no reply of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9744,25 +9755,32 @@ impl JobProcessor {
             );
         }
         // A change to another chat's page, put back or not, is the turn's result, which its reply
-        // says: run again, the turn would make it again. So is no change for a message that names
-        // only pages another chat made: the person changes those in that chat, and the answer
-        // that says so is the turn's. Run again for files, it vanished while the retry began, and
-        // came back rewritten (a local test, Nov 20).
-        let names_only_another_chats_pages = expects_workspace_file_changes_after_actions
-            && outcome.files.is_empty()
-            && !held_pages.changed_a_page()
-            && held_pages.names_only_held_pages(prompt_text);
-        let workspace_file_changes_missing = expects_workspace_file_changes_after_actions
+        // says: run again, the turn would make it again.
+        let no_files_for_a_required_change = expects_workspace_file_changes_after_actions
             && outcome.files.is_empty()
             && !workspace_file_changes_satisfied_by_patch_apply
-            && !held_pages.changed_a_page()
-            && !names_only_another_chats_pages;
+            && !held_pages.changed_a_page();
+        // So is no change for a message that names only pages another chat made, in a chat with
+        // a page of its own: the person changes those in that chat, and the answer that says so
+        // is the turn's. Run again for files, it vanished while the retry began, and came back
+        // rewritten (a local test, Nov 20). A decline says nothing, and neither does a run that
+        // ended with no reply of its own: neither is such an answer.
+        let answered = has_final_reply_event(&output.events)
+            && !outcome.summary.trim().is_empty()
+            && outcome.summary != DEFAULT_CODEX_OUTCOME_SUMMARY
+            && !participation_decline_sentinel(&outcome.summary);
+        let names_only_another_chats_pages = no_files_for_a_required_change
+            && answered
+            && held_pages.names_only_held_pages(prompt_text);
+        let workspace_file_changes_missing =
+            no_files_for_a_required_change && !names_only_another_chats_pages;
 
         // A browser turn that hands the person's message to the building turn
         // has its answer: no reason to run it again.
-        let recovery_retry_required = !clean_ambient_decline
+        let may_run_again = !clean_ambient_decline
             && !hands_the_message_to_the_building_turn
-            && !shared_browser_turn_ends_without_a_page
+            && !shared_browser_turn_ends_without_a_page;
+        let recovery_retry_required = may_run_again
             && (reported_file_changes_missing
                 || workspace_file_changes_missing
                 || codex_fallback_summary_kind.is_some()
@@ -9790,6 +9808,14 @@ impl JobProcessor {
         // start again from the person's request and repeat what the turn did. One that ended
         // without its answer fails.
         let run_once = codex_run_options.run_once();
+        // The one turn that would have run again for its files and doesn't: its answer stands,
+        // with the runtime's line under it.
+        let stands_for_another_chats_page = names_only_another_chats_pages
+            && !run_once
+            && should_retry_codex_once(
+                first_shared_browser_terminal_consent_failure,
+                may_run_again,
+            );
         if run_once && codex_fallback_summary_kind.is_some() {
             return Err(JobFailureWithArtifacts {
                 message: "The turn ended without an answer. It was not run again, because it may \
@@ -10139,6 +10165,10 @@ impl JobProcessor {
                 without_project_preferences(&retry_prompt, &project_id, &retry_preferences)?;
             let recovery_run =
                 crate::turn_phases::span(job_id, crate::turn_phases::Phase::Recovery);
+            let withdraws_the_first_answer = retry_withdraws_the_first_answer(
+                codex_fallback_summary_kind,
+                reported_file_changes_missing,
+            );
             let retry_output_result = if let Some(progress) = progress_sender.as_ref() {
                 let mut retry_steps = StepStream::of(progress);
                 let mut retry_draft = progress
@@ -10153,11 +10183,15 @@ impl JobProcessor {
                             )
                     })
                     .map(|sender| {
-                        reply_draft::ReplyDraftStream::start(
+                        let mut draft = reply_draft::ReplyDraftStream::start(
                             sender,
                             retry_codex_run_options.allow_plain_text_final_fallback,
                             draft_ends_at_finding_lines,
-                        )
+                        );
+                        if withdraws_the_first_answer {
+                            draft.withdraw_shown();
+                        }
+                        draft
                     });
                 let mut retry_event_handler = |event: &JsonValue| -> Result<()> {
                     stream_turn_event(
@@ -10888,10 +10922,7 @@ impl JobProcessor {
                         job_id = %job_id,
                         "no file change after the recovery pass; its reply is the answer"
                     );
-                    save_report::append_not_saved(
-                        &mut retry_outcome.summary,
-                        &[NOTHING_CHANGED_LINE.to_string()],
-                    );
+                    append_nothing_changed(&mut retry_outcome.summary);
                     retry_artifacts.push(json!({
                         "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
                         "metadata": { "reason": "no_change_after_recovery" },
@@ -11419,11 +11450,8 @@ impl JobProcessor {
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
         // A change read as required that this chat can't make: its answer stands, with the
         // runtime's line under it, as after a recovery pass that changed nothing.
-        if names_only_another_chats_pages {
-            save_report::append_not_saved(
-                &mut outcome.summary,
-                &[NOTHING_CHANGED_LINE.to_string()],
-            );
+        if stands_for_another_chats_page {
+            append_nothing_changed(&mut outcome.summary);
             artifacts.push(json!({
                 "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
                 "metadata": { "reason": "another_chats_page" },
@@ -14922,7 +14950,9 @@ fn post_only_the_card(job: &LeaseJob, outcome: &mut CodexOutcome) {
 /// that nothing the person could have read before it shows, or an address Studio can't check
 /// ([`browser_request::BrowserRequest::waits_for_the_person`]). What they could have read is
 /// their messages and Octo's earlier replies in the chat's history
-/// ([`conversation_context::read_before_a_card`]), and the turn's own message. The two can
+/// ([`conversation_context::read_before_a_card`]), and the turn's own message. Each text's hosts
+/// are read as Studio reads them, a page's file name and a query's value included, from one
+/// list of cases both are tested against. The two can
 /// differ only where the runtime knows less than Studio, and then the card reads as waiting:
 /// in a shared chat the history doesn't say whose each message is, and it holds only the chat's
 /// latest rows. Studio also leaves a card a button for what the runtime can't see (a browser in
@@ -15862,6 +15892,20 @@ fn is_retryable_codex_upstream_summary(summary: &str) -> bool {
         || normalized.contains("gateway timeout")
         || normalized.contains("timed out")
         || normalized.contains("timeout")
+}
+
+/// Whether the first answer's words leave the reply being written as its retry begins, instead
+/// of staying until the retry's words replace them (`reply_draft`): the runtime found them
+/// untrue. They were written for a card it refused ("I've opened a browser check of the official
+/// results.", with no card and no browser behind it), or they list files that were never
+/// written. Any other answer asked for again may be a true account, such as "I can't change …
+/// here because it was made in another chat" before a retry for the files it didn't write: taken
+/// away as the retry began, it vanished, "Thinking…" came back, and it returned rewritten.
+fn retry_withdraws_the_first_answer(
+    fallback: Option<CodexFallbackSummaryKind>,
+    reported_file_changes_missing: bool,
+) -> bool {
+    reported_file_changes_missing || fallback == Some(CodexFallbackSummaryKind::RefusedBrowserCard)
 }
 
 /// The words on the line while the runtime sends the turn's request again, by the retry's
@@ -31919,6 +31963,73 @@ mod tests {
         );
     }
 
+    /// Studio reads a host wherever a task holds a name with an ending: a page's file name
+    /// (`…/connections.html`) and a query's value are hosts to it, as the site's own is, and a
+    /// host under `localhost` is one it can't check. So it holds a card for such a page though
+    /// the person or an earlier reply gave the site, and the turn's words stay above it. Read by
+    /// each address's site alone, those cards were taken to open by themselves and lost their
+    /// words, while Studio left them a button. Only the very address the person gave opens by
+    /// itself.
+    #[test]
+    fn a_card_for_a_page_named_by_its_file_waits_as_studio_holds_it() {
+        let posted = |job: &LeaseJob, summary: &str, task: &str| {
+            let raw = json!({
+                "summary": summary,
+                "files": [],
+                "actions": [{ "type": "request_browser", "task": task }],
+            });
+            let mut outcome = extract_codex_outcome(&raw).expect("extract outcome");
+            post_only_the_card(job, &mut outcome);
+            assert_eq!(build_final_messages_from_outcome(&outcome, None).len(), 1);
+            outcome.summary
+        };
+        let route = "I couldn't read the planner's connections page directly. The card opens it to find a connection.";
+        let route_card = "Open https://www.transit.example/connections.html and find a connection from the old town to the airport.";
+        // The person gave the site, not its page.
+        let asked = "How do I get from the old town to the airport? Use transit.example.";
+        assert_eq!(
+            posted(&chat_turn(json!([]), asked, 1), route, route_card),
+            route
+        );
+        // An earlier reply gave the site, and the card opens a page on it with a file name.
+        let earlier = json!([
+            { "role": "user", "content": "Which camera is the newest?" },
+            { "role": "assistant", "content": "The newest is on https://shop.example/cameras." },
+        ]);
+        let weight =
+            "The maker's page for it couldn't be read here. The card opens it for the weight.";
+        let weight_card =
+            "Read https://shop.example/cameras/learn/ABCDE-131-master.html for its weight.";
+        assert_eq!(
+            posted(
+                &chat_turn(earlier, "What does it weigh?", 1),
+                weight,
+                weight_card
+            ),
+            weight
+        );
+        // A host in a query's value is one more the person never read.
+        let returns = "The returns page couldn't be read here. The card opens it.";
+        assert_eq!(
+            posted(
+                &chat_turn(json!([]), "Check shop.example's returns for me.", 1),
+                returns,
+                "Open https://shop.example/returns?ref=partner.example and read it."
+            ),
+            returns
+        );
+        // A host under localhost is one Studio can't check, whoever gave it.
+        let local = "Open http://app.localhost:3000/settings and read the page.";
+        assert_eq!(posted(&chat_turn(json!([]), local, 1), route, local), route);
+        // The very address the person gave opens by itself, with no words of its own.
+        let gave =
+            "Read https://www.transit.example/connections.html for a connection to the airport.";
+        assert_eq!(
+            posted(&chat_turn(json!([]), gave, 1), route, route_card),
+            ""
+        );
+    }
+
     /// A card that continues building asks the browser only what to find or
     /// check; the building stays with `continueBuilding`. A task that ended
     /// "then build a comparison page with sources" reached a browser turn that
@@ -32442,6 +32553,51 @@ mod tests {
         post_only_the_card(&job, &mut outcome);
         assert_eq!(outcome.summary, words);
         assert!(build_final_messages_from_outcome(&outcome, None).is_empty());
+    }
+
+    /// The words of an answer the runtime found untrue leave the reply being written as its
+    /// retry begins: those written for a card it refused, and a list of files that were never
+    /// written. Any other answer asked for again may be a true account, and stays until the
+    /// retry's words replace it: one that changed no file, one that skipped a lookup, one that
+    /// ended without its final message.
+    #[test]
+    fn only_an_answer_found_untrue_leaves_the_draft_as_its_retry_begins() {
+        use CodexFallbackSummaryKind::*;
+        assert!(retry_withdraws_the_first_answer(
+            Some(RefusedBrowserCard),
+            false
+        ));
+        assert!(retry_withdraws_the_first_answer(None, true));
+        assert!(!retry_withdraws_the_first_answer(None, false));
+        for kind in [
+            MissingFinalAssistantMessage,
+            InvalidFinalAssistantMessageJson,
+            DeclinedATurnThatNeedsAnAnswer,
+        ] {
+            assert!(
+                !retry_withdraws_the_first_answer(Some(kind), false),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The runtime's line goes under a reply that stood without the change read as required,
+    /// once, and never under a decline: the controller keeps the bare word out of the chat, and
+    /// with the line under it a group would read "NO_RESPONSE" and "Nothing was changed.".
+    #[test]
+    fn nothing_was_changed_goes_under_a_reply_and_never_under_a_decline() {
+        let mut reply = "I can't change it here: it was made in another chat.".to_string();
+        append_nothing_changed(&mut reply);
+        append_nothing_changed(&mut reply);
+        assert_eq!(
+            reply,
+            "I can't change it here: it was made in another chat.\n\nNothing was changed."
+        );
+        for decline in ["NO_RESPONSE", " NO_RESPONSE\n", "`NO_RESPONSE`"] {
+            let mut summary = decline.to_string();
+            append_nothing_changed(&mut summary);
+            assert_eq!(summary, decline);
+        }
     }
 
     /// A refused card leaves the words written for it with nothing behind them, whatever else

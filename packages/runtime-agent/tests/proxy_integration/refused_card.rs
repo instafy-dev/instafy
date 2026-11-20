@@ -11,9 +11,14 @@
 //! words show above it: a return policy's retry handed over the shop's own page and wrote what a
 //! search result said, and the person read only the card (a local test, Nov 20). A retry's card
 //! refused too is left out, and its words, told to stand alone, are all the person reads.
+//!
+//! The first answer's words go from the reply being written as the retry begins: they were
+//! written for a card that never came. Any other answer asked for again stays until the retry's
+//! words replace it (`pages_of_their_own_chats`).
 
 // The proxy fixtures of `tests/proxy_integration.rs`, as the evidence retry's own tests use them.
 use crate::*;
+use runtime_agent::jobs::ReplyDraft;
 use std::sync::Mutex as StdMutex;
 
 const CHILD: &str = "INSTAFY_REFUSED_CARD_TEST_CHILD";
@@ -33,6 +38,10 @@ const HOTEL_REQUEST: &str =
     "Find a hotel in the old town for 15 to 17 January, 2 adults, under 140 euros a night.";
 const HOTEL_NO_PAGE: &str = "Check hotel availability in the old town for 15 to 17 January for 2 adults under 140 euros a night.";
 const HOTEL_WORDS: &str = "One hotel's listing showed 139 euros a night in the search results, but its own page couldn't be read, so the dates and the price for two adults aren't confirmed.";
+/// What the hotel's first answer said of a card that never came, and what a retry not told that
+/// its words may stand alone says again.
+const HOTEL_OPENED: &str =
+    "I've opened a browser check for those dates; no reservation will be made.";
 const STAND_ALONE: &str =
     "If this card is refused too, only your words show: make them stand alone.";
 
@@ -96,8 +105,10 @@ impl Case {
         payload
     }
 
-    /// The retry's answer, told why the first one's card was refused.
-    fn retry_answer(self) -> Option<Value> {
+    /// The retry's answer, told why the first one's card was refused. The stand-in model writes
+    /// words that stand alone only when its request says its card may be refused too
+    /// (`stand_alone`): otherwise it points at the card again, as the hotel's retry did.
+    fn retry_answer(self, stand_alone: bool) -> Option<Value> {
         let answer = |summary: &str, task: &str| {
             json!({
                 "summary":summary,"code":"","suggestions":[],"files":[],
@@ -109,7 +120,8 @@ impl Case {
             Self::TheOnlyCard => Some(answer("", NAMES_ITS_PAGE)),
             Self::ACardLeft => None,
             Self::AWaitingCard => Some(answer(POLICY_WORDS, POLICY_PAGE)),
-            Self::RefusedTwice => Some(answer(HOTEL_WORDS, HOTEL_NO_PAGE)),
+            Self::RefusedTwice if stand_alone => Some(answer(HOTEL_WORDS, HOTEL_NO_PAGE)),
+            Self::RefusedTwice => Some(answer(HOTEL_OPENED, HOTEL_NO_PAGE)),
         }
     }
 
@@ -146,11 +158,7 @@ impl Case {
                 "I'll check the shop's return information for your order.".to_string(),
                 json!([]),
             ),
-            Self::RefusedTwice => (
-                "I've opened a browser check for those dates; no reservation will be made."
-                    .to_string(),
-                json!([]),
-            ),
+            Self::RefusedTwice => (HOTEL_OPENED.to_string(), json!([])),
         };
         json!({
             "summary":summary,"code":"","suggestions":[],
@@ -206,6 +214,10 @@ fn run_isolated(case: Case) -> Result<()> {
 struct Provider {
     case: Case,
     requests: StdMutex<Vec<Value>>,
+    /// The reply being written, as the person's chat shows it, and what it showed as the
+    /// retry's request reached the model.
+    draft: tokio::sync::watch::Receiver<ReplyDraft>,
+    draft_as_the_retry_began: StdMutex<Option<ReplyDraft>>,
 }
 
 fn response(item: Value) -> axum::response::Response {
@@ -234,15 +246,19 @@ async fn provider_request(
         headers.get("authorization").and_then(|v| v.to_str().ok()),
         Some(format!("Bearer {PROVIDER_KEY}").as_str())
     );
+    let stand_alone = body["input"].to_string().contains(STAND_ALONE);
     let index = {
         let mut requests = state.requests.lock().unwrap();
         requests.push(body);
         requests.len() - 1
     };
+    if index == 1 {
+        *state.draft_as_the_retry_began.lock().unwrap() = Some(state.draft.borrow().clone());
+    }
     match (state.case, index) {
         (case, 0) => response(final_answer(&case.first_answer())),
-        (case, 1) if case.retry_answer().is_some() => {
-            response(final_answer(&case.retry_answer().unwrap()))
+        (case, 1) if case.retry_answer(stand_alone).is_some() => {
+            response(final_answer(&case.retry_answer(stand_alone).unwrap()))
         }
         (case, _) => panic!("unexpected extra provider request {index} for {case:?}"),
     }
@@ -285,9 +301,12 @@ async fn run_case(case: Case) -> Result<()> {
         auth_path.to_string_lossy(),
     ));
 
+    let (draft_sender, draft) = tokio::sync::watch::channel(ReplyDraft::default());
     let state = Arc::new(Provider {
         case,
         requests: StdMutex::new(Vec::new()),
+        draft,
+        draft_as_the_retry_began: StdMutex::new(None),
     });
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let upstream = listener.local_addr()?;
@@ -386,7 +405,7 @@ async fn run_case(case: Case) -> Result<()> {
             Some(JobProgress {
                 sender,
                 status: Arc::new(AtomicBool::new(true)),
-                reply_draft: None,
+                reply_draft: Some(draft_sender),
             }),
             None,
             None,
@@ -427,6 +446,18 @@ async fn run_case(case: Case) -> Result<()> {
         })
         .collect();
     let requests = state.requests.lock().unwrap().clone();
+    // The first answer's words were written for a card that never came: they are gone from the
+    // reply being written as the retry begins, not left there until the retry's words come.
+    if case != Case::ACardLeft {
+        let shown = state
+            .draft_as_the_retry_began
+            .lock()
+            .unwrap()
+            .clone()
+            .context("the retry's request reached the model")?;
+        assert!(shown.segment > 0, "the first answer was drafted: {shown:?}");
+        assert_eq!(shown.text, "", "{shown:?}");
+    }
     match case {
         Case::AWaitingCard | Case::RefusedTwice => {
             assert_eq!(
@@ -446,18 +477,9 @@ async fn run_case(case: Case) -> Result<()> {
             } else {
                 HOTEL_WORDS
             };
+            // Told its card may be refused too, the retry's words stand alone: never the line
+            // that a browser check was opened, which the stand-in model writes again untold.
             assert_eq!(execution.summary, words);
-            // Alone, they never say a browser check was opened.
-            if case == Case::RefusedTwice {
-                assert!(
-                    !execution
-                        .summary
-                        .split(|c: char| !c.is_alphanumeric())
-                        .any(|word| word.eq_ignore_ascii_case("opened")),
-                    "{}",
-                    execution.summary
-                );
-            }
         }
         Case::TheOnlyCard => {
             // Nothing failed that the person saw: the line reads "Working…".

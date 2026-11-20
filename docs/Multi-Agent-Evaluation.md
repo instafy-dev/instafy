@@ -505,10 +505,12 @@ request before anything runs, so a required write that changes nothing gets one 
 which also asks for an observation or a lookup of earlier chats the turn skipped. When that pass
 changes nothing either, its reply (it finds the change already made, asks the person something,
 or says what blocks the work) is the turn's result, with the runtime's line "Nothing was
-changed." under it, recorded as a `codex/required-changes-not-made` artifact. A message that
-names, by title or folder, only pages another chat made (read-only in this chat) gets no
-recovery pass: a first reply that changed nothing is the result, with the same line and
-artifact. A lookup it still skipped fails the turn, as does a reply that lists a file missing
+changed." under it, recorded as a `codex/required-changes-not-made` artifact. In a chat that
+has a page of its own, a message that names, by title or folder, only pages another chat made
+(read-only in this chat) gets no recovery pass: a first reply that changed nothing is the
+result, with the same line and artifact. A chat that has made no page keeps the pass: its
+message may be asking for its first page in the words of another chat's title. The line never
+goes under a turn's decline. A lookup it still skipped fails the turn, as does a reply that lists a file missing
 from disk, or a pass that stops with no reply of its own. What such a reply says is one rule in `AGENTS.md`'s replies
 guide.
 

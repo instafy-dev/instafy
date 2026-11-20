@@ -1,0 +1,363 @@
+{
+  "note": "The one list both readers of a browser card's hosts are pinned to: Studio's hostsNamedIn and namesUncheckableAddress (packages/frontend/src/screens/studio/components/browserAutoStart.ts), which decide whether a card opens by itself, and the runtime's hosts_studio_reads and studio_cannot_check (packages/runtime-agent/src/jobs/browser_request.rs), which decide whether a turn with only that card keeps its words. A rule changed on one side and not the other fails a test on both. `hosts` is every host the text names, sorted; `uncheckable` is whether it names an address Studio can't compare with what the person read.",
+  "cases": [
+    {
+      "name": "a page named by its file",
+      "text": "Open https://www.transit.example/connections.html and find a connection to the airport.",
+      "hosts": [
+        "connections.html",
+        "transit.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a file name with dashes and capitals",
+      "text": "Read https://shop.example/de/at/cameras/learn/model13/ABCDE-131-master.html for the weight.",
+      "hosts": [
+        "abcde-131-master.html",
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a host in a query's value",
+      "text": "Open https://shop.example/returns?ref=partner.example and read it.",
+      "hosts": [
+        "partner.example",
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "every host, in an address or bare, and an IPv4 address",
+      "text": "Read the pricing page at shop.example/pricing, then https://WWW.Other.example/x and http://10.0.0.5/admin.",
+      "hosts": [
+        "10.0.0.5",
+        "other.example",
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "an e-mail address's domain and an abbreviation name none",
+      "text": "Email support@shop.example, e.g. about plans.",
+      "hosts": [],
+      "uncheckable": false
+    },
+    {
+      "name": "a host under localhost",
+      "text": "Open http://app.localhost:3000/settings.",
+      "hosts": [
+        "app.localhost"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "localhost with a port, no scheme",
+      "text": "Open localhost:5173 and check the header.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "localhost before more labels",
+      "text": "Open localhost.example and check the header.",
+      "hosts": [
+        "localhost.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "a word that ends in localhost",
+      "text": "Open mylocalhost.example and check the header.",
+      "hosts": [
+        "mylocalhost.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "an IPv6 literal in an address",
+      "text": "Open http://[::1]:8080/admin.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "a bare IPv6 literal",
+      "text": "Open fe80::1 and read the status page.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "a full IPv6 literal in capitals",
+      "text": "Open 2001:DB8:0:0:0:0:2:1 and read it.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "an internationalized host in an address",
+      "text": "Open https://bücher.example/kasse.",
+      "hosts": [
+        "cher.example",
+        "xn--bcher-kva.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "a bare internationalized host",
+      "text": "Open bücher.example and find the cart.",
+      "hosts": [
+        "cher.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "a bare Unicode domain",
+      "text": "Open пример.рф and find the settings.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "a punycode host in an address",
+      "text": "Open https://xn--bcher-kva.example/kasse.",
+      "hosts": [
+        "xn--bcher-kva.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "a bare punycode host",
+      "text": "Open xn--bcher-kva.example and find the cart.",
+      "hosts": [
+        "xn--bcher-kva.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "a fullwidth dot",
+      "text": "Open cheapflights．example and pick the cheapest.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "an ideographic full stop in an address",
+      "text": "Open https://cheapflights。example/deals.",
+      "hosts": [
+        "cheapflights.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "an address that does not parse",
+      "text": "Open http://exa%mple.com/deals.",
+      "hosts": [
+        "mple.com"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "a port no address has",
+      "text": "Open http://shop.example:99999/deals.",
+      "hosts": [
+        "shop.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "an abbreviation in Cyrillic",
+      "text": "Откройте настройки, т.е. страницу ключей.",
+      "hosts": [],
+      "uncheckable": false
+    },
+    {
+      "name": "sentences that end in an ideographic full stop",
+      "text": "設定を開いてください。次にキーを表示します。",
+      "hosts": [],
+      "uncheckable": false
+    },
+    {
+      "name": "a time and a path in code",
+      "text": "Stop at 12:30:45 and use std::fs as the example.",
+      "hosts": [],
+      "uncheckable": false
+    },
+    {
+      "name": "a comma right after an address's host",
+      "text": "Open https://shop.example, then read the returns page.",
+      "hosts": [
+        "shop.example",
+        "shop.example,"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a bracket ends an address",
+      "text": "See (https://shop.example/a) and [https://other.example/b].",
+      "hosts": [
+        "other.example",
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "file names and a version",
+      "text": "Use Node.js and file.tar.gz from v1.2.3.",
+      "hosts": [
+        "file.tar.gz",
+        "node.js"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "numbers with dots",
+      "text": "Ping 10.0.0.5, 1.2.3.4.5 and 300.1.1.1.",
+      "hosts": [
+        "10.0.0.5",
+        "300.1.1.1"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "an address of five numbers",
+      "text": "Open http://1.2.3.4.5/x.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "a hexadecimal address",
+      "text": "Open http://0x7f.1/.",
+      "hosts": [
+        "127.0.0.1"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a name and password before the host",
+      "text": "Open https://user:pw@shop.example/x.",
+      "hosts": [
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "capitals and a dot after the host",
+      "text": "Open HTTPS://SHOP.Example./Path now.",
+      "hosts": [
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a host that ends the sentence",
+      "text": "Visit shop.example.",
+      "hosts": [
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "an underscore beside a name",
+      "text": "A file_name.txt and a-b.example_c.",
+      "hosts": [
+        "a-b.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "an underscore in an address's host",
+      "text": "Open http://exam_ple.example/x.",
+      "hosts": [
+        "exam_ple.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "letters before the scheme",
+      "text": "Open xhttps://shop.example/ now.",
+      "hosts": [
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a time of day",
+      "text": "Meet at 10:30 or 2:15.",
+      "hosts": [],
+      "uncheckable": false
+    },
+    {
+      "name": "a loopback address",
+      "text": "::1 is loopback.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "two colons after a letter",
+      "text": "The ratio a::b holds.",
+      "hosts": [],
+      "uncheckable": true
+    },
+    {
+      "name": "a time in brackets",
+      "text": "At [12:30] open shop.example.",
+      "hosts": [
+        "shop.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "a no-break space ends an address",
+      "text": "Open https://shop.example/a\u00a0b.example now.",
+      "hosts": [
+        "b.example",
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a path with letters beyond ASCII",
+      "text": "Open https://shop.example/pfad/über.html now.",
+      "hosts": [
+        "ber.html",
+        "shop.example"
+      ],
+      "uncheckable": true
+    },
+    {
+      "name": "a host with a trailing dot and www",
+      "text": "Open www.shop.example. Then stop.",
+      "hosts": [
+        "shop.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "no address at all",
+      "text": "Find the museum's opening hours.",
+      "hosts": [],
+      "uncheckable": false
+    },
+    {
+      "name": "labels that start or end with a dash",
+      "text": "Try -shop.example, shop-.example and sh-op.example.",
+      "hosts": [
+        "sh-op.example"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a one-letter ending",
+      "text": "Compare a.b and c.de.",
+      "hosts": [
+        "c.de"
+      ],
+      "uncheckable": false
+    },
+    {
+      "name": "a long run of labels",
+      "text": "Open a.b.c.d.example/x and a.b.c.1.",
+      "hosts": [
+        "a.b.c.d.example"
+      ],
+      "uncheckable": false
+    }
+  ]
+}

@@ -297,7 +297,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   card the turn posted before it was done with its site. While the reply is written, its draft
   grows in the reply's place, above the cards, in the turn's own row. When the runtime asks for
   the answer again (a retry), the answer shown stays until the retry's first words replace it
-  there; it is never taken away first. A turn whose browser step
+  there; it is not taken away first. Only an answer the runtime found untrue goes as its retry
+  begins: words written for a browser card it refused, or a list of files that were never
+  written. A turn whose browser step
   ended its run on the approval lane (a step the person said no to or left, or a page waiting for
   their input) shows no draft: the runtime replies with its own sentence ("You said no, so that
   step didn't happen, and nothing from it was sent. Tell Octo what to try instead."), never the
@@ -313,7 +315,9 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   own (`post_only_the_card`, `jobs/mod.rs`): the card says where the browser goes, and the browser
   turn says what it found. An empty reply shows nothing and notifies nobody. A card that waits for
   the person, such as one for a page Octo found itself, keeps the turn's reply above it: what it
-  found, what it didn't, and what the card opens. The browser rule tells Octo which, and that a
+  found, what it didn't, and what the card opens. The runtime reads a card's hosts as Studio does,
+  a page's file name (`…/connections.html`) and a query's value included, from one list of cases
+  both are tested against (`card_hosts_fixtures.json`). The browser rule tells Octo which, and that a
   reply that does show beside a card never says a page opened before a browser tool saw it, or what
   the browser will submit, send or buy.
 - A command on its own in the conversation is one row: its label (or "Ran a command"), its

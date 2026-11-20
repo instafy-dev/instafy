@@ -27,10 +27,14 @@
 //! the turn found it. What no step of the turn wrote there stays: a viewer's click the page's own
 //! server writes meanwhile. A scheduled run has no chat to ask in, and changes the page it names.
 //!
-//! A message that names only the first chat's page, by its title, asks for a change this chat
-//! can't make, though the routing step read it as a change required here: the turn's answer that
-//! says so is its result. Run again for the files it didn't write, that answer vanished while the
-//! retry began and came back rewritten (a local test, Nov 20).
+//! A message that names only the first chat's page, by its title, in a chat that has a page of
+//! its own, asks for a change this chat can't make, though the routing step read it as a change
+//! required here: the turn's answer that says so is its result. Run again for the files it didn't
+//! write, that answer vanished while the retry began and came back rewritten (a local test,
+//! Nov 20). A chat that has made no page may be asking for its first in the words of the other
+//! chat's title, so its turn keeps its second pass, and the answer shown stays until that pass's
+//! words replace it. A group chat's turn that declines stays silent: the runtime's line is never
+//! put under the decline word.
 
 use super::*;
 use runtime_agent::jobs::{JobExecution, ReplyDraft};
@@ -79,9 +83,14 @@ const PRICES_LINE: &str = "{\"Laptop 12\":\"1049 EUR\"}\n";
 /// The runtime's line when a turn changed the first chat's page.
 const NOT_CHANGED: &str =
     "I didn't change “Framework Laptop 12, 13 and 16”: it was made in another chat.";
-/// The new chat names the first chat's page by its title, and the stand-in model's answer.
+/// The new chat names the first chat's page by its title, and the stand-in model's answer: its
+/// first, and what it says when asked once more for the files it didn't write.
 const NAMED: &str = "Add a battery life column to Framework Laptop 12, 13 and 16.";
 const NAMED_REPLY: &str = "I can't change “Framework Laptop 12, 13 and 16” here because it was made in another chat. Ask for the battery life column in that chat.";
+const NAMED_AGAIN_REPLY: &str = "I can't edit “Framework Laptop 12, 13 and 16” from this chat: it is read-only here. Ask for the battery life column in the chat that made it.";
+/// A teammate's message in a group chat, which Octo may leave unanswered.
+const NAMED_TO_THE_GROUP: &str =
+    "Can someone add a battery life column to Framework Laptop 12, 13 and 16?";
 
 #[test]
 fn a_new_chat_builds_its_own_page_and_leaves_another_chats_page_as_it_is_via_proxy() -> Result<()> {
@@ -137,12 +146,54 @@ fn a_page_another_chat_made_stays_as_its_last_save_holds_it_via_proxy() -> Resul
 
 const NAMED_CHILD: &str = "INSTAFY_PAGES_NAMED_FROM_ANOTHER_CHAT_TEST_CHILD";
 
+/// Where a message that names the first chat's page by its title comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Named {
+    /// A chat that made a page of its own: the message names only the other chat's.
+    AChatWithAPageOfItsOwn,
+    /// A chat that has made no page: its message may ask for its first.
+    AChatWithNoPage,
+    /// A group chat, where the turn may decline, and does.
+    AGroupChat,
+}
+
+impl Named {
+    fn test_name(self) -> &'static str {
+        match self {
+            Self::AChatWithAPageOfItsOwn => {
+                "pages_of_their_own_chats::a_change_to_another_chats_page_is_answered_once_and_the_answer_stays_via_proxy"
+            }
+            Self::AChatWithNoPage => {
+                "pages_of_their_own_chats::a_chat_with_no_page_keeps_its_second_pass_and_its_answer_is_replaced_in_place_via_proxy"
+            }
+            Self::AGroupChat => {
+                "pages_of_their_own_chats::a_declined_group_turn_that_names_another_chats_page_stays_silent_via_proxy"
+            }
+        }
+    }
+}
+
 #[test]
 fn a_change_to_another_chats_page_is_answered_once_and_the_answer_stays_via_proxy() -> Result<()> {
+    run_named(Named::AChatWithAPageOfItsOwn)
+}
+
+#[test]
+fn a_chat_with_no_page_keeps_its_second_pass_and_its_answer_is_replaced_in_place_via_proxy()
+-> Result<()> {
+    run_named(Named::AChatWithNoPage)
+}
+
+#[test]
+fn a_declined_group_turn_that_names_another_chats_page_stays_silent_via_proxy() -> Result<()> {
+    run_named(Named::AGroupChat)
+}
+
+fn run_named(from: Named) -> Result<()> {
     if std::env::var(NAMED_CHILD).as_deref() != Ok("1") {
         return run_isolated_fixture(
             NAMED_CHILD,
-            "pages_of_their_own_chats::a_change_to_another_chats_page_is_answered_once_and_the_answer_stays_via_proxy",
+            from.test_name(),
             "pages-named-from-another-chat",
         );
     }
@@ -156,7 +207,7 @@ fn a_change_to_another_chats_page_is_answered_once_and_the_answer_stays_via_prox
                 .worker_threads(2)
                 .thread_stack_size(STACK)
                 .build()?
-                .block_on(run_named_case())
+                .block_on(run_named_case(from))
         })?
         .join()
         .map_err(|_| anyhow::anyhow!("named page fixture panicked"))?
@@ -200,6 +251,10 @@ struct Provider {
     /// A viewer's click on the first chat's page, which its page's server writes when the new
     /// chat's turn begins: the file and what it records.
     click: StdMutex<Option<(PathBuf, String)>>,
+    /// The reply being written of a turn that names the first chat's page, as the person's chat
+    /// shows it, and what it showed each time that turn's request reached the model.
+    draft: StdMutex<Option<tokio::sync::watch::Receiver<ReplyDraft>>>,
+    drafts_as_asked: StdMutex<Vec<ReplyDraft>>,
 }
 
 impl Provider {
@@ -209,6 +264,8 @@ impl Provider {
             breaks_their_page,
             weights_gate: tokio::sync::Notify::new(),
             click: StdMutex::new(None),
+            draft: StdMutex::new(None),
+            drafts_as_asked: StdMutex::new(Vec::new()),
         })
     }
 }
@@ -371,9 +428,30 @@ async fn provider_request(
             REMEMBERED,
         )
     } else if asks(&body, NAMED) {
-        // Told the page is another chat's, read-only here, it changes nothing and says so.
+        // Told the page is another chat's, read-only here, it changes nothing and says so, in
+        // other words when asked once more.
+        let shown = state
+            .draft
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|draft| draft.borrow().clone())
+            .unwrap_or_default();
+        let mut asked = state.drafts_as_asked.lock().unwrap();
+        asked.push(shown);
+        let words = if asked.len() == 1 {
+            NAMED_REPLY
+        } else {
+            NAMED_AGAIN_REPLY
+        };
         return response(message(
-            &json!({"summary":NAMED_REPLY,"code":"","suggestions":[],"files":[],"actions":[]})
+            &json!({"summary":words,"code":"","suggestions":[],"files":[],"actions":[]})
+                .to_string(),
+        ));
+    } else if asks(&body, NAMED_TO_THE_GROUP) {
+        // Nobody asked Octo: it leaves the message to the people in the chat.
+        return response(message(
+            &json!({"summary":"NO_RESPONSE","code":"","suggestions":[],"files":[],"actions":[]})
                 .to_string(),
         ));
     } else if asks(&body, FILL_IN) {
@@ -1158,7 +1236,7 @@ async fn run_scheduled_case() -> Result<()> {
     space.finish().await
 }
 
-async fn run_named_case() -> Result<()> {
+async fn run_named_case(from: Named) -> Result<()> {
     let _env = env_guard().await;
     let space = Space::start(Provider::new(false)).await?;
     let (project_id, workspace) = (space.project_id, space.workspace.clone());
@@ -1167,14 +1245,25 @@ async fn run_named_case() -> Result<()> {
     fs::create_dir_all(workspace.join(THEIRS))?;
     fs::write(workspace.join(THEIRS).join("data.json"), THEIR_DATA)?;
     record_card(&workspace, first_chat, THEIRS, THEIR_TITLE)?;
+    // The new chat's own comparison, and its card.
+    if from != Named::AChatWithNoPage {
+        fs::create_dir_all(workspace.join(OWN))?;
+        fs::write(workspace.join(OWN).join("data.json"), OWN_DATA)?;
+        record_card(&workspace, new_chat, OWN, OWN_TITLE)?;
+    }
 
-    // A new chat names that page by its title, and the routing step reads it as a change
-    // required here.
+    // The new chat names the first chat's page by its title, and the routing step reads it as a
+    // change required here.
+    let words = if from == Named::AGroupChat {
+        NAMED_TO_THE_GROUP
+    } else {
+        NAMED
+    };
     let mut named = job(
         project_id,
         new_chat,
-        NAMED,
-        vec![person(NAMED, "run-1")],
+        words,
+        vec![person(words, "run-1")],
         None,
     );
     named.payload["metadata"] = json!({
@@ -1184,8 +1273,16 @@ async fn run_named_case() -> Result<()> {
             "workspaceFileChanges":true,"commandExecution":false,"genericMcpToolExecution":false
         }
     });
+    if from == Named::AGroupChat {
+        // A teammate's message the controller leaves to Octo to answer or not.
+        named.payload["metadata"]["groupParticipation"] = json!({
+            "decision":"agent_evaluation","reason":"skill_mode_ambient",
+            "enforcedBy":"runtime-controller"
+        });
+    }
     let (sender, mut progress) = tokio::sync::mpsc::unbounded_channel();
     let (draft_sender, drafts) = tokio::sync::watch::channel(ReplyDraft::default());
+    *space.state.draft.lock().unwrap() = Some(drafts.clone());
     let answered = tokio::time::timeout(
         Duration::from_secs(60),
         space.processor.run_apply_job(
@@ -1205,35 +1302,68 @@ async fn run_named_case() -> Result<()> {
     .context("the named page's turn timed out")?
     .context("the named page's turn failed")?;
 
-    // One answer: the model was asked once, and nothing said it tried again.
     let asked = space
         .state
         .requests
         .lock()
         .unwrap()
         .iter()
-        .filter(|request| asks(request, NAMED))
+        .filter(|request| asks(request, words))
         .count();
-    assert_eq!(asked, 1, "the turn ran once");
     let mut retries = Vec::new();
     while let Ok(message) = progress.try_recv() {
         if let Some(metadata) = message.metadata.as_ref()
             && metadata.get("kind").and_then(Value::as_str) == Some("codex_retry")
         {
-            retries.push(message.content.clone());
+            retries.push(metadata["reason"].clone());
         }
     }
-    assert!(retries.is_empty(), "{retries:?}");
-    // The answer that streamed is the one that stays, with the runtime's line under it.
-    assert_eq!(drafts.borrow().text, NAMED_REPLY);
-    assert_eq!(
-        answered.summary,
-        format!("{NAMED_REPLY}\n\nNothing was changed.")
-    );
-    assert!(answered.artifacts.iter().any(|artifact| {
-        artifact["kind"] == "codex/required-changes-not-made"
-            && artifact["metadata"]["reason"] == "another_chats_page"
-    }));
+    let not_made: Vec<&Value> = answered
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact["kind"] == "codex/required-changes-not-made")
+        .map(|artifact| &artifact["metadata"]["reason"])
+        .collect();
+    match from {
+        Named::AChatWithAPageOfItsOwn => {
+            // One answer: the model was asked once, and nothing said it tried again.
+            assert_eq!(asked, 1, "the turn ran once");
+            assert!(retries.is_empty(), "{retries:?}");
+            // The answer that streamed is the one that stays, with the runtime's line under it.
+            assert_eq!(drafts.borrow().text, NAMED_REPLY);
+            assert_eq!(
+                answered.summary,
+                format!("{NAMED_REPLY}\n\nNothing was changed.")
+            );
+            assert_eq!(not_made, vec![&json!("another_chats_page")]);
+        }
+        Named::AChatWithNoPage => {
+            // The message may ask for this chat's first page: the turn keeps its second pass.
+            assert_eq!(asked, 2, "the turn ran once more");
+            assert_eq!(retries, vec![json!("no_file_changes")]);
+            // The answer that streamed is still there as the second pass begins, and that
+            // pass's words take its place: never a moment with no answer.
+            let shown = space.state.drafts_as_asked.lock().unwrap().clone();
+            assert_eq!(shown.len(), 2);
+            assert_eq!(shown[1].text, NAMED_REPLY, "{shown:?}");
+            assert_eq!(drafts.borrow().text, NAMED_AGAIN_REPLY);
+            assert!(drafts.borrow().segment > shown[1].segment);
+            assert_eq!(
+                answered.summary,
+                format!("{NAMED_AGAIN_REPLY}\n\nNothing was changed.")
+            );
+            assert_eq!(not_made, vec![&json!("no_change_after_recovery")]);
+        }
+        Named::AGroupChat => {
+            // The decline is the turn's whole answer: asked once, and the bare word, which the
+            // controller keeps out of the chat. With the runtime's line under it, the group
+            // would have read "NO_RESPONSE" and "Nothing was changed.".
+            assert_eq!(asked, 1, "the turn ran once");
+            assert!(retries.is_empty(), "{retries:?}");
+            assert_eq!(answered.summary, "NO_RESPONSE");
+            assert!(not_made.is_empty(), "{not_made:?}");
+        }
+    }
     // The first chat's page is as it was.
     assert_eq!(
         fs::read(workspace.join(THEIRS).join("data.json"))?,
