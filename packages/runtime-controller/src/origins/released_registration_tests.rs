@@ -20,11 +20,16 @@ impl PrivateOriginFixture {
             "_instafySelfHostedAccess": { "mode": "private", "ownerUserId": owner_id }
         });
         runtime::set_runtime_generation_capability(&mut capabilities, generation);
+        // The owner owns the space: a private runtime whose owner cannot
+        // write it is refused before its origin is looked at
+        // (runtime_owner_access_revoked).
+        ensure_test_user(pool, &owner_id).await?;
         let connection = pool.get().await?;
         connection
             .execute(
-                "insert into projects (id, project_type, status) values ($1, 'customer', 'active')",
-                &[&project_id],
+                "insert into projects (id, owner_user_id, project_type, status)
+                 values ($1, $2, 'customer', 'active')",
+                &[&project_id, &owner_id],
             )
             .await?;
         connection.execute(
