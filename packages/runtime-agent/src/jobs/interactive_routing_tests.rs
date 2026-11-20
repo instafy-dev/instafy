@@ -296,7 +296,7 @@ fn a_typed_checked_holds_the_card_and_a_tool_nobody_ran_says_not_run() {
         "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
     ));
     for needle in [
-        "A failing check never holds the card back: it names the card's command. Two findings are the exception, and the card's own command answers with them too: a typed \"checked <date>\" or \"seen <date>\", which is always deleted, never reworded, and files loaded from outside the page's folder.",
+        "A failing check never holds the card back: it names the card's command. Two findings are the exception: files loaded from outside the page's folder, and a typed \"checked <date>\" or \"seen <date>\", which is always deleted, never reworded (the card's own command names it too).",
         "A tool or step nobody ran (a planner whose form was never sent) gets a caption that links it by its name and says \"not run\", with no day.",
         "A page says what it shows, never \"I\".",
         "4. After any edit, check again. No new card is needed: once your change is saved, every open view of the page loads it again by itself.",
