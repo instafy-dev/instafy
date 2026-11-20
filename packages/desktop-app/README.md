@@ -158,4 +158,7 @@ The desktop runtime launcher expects a locally-built `runtime-agent` binary:
 cargo build --manifest-path packages/runtime-agent/Cargo.toml
 ```
 
+That build refuses Codex turns on code-mode-only models, because it has no `codex-code-mode-host`
+next to it. To run those turns, build the host as well; [DEV_SETUP.md](../../DEV_SETUP.md) shows how.
+
 If the desktop app can’t find it automatically, set `INSTAFY_RUNTIME_AGENT_BIN` or select it when prompted.
