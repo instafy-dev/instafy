@@ -1389,10 +1389,7 @@ fn a_set_up_request_still_gets_the_search_keys_card() {
     let description = entry["key_request"]["description"].as_str().unwrap();
     assert_eq!(name, "BRAVE_SEARCH_API_KEY");
     assert!(!description.contains(['{', '}']), "{description}");
-    assert!(description.contains(&format!(
-        "up to {} searches a day",
-        entry["daily_limit"]
-    )));
+    assert!(description.contains(&format!("up to {} searches a day", entry["daily_limit"])));
 
     let line = "The key card (first `key_env` in `references/search-providers.json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.";
     assert!(flat(RESEARCH_SKILL).contains(line));
