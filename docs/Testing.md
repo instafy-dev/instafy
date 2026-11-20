@@ -1881,7 +1881,40 @@ of deleting, booking or saving go without a prompt, in Octo's own tab too; a
 pause on a booking's icon button under a line about cookies is the person's
 step; a key beside an icon button names no control, whole or in part; and a
 withheld page's controls are named without their rows' words, in its reading
-and in a step's words. The Personal
+and in a step's words. Every click says which control it hit and what it was
+seen to change ("a new page opened", "the page loaded again", "the page
+changed, and so did its address", "the page went to "#weekend"", "a dialog
+opened", "a dialog closed", "a list opened", "the page changed"), a pass in
+the fragment a click went to is masked as the reading's address masks it, and
+a button that does nothing on a page too busy to be read is not said to have
+changed it. A click on a planner's zoom button after a stop was typed adds that the
+field still holds what was typed with none of its suggestions chosen: once,
+and never after its own stop was clicked (a stop that reads as it was typed
+too), after a key was pressed in the field, or for a date field with a
+calendar and a search box that showed no suggestions. A guided
+ticket page modelled on one a reading listed with three "unnamed button"s and
+no card's "Tickets" is read with each card's control drawn as a button, in a
+frame, hidden, as a control of no kind a reading knows, and across a shadow
+root (a web component's button with its words slotted into it, and a button
+slotted into a card a web component draws): a frame leaves the cards' words
+unread and nothing listed or counted, a hidden control's words are not read
+and it is counted, one of no kind is neither listed nor counted, and only the
+controls across a shadow root read as that reading did, a listed control at
+each card with the cards' words in the text; they are named by their cards'
+headings ("button in “Entree museum”"), a click on one opens that card's
+tickets with no prompt, and a pause on one highlights it, as a card larger
+than a row names its icon button by its heading too; a button whose slotted
+words delete a booking is left to the person in Octo's own tab, as its checks
+read them as a deletion, and a click on a card that is a control around such
+a button is refused, pressing nothing. An events page's cards,
+controls named "Open … in a new tab", are no commit buttons and open without
+a prompt, in Octo's own tab too, while one whose name books asks, it and one
+in a form are refused in Octo's own tab, which takes reading steps only, and
+one that opens another window is closed with the step saying so. The policy's
+case table and the Personal Browser's security test hold that a name that
+says it opens something never makes a button with no address navigation
+("Open Long", "View PIN", "Tür öffnen"): the owner tier asks for each. The
+Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 
