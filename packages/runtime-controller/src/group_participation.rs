@@ -743,6 +743,19 @@ pub(crate) async fn cancel_covered_default_octo_job(
         return Ok(None);
     }
 
+    // The give-back below locks the org's balance, and the dispatch then
+    // writes the human's message, which updates the conversation and then
+    // its root. The dispatch holds the conversation already; lock its root
+    // too before the balance, as a dispatch locks its conversation and root
+    // before it reserves (crate::conversations::lock_conversations_for_writes).
+    crate::conversations::lock_conversations_for_writes(transaction, &[*conversation_id])
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to lock the covered Octo turn's conversation: {error}"
+            ))
+        })?;
+
     let reason: Option<&str> = Some(HUMAN_ANSWER_CANCELLATION_REASON);
     let canceled = transaction
         .query_opt(
