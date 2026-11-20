@@ -3923,6 +3923,9 @@ fn classify_canonical_origin_proxy_request(
                 || is_exact_browser_page_action(normalized, "capture")
                 // Keep tab: one of Octo's tabs stays open when its turn ends.
                 || is_exact_browser_page_action(normalized, "keep")
+                // A Stop ended the turn that paused on the person's fields:
+                // the outlines that pause drew come off the page.
+                || is_exact_browser_page_action(normalized, "end-pause")
             {
                 Ok(ORIGIN_PROXY_BROWSER_CONTROL_SCOPES)
             } else {
@@ -5952,6 +5955,13 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
                 .expect("keeping one of Octo's tabs should be proxyable");
         assert_eq!(keep_scopes, ORIGIN_PROXY_BROWSER_CONTROL_SCOPES);
         assert!(classify_origin_proxy_request(&Method::GET, "/browser/pages/ABC123/keep").is_err());
+        let end_pause_scopes =
+            classify_origin_proxy_request(&Method::POST, "/browser/pages/ABC123/end-pause")
+                .expect("ending a stopped pause should be proxyable");
+        assert_eq!(end_pause_scopes, ORIGIN_PROXY_BROWSER_CONTROL_SCOPES);
+        assert!(
+            classify_origin_proxy_request(&Method::GET, "/browser/pages/ABC123/end-pause").is_err()
+        );
         // A chat's own tab: opening a blank one needs control, and only POST.
         let new_page_scopes = classify_origin_proxy_request(&Method::POST, "/browser/pages/new")
             .expect("opening a chat's tab should be proxyable");
@@ -5969,6 +5979,9 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
             "/browser/pages/ABC123/keep/",
             "/browser/pages/ABC123/kept",
             "/browser/pages/ABC123/nested/keep",
+            "/browser/pages/ABC123/end-pause/",
+            "/browser/pages/ABC123/end-pauses",
+            "/browser/pages/ABC123/nested/end-pause",
             "/browser/pages/new/",
             "/browser/pages/newer",
             "/browser/pages/new/tab",

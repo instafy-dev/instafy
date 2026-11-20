@@ -144,7 +144,8 @@ import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import { useChatRunStop } from "./useChatRunStop";
-import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, chatRunStopOnScreen, resolveChatRunStopTargets } from "./chatRunStopTargets";
+import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, resolveChatRunStopTargets } from "./chatRunStopTargets";
+import { runIdsEndedByStop } from "./controllerConversationNotice";
 import { ChatRunStopNoticeProvider } from "./ChatRunStopNotice";
 import { useChatRunStopContinuation } from "./useChatRunStopContinuation";
 import {
@@ -4751,6 +4752,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeId: resolvedBrowserRuntimeId,
     pageId: browserHandoffPage?.id ?? null,
   }), [runs, activeProjectId, activeConversationEntry?.controllerId, resolvedBrowserRuntimeId, browserHandoffPage?.id]);
+  // The runs a person's Stop ended, as the chat's rows show them: a pause one
+  // of them asked for is over, and Continue under its row is the way on.
+  // The chat's latest messages hold it, whichever part of the chat is shown.
+  const browserHumanInputStoppedRunIds = useMemo(() => runIdsEndedByStop(recentMessages), [recentMessages]);
   // The sites of the cards the person pressed in this chat: their OK for
   // each one in the chat's later browser turns. Only a press that went out
   // counts.
@@ -5955,6 +5960,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     messages,
     { getAgentDisplayName: (handle) => agentByHandle.get(handle)?.displayName },
   ), [agentByHandle, messages, runs, stopConversationId]);
+  // Who may stop: a writer of the space, in the chat itself. Never in a job
+  // thread's tab, which is not the chat.
   const canStopRuns = projectCapabilitiesResolved === true && canWriteProject === true
     && !projectAccessPending && Boolean(currentUserId) && !jobThread;
   // The newest message is between two of its parts, and the next goes on by
@@ -5975,8 +5982,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     followOnTargets: stopFollowOnTargets,
     canStop: canStopRuns,
     viewerUserId: currentUserId,
-    active: chatRunStopOnScreen({ chatVisible, browserVisible, jobThread: Boolean(jobThread) }),
-    // The Browser view keeps Escape for the browser.
+    // Stop is in the composer, which every view of the chat keeps (Chat, its
+    // Browser view, a page or a file in front): no view decides whether it
+    // is offered. The Browser view keeps Escape for the browser.
     escapeStops: !browserVisible,
     escapeBlocked: Boolean(messageMenu || imageLightbox || invitePrompt || connectSheetOpen
       || addMenuOpen || skillsImport.addSkillModalOpen || agentProfileModal),
@@ -6824,6 +6832,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     currentUserId={currentUserId}
                     humanInputIdentityKey={browserHandoff.identityKey}
                     humanInputRunIds={browserHumanInputRunIds}
+                    humanInputStoppedRunIds={browserHumanInputStoppedRunIds}
                     onTakeOverAgent={browserHandoff.sharedJobWhileAgentHolds ? takeOverSharedBrowser : null}
                     onContinueAfterHumanInput={browserHandoff.continueSharedRun}
                     onPresenceChange={setSharedBrowserPresence}

@@ -68,7 +68,8 @@ The caption stays compact on wide screens; long captions truncate within a reada
 and expose the full status on hover. The rail and captions contain no cancellation controls.
 
 A writable chat has one square Stop icon in the composer while jobs are live, including thinking
-before any command runs, in Chat and in the chat's Browser view. With an empty draft it replaces
+before any command runs, in every view of the chat that keeps its composer: Chat, the chat's
+Browser view, a page (a map too) or a file in front. With an empty draft it replaces
 the primary send/voice action; with text or attachments it sits beside Send. Active voice
 recording keeps its own controls. The icon has an accessible label and tooltip, with the same
 touch target as the other composer controls. With multiple agents it opens an agent choice and

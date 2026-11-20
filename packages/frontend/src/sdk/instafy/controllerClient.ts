@@ -166,6 +166,7 @@ import {
 import {
   browserSessionStatusIndicatesUnavailable,
   commandRuntimeBrowserSessionPage,
+  endRuntimeBrowserSessionHumanInput,
   fetchRuntimeBrowserSessionCapabilities,
   fetchRuntimeBrowserSessionActions,
   fetchRuntimeBrowserSessionPages,
@@ -417,6 +418,7 @@ export const controllerClient = createControllerClient({
     focusPage: focusRuntimeBrowserSessionPage,
     openPage: openRuntimeBrowserSessionPage,
     keepPage: keepRuntimeBrowserSessionPage,
+    endHumanInput: endRuntimeBrowserSessionHumanInput,
     commandPage: commandRuntimeBrowserSessionPage,
     fetchHost: fetchSharedBrowserHost,
     startHost: startSharedBrowserHost,

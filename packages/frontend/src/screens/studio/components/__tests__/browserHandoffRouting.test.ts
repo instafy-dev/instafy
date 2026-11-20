@@ -11,6 +11,7 @@ import {
   sharedBrowserAgentPageIds,
   sharedBrowserConversationRunIds,
   sharedBrowserFollowUp,
+  sharedBrowserHumanInputStopped,
   sharedBrowserTakeoverJob,
 } from "../browserHandoffRouting";
 
@@ -147,6 +148,16 @@ describe("selectSharedBrowserHumanInput", () => {
     }
     vi.setSystemTime(10000);
     expect(selectSharedBrowserHumanInput([action], USER_ID, "page-1", "https://example.test", CURRENT_RUN_IDS)).toBeNull();
+  });
+
+  it("knows a pause's turn was stopped only from the chat's record of a Stop naming its run", () => {
+    const request = guidance().humanInputRequest!;
+    expect(sharedBrowserHumanInputStopped(request, new Set([RUN_ID]))).toBe(true);
+    // Another turn's Stop, in this chat or any other, ends no pause but its own.
+    expect(sharedBrowserHumanInputStopped(request, new Set(["00000000-0000-4000-8000-00000000000a"]))).toBe(false);
+    expect(sharedBrowserHumanInputStopped(request, new Set())).toBe(false);
+    expect(sharedBrowserHumanInputStopped(request, null)).toBe(false);
+    expect(sharedBrowserHumanInputStopped(null, new Set([RUN_ID]))).toBe(false);
   });
 
   it("does not resurrect an older request when a newer request belongs to another person", () => {

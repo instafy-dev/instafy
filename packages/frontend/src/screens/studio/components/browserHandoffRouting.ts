@@ -40,6 +40,19 @@ export function selectSharedBrowserHumanInput(
     ? request : null;
 }
 
+/**
+ * Whether a Stop ended the turn that asked for this pause: the chat's own
+ * record of the Stop names its run (`runIdsEndedByStop`). Never a run's
+ * canceled status alone: a take-over cancels its run too, and the pause it
+ * interrupts goes on, for the person who took over to answer.
+ */
+export function sharedBrowserHumanInputStopped(
+  request: { runId: string } | null,
+  stoppedRunIds: ReadonlySet<string> | null | undefined,
+): boolean {
+  return request !== null && stoppedRunIds?.has(request.runId) === true;
+}
+
 function runTimestamp(run: RunRecord): number {
   return Date.parse(run.updatedAt ?? run.createdAt ?? "") || 0;
 }

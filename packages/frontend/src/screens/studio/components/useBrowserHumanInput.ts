@@ -53,6 +53,14 @@ export type BrowserHumanInputOptions = {
   identityKey: string;
   /** Caller must validate exact user/runtime/page/origin before passing a request. */
   request: BrowserHumanInputRequest | null;
+  /**
+   * The pause whose turn a Stop ended (the chat's record of the Stop, never a
+   * run's canceled status alone: a take-over cancels its run too, and its
+   * pause goes on). It need not be `request` any more: a pause outlasts its
+   * request. The pause is over, as once Let Octo continue is sent, and the
+   * chat's Continue under the stopped turn is the way on.
+   */
+  stoppedHandoffId?: string | null;
   canTakeOver: boolean;
   /** Live origin ownership / native revoked capability, never canceled-run status. */
   humanControlConfirmed: boolean;
@@ -115,6 +123,14 @@ export function useBrowserHumanInput(options: BrowserHumanInputOptions) {
     const timer = window.setTimeout(() => setNow(Date.now()), Math.max(0, request.expiresAtMs - Date.now()) + 1);
     return () => window.clearTimeout(timer);
   }, [request]);
+  // A Stop ended the turn that asked: its pause ends with it, the row it
+  // left after its request too. Set while rendering, so no frame shows Let
+  // Octo continue for a stopped turn.
+  const stoppedHandoffId = options.stoppedHandoffId ?? null;
+  if (stoppedHandoffId && dismissedId !== stoppedHandoffId) {
+    setDismissedId(stoppedHandoffId);
+    setStartedIdentity(null);
+  }
   const liveRequest = request && request.expiresAtMs > now && request.handoffId !== dismissedId ? request : null;
   // Keep only the manual-step UI across a user-driven login/navigation. The
   // origin-bound field guidance may disappear, but continuation still starts a fresh

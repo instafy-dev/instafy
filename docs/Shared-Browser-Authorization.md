@@ -31,6 +31,14 @@ input changes an ephemeral Chromium session, not the canonical workspace.
   browser has 24 tabs, it closes the tab used least recently after the new one
   opens (never the tab on screen, the one used last, or one of Octo's), and
   answers 409 `browser_tab_limit` only when no tab can make room.
+- `POST /browser/pages/:pageId/end-pause` requires `browser.control`, but no
+  driver lease: after a Stop ended the turn that paused on a person's fields,
+  it puts back the outline each highlighted control had (the browser tools'
+  own steps before a page is next read), sends the page no input and reads
+  nothing of it. It acts only for the person that pause asked
+  (`initiatorUserId`), on the page's latest pause in the browser's own log
+  (`handoffId`), with no reading of the page or move to another since;
+  otherwise it answers 409 and touches nothing.
 - CDP screencast and a WebRTC offer require `browser.view`; both are pixel-only
   and close at the signed grant deadline. Their separate input websocket still
   requires `browser.control` and the live driver lease.

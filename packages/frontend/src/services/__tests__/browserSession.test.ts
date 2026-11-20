@@ -17,6 +17,7 @@ import {
   fetchRuntimeBrowserSessionCapabilities,
   fetchRuntimeBrowserSessionPages,
   fetchSharedBrowserHost,
+  endRuntimeBrowserSessionHumanInput,
   focusRuntimeBrowserSessionPage,
   isBrowserSessionUnavailableError,
   keepRuntimeBrowserSessionPage,
@@ -542,6 +543,45 @@ describe("runtime browser session page controls", () => {
     await expect(
       keepRuntimeBrowserSessionPage({ projectId: "project-1", browserSessionId: "browser-surface-1", pageId: " " }),
     ).resolves.toBe(false);
+  });
+
+  // A Stop ended the turn that paused on the person's fields: the browser
+  // takes that pause's outlines off the page.
+  it("ends a stopped pause on its page with browser control, and says when nothing was ended", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      endRuntimeBrowserSessionHumanInput({
+        projectId: "project-1", browserSessionId: "browser-surface-1", pageId: " tab/1 ", handoffId: "handoff-1",
+      }),
+    ).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      "https://origin.example.test/browser/pages/tab%2F1/end-pause",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ handoffId: "handoff-1" }) }),
+    );
+    expect(requestOriginAccessTokenMock).toHaveBeenCalledWith(
+      expect.objectContaining({ scopes: ["browser.control"], browserSessionId: "browser-surface-1" }),
+    );
+
+    // An older browser has no such call; a pause a later one replaced, or
+    // another person's, is refused: nothing was ended, and nothing is thrown.
+    for (const status of [404, 409, 503]) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no", { status })));
+      await expect(
+        endRuntimeBrowserSessionHumanInput({
+          projectId: "project-1", browserSessionId: "browser-surface-1", pageId: "tab-1", handoffId: "handoff-1",
+        }),
+      ).resolves.toBe(false);
+    }
+    const unsent = vi.fn();
+    vi.stubGlobal("fetch", unsent);
+    await expect(
+      endRuntimeBrowserSessionHumanInput({ projectId: "project-1", browserSessionId: "browser-surface-1", pageId: " ", handoffId: "handoff-1" }),
+    ).resolves.toBe(false);
+    await expect(
+      endRuntimeBrowserSessionHumanInput({ projectId: "project-1", browserSessionId: "browser-surface-1", pageId: "tab-1", handoffId: "" }),
+    ).resolves.toBe(false);
+    expect(unsent).not.toHaveBeenCalled();
   });
 
   // A chat's own tab: a new chat's browser turn never starts on a page

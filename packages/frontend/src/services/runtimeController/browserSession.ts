@@ -1196,6 +1196,55 @@ export async function keepRuntimeBrowserSessionPage(params: {
   return true;
 }
 
+/**
+ * Ends a pause a Stop ended: the outlines it drew on the person's fields are
+ * on the page itself, so Instafy's browser takes them off. It sends the page
+ * nothing else and reads nothing of it. False when nothing was ended: the
+ * browser cannot be reached, it has no such call (an older one keeps the
+ * outlines until the page is next read), or the pause is no longer the
+ * page's latest or is not this person's.
+ */
+export async function endRuntimeBrowserSessionHumanInput(params: {
+  projectId: string;
+  browserSessionId: string;
+  pageId: string;
+  handoffId: string;
+  preferRuntimeId?: string | null;
+  accessToken?: string | null;
+}): Promise<boolean> {
+  const pageId = params.pageId.trim();
+  if (!pageId || !params.handoffId) {
+    return false;
+  }
+
+  const token = await requestOriginAccessToken({
+    projectId: params.projectId,
+    protocol: "http",
+    scopes: ["browser.control"],
+    preferRuntime: params.preferRuntimeId ?? null,
+    accessToken: params.accessToken ?? null,
+    browserSessionId: params.browserSessionId,
+  });
+
+  if (!token) {
+    return false;
+  }
+
+  const response = await fetch(
+    buildOriginEndpointUrl(token.endpoint, `/browser/pages/${encodeURIComponent(pageId)}/end-pause`),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ handoffId: params.handoffId }),
+    },
+  );
+
+  return response.ok;
+}
+
 function toFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

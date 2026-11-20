@@ -248,6 +248,21 @@ export function readChatRunStopNotice(message: ChatMessage) {
   };
 }
 
+/**
+ * The runs a person's Stop ended, from the chat's own notices of them, which
+ * every reader of the chat holds, after a reload too. A take-over ends a run
+ * as well and is no Stop: its notice records none.
+ */
+export function runIdsEndedByStop(messages: readonly ChatMessage[]): ReadonlySet<string> {
+  const runs = new Set<string>();
+  for (const message of messages) {
+    if (getControllerConversationNoticeKind(message) !== "run_cancellation") continue;
+    const notice = readChatRunStopNotice(message);
+    if (notice.requested) for (const run of notice.runIds) runs.add(run);
+  }
+  return runs;
+}
+
 /** The prompt metadata naming the Stop whose turn a press of Continue carries on. */
 export const CONTINUED_STOP_METADATA_KEY = "continuedStopMessageId";
 

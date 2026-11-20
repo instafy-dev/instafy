@@ -102,17 +102,6 @@ export function chatRunStopBetweenParts(chat: {
     chat.routedWaitingKeys.has(browserRequestKey(row));
 }
 
-/**
- * Whether the chat offers Stop (useChatRunStop's `active`): the chat is on
- * screen, in Chat or in its Browser view, both above the one composer that
- * holds Stop. A pause on the person's fields brings the Browser view forward
- * by itself while its turn still writes its reply, and Stop stays there until
- * that turn ends. Never in a job thread's tab, which is not the chat.
- */
-export function chatRunStopOnScreen(view: { chatVisible: boolean; browserVisible: boolean; jobThread: boolean }): boolean {
-  return (view.chatVisible || view.browserVisible) && !view.jobThread;
-}
-
 export function groupChatRunStopTargets(targets: readonly ChatRunStopTarget[]) {
   const groups = new Map<string, { handle: string; label: string; targets: ChatRunStopTarget[] }>();
   for (const target of targets) {

@@ -17,7 +17,6 @@ import {
   chatRunStopBetweenParts,
   chatRunStopFollowOnTargets,
   chatRunStopNeedsConfirmation,
-  chatRunStopOnScreen,
   groupChatRunStopTargets,
   resolveChatRunStopTargets,
   runsCanceledByStop,
@@ -249,25 +248,52 @@ describe("a message between two of its parts", () => {
 
 // A sign-in pause in a local test: Studio brought the chat's Browser view
 // forward by itself, and Stop went with the Chat view, though the turn that
-// paused went on writing its reply for 14 s.
+// paused went on writing its reply for 14 s. Local tests, Nov 19 and 20: a
+// message sent with a map or a page of the chat in front had no Stop at any
+// moment of its turn, under the same composer.
 describe("where the chat offers Stop", () => {
-  it("is in Chat and in the chat's Browser view, never in a job thread's tab", () => {
-    expect(chatRunStopOnScreen({ chatVisible: true, browserVisible: false, jobThread: false })).toBe(true);
-    expect(chatRunStopOnScreen({ chatVisible: false, browserVisible: true, jobThread: false })).toBe(true);
-    expect(chatRunStopOnScreen({ chatVisible: true, browserVisible: true, jobThread: false })).toBe(true);
-    // Another of the chat's views, a file or a preview, in front alone.
-    expect(chatRunStopOnScreen({ chatVisible: false, browserVisible: false, jobThread: false })).toBe(false);
-    expect(chatRunStopOnScreen({ chatVisible: true, browserVisible: false, jobThread: true })).toBe(false);
-  });
-
-  it("is what ChatPanel gives Stop", () => {
+  it("is wherever the chat's composer is: no view in front decides it, and a job thread's tab has none", () => {
     const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
     const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
     const start = chatPanel.indexOf("const runStop = useChatRunStop({");
     expect(start).toBeGreaterThan(-1);
     const call = chatPanel.slice(start, chatPanel.indexOf("});", start));
-    expect(call).toContain("active: chatRunStopOnScreen({ chatVisible, browserVisible, jobThread: Boolean(jobThread) }),");
-    // The Browser view keeps Escape for the browser, and Stop's words say so.
-    expect(call).toContain("escapeStops: !browserVisible,");
+    const code = (text: string) => text.split("\n").filter((line) => !line.trim().startsWith("//"));
+    // Stop takes no view: a page, a map or a file of the chat in front keeps
+    // it, as Chat and the Browser view do. Only Escape follows the view: the
+    // Browser view keeps that key for the browser, and Stop's words say so.
+    const views = ["chatVisible", "browserVisible", "splitSurfaces", "hasResources", "activeSurfaceId", "resourceId",
+      "selectedPreview", "selectedFile"];
+    expect(code(call).filter((line) => views.some((view) => line.includes(view))).map((line) => line.trim()))
+      .toEqual(["escapeStops: !browserVisible,"]);
+    expect(call).not.toContain("active:");
+    // Who may stop is no view's matter either: a writer of the space, in the
+    // chat itself, never in a job thread's tab.
+    expect(call).toContain("canStop: canStopRuns,");
+    const canStopFrom = chatPanel.indexOf("const canStopRuns =");
+    expect(canStopFrom).toBeGreaterThan(-1);
+    const canStop = chatPanel.slice(canStopFrom, chatPanel.indexOf(";", canStopFrom));
+    expect(canStop).toContain("&& !jobThread");
+    for (const view of views) expect(canStop).not.toContain(view);
+    // One composer holds Stop, outside every view's own panel: the chat's,
+    // the Browser view's, a file's and a page's.
+    const composer = chatPanel.indexOf("<ChatComposerSurface");
+    expect(chatPanel.indexOf("<ChatComposerSurface", composer + 1)).toBe(-1);
+    expect(chatPanel.slice(composer, composer + 400)).toContain("composerRunStopController={runStop}");
+    for (const panel of ["const chatSurface = (", "const resourceContent = <>"]) {
+      const from = chatPanel.indexOf(panel);
+      expect(from).toBeGreaterThan(-1);
+      expect(from).toBeLessThan(composer);
+    }
+    expect(chatPanel.slice(chatPanel.indexOf("const chatSurface = ("), composer)).not.toContain("composerRunStopController");
+  });
+
+  // A Stop during a pause on the person's fields ends that pause: the
+  // Browser view learns of the Stop from the chat's own record of it.
+  it("gives the chat's Browser view the runs a Stop ended, from the chat's latest messages", () => {
+    const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
+    const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
+    expect(chatPanel).toContain("const browserHumanInputStoppedRunIds = useMemo(() => runIdsEndedByStop(recentMessages), [recentMessages]);");
+    expect(chatPanel).toContain("humanInputStoppedRunIds={browserHumanInputStoppedRunIds}");
   });
 });
