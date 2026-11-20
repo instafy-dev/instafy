@@ -8,7 +8,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { browserSessions: { endHumanInput: vi.fn() } } }));
+const sdk = vi.hoisted(() => ({ client: {} as { browserSessions?: { endHumanInput: (...args: unknown[]) => Promise<boolean> } } }));
+vi.mock("../../../../sdk/instafy", () => ({ controllerClient: sdk.client }));
 import { useEndStoppedBrowserPause } from "../useEndStoppedBrowserPause";
 
 type Options = Parameters<typeof useEndStoppedBrowserPause>[0];
@@ -59,6 +60,20 @@ describe("useEndStoppedBrowserPause", () => {
     await act(async () => { await Promise.resolve(); });
     expect(end).toHaveBeenCalledTimes(2);
     expect(container.textContent).toBe("");
+  });
+
+  it("uses the browser's own client by default, and reads it only once a pause was stopped", async () => {
+    // A view with no stopped pause never touches the client, whatever it holds.
+    delete sdk.client.browserSessions;
+    await render({ end: undefined });
+    await render({ end: undefined, preferRuntimeId: "runtime-2" });
+    const endHumanInput = vi.fn(async () => true);
+    sdk.client.browserSessions = { endHumanInput };
+    await render({ end: undefined, request: pause });
+    expect(endHumanInput).toHaveBeenCalledExactlyOnceWith({
+      projectId: "project-1", browserSessionId: "session-1", preferRuntimeId: "runtime-2", pageId: "PAGE1", handoffId: "handoff-1",
+    });
+    expect(end).not.toHaveBeenCalled();
   });
 
   it("sends nothing without a space to send it for", async () => {

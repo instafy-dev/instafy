@@ -17,11 +17,13 @@ export function useEndStoppedBrowserPause(options: {
   preferRuntimeId: string | null;
   end?: typeof controllerClient.browserSessions.endHumanInput;
 }): void {
-  const { projectId, browserSessionId, preferRuntimeId, end = controllerClient.browserSessions.endHumanInput } = options;
+  const { projectId, browserSessionId, preferRuntimeId, end } = options;
   const handoffId = options.request?.handoffId ?? null;
   const pageId = options.request?.browserPageId ?? null;
   useEffect(() => {
     if (!handoffId || !pageId || !projectId) return;
-    void end({ projectId, browserSessionId, preferRuntimeId, pageId, handoffId }).catch(() => false);
+    // The browser's client is read only once there is a pause to end.
+    void (end ?? controllerClient.browserSessions.endHumanInput)({ projectId, browserSessionId, preferRuntimeId, pageId, handoffId })
+      .catch(() => false);
   }, [browserSessionId, end, handoffId, pageId, preferRuntimeId, projectId]);
 }
