@@ -109,20 +109,23 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    words. A stop drawn anew under the pointer, for a field that names no
 //    list of its own beside a "Sort by" list, is not clicked, and no other
 //    list's options are named as its suggestions.
-// 14. Every click says which control it hit and what changed: a new page,
-//    the page loaded again, its address or its fragment, a dialog or a list
-//    opened, a dialog closed, the page changed. A click that is not on one of
-//    a typed field's own suggestions says the field still holds what was
-//    typed, with none of them chosen.
+// 14. Every click says which control it hit and what it was seen to change:
+//    a new page, the page loaded again, its address or its fragment, a dialog
+//    or a list opened, a dialog closed, the page changed; a page too busy to
+//    be read says nothing changed. The first click after a field showed
+//    suggestions, on no option, says the field still holds what was typed,
+//    with none of them chosen: once, and never after a suggestion was chosen,
+//    a key was pressed in the field, or of a field that suggested nothing.
 // 15. A guided ticket page, read with each card's "Tickets" drawn each way a
 //    reading could miss it, records which way a reading that listed three
 //    "unnamed button"s and no card's control saw: only a control across a
 //    shadow root reads so. The cards' controls are then named by their
-//    headings, clicked and highlighted by that name.
-// 16. A control whose name only says it opens something ("Open … in a new
-//    tab") goes without a prompt, in Octo's own tab too, while one whose name
-//    books asks, it and one in a form are refused in Octo's own tab, and one
-//    that opens another window is closed and the step says so.
+//    headings, clicked and highlighted by that name. A card that is a control
+//    around a button whose words are slotted is not clicked through to it.
+// 16. A control named "Open … in a new tab" is no commit button, so it goes
+//    without a prompt, in Octo's own tab too, while one whose name books
+//    asks, it and one in a form are refused in Octo's own tab, and one that
+//    opens another window is closed and the step says so.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -655,6 +658,19 @@ const GUIDED_TICKETS = (cta) => `<header><nav><button type="button" aria-expande
 // booking" into it: a step's checks read them as the button's own.
 const SLOTTED_RISK = `<h1>Your bookings</h1><div class="booking"><h3>Museum entry, Saturday</h3><p>2 adults</p>
 <ticket-cta>Delete booking</ticket-cta></div>${GUIDED_COMPONENTS}`;
+// A booking card that is a control itself, drawn by a web component around a
+// button whose words are slotted into it: the middle of the card is that
+// button, which deletes the booking.
+const SLOTTED_NESTED = `<h1>Your bookings</h1><booking-card>Details</booking-card><p id="state">Booking kept</p>
+<script>
+customElements.define("booking-card", class extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" }).innerHTML = '<div role="button" tabindex="0" aria-label="Museum entry, Saturday" style="display:inline-block"><button type="button" aria-label="Delete booking"><slot></slot></button></div>';
+    this.shadowRoot.querySelector("button").addEventListener("click", () => { document.getElementById("state").textContent = "Booking deleted"; });
+  }
+});
+</script>`;
 // A card larger than a row: its words run past what a row holds, so its
 // first words name nothing, and its icon button is named by its heading.
 const LONG_CARD = `<h1>Tickets</h1><div class="product"><h3>Entree museum</h3>
@@ -662,9 +678,11 @@ const LONG_CARD = `<h1>Tickets</h1><div class="product"><h3>Entree museum</h3>
 <div><button type="button">${GUIDED_ICON}</button></div></div>
 <div class="product"><h3>Entree tuinen</h3><p>${"Wandel door de tuinen rond het museum, met beelden uit vier eeuwen. ".repeat(7)}</p>
 <div><button type="button">${GUIDED_ICON}</button></div></div>`;
-// What a click shows or opens in place: a dialog and its "Close", and a
-// list a button opens.
-const CLICK_EFFECTS = `<h1>Exhibitions</h1>
+// What a click shows or opens in place: a dialog and its "Close", a list a
+// button opens, and a link to a part of the page whose name in the address
+// carries a pass (`pass`, a value the reading's own address masks).
+const CLICK_EFFECTS = (pass) => `<h1>Exhibitions</h1>
+<p><a href="#access_token=${pass}&amp;token_type=Bearer">Show my pass</a></p>
 <p><button type="button" onclick="document.getElementById('dates').showModal()">Choose a date</button>
 <button type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="sort" onclick="this.setAttribute('aria-expanded', 'true'); document.getElementById('sort').hidden = false">Sort by</button></p>
 <ul id="sort" role="listbox" hidden><li role="option">Newest</li><li role="option">Oldest</li></ul>
@@ -693,6 +711,18 @@ list.addEventListener("click", (event) => {
   draw([]);
 });
 </script>`;
+// Fields that say they open something and suggest nothing: a date field with
+// a calendar, and a search box whose list stays empty.
+const TYPED_NO_SUGGESTIONS = `<h1>Connections</h1>
+<p><label for="date">Date</label><input id="date" aria-haspopup="dialog" aria-expanded="false"></p>
+<p><label for="place">Find a stop</label><input id="place" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="places" autocomplete="off"></p>
+<ul id="places" role="listbox"></ul>
+<p><button type="button" onclick="document.getElementById('found').textContent = 'Connections on ' + document.getElementById('date').value">Show connections</button></p><p id="found"></p>`;
+// A button that changes nothing and keeps the page too busy to be read for
+// some seconds after it is pressed, as a heavy script does.
+const BUSY_AFTER_CLICK = `<h1>Journey planner</h1>
+<p><button type="button" onclick="let chunks = 5; const busy = () => { const until = Date.now() + 1600; while (Date.now() < until) {} if (--chunks > 0) setTimeout(busy, 100); }; setTimeout(busy, 0);">Check for delays</button></p>
+<p>No route yet</p>`;
 // An events page's cards, buttons named after what they open "in a new tab":
 // one that shows its event, one whose name books, one in a search form, and
 // one that opens another window.
@@ -857,6 +887,9 @@ export async function runSharedBrowserPageReadingFixture() {
       digest("a key beside its button", "base64url").slice(0, 32),
     ];
     const withheldKey = digest("a recovery key", "base64url");
+    // A pass in a link's fragment, in the dotted shape of an access token.
+    const fragmentPass = ["ya29", digest("a pass", "base64url").slice(0, 10), digest("its second part", "base64url").slice(0, 15), digest("its third part", "base64url").slice(0, 9)]
+      .map((part) => part.replace(/[^A-Za-z0-9]/g, "x")).join(".");
     const pages = {
       "site.test /reading/collapsed": page("Visit", COLLAPSED),
       "site.test /reading/choices": page("Order", CHOICES),
@@ -932,7 +965,10 @@ export async function runSharedBrowserPageReadingFixture() {
         [`site.test /reading/guided-${cta.replaceAll(" ", "-")}`, page("Tickets", GUIDED_TICKETS(cta))])),
       "site.test /reading/long-card": page("Tickets", LONG_CARD),
       "site.test /reading/slotted-risk": page("Your bookings", SLOTTED_RISK),
-      "site.test /reading/click-effects": page("Exhibitions", CLICK_EFFECTS),
+      "site.test /reading/slotted-nested": page("Your bookings", SLOTTED_NESTED),
+      "site.test /reading/typed-no-suggestions": page("Connections", TYPED_NO_SUGGESTIONS),
+      "site.test /reading/busy-after-click": page("Journey planner", BUSY_AFTER_CLICK),
+      "site.test /reading/click-effects": page("Exhibitions", CLICK_EFFECTS(fragmentPass)),
       "site.test /reading/typed-then-click": page("Journey planner", TYPED_THEN_CLICK),
       "site.test /reading/event-cards": page("This weekend", EVENT_CARDS),
       "frame.test /guided-cards": page("Tickets", `${GUIDED_CARDS_HTML("button")}${GUIDED_COMPONENTS}`),
@@ -1983,12 +2019,13 @@ export async function runSharedBrowserPageReadingFixture() {
     });
     assert.deepEqual(rowProblems, [], rowProblems.join("\n"));
 
-    // 14. A click says what it hit and what changed, as a type step and a
-    // choice do: every click said only "Clicked the control.", and a turn
-    // that clicked a planner's map after typing a stop wrote that it had
-    // chosen the stop and sent the journey. A dialog or a list it opens says
-    // so, and a field a type step left with suggestions that still holds what
-    // was typed says none of them is chosen, until one of its own is clicked.
+    // 14. A click says what it hit and what it was seen to change, as a type
+    // step and a choice do: every click said only "Clicked the control.", and
+    // a turn that clicked a planner's map after typing a stop wrote that it
+    // had chosen the stop and sent the journey. A dialog or a list it opens
+    // says so. The first click after a field showed suggestions, when it is
+    // on no option, says the field still holds what was typed and none of
+    // them is chosen.
     reading = await read("/reading/click-effects");
     const dated = await ok("POST", "/v1/click", { index: control(reading, "Choose a date").index, snapshotId: reading.snapshotId });
     assert.equal(dated.done, 'Clicked "Choose a date": a dialog opened.');
@@ -1996,16 +2033,56 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.equal(closedDates.done, 'Clicked "Close": a dialog closed.');
     const sorted = await ok("POST", "/v1/click", { index: control(closedDates, "Sort by").index, snapshotId: closedDates.snapshotId });
     assert.equal(sorted.done, 'Clicked "Sort by": a list opened.');
-    reading = await read("/reading/typed-then-click");
-    const typedOrigin = await ok("POST", "/v1/type", { index: control(reading, "Origin").index, snapshotId: reading.snapshotId, text: "Central" });
-    assert.match(typedOrigin.done, /2 suggestions under "Origin"/u, typedOrigin.done);
-    const zoomed = await ok("POST", "/v1/click", { index: control(typedOrigin, "Zoom in").index, snapshotId: typedOrigin.snapshotId });
-    assert.equal(zoomed.done, 'Clicked "Zoom in": the page changed. "Origin" still holds what was typed: none of its suggestions is chosen.');
-    const chosenStop = await ok("POST", "/v1/click", { index: control(zoomed, "Central Station").index, snapshotId: zoomed.snapshotId });
-    assert.equal(chosenStop.done, 'Clicked "Central Station": the page changed.', "a click on the field's own stop said none was chosen");
-    assert.equal(await runPage.evaluate(() => document.getElementById("origin").value), "Central Station");
-    const zoomedAgain = await ok("POST", "/v1/click", { index: control(chosenStop, "Zoom in").index, snapshotId: chosenStop.snapshotId });
-    assert.equal(zoomedAgain.done, 'Clicked "Zoom in": the page changed.', "a field with its stop chosen was said to hold what was typed");
+    // The part of the page a click went to is named as the reading's own
+    // address names it: a pass in the fragment is masked in both.
+    reading = await read("/reading/click-effects");
+    const passed = await ok("POST", "/v1/click", { index: control(reading, "Show my pass").index, snapshotId: reading.snapshotId });
+    assert.ok(new URL(await runPage.evaluate(() => location.href)).hash.includes(fragmentPass), "the link did not go to its part");
+    assert.ok(!JSON.stringify(passed).includes(fragmentPass), `a click's answer carried the pass in the address: ${passed.done}`);
+    assert.equal(passed.done, 'Clicked "Show my pass": the page went to "#access_token=REDACTED&token_type=Bearer".');
+    // A page too busy to be read after the click is not said to have changed:
+    // nothing was compared, and the button did nothing.
+    reading = await read("/reading/busy-after-click");
+    const busyClick = await ok("POST", "/v1/click", { index: control(reading, "Check for delays").index, snapshotId: reading.snapshotId });
+    assert.ok(['Clicked "Check for delays".', `Clicked "Check for delays". ${UNCHANGED_WORDS}`].includes(busyClick.done), busyClick.done);
+    const STILL_HOLDS = '"Origin" still holds what was typed: none of its suggestions is chosen.';
+    const typeOrigin = async (text) => {
+      const observed = await read("/reading/typed-then-click");
+      const typed = await ok("POST", "/v1/type", { index: control(observed, "Origin").index, snapshotId: observed.snapshotId, text });
+      assert.match(typed.done, /2 suggestions under "Origin"/u, typed.done);
+      return typed;
+    };
+    const zoom = async (observed) => await ok("POST", "/v1/click", { index: control(observed, "Zoom in").index, snapshotId: observed.snapshotId });
+    // Said by the first click after the type step, and once.
+    let planner = await zoom(await typeOrigin("Central"));
+    assert.equal(planner.done, `Clicked "Zoom in": the page changed. ${STILL_HOLDS}`);
+    planner = await zoom(planner);
+    assert.equal(planner.done, 'Clicked "Zoom in": the page changed.', "the field was named again by a later click");
+    // Never after one of its suggestions was chosen, a stop that reads as it
+    // was typed too: every later click said none was chosen.
+    for (const text of ["Central", "Central Station"]) {
+      planner = await typeOrigin(text);
+      planner = await ok("POST", "/v1/click", { index: control(planner, "Central Station").index, snapshotId: planner.snapshotId });
+      assert.equal(planner.done, 'Clicked "Central Station": the page changed.', `${text}: a click on the field's own stop said none was chosen`);
+      assert.equal(await runPage.evaluate(() => document.getElementById("origin").value), "Central Station");
+      planner = await zoom(planner);
+      assert.equal(planner.done, 'Clicked "Zoom in": the page changed.', `${text}: a field with its stop chosen was said to hold what was typed`);
+    }
+    // Nor after a key was pressed in the field, which may choose one or send it.
+    planner = await typeOrigin("Central");
+    planner = await ok("POST", "/v1/press", { index: control(planner, "Origin").index, snapshotId: planner.snapshotId, key: "ArrowDown" });
+    planner = await zoom(planner);
+    assert.equal(planner.done, 'Clicked "Zoom in": the page changed.', "a field a key was pressed in was said to hold what was typed");
+    // A field that only says it opens something showed no suggestions: a
+    // date field with a calendar and a search box whose list stayed empty
+    // were each said to have none of their suggestions chosen.
+    reading = await read("/reading/typed-no-suggestions");
+    let connections = await ok("POST", "/v1/type", { index: control(reading, "Date").index, snapshotId: reading.snapshotId, text: "12.12.2026" });
+    assert.doesNotMatch(connections.done, /suggestion/u, connections.done);
+    connections = await ok("POST", "/v1/type", { index: control(connections, "Find a stop").index, snapshotId: connections.snapshotId, text: "rail" });
+    assert.doesNotMatch(connections.done, /suggestion/u, connections.done);
+    connections = await ok("POST", "/v1/click", { index: control(connections, "Show connections").index, snapshotId: connections.snapshotId });
+    assert.equal(connections.done, 'Clicked "Show connections": the page changed.', "a field that showed no suggestions was said to have none chosen");
 
     // 15. A guided ticket page's cards. A reading of one listed its step bar
     // and three "unnamed button"s, two of them on the right in the page's
@@ -2098,17 +2175,28 @@ export async function runSharedBrowserPageReadingFixture() {
     } finally {
       await runTool("POST", "/v1/tabs/close", { tabId: ownBookings.tabId });
     }
+    // A click lands on a shadow button through the words slotted into it,
+    // and that way in is judged as any other: a card that is a control around
+    // such a button would take the press on the button, which deletes, with
+    // no prompt. Nothing is pressed.
+    reading = await read("/reading/slotted-nested");
+    const promptsBeforeNested = prompts.length;
+    const nested = await runTool("POST", "/v1/click", { index: control(reading, "Museum entry, Saturday").index, snapshotId: reading.snapshotId });
+    assert.equal(nested.code, 1, `a click on a card pressed the button inside it: ${nested.stdout}`);
+    assert.ok(nested.stderr.includes('A click in the middle of "Museum entry, Saturday" would land on something else inside it (another control, or a frame), so nothing was done.'), nested.stderr);
+    assert.equal(await runPage.evaluate(() => document.getElementById("state").textContent), "Booking kept", "the button inside the card was pressed");
+    assert.equal(prompts.length, promptsBeforeNested, "a click that cannot land asked");
     // A card larger than a row names its icon button by its heading too.
     reading = await read("/reading/long-card");
     assert.deepEqual(labels(reading), ["button in “Entree museum”", "button in “Entree tuinen”"]);
 
-    // 16. A control whose name only says it opens something goes where a
-    // link to that page goes: an events page's cards, buttons named "Open …
-    // in a new tab", each asked, since the "new" of "a new tab" read as a
-    // commit word. One whose name books and one in a form still ask (in
-    // Octo's own tab, which takes reading steps only, they are refused), and
-    // one that opens another window keeps the rule for windows: it is closed
-    // and the step says so.
+    // 16. The words at the end of a name that say where it opens commit
+    // nothing: an events page's cards, buttons named "Open … in a new tab",
+    // each asked, since the "new" of "a new tab" read as a commit word. They
+    // go as any other button with no risk word does. One whose name books
+    // and one in a form still ask (in Octo's own tab, which takes reading
+    // steps only, they are refused), and one that opens another window keeps
+    // the rule for windows: it is closed and the step says so.
     reading = await read("/reading/event-cards");
     const promptsBeforeCards = prompts.length;
     const market = await ok("POST", "/v1/click", { index: control(reading, "Open Winter Market on the Old Square in a new tab").index, snapshotId: reading.snapshotId });
@@ -2175,9 +2263,9 @@ export async function runSharedBrowserPageReadingFixture() {
         "a field's own suggestion is chosen by a click that leaves the focus in the field, from a list that closes as the field loses it and from one that draws its stops anew under the pointer, found again by the reading's record and clicked once; a stop the list no longer shows is not clicked, and the step answers with the field's suggestions as they read now",
         "a ticket shop's controls with no name of their own are named by their row or card (\"+ beside “Adult”\"), listed and highlighted by that name, while the same rows in a frame are named by the frame's site and none is listed or counted",
         "a row's words only tell its controls apart where they are named: reading steps in rows that speak of deleting, booking or saving go without a prompt, in Octo's own tab too, a pause on a booking's icon button under a line about cookies is the person's step, a key beside an icon button names no control, whole or in part, a withheld page's controls are named without their rows' words in its reading and a step's words, and a stop drawn anew for a field that names no list of its own names no other list's options",
-        "every click says which control it hit and what changed (a new page, the page loaded again, its address or fragment, a dialog or a list opened, a dialog closed, the page changed), and a click that is not on one of a typed field's own suggestions says the field still holds what was typed with none of them chosen",
-        "a guided ticket page's cards read as a reading that listed three unnamed buttons and no card's control saw them only when each card's control sits across a shadow root, never in a frame, hidden or of no control kind; those controls are named by their cards' headings, a card larger than a row's too, and are clicked and highlighted by that name, while the words slotted into such a button reach a step's checks: one that deletes is refused in Octo's own tab",
-        "a control whose name only says it opens something goes without a prompt, in Octo's own tab too, while one whose name books asks, it and one in a form are refused in Octo's own tab, and one that opens another window is closed and the step says so",
+        "every click says which control it hit and what it was seen to change (a new page, the page loaded again, its address or fragment, a dialog or a list opened, a dialog closed, the page changed), and nothing of a page too busy to be read; the first click after a field showed suggestions, on no option, says the field still holds what was typed with none of them chosen, once, and never after one was chosen (a stop that reads as it was typed too), after a key pressed in the field, or of a field that showed none",
+        "a guided ticket page's cards read as a reading that listed three unnamed buttons and no card's control saw them only when each card's control sits across a shadow root, never in a frame, hidden or of no control kind; those controls are named by their cards' headings, a card larger than a row's too, and are clicked and highlighted by that name, while the words slotted into such a button reach a step's checks: one that deletes is refused in Octo's own tab, and a card that is a control around one is not clicked through to it",
+        "a control named as opening in a new tab is no commit button and goes without a prompt, in Octo's own tab too, while one whose name books asks, it and one in a form are refused in Octo's own tab, and one that opens another window is closed and the step says so",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

@@ -35,16 +35,18 @@ load `redaction.js` first.
   exceptions are short whole-name lists that also need the right structure:
   cookie dismissals, page numbers and menu or section toggles ("Menü
   ein-/ausklappen", "Toggle navigation", or a hamburger icon on an unnamed
-  button), and a control with no address whose name only says it opens
-  something ("Open … in a new tab", "View …"), which is navigation when what
-  it opens carries no risk or commit word, sign-in or account, outside a
-  form, a dialog, a row, a credential context and a consent notice.
-  `commit: true` marks an ordinary control whose label or icon commits
+  button). `commit: true` marks an ordinary control whose label or icon commits
   a change (Save, Speichern, Umbuchen, Beleg erfassen, Stornobuchung, a floppy
   disk), which the Shared Browser still asks for under routine browsing. Menu
   items, tabs, tree items, disclosure and menu openers, navigation-area items,
   lists (a select, combobox or listbox) and their options never carry it, and a
   menu item named for a list ("Buchungen", "Stornobuchung") stays navigation.
+  The words at the end of a name that only say where it opens ("in a new tab",
+  "(opens in a new window)") are no commit words for a control with no address
+  outside a form, a dialog, a row, a credential context and a consent notice:
+  a card named "Open Winter Market in a new tab" asks as a plain change. A
+  name that says it opens something never makes a button with no address
+  navigation: "Open Long" opens a trade and "View PIN" shows a code.
   `stepLabels` names a list by its own label, or by the option it shows when it
   has none, never by its options; the in-page rules read what a select or a
   listbox shows as its chosen option.

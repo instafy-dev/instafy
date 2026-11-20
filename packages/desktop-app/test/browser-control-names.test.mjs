@@ -186,6 +186,10 @@ test("an unnamed control with no row's words is named by the heading of its card
   }
   // Cut between words.
   assert.equal(cardHeadingOf(byId("long-heading")), "A heading far longer than any name should be, with many");
+  // Of an icon inside the heading, only what it draws: its metadata named a
+  // card's button "image/svg+xml…".
+  const iconed = page(`<div class="product"><h3>${INKSCAPE_ICON} Entree museum</h3><p>Bezoek de vaste collectie</p><div><button id="iconed" type="button"></button></div></div>`);
+  assert.equal(rules(iconed).cardHeadingOf(iconed.document.getElementById("iconed")), "Entree museum");
   // The heading names it only with no words of its own, and after the
   // words beside it and its row's.
   assert.equal(policy.unnamedControlName({ tag: "button", card: "Entree museum", position: "top right" }), "button in “Entree museum”");
@@ -200,6 +204,44 @@ test("an unnamed control with no row's words is named by the heading of its card
   assert.equal(policy.unnamedControlName({ tag: "button", card: "A heading far longer than any name should be, with many words in it" }), "unnamed button");
   const key = createHash("sha256").update("a card's key").digest("base64url");
   assert.equal(policy.unnamedControlName({ tag: "button", card: key }), "unnamed button");
+});
+
+test("the controls of one reading share what the parts of the page around them answer for a card's heading", () => {
+  // A seat map's hundreds of unnamed seats, with no row's words, each walked
+  // the same parts of the page for a heading, and its reading took twice as
+  // long. Given one reading's shared pass, each part is worked out once, and
+  // the names are the same.
+  const seats = Array.from({ length: 60 }, (_, at) => `<div role="button" tabindex="0" id="seat-${at}"></div>`).join("");
+  const window = page(`
+    <div class="product"><h3>Entree museum</h3><p>Bezoek de vaste collectie</p><div><button id="first" type="button"></button> <button id="second" type="button"></button></div></div>
+    <div class="product"><h3>Entree tuinen</h3><div><button id="inner" type="button"><h4></h4></button></div></div>
+    <section>${"<div>".repeat(4)}${seats}${"</div>".repeat(4)}</section>`);
+  const { cardHeadingOf } = rules(window);
+  const byId = (id) => window.document.getElementById(id);
+  let styles = 0;
+  const computed = window.getComputedStyle.bind(window);
+  window.getComputedStyle = (...args) => {
+    styles += 1;
+    return computed(...args);
+  };
+  const named = (pass) => {
+    styles = 0;
+    const names = Array.from({ length: 60 }, (_, at) => cardHeadingOf(byId(`seat-${at}`), 60, pass));
+    return { names, styles };
+  };
+  const alone = named(null);
+  const shared = named(new window.Map());
+  assert.deepEqual(shared.names, alone.names);
+  assert.ok(alone.names.every((name) => name === ""), "a seat map is no card");
+  assert.ok(shared.styles > 0 && shared.styles * 20 < alone.styles, `shared ${shared.styles}, each alone ${alone.styles}`);
+  // The same names with a shared pass as without: two controls of one card,
+  // and a control that holds a heading of its own, which is never its card's.
+  const pass = new window.Map();
+  for (const id of ["first", "second", "inner"]) {
+    assert.equal(cardHeadingOf(byId(id), 60, pass), cardHeadingOf(byId(id)), id);
+  }
+  assert.equal(cardHeadingOf(byId("first"), 60, pass), "Entree museum");
+  assert.equal(cardHeadingOf(byId("inner"), 60, pass), "Entree tuinen");
 });
 
 test("a row's words and the text beside a control name it whole, never cut, and never as a value the redaction rules mask", () => {

@@ -5500,11 +5500,13 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
 }
 
 // A click on a checkbox says whether it is checked now. Any other click says which control it hit
-// and what changed: every click answered "Clicked the control.", and a turn that clicked a
-// planner's map after typing a stop wrote that it had chosen the stop and sent the journey. The
-// checkbox's click chose an option, and its activity says so: a form's clicks on its size and
-// toppings read "Browsed httpbin.org" between the rows of its typing (a local test, Nov 5), where
-// they are part of filling the form in.
+// and what it was seen to change: every click answered "Clicked the control.", and a turn that
+// clicked a planner's map after typing a stop wrote that it had chosen the stop and sent the
+// journey. This page's reading cannot be had, before the click or after, so nothing was compared
+// and the click names its control alone: it said "the page changed" of a button that did
+// nothing. The checkbox's click chose an option, and its activity says so: a form's clicks on its
+// size and toppings read "Browsed httpbin.org" between the rows of its typing (a local test,
+// Nov 5), where they are part of filling the form in.
 #[test]
 fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
     for (mode, done, step) in [
@@ -5515,7 +5517,7 @@ fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
         ),
         (
             "plain-button",
-            Some("Clicked \"Show details\": the page changed."),
+            Some("Clicked \"Show details\"."),
             "click",
         ),
     ] {

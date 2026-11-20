@@ -125,7 +125,8 @@ export declare function controlNameRulesInPage(): {
   shownTextOf(element: Element, max?: number): string;
   nearbyTextOf(element: Element, max?: number): string;
   rowTextOf(element: Element, max?: number): string;
-  cardHeadingOf(element: Element, max?: number): string;
+  /** `pass`: a Map one reading shares between its controls, so each part of the page around them is worked out once. */
+  cardHeadingOf(element: Element, max?: number, pass?: Map<Element, unknown> | null): string;
 };
 /** True for text that names nothing, such as a bare media type ("image/svg+xml"). */
 export declare function isPlaceholderName(value: unknown): boolean;

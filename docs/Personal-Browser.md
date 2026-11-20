@@ -211,12 +211,7 @@ does:
   dropdown, offcanvas or sidebar toggle, a whole name such as "Menü
   ein-/ausklappen" or "Toggle menu", or an unnamed hamburger icon; judged by
   the control's own names, never by the label of its form's submit button),
-  neutral menu, tree, tab and navigation items, a control with no address
-  whose name only says it opens something ("Open … in a new tab", "View …"),
-  judged on what it opens and only outside a form, a dialog, a row, a
-  credential context and a consent notice, so a name that pays, sends,
-  deletes, downloads, shares, commits, signs in or opens an account still
-  asks, page
+  neutral menu, tree, tab and navigation items, page
   numbers, privacy-preserving cookie dismissals (Reject all, Necessary only,
   Close, Alle ablehnen, Nur notwendige, Schließen; a bare Decline or Ablehnen
   asks), clicking into a field, typing

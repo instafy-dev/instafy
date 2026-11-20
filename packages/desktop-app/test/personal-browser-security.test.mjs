@@ -103,6 +103,26 @@ test("routine frees reading-style steps: plain links, menus, tabs, dismissals an
   }
 });
 
+// A name that says it opens something never makes a script's button
+// navigation: "Open …" and "View …" also name a trade, a door and a code, and
+// "in a new tab" says nothing of what the script does. The owner tier asks
+// for each, as it does for every button with no address.
+test("routine asks for a button with no address whatever its name says it opens", () => {
+  const page = { pageUrl: "https://example.test/events" };
+  for (const text of [
+    "Open Long", "Open Short", "Open position", "View PIN", "View card number", "Open garage door", "T\u00fcr \u00f6ffnen",
+    "Open dispute", "View opening hours", "Place bid in a new tab", "Donate in a new tab",
+    "Open Winter Market on the Old Square in a new tab", "Programme (opens in a new window)",
+    "Wintermarkt am Rathaus in neuem Tab \u00f6ffnen",
+  ]) {
+    for (const descriptor of [{ tag: "button", type: "button", text }, { tag: "div", role: "button", ariaLabel: text, text: "" }]) {
+      assert.equal(classifyPersonalBrowserStep("click", descriptor, page).verdict, "ask", JSON.stringify(descriptor));
+      assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine", page), true, JSON.stringify(descriptor));
+      assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "ask", page), true, JSON.stringify(descriptor));
+    }
+  }
+});
+
 // A page wrapped in one form (FreeFinance) has every control inside it. The
 // form's submit label is not the toggle's own name, so it does not make a
 // menu or section toggle ask; the form's own submit still does.

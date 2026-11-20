@@ -413,17 +413,12 @@
   ]);
   const VALUE_INPUT_TYPES = new Set(["range", "number", "radio", "checkbox", "date", "time", "datetime-local", "month", "week", "color"]);
   const NAVIGATION_AREAS = ["nav", "menu", "menubar", "tree", "tablist"];
-  // The words of a name that only say it opens something: "Open" or "View"
-  // first, German "öffnen" last, and "in a new tab" or "(opens in a new
-  // window)" last, in English and German. What is left is the thing it opens,
-  // whose words are judged on their own (openedByName). A name that shows
-  // more of the page it is on ("View more", "Mehr anzeigen") opens nothing.
-  // They read a name whose spaces cleanText made single, with no run of
-  // repeated characters for a match to retry from, and what they leave is
-  // trimmed one character at a time (withoutSeparators).
-  const OPENS_FIRST = /^(?:open|view)\s/iu;
-  const OPENS_LAST = /\söffnen$/iu;
-  const SHOWS_MORE = /^(?:more|less|mehr|weniger)$/iu;
+  // The words at the end of a name that only say where it opens: "in a new
+  // tab" or "(opens in a new window)", in English and German. Their "new" and
+  // "neuen" are no commit words (withoutNewTabWords). They read a name whose
+  // spaces cleanText made single, with no run of repeated characters for a
+  // match to retry from, and what they leave is trimmed one character at a
+  // time (withoutSeparators).
   const OPENS_NEW_TAB = new RegExp(
     `(?<![\\p{L}\\p{N}])\\(?(?:${[
       "(?:opens?\\s)?in\\s(?:a\\s)?new\\s(?:tab|window)",
@@ -433,12 +428,6 @@
     "iu",
   );
   const SEPARATORS = new Set([" ", ",", ":", ";", "\u2013", "\u2014", "-"]);
-  // A sign-in, a sign-up or an account in the words of what an opener opens,
-  // which keep it out of the opener rule ("sign" is a commit word already).
-  const SIGN_IN_WORDS = words([
-    "log\\s*in", "login", "log\\s*on", "logon", "sign\\s*up", "signup", "register", "registration", "accounts?",
-    "anmelden", "anmeldung", "einloggen", "registrieren", "registrierung", "konto", "kontos",
-  ]);
 
   // Risky addresses are judged by the address only.
   const RISKY_SIGN_OUT = /^(?:log-?out|sign-?out|sign_out|log_out|abmelden|unsubscribe|abbestellen|austragen|newsletter-abmelden)$/i;
@@ -753,19 +742,12 @@
     return !label && TOGGLE_ICON.test(cleanText(target.iconHint));
   }
 
-  // What a control whose name only says it opens something opens: "Open
-  // Winter Market in a new tab" opens "Winter Market", "Karte öffnen" opens
-  // "Karte". Null when no opener's words are in its name, or when what is
-  // left only shows more of the same page.
-  function openedByName(label) {
-    let rest = cleanText(label);
-    let opener = false;
-    for (const pattern of [OPENS_NEW_TAB, OPENS_LAST, OPENS_FIRST]) {
-      if (!pattern.test(rest)) continue;
-      rest = withoutSeparators(rest.replace(pattern, ""));
-      opener = true;
-    }
-    return opener && !SHOWS_MORE.test(rest) ? rest : null;
+  // The name without the words at its end that only say where it opens:
+  // "Open Winter Market in a new tab" is "Open Winter Market", and "Programme
+  // (opens in a new window)" is "Programme".
+  function withoutNewTabWords(name) {
+    const text = cleanText(name);
+    return OPENS_NEW_TAB.test(text) ? withoutSeparators(text.replace(OPENS_NEW_TAB, "")) : text;
   }
 
   // The text without the spaces, commas, colons and dashes at its ends, one
@@ -776,22 +758,6 @@
     while (start < end && SEPARATORS.has(text[start])) start += 1;
     while (end > start && SEPARATORS.has(text[end - 1])) end -= 1;
     return text.slice(start, end);
-  }
-
-  // The same for each of a control's names (its accessible name, the text it
-  // holds, its title): what each opens, or the name itself when it says
-  // nothing of opening, so the words of every name are judged. An events
-  // page's card is named "Open Winter Market in a new tab" and holds the
-  // event's title and dates. Null when none of its names is an opener's.
-  function openedByNames(names) {
-    let opener = false;
-    const rests = names.map((name) => {
-      const rest = openedByName(name);
-      if (rest === null) return cleanText(name);
-      opener = true;
-      return rest;
-    });
-    return opener ? rests : null;
   }
 
   // Whether the control sits in a form, by any of the facts a host gives of
@@ -1058,7 +1024,9 @@
       for (const child of container.children) walk(child);
       return found;
     };
-    // A heading's words, read as drawn: slotted words too.
+    // A heading's words, read as drawn: slotted words too, and of an icon
+    // inside it only the text an svg draws, never its metadata, title or
+    // description ("image/svg+xml").
     const headingWordsOf = (heading, max) => {
       let text = "";
       let visited = 0;
@@ -1069,7 +1037,13 @@
           text += node.nodeValue || "";
           return;
         }
-        if (!isElement(node) || NEVER_DRAWN.has(String(node.tagName).toUpperCase()) || hidden(node)) return;
+        if (!isElement(node)) return;
+        if (node.namespaceURI === SVG) {
+          if (!SVG_TEXT.has(node.localName)) return;
+        } else if (NEVER_DRAWN.has(String(node.tagName).toUpperCase())) {
+          return;
+        }
+        if (hidden(node)) return;
         if (String(node.localName).toLowerCase() === "slot" && typeof node.assignedNodes === "function") {
           const assigned = node.assignedNodes({ flatten: true });
           if (assigned.length) {
@@ -1083,16 +1057,41 @@
       walk(heading);
       return clean(text, max * 4);
     };
-    const cardHeadingOf = (element, max = 60) => {
+    // `pass`, when given, is a Map that one pass over a page shares between
+    // the controls it names (a reading, made in one go while the page stands
+    // still): what each element around them answers, too big for a card or
+    // the headings it holds, is worked out once. A seat map's hundreds of
+    // unnamed seats each walked the same parts of the page again, and its
+    // reading took twice as long.
+    const cardHeadingOf = (element, max = 60, pass = null) => {
       if (!isElement(element)) return "";
       const doc = element.ownerDocument;
+      const shared = pass && typeof pass.get === "function" && typeof pass.set === "function" ? pass : null;
+      const partOf = (node) => {
+        let part = shared.get(node);
+        if (part === undefined) {
+          const big = shownTextOf(node, CARD_MAX_CHARS + 1).length > CARD_MAX_CHARS;
+          part = { big, headings: big ? [] : headingsIn(node, null) };
+          shared.set(node, part);
+        }
+        return part;
+      };
+      // A heading inside the control is never its card's: a part's shared
+      // headings are used only when none of them is.
+      const inControl = (heading) => {
+        for (let node = heading, depth = 0; isElement(node) && depth < 64; node = flatParentOf(node), depth += 1) {
+          if (node === element) return true;
+        }
+        return false;
+      };
       for (let node = flatParentOf(element), depth = 0; isElement(node) && depth < 12; node = flatParentOf(node), depth += 1) {
         if (node === doc.body || node === doc.documentElement) return "";
         const role = String(node.getAttribute("role") || "").trim().toLowerCase();
         if (String(node.tagName).toUpperCase() === "MAIN" || role === "main") return "";
         if (String(node.localName).toLowerCase() === "slot") continue;
-        if (shownTextOf(node, CARD_MAX_CHARS + 1).length > CARD_MAX_CHARS) return "";
-        const headings = headingsIn(node, element);
+        const part = shared ? partOf(node) : null;
+        if (part ? part.big : shownTextOf(node, CARD_MAX_CHARS + 1).length > CARD_MAX_CHARS) return "";
+        const headings = part && !part.headings.some(inControl) ? part.headings : headingsIn(node, element);
         if (headings.length > 1) return "";
         if (headings.length === 0) continue;
         const words = headingWordsOf(headings[0], max);
@@ -1411,24 +1410,6 @@
       if (navigationItem && label && !riskyLabel(label, names) && !inDialog && target.credentialContext !== true) {
         return allow("navigation", "menu, tree, tab or navigation item");
       }
-      // A control with no address whose name only says it opens something
-      // ("Open …", "View …", "… in a new tab") goes where a link to that page
-      // goes: an events page's cards, buttons named "Open Winter Market on
-      // the Old Square in a new tab", each asked as a commit, by the "new" of
-      // "a new tab". It is judged on what it opens, and only outside a form, a
-      // dialog, a row, a credential context and a consent notice: a name that
-      // pays, sends, deletes, downloads, shares, commits, signs in or opens an
-      // account still asks, and so does any link, which the rules above judge.
-      const opens = (isButtonLike(target) || tag === "a" || role === "link") && !rowTarget && !href &&
-        target.download !== true ? openedByNames(names) : null;
-      if (
-        opens !== null && !inDialog && !inForm(target) && target.consentContext !== true &&
-        !credentialish(target, label) && namedCategory === null && iconCategory === null &&
-        opens.every((rest) => !riskyLabel(rest, [rest]) && !COMMIT_NOUN.test(rest) && !SIGN_IN_WORDS.test(rest) &&
-          !FEDERATED_SIGN_IN.test(rest))
-      ) {
-        return allow("navigation", "control whose name only opens a page");
-      }
       // A cookie or consent banner's refusal, judged by where it sits (the
       // page describer's consent context) as well as its words: "Reject all"
       // in an editor's suggestions panel is no banner, and asks below.
@@ -1459,7 +1440,22 @@
       tag === "summary" ||
       target.menuOpener === true ||
       areas.some((area) => NAVIGATION_AREAS.includes(area));
-    if (!structural && (isCommitLabel(label, names) || COMMIT_NOUN.test(label) || iconCategory === "commit")) {
+    // The words at the end of a name that only say where it opens ("in a new
+    // tab", "(opens in a new window)") commit nothing: an events page's
+    // cards, buttons named "Open Winter Market on the Old Square in a new
+    // tab", each asked as a commit button, by the "new" of "a new tab". The
+    // commit words are read in the name without them, for a control with no
+    // address outside a form, a dialog, a row, a credential context and a
+    // consent notice; anywhere else the name is read whole, as before. The
+    // click still asks as a change, and a risk word anywhere in the name
+    // asks as it did. A name that says it opens something never makes a
+    // script's button navigation: "Open …" and "View …" also name a trade, a
+    // door and a code.
+    const readsWhole = inDialog || inForm(target) || rowTarget || Boolean(href) || target.download === true ||
+      target.consentContext === true || credentialish(target, label);
+    const commitNames = readsWhole ? names : names.map(withoutNewTabWords);
+    const commitLabel = readsWhole ? label : commitNames.join(" ");
+    if (!structural && (isCommitLabel(commitLabel, commitNames) || COMMIT_NOUN.test(label) || iconCategory === "commit")) {
       return { ...ask("change", "control"), commit: true };
     }
     return ask("change", "control");
