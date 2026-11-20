@@ -41,7 +41,7 @@ use crate::{ApiError, AppConfig, AppState};
 const HOUR_SECONDS: i64 = 60 * 60;
 const CODEX_ISSUER_ENV: &str = "CODEX_DEVICE_AUTH_ISSUER";
 
-fn config(key_id: &str, proxy_base_url: Option<String>) -> AppConfig {
+pub(crate) fn config(key_id: &str, proxy_base_url: Option<String>) -> AppConfig {
     let mut config = build_app_config(test_origin_private_key(), test_origin_public_key(), key_id);
     config.proxy_base_url = proxy_base_url;
     config.credential_keys = Some(
@@ -50,18 +50,18 @@ fn config(key_id: &str, proxy_base_url: Option<String>) -> AppConfig {
     config
 }
 
-fn user_token(config: &AppConfig, user_id: Uuid) -> String {
+pub(crate) fn user_token(config: &AppConfig, user_id: Uuid) -> String {
     crate::auth::issue_controller_token(config, &user_id)
         .expect("issue user session")
         .token
 }
 
-fn api_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
+pub(crate) fn api_error(error: (StatusCode, Json<ApiError>)) -> anyhow::Error {
     let (status, Json(body)) = error;
     anyhow::anyhow!("status {}: {}", status.as_u16(), body.message)
 }
 
-async fn send(
+pub(crate) async fn send(
     app: &axum::Router,
     token: &str,
     method: &str,
@@ -100,7 +100,7 @@ fn codex_login(label: &str) -> Value {
 /// Makes `users`, runs `body`, then deletes the users, and with them their
 /// connections, agents and receipts, whether `body` passed, failed or
 /// panicked.
-async fn with_users(
+pub(crate) async fn with_users(
     pool: &PgPool,
     users: &[Uuid],
     body: impl Future<Output = anyhow::Result<()>>,
@@ -181,7 +181,7 @@ async fn seed_credential_tests(
 /// Opens `connections` pooled connections at once and leaves them idle, so
 /// requests sent together start together, instead of one opening a
 /// connection while the other runs to its end.
-async fn warm_pool(pool: &PgPool, connections: usize) -> anyhow::Result<()> {
+pub(crate) async fn warm_pool(pool: &PgPool, connections: usize) -> anyhow::Result<()> {
     let opened = futures_util::future::try_join_all((0..connections).map(|_| pool.get())).await?;
     drop(opened);
     Ok(())
@@ -241,30 +241,36 @@ async fn settled_codex_counts(pool: &PgPool) -> anyhow::Result<(i64, i64)> {
 }
 
 /// A proxy that answers a probe only when the test lets it.
-struct SlowProxy {
-    url: String,
-    reached: Arc<Notify>,
-    respond: Arc<Notify>,
+pub(crate) struct SlowProxy {
+    pub(crate) url: String,
+    pub(crate) reached: Arc<Notify>,
+    pub(crate) respond: Arc<Notify>,
     _server: AbortingTask<()>,
 }
 
 impl SlowProxy {
-    async fn start() -> anyhow::Result<Self> {
-        async fn answer(
-            axum::extract::State((reached, respond)): axum::extract::State<(
+    pub(crate) async fn start() -> anyhow::Result<Self> {
+        Self::start_answering(json!({ "output": [] })).await
+    }
+
+    /// A slow proxy that answers every request with `answer`.
+    pub(crate) async fn start_answering(answer: Value) -> anyhow::Result<Self> {
+        async fn respond_when_let(
+            axum::extract::State((reached, respond, answer)): axum::extract::State<(
                 Arc<Notify>,
                 Arc<Notify>,
+                Arc<Value>,
             )>,
         ) -> axum::Json<Value> {
             reached.notify_one();
             respond.notified().await;
-            axum::Json(json!({ "output": [] }))
+            axum::Json(answer.as_ref().clone())
         }
         let reached = Arc::new(Notify::new());
         let respond = Arc::new(Notify::new());
         let app = axum::Router::new()
-            .route("/v1/responses", axum::routing::post(answer))
-            .with_state((reached.clone(), respond.clone()));
+            .route("/v1/responses", axum::routing::post(respond_when_let))
+            .with_state((reached.clone(), respond.clone(), Arc::new(answer)));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", listener.local_addr()?);
         let server = spawn_aborting(async move {
@@ -516,7 +522,7 @@ async fn connections_and_agents(
     Ok((connections, agents))
 }
 
-async fn receipts(pool: &PgPool, user_id: Uuid, action: &str) -> anyhow::Result<i64> {
+pub(crate) async fn receipts(pool: &PgPool, user_id: Uuid, action: &str) -> anyhow::Result<i64> {
     sql_one(
         pool,
         "select count(*)::bigint from ai_connection_attempts where user_id = $1 and action = $2",
@@ -533,7 +539,7 @@ async fn is_open(pool: &PgPool, user_id: Uuid, session_id: Uuid) -> anyhow::Resu
 
 /// Polls `check` every 100 ms for up to 30 s. A ChatGPT poller looks at its
 /// login a poll interval after it starts, then every ten seconds.
-async fn wait_until<F, Fut>(what: &str, mut check: F) -> anyhow::Result<()>
+pub(crate) async fn wait_until<F, Fut>(what: &str, mut check: F) -> anyhow::Result<()>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<bool>>,
@@ -547,7 +553,13 @@ where
     anyhow::bail!("timed out waiting for {what}")
 }
 
-fn assert_limited(status: StatusCode, body: &Value, code: &str, limit: i64, window_seconds: i64) {
+pub(crate) fn assert_limited(
+    status: StatusCode,
+    body: &Value,
+    code: &str,
+    limit: i64,
+    window_seconds: i64,
+) {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     assert_eq!(body["code"], json!(code), "{body}");
     let details = &body["details"];

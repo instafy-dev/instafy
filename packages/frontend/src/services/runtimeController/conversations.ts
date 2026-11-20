@@ -10,6 +10,7 @@ import {
 import { logControllerRequestError } from "./logging";
 import { reportControllerProjectNotFound } from "./projectNotFound";
 import { createControllerReadBudget } from "./readBudget";
+import { noteSideCallRefusal, sideCallCooldown } from "./sideCallCooldown";
 
 export interface DispatchControllerPromptParams {
   projectId: string;
@@ -423,6 +424,12 @@ export async function requestProjectConversationTitle(
   if (!resolvedAccessToken) {
     return { success: false, title: null, error: "Missing controller session token." };
   }
+  // Over the per-account limit the controller refuses until a slot frees; the
+  // chat keeps its fallback title meanwhile.
+  const refused = sideCallCooldown("conversation_title", requestContext);
+  if (refused) {
+    return { success: false, title: null, error: refused };
+  }
 
   try {
     const response = await fetch(
@@ -443,12 +450,13 @@ export async function requestProjectConversationTitle(
     );
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(
+      const error = await readControllerApiError(
         response,
         "Unable to generate conversation title",
         requestContext,
       );
-      return { success: false, title: null, error: errorMessage };
+      noteSideCallRefusal("conversation_title", requestContext, error);
+      return { success: false, title: null, error: error.message };
     }
 
     const payload = (await response.json()) as Record<string, unknown>;

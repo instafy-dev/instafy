@@ -1,8 +1,9 @@
 import {
-  readControllerError,
+  readControllerApiError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
+import { noteSideCallRefusal, sideCallCooldown } from "./sideCallCooldown";
 
 export interface ProjectEditorInlineCompletionParams {
   projectId: string;
@@ -45,6 +46,12 @@ export async function requestProjectEditorInlineCompletion(
   if (!resolvedAccessToken) {
     return { success: false, completion: null, error: "Missing controller session token." };
   }
+  // Over the per-account limit the controller refuses until a slot frees, so
+  // the editor shows no completion instead of asking at every pause.
+  const refused = sideCallCooldown("editor_completion", requestContext);
+  if (refused) {
+    return { success: false, completion: null, error: refused };
+  }
 
   try {
     const response = await fetch(
@@ -68,12 +75,13 @@ export async function requestProjectEditorInlineCompletion(
     );
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(
+      const error = await readControllerApiError(
         response,
         "Unable to load editor completion",
         requestContext,
       );
-      return { success: false, completion: null, error: errorMessage };
+      noteSideCallRefusal("editor_completion", requestContext, error);
+      return { success: false, completion: null, error: error.message };
     }
 
     const payload = (await response.json()) as Record<string, unknown>;
