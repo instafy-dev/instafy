@@ -1866,7 +1866,28 @@ of deleting, booking or saving go without a prompt, in Octo's own tab too; a
 pause on a booking's icon button under a line about cookies is the person's
 step; a key beside an icon button names no control, whole or in part; and a
 withheld page's controls are named without their rows' words, in its reading
-and in a step's words. The Personal
+and in a step's words. Every click says which control it hit and what changed
+("a new page opened", "the page loaded again", "the page changed, and so did
+its address", "the page went to "#weekend"", "a dialog opened", "a dialog
+closed", "a list opened", "the page changed"), and a click on a planner's zoom
+button after a stop was typed adds that the field still holds what was typed
+with none of its suggestions chosen, until its own stop is clicked. A guided
+ticket page modelled on one a reading listed with three "unnamed button"s and
+no card's "Tickets" is read with each card's control drawn as a button, in a
+frame, hidden, as a control of no kind a reading knows, and across a shadow
+root (a web component's button with its words slotted into it, and a button
+slotted into a card a web component draws): a frame leaves the cards' words
+unread and nothing listed or counted, a hidden control's words are not read
+and it is counted, one of no kind is neither listed nor counted, and only the
+controls across a shadow root read as that reading did, a listed control at
+each card with the cards' words in the text; they are named by their cards'
+headings ("button in “Entree museum”"), a click on one opens that card's
+tickets with no prompt, and a pause on one highlights it, as a card larger
+than a row names its icon button by its heading too. An events page's cards,
+controls named "Open … in a new tab", open without a prompt, in Octo's own tab
+too, while one whose name books asks (and is refused in Octo's own tab), as
+does one in a form, and one that opens another window is closed with the step
+saying so. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 

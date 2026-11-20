@@ -35,7 +35,11 @@ load `redaction.js` first.
   exceptions are short whole-name lists that also need the right structure:
   cookie dismissals, page numbers and menu or section toggles ("Menü
   ein-/ausklappen", "Toggle navigation", or a hamburger icon on an unnamed
-  button). `commit: true` marks an ordinary control whose label or icon commits
+  button), and a control with no address whose name only says it opens
+  something ("Open … in a new tab", "View …"), which is navigation when what
+  it opens carries no risk or commit word, sign-in or account, outside a
+  form, a dialog, a row, a credential context and a consent notice.
+  `commit: true` marks an ordinary control whose label or icon commits
   a change (Save, Speichern, Umbuchen, Beleg erfassen, Stornobuchung, a floppy
   disk), which the Shared Browser still asks for under routine browsing. Menu
   items, tabs, tree items, disclosure and menu openers, navigation-area items,
@@ -53,7 +57,10 @@ load `redaction.js` first.
   to the necessary cookies or to a selection ("Accept only necessary",
   "Accept selection") saves a refusal, so it asks with `commit: true` instead.
   `unnamedControlName(hints)` names a control the page left unnamed from its
-  tooltip attribute, image text, icon and position, so a prompt never shows an
+  tooltip attribute, image text, icon and position, the text beside it, its
+  row's first words or, with none, its card's heading ("button in “Entree
+  museum”", `controlNameRulesInPage`'s `cardHeadingOf`, which reads the page
+  as drawn, through slots and open shadow roots), so a prompt never shows an
   index such as "button 5".
   `isFreeSiteSearch(target, pageUrl, submittedEntries)` is the stricter test
   the Shared Browser applies before it lets Enter in a site's own search box

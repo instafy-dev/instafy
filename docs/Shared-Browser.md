@@ -746,6 +746,20 @@ An icon-only control whose icon is a trash can, a paper plane, a cart or card,
 a share or add-user, a download or a sign-out asks in that category, and one
 whose icon is a floppy disk, pencil or plus asks as a commit button.
 
+A control with no address whose name only says it opens something ("Open …"
+or "View …" first, "öffnen" last, or "in a new tab", "(opens in a new window)"
+or "in neuem Tab" last) is navigation, as a plain link to that page is: an
+events page's cards were buttons named "Open Winter Market on the Old Square
+in a new tab", and each click asked, since the "new" of "a new tab" read as a
+commit word. It is judged on what it opens, the name without those words: a
+risk or commit word there, a sign-in, a sign-up or an account keeps it out of
+this rule, and so does a form, a dialog, a row, a credential context or a
+consent notice around it, so what pays, sends, deletes, downloads, shares,
+commits or signs in still asks. A link is judged by the link rules, never by
+this one, and a name that shows more of the page it is on ("View more", "Mehr
+anzeigen") opens nothing. A click that opens another window is still stopped
+and closed, and the step says so (below).
+
 A control is named by its accessible name or the text it draws. The text it
 draws leaves out what never draws: scripts and styles, parts the page's CSS
 hides (`display: none`, as the `hidden` attribute does unless the page's own
@@ -802,13 +816,28 @@ has some, when that element holds at most 400 characters, never a field's
 value. A control whose own name is only marks ("+", "−", "×") keeps them and
 is told apart the same way ("+ beside “Adult”"). A ticket page's reading listed
 its rows' buttons as "unnamed button", none told apart, so the turn could
-neither highlight the one for a ticket nor name it. The row's words only tell
+neither highlight the one for a ticket nor name it. With no row's words, the
+heading of the card it sits in names it instead ("button in “Entree
+museum”", "+ in “Entree museum”"): the one heading (`h2` to `h6`, or a
+heading role below level one) of the nearest element around it that holds
+any, read in the tree as the page draws it, through slots and open shadow
+roots, at most 60 characters cut between words. None when that element holds
+more than one heading (a list of cards), is the page's `main` part or holds
+more than 2,000 characters, and never a hidden heading or the page's title. A
+guided ticket page's reading listed its product cards' controls as "unnamed
+button"s beside the basket's, with the cards' words in its text and no frame
+mark, as buttons whose words sit across a shadow root read (a web component's
+button with its words slotted into it, or a button slotted into a card a web
+component draws), and a card larger than a row has no first words to use
+either. A click lands on such a button through the words
+slotted into it, which the page reports as the component's own. The row's words only tell
 it apart where it is named (a reading, a prompt, a step's result, the action
 log): a step's checks read its name without them, so they never make a step
 ask, refuse it in Octo's own tab or make a pause a cookie notice's (a "+"
 beside "How do I delete my account?", a "×" over "Save 10% on your first
-order", a booking's icon button under a line about cookies). A withheld page's
-controls are named without them: they are the page's text. The text beside it
+order", a booking's icon button under a line about cookies), and nor does a
+card's heading. A withheld page's controls are named without either: they are
+the page's text. The text beside it
 and a row's words are used whole or not at all, never cut inside a word, and
 never when they are an address or hold a value the redaction rules mask: a key
 beside an icon button, which the page's text masks by the words around it,
@@ -843,7 +872,8 @@ Dutch, so a "Reservar" or "Publicar" button is not one, and a word that is
 also a headline's verb counts only where a button puts it), or a menu item,
 tab or navigation item whose only risky word is a commit word outside the
 consequential list (such as "Neu", "Weiter", "Erfassen" or "Abgleichen" in a
-menu), can still act without a prompt. **Ask** reviews every click, typing,
+menu), or a control whose name only says it opens something while its script
+does more, can still act without a prompt. **Ask** reviews every click, typing,
 form submission and key press. Its one relaxation is the plain address: on a
 site already approved in that tab, an address that is not on the risky-address
 list opens without a prompt, so such an address with side effects can act
@@ -2307,6 +2337,27 @@ now: "The page still reads as it did before this step, 6 seconds after it:
 this result is the page as it is now." A list that came between the look and
 that reading was in the result while its answer said the page read as
 before, so the words go only with a reading that reads so too.
+Every click says in its `done` which control it hit, by the name its reading
+gave it cut to 60 characters, and what changed, as a type step and a choice
+do: "Clicked "Plan your visit": a new page opened." Another document at
+another address is a new page, one at the same address "the page loaded
+again"; on the same document another address is "the page changed, and so did
+its address", another fragment "the page went to "#weekend"", a dialog or a
+list a person can see now and could not before "a dialog opened" or "a list
+opened", a dialog gone "a dialog closed", and anything else "the page
+changed". A page that reads as before says "Clicked "Check for delays"." and
+the words above. Before, a click said only "Clicked the control.": a turn that
+clicked a planner's map after typing a stop wrote that it had chosen the stop
+and sent the journey, and one that pressed a shop's basket for its ticket
+button wrote that the ticket button opened an empty basket. A type step that
+types into a field without sending it marks the field when a list of
+suggestions came under it, or it says it opens one, with a digest of what it
+holds, never the text; a later click that is not on one of that field's own
+suggestions adds, for each such field that still holds what was typed,
+""Origin" still holds what was typed: none of its suggestions is chosen." A
+field whose suggestion was chosen, that the page emptied or changed, or a new
+page, says nothing. A withheld page's control and fields are named by their
+own hints only.
 `omittedControls` counts
 the controls left out, so a list cut short by a closed menu, or by a box the
 page scrolls itself, does not read as the whole page; it counts the controls

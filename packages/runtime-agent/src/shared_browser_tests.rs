@@ -5499,10 +5499,12 @@ fn a_type_step_names_the_field_and_how_many_characters_went_in_never_the_text() 
     }
 }
 
-// A click on a checkbox says whether it is checked now. Any other click says nothing more than
-// its reading. The checkbox's click chose an option, and its activity says so: a form's clicks on
-// its size and toppings read "Browsed httpbin.org" between the rows of its typing (a local test,
-// Nov 5), where they are part of filling the form in.
+// A click on a checkbox says whether it is checked now. Any other click says which control it hit
+// and what changed: every click answered "Clicked the control.", and a turn that clicked a
+// planner's map after typing a stop wrote that it had chosen the stop and sent the journey. The
+// checkbox's click chose an option, and its activity says so: a form's clicks on its size and
+// toppings read "Browsed httpbin.org" between the rows of its typing (a local test, Nov 5), where
+// they are part of filling the form in.
 #[test]
 fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
     for (mode, done, step) in [
@@ -5511,7 +5513,11 @@ fn a_click_on_a_checkbox_says_whether_it_is_checked_now() {
             Some("Clicked \"Extra Cheese\", and it is checked now."),
             "choose",
         ),
-        ("plain-button", None, "click"),
+        (
+            "plain-button",
+            Some("Clicked \"Show details\": the page changed."),
+            "click",
+        ),
     ] {
         let fixture = EmbeddedControllerFixture::new();
         fixture.prepare_routine_start("page-target");
@@ -7507,7 +7513,7 @@ async fn model_view(result: CallToolResult) -> ModelView {
 /// 22-page browser turn (a local test, Nov 4), half of the 409k characters its
 /// 15 uncut steps sent, and 7 more steps cut at the cell's output limit. The
 /// text now says what the step did, in the controller's own words when it has
-/// them: a step that ran out of time, a typed field, a withheld page.
+/// them: a step that ran out of time, a typed field, a click, a withheld page.
 #[tokio::test]
 async fn every_way_a_model_reads_a_step_holds_its_page_once() {
     const PAGE_TEXT: &str = "Battery: up to 20 hours on one charge";
@@ -7528,6 +7534,7 @@ async fn every_way_a_model_reads_a_step_holds_its_page_once() {
     };
     let timed_out = "This step was still running after 20 seconds, so it stopped where it was. This is the page as it is now: check what the step did before you act again.";
     let typed = "Typed 12 characters into \"Customer name:\". A page's reading never shows typed text. Nothing was sent yet.";
+    let clicked = "Clicked \"Zoom in\": the page changed. \"Origin\" still holds what was typed: none of its suggestions is chosen.";
     for (tool, payload, did) in [
         ("navigate", page(json!({})), "Opened the page."),
         ("snapshot", page(json!({})), "Read the page."),
@@ -7542,6 +7549,7 @@ async fn every_way_a_model_reads_a_step_holds_its_page_once() {
             timed_out,
         ),
         ("type", page(json!({ "done": typed })), typed),
+        ("click", page(json!({ "done": clicked })), clicked),
     ] {
         let view = model_view(successful_tool_result(tool, payload.clone())).await;
         assert_eq!(
