@@ -1275,11 +1275,12 @@ mod tests {
     /// received there, both `browser_then_build`. "Add each laptop's warranty from its own page."
     /// went `direct`, its reason that the building turn would read the pages; that turn, which
     /// changes files and opens no browser, asked the person to send them. Its input now reads that
-    /// a change that needs what a web page says starts in the browser, and that the building
-    /// turn's own reads end in words. After a page whose metro route was not confirmed, a section
-    /// the person stopped and a tip they stopped and undid, "keep going" read them as "the
-    /// unfinished page work" and stayed `direct`: its input now reads the chat up to the page and
-    /// nothing the person took back.
+    /// a change that needs what a web page says starts in the browser, and nothing that says a
+    /// building turn reads first and opens the browser itself: a change's building turn can't, and
+    /// a change that needed each maker's page went `direct` again for it (a local test, Nov 20).
+    /// After a page whose metro route was not confirmed, a section the person stopped and a tip
+    /// they stopped and undid, "keep going" read them as "the unfinished page work" and stayed
+    /// `direct`: its input now reads the chat up to the page and nothing the person took back.
     #[test]
     fn a_change_that_needs_a_page_and_keep_going_after_two_stops_read_their_lines() {
         let cases = shipped();
@@ -1290,12 +1291,17 @@ mod tests {
         let input = routing_input(&warranty, workspace.path()).unwrap();
         assert!(input.browser_routes_offered);
         for line in [
-            "it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map,",
+            "it carries that on. So is a change that needs what a web page says.\n- Stay `direct` (`required`) for a map (its research too),",
             "the building turn reads it and answers with a card naming it,",
-            "the building turn reads first, opening the browser itself if a page needs it.",
+            "an order's own status or items, a form or planner).\n- `browser`:",
         ] {
             assert!(input.prompt.contains(line), "{line}: {}", input.prompt);
         }
+        assert!(
+            !input.prompt.contains("opening the browser itself"),
+            "{}",
+            input.prompt
+        );
         // Both requests and their replies, the two requests sent on to the browser and the two
         // hand-backs' words left out.
         assert_eq!(input.history_metrics["includedTurns"], json!(7));
@@ -1380,7 +1386,7 @@ mod tests {
         assert!(input.browser_routes_offered);
         assert!(
             input.prompt.contains(
-                "- Stay `direct` (`required`) for a map, for a change in the person's own words to a page or map here (a note, a name, a color),"
+                "- Stay `direct` (`required`) for a map (its research too), for a change in the person's own words to a page or map here (a note, a name, a color),"
             ),
             "{}",
             input.prompt
@@ -1490,16 +1496,17 @@ mod tests {
     /// routing alone (a skill's other sections, a browser turn's run text, a section only a turn
     /// reads) keeps both hashes. A change that means to move routes updates them, and its pull
     /// request carries the routing check's table. A message whose turn can search the web shares
-    /// a start of its own: the same, with the one line that says so after the browser skill's
-    /// routing section, and one on a runtime where research that ends in a page searches first
-    /// has the next line too. The space's pages, which differ from chat to chat, come after it.
+    /// a start of its own: the same, with the line that says so after the browser skill's
+    /// routing section and, after it, the line that says research that ends in a page doesn't
+    /// search first; on a runtime where such research searches first, that second line says so
+    /// instead. The space's pages, which differ from chat to chat, come after it.
     #[test]
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
-            "245b96d49ce1628d18815a09c0e6a30944abc4f695650ae5cee8d10e21a35782";
+            "ae070fe68e8531847ddd9cfc92b81b3f6ceec61d8795c71d78a21508badc7885";
         const CASE_PROMPTS_SHA256: &str =
-            "f99f9b6916f9e49e520a0280b0c98328a4bc2b18e251ce6faa9ee1c5486dc7fd";
+            "0dc6f3392e5a7ee021bed4ab774803532d2e87307ee8b97131a83734b46867c1";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1529,7 +1536,7 @@ mod tests {
         assert_eq!(
             starts.len(),
             3,
-            "three starts: without search, with it, and with research pages searching first"
+            "three starts: without search, with it, and with research pages searching first too"
         );
         let cases = shipped();
         let start_where = |searching: bool, pages_first: bool| {
@@ -1557,17 +1564,22 @@ mod tests {
         let start = start_where(false, false);
         let search_start = start_where(true, false);
         let pages_start = start_where(true, true);
-        // The one line is all that tells the first two apart, and the next one the last two.
+        // Two lines are all that tell the first two apart: that Octo can search the web, and
+        // that research that ends in a page doesn't search first. The second line alone tells the
+        // last two apart: it says such research searches first, or that it doesn't.
+        let lines = format!(
+            "{}{}",
+            super::super::ROUTING_SEARCH_FACT,
+            super::super::ROUTING_NO_SEARCH_FIRST_FACT
+        );
+        assert_eq!(search_start.matches(&lines).count(), 1);
         assert_eq!(
             search_start
                 .matches(super::super::ROUTING_SEARCH_FACT)
                 .count(),
             1
         );
-        assert_eq!(
-            search_start.replacen(super::super::ROUTING_SEARCH_FACT, "", 1),
-            start
-        );
+        assert_eq!(search_start.replacen(&lines, "", 1), start);
         assert_eq!(
             pages_start
                 .matches(super::super::ROUTING_SEARCH_FIRST_FACT)
@@ -1575,11 +1587,17 @@ mod tests {
             1
         );
         assert_eq!(
-            pages_start.replacen(super::super::ROUTING_SEARCH_FIRST_FACT, "", 1),
+            pages_start.replacen(
+                super::super::ROUTING_SEARCH_FIRST_FACT,
+                super::super::ROUTING_NO_SEARCH_FIRST_FACT,
+                1
+            ),
             search_start
         );
         assert!(!start.contains(super::super::ROUTING_SEARCH_FACT));
+        assert!(!start.contains(super::super::ROUTING_NO_SEARCH_FIRST_FACT));
         assert!(!search_start.contains(super::super::ROUTING_SEARCH_FIRST_FACT));
+        assert!(!pages_start.contains(super::super::ROUTING_NO_SEARCH_FIRST_FACT));
         let mut prompts = String::new();
         let mut each = String::new();
         for (id, input) in &inputs {
@@ -1698,29 +1716,33 @@ mod tests {
         );
     }
 
-    /// Every rule of the browser skill's routing section has a case on a subject of its own, so
-    /// a rule that holds only for the recorded tests' subjects shows: the recorded tests sent
-    /// every earlier case about the same few places, products and sites. The cases from
-    /// `news-today` on are these, each with the route its rule gives, and each case's routing
-    /// input reads that rule. Eight of them are lookups that a search for fresh information
-    /// changes: news, a recent result and opening hours answered in a reply, news put on a page
-    /// and a comparison page (both `browser_then_build` when Octo can't search the web), a trip
-    /// on a map, an order in the person's own account and a site opened in the browser. Where
-    /// two rules could both be read as a case's, the case says which one decides: a note in the
-    /// person's own words, and a place added to a map, after replies that said something wasn't
-    /// found. Those sent where Octo can search the web for the message have one line saying so
-    /// in their routing input, and a second where research that ends in a page searches first:
-    /// news put on a page, a comparison page and a page of places stay `direct` only with both,
-    /// browsing first without them, a page that needs prices for dates or a route still browses
-    /// first with both, as a site must be used first (that rule's, not the one for research that
-    /// ends in a page), an order in the person's own account is still the browser's, and news
-    /// answered in a reply and a hotel for dates nobody named stay `direct`, while hotels for
-    /// dates nobody named put on a page browse first unless research that ends in a page searches
-    /// first. A question about a shop's policy beside an order number stays `direct`, with search
-    /// or without, while that order's own status is the browser's, a page a reply linked, opened
-    /// in the browser, goes by its address whatever the person calls it, also where the reply
-    /// linked no article, and a change to another chat's page, which the routing input's pages
-    /// name, stays `direct` with no change.
+    /// Every rule of the browser skill's routing section has a case on a subject of its own, so a
+    /// rule that holds only for the recorded tests' subjects shows: the recorded tests sent every
+    /// earlier case about the same few places, products and sites. The cases from `news-today` on
+    /// are these, each with the route its rule gives, and each case's routing input reads that
+    /// rule. Eight of them are lookups that a search for fresh information changes: news, a recent
+    /// result and opening hours answered in a reply, news put on a page and a comparison page (both
+    /// `browser_then_build` when Octo can't search the web), a trip on a map, an order in the
+    /// person's own account and a site opened in the browser. Where two rules could both be read as
+    /// a case's, the case says which one decides: a note in the person's own words, and a place
+    /// added to a map, after replies that said something wasn't found. Those sent where Octo can
+    /// search the web for the message have one line saying so in their routing input, and a second
+    /// saying whether research that ends in a page searches first: news put on a page, a comparison
+    /// page and a page of places stay `direct` only where it does, browsing first where it doesn't
+    /// and without search, a trip, a trip with the suggested hotels' prices for the person's dates
+    /// and events put on a map stay `direct` where it does, as a map does where it doesn't and
+    /// without search, while a map of what a site the person names in the browser says goes to the
+    /// browser first with search or without (the line that keeps a map's research with it is not
+    /// about a site to use), a page that needs prices for dates or a route still browses first
+    /// where it does, as a site must be used first (that rule's, not the one for research that
+    /// ends in a page), an order in the person's own account is still the
+    /// browser's, and news answered in a reply and a hotel for dates nobody named stay `direct`,
+    /// while hotels for dates nobody named put on a page browse first unless research that ends in
+    /// a page searches first. A question about a shop's policy beside an order number stays
+    /// `direct`, with search or without, while that order's own status is the browser's, a page a
+    /// reply linked, opened in the browser, goes by its address whatever the person calls it, also
+    /// where the reply linked no article, and a change to another chat's page, which the routing
+    /// input's pages name, stays `direct` with no change.
     #[test]
     fn every_rule_of_the_routing_section_has_a_case_on_a_subject_of_its_own() {
         let cases = shipped();
@@ -1800,10 +1822,14 @@ mod tests {
             (
                 "- `browser_then_build`: the same, then Octo makes or changes something here",
                 "browser_then_build",
-                &["browser-named-then-page"],
+                &[
+                    "browser-named-then-page",
+                    "map-from-a-site-in-the-browser",
+                    "map-from-a-site-in-the-browser-searching",
+                ],
             ),
             (
-                "So is research that ends in a page (a comparison, prices, a route), unless it searches first.",
+                "So is research that ends in a page (a comparison, prices, a route; not a map), unless it searches first (in Octo's own turn: the browser can't).",
                 "browser_then_build",
                 &[
                     "comparison-page-watches",
@@ -1811,6 +1837,8 @@ mod tests {
                     "news-then-page-searching-pages-browse-first",
                     "hotels-for-dates-nobody-named-page-searching",
                     "page-of-places",
+                    "comparison-page-watches-searching-pages-browse-first",
+                    "hotels-for-dates-page-searching-pages-browse-first",
                 ],
             ),
             (
@@ -1838,9 +1866,16 @@ mod tests {
                 &["change-needs-each-makers-page"],
             ),
             (
-                "- Stay `direct` (`required`) for a map,",
+                "- Stay `direct` (`required`) for a map (its research too),",
                 "direct",
-                &["trip-on-a-map", "sight-a-map-did-not-find-on-a-day"],
+                &[
+                    "trip-on-a-map",
+                    "sight-a-map-did-not-find-on-a-day",
+                    "trip-on-a-map-searching",
+                    "trip-map-with-hotel-prices-searching",
+                    "events-this-weekend-on-a-map-searching",
+                    "trip-on-a-map-searching-pages-browse-first",
+                ],
             ),
             (
                 "for a change in the person's own words to a page or map here (a note, a name, a color)",
@@ -1893,7 +1928,8 @@ mod tests {
                 assert!(input.prompt.contains(rule), "{id} reads: {rule}");
                 // Whether Octo can search the web for the message is one line of the routing
                 // input, after the section, there exactly when the case says so, and whether
-                // research that ends in a page searches first is the line after it.
+                // research that ends in a page searches first is the line after it, which says
+                // that it does or that it doesn't.
                 let fact = format!("```\n{}", super::super::ROUTING_SEARCH_FACT);
                 assert_eq!(input.prompt.contains(&fact), case.integrated_search, "{id}");
                 assert_eq!(
@@ -1922,20 +1958,35 @@ mod tests {
                     usize::from(case.research_pages_search_first),
                     "{id}"
                 );
+                let not_first = case.integrated_search && !case.research_pages_search_first;
+                let alone = format!(
+                    "```\n{}{}",
+                    super::super::ROUTING_SEARCH_FACT,
+                    super::super::ROUTING_NO_SEARCH_FIRST_FACT
+                );
+                assert_eq!(input.prompt.contains(&alone), not_first, "{id}");
+                assert_eq!(
+                    input
+                        .prompt
+                        .matches(super::super::ROUTING_NO_SEARCH_FIRST_FACT)
+                        .count(),
+                    usize::from(not_first),
+                    "{id}"
+                );
                 covered.insert(case.id);
             }
         }
         // Research that ends in a page stays `direct` where it searches first and browses first
         // where it doesn't: a case filed under either sentence has the line that says research
         // that ends in a page searches first exactly when that sentence says so. The line that
-        // Octo can search the web, alone, is not it.
+        // Octo can search the web is not it: the line after it then says such research doesn't.
         for (sentence, searches_first) in [
             (
                 "or that ends in a page when it searches first, stays `direct`",
                 true,
             ),
             (
-                "So is research that ends in a page (a comparison, prices, a route), unless it searches first.",
+                "So is research that ends in a page (a comparison, prices, a route; not a map), unless it searches first (in Octo's own turn: the browser can't).",
                 false,
             ),
         ] {
@@ -1953,8 +2004,11 @@ mod tests {
         }
         // Each case that can search has a twin rule on the same kind of message without it: news,
         // a comparison and a page of places put on a page browse first unless Octo can search the
-        // web and research that ends in a page searches first. Three of them are word for word the
-        // same message, with only the search lines of the routing input between them.
+        // web and research that ends in a page searches first. Five of them are word for word the
+        // same message, with only the search lines of the routing input between them: a
+        // comparison page and a page that needs prices for dates at hotels the person named
+        // browse first where research that ends in a page doesn't search first, the second also
+        // where it does, as a site must be used first.
         for (searching, without) in [
             ("news-then-page-searching", "news-then-page"),
             ("comparison-page-searching", "comparison-page-watches"),
@@ -1967,6 +2021,14 @@ mod tests {
                 "news-then-page-searching-pages-browse-first",
             ),
             ("page-of-places-searching", "page-of-places"),
+            (
+                "comparison-page-watches-searching",
+                "comparison-page-watches-searching-pages-browse-first",
+            ),
+            (
+                "hotels-for-dates-page-searching",
+                "hotels-for-dates-page-searching-pages-browse-first",
+            ),
         ] {
             let (searching, without) = (case(&cases, searching), case(&cases, without));
             assert!(searching.research_pages_search_first, "{}", searching.id);
@@ -1986,8 +2048,55 @@ mod tests {
                 "policy-beside-an-order-number",
             ),
             ("page-of-places-searching", "page-of-places"),
+            (
+                "comparison-page-watches-searching",
+                "comparison-page-watches-searching-pages-browse-first",
+            ),
+            (
+                "hotels-for-dates-page-searching",
+                "hotels-for-dates-page-searching-pages-browse-first",
+            ),
+            (
+                "trip-on-a-map-searching",
+                "trip-on-a-map-searching-pages-browse-first",
+            ),
+            (
+                "map-from-a-site-in-the-browser-searching",
+                "map-from-a-site-in-the-browser",
+            ),
         ] {
             assert_eq!(case(&cases, one).message, case(&cases, other).message);
+        }
+        // A map stays `direct` (`required`) in every search state, where research that ends in a
+        // page searches first, where it doesn't and without search: its research is the map's
+        // own, a trip's, the prices of the hotels it suggests for the person's dates and the
+        // events it puts on it, and Instafy's browser can't search. Where such research searches
+        // first, trips and events put on a map went to the browser first (a local test, Nov 20).
+        let trip = case(&cases, "trip-on-a-map");
+        assert!(!trip.integrated_search);
+        for (id, pages_first) in [
+            ("trip-on-a-map-searching", true),
+            ("trip-map-with-hotel-prices-searching", true),
+            ("events-this-weekend-on-a-map-searching", true),
+            ("trip-on-a-map-searching-pages-browse-first", false),
+        ] {
+            let map = case(&cases, id);
+            assert!(map.integrated_search, "{id}");
+            assert_eq!(map.research_pages_search_first, pages_first, "{id}");
+            assert_eq!(map.expected(), trip.expected(), "{id}");
+            assert_eq!(map.expected(), "direct (change: required)", "{id}");
+        }
+        // Where the person names the browser for a site's own words, a map of them goes to the
+        // browser first, with search as without it: the line that keeps a map's research with it
+        // doesn't reach a site to use.
+        for (id, searching) in [
+            ("map-from-a-site-in-the-browser", false),
+            ("map-from-a-site-in-the-browser-searching", true),
+        ] {
+            let map = case(&cases, id);
+            assert_eq!(map.integrated_search, searching, "{id}");
+            assert_eq!(map.research_pages_search_first, searching, "{id}");
+            assert_eq!(map.expected(), "browser_then_build", "{id}");
         }
         // A question about a shop's policy beside an order number stays with Octo whether or not
         // it can search the web for the message: the twins differ only in that line.
