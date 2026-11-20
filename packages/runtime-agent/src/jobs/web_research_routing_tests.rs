@@ -1232,7 +1232,7 @@ fn a_searchs_text_is_labelled_as_one_and_checked_is_only_for_a_page_read() {
         assert!(!research.contains(gone), "{gone}");
     }
     let lines = [
-        "With the AI's own web search, search, then read what it found; it uses no `instafy web` allowance. Its text is what the search provider wrote, not a page you read: say a fact from it as \"a web search on <date> found, on <that result's site>: …\" with its link and date, or read the page first.",
+        "With the AI's own web search, search, then read what it found; it uses no `instafy web` allowance. Its text is what the search provider wrote, not a page you read: say a fact from it as \"a web search on <date> found, on <that result's site>: …\" with that result's link and date, or read the page first.",
         "- Search never proves live stock or prices.",
         "- No price on an item's pages: search \"<name> price\" (Finding sources), or `--chain reference-search` for shops' official sites;",
         "- From a page read: \"checked 26 Oct on <host>\", linked to it.",
@@ -1306,7 +1306,7 @@ fn a_searchs_fact_is_said_as_one_and_the_key_card_waits_to_be_asked_for() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     for needle in [
-        "Its text is what the search provider wrote, not a page you read: say a fact from it as \"a web search on <date> found, on <that result's site>: …\" with its link and date, or read the page first.",
+        "Its text is what the search provider wrote, not a page you read: say a fact from it as \"a web search on <date> found, on <that result's site>: …\" with that result's link and date, or read the page first.",
         "- From a page read: \"checked 26 Oct on <host>\", linked to it.",
         "The key card (`request_secret` for the first `key_env` in `references/search-providers.json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
         "News or a score: read the subject's own news or results page before you say it doesn't show or you couldn't check.",
@@ -1449,10 +1449,10 @@ fn a_lookup_says_where_each_fact_came_from() {
             .unwrap_or_else(|| panic!("{name}"))
     };
     assert!(section("The AI's own web search").contains(
-        "say a fact from it as \"a web search on <date> found, on <that result's site>: …\" with its link and date, or read the page first."
+        "say a fact from it as \"a web search on <date> found, on <that result's site>: …\" with that result's link and date, or read the page first."
     ));
     assert!(section("Sources by need").contains(
-        "Aggregators only lead to the business's own page, never the final source; a site posing as an official one is no source or link (\"I couldn't check it on <name>'s own site\")."
+        "Direct access is only in a visible browser tab. A site posing as an official one is no source or link (\"I couldn't check it on <name>'s own site\")."
     ));
     let citing = section("Citing");
     for needle in [
@@ -1487,7 +1487,7 @@ fn a_lookup_says_where_each_fact_came_from() {
     ));
     for needle in [
         "found, on <that result's site>: …",
-        "a site posing as an official one is no source or link",
+        "A site posing as an official one is no source or link",
         "\"Cheapest\" needs one price below all others found",
         "never a signed storage address",
         "before you say it doesn't show or you couldn't check",
@@ -1505,7 +1505,7 @@ fn a_lookup_says_where_each_fact_came_from() {
             "{transport}"
         );
         for needle in [
-            "a site posing as an official one is no source or link",
+            "A site posing as an official one is no source or link",
             "\"Cheapest\" needs one price below all others found",
             "never a signed storage address",
         ] {
@@ -1981,7 +1981,7 @@ async fn granted_prompt(
 
 /// A turn that may run the AI's own web search carries the research skill whatever its words, first and whole, as a
 /// browser turn carries the browser skill: the skill says how to say what a search found ("a web search on <date>
-/// found: …"), and what "checked" means. Searching turns whose words routed other skills stated a search's excerpts as
+/// found, on <that result's site>: …"), and what "checked" means. Searching turns whose words routed other skills stated a search's excerpts as
 /// facts (a local test, Nov 19). It takes no routing place, so the skills the words route still load; a turn that can't
 /// search, and a browser turn, which never searches, carry it only when their words route it.
 #[tokio::test]

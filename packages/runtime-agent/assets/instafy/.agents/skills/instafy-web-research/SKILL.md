@@ -15,7 +15,7 @@ Read permitted source content this turn; trace facts to their sources. Find page
 
 ## The AI's own web search
 
-With the AI's own web search, search, then read what it found; it uses no `instafy web` allowance. Its text is what the search provider wrote, not a page you read: say a fact from it as "a web search on <date> found, on <that result's site>: …" with its link and date, or read the page first.
+With the AI's own web search, search, then read what it found; it uses no `instafy web` allowance. Its text is what the search provider wrote, not a page you read: say a fact from it as "a web search on <date> found, on <that result's site>: …" with that result's link and date, or read the page first.
 
 - When each search costs the person credits (this run's instructions say so), search only for what is fresh (news, today's prices or events, live status) or to find a page no source names; read a known official page with `instafy web read` instead. At most 2 searches a message, more only when the person asks for deeper research.
 - Search never proves live stock or prices.
@@ -46,7 +46,7 @@ Never fetch pages with `curl`, `wget` or ad-hoc scripts. Inspect `instafy web bu
 | Opening hours, closures, rules, fees | the official page | a second official notice |
 | Events and dates | the organiser's page | the venue's page |
 
-Aggregators only lead to the business's own page, never the final source; a site posing as an official one is no source or link ("I couldn't check it on <name>'s own site"). Direct access is only in a visible browser tab.
+Aggregators only lead to the business's own page, never the final source. Direct access is only in a visible browser tab. A site posing as an official one is no source or link ("I couldn't check it on <name>'s own site").
 
 ## Optional workspace policies
 

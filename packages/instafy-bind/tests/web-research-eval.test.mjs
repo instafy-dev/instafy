@@ -277,7 +277,7 @@ test("research and browser policy checks match the current skills", () => {
     key_facts_supported: ["need two independent sources, or one official source"],
     cites_checked_on: ['From a page read: "checked 26 Oct on <host>", linked to it.'],
     // "seen" for a price a page read showed; one a web search gave has the search's label
-    prices_seen: ['A price read on a page is the amount and currency, "seen 26 Oct"', 'say a fact from it as "a web search on <date> found, on <that result\'s site>: …" with its link and date, or read the page first', 'Prices are stored with "seen <date>"'],
+    prices_seen: ['A price read on a page is the amount and currency, "seen 26 Oct"', 'say a fact from it as "a web search on <date> found, on <that result\'s site>: …" with that result\'s link and date, or read the page first', 'Prices are stored with "seen <date>"'],
     prices_link_out: ["Shopping and trip items link to the shop's or operator's page."],
     not_read_listed: ['"not read: <page> (<why, in plain words>)"'],
     no_copied_listing: ["Link out instead of copying listings, reviews, photos or descriptions"],
