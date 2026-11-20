@@ -149,8 +149,9 @@ const WEEKDAY = "(?:mon|tue(?:s)?|wed(?:nes)?|thu(?:r(?:s)?)?|fri|sat(?:ur)?|sun
 const DAY = `(?:\\d{1,2}(?:st|nd|rd|th)?\\.?(?:\\s+(?:of\\s+)?|-)${MONTH}\\b|${MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b|\\d{4}-\\d{1,2}-\\d{1,2}\\b|\\d{1,2}[./]\\d{1,2}[./]\\d{2,4}\\b)`;
 // What makes the words a sentence, not a caption: before them, a word that says the opposite ("not checked 20 Nov",
 // "never checked", "wasn't checked", "not yet checked") or a sentence for a visitor ("can be seen 3 Oct", "must be
-// checked", "couldn't be checked", "best seen 12 Aug"); after them, the rest of a span of days ("3 Oct to 15 Jan").
-const NO_CAPTION_BEFORE = "(?<!(?:\\b(?:not|never|yet|be|been|being|best)|n['’]t)\\s+)";
+// checked", "couldn't be checked", "best seen 12 Aug", "first seen 3 Sep"); after them, the rest of a span of days
+// ("3 Oct to 15 Jan").
+const NO_CAPTION_BEFORE = "(?<!(?:\\b(?:not|never|yet|be|been|being|best|first)|n['’]t)\\s+)";
 const NO_SPAN_AFTER = `(?!(?:,?\\s*\\d{4})?\\s*(?:to|until|till|through|[–—-])\\s*(?:${WEEKDAY}\\.?,?\\s+)?${DAY})`;
 /** "checked 20 Nov 2026", "seen 5 Aug", "Checked on November 8, 2026", "checked 2026-11-20", "Last checked: 20 Nov",
  *  "checked Thu 20 Nov": the caption site.trust and site.cite write from how a fact's page was read, here as typed

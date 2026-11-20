@@ -517,7 +517,7 @@ test("the typed words are a caption's: not a sentence for a visitor or one that 
     "checked 20-Nov-2026", "Prices were checked 20 Nov", "Museum · checked 20 Nov 2026 – no result", "Journey planner · checked 20 Nov 2026; no connection result",
     "Hours double-checked 20 Nov", "not found · seen 5 Aug"]) assert.match(said, TYPED_READ, said);
   for (const unsaid of ["The special exhibition can be seen 3 Oct 2026 to 15 Jan 2027.", "The parade can be seen on 12 June from the bridge.",
-    "The comet is best seen 12 Aug after midnight.", "Bags are checked 24 Dec to 6 Jan at the door.", "Coats are checked 24 Dec – 6 Jan", "Tickets are checked 2026-12-24 until 2027-01-06",
+    "The comet is best seen 12 Aug after midnight.", "First seen 3 Sep 2026 at the trade fair", "Bags are checked 24 Dec to 6 Jan at the door.", "Coats are checked 24 Dec – 6 Jan", "Tickets are checked 2026-12-24 until 2027-01-06",
     "The planner was never checked 20 Nov.", "Route: couldn't be checked 20 Nov, the form was not sent", "The route wasn't checked 20 Nov", "Prices not yet checked 20 Nov",
     "The price hasn't been checked 20 Nov", "Large bags must be checked 20 Nov and after", "checked 20/11", "checked 2/3 of the rooms", "Checked: 3 of 5 rooms", "seen Sunday morning"]) {
     assert.doesNotMatch(unsaid, TYPED_READ, unsaid);
