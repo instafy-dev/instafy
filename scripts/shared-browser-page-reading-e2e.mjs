@@ -651,6 +651,10 @@ const GUIDED_TICKETS = (cta) => `<header><nav><button type="button" aria-expande
 <h2>Koop hier je officiële tickets</h2><p>${"Ontdek schilderijen, beelden en prenten uit vijf eeuwen, met een audiotour door alle zalen. ".repeat(6)}</p>
 <h2>Plan je bezoek</h2>${cta === "framed" ? '<iframe src="{frame}/guided-cards" title="Tickets" width="700" height="400"></iframe>' : GUIDED_CARDS_HTML(cta)}
 </main><footer><a href="/reading/visit?about">Over ons</a> <a href="/reading/visit?press">Pers</a></footer>${GUIDED_COMPONENTS}`;
+// A booking card whose web component's button slots the words "Delete
+// booking" into it: a step's checks read them as the button's own.
+const SLOTTED_RISK = `<h1>Your bookings</h1><div class="booking"><h3>Museum entry, Saturday</h3><p>2 adults</p>
+<ticket-cta>Delete booking</ticket-cta></div>${GUIDED_COMPONENTS}`;
 // A card larger than a row: its words run past what a row holds, so its
 // first words name nothing, and its icon button is named by its heading.
 const LONG_CARD = `<h1>Tickets</h1><div class="product"><h3>Entree museum</h3>
@@ -927,6 +931,7 @@ export async function runSharedBrowserPageReadingFixture() {
       ...Object.fromEntries(["button", "framed", "hidden", "no kind", "slotted words", "slotted card"].map((cta) =>
         [`site.test /reading/guided-${cta.replaceAll(" ", "-")}`, page("Tickets", GUIDED_TICKETS(cta))])),
       "site.test /reading/long-card": page("Tickets", LONG_CARD),
+      "site.test /reading/slotted-risk": page("Your bookings", SLOTTED_RISK),
       "site.test /reading/click-effects": page("Exhibitions", CLICK_EFFECTS),
       "site.test /reading/typed-then-click": page("Journey planner", TYPED_THEN_CLICK),
       "site.test /reading/event-cards": page("This weekend", EVENT_CARDS),
@@ -2079,6 +2084,20 @@ export async function runSharedBrowserPageReadingFixture() {
       }
       return found;
     }), [GUIDED_CARDS[0][0]], "the card's control was not outlined");
+    // A step's checks read the words slotted into such a button, as a person
+    // reads them on it: one that deletes is a named risk, which Octo's own
+    // tab, which takes reading steps only, leaves to the person, though the
+    // reading names it by its card.
+    const ownBookings = await ok("POST", "/v1/tabs/open", { url: `${sites().site}/reading/slotted-risk` });
+    try {
+      const bookings = await ok("GET", "/v1/snapshot");
+      assert.equal(bookings.tabId, ownBookings.tabId, "read in Octo's own tab");
+      const deleting = await runTool("POST", "/v1/click", { index: control(bookings, "button in \u201cMuseum entry, Saturday\u201d").index, snapshotId: bookings.snapshotId });
+      assert.equal(deleting.code, 1, `a slotted delete button was clicked: ${deleting.stdout}`);
+      assert.ok(deleting.stderr.includes("Octo's own tabs are for reading, so this step was not performed there."), deleting.stderr);
+    } finally {
+      await runTool("POST", "/v1/tabs/close", { tabId: ownBookings.tabId });
+    }
     // A card larger than a row names its icon button by its heading too.
     reading = await read("/reading/long-card");
     assert.deepEqual(labels(reading), ["button in “Entree museum”", "button in “Entree tuinen”"]);
@@ -2157,7 +2176,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a ticket shop's controls with no name of their own are named by their row or card (\"+ beside “Adult”\"), listed and highlighted by that name, while the same rows in a frame are named by the frame's site and none is listed or counted",
         "a row's words only tell its controls apart where they are named: reading steps in rows that speak of deleting, booking or saving go without a prompt, in Octo's own tab too, a pause on a booking's icon button under a line about cookies is the person's step, a key beside an icon button names no control, whole or in part, a withheld page's controls are named without their rows' words in its reading and a step's words, and a stop drawn anew for a field that names no list of its own names no other list's options",
         "every click says which control it hit and what changed (a new page, the page loaded again, its address or fragment, a dialog or a list opened, a dialog closed, the page changed), and a click that is not on one of a typed field's own suggestions says the field still holds what was typed with none of them chosen",
-        "a guided ticket page's cards read as a reading that listed three unnamed buttons and no card's control saw them only when each card's control sits across a shadow root, never in a frame, hidden or of no control kind; those controls are named by their cards' headings, a card larger than a row's too, and are clicked and highlighted by that name",
+        "a guided ticket page's cards read as a reading that listed three unnamed buttons and no card's control saw them only when each card's control sits across a shadow root, never in a frame, hidden or of no control kind; those controls are named by their cards' headings, a card larger than a row's too, and are clicked and highlighted by that name, while the words slotted into such a button reach a step's checks: one that deletes is refused in Octo's own tab",
         "a control whose name only says it opens something goes without a prompt, in Octo's own tab too, while one whose name books asks, it and one in a form are refused in Octo's own tab, and one that opens another window is closed and the step says so",
       ],
       limitations: [

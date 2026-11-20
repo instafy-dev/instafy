@@ -829,9 +829,11 @@ button"s beside the basket's, with the cards' words in its text and no frame
 mark, as buttons whose words sit across a shadow root read (a web component's
 button with its words slotted into it, or a button slotted into a card a web
 component draws), and a card larger than a row has no first words to use
-either. A click lands on such a button through the words
-slotted into it, which the page reports as the component's own. The row's words only tell
-it apart where it is named (a reading, a prompt, a step's result, the action
+either. A click lands on such a button through the words slotted into it,
+which the page reports as the component's own, and a step's checks read those
+words as the button's text, and the secret-screen check as one of its names:
+a person reads them on it, so a slotted "Delete booking" still asks. The row's
+words only tell it apart where it is named (a reading, a prompt, a step's result, the action
 log): a step's checks read its name without them, so they never make a step
 ask, refuse it in Octo's own tab or make a pause a cookie notice's (a "+"
 beside "How do I delete my account?", a "×" over "Save 10% on your first

@@ -1330,6 +1330,25 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       .map((id) => ownWords(element.ownerDocument?.getElementById(id)))
       .join(" "),
   );
+  // The words a web component slots into the control (a button drawn in its
+  // shadow root around the component's own text), which its text does not
+  // hold: a person reads them on the control, so a step's checks read them
+  // as its text, and the secret-screen check as one of its names. Its shown
+  // name stays the reading's own (a card's heading names one with none). A
+  // click lands on such a button through them, so its risk words must count.
+  const slottedWords = () => {
+    try {
+      if (element instanceof HTMLTextAreaElement || typeof element.querySelectorAll !== "function") return "";
+      return Array.from(element.querySelectorAll("slot"))
+        .slice(0, 16)
+        .map((slot) => typeof slot.assignedNodes === "function"
+          ? slot.assignedNodes({ flatten: true }).map((node) => node.textContent || "").join(" ")
+          : "")
+        .join(" ");
+    } catch (_) {
+      return "";
+    }
+  };
   // Every name the control may be known by, its text included, for the
   // secret-screen check alone.
   const checkedName = () => {
@@ -1338,7 +1357,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       [
         element.getAttribute("aria-label"), ariaLabelledByText, labels,
         element.getAttribute("placeholder"), element.getAttribute("title"),
-        element.textContent, element.getAttribute("name"),
+        element.textContent, slottedWords(), element.getAttribute("name"),
         element.getAttribute("data-bs-original-title"), element.getAttribute("data-original-title"),
         element.getAttribute("data-tippy-content"), element.getAttribute("data-tooltip"),
         image ? image.getAttribute("alt") : "",
@@ -1925,7 +1944,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
       : "",
     labels,
     // A text area's text is what it holds, a value, never its name.
-    text: element instanceof HTMLTextAreaElement ? "" : bounded(element.textContent || ""),
+    text: element instanceof HTMLTextAreaElement ? "" : bounded([element.textContent || "", slottedWords()].join(" ")),
     // The text the control draws: what textContent holds, less scripts,
     // styles, an svg's metadata, title and defs, and hidden parts.
     shownText: (() => {

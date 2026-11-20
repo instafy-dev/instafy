@@ -1883,7 +1883,9 @@ controls across a shadow root read as that reading did, a listed control at
 each card with the cards' words in the text; they are named by their cards'
 headings ("button in “Entree museum”"), a click on one opens that card's
 tickets with no prompt, and a pause on one highlights it, as a card larger
-than a row names its icon button by its heading too. An events page's cards,
+than a row names its icon button by its heading too; a button whose slotted
+words delete a booking is left to the person in Octo's own tab, as its checks
+read them as a deletion. An events page's cards,
 controls named "Open … in a new tab", open without a prompt, in Octo's own tab
 too, while one whose name books asks, it and one in a form are refused in
 Octo's own tab, which takes reading steps only, and one that opens another
