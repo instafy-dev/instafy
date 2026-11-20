@@ -337,6 +337,75 @@ test("Personal Browser hard-blocks password, OTP, and payment field typing", () 
   assert.equal(isSensitivePersonalBrowserEditable({ name: "search", type: "text" }), false);
 });
 
+test("a one-time-code mark makes a code's field only with a sign of a code", () => {
+  // The shape the page reads of a field; a descriptor without one keeps the
+  // mark alone as the sign (the test above).
+  const shape = (overrides = {}) => ({
+    maxLength: null, size: null, pattern: "", opensList: false, formSignIn: false, alone: false, ...overrides,
+  });
+  const field = (overrides) => ({ tag: "input", type: "text", autocomplete: "one-time-code", ...overrides });
+  // A planner's stops, marked only to keep autofill out: a plain field beside
+  // another, a combobox whose list opens as a person types, even with digits
+  // typed and when it is the only field of its form, and a postcode.
+  const typed = [
+    [field({ ariaLabel: "Destination", fieldShape: shape() }), "Old Town"],
+    [field({ ariaLabel: "Start", role: "combobox", fieldShape: shape({ opensList: true }) }), "Central Station"],
+    [field({ ariaLabel: "Start", fieldShape: shape({ opensList: true }) }), "20500"],
+    [field({ ariaLabel: "Find a stop", fieldShape: shape({ opensList: true, alone: true }) }), "Central Station"],
+    [field({ ariaLabel: "Postcode", name: "postcode", fieldShape: shape() }), "AB1 2CD"],
+    [field({ ariaLabel: "Destination", fieldShape: shape() }), "Terminal 2"],
+    [field({ ariaLabel: "Start", fieldShape: shape({ opensList: true }) }), "K7X2QP"],
+  ];
+  for (const [descriptor, text] of typed) {
+    assert.equal(isSensitivePersonalBrowserEditable(descriptor, text), false, JSON.stringify(descriptor));
+  }
+  // A code: a numeric "Code" field, one that holds 6 characters, one that
+  // takes digits by its type or pattern, one that names a code, a credential
+  // or a password (in a camel-cased name too), one in a form with a password
+  // or a sign-in field, and digits, or a word of letters and digits, typed
+  // into a plain one.
+  const blocked = [
+    [field({ ariaLabel: "Code", inputMode: "numeric", fieldShape: shape() }), "Old Town"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ maxLength: 6 }) }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ size: 8 }) }), "AB12CD"],
+    [field({ type: "tel", ariaLabel: "Enter what we sent you", fieldShape: shape() }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ pattern: "[0-9]{6}" }) }), "AB12CD"],
+    [field({ name: "otp", fieldShape: shape() }), "AB12CD"],
+    [field({ name: "smsCode", fieldShape: shape() }), "AB12CD"],
+    [field({ id: "otpCode", fieldShape: shape() }), "AB12CD"],
+    [field({ name: "token", fieldShape: shape() }), "AB12CD"],
+    [field({ ariaLabel: "Einmalpasswort", fieldShape: shape() }), "AB12CD"],
+    [field({ placeholder: "Your PIN", fieldShape: shape() }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", formHasPassword: true, fieldShape: shape() }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ formSignIn: true }) }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape() }), "482 910"],
+    // One word that mixes letters and digits reads as a code too.
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape() }), "K7X2QP"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape() }), "a1b2-c3d4"],
+    // The only field of its form, labelled in words the rules do not know
+    // and taking letters; and a shape that does not say whether it is.
+    [field({ ariaLabel: "Kod weryfikacyjny", fieldShape: shape({ alone: true }) }), "K7X2QP"],
+    [field({ ariaLabel: "Kod weryfikacyjny", fieldShape: { maxLength: null, size: null, pattern: "", opensList: false, formSignIn: false } }), "K7X2QP"],
+    // A code's own signs count in a field that says it opens a list.
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ opensList: true, maxLength: 6 }) }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", inputMode: "numeric", fieldShape: shape({ opensList: true }) }), "AB12CD"],
+    [field({ name: "code", fieldShape: shape({ opensList: true }) }), "AB12CD"],
+    [field({ ariaLabel: "Enter what we sent you", fieldShape: shape({ opensList: true, formSignIn: true }) }), "AB12CD"],
+  ];
+  for (const [descriptor, text] of blocked) {
+    assert.equal(isSensitivePersonalBrowserEditable(descriptor, text), true, JSON.stringify(descriptor));
+  }
+  // Every other rule stays: a password field, a card field and a secret's
+  // words, in a field that opens a list too.
+  for (const descriptor of [
+    field({ type: "password", fieldShape: shape({ opensList: true }) }),
+    field({ autocomplete: "one-time-code cc-number", fieldShape: shape({ opensList: true }) }),
+    field({ ariaLabel: "Verification code", fieldShape: shape({ opensList: true }) }),
+  ]) {
+    assert.equal(isSensitivePersonalBrowserEditable(descriptor, "Start"), true, JSON.stringify(descriptor));
+  }
+});
+
 test("Space and Enter are treated as activations and mutating keys stay blocked on secrets", () => {
   assert.equal(isPersonalBrowserActivationKey("Enter"), true);
   assert.equal(isPersonalBrowserActivationKey(" "), true);

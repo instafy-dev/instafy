@@ -76,7 +76,7 @@
     root.__instafyBrowserActionPolicy = api;
   }
 })(typeof globalThis === "object" ? globalThis : null, function browserActionPolicyFactory(redaction) {
-  if (!redaction || typeof redaction.CREDENTIAL_CONTEXT_SOURCE !== "string") {
+  if (!redaction || typeof redaction.CREDENTIAL_CONTEXT_SOURCE !== "string" || typeof redaction.CODE_WORD_SOURCE !== "string") {
     throw new Error("The browser action policy needs the redaction module.");
   }
 
@@ -1331,16 +1331,87 @@
   }
 
   // A field the person fills to sign in, which the agent never types into: a
-  // password or one-time code field, or the account identifier the typing
-  // rules above refuse (a form's field right before its password, an email
-  // field in a form with a password, an email-first username field). A host
-  // names these so the agent pauses on them for the person.
+  // password or one-time code field (isOneTimeCodeField), or the account
+  // identifier the typing rules above refuse (a form's field right before its
+  // password, an email field in a form with a password, an email-first
+  // username field). A host names these so the agent pauses on them for the
+  // person.
   function isSignInField(target) {
     const safeTarget = target && typeof target === "object" ? target : {};
     if (lower(safeTarget.tag) !== "input" || !TEXT_INPUT_TYPES.has(lower(safeTarget.type))) return false;
     if (lower(safeTarget.type) === "password") return true;
-    if (/(?:^|\s)(?:current-password|one-time-code)(?:\s|$)/.test(lower(safeTarget.autocomplete))) return true;
+    if (/(?:^|\s)current-password(?:\s|$)/.test(lower(safeTarget.autocomplete))) return true;
+    if (isOneTimeCodeField(safeTarget)) return true;
     return classifyTyping(safeTarget, {}).code === REFUSALS.sign_in.code;
+  }
+
+  // Whether a field `autocomplete="one-time-code"` marks holds a one-time
+  // code. The mark alone is no sign of one: sites also put it on plain fields
+  // (a journey planner's stops) to keep the browser's autofill out of them.
+  // With the mark, a field holds a code when it shows a sign of one of its
+  // own: its names (its label, name, id, placeholder or title, a camel-cased
+  // name read as its words) name a code (the redaction module's code words:
+  // "code", "PIN", "TAN", "Bestätigungscode", never "Postcode"), a credential
+  // (its credential words: "token", "Einmalpasswort") or a password or a
+  // code's step ("verify", "two-factor"); it sits under a heading, dialog or
+  // row that names a credential; it takes digits (input mode numeric, decimal
+  // or tel, a tel or number field, or a pattern of digits alone); it holds at
+  // most 10 characters (maxlength or size); or its form holds a password or
+  // sign-in field. A field with none of these that opens a list as a person
+  // types (a combobox, aria-autocomplete list or both, a datalist, or a list
+  // it names) holds no code, whatever is typed: a code's field offers no
+  // list. Any other holds one when it is the only field a person types into
+  // in its form (or, in no form, on the page): a code's step asks for nothing
+  // else, in whatever language it is labelled, while a planner asks for two
+  // stops; or when the text a step types into it (`ctx.typed`) reads as a
+  // code: digits alone, or one word that mixes letters and digits. A host
+  // that reports no shape for the field (`fieldShape`), or a rule made
+  // without its words, keeps the mark as the sign, as it was.
+  // Passwords, card fields and a secret's words stay the hosts' own rules.
+  // Runs inside the page too (a host sends its source with the words), so it
+  // uses nothing from this file's scope.
+  function oneTimeCodeRulesInPage(codeWordSource, credentialWordSource) {
+    const known = [codeWordSource, credentialWordSource].every((source) => typeof source === "string" && source !== "");
+    const CODE_WORD = new RegExp(known ? codeWordSource : "(?!)", "iu");
+    const CREDENTIAL_WORD = new RegExp(known ? credentialWordSource : "(?!)", "iu");
+    const STEP_WORD = /(?<![\p{L}\p{N}])(?:passw(?:ord|ort)s?|kennw(?:ort|örter)|totp|one[\s_-]*time|verif\p{L}*|authenticat\p{L}*|two[\s_-]*factor|2[\s_-]*step)(?![\p{L}\p{N}])/iu;
+    const text = (value) => (typeof value === "string" ? value : "");
+    const lowered = (value) => text(value).trim().toLowerCase();
+    const short = (value) => Number.isSafeInteger(value) && value > 0 && value <= 10;
+    return {
+      isOneTimeCodeField(target, ctx) {
+        const field = target && typeof target === "object" ? target : {};
+        if (!lowered(field.autocomplete).split(/\s+/).includes("one-time-code")) return false;
+        const shape = field.fieldShape;
+        if (!known || !shape || typeof shape !== "object" || Array.isArray(shape)) return true;
+        // "otpCode" reads as "otp Code", as "otp_code" and "otp-code" do.
+        const names = [field.ariaLabel, field.name, field.id, field.placeholder, field.title].map(text).join(" ")
+          .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, "$1 $2");
+        if (CODE_WORD.test(names) || CREDENTIAL_WORD.test(names) || STEP_WORD.test(names) || field.credentialContext === true) {
+          return true;
+        }
+        const type = lowered(field.type);
+        if (type === "tel" || type === "number" || ["numeric", "decimal", "tel"].includes(lowered(field.inputMode))) {
+          return true;
+        }
+        // A pattern of digits alone: \d or [0-9], each with a count, anchored or not.
+        if (/^\^?(?:(?:\\d|\[0-9\]|\[\\d\])(?:[*+?]|\{\d+(?:,\d*)?\})?)+\$?$/.test(text(shape.pattern).trim())) return true;
+        if (short(shape.maxLength) || short(shape.size)) return true;
+        if (field.formHasPassword === true || shape.formSignIn === true) return true;
+        if (shape.opensList === true) return false;
+        if (shape.alone !== false) return true;
+        // Digits alone, in groups too ("482 910"), or one word of four or
+        // more characters that mixes letters and digits ("K7X2QP", "a1b2-c3d4").
+        const typed = ctx && typeof ctx.typed === "string" ? ctx.typed.trim() : "";
+        if (/^\p{Nd}+$/u.test(typed.replace(/[\s-]+/g, ""))) return true;
+        const word = typed.replace(/-/g, "");
+        return /^[\p{L}\p{Nd}]{4,}$/u.test(word) && /\p{L}/u.test(word) && /\p{Nd}/u.test(word);
+      },
+    };
+  }
+  const oneTimeCodeRules = oneTimeCodeRulesInPage(redaction.CODE_WORD_SOURCE, redaction.CREDENTIAL_CONTEXT_SOURCE);
+  function isOneTimeCodeField(target, ctx) {
+    return oneTimeCodeRules.isOneTimeCodeField(target, ctx);
   }
 
   // A link or button that only opens a site's sign-in page: named exactly
@@ -1438,6 +1509,8 @@
     isEditable,
     isSearchField,
     isSignInField,
+    isOneTimeCodeField,
+    oneTimeCodeRulesInPage,
     isSignInOpener,
     isFreeSiteSearch,
     isPublicHost,
