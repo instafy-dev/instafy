@@ -176,6 +176,25 @@ describe("ConversationSurfaceTabs", () => {
       chatPanel.remove();
     });
 
+    // jsdom applies no media queries or hover, so this reads the classes that do.
+    it("shows a view's close with a mouse on its selected tab, and on another only while hovered or focused; always on touch", async () => {
+      await act(async () => root.render(<Strip onClose={vi.fn()} />));
+      const fileClose = container.querySelector<HTMLButtonElement>('[aria-label="Close a.md view"]')!;
+      const classes = (element: Element | null) => element?.className.split(/\s+/) ?? [];
+      // Browser is selected: its close is never hidden.
+      expect(classes(closeButton())).not.toContain("pointer-fine:opacity-0");
+      // Another view's close hides only for a fine pointer, until its tab is hovered or holds focus.
+      expect(classes(fileClose)).toEqual(expect.arrayContaining([
+        "pointer-fine:opacity-0", "pointer-fine:group-hover/view-tab:opacity-100", "pointer-fine:group-focus-within/view-tab:opacity-100",
+      ]));
+      expect(classes(fileClose)).not.toContain("opacity-0");
+      expect(classes(fileClose.closest('[data-tab-id="file:a.md"]'))).toContain("group/view-tab");
+      // The close shows on whichever tab is selected.
+      await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-file:a.md"]')!.click());
+      expect(classes(fileClose)).not.toContain("pointer-fine:opacity-0");
+      expect(classes(closeButton())).toContain("pointer-fine:opacity-0");
+    });
+
     it("hands its place beside Chat to the next view in a split", async () => {
       await act(async () => root.render(<Strip onClose={vi.fn()} split />));
       expect(container.querySelector('[data-testid="conversation-subtab-chat"]')).toBeNull();
