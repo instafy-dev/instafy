@@ -161,7 +161,7 @@ async function referenceTurn({ key }: { key: boolean }): Promise<Transcript> {
   const queries = key ? [...CASE.items.map((i) => `${i.name} reviews`), `${CASE.items[0]!.name} price`] : [`${CASE.items[0]!.name} reviews`];
   for (const query of queries) {
     const search = await webSearch({ query }, { ...common, stateDir: searchState });
-    searches.push({ query: search.query, status: search.status, results: search.results, tell: search.tell, ...(search.offer ? { offer: search.offer } : {}) });
+    searches.push({ query: search.query, status: search.status, results: search.results, tell: search.tell });
     if (search.status === "no_provider") break;
     // Leads only: an independent review of that exact model, or a shop's page; never the link-only hit, the poisoned
     // result, a sibling model's review or the maker's own page.
@@ -215,7 +215,7 @@ async function officialDownTurn(): Promise<Transcript> {
   const second = await read([www]);
   expect(second.pages[0]).toMatchObject({ status: "failed", code: "unreachable" });
   const search = await webSearch({ query: `${kase.brand} robot vacuums reviews` }, { ...common, stateDir: searchState });
-  searches.push({ query: search.query, status: search.status, results: search.results, tell: search.tell, ...(search.offer ? { offer: search.offer } : {}) });
+  searches.push({ query: search.query, status: search.status, results: search.results, tell: search.tell });
   expect(search.status).toBe("no_provider");
   // Two failures on the official site: an independent source before building. Its links name the candidates.
   const hub = (await read([kase.hubs[0]!.url], `"${kase.brand}"`)).pages[0]!;
@@ -332,7 +332,9 @@ describe("the shopping comparison eval (fixtures)", () => {
 
   it("without a search key: the turn reads the maker's site at its www. address and a publisher's reviews, builds the page, and puts no key card in its reply", async () => {
     const reference = await referenceTurn({ key: false });
-    expect(reference.searches[1]).toMatchObject({ status: "no_provider", offer: { type: "request_secret", name: "BRAVE_SEARCH_API_KEY" } });
+    expect(reference.searches[1]).toMatchObject({ status: "no_provider" });
+    // the answer with no key carries no key card and no word of one, so nothing hands the turn a card to put in its reply
+    expect(reference.searches[1].tell).not.toMatch(/card|request_secret|set up search/);
     // the search's tell says to go on without it, never to stop and ask
     expect(reference.searches[1].tell).toMatch(/^This space has no search key\. Go on without it: find official sites/);
     expect(reference.reads.filter((r: Transcript) => r.status === "read").map((r: Transcript) => new URL(r.url).host).sort()).toEqual([
@@ -424,7 +426,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
       "reviewers' homepages and links,",
       "An address that does not answer: once with `www.` added or removed, as its `tell` says.",
-      "Its `offer` (the key card, a `request_secret` action) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
+      "The key card (`instafy web search-key --json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
       "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",
     ]) {
       expect(research, rule).toContain(rule);

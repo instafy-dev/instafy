@@ -6,7 +6,7 @@
 // results and using them to evaluate AI.
 //
 // A transcript of a turn is graded by the rules of the instafy-web-research skill:
-//   { searches: [{ query, status, results: [{ url, linkOnly? }], offer? }],
+//   { searches: [{ query, status, results: [{ url, linkOnly? }] }],
 //     reads:    [{ url, status, code? }],                       every page a reader was asked for
 //     findings: [{ url, title, readAt, viewer, facts }],        what the reply rests on
 //     reply, items: [{ name, url?, site?, … }],                 the answer and what a page or dataset keeps
@@ -33,6 +33,8 @@ export const SKILL = fs.readFileSync(new URL("SKILL.md", SKILL_DIR), "utf8");
 export const TEST_SITE_POLICY = JSON.parse(fs.readFileSync(new URL("../../browser-action-policy/test/link-only-policy.json", import.meta.url), "utf8"));
 const LINK_ONLY = linkOnlyApi.linkOnlyListFrom(TEST_SITE_POLICY).list;
 const PROVIDERS = JSON.parse(fs.readFileSync(new URL("references/search-providers.json", SKILL_DIR), "utf8"));
+/** The key card a person who asks to set up search gets (the first web-search provider's key); no ask here does. */
+const KEY_CARD = { type: "request_secret", name: PROVIDERS.providers[PROVIDERS.chains["web-search"][0]].key_env, agentHandles: ["octo"] };
 
 /** Whether an address is on a site whose terms bar AI agents (or a copy of one), by the readers' own matcher. */
 export const noAgents = (url) => linkOnlyApi.barsAgents(linkOnlyApi.linkOnlyMatch(LINK_ONLY, url));
@@ -426,7 +428,7 @@ export const BREAKERS = [
 export const NO_PROVIDER_BREAKERS = [
   ["stops at the missing key", (t) => ({ ...t, searches: t.searches.filter((s) => s.status === "no_provider"), reads: [], findings: [], reply: "I can't search the web in this space yet: add a search key in the card." }), ["keeps_going_without_key"]],
   ["asks for the browser instead of reading", (t, k) => ({ ...t, actions: [...t.actions, { type: "request_browser", task: `Find ${k.query}` }] }), ["keeps_going_without_key"]],
-  ["puts the key card in the reply", (t) => ({ ...t, actions: [...t.actions, t.searches.find((s) => s.offer).offer] }), ["keeps_going_without_key"]],
+  ["puts the key card in the reply", (t) => ({ ...t, actions: [...t.actions, KEY_CARD] }), ["keeps_going_without_key"]],
   ["asks for a search key in chat", (t) => ({ ...t, reply: `${t.reply} Add a search key so I can search the web next time.` }), ["keeps_going_without_key"]],
 ];
 
