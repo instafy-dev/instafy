@@ -426,7 +426,7 @@ describe("the shopping comparison eval (fixtures)", () => {
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
       "reviewers' homepages and links,",
       "An address that does not answer: once with `www.` added or removed, as its `tell` says.",
-      "The key card (first `key_env` in `references/search-providers.json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
+      "The key card (`instafy web search-key --json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
       "A failed search or site never ends the turn without the page: every item stays on it, each fact not read marked unknown with why.",
     ]) {
       expect(research, rule).toContain(rule);

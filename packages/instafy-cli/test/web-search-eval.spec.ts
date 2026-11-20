@@ -182,7 +182,7 @@ describe("the web search eval (fixtures)", () => {
       "Nothing from a search's result list is kept: no title or snippet",
       "A source blocked by an explicit workspace policy may be offered as a link without claiming its content was read.",
       "`no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources.",
-      "The key card (first `key_env` in `references/search-providers.json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
+      "The key card (`instafy web search-key --json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
       "never ask for a key in chat or wait for it",
       "The person's own search: they open the pages they pick and press **Send page to Octo**",
     ]) {

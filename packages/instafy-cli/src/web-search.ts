@@ -11,8 +11,8 @@
 //   the turn has a time limit, else while the turn's own folder is there), never a published app, a person's own
 //   code, a terminal command or a process left over from an earlier turn;
 // - a chain's providers are tried in order and one whose key (`key_env`) is not set is skipped. With none left the
-//   answer is `no_provider`, which says how to go on without a key and carries no card: a key's card comes only from a
-//   person who asks to set up search (the web-research skill);
+//   answer is `no_provider`, which says how to go on without a key and carries no card: the key's card comes only from
+//   `instafy web search-key`, which a turn runs for a person who asks to set up search (the web-research skill);
 // - a key goes only, over https, to the host of its own entry's `url`, in the header the entry names. It is never
 //   printed or written: not in the output, not in errors, not in the turn's state. Nothing is cached, and no result
 //   list is written anywhere;
@@ -152,7 +152,7 @@ export type SearchProvider = {
   body: Json | null;
   auth: { header: string; prefix: string } | null;
   keyEnv: string | null;
-  /** the words of the key's card, which a turn writes only for a person who asks to set up search; checked here */
+  /** the words of the key's card (`instafy web search-key`, only for a person who asks to set up search) */
   keyRequest: { description: string } | null;
   results: {
     list: FieldPath;
@@ -1169,8 +1169,8 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
 
   if (!usable.length) {
     // No key card here: a turn copied the one this answer carried into its reply, and a person who asked for a score
-    // got a card asking for a search key. Only a person who asks to set up search gets that card, which the turn
-    // writes from the entry's `key_env` and `key_request`, as the web-research skill says.
+    // got a card asking for a search key. Only a person who asks to set up search gets that card, from
+    // `instafy web search-key` (searchKeyCard), as the web-research skill says.
     if (members.some((provider) => provider.keyEnv)) return report("no_provider");
     return report("no_provider", { tell: `Every provider of ${chainName} is switched off in this space. ${tellFor("unavailable", chainName)}` });
   }
@@ -1311,6 +1311,62 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// The search key's card
+
+/** The card that asks the person for the space's search key: a `request_secret` action for the reply. */
+export type SearchKeyCard = { type: "request_secret"; name: string; description: string; agentHandles: string[] };
+export type SearchKeyReport = { ok: true; card: SearchKeyCard | null; tell: string; warnings: string[] };
+
+/**
+ * `instafy web search-key`: the card for the key a search of the default chain tries first, from the list built into
+ * this command as a search reads it (a space's copies only switch providers off), with its entry's words and the
+ * searches a day it allows. Only for a person who asks to set up search: no search's answer carries it.
+ */
+export function searchKeyCard(deps: Pick<WebSearchDeps, "skillRoots" | "bundledProviders" | "env" | "cwd"> = {}): SearchKeyReport {
+  const env = deps.env ?? process.env;
+  const copies = skillDataCopies(deps.skillRoots ?? defaultSkillRoots(deps.cwd ?? process.cwd(), env), SEARCH_PROVIDERS_FILE);
+  const catalog = loadSearchProviders("bundledProviders" in deps ? deps.bundledProviders : BUNDLED_SEARCH_PROVIDERS, copies.copies);
+  const warnings = [...catalog.warnings, ...copies.warnings];
+  const first = (catalog.chains.get(DEFAULT_CHAIN)?.providers ?? [])
+    .map((id) => catalog.providers.get(id)!)
+    .find((provider) => provider.keyEnv && provider.keyRequest);
+  if (!first) {
+    const tell = `Every provider of ${DEFAULT_CHAIN} that takes a key is switched off in this space, so there is no search key to set up.`;
+    return { ok: true, card: null, tell, warnings };
+  }
+  return {
+    ok: true,
+    card: {
+      type: "request_secret",
+      name: first.keyEnv!,
+      description: first.keyRequest!.description.split("{daily}").join(String(first.dailyLimit)),
+      agentHandles: ["octo"],
+    },
+    tell: "Only for a person who asks to set up search: put `card` in the reply's actions. Never ask for the key in chat, and never wait for it.",
+    warnings,
+  };
+}
+
+export function runWebSearchKeyCli(
+  opts: { json?: boolean },
+  io: { out: (line: string) => void; err: (line: string) => void } = { out: console.log, err: console.error },
+  deps: Pick<WebSearchDeps, "skillRoots" | "bundledProviders" | "env" | "cwd"> = {},
+): number {
+  try {
+    const report = searchKeyCard(deps);
+    const text = [...(report.card ? [`card: ${JSON.stringify(report.card)}`] : []), report.tell, ...report.warnings.map((w) => `warning: ${w}`)];
+    io.out(opts.json ? JSON.stringify(report, null, 1) : text.join("\n"));
+    return report.card ? WEB_SEARCH_EXIT_OK : WEB_SEARCH_EXIT_NONE;
+  } catch (error) {
+    const message =
+      error instanceof SearchProvidersUnavailableError ? error.message : `web search-key failed: ${error instanceof Error ? error.message : String(error)}`;
+    if (opts.json) io.out(JSON.stringify({ ok: false, exitCode: WEB_SEARCH_EXIT_INTERNAL, error: message }));
+    else io.err(message);
+    return WEB_SEARCH_EXIT_INTERNAL;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // The command
 
 export function formatWebSearch(report: WebSearchReport): string {
@@ -1415,6 +1471,16 @@ export function registerWebSearchCommand(web: Command): Command {
     .option("--json", "Output JSON")
     .action(async (words: string[], opts: WebSearchCliOptions) => {
       process.exitCode = await runWebSearchCli(words, opts);
+    });
+  web
+    .command("search-key")
+    .description(
+      "The card that asks the person for the space's search key (a request_secret action), only for a person who asks " +
+        "to set up search: the key `instafy web search` tries first, with its provider's words (exit 2: none takes a key).",
+    )
+    .option("--json", "Output JSON")
+    .action((opts: { json?: boolean }) => {
+      process.exitCode = runWebSearchKeyCli(opts);
     });
   return web;
 }

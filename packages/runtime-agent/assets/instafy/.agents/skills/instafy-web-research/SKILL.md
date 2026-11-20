@@ -15,7 +15,7 @@ Read permitted source content this turn; trace facts to their sources. Find page
 
 ## The AI's own web search
 
-With the AI's own web search, search, then read what it found. Its text is what the search provider wrote, not a page you read: say a fact from it as "a web search on <date> found, on <that result's site>: …" with its link and date, or read the page first.
+With the AI's own web search, search, then read what it found. Its text is what the search provider wrote, not a page you read: say a fact from it as "a web search on <date> found, on <that result's site>: …" with that result's link and date, or read the page first.
 
 - When each search costs the person credits (this run's instructions say so), search only for what is fresh (news, today's prices or events, live status) or to find a page no source names; read a known official page with `instafy web read` instead. At most 2 searches a message, more only when the person asks for deeper research.
 - Search never proves live stock or prices.
@@ -81,7 +81,7 @@ Use the first that can answer, then the next for the rest:
 - An item only a result names is "not checked".
 - Reviews: search "<name> review", with the item's name as its official page gives it.
 - A `linkOnly` result keeps only its link and site name: give it to the person as a plain link, and never read or open it.
-- `no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources. News or a score: read the subject's own news or results page before saying it doesn't show or you couldn't check. The key card (first `key_env` in `references/search-providers.json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.
+- `no_provider` (no key), `not_found` or `unavailable` never ends the task: go on with the other steps of Finding sources. News or a score: read the subject's own news or results page before saying it doesn't show or you couldn't check. The key card (`instafy web search-key --json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.
 - No price on an item's pages: search "<name> price" (Finding sources), or `--chain reference-search` for shops' official sites; a shop restricted by workspace policy can use Guided mode.
 
 ## How much to read

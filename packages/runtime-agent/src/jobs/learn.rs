@@ -828,7 +828,7 @@ const LEGACY_WEB_RESEARCH_SHA256: &[&str] = &[
     // From before a search's fact named the site of the result it came from, a site posing as an
     // official one was no source and no link, a link was the publisher's page, "cheapest" needed one
     // price below all others, news or a score with no search came from the subject's own page, and
-    // the key card came from the provider list for a person who asks to set up search.
+    // the key card came from `instafy web search-key` for a person who asks to set up search.
     "2b9977b774663276901a2b05ad802a748a3172ec8b17fd590ba201d801fcf943", // v23
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its

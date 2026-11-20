@@ -22,6 +22,7 @@ import {
   prepareQuery,
   registerWebSearchCommand,
   runWebSearchCli,
+  runWebSearchKeyCli,
   webSearch,
   type SearchRequest,
   type SearchTransport,
@@ -586,7 +587,7 @@ describe("the person's own key (secret-request card)", () => {
   // A score question with no key got a card asking for a search key and no score: the turn copied the card this answer
   // carried into its reply, beside a sentence saying the card was only for a person who asks to set up search (a
   // local test, Nov 20). The answer carries no card and no word of one, in every turn; a person who asks to set up
-  // search gets the card from the turn, which writes it from the provider list (the web-research skill).
+  // search gets the card from `instafy web search-key` (below), which the web-research skill names for that only.
   it("without a key answers no_provider with how to go on, and no key card or word of one", async () => {
     const out: string[] = [];
     const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
@@ -616,21 +617,61 @@ describe("the person's own key (secret-request card)", () => {
     expect(requests).toHaveLength(0);
   });
 
-  // The words a person who asks to set up search gets on the key's card: the provider list's own, with the day's
-  // searches it names those its entry allows (the answer above no longer writes the card, so nothing fills them in).
-  it("keeps each key's card words in the provider list, whole", () => {
-    const providers = JSON.parse(fs.readFileSync(PROVIDERS_PATH, "utf8")) as {
-      providers: Record<string, { key_env?: string; daily_limit?: number; key_request?: { description: string } }>;
-      chains: Record<string, unknown>;
-    };
-    const keyed = (providers.chains["web-search"] as string[]).map((id) => providers.providers[id]!);
-    expect(keyed[0]!.key_env).toBe("BRAVE_SEARCH_API_KEY");
-    for (const entry of keyed) {
-      expect(entry.key_env).toMatch(/^[A-Z][A-Z0-9_]+$/);
-      expect(entry.key_request!.description).not.toMatch(/[{}]/);
-      expect(entry.key_request!.description).toContain(`up to ${entry.daily_limit} searches a day`);
-    }
-    expect(loadSearchProviders(BUNDLED_SEARCH_PROVIDERS).warnings).toEqual([]);
+  // A person who asks to set up search gets the key's card from `instafy web search-key`, which builds it from the list
+  // built into the CLI the way a search reads it: the first provider of the chain this space hasn't switched off that
+  // takes a key, with its entry's words and the searches a day it allows. A space's own copy of the list can't be the
+  // card's source: the runtime doesn't write one in a folder it keeps itself, a space's copy may only switch providers
+  // off, and an edited copy keeps its old words.
+  it("gives the key card only through `instafy web search-key`, from the built-in list and the space's off switches", () => {
+    const out: string[] = [];
+    const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
+    const card = (name: string, maker: string) => ({
+      type: "request_secret",
+      name,
+      description: `${maker} Search API key for Octo's web searches. Everyone in this space can search with this key, up to 100 searches a day. ${maker} bills the key's owner.`,
+      agentHandles: ["octo"],
+    });
+    const tell = "Only for a person who asks to set up search: put `card` in the reply's actions. Never ask for the key in chat, and never wait for it.";
+    // No copy of the list in the space, and no turn: the card is the same.
+    const bare = { env: {}, cwd: tmp, skillRoots: [] };
+    expect(runWebSearchKeyCli({ json: true }, io, bare)).toBe(WEB_SEARCH_EXIT_OK);
+    expect(JSON.parse(out.pop()!)).toEqual({ ok: true, card: card("BRAVE_SEARCH_API_KEY", "Brave"), tell, warnings: [] });
+    expect(runWebSearchKeyCli({}, io, bare)).toBe(WEB_SEARCH_EXIT_OK);
+    expect(out.pop()!.split("\n")).toEqual([`card: ${JSON.stringify(card("BRAVE_SEARCH_API_KEY", "Brave"))}`, tell]);
+
+    // A space that switched Brave off, with an off-only copy where the skill keeps the list: searches use Kagi, so the
+    // card asks for Kagi's key.
+    const skills = path.join(base, "space", ".agents", "skills");
+    const copy = path.join(skills, "instafy-web-research", "references", "search-providers.json");
+    fs.mkdirSync(path.dirname(copy), { recursive: true });
+    fs.writeFileSync(copy, JSON.stringify({ schema: "instafy.search-providers@1", off: ["brave-own-key"] }));
+    const space = { env: {}, cwd: path.join(base, "space"), skillRoots: [skills] };
+    expect(runWebSearchKeyCli({ json: true }, io, space)).toBe(WEB_SEARCH_EXIT_OK);
+    expect(JSON.parse(out.pop()!)).toMatchObject({ card: card("KAGI_API_KEY", "Kagi") });
+    // A whole copy edited before, with Brave switched off in its entry and its words still to be filled in: its words
+    // are not read.
+    const edited = JSON.parse(fs.readFileSync(PROVIDERS_PATH, "utf8")) as { providers: Record<string, Record<string, unknown>> };
+    edited.providers["brave-own-key"]!.off = true;
+    edited.providers["kagi-own-key"]!.key_request = { description: "Kagi key, up to {daily} searches a day." };
+    fs.writeFileSync(copy, JSON.stringify(edited));
+    expect(runWebSearchKeyCli({ json: true }, io, space)).toBe(WEB_SEARCH_EXIT_OK);
+    expect(JSON.parse(out.pop()!)).toMatchObject({ card: card("KAGI_API_KEY", "Kagi") });
+    // Every provider that takes a key switched off: no card.
+    fs.writeFileSync(copy, JSON.stringify({ schema: "instafy.search-providers@1", off: ["brave-own-key", "kagi-own-key"] }));
+    expect(runWebSearchKeyCli({ json: true }, io, space)).toBe(WEB_SEARCH_EXIT_NONE);
+    expect(JSON.parse(out.pop()!)).toEqual({
+      ok: true,
+      card: null,
+      tell: "Every provider of web-search that takes a key is switched off in this space, so there is no search key to set up.",
+      warnings: [],
+    });
+
+    // The research skill sends a person who asks to set up search to this command, and to no file of the space's.
+    const skill = fs.readFileSync(path.resolve(PROVIDERS_PATH, "..", "..", "SKILL.md"), "utf8").split(/\s+/).join(" ");
+    expect(skill).toContain(
+      "The key card (`instafy web search-key --json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
+    );
+    expect(skill).not.toContain("references/search-providers.json");
   });
 
   it("refuses the 101st search of the day on a space's key", async () => {
@@ -678,6 +719,9 @@ describe("what the room keeps, and the command", () => {
     registerWebSearchCommand(web);
     const search = web.commands.find((c) => c.name() === "search")!;
     expect(search.options.map((o) => o.long)).toEqual(["--count", "--site", "--lang", "--country", "--chain", "--provider", "--json"]);
+    const key = web.commands.find((c) => c.name() === "search-key")!;
+    expect(key.options.map((o) => o.long)).toEqual(["--json"]);
+    expect(key.registeredArguments).toEqual([]);
   });
 
   it("carries the skill's provider list in the built CLI and refuses outside a turn there too", () => {
@@ -693,5 +737,25 @@ describe("what the room keeps, and the command", () => {
     });
     expect(run.status, run.stderr).toBe(WEB_SEARCH_EXIT_USAGE);
     expect(JSON.parse(run.stdout).error).toMatch(/runs only in Octo's turns/);
+    // The key's card comes from the built CLI's own list, in a folder with no copy of it.
+    const key = spawnSync(process.execPath, [cliBin, "web", "search-key", "--json"], {
+      cwd: home,
+      env: { ...process.env, HOME: home, INSTAFY_SKILL_PACKS_DIR: "" },
+      encoding: "utf8",
+    });
+    expect(key.status, key.stderr).toBe(WEB_SEARCH_EXIT_OK);
+    expect(JSON.parse(key.stdout).card).toMatchObject({ type: "request_secret", name: "BRAVE_SEARCH_API_KEY", agentHandles: ["octo"] });
+    expect(JSON.parse(key.stdout).card.description).toContain("up to 100 searches a day");
+    // And it finds the folder's own copy as a search does: with the first provider switched off there, the next one's key.
+    const copy = path.join(home, ".agents", "skills", "instafy-web-research", "references", "search-providers.json");
+    fs.mkdirSync(path.dirname(copy), { recursive: true });
+    fs.writeFileSync(copy, JSON.stringify({ schema: "instafy.search-providers@1", off: ["brave-own-key"] }));
+    const next = spawnSync(process.execPath, [cliBin, "web", "search-key", "--json"], {
+      cwd: home,
+      env: { ...process.env, HOME: home, INSTAFY_SKILL_PACKS_DIR: "" },
+      encoding: "utf8",
+    });
+    expect(next.status, next.stderr).toBe(WEB_SEARCH_EXIT_OK);
+    expect(JSON.parse(next.stdout).card).toMatchObject({ type: "request_secret", name: "KAGI_API_KEY" });
   });
 });
