@@ -137,9 +137,11 @@ export declare function isSignInField(target: PersonalBrowserStepTarget): boolea
 /**
  * The shape a host reads of a field, for isOneTimeCodeField: its maxlength
  * and size (null when absent), its pattern, whether it opens a list as a
- * person types (a combobox, aria-autocomplete list or both, or a list it
- * names) and whether another field of its form is a sign-in's (marked
- * username, webauthn, current-password or new-password).
+ * person types (a combobox, aria-autocomplete list or both, a datalist, or a
+ * list it names), whether another field of its form is a sign-in's (marked
+ * username, webauthn, current-password or new-password), and, for a field
+ * the mark marks, whether it is the only field a person types into in its
+ * form (or, in no form, on the page).
  */
 export type FieldShape = {
   maxLength: number | null;
@@ -147,21 +149,29 @@ export type FieldShape = {
   pattern: string;
   opensList: boolean;
   formSignIn: boolean;
+  alone: boolean;
 };
 /**
  * Whether a field `autocomplete="one-time-code"` marks holds a one-time
- * code: with a sign of one (its own names name a code, a password or a
- * code's step, it sits in a credential context, it takes digits, it holds at
- * most 10 characters, its form holds a password or sign-in field, or
- * `ctx.typed` is digits alone), and never by the mark alone for a field that
- * opens a list. Without `target.fieldShape` the mark is the sign, as it was.
+ * code. It does with a sign of one of its own: its names name a code, a
+ * credential, a password or a code's step, it sits in a credential context,
+ * it takes digits, it holds at most 10 characters, or its form holds a
+ * password or sign-in field. A field with none of these that opens a list
+ * holds no code; any other does when it is the only field of its form (or
+ * page), or when `ctx.typed` reads as a code (digits alone, or one word that
+ * mixes letters and digits). Without `target.fieldShape` the mark is the
+ * sign, as it was.
  */
 export declare function isOneTimeCodeField(
   target: PersonalBrowserStepTarget,
   ctx?: { typed?: string },
 ): boolean;
-/** Run inside the page from its source, with the redaction module's CODE_WORD_SOURCE: isOneTimeCodeField's rule. */
-export declare function oneTimeCodeRulesInPage(codeWordSource: string): {
+/**
+ * Run inside the page from its source, with the redaction module's
+ * CODE_WORD_SOURCE and CREDENTIAL_CONTEXT_SOURCE: isOneTimeCodeField's rule.
+ * Made without either, the mark is the sign.
+ */
+export declare function oneTimeCodeRulesInPage(codeWordSource: string, credentialWordSource: string): {
   isOneTimeCodeField(target: PersonalBrowserStepTarget, ctx?: { typed?: string }): boolean;
 };
 /**

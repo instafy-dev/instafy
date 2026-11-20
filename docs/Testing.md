@@ -1767,11 +1767,13 @@ person then signs in on the page, and a fresh run on the same page (what **Let
 Octo continue** starts) stars the repository, asking once before the form post.
 A planner whose fields the site marks against autofill alone
 (`autocomplete="one-time-code"`) is typed into, a start that opens its list as
-a person types with digits too, and the page names no sign-in; digits typed
-into its destination, a numeric "Code" field, one that holds 6 characters and
-one that takes digits are refused before any prompt, and the code page names
-them as a sign-in's. The person's values never reach a tool's output or the
-action feed.
+a person types with digits too, and the page names no sign-in; digits, or a
+word of letters and digits, typed into its destination, a numeric "Code"
+field, one that holds 6 characters and one that takes digits are refused
+before any prompt, and the code page names them as a sign-in's. So are the only field of a form labelled in words the
+rules do not know, a code field that names a list of hints, and one that says
+it opens a list while it takes digits. The person's values never reach a
+tool's output or the action feed.
 
 Last, `scripts/shared-browser-allowed-step-e2e.mjs` answers prompts on loopback
 pages that change by themselves while a prompt waits. On a journey planner, a
@@ -1867,8 +1869,10 @@ own beside a "Sort by" list, it names no other list's options. On a page with
 more controls than a reading holds, the options a field opened past the cap,
 and the plain rows of a list drawn under a field that names none (marked
 against autofill alone), are listed first and named with the indices a click
-then takes to choose one, while a calendar under a day field names no
-suggestions. A ticket shop's
+then takes to choose one, a row that holds two controls by the one that draws
+the stop. A calendar under a day field, one the field names, a list a ticked
+box names and a list of the page's own that a search box filters name no
+suggestions and add no rows to a reading. A ticket shop's
 controls with no name of their own are named by their row or card ("+ beside
 “Adult”") and highlighted by that name, while the same rows in a frame are
 named by the frame's site and none is listed or counted. A row's words only

@@ -1591,8 +1591,12 @@ function describeInPage(rule, forms, names, element, sources, mode) {
     // A field's shape, for its one-time-code mark (actionPolicy's
     // isOneTimeCodeField): its maxlength and size, its pattern, whether it
     // opens a list as a person types (a combobox, aria-autocomplete list or
-    // both, a datalist, or a list it names), and whether another field of
-    // its form is a sign-in's. Null for any other control.
+    // both, a datalist, or a list it names: one with a list's role or
+    // options, never a plain list of hints), whether another field of its
+    // form is a sign-in's, and, for a field the mark marks, whether it is the
+    // only field a person types into in its form or, in no form, on the page
+    // (among those in no form, open shadow roots too). Null for any other
+    // control.
     let fieldShape = null;
     if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
       const number = (name) => {
@@ -1603,10 +1607,39 @@ function describeInPage(rule, forms, names, element, sources, mode) {
         bounded(attribute(node, name), 400).split(/\s+/).filter(Boolean).slice(0, 16).some((id) => {
           const named = node.ownerDocument?.getElementById(id);
           return Boolean(named) && (["listbox", "grid", "tree", "menu"].includes(roleOf(named)) ||
-            ["UL", "OL", "DATALIST"].includes(tagOf(named)) || Boolean(named.querySelector("[role=option]")));
+            tagOf(named) === "DATALIST" || Boolean(named.querySelector("[role=option]")));
         }));
       const combobox = element.closest("[role=combobox]");
       const signInMark = /(?:^|\s)(?:username|webauthn|current-password|new-password)(?:\s|$)/i;
+      // A field a person sees and types text into: not one turned off, read
+      // only, hidden, see-through, a dot, or placed off the page's edge.
+      const drawn = (control) => {
+        if (typeof control.getBoundingClientRect !== "function") return true;
+        const box = control.getBoundingClientRect();
+        const view = control.ownerDocument?.defaultView;
+        if (!(box.width > 1 && box.height > 1 &&
+          box.right + (view?.scrollX || 0) > 0 && box.bottom + (view?.scrollY || 0) > 0)) return false;
+        return typeof control.checkVisibility !== "function" ||
+          control.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+      };
+      const typesText = (control) =>
+        (control instanceof HTMLTextAreaElement || (control instanceof HTMLInputElement &&
+          ["text", "search", "email", "url", "tel", "number"].includes(String(control.type || "").toLowerCase()))) &&
+        control.disabled !== true && control.readOnly !== true && drawn(control);
+      const alone = () => {
+        if (form) return !controls.some((control) => control !== element && control.form === form && typesText(control));
+        const roots = [element.ownerDocument];
+        for (let seen = 0; roots.length;) {
+          for (const node of roots.pop().querySelectorAll("*")) {
+            seen += 1;
+            // A page too large to look through keeps the mark as the sign.
+            if (seen > 20_000) return true;
+            if (node !== element && !node.form && typesText(node)) return false;
+            if (node.shadowRoot) roots.push(node.shadowRoot);
+          }
+        }
+        return true;
+      };
       fieldShape = {
         maxLength: number("maxlength"),
         size: number("size"),
@@ -1617,6 +1650,7 @@ function describeInPage(rule, forms, names, element, sources, mode) {
           namesList(element) || (combobox ? namesList(combobox) : false),
         formSignIn: controls.some((control) => control !== element && control.form === form &&
           (isPassword(control) || signInMark.test(bounded(attribute(control, "autocomplete"), 200)))),
+        alone: /(?:^|\s)one-time-code(?:\s|$)/i.test(bounded(attribute(element, "autocomplete"), 200)) ? alone() : false,
       };
     }
     return {
@@ -2047,15 +2081,15 @@ function listInPage(rule, rules, describe, request) {
   });
   let kept = glances.flatMap((glance, ordinal) => (glance.shown ? [ordinal] : []));
   if (kept.length > request.limit) {
-    let rows = [];
+    let first = [];
     try {
       const field = rules.focusedField(document);
-      rows = field ? rules.listOf(field).rows : [];
+      const rows = field ? rules.listOf(field).rows : [];
+      const stands = new Set(rules.standIns(rows, kept.map((ordinal) => elements[ordinal]), [field]).values());
+      first = kept.filter((ordinal) => stands.has(elements[ordinal]));
     } catch (_) {
-      rows = [];
+      first = [];
     }
-    const inside = (element, row) => row === element || (!row.matches("[role=option]") && row.contains(element));
-    const first = kept.filter((ordinal) => rows.some((row) => inside(elements[ordinal], row)));
     let rest = kept.filter((ordinal) => !first.includes(ordinal));
     const room = Math.max(request.limit - first.length, 0);
     if (rest.length > room) rest = rest.filter((ordinal) => !glances[ordinal].above);
@@ -2367,6 +2401,8 @@ function fieldShapeOf(raw) {
     pattern: typeof raw.pattern === "string" ? raw.pattern.slice(0, 200) : "",
     opensList: raw.opensList === true,
     formSignIn: raw.formSignIn === true,
+    // Only a page that says another field stands beside it makes it not alone.
+    alone: raw.alone !== false,
   };
 }
 
@@ -2649,20 +2685,34 @@ const MAX_FIELD_LIST_NAME_CHARS = 80;
 // a field and the combobox it sits in: whether it says it opens a list
 // (`named`), the lists it names as its own (`lists`: aria-controls,
 // aria-owns, the list its active option sits in, the combobox around it), and
-// the rows a person can see and pick there (`rows`). A field that names none
-// has the rows of the list drawn against it: just under or over it, over the
-// page (placed absolute or fixed) and holding neither the field nor anything
-// around it, as a planner draws its stops, when a row there shares the start
-// of a word with what the field holds (a calendar drawn under a date field is
-// no list of its stops). A list's rows are its options (role=option), else
+// the rows a person can see and pick there (`rows`): the options
+// (role=option) of the lists it names and of the combobox around it. A list
+// that holds no option gives its plain rows, as a planner draws its stops:
 // its items (li), else the most children it holds drawn alike, one under
-// another; a combobox around the field gives its options only. At most
-// MAX_ROWS rows, each with words. What the field holds never leaves the page.
+// another. Those count only in a list that pops up at the field: one it names
+// that has a list's role or is drawn over the page (it, or what holds it
+// apart from the field, placed absolute or fixed), or, for a field that names
+// none, the one drawn against it (just under or over it, over the page and
+// holding neither the field nor anything around it); and only when a row
+// there shares the start of a word with what the field holds. So a calendar a
+// date field opens or names is no list of its stops, and neither is a list of
+// the page's own that a filter box names. `listOf(field, true)` leaves that
+// last check out: what stood at the field before a step typed.
+// `focusedField` is the focused element when a person types text into it (a
+// box that is ticked is none, whatever it names). `standIns(rows, elements,
+// fields)` gives, for each row, the element of `elements` that stands for it:
+// the row itself, or, for a row that is no option, the first one inside it
+// whose words share the start of a word with what one of `fields` holds (a
+// stop's link beside a button that saves it), else the first that draws
+// words, else the first. At most MAX_ROWS rows, each with words. What the
+// field holds never leaves the page.
 function fieldListRulesInPage() {
   const MAX_ROWS = 50;
   // How far under or over a field a list drawn against it may start.
   const GAP = 24;
   const MAX_NODES = 2_000;
+  const LIST_ROLES = ["listbox", "grid", "tree", "menu"];
+  const TEXT_TYPES = ["text", "search", "email", "url", "tel", "number"];
   const wordsOf = (element) => String(element.textContent || "").replace(/\s+/g, " ").trim();
   const shown = (element) => {
     try {
@@ -2674,6 +2724,14 @@ function fieldListRulesInPage() {
       return false;
     }
   };
+  const inside = (element, list) => {
+    for (let node = element, depth = 0; node && depth < 512; node = node.parentNode || node.host, depth += 1) {
+      if (node === list) return true;
+    }
+    return false;
+  };
+  const placedOver = (node) =>
+    ["absolute", "fixed"].includes(node.ownerDocument.defaultView.getComputedStyle(node).position);
   const optionsOf = (list) => Array.from(list.querySelectorAll("[role=option]")).filter(shown);
   // Words folded for a loose match: case, accents and ae, oe, ue aside.
   const folded = (text) => String(text || "").normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase()
@@ -2684,9 +2742,7 @@ function fieldListRulesInPage() {
     const starts = folded(held).filter((word) => word.length >= 3 && /\p{L}/u.test(word)).map((word) => word.slice(0, 3));
     return starts.length > 0 && rows.some((row) => folded(wordsOf(row)).some((word) => starts.some((start) => word.startsWith(start))));
   };
-  const rowsOf = (list) => {
-    const options = optionsOf(list);
-    if (options.length) return options;
+  const plainRowsOf = (list) => {
     const items = Array.from(list.querySelectorAll("li"))
       .filter((item) => !item.querySelector("li") && shown(item) && wordsOf(item));
     if (items.length) return items;
@@ -2719,16 +2775,21 @@ function fieldListRulesInPage() {
         if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) continue;
         for (let node = at(x, y), depth = 0; node && depth < 32; node = node.parentElement, depth += 1) {
           if (node === doc.body || node === doc.documentElement || node.contains(field)) break;
-          if (["absolute", "fixed"].includes(view.getComputedStyle(node).position) &&
-            against(node.getBoundingClientRect())) {
-            return node;
-          }
+          if (placedOver(node) && against(node.getBoundingClientRect())) return node;
         }
       }
     }
     return null;
   };
-  const listOf = (field) => {
+  // Whether a list a field names pops up at it.
+  const popsUp = (list, field) => {
+    if (LIST_ROLES.includes(String(list.getAttribute("role") || "").toLowerCase().trim())) return true;
+    for (let node = list, depth = 0; node && depth < 8 && !inside(field, node); node = node.parentElement, depth += 1) {
+      if (placedOver(node)) return true;
+    }
+    return false;
+  };
+  const listOf = (field, before = false) => {
     const doc = field.ownerDocument;
     const answer = { named: false, lists: [], rows: [] };
     const combobox = field.closest("[role=combobox]");
@@ -2757,38 +2818,67 @@ function fieldListRulesInPage() {
       if (node === combobox && combobox !== field) answer.lists.push(combobox);
     }
     answer.lists.unshift(...named);
+    const plain = (list) => {
+      const rows = plainRowsOf(list);
+      return before || related(rows, field) ? rows : [];
+    };
+    const rowsOf = (list, popped) => {
+      const options = optionsOf(list);
+      if (options.length) return popped && !before && !related(options, field) ? [] : options;
+      return popped || popsUp(list, field) ? plain(list) : [];
+    };
     const drawn = answer.lists.length ? null : drawnAgainst(field);
-    const drawnRows = drawn ? rowsOf(drawn) : [];
     const rows = [
-      ...(drawn ? (related(drawnRows, field) ? drawnRows : []) : named.flatMap(rowsOf)),
+      ...(drawn ? rowsOf(drawn, true) : named.flatMap((list) => rowsOf(list, false))),
       ...(combobox && combobox !== field ? optionsOf(combobox) : []),
     ];
     answer.rows = rows.filter((row, index) => rows.indexOf(row) === index).slice(0, MAX_ROWS);
     return answer;
   };
   // The focused element, inside open shadow roots too, when it is a field
-  // a person types into; null otherwise.
+  // a person types text into; null otherwise.
   const focusedField = (doc) => {
     let field = doc.activeElement;
     for (let depth = 0; field && field.shadowRoot && field.shadowRoot.activeElement && depth < 64; depth += 1) {
       field = field.shadowRoot.activeElement;
     }
-    return field && typeof field.matches === "function" &&
-      field.matches("input, textarea, [contenteditable], [role=combobox], [role=searchbox], [role=textbox]")
-      ? field
-      : null;
+    if (!field || typeof field.matches !== "function") return null;
+    if (field.matches("textarea, [contenteditable], [role=combobox], [role=searchbox], [role=textbox]")) return field;
+    return field.matches("input") && TEXT_TYPES.includes(String(field.type || "").toLowerCase()) ? field : null;
   };
-  return { listOf, focusedField, MAX_ROWS };
+  const standIns = (rows, elements, fields) => {
+    const found = new Map();
+    const set = new Set(rows);
+    if (!set.size) return found;
+    // How well an element inside a row stands for it.
+    const fit = (element) => (fields.some((field) => related([element], field)) ? 2
+      : /[\p{L}\p{N}]/u.test(wordsOf(element)) ? 1 : 0);
+    const fits = new Map();
+    for (const element of elements) {
+      for (let node = element, depth = 0; node && depth < 512; node = node.parentNode || node.host, depth += 1) {
+        if (!set.has(node)) continue;
+        if (node === element) {
+          found.set(node, element);
+        } else if (!node.matches("[role=option]") && found.get(node) !== node &&
+          (!found.has(node) || fit(element) > fits.get(node))) {
+          found.set(node, element);
+          fits.set(node, fit(element));
+        }
+      }
+    }
+    return found;
+  };
+  return { listOf, focusedField, standIns, inside, MAX_ROWS };
 }
 
 // Runs inside the page through Playwright, with fieldListRulesInPage's rules
 // joined in front (FIELD_LIST_IN_PAGE), so it must not use anything from this
 // file's scope. Of `request.elements`, the options a person can see and choose
 // in the list `field` opens as they type (a combobox's suggestions, a
-// planner's stops): its options and rows (fieldListRulesInPage), or the one
-// control a row holds (a stop's link). When the field, or the combobox it
-// sits in, names a list of its own (aria-controls, aria-owns, the list its
-// active option sits in) or holds one (`own`), those of that list (`listed`);
+// planner's stops): its options and rows (fieldListRulesInPage), or the
+// control that stands for a row (a stop's link). When the field, or the
+// combobox it sits in, names a list of its own (aria-controls, aria-owns, the
+// list its active option sits in) or holds one (`own`), those of that list (`listed`);
 // when it names none, those shown anywhere, and the rows of the list drawn
 // against it, that were not before the step typed (`fresh`; `request.before`
 // holds the words of those that were). Another list on the page is never the
@@ -2798,9 +2888,9 @@ function fieldListRulesInPage() {
 // counts with the one the page moved the focus to (a planner that opens its
 // search in a field of its own). Answers too whether a field says it opens a
 // list (`named`), the words of each set (`ownWords`, `freshWords`, with the
-// rows `request.elements` leaves out, whose number is `unlisted`) and of every
-// option shown (`shown`). Those words never leave the step: it only compares
-// them.
+// rows nothing in `request.elements` stands for, whose number is `unlisted`)
+// and of every option shown (`shown`), a row's own words for the control that
+// stands for it. Those words never leave the step: it only compares them.
 function fieldListInPage(rules, field, request) {
   const answer = {
     kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [],
@@ -2825,31 +2915,31 @@ function fieldListInPage(rules, field, request) {
     }
     const lists = [];
     const rows = [];
+    // Before the step typed, a list drawn at the field counts whatever the
+    // field holds: what stood there then is no suggestion the text brought.
+    const typed = Boolean(request && request.typed === true);
     for (const each of fields) {
-      const list = rules.listOf(each);
+      const list = rules.listOf(each, !typed);
       if (list.named) answer.named = true;
       lists.push(...list.lists);
       rows.push(...list.rows);
     }
-    const inside = (element, list) => {
-      for (let node = element, depth = 0; node && depth < 512; node = node.parentNode || node.host, depth += 1) {
-        if (node === list) return true;
-      }
-      return false;
-    };
-    // A row stands for itself, and a row that is no option for the one
-    // element given inside it (a stop's link).
-    const standsFor = (element, row) => row === element || (!row.matches("[role=option]") && inside(element, row) &&
-      elements.filter((other) => inside(other, row)).length === 1);
-    const options = elements.filter((element) => element instanceof view.Element && shown(element) &&
-      (element.matches("[role=option]") || rows.some((row) => standsFor(element, row))));
-    // The rows no element given stands for: a list the reading leaves out.
-    const loose = rows.filter((row) => !options.some((option) => inside(option, row)));
+    const inside = rules.inside;
+    // A row stands for itself, or the control given inside it that draws
+    // the stop does (its link, beside a button that saves it): the reading
+    // lists that control, so the step names it and a click takes it.
+    const given = elements.filter((element) => element instanceof view.Element && shown(element));
+    const stands = rules.standIns(rows, given, fields);
+    const rowOf = new Map(Array.from(stands, ([row, element]) => [element, row]));
+    const options = given.filter((element) => element.matches("[role=option]") || rowOf.has(element));
+    // The rows nothing given stands for: a list the reading leaves out.
+    const loose = rows.filter((row) => !stands.has(row));
+    const said = (option) => wordsOf(rowOf.get(option) || option);
     const turnedOn = (option) => !option.matches(":disabled") && !option.closest("[aria-disabled=true]");
     const usable = options.filter(turnedOn);
     const usableLoose = loose.filter(turnedOn);
     const ownOf = (set) => lists.length ? set.filter((option) => lists.some((list) => inside(option, list))) : [];
-    const freshOf = (set) => lists.length ? [] : set.filter((option) => !before.has(wordsOf(option)));
+    const freshOf = (set) => lists.length ? [] : set.filter((option) => !before.has(said(option)));
     const own = ownOf(usable);
     const fresh = freshOf(usable);
     const ownLoose = ownOf(usableLoose);
@@ -2857,10 +2947,10 @@ function fieldListInPage(rules, field, request) {
     answer.own = lists.length > 0;
     answer.listed = elements.map((element) => own.includes(element));
     answer.fresh = elements.map((element) => fresh.includes(element));
-    answer.ownWords = [...own, ...ownLoose].map(wordsOf);
-    answer.freshWords = [...fresh, ...freshLoose].map(wordsOf);
+    answer.ownWords = [...own, ...ownLoose].map(said);
+    answer.freshWords = [...fresh, ...freshLoose].map(said);
     answer.unlisted = { own: ownLoose.length, fresh: freshLoose.length };
-    answer.shown = [...options, ...loose].map(wordsOf);
+    answer.shown = [...options, ...loose].map(said);
     return answer;
   } catch (_) {
     return {

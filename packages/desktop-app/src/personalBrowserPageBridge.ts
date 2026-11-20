@@ -562,9 +562,12 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
       // isOneTimeCodeField), read as the Shared Browser reads it: its
       // maxlength and size, its pattern, whether it opens a list as a person
       // types (a combobox, aria-autocomplete list or both, a datalist, or a
-      // list it names), and whether another field of its form is a
-      // sign-in's. Null for any other control, or when the page cannot say,
-      // and then the mark alone makes a code's field.
+      // list it names: one with a list's role or options, never a plain list
+      // of hints), whether another field of its form is a sign-in's, and,
+      // for a field the mark marks, whether it is the only field a person
+      // types into in its form or, in no form, on the page (among those in
+      // no form, open shadow roots too). Null for any other control, or when
+      // the page cannot say, and then the mark alone makes a code's field.
       let fieldShape = null;
       try {
         if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
@@ -577,11 +580,41 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
             clean(node.getAttribute(name), 400).split(/\\s+/).filter(Boolean).slice(0, 16).some((id) => {
               const named = document.getElementById(id);
               return Boolean(named) && (["listbox", "grid", "tree", "menu"].includes(roleOf(named)) ||
-                ["UL", "OL", "DATALIST"].includes(String(named.tagName).toUpperCase()) ||
+                String(named.tagName).toUpperCase() === "DATALIST" ||
                 Boolean(named.querySelector("[role=option]")));
             }));
           const combobox = element.closest("[role=combobox]");
           const signInMark = /(?:^|\\s)(?:username|webauthn|current-password|new-password)(?:\\s|$)/i;
+          // A field a person sees and types text into: not one turned off,
+          // read only, hidden, see-through, a dot, or placed off the page's
+          // edge.
+          const drawn = (control) => {
+            if (typeof control.getBoundingClientRect !== "function") return true;
+            const box = control.getBoundingClientRect();
+            if (!(box.width > 1 && box.height > 1 &&
+              box.right + (typeof scrollX === "number" ? scrollX : 0) > 0 &&
+              box.bottom + (typeof scrollY === "number" ? scrollY : 0) > 0)) return false;
+            return typeof control.checkVisibility !== "function" ||
+              control.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+          };
+          const typesText = (control) =>
+            (control instanceof HTMLTextAreaElement || (control instanceof HTMLInputElement &&
+              ["text", "search", "email", "url", "tel", "number"].includes(String(control.type || "").toLowerCase()))) &&
+            control.disabled !== true && control.readOnly !== true && drawn(control);
+          const alone = () => {
+            if (form) return !formControls.some((control) => control !== element && control.form === form && typesText(control));
+            const roots = [document];
+            for (let seen = 0; roots.length;) {
+              for (const node of roots.pop().querySelectorAll("*")) {
+                seen += 1;
+                // A page too large to look through keeps the mark as the sign.
+                if (seen > 20_000) return true;
+                if (node !== element && !node.form && typesText(node)) return false;
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+              }
+            }
+            return true;
+          };
           fieldShape = {
             maxLength: number("maxlength"),
             size: number("size"),
@@ -592,6 +625,7 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
               namesList(element) || (combobox ? namesList(combobox) : false),
             formSignIn: formControls.some((control) => control !== element && control.form === form &&
               (isPasswordControl(control) || signInMark.test(clean(control.getAttribute("autocomplete"), 200)))),
+            alone: /(?:^|\\s)one-time-code(?:\\s|$)/i.test(clean(element.getAttribute("autocomplete"), 200)) ? alone() : false,
           };
         }
       } catch {
@@ -1020,7 +1054,7 @@ export async function typeIntoPersonalBrowserTarget(
       ].join(" ");
       const sensitive = item.type === "password"
         || /(?:current-password|new-password|cc-(?:number|csc|exp|name))/i.test(item.autocomplete)
-        || (${ONE_TIME_CODE_RULES_SOURCE})(${serializeForScript(CODE_WORD_SOURCE)}).isOneTimeCodeField(item, { typed: args.text })
+        || (${ONE_TIME_CODE_RULES_SOURCE})(${serializeForScript(CODE_WORD_SOURCE)}, ${serializeForScript(CREDENTIAL_CONTEXT_SOURCE)}).isOneTimeCodeField(item, { typed: args.text })
         || /(?:\\bpass(?:word|code|phrase)?\\b|\\bpin\\b|\\bone[\\s_-]*time\\b|\\botp\\b|\\b2fa\\b|\\bmfa\\b|\\bverification[\\s_-]*code\\b|\\bsecurity[\\s_-]*code\\b|\\bcvv\\b|\\bcvc\\b|\\bcard[\\s_-]*(?:number|code)\\b|\\bcredit[\\s_-]*card\\b|\\bdebit[\\s_-]*card\\b|\\bpayment\\b)/i.test(sensitiveText);
       if (sensitive) {
         return { typed: false, blockedSensitive: true, targetChanged: false, descriptor: item };

@@ -411,10 +411,12 @@ test("matching isolated targets still click, type, and apply editable key defaul
 });
 
 test("a field a one-time-code mark marks is typed into only without a sign of a code", async () => {
-  const harness = createPageHarness();
-  const typeInto = async (attributes, text) => {
+  // A page of its own for each field; `beside`: the page's other fields,
+  // none of them in a form.
+  const typeInto = async (attributes, text, beside = []) => {
+    const harness = createPageHarness();
     const input = new harness.HTMLInputElement({ autocomplete: "one-time-code", ...attributes });
-    harness.document.elements = [input];
+    harness.document.elements = [input, ...beside.map((each) => new harness.HTMLInputElement(each))];
     const snapshot = await harness.bridge.snapshotPersonalBrowserPage(harness.webContents);
     const descriptor = snapshot.interactive[0].descriptor;
     const result = await harness.bridge.typeIntoPersonalBrowserTarget(
@@ -425,25 +427,40 @@ test("a field a one-time-code mark marks is typed into only without a sign of a 
     );
     return { descriptor, result, value: input.value };
   };
-  // A planner's stop, marked only to keep autofill out: its shape is read,
-  // and a place's name goes in.
-  const planner = await typeInto({ "aria-label": "Ziel wählen" }, "Deutsches Museum");
-  assert.deepEqual({ ...planner.descriptor.fieldShape }, { maxLength: null, size: null, pattern: "", opensList: false, formSignIn: false });
-  assert.equal(security.isSensitivePersonalBrowserEditable(planner.descriptor, "Deutsches Museum"), false);
+  // A planner's stop, marked only to keep autofill out, beside its other
+  // stop: its shape is read, and a place's name goes in.
+  const start = { "aria-label": "Start", autocomplete: "one-time-code" };
+  const planner = await typeInto({ "aria-label": "Destination" }, "Old Town", [start]);
+  assert.deepEqual(
+    { ...planner.descriptor.fieldShape },
+    { maxLength: null, size: null, pattern: "", opensList: false, formSignIn: false, alone: false },
+  );
+  assert.equal(security.isSensitivePersonalBrowserEditable(planner.descriptor, "Old Town"), false);
   assert.equal(planner.result.typed, true);
   assert.equal(planner.result.blockedSensitive, false);
-  assert.equal(planner.value, "Deutsches Museum");
-  // Digits alone in the same field, a numeric "Code" field and one that
-  // holds 6 characters are a code's: nothing goes in.
-  for (const [attributes, text] of [
-    [{ "aria-label": "Ziel wählen" }, "482910"],
-    [{ "aria-label": "Code", inputmode: "numeric" }, "Deutsches Museum"],
-    [{ "aria-label": "Enter what we sent you", maxlength: "6" }, "AB12CD"],
+  assert.equal(planner.value, "Old Town");
+  // Its other stop says it opens a list as a person types: digits go in.
+  const combobox = await typeInto({ "aria-label": "Start", role: "combobox" }, "20500", [{ "aria-label": "Destination" }]);
+  assert.equal(combobox.descriptor.fieldShape.opensList, true);
+  assert.equal(combobox.result.typed, true);
+  assert.equal(combobox.value, "20500");
+  // Digits alone in the same field, a numeric "Code" field, one that holds 6
+  // characters, one that takes digits though it says it opens a list, and
+  // the only field of its page, whatever it is labelled and whatever goes
+  // in, are a code's: nothing goes in.
+  for (const [attributes, text, beside] of [
+    [{ "aria-label": "Destination" }, "482910", [start]],
+    [{ "aria-label": "Code", inputmode: "numeric" }, "Old Town", [start]],
+    [{ "aria-label": "Enter what we sent you", maxlength: "6" }, "AB12CD", [start]],
+    [{ "aria-label": "Enter the number from your app", role: "combobox", inputmode: "numeric" }, "AB12CD", [start]],
+    [{ "aria-label": "Kod weryfikacyjny" }, "K7X2QP", []],
+    [{ "aria-label": "Kod weryfikacyjny" }, "K7X2QP", [{ "aria-label": "Szukaj", type: "checkbox" }]],
   ]) {
-    const code = await typeInto(attributes, text);
+    const code = await typeInto(attributes, text, beside);
     assert.equal(code.result.typed, false, JSON.stringify(attributes));
     assert.equal(code.result.blockedSensitive, true, JSON.stringify(attributes));
     assert.equal(code.value, "", JSON.stringify(attributes));
+    assert.equal(security.isSensitivePersonalBrowserEditable(code.descriptor, text), true, JSON.stringify(attributes));
   }
 });
 

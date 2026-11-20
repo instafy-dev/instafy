@@ -606,7 +606,8 @@ const UNNAMED_LIST = SUGGESTION_LIST('list.addEventListener("mouseover", () => d
   .replace('<ul id="from-stops" role="listbox"></ul>', '<ul id="from-stops"></ul>')
   .replace('  field.setAttribute("aria-expanded", stops.length ? "true" : "false");\n', "");
 // 250 links, more than a reading holds with the planner's own controls.
-const MANY_LINES = Array.from({ length: 250 }, (_, index) => `<a href="/reading/line-${index + 1}">Line ${index + 1}</a>`).join(" ");
+const LINES = (count) => Array.from({ length: count }, (_, index) => `<a href="/reading/line-${index + 1}">Line ${index + 1}</a>`).join(" ");
+const MANY_LINES = LINES(250);
 // A planner whose stops fall past a reading's cap: a field at the top that
 // names its list, 250 links under it, and its list drawn under the field but
 // put at the end of the page, as such lists are put. A reading holds 200
@@ -663,8 +664,8 @@ const under = (element, field) => {
   element.style.width = box.width + "px";
 };
 origin.addEventListener("input", () => {
-  const stops = origin.value ? ["München Hbf", "Hauptbahnhof (U, Tram)", "Hauptbahnhof Nord", "Hauptbahnhof Süd"] : [];
-  menu.innerHTML = stops.map((stop) => '<li><div tabindex="-1"><b>' + stop + '</b> <small>München</small></div></li>').join("");
+  const stops = origin.value ? ["Südpark", "Südpark (Tram)", "Südpark Nord", "Südpark West"] : [];
+  menu.innerHTML = stops.map((stop) => '<li><div tabindex="-1"><b>' + stop + '</b> <small>Neustadt</small></div></li>').join("");
   under(menu, origin);
   menu.style.display = stops.length ? "block" : "none";
 });
@@ -681,6 +682,80 @@ const day = document.getElementById("day");
 const calendar = document.getElementById("calendar");
 day.addEventListener("focus", () => { under(calendar, day); calendar.style.display = "table"; });
 day.addEventListener("blur", () => { calendar.style.display = "none"; });
+</script>`;
+// A planner whose field says nothing of a list, and whose stops come as rows
+// of a list drawn under it that each hold two controls: a button that saves
+// the stop, then the stop's link. The type step said such stops came but that
+// the reading did not list them, while it listed both controls of every row.
+const ROW_CONTROLS = `<h1>Journey planner</h1>
+<p><label for="from">From</label><input id="from" name="from" autocomplete="off"></p>
+<p><button type="button">Plan journey</button></p>
+<ul id="menu" style="position:absolute;display:none;margin:0;padding:0;list-style:none;background:#fff;border:1px solid #888"></ul>
+<script>
+const field = document.getElementById("from");
+const menu = document.getElementById("menu");
+window.chosen = 0;
+window.saved = 0;
+field.addEventListener("input", () => {
+  const box = field.getBoundingClientRect();
+  menu.style.top = (box.bottom + scrollY) + "px";
+  menu.style.left = (box.left + scrollX) + "px";
+  menu.innerHTML = field.value ? ["Central Station", "Central Square"].map((stop) =>
+    '<li><button type="button">Save</button> <a href="#stop">' + stop + '</a></li>').join("") : "";
+  menu.style.display = field.value ? "block" : "none";
+});
+menu.addEventListener("mousedown", (event) => event.preventDefault());
+menu.addEventListener("click", (event) => {
+  event.preventDefault();
+  if (event.target.closest("button")) { window.saved += 1; return; }
+  const stop = event.target.closest("a");
+  if (!stop) return;
+  window.chosen += 1;
+  field.value = stop.textContent;
+  menu.style.display = "none";
+});
+</script>`;
+// A day field that names the calendar it opens as a person types
+// (aria-controls), drawn under it: weeks of plain cells. Its weeks were
+// listed as controls and named as the field's suggestions, and a click on one
+// picked a day nobody asked for.
+const NAMED_CALENDAR = `<h1>Journey planner</h1>
+<p><label for="day">Day</label><input id="day" role="combobox" aria-haspopup="dialog" aria-expanded="false" aria-controls="calendar" autocomplete="off"></p>
+<p><button type="button">Plan journey</button></p>
+<div id="calendar" role="dialog" aria-label="Choose a day" style="position:absolute;display:none;background:#fff;border:1px solid #888"><table role="grid">${[2, 9, 16, 23].map((first) =>
+  `<tr>${Array.from({ length: 7 }, (_, day) => `<td>${first + day}</td>`).join("")}</tr>`).join("")}</table></div>
+<script>
+const day = document.getElementById("day");
+const calendar = document.getElementById("calendar");
+day.addEventListener("input", () => {
+  const box = day.getBoundingClientRect();
+  calendar.style.top = (box.bottom + scrollY) + "px";
+  calendar.style.left = (box.left + scrollX) + "px";
+  calendar.style.display = "block";
+  day.setAttribute("aria-expanded", "true");
+});
+calendar.addEventListener("mousedown", (event) => event.preventDefault());
+</script>`;
+// A box that names the list it filters (aria-controls), 50 rows of plain
+// text, over 170 links and a form. Once the box was ticked and kept the
+// focus, every reading listed the rows as controls, first, and left the
+// form's field and button out.
+const TICKED_LIST = `<h1>Stops</h1>
+<p><label><input type="checkbox" id="step-free" aria-controls="stops"> Step-free stops only</label></p>
+<ul id="stops">${Array.from({ length: 50 }, (_, index) => `<li>Stop ${index + 1}</li>`).join("")}</ul>
+<nav>${LINES(170)}</nav>
+<form method="get" action="/reading/visit"><label>From <input name="from"></label><button>Show times</button></form>`;
+// A search box that names the list of the page's own it filters
+// (aria-controls): plain rows in the page's flow, which the page only shows
+// or hides. They were named as the box's suggestions to click.
+const FILTERED_LIST = `<h1>Stations</h1>
+<p><label>Filter stations <input type="search" id="filter" aria-controls="stations"></label></p>
+<ul id="stations"><li>Central Station</li><li>Central Square</li><li>Harbour</li><li>Old Town</li></ul>
+<script>
+const filter = document.getElementById("filter");
+filter.addEventListener("input", () => {
+  for (const row of document.querySelectorAll("#stations li")) row.hidden = !row.textContent.toLowerCase().includes(filter.value.toLowerCase());
+});
 </script>`;
 // A link that keeps moving, which the page never lets a click take, to a
 // page that loads at once.
@@ -862,6 +937,10 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/key-lists": page("Journey planner", KEY_LISTS),
       "site.test /reading/capped-list": page("Journey planner", CAPPED_LIST),
       "site.test /reading/plain-rows": page("Journey planner", PLAIN_ROWS),
+      "site.test /reading/row-controls": page("Journey planner", ROW_CONTROLS),
+      "site.test /reading/named-calendar": page("Journey planner", NAMED_CALENDAR),
+      "site.test /reading/ticked-list": page("Stops", TICKED_LIST),
+      "site.test /reading/filtered-list": page("Stations", FILTERED_LIST),
       "site.test /reading/moving-link": page("Museum", MOVING_LINK),
       "site.test /reading/key-only-list": page("Find a stop", KEY_ONLY_LIST),
       "site.test /reading/sorted-search": page("Museums", SORTED_SEARCH),
@@ -1744,8 +1823,9 @@ export async function runSharedBrowserPageReadingFixture() {
     // the type step names them with the indices the next click takes.
     for (const [pathname, label, text, stops] of [
       ["/reading/capped-list", "From", "Central", ["Central Station", "Central Square"]],
-      ["/reading/plain-rows", "Origin", "München Hauptbahnhof",
-        ["München Hbf München", "Hauptbahnhof (U, Tram) München", "Hauptbahnhof Nord München", "Hauptbahnhof Süd München"]],
+      // Typed without its umlaut, as a person without the key types it.
+      ["/reading/plain-rows", "Origin", "Suedpark",
+        ["Südpark Neustadt", "Südpark (Tram) Neustadt", "Südpark Nord Neustadt", "Südpark West Neustadt"]],
     ]) {
       await runPage.mouse.move(1, 1);
       reading = await read(pathname);
@@ -1771,7 +1851,7 @@ export async function runSharedBrowserPageReadingFixture() {
       assert.equal(await runPage.evaluate(() => window.chosen), 1, `${pathname}: the stop was not chosen once`);
       assert.equal(
         await runPage.evaluate((id) => document.getElementById(id).value, pathname === "/reading/capped-list" ? "from" : "origin"),
-        stops[1].replace(/ München$/u, ""),
+        stops[1].replace(/ Neustadt$/u, ""),
         `${pathname}: another stop was chosen`,
       );
       assert.deepEqual(requests, [], `${pathname}: choosing a stop sent something`);
@@ -1782,6 +1862,53 @@ export async function runSharedBrowserPageReadingFixture() {
     const typedDay = await ok("POST", "/v1/type", { index: control(reading, "Day").index, snapshotId: reading.snapshotId, text: "20.11.2026" });
     assert.equal(await runPage.evaluate(() => getComputedStyle(document.getElementById("calendar")).display), "table", "the calendar never opened");
     assert.doesNotMatch(typedDay.done, /suggestion/u, `a calendar's rows were named as the field's suggestions: ${typedDay.done}`);
+    // Neither is a calendar the day field names as its own (aria-controls):
+    // none of its weeks is listed as a control or named.
+    reading = await read("/reading/named-calendar");
+    const typedNamedDay = await ok("POST", "/v1/type", { index: control(reading, "Day").index, snapshotId: reading.snapshotId, text: "20.11.2026" });
+    assert.equal(await runPage.evaluate(() => getComputedStyle(document.getElementById("calendar")).display), "block", "the named calendar never opened");
+    assert.doesNotMatch(typedNamedDay.done, /suggestion/u, `a named calendar's weeks were named as the field's suggestions: ${typedNamedDay.done}`);
+    assert.deepEqual(
+      typedNamedDay.interactiveElements.map((entry) => entry.label), ["Day", "Plan journey"],
+      "a named calendar's weeks were listed as controls",
+    );
+    // A stop's row that holds two controls is named by the one that draws
+    // the stop, not the "Save" before it, with the index a click takes: the
+    // stop is chosen once, with the focus left in the field, and nothing is
+    // saved.
+    reading = await read("/reading/row-controls");
+    const typedRows = await ok("POST", "/v1/type", { index: control(reading, "From").index, snapshotId: reading.snapshotId, text: "Central" });
+    const stopLinks = ["Central Station", "Central Square"].map((stop) => control(typedRows, stop));
+    assert.deepEqual(stopLinks.map(({ tag }) => tag), ["a", "a"]);
+    assert.ok(
+      typedRows.done.includes(`2 suggestions under "From": "Central Station" (index ${stopLinks[0].index}), "Central Square" (index ${stopLinks[1].index}). Click one.`),
+      `the type step did not name the stops by their links: ${typedRows.done}`,
+    );
+    assert.doesNotMatch(typedRows.done, /doesn't list them/u, typedRows.done);
+    const chosenRow = await runTool("POST", "/v1/click", { index: stopLinks[1].index, snapshotId: typedRows.snapshotId });
+    assert.equal(chosenRow.code, 0, `the click on a stop's link failed: ${chosenRow.stderr}`);
+    assert.deepEqual(
+      await runPage.evaluate(() => [window.chosen, window.saved, document.getElementById("from").value, document.activeElement?.id]),
+      [1, 0, "Central Square", "from"],
+    );
+    // A box that names a list is no field a person types into: once it is
+    // ticked, with the focus on it, the reading lists what it listed before,
+    // the form's field and button too, and none of the list's rows.
+    reading = await read("/reading/ticked-list");
+    const beforeTick = reading.interactiveElements.map((entry) => entry.label);
+    assert.ok(["From", "Show times"].every((label) => beforeTick.includes(label)), beforeTick.join(", "));
+    await ok("POST", "/v1/click", { index: control(reading, "Step-free stops only").index, snapshotId: reading.snapshotId });
+    assert.equal(await runPage.evaluate(() => document.activeElement?.id), "step-free", "the box did not keep the focus");
+    const afterTick = await ok("GET", "/v1/snapshot");
+    assert.deepEqual(afterTick.interactiveElements.map((entry) => entry.label), beforeTick, "a ticked box's list changed what the reading lists");
+    assert.equal(afterTick.omittedControls ?? 0, reading.omittedControls ?? 0);
+    // A search box that names the list of the page's own it filters gets no
+    // suggestions: its rows are the page's text, not a list it opened.
+    reading = await read("/reading/filtered-list");
+    const typedFilter = await ok("POST", "/v1/type", { index: control(reading, "Filter stations").index, snapshotId: reading.snapshotId, text: "Central" });
+    assert.deepEqual(await runPage.evaluate(() => Array.from(document.querySelectorAll("#stations li")).filter((row) => !row.hidden).length), 2);
+    assert.doesNotMatch(typedFilter.done, /suggestion/u, `a filtered list's rows were named as suggestions: ${typedFilter.done}`);
+    assert.deepEqual(typedFilter.interactiveElements.map((entry) => entry.label), ["Filter stations"], "a filtered list's rows were listed as controls");
     // h. A click on a plain link the page does not take in time (one that
     // keeps moving) opens the link's address in the tab, as a link under a
     // cookie notice does: a museum's hours link timed out, and the turn said
@@ -1992,7 +2119,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so (a link to the page itself is refused as a button is), a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never Octo's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's settings or limited accept is a cookie notice's pause, while one on a refusal no list knows or a booking's button in small print that speaks of cookies is a step of the person's, the booking's button scrolled into view, each outlined and published with fixed labels and nothing pressed; a pause on an account's deletion dressed up as a notice is refused, outlining and publishing nothing, as is any pause in Octo's own tab; under a bar whose only button accepts the planner's own button works with no prompt",
         "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first, and one whose result comes 5 s later reads it too; one whose page still reads as before 6 s on says so and that its reading is the page as it is now, leaving no snapshot to take; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
-        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; on a page with more controls than a reading holds, the options a field opened, and the plain rows of a list drawn under a field that names none (marked against autofill alone), are listed first and named with the indices a click then takes to choose one, while a calendar under a day field is no list of its stops; a click on a plain link that keeps moving opens the link's address in the tab, once",
+        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; on a page with more controls than a reading holds, the options a field opened, and the plain rows of a list drawn under a field that names none (marked against autofill alone), are listed first and named with the indices a click then takes to choose one, a row that holds two controls by the one that draws the stop, while a calendar under a day field, one the field names, a list a ticked box names and a list of the page's own a search box filters are no list of its stops; a click on a plain link that keeps moving opens the link's address in the tab, once",
         "a field's own suggestion is chosen by a click that leaves the focus in the field, from a list that closes as the field loses it and from one that draws its stops anew under the pointer, found again by the reading's record and clicked once; a stop the list no longer shows is not clicked, and the step answers with the field's suggestions as they read now",
         "a ticket shop's controls with no name of their own are named by their row or card (\"+ beside “Adult”\"), listed and highlighted by that name, while the same rows in a frame are named by the frame's site and none is listed or counted",
         "a row's words only tell its controls apart where they are named: reading steps in rows that speak of deleting, booking or saving go without a prompt, in Octo's own tab too, a pause on a booking's icon button under a line about cookies is the person's step, a key beside an icon button names no control, whole or in part, a withheld page's controls are named without their rows' words in its reading and a step's words, and a stop drawn anew for a field that names no list of its own names no other list's options",
