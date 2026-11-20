@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../../services/runtimeController";
 import type { SharedBrowserHostSnapshot } from "../../../../services/runtimeController/browserSession";
@@ -16,6 +19,7 @@ import {
   hostsNamedIn,
   isBrowserAutoStartDeclined,
   markBrowserAutoStartDeclined,
+  namesUncheckableAddress,
   recordBrowserAutoStart,
   type BrowserAutoStartPlanInput,
 } from "../browserAutoStart";
@@ -343,6 +347,32 @@ describe("addresses Studio may open by itself", () => {
     expect([...hostsNamedIn("Read the pricing page at stripe.com/pricing, then https://WWW.Example.org/x and http://10.0.0.5/admin.")])
       .toEqual(["example.org", "10.0.0.5", "stripe.com"]);
     expect(hostsNamedIn("Email support@stripe.com, e.g. about plans.").size).toBe(0);
+  });
+
+  // The runtime reads a card's hosts the same way, to keep a turn's words above a card that
+  // waits here (runtime-agent `jobs/browser_request.rs`). The list below is the runtime's own
+  // file: a rule changed on one side and not the other fails here and in its Rust test at once.
+  it("reads the hosts of the list the runtime is pinned to", () => {
+    const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../../../..");
+    const fixtures = JSON.parse(
+      readFileSync(resolve(repo, "packages/runtime-agent/src/jobs/card_hosts_fixtures.json"), "utf8"),
+    ) as { cases: { name: string; text: string; hosts: string[]; uncheckable: boolean }[] };
+    expect(fixtures.cases.length).toBeGreaterThanOrEqual(40);
+    for (const fixture of fixtures.cases) {
+      expect([...hostsNamedIn(fixture.text)].sort(), fixture.name).toEqual(fixture.hosts);
+      expect(namesUncheckableAddress(fixture.text), fixture.name).toBe(fixture.uncheckable);
+    }
+  });
+
+  // A page's file name and a query's value are hosts too: a card for a page on a site the
+  // person gave still waits, unless they gave that very address.
+  it("holds a card for a page named by its file on a site the person gave", () => {
+    const task = "Open https://www.transit.example/connections.html and find a connection to the airport.";
+    expect(seen(task, [message({ authorId: ME, content: "How do I get to the airport? Use transit.example." })])).toBe(false);
+    expect(seen(task, [message({ authorId: ME, content: "Read https://www.transit.example/connections.html for me." })])).toBe(true);
+    expect(seen("Open https://shop.example/returns?ref=partner.example and read it.", [
+      message({ authorId: ME, content: "Check shop.example's returns for me." }),
+    ])).toBe(false);
   });
 
   it("opens an address the person wrote, or one an earlier reply showed them", () => {

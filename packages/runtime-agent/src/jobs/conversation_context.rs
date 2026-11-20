@@ -850,6 +850,23 @@ const NON_CONVERSATIONAL_TYPES: [&str; 13] = [
 /// Studio counts only the viewer's own messages; the history does not say who wrote each, so
 /// every participant's counts here, and Studio still decides whether the card opens by itself.
 pub(super) fn read_by_the_person(entries: &[JsonValue]) -> Vec<&str> {
+    read_in_the_chat(entries, true)
+}
+
+/// What Studio counts as seen before a turn's card, in the tab of the person who sent the turn,
+/// the one tab that may open it by itself (`browserAutoStartAddressesSeen`), as far as the
+/// history can tell: Octo's replies the person could read, as [`read_by_the_person`] reads them,
+/// and the person's own messages where the history can say they are theirs, in a chat with no
+/// one else in it (`one_person`). In a shared chat it can't: a teammate's message is not the
+/// person's, and Studio holds a card for a host only a teammate gave, so only the turn's own
+/// message counts there, which the caller adds. Whatever this leaves out reads as not seen: the
+/// card is taken to wait, and its turn keeps its words.
+pub(super) fn read_before_a_card(entries: &[JsonValue], one_person: bool) -> Vec<&str> {
+    read_in_the_chat(entries, one_person)
+}
+
+/// [`read_by_the_person`], with the person's messages only when `persons_messages`.
+fn read_in_the_chat(entries: &[JsonValue], persons_messages: bool) -> Vec<&str> {
     let lower = |entry: &JsonValue, pointer: &str| {
         entry
             .pointer(pointer)
@@ -881,7 +898,12 @@ pub(super) fn read_by_the_person(entries: &[JsonValue]) -> Vec<&str> {
                     || NON_CONVERSATIONAL_TYPES.contains(&kind.as_str())
             });
         match entry_text(entry, "role") {
-            Some("user") => !hidden && !is_browser_entry(entry) && !is_hand_back_prompt(entry),
+            Some("user") => {
+                persons_messages
+                    && !hidden
+                    && !is_browser_entry(entry)
+                    && !is_hand_back_prompt(entry)
+            }
             Some("assistant") => !hidden && !not_conversation,
             _ => false,
         }

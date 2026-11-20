@@ -301,12 +301,23 @@ enum AgentRoutingPreflightRoute {
 }
 
 /// Recorded on a turn whose request was read as needing file changes and whose
-/// recovery pass changed none either: the reply stood as the result, with
-/// [`NOTHING_CHANGED_LINE`] under it.
+/// recovery pass changed none either, or that changed none for a message naming
+/// only pages another chat made, which runs no recovery pass: the reply stood
+/// as the result, with [`NOTHING_CHANGED_LINE`] under it.
 const REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND: &str = "codex/required-changes-not-made";
 
 /// The runtime's line under such a reply, whatever the reply says it did.
 const NOTHING_CHANGED_LINE: &str = "Nothing was changed.";
+
+/// Puts [`NOTHING_CHANGED_LINE`] under a reply that stood without the change read as required.
+/// Never under a decline: the controller keeps the bare decline word out of the chat, and with
+/// the line under it a group would read "NO_RESPONSE" and "Nothing was changed." where Octo had
+/// chosen to say nothing.
+fn append_nothing_changed(summary: &mut String) {
+    if !participation_decline_sentinel(summary) {
+        save_report::append_not_saved(summary, &[NOTHING_CHANGED_LINE.to_string()]);
+    }
+}
 
 /// The last line a reply that changed nothing was once asked to end with. A
 /// thread started before that ask was dropped still holds it, and a later turn
@@ -317,9 +328,12 @@ const NO_FILE_CHANGES_MARKER: &str = "NO_FILE_CHANGES";
 // A completion requirement, never permission to write. Conditional work may
 // legitimately finish after inspection without producing a patch. A required
 // change gets one recovery pass; a reply that still changes nothing is then
-// the turn's result, with [`NOTHING_CHANGED_LINE`] under it. A reply that lists
-// a file missing from disk fails the turn, and so does a recovery pass that
-// stops with no reply of its own.
+// the turn's result, with [`NOTHING_CHANGED_LINE`] under it. In a chat with a
+// page of its own, a message that names only pages another chat made gets
+// none: the first reply is the result, with that line under it
+// (`space_pages::HeldPages::names_only_held_pages`).
+// A reply that lists a file missing from disk fails the turn, and so does a
+// recovery pass that stops with no reply of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceFileChangeRequirement {
     None,
@@ -4568,14 +4582,15 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// prompt asked for it, once that turn is finished, for an address the person
 /// could have seen and where nothing else is stopped or taken over; anywhere
 /// else the card is a button. Opening it changes no approval in the browser.
-/// The card itself says where the browser goes. A turn whose only action is
-/// the card posts the card alone ([`post_only_the_card`]), so the contract
-/// says that such a turn's `summary` may not show: what the person needs goes
-/// in `task`, or in a reply without the card. A reply that does show beside a
-/// card (with another card or a file, in a skill setup, on an evaluated turn)
-/// never says that a page was opened before a browser tool saw it, so it stays
-/// true when the card is only a button, nor what the browser will submit, send
-/// or buy: that step asks the person first, and they may say no.
+/// The card itself says where the browser goes. A turn whose only action is a
+/// card that opens by itself, every address it opens one the person or an
+/// earlier reply gave, posts the card alone ([`post_only_the_card`]); one that
+/// waits for the person keeps its words above it. So the contract says when
+/// such a turn's `summary` shows. A reply that does show beside a card never
+/// says that a page was opened before a browser tool saw it, so it stays true
+/// when the card is only a button, nor what the browser will submit, send or
+/// buy: that step asks the person first, and they may say no. It says what was
+/// found, what wasn't, and what the card opens.
 ///
 /// A sign-in the person asked for, or one a step they asked for needs, is
 /// opened and paused on (`request_human_input`), so the task can go on after
@@ -4600,7 +4615,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do on each page it opens, named by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named. A card naming none is refused: search first, then hand over what it found. Never put the person's details, such as an order number or an e-mail address, in it.\n\
 - `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
-- A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n\
+- With only this card, `summary` shows unless the person or your earlier replies gave every address it opens: such a card opens by itself. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n\
 - Skip it when a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
@@ -5009,7 +5024,9 @@ fn declined_a_turn_that_needs_an_answer(
 /// Nov 19), and a key's card or a skill setup's words say where the browser goes just the same.
 /// A turn that changed files (`changed_files`) keeps its answer, which says what it made: run
 /// again, a build starts over from the person's request. A card that retry writes is checked the
-/// same way, and is not tried again.
+/// same way, and is not tried again: its words are then all the person reads, so the retry is
+/// told to make them stand alone. A hotel question's retry wrote a second card naming no page
+/// beside "I've opened a browser check for those dates", and no card came (a local test, Nov 20).
 fn refused_browser_card(
     job: &LeaseJob,
     reply: &JsonValue,
@@ -9753,16 +9770,31 @@ impl JobProcessor {
         }
         // A change to another chat's page, put back or not, is the turn's result, which its reply
         // says: run again, the turn would make it again.
-        let workspace_file_changes_missing = expects_workspace_file_changes_after_actions
+        let no_files_for_a_required_change = expects_workspace_file_changes_after_actions
             && outcome.files.is_empty()
             && !workspace_file_changes_satisfied_by_patch_apply
             && !held_pages.changed_a_page();
+        // So is no change for a message that names only pages another chat made, in a chat with
+        // a page of its own: the person changes those in that chat, and the answer that says so
+        // is the turn's. Run again for files, it vanished while the retry began, and came back
+        // rewritten (a local test, Nov 20). A decline says nothing, and neither does a run that
+        // ended with no reply of its own: neither is such an answer.
+        let answered = has_final_reply_event(&output.events)
+            && !outcome.summary.trim().is_empty()
+            && outcome.summary != DEFAULT_CODEX_OUTCOME_SUMMARY
+            && !participation_decline_sentinel(&outcome.summary);
+        let names_only_another_chats_pages = no_files_for_a_required_change
+            && answered
+            && held_pages.names_only_held_pages(prompt_text);
+        let workspace_file_changes_missing =
+            no_files_for_a_required_change && !names_only_another_chats_pages;
 
         // A browser turn that hands the person's message to the building turn
         // has its answer: no reason to run it again.
-        let recovery_retry_required = !clean_ambient_decline
+        let may_run_again = !clean_ambient_decline
             && !hands_the_message_to_the_building_turn
-            && !shared_browser_turn_ends_without_a_page
+            && !shared_browser_turn_ends_without_a_page;
+        let recovery_retry_required = may_run_again
             && (reported_file_changes_missing
                 || workspace_file_changes_missing
                 || codex_fallback_summary_kind.is_some()
@@ -9790,6 +9822,14 @@ impl JobProcessor {
         // start again from the person's request and repeat what the turn did. One that ended
         // without its answer fails.
         let run_once = codex_run_options.run_once();
+        // The one turn that would have run again for its files and doesn't: its answer stands,
+        // with the runtime's line under it.
+        let stands_for_another_chats_page = names_only_another_chats_pages
+            && !run_once
+            && should_retry_codex_once(
+                first_shared_browser_terminal_consent_failure,
+                may_run_again,
+            );
         if run_once && codex_fallback_summary_kind.is_some() {
             return Err(JobFailureWithArtifacts {
                 message: "The turn ended without an answer. It was not run again, because it may \
@@ -10139,6 +10179,10 @@ impl JobProcessor {
                 without_project_preferences(&retry_prompt, &project_id, &retry_preferences)?;
             let recovery_run =
                 crate::turn_phases::span(job_id, crate::turn_phases::Phase::Recovery);
+            let withdraws_the_first_answer = retry_withdraws_the_first_answer(
+                codex_fallback_summary_kind,
+                reported_file_changes_missing,
+            );
             let retry_output_result = if let Some(progress) = progress_sender.as_ref() {
                 let mut retry_steps = StepStream::of(progress);
                 let mut retry_draft = progress
@@ -10153,11 +10197,15 @@ impl JobProcessor {
                             )
                     })
                     .map(|sender| {
-                        reply_draft::ReplyDraftStream::start(
+                        let mut draft = reply_draft::ReplyDraftStream::start(
                             sender,
                             retry_codex_run_options.allow_plain_text_final_fallback,
                             draft_ends_at_finding_lines,
-                        )
+                        );
+                        if withdraws_the_first_answer {
+                            draft.withdraw_shown();
+                        }
+                        draft
                     });
                 let mut retry_event_handler = |event: &JsonValue| -> Result<()> {
                     stream_turn_event(
@@ -10888,10 +10936,7 @@ impl JobProcessor {
                         job_id = %job_id,
                         "no file change after the recovery pass; its reply is the answer"
                     );
-                    save_report::append_not_saved(
-                        &mut retry_outcome.summary,
-                        &[NOTHING_CHANGED_LINE.to_string()],
-                    );
+                    append_nothing_changed(&mut retry_outcome.summary);
                     retry_artifacts.push(json!({
                         "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
                         "metadata": { "reason": "no_change_after_recovery" },
@@ -11417,6 +11462,15 @@ impl JobProcessor {
         held_pages.reply(&mut outcome.summary, &outcome.files);
         save_report::append_not_saved(&mut outcome.summary, &unopened_pages);
         save_report::append_not_saved(&mut outcome.summary, &not_saved);
+        // A change read as required that this chat can't make: its answer stands, with the
+        // runtime's line under it, as after a recovery pass that changed nothing.
+        if stands_for_another_chats_page {
+            append_nothing_changed(&mut outcome.summary);
+            artifacts.push(json!({
+                "kind": REQUIRED_CHANGES_NOT_MADE_ARTIFACT_KIND,
+                "metadata": { "reason": "another_chats_page" },
+            }));
+        }
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
             summary: outcome.summary,
@@ -14858,17 +14912,26 @@ fn stream_settled_cards(
     remaining.collect()
 }
 
-/// A turn whose only action is a `request_browser` card, and that reports no
-/// file, posts the card and no reply of its own: the card says where the
-/// browser goes, and the browser turn says what it found. The words a model
-/// wrote beside the card promised what the browser had not done, a submit
-/// the person then refused among them ("The browser will handle the form and
-/// submission."), however the contract put it. So the runtime decides what
-/// the person reads here, as it does with a hand-back's "Finished in the
-/// browser." and a pause's fixed reply. An empty reply is no reply: the
-/// controller and Studio show none, and nothing notifies. The browser rule
-/// ([`BROWSER_CHOICE_CONTRACT`]) tells the model so, and that what the person
-/// needs goes in the card's `task` or in a reply without the card.
+/// A turn whose only action is a `request_browser` card that Studio opens by
+/// itself, and that reports no file, posts the card and no reply of its own:
+/// the card says where the browser goes, and the browser turn says what it
+/// found. The words a model wrote beside such a card promised what the
+/// browser had not done, a submit the person then refused among them ("The
+/// browser will handle the form and submission."), however the contract put
+/// it. So the runtime decides what the person reads here, as it does with a
+/// hand-back's "Finished in the browser." and a pause's fixed reply. An empty
+/// reply is no reply: the controller and Studio show none, and nothing
+/// notifies.
+///
+/// A card that waits for the person keeps its turn's words above it
+/// ([`card_waits_for_the_person`]): nothing answers until they open it, and
+/// cleared, the turn's answer never reached the chat. Since cards name the
+/// pages they open, nearly always pages Octo found itself, a return policy's
+/// turn wrote "The search result says unopened items can be returned within
+/// 365 days…" under a card for the shop's own page, and the person read only
+/// "Open browser and continue" (a local test, Nov 20). The browser rule
+/// ([`BROWSER_CHOICE_CONTRACT`]) tells the model which words show, and that
+/// they never say a page opened before a browser tool saw it.
 ///
 /// A skill setup keeps its words: its replies carry the setup's walk and its
 /// next question beside the card ([`SKILL_SETUP_CONTINUATION`]). So does a
@@ -14889,9 +14952,51 @@ fn post_only_the_card(job: &LeaseJob, outcome: &mut CodexOutcome) {
         && outcome.read_files.is_empty()
         && !evaluated
         && !conversation_began_with_skill_setup(job)
+        && !card_waits_for_the_person(job, &outcome.actions)
     {
         outcome.summary.clear();
     }
+}
+
+/// Whether the card a turn posts, its first `request_browser`
+/// ([`build_final_messages_from_actions`]), waits for the person to open it, as Studio decides
+/// by the hosts its task names (`browserAutoStartAddressesSeen`, `useChatBrowserRequest`): one
+/// that nothing the person could have read before it shows, or an address Studio can't check
+/// ([`browser_request::BrowserRequest::waits_for_the_person`]). What they could have read is
+/// their messages and Octo's earlier replies in the chat's history
+/// ([`conversation_context::read_before_a_card`]), and the turn's own message. Each text's hosts
+/// are read as Studio reads them, a page's file name and a query's value included, from one
+/// list of cases both are tested against. The two can
+/// differ only where the runtime knows less than Studio, and then the card reads as waiting:
+/// in a shared chat the history doesn't say whose each message is, and it holds only the chat's
+/// latest rows. Studio also leaves a card a button for what the runtime can't see (a browser in
+/// use, a machine it would start, a card opened in the last ten minutes): those keep the rule
+/// as it was. A turn without its chat's history (the controller sends it with every chat turn)
+/// has nothing to compare, and its card is not taken to wait.
+fn card_waits_for_the_person(job: &LeaseJob, actions: &[CodexAction]) -> bool {
+    let Some(entries) = job
+        .payload
+        .get("conversation_history")
+        .and_then(JsonValue::as_array)
+    else {
+        return false;
+    };
+    let Some(card) = actions.iter().find_map(|action| match action {
+        CodexAction::RequestBrowser(request) => Some(request),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let message = job
+        .payload
+        .get("prompt_text")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    let seen: Vec<&str> = conversation_context::read_before_a_card(entries, one_on_one_turn(job))
+        .into_iter()
+        .chain(std::iter::once(message))
+        .collect();
+    card.waits_for_the_person(&seen)
 }
 
 /// The chat messages an assistant turn's actions become.
@@ -15803,6 +15908,20 @@ fn is_retryable_codex_upstream_summary(summary: &str) -> bool {
         || normalized.contains("timeout")
 }
 
+/// Whether the first answer's words leave the reply being written as its retry begins, instead
+/// of staying until the retry's words replace them (`reply_draft`): the runtime found them
+/// untrue. They were written for a card it refused ("I've opened a browser check of the official
+/// results.", with no card and no browser behind it), or they list files that were never
+/// written. Any other answer asked for again may be a true account, such as "I can't change …
+/// here because it was made in another chat" before a retry for the files it didn't write: taken
+/// away as the retry began, it vanished, "Thinking…" came back, and it returned rewritten.
+fn retry_withdraws_the_first_answer(
+    fallback: Option<CodexFallbackSummaryKind>,
+    reported_file_changes_missing: bool,
+) -> bool {
+    reported_file_changes_missing || fallback == Some(CodexFallbackSummaryKind::RefusedBrowserCard)
+}
+
 /// The words on the line while the runtime sends the turn's request again, by the retry's
 /// reason. A retry for evidence the answer lacked (a command or lookup the routing step asked
 /// for, `routing_recovery::Plan::reason`) failed nothing the person saw: the turn is still at
@@ -15863,7 +15982,7 @@ fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> 
             "Your previous answer was only `NO_RESPONSE`. That word declines an ambient group turn that Instafy marks for a participation decision, and this turn is not one: the person is talking to you, so answer them. Do not answer `NO_RESPONSE`."
         }
         CodexFallbackSummaryKind::RefusedBrowserCard => {
-            "Your previous answer's `request_browser` card was refused: a card names each page it opens by its address, and never the person's details. For a page you have no address for, search first, then hand over what it found: answer from the pages you read, or end with one card naming each page it opens by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named, and what to do there. Never put the person's details, such as an order number or an e-mail address, in a card."
+            "Your previous answer's `request_browser` card was refused: a card names each page it opens by its address, and never the person's details. For a page you have no address for, search first, then hand over what it found: answer from the pages you read, or end with one card naming each page it opens by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named, and what to do there. Never put the person's details, such as an order number or an e-mail address, in a card. If this card is refused too, only your words show: make them stand alone."
         }
     };
     let observation_requirement = match kind {
@@ -30284,7 +30403,8 @@ mod tests {
         // show its reply, while a reply beside a card still never promises a
         // page or a submit. Since Nov 19 it says a card names each page it
         // opens by its address, never the person's details, and that one
-        // naming none is refused.
+        // naming none is refused. Since Nov 20 a lone card's turn shows its
+        // reply unless the card opens by itself.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
             browser_choice <= 610,
@@ -31705,13 +31825,14 @@ mod tests {
     /// action or a reported file, a skill setup, an evaluated turn) carry the
     /// browser rule, and the rule still says what such a reply never says: the
     /// submit the person later refused ("The browser will handle the form and
-    /// submission.") came from a turn like these. It also tells the model that
-    /// a turn with only the card may show no reply, so nothing the person
-    /// needs is written where it is dropped.
+    /// submission.") came from a turn like these. It also tells the model when
+    /// a turn with only the card shows its reply: not beside a card that opens
+    /// by itself, so nothing the person needs is written where it is dropped,
+    /// and above one that waits for them, so what it found is said there.
     #[test]
     fn a_reply_beside_a_card_never_promises_and_a_lone_card_may_show_none() {
         assert!(BROWSER_CHOICE_CONTRACT.contains(
-            "- A turn with only this card may not show its `summary`: put what the person needs in `task`, or reply without the card. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n"
+            "- With only this card, `summary` shows unless the person or your earlier replies gave every address it opens: such a card opens by itself. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n"
         ));
         let evaluated = test_lease_job(
             Some("feature"),
@@ -31728,6 +31849,202 @@ mod tests {
         ] {
             assert!(browser_choice_applies(&job, false, false, false, false));
         }
+    }
+
+    /// A chat turn as the controller leases it: the person's message, the chat's history ending
+    /// with it, and, for a chat of one person, the controller's participation record.
+    fn chat_turn(history: JsonValue, message: &str, participants: u64) -> LeaseJob {
+        let mut history = history.as_array().cloned().unwrap_or_default();
+        history.push(json!({ "role": "user", "content": message }));
+        test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": message,
+                "conversation_history": history,
+                "metadata": { "groupParticipation": {
+                    "decision": "respond",
+                    "reason": "single_human_conversation",
+                    "participantCount": participants,
+                    "enforcedBy": "runtime-controller"
+                } }
+            }),
+        )
+    }
+
+    /// A card-only turn whose card opens a page Octo found itself waits for the person, and its
+    /// words show above it: what it read, or why it couldn't. Cleared, a return policy's turn
+    /// ("The search result says unopened items can be returned within 365 days…") and an opening
+    /// hours' turn ("Its official visit page is blocked to my page reader.") showed only "Open
+    /// browser and continue", with search on and with it off (a local test, Nov 20). What counts
+    /// as seen is what Studio counts: the person's messages and Octo's earlier replies, never the
+    /// turn's own words, and in a shared chat only the turn's own message of the person's.
+    #[test]
+    fn a_card_that_waits_for_the_person_keeps_its_turns_words_above_it() {
+        let posted = |job: &LeaseJob, raw: JsonValue| {
+            let mut outcome = extract_codex_outcome(&raw).expect("extract outcome");
+            post_only_the_card(job, &mut outcome);
+            let messages = build_final_messages_from_outcome(&outcome, None);
+            assert_eq!(messages.len(), 1, "{raw}");
+            assert_eq!(messages[0].message_type.as_deref(), Some("action_request"));
+            outcome.summary
+        };
+        let answer = |summary: &str, task: &str| {
+            json!({
+                "summary": summary,
+                "files": [],
+                "actions": [{ "type": "request_browser", "task": task }],
+            })
+        };
+        // The return policy, with search on: the card opens the shop's page a search found.
+        let policy = "I found the shop's official return-policy page, but its site refused a direct read. The search result says unopened items can be returned within 365 days with proof of purchase, but I couldn't verify the full terms. The card opens the official page; I won't use your email or order number.";
+        let policy_card = "Open the shop's official return-policy page at https://www.shop.example/us/help/returns/policy/ and explain the policy that may apply to my order. Do not use or submit my email address or order number.";
+        let asked = "My email is ana@example.com and my order is 123-4567. What is the shop's return policy for it?";
+        assert_eq!(
+            posted(&chat_turn(json!([]), asked, 1), answer(policy, policy_card)),
+            policy
+        );
+        // The opening hours, with search off: the card opens the museum's own page.
+        let hours = "I couldn't confirm whether the city museum is open this Sunday, or its hours: its official visit page is blocked to my page reader. The browser can check that page for the Sunday hours.";
+        let hours_card = "Check https://www.museum.example/visit for the city museum's opening hours and whether it is open this Sunday.";
+        let asked = "Is the city museum open this Sunday, and what are its hours?";
+        assert_eq!(
+            posted(&chat_turn(json!([]), asked, 1), answer(hours, hours_card)),
+            hours
+        );
+        // Words that name the page themselves are the card's own turn's: still not seen.
+        let named =
+            "Its official page, https://www.museum.example/visit, is blocked to my page reader.";
+        assert_eq!(
+            posted(&chat_turn(json!([]), asked, 1), answer(named, hours_card)),
+            named
+        );
+
+        // A card naming only an address the person gave opens by itself: no words of its own.
+        let pizza = "Open httpbin.org/forms/post, fill in a test pizza order using made-up details, and submit it.";
+        let said = "I've sent the test pizza order task to Instafy's browser. The browser will handle the form and submission.";
+        assert_eq!(
+            posted(&chat_turn(json!([]), pizza, 1), answer(said, pizza)),
+            ""
+        );
+        // So does one naming an address an earlier reply gave.
+        let earlier = json!([
+            { "role": "user", "content": "Where are the city museum's opening hours?" },
+            { "role": "assistant", "content": "They are on https://www.museum.example/visit." },
+        ]);
+        let asked = "Check them for this Sunday.";
+        assert_eq!(
+            posted(
+                &chat_turn(earlier.clone(), asked, 1),
+                answer(hours, hours_card)
+            ),
+            ""
+        );
+        // Never one a step, a status line or a card gave.
+        let not_read = json!([
+            { "role": "user", "content": "Where are the city museum's opening hours?" },
+            { "role": "assistant", "content": "instafy web read https://www.museum.example/visit",
+              "metadata": { "kind": "update", "source": "agent" } },
+            { "role": "assistant", "content": "Continue this task in Instafy's browser.",
+              "metadata": { "messageType": "action_request",
+                "details": { "browserRequest": { "task": hours_card } } } },
+        ]);
+        assert_eq!(
+            posted(&chat_turn(not_read, asked, 1), answer(hours, hours_card)),
+            hours
+        );
+        // In a chat with others, an address an earlier message gave may be a teammate's: Studio
+        // holds the card for any other person, so the words stay. The turn's own message counts.
+        let teammate = json!([
+            { "role": "user", "content": "The hours are on www.museum.example/visit." },
+        ]);
+        assert_eq!(
+            posted(
+                &chat_turn(teammate.clone(), asked, 2),
+                answer(hours, hours_card)
+            ),
+            hours
+        );
+        assert_eq!(
+            posted(&chat_turn(teammate, asked, 1), answer(hours, hours_card)),
+            ""
+        );
+        assert_eq!(
+            posted(&chat_turn(json!([]), pizza, 2), answer(said, pizza)),
+            ""
+        );
+        // An address Studio can't check is never seen.
+        let local = "Open http://localhost:3000/ and read the page.";
+        assert_eq!(
+            posted(&chat_turn(json!([]), local, 1), answer(said, local)),
+            said
+        );
+    }
+
+    /// Studio reads a host wherever a task holds a name with an ending: a page's file name
+    /// (`…/connections.html`) and a query's value are hosts to it, as the site's own is, and a
+    /// host under `localhost` is one it can't check. So it holds a card for such a page though
+    /// the person or an earlier reply gave the site, and the turn's words stay above it. Read by
+    /// each address's site alone, those cards were taken to open by themselves and lost their
+    /// words, while Studio left them a button. Only the very address the person gave opens by
+    /// itself.
+    #[test]
+    fn a_card_for_a_page_named_by_its_file_waits_as_studio_holds_it() {
+        let posted = |job: &LeaseJob, summary: &str, task: &str| {
+            let raw = json!({
+                "summary": summary,
+                "files": [],
+                "actions": [{ "type": "request_browser", "task": task }],
+            });
+            let mut outcome = extract_codex_outcome(&raw).expect("extract outcome");
+            post_only_the_card(job, &mut outcome);
+            assert_eq!(build_final_messages_from_outcome(&outcome, None).len(), 1);
+            outcome.summary
+        };
+        let route = "I couldn't read the planner's connections page directly. The card opens it to find a connection.";
+        let route_card = "Open https://www.transit.example/connections.html and find a connection from the old town to the airport.";
+        // The person gave the site, not its page.
+        let asked = "How do I get from the old town to the airport? Use transit.example.";
+        assert_eq!(
+            posted(&chat_turn(json!([]), asked, 1), route, route_card),
+            route
+        );
+        // An earlier reply gave the site, and the card opens a page on it with a file name.
+        let earlier = json!([
+            { "role": "user", "content": "Which camera is the newest?" },
+            { "role": "assistant", "content": "The newest is on https://shop.example/cameras." },
+        ]);
+        let weight =
+            "The maker's page for it couldn't be read here. The card opens it for the weight.";
+        let weight_card =
+            "Read https://shop.example/cameras/learn/ABCDE-131-master.html for its weight.";
+        assert_eq!(
+            posted(
+                &chat_turn(earlier, "What does it weigh?", 1),
+                weight,
+                weight_card
+            ),
+            weight
+        );
+        // A host in a query's value is one more the person never read.
+        let returns = "The returns page couldn't be read here. The card opens it.";
+        assert_eq!(
+            posted(
+                &chat_turn(json!([]), "Check shop.example's returns for me.", 1),
+                returns,
+                "Open https://shop.example/returns?ref=partner.example and read it."
+            ),
+            returns
+        );
+        // A host under localhost is one Studio can't check, whoever gave it.
+        let local = "Open http://app.localhost:3000/settings and read the page.";
+        assert_eq!(posted(&chat_turn(json!([]), local, 1), route, local), route);
+        // The very address the person gave opens by itself, with no words of its own.
+        let gave =
+            "Read https://www.transit.example/connections.html for a connection to the airport.";
+        assert_eq!(
+            posted(&chat_turn(json!([]), gave, 1), route, route_card),
+            ""
+        );
     }
 
     /// A card that continues building asks the browser only what to find or
@@ -32215,6 +32532,89 @@ mod tests {
             retry_status_activity(codex_fallback_retry_reason(refused)),
             activity_labels::evidence_retry_activity()
         );
+    }
+
+    /// A card the retry writes is checked as the first one was and not tried again: refused too,
+    /// it is left out, and the retry's words are all the person reads. So the retry is told to
+    /// make them stand alone. A hotel question's retry wrote a second card naming no page beside
+    /// "I've opened a browser check for those dates; no reservation will be made.", and no card
+    /// came (a local test, Nov 20).
+    #[test]
+    fn a_retry_whose_card_is_refused_too_ends_in_words_that_stand_alone() {
+        let retry = codex_fallback_retry_prompt(
+            "Latest user request: a hotel in the old town for 15 to 17 January",
+            CodexFallbackSummaryKind::RefusedBrowserCard,
+        );
+        assert!(
+            retry.contains(
+                "in a card. If this card is refused too, only your words show: make them stand alone.\n"
+            ),
+            "{retry}"
+        );
+        let words = "One hotel's listing showed EUR 139 a night in the search results, but its own page couldn't be read, so the dates and the price for two adults aren't confirmed.";
+        let raw = json!({
+            "summary": words,
+            "files": [],
+            "actions": [{
+                "type": "request_browser",
+                "task": "Check hotel availability in the old town for 15 to 17 January for 2 adults under 140 euros a night.",
+            }],
+        });
+        let job = chat_turn(
+            json!([]),
+            "Find a hotel in the old town for 15 to 17 January, 2 adults, under 140 euros a night.",
+            1,
+        );
+        let mut outcome = extract_codex_outcome(&raw).expect("extract outcome");
+        assert!(outcome.actions.is_empty(), "the card is refused");
+        post_only_the_card(&job, &mut outcome);
+        assert_eq!(outcome.summary, words);
+        assert!(build_final_messages_from_outcome(&outcome, None).is_empty());
+    }
+
+    /// The words of an answer the runtime found untrue leave the reply being written as its
+    /// retry begins: those written for a card it refused, and a list of files that were never
+    /// written. Any other answer asked for again may be a true account, and stays until the
+    /// retry's words replace it: one that changed no file, one that skipped a lookup, one that
+    /// ended without its final message.
+    #[test]
+    fn only_an_answer_found_untrue_leaves_the_draft_as_its_retry_begins() {
+        use CodexFallbackSummaryKind::*;
+        assert!(retry_withdraws_the_first_answer(
+            Some(RefusedBrowserCard),
+            false
+        ));
+        assert!(retry_withdraws_the_first_answer(None, true));
+        assert!(!retry_withdraws_the_first_answer(None, false));
+        for kind in [
+            MissingFinalAssistantMessage,
+            InvalidFinalAssistantMessageJson,
+            DeclinedATurnThatNeedsAnAnswer,
+        ] {
+            assert!(
+                !retry_withdraws_the_first_answer(Some(kind), false),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The runtime's line goes under a reply that stood without the change read as required,
+    /// once, and never under a decline: the controller keeps the bare word out of the chat, and
+    /// with the line under it a group would read "NO_RESPONSE" and "Nothing was changed.".
+    #[test]
+    fn nothing_was_changed_goes_under_a_reply_and_never_under_a_decline() {
+        let mut reply = "I can't change it here: it was made in another chat.".to_string();
+        append_nothing_changed(&mut reply);
+        append_nothing_changed(&mut reply);
+        assert_eq!(
+            reply,
+            "I can't change it here: it was made in another chat.\n\nNothing was changed."
+        );
+        for decline in ["NO_RESPONSE", " NO_RESPONSE\n", "`NO_RESPONSE`"] {
+            let mut summary = decline.to_string();
+            append_nothing_changed(&mut summary);
+            assert_eq!(summary, decline);
+        }
     }
 
     /// A refused card leaves the words written for it with nothing behind them, whatever else

@@ -434,7 +434,30 @@ The default-focused action is **Deny**. Only the initiating user with live
 expired request, or a replay cannot satisfy it. Scroll is allowed only after
 the page origin has been approved because it changes no remote state. Typing
 authentication, payment, or identity secrets remains blocked outright and is
-not made possible by approval.
+not made possible by approval. A secret's field is a password field, one marked
+for a password or a card (`autocomplete` `current-password`, `new-password` or
+`cc-*`), or one whose names or form hold a secret's words. A field marked
+`autocomplete="one-time-code"` is a code's only with a sign of a code (the
+shared policy's `isOneTimeCodeField`), since sites put the mark on a journey
+planner's stops too, only to keep autofill out of them, and those are typed
+into. A sign of the field's own always counts: its label, name, id,
+placeholder or title names a code (the redaction module's code words, never
+"Postcode"; a camel-cased name such as `otpCode` reads as its words), a
+credential, a password or a code's step; it sits under a heading, dialog or
+row that names a credential; it takes digits (input mode numeric, decimal or
+tel, a `tel` or `number` field, or a pattern of digits alone); it holds at
+most 10 characters (`maxlength` or `size`); or its form holds a password or
+sign-in field. A field with none of these that opens a list as a person types
+(a combobox, `aria-autocomplete` list or both, a datalist, or a list it names
+that has a list's role or options, never a plain list of hints) is no code's,
+whatever is typed. Any other is a code's when it is the only field a person
+types into in its form (in no form, on the page): a code's step asks for
+nothing else, in whatever language it is labelled, while a planner asks for
+two stops; or when the text typed into it reads as a code: digits alone, or
+one word that mixes letters and digits. A field the page
+reports no shape for keeps the mark alone as the sign, and the same rule
+names a page's sign-in fields (`isSignInField`). The Personal Browser judges
+the mark the same way.
 
 Two steps never ask, in Ask too:
 
@@ -2402,7 +2425,26 @@ out of order. The step then looks for the list its field opens: the options
 its own (`aria-controls`, `aria-owns`, the list its active option is in) or
 holds, all of them once they differ from what that list showed before the
 step (a list the text narrowed is named whole); else, for a field that names
-no list, options shown that were not before it typed. Another list on the
+no list, options shown that were not before it typed. A planner that draws
+its stops as plain rows with no role has them named too: a list that holds no
+option gives its items (`li`), else the most children it holds drawn alike,
+one under another. Such rows count only in a list that pops up at the field:
+one it names that has a list's role or is drawn over the page, or, for a
+field that names none, the one drawn against it (just under or over it, over
+the page and holding neither the field nor what is around it); only when a
+row there shares the start of a word with what the field holds; and only for
+a field a person types text into. So a calendar a date field opens or names
+is none, and neither is a list of the page's own that a search box filters or
+a ticked box names. A row that holds controls is named by the first of them
+whose words share the start of a word with what the field holds (a stop's
+link beside a button that saves it), else the first that draws words. A reading
+lists plain rows after the page's controls, and on a page with more controls
+than it holds (200) it keeps the focused field's open options first, so the
+indices the step names are the ones the next click takes, and a click on a
+row leaves the focus in the field as a click on an option does. Rows that no
+control of the reading stands for are counted, never named ("2 suggestions
+came under "From", but this reading doesn't list them, so none can be clicked
+here."): only a reading masks a page's words. Another list on the
 page is never the field's: a field's options were named under another field,
 and a page's "Sort by" under a search. An option turned off (a list's
 "Searching…" or "No matching stops" row) is none, and the step keeps looking
@@ -3248,11 +3290,18 @@ unless the policy is `"covered"`.
 - **Cards after a press.** A card says what it is for ("Continue in
   Instafy's browser", and the site it is headed for), never what pressing it
   does: older cards carry a line about that, which is not shown. A turn whose
-  only action is the card posts the card and no reply of its own, except in a
-  skill setup, whose reply carries its walk, and on a turn that decides whether
-  to answer at all. A reply that does show beside a card never says a page
+  only action is a card that opens by itself posts the card and no reply of its
+  own, except in a skill setup, whose reply carries its walk, and on a turn that
+  decides whether to answer at all. A card that waits for the person, because
+  its task names an address neither the person's messages nor Octo's earlier
+  replies show (the runtime reads the chat's history and each text's hosts as
+  Studio does, a page's file name and a query's value included, and in a
+  shared chat counts only the turn's own message of the person's), keeps the
+  turn's reply above it. A reply that does show beside a card never says a page
   opened before a browser tool saw it, or what the browser will submit, send or
-  buy. A card shows only while it needs the person. While Studio opens it by
+  buy. A refused card's words leave the reply being written as its retry begins,
+  and the retry is told that if its own card is refused too, only its words
+  show, so they stand alone. A card shows only while it needs the person. While Studio opens it by
   itself, the turn's one line **Opening Instafy's browser…** takes its place,
   with no box. Once it was continued, by Studio or by the person's press, it
   leaves the chat, also after a reload, so it is never offered again: the
