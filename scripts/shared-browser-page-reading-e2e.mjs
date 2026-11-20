@@ -121,8 +121,8 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    headings, clicked and highlighted by that name.
 // 16. A control whose name only says it opens something ("Open … in a new
 //    tab") goes without a prompt, in Octo's own tab too, while one whose name
-//    books or one in a form still asks, and one that opens another window is
-//    closed and the step says so.
+//    books asks, it and one in a form are refused in Octo's own tab, and one
+//    that opens another window is closed and the step says so.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -2158,7 +2158,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a row's words only tell its controls apart where they are named: reading steps in rows that speak of deleting, booking or saving go without a prompt, in Octo's own tab too, a pause on a booking's icon button under a line about cookies is the person's step, a key beside an icon button names no control, whole or in part, a withheld page's controls are named without their rows' words in its reading and a step's words, and a stop drawn anew for a field that names no list of its own names no other list's options",
         "every click says which control it hit and what changed (a new page, the page loaded again, its address or fragment, a dialog or a list opened, a dialog closed, the page changed), and a click that is not on one of a typed field's own suggestions says the field still holds what was typed with none of them chosen",
         "a guided ticket page's cards read as a reading that listed three unnamed buttons and no card's control saw them only when each card's control sits across a shadow root, never in a frame, hidden or of no control kind; those controls are named by their cards' headings, a card larger than a row's too, and are clicked and highlighted by that name",
-        "a control whose name only says it opens something goes without a prompt, in Octo's own tab too, while one whose name books or one in a form still asks, and one that opens another window is closed and the step says so",
+        "a control whose name only says it opens something goes without a prompt, in Octo's own tab too, while one whose name books asks, it and one in a form are refused in Octo's own tab, and one that opens another window is closed and the step says so",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

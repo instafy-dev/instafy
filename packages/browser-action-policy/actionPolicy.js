@@ -418,17 +418,21 @@
   // window)" last, in English and German. What is left is the thing it opens,
   // whose words are judged on their own (openedByName). A name that shows
   // more of the page it is on ("View more", "Mehr anzeigen") opens nothing.
-  const OPENS_FIRST = /^(?:open|view)\s+/iu;
-  const OPENS_LAST = /\s+öffnen$/iu;
+  // They read a name whose spaces cleanText made single, with no run of
+  // repeated characters for a match to retry from, and what they leave is
+  // trimmed one character at a time (withoutSeparators).
+  const OPENS_FIRST = /^(?:open|view)\s/iu;
+  const OPENS_LAST = /\söffnen$/iu;
   const SHOWS_MORE = /^(?:more|less|mehr|weniger)$/iu;
   const OPENS_NEW_TAB = new RegExp(
-    `(?:^|[\\s,:;–—-]+)\\(?(?:(?:${[
-      "(?:opens?\\s+)?in\\s+(?:a\\s+)?new\\s+(?:tab|window)",
-      "(?:öffnet\\s+(?:sich\\s+)?)?in\\s+(?:einem\\s+)?neuen\\s+(?:tab|fenster)(?:\\s+öffnen)?",
-      "(?:öffnet\\s+(?:sich\\s+)?)?in\\s+neuem\\s+(?:tab|fenster)(?:\\s+öffnen)?",
-    ].join("|")}))\\)?[.!]?$`,
+    `(?<![\\p{L}\\p{N}])\\(?(?:${[
+      "(?:opens?\\s)?in\\s(?:a\\s)?new\\s(?:tab|window)",
+      "(?:öffnet\\s(?:sich\\s)?)?in\\s(?:einem\\s)?neuen\\s(?:tab|fenster)(?:\\söffnen)?",
+      "(?:öffnet\\s(?:sich\\s)?)?in\\sneuem\\s(?:tab|fenster)(?:\\söffnen)?",
+    ].join("|")})\\)?[.!]?$`,
     "iu",
   );
+  const SEPARATORS = new Set([" ", ",", ":", ";", "\u2013", "\u2014", "-"]);
   // A sign-in, a sign-up or an account in the words of what an opener opens,
   // which keep it out of the opener rule ("sign" is a commit word already).
   const SIGN_IN_WORDS = words([
@@ -757,13 +761,21 @@
     let rest = cleanText(label);
     let opener = false;
     for (const pattern of [OPENS_NEW_TAB, OPENS_LAST, OPENS_FIRST]) {
-      const next = rest.replace(pattern, "").trim();
-      if (next !== rest) {
-        rest = next;
-        opener = true;
-      }
+      if (!pattern.test(rest)) continue;
+      rest = withoutSeparators(rest.replace(pattern, ""));
+      opener = true;
     }
     return opener && !SHOWS_MORE.test(rest) ? rest : null;
+  }
+
+  // The text without the spaces, commas, colons and dashes at its ends, one
+  // character at a time.
+  function withoutSeparators(text) {
+    let start = 0;
+    let end = text.length;
+    while (start < end && SEPARATORS.has(text[start])) start += 1;
+    while (end > start && SEPARATORS.has(text[end - 1])) end -= 1;
+    return text.slice(start, end);
   }
 
   // The same for each of a control's names (its accessible name, the text it

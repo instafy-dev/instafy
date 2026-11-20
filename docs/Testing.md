@@ -1885,9 +1885,9 @@ headings ("button in “Entree museum”"), a click on one opens that card's
 tickets with no prompt, and a pause on one highlights it, as a card larger
 than a row names its icon button by its heading too. An events page's cards,
 controls named "Open … in a new tab", open without a prompt, in Octo's own tab
-too, while one whose name books asks (and is refused in Octo's own tab), as
-does one in a form, and one that opens another window is closed with the step
-saying so. The Personal
+too, while one whose name books asks, it and one in a form are refused in
+Octo's own tab, which takes reading steps only, and one that opens another
+window is closed with the step saying so. The Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
 
