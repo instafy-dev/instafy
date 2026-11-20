@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_CONVERSATION_SURFACES, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, readConversationSurfaces, selectConversationView, useConversationSurfacesOwner, visibleSitePreviewId } from "../conversationSurfaces";
+import { DEFAULT_CONVERSATION_SURFACES, closeConversationBrowser, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, readConversationSurfaces, selectConversationView, useConversationSurfacesOwner, visibleSitePreviewId } from "../conversationSurfaces";
 
 describe("conversation surface ownership", () => {
   beforeEach(() => { sessionStorage.clear(); });
@@ -78,6 +78,28 @@ describe("conversation surface ownership", () => {
     const onFile = selectConversationView(state, "file:a.md");
     const previewsOnly = closeConversationFile(closeConversationFile(selectConversationView(onFile, "file:b.md"), "file:b.md", false), "file:a.md", false);
     expect(previewsOnly.activeId).toBe(`preview:${pid(2)}`);
+  });
+
+  it("brings Chat forward when the Browser view closes, and the next view takes its place beside Chat", () => {
+    const previewId = "11111111-1111-4111-8111-111111111111";
+    const onBrowser = selectConversationView(DEFAULT_CONVERSATION_SURFACES, "browser");
+    // Browser in front: Chat comes forward. With no other view, the choice
+    // beside Chat stays Browser for when the browser opens again.
+    expect(closeConversationBrowser(onBrowser)).toEqual({ ...onBrowser, activeId: "chat", resourceId: "browser" });
+    // Beside Chat (a split): the first file, then the first preview, takes its place.
+    const withViews = selectConversationView(
+      openConversationPreview(openConversationFile(DEFAULT_CONVERSATION_SURFACES, { id: "file:a.md", path: "a.md" }), { previewId, title: "Docs" }),
+      "browser",
+    );
+    expect(closeConversationBrowser(withViews)).toMatchObject({ activeId: "chat", resourceId: "file:a.md" });
+    const previewOnly = selectConversationView(openConversationPreview(DEFAULT_CONVERSATION_SURFACES, { previewId, title: "Docs" }), "browser");
+    expect(closeConversationBrowser(previewOnly)).toMatchObject({ activeId: "chat", resourceId: `preview:${previewId}` });
+    // Another view in front stays in front.
+    const onFile = selectConversationView(withViews, "file:a.md");
+    expect(closeConversationBrowser({ ...onFile, resourceId: "browser" })).toMatchObject({ activeId: "file:a.md", resourceId: "file:a.md" });
+    // Nothing to change: the same state, so nothing is written.
+    const unchanged = { ...selectConversationView(withViews, "chat"), resourceId: "file:a.md" };
+    expect(closeConversationBrowser(unchanged)).toBe(unchanged);
   });
 
   it("resolves the view beside Chat and which preview is on screen", () => {

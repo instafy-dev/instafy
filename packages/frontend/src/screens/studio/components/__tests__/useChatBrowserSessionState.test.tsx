@@ -256,9 +256,11 @@ describe("useChatBrowserSessionState", () => {
         stale.resumeBrowserSession("late-browser");
         stale.handleBrowserSessionOpenChange(true);
         stale.handleHiddenBrowserSessionUnavailable();
+        stale.closeBrowserView();
       });
       expect(resultRef.current?.exactBrowserRuntimeId).toBeNull();
       expect(resultRef.current?.browserSessionOpen).toBe(false);
+      expect(resultRef.current?.browserViewClosed).toBe(false);
       expect(setSessionRuntimeOverride).not.toHaveBeenCalled();
       expect(refreshRuntimeStatuses).not.toHaveBeenCalled();
       expect(window.sessionStorage.getItem(`instafy:browser-session:${next.userId}:${next.projectId}:conversation-1`)).toBeNull();
@@ -266,6 +268,9 @@ describe("useChatBrowserSessionState", () => {
       await act(async () => resultRef.current?.handleBrowserRuntimeIdResolved("second-browser"));
       await act(async () => root.render(<TestHarness resultRef={resultRef} />));
       expect(resultRef.current?.exactBrowserRuntimeId).toBe("first-browser");
+      // The stale close reached neither chat.
+      expect(resultRef.current?.browserViewClosed).toBe(false);
+      expect(resultRef.current?.browserSessionOpen).toBe(true);
       await act(async () => root.render(<TestHarness resultRef={resultRef} {...next} />));
       expect(resultRef.current?.exactBrowserRuntimeId).toBe("second-browser");
     },
@@ -298,6 +303,89 @@ describe("useChatBrowserSessionState", () => {
     expect(resultRef.current?.exactBrowserRuntimeId).toBe("saved");
     await act(async () => resultRef.current?.resumeBrowserSession("next"));
     expect(JSON.parse(window.localStorage.getItem(key)!)).toMatchObject({ exactRuntimeId: "next" });
+  });
+
+  // The Browser tab's close: only the view closes. The machine stays bound and
+  // nothing asks for runtimes again, so a turn Octo runs in that browser goes
+  // on, and the view opens on that same browser when it comes back.
+  it("closes the Browser view, keeping its machine, until the browser opens again", async () => {
+    const key = "instafy:browser-session:user-1:project-1:conversation-1";
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    await act(async () => resultRef.current?.resumeBrowserSession("octo-browser", { show: false }));
+    setSessionRuntimeOverride.mockClear();
+    await act(async () => resultRef.current?.closeBrowserView());
+
+    expect(resultRef.current?.browserSessionOpen).toBe(false);
+    expect(resultRef.current?.hasHiddenBrowserSession).toBe(false);
+    expect(resultRef.current?.browserViewClosed).toBe(true);
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("octo-browser");
+    expect(resultRef.current?.resolvedBrowserRuntimeId).toBe("octo-browser");
+    expect(refreshRuntimeStatuses).not.toHaveBeenCalled();
+    expect(setSessionRuntimeOverride).not.toHaveBeenCalled();
+    for (const storage of [window.sessionStorage, window.localStorage]) {
+      expect(JSON.parse(storage.getItem(key)!)).toEqual({
+        open: false, runtimeId: "octo-browser", exactRuntimeId: "octo-browser", closed: true,
+      });
+    }
+
+    // A reload keeps it closed, its machine kept.
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    expect(resultRef.current?.browserSessionStateHydrated).toBe(true);
+    expect(resultRef.current?.browserSessionOpen).toBe(false);
+    expect(resultRef.current?.hasHiddenBrowserSession).toBe(false);
+    expect(resultRef.current?.browserViewClosed).toBe(true);
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("octo-browser");
+
+    // Opening it again (the composer's Open browser) comes back on that browser, on screen.
+    const before = resultRef.current?.browserSessionExpandRequestToken ?? 0;
+    await act(async () => resultRef.current?.handleToggleBrowserSession());
+    expect(resultRef.current?.browserSessionOpen).toBe(true);
+    expect(resultRef.current?.browserViewClosed).toBe(false);
+    expect(resultRef.current?.browserSessionOpenedInPage).toBe(true);
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("octo-browser");
+    expect(resultRef.current?.browserSessionExpandRequestToken).toBeGreaterThan(before);
+    expect(JSON.parse(window.sessionStorage.getItem(key)!)).toEqual({
+      open: true, runtimeId: "octo-browser", exactRuntimeId: "octo-browser",
+    });
+  });
+
+  it.each([
+    ["the composer's Open browser", (state: BrowserSessionState) => state.openBrowserSession(null)],
+    ["a turn's Open browser button", () => window.dispatchEvent(new CustomEvent("instafy:browser-open", {
+      detail: { runtimeId: "saved-browser", conversationLocalId: "conversation-1" },
+    }))],
+    ["a browser card's press", (state: BrowserSessionState) => state.resumeBrowserSession("saved-browser")],
+    ["the browser view itself", (state: BrowserSessionState) => state.handleBrowserSessionOpenChange(true)],
+  ])("opens a closed view again from %s", async (_way, open) => {
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    await act(async () => resultRef.current?.resumeBrowserSession("saved-browser"));
+    await act(async () => resultRef.current?.closeBrowserView());
+    expect(resultRef.current?.browserViewClosed).toBe(true);
+    await act(async () => { open(resultRef.current!); });
+    expect(resultRef.current?.browserSessionOpen).toBe(true);
+    expect(resultRef.current?.browserViewClosed).toBe(false);
+    expect(resultRef.current?.resolvedBrowserRuntimeId).toBe("saved-browser");
+  });
+
+  it("keeps a view closed from the view bar while the chat's panel is off screen, and in a new window", async () => {
+    const key = "instafy:browser-session:user-1:project-1:conversation-1";
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    await act(async () => resultRef.current?.resumeBrowserSession("saved-browser"));
+    const offScreen = resultRef.current!;
+    // One of the chat's own tabs is in front: its panel is gone, its close still holds.
+    await act(async () => root.unmount());
+    offScreen.closeBrowserView();
+    expect(JSON.parse(window.localStorage.getItem(key)!)).toMatchObject({ open: false, closed: true, exactRuntimeId: "saved-browser" });
+
+    window.sessionStorage.clear();
+    root = createRoot(container);
+    await act(async () => root.render(<TestHarness resultRef={resultRef} />));
+    expect(resultRef.current?.browserSessionOpen).toBe(false);
+    expect(resultRef.current?.hasHiddenBrowserSession).toBe(false);
+    expect(resultRef.current?.browserViewClosed).toBe(true);
+    expect(resultRef.current?.exactBrowserRuntimeId).toBe("saved-browser");
   });
 
   it("never announces the previous account's runtime as hydrated under a new account", async () => {

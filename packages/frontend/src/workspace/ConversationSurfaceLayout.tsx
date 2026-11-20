@@ -57,7 +57,8 @@ export function ConversationSurfaceTabs({
   useLayoutEffect(() => {
     if (!restoreFocus.current) return;
     restoreFocus.current = false;
-    const target = tabs.current.get(selected) ?? document.getElementById(chatPanelId);
+    // With its last view closed the tab list is hidden: Chat itself takes focus.
+    const target = (resources.length ? tabs.current.get(selected) : null) ?? document.getElementById(chatPanelId);
     target?.focus();
   }, [selected, resources.length, chatPanelId]);
   const close = (view: ConversationSurface) => {

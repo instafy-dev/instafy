@@ -20,6 +20,35 @@ function sanitizeRuntimeId(runtimeId: string | null | undefined): string | null 
   return trimmed.length > 0 ? trimmed : null;
 }
 
+const BROWSER_SESSION_STORES = ["sessionStorage", "localStorage"] as const;
+
+/**
+ * Saves that the person closed a chat's Browser view, keeping the machine the
+ * browser is on for its next open. Written at once rather than by the effect
+ * that saves this hook's state, so a close from the conversation's view bar
+ * holds while the chat's panel is not on screen (one of its own tabs is).
+ */
+function saveClosedBrowserView(storageKey: string) {
+  let saved: { runtimeId?: unknown; exactRuntimeId?: unknown } = {};
+  for (const storage of BROWSER_SESSION_STORES) {
+    try {
+      const raw = window[storage].getItem(storageKey);
+      if (raw === null) continue;
+      saved = JSON.parse(raw) ?? {};
+      break;
+    } catch { /* Try the other store. */ }
+  }
+  const value = JSON.stringify({
+    open: false,
+    runtimeId: typeof saved.runtimeId === "string" ? saved.runtimeId : null,
+    exactRuntimeId: typeof saved.exactRuntimeId === "string" ? saved.exactRuntimeId : null,
+    closed: true,
+  });
+  for (const storage of BROWSER_SESSION_STORES) {
+    try { window[storage].setItem(storageKey, value); } catch { /* Storage may be unavailable. */ }
+  }
+}
+
 export function useChatBrowserSessionState({
   currentUserId,
   activeConversationControllerId,
@@ -31,6 +60,9 @@ export function useChatBrowserSessionState({
   setSessionRuntimeOverride,
 }: UseChatBrowserSessionStateOptions) {
   const [browserSessionOpen, setBrowserSessionOpen] = useState(false);
+  // The person closed this chat's Browser view (closeBrowserView): it stays
+  // closed, with a machine bound to it too, until the browser opens again.
+  const [browserViewClosed, setBrowserViewClosed] = useState(false);
   const [browserSessionRuntimeId, setBrowserSessionRuntimeId] = useState<string | null>(null);
   const [exactBrowserRuntimeId, setExactBrowserRuntimeId] = useState<string | null>(null);
   // The storage scope in which the browser was last opened by an action in
@@ -61,6 +93,7 @@ export function useChatBrowserSessionState({
     setBrowserSessionRuntimeId(null);
     setExactBrowserRuntimeId(null);
     setBrowserSessionOpen(false);
+    setBrowserViewClosed(false);
     setOpenedInPageKey(null);
     setHydratedStorageKey(null);
   }, [browserSessionStateStorageKey]);
@@ -74,6 +107,7 @@ export function useChatBrowserSessionState({
       setBrowserSessionRuntimeId(null);
       setExactBrowserRuntimeId(null);
       setBrowserSessionOpen(false);
+      setBrowserViewClosed(false);
       setHydratedStorageKey(null);
       return;
     }
@@ -87,7 +121,7 @@ export function useChatBrowserSessionState({
       // the tab/app has closed. These are identifiers only, never cookies or URL
       // snapshots. The controller still verifies availability and access.
       let raw: string | null = null;
-      for (const storage of ["sessionStorage", "localStorage"] as const) {
+      for (const storage of BROWSER_SESSION_STORES) {
         try { raw = window[storage].getItem(browserSessionStateStorageKey); } catch { /* Try the other store. */ }
         if (raw !== null) break;
       }
@@ -95,27 +129,34 @@ export function useChatBrowserSessionState({
         setBrowserSessionRuntimeId(null);
         setExactBrowserRuntimeId(null);
         setBrowserSessionOpen(false);
+        setBrowserViewClosed(false);
         setHydratedStorageKey(browserSessionStateStorageKey);
         return;
       }
       const parsed = JSON.parse(raw) as {
         open?: unknown;
+        closed?: unknown;
         runtimeId?: unknown;
         exactRuntimeId?: unknown;
       };
       const open = typeof parsed?.open === "boolean" ? parsed.open : false;
+      // A view the person closed stays closed after a reload or in a new
+      // window, its machine kept for the next open.
+      const closed = !open && parsed?.closed === true;
       const runtimeId =
         typeof parsed?.runtimeId === "string" && parsed.runtimeId.trim().length > 0
           ? parsed.runtimeId.trim()
           : null;
       setBrowserSessionRuntimeId(runtimeId);
       setExactBrowserRuntimeId(parsed.exactRuntimeId === runtimeId ? runtimeId : null);
-      setBrowserSessionOpen(open || Boolean(runtimeId));
+      setBrowserSessionOpen(open || (Boolean(runtimeId) && !closed));
+      setBrowserViewClosed(closed);
       setHydratedStorageKey(browserSessionStateStorageKey);
     } catch {
       setBrowserSessionRuntimeId(null);
       setExactBrowserRuntimeId(null);
       setBrowserSessionOpen(false);
+      setBrowserViewClosed(false);
       setHydratedStorageKey(browserSessionStateStorageKey);
     }
   }, [browserSessionStateStorageKey]);
@@ -133,16 +174,19 @@ export function useChatBrowserSessionState({
       open: browserSessionOpen,
       runtimeId: browserSessionRuntimeId,
       exactRuntimeId: exactBrowserRuntimeId,
+      ...(browserViewClosed ? { closed: true } : {}),
     });
-    for (const storage of ["sessionStorage", "localStorage"] as const) {
+    for (const storage of BROWSER_SESSION_STORES) {
       try { window[storage].setItem(browserSessionStateStorageKey, value); } catch { /* Storage may be unavailable. */ }
     }
-  }, [browserSessionOpen, browserSessionRuntimeId, exactBrowserRuntimeId, browserSessionStateHydrated, browserSessionStateStorageKey]);
+  }, [browserSessionOpen, browserSessionRuntimeId, browserViewClosed, exactBrowserRuntimeId, browserSessionStateHydrated, browserSessionStateStorageKey]);
 
   const resolvedBrowserRuntimeId = browserSessionRuntimeId ?? null;
   const preferredBrowserRuntimeId =
     resolvedBrowserRuntimeId ?? effectiveRuntimeId ?? preferredRuntimeId ?? null;
-  const hasHiddenBrowserSession = !browserSessionOpen && Boolean(resolvedBrowserRuntimeId);
+  // A browser that is not open but still has a machine keeps its tab, which
+  // opens it again; a view the person closed has none.
+  const hasHiddenBrowserSession = !browserSessionOpen && !browserViewClosed && Boolean(resolvedBrowserRuntimeId);
   const [browserSessionExpandRequestToken, setBrowserSessionExpandRequestToken] = useState(0);
   const browserSessionReopenAfterBugReportRef = useRef(false);
 
@@ -155,6 +199,7 @@ export function useChatBrowserSessionState({
       setExactBrowserRuntimeId((current) => current === sanitizedRuntimeId ? current : null);
     }
     setBrowserSessionOpen(true);
+    setBrowserViewClosed(false);
     setOpenedInPageKey(browserSessionStateStorageKey);
     setBrowserSessionExpandRequestToken((current) => current + 1);
   }, [browserSessionStateStorageKey]);
@@ -172,6 +217,7 @@ export function useChatBrowserSessionState({
     setBrowserSessionRuntimeId(normalized);
     setExactBrowserRuntimeId(normalized);
     setBrowserSessionOpen(true);
+    setBrowserViewClosed(false);
     setOpenedInPageKey(browserSessionStateStorageKey);
     if (options.show !== false) setBrowserSessionExpandRequestToken((current) => current + 1);
   }, [browserSessionStateStorageKey]);
@@ -180,7 +226,24 @@ export function useChatBrowserSessionState({
     if (!browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) return;
     browserSessionStateDirtyRef.current = true;
     setBrowserSessionOpen(open);
+    if (open) setBrowserViewClosed(false);
     setOpenedInPageKey(open ? browserSessionStateStorageKey : null);
+  }, [browserSessionStateStorageKey]);
+
+  /**
+   * The person closes this chat's Browser view: its tab goes away and this
+   * page stops showing the browser. Only the view closes. The browser, its
+   * pages and any turn running in it go on as they are, and its machine stays
+   * bound for the next open. It stays closed, after a reload or in a new
+   * window too, until the browser is opened here again.
+   */
+  const closeBrowserView = useCallback(() => {
+    if (!browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) return;
+    browserSessionStateDirtyRef.current = true;
+    setBrowserSessionOpen(false);
+    setBrowserViewClosed(true);
+    setOpenedInPageKey(null);
+    saveClosedBrowserView(browserSessionStateStorageKey);
   }, [browserSessionStateStorageKey]);
 
   const requestBrowserSessionExpand = useCallback(() => {
@@ -308,6 +371,8 @@ export function useChatBrowserSessionState({
     browserSessionOpenedInPage: browserSessionOpen &&
       openedInPageKey !== null && openedInPageKey === browserSessionStateStorageKey,
     browserSessionExpandRequestToken,
+    browserViewClosed,
+    closeBrowserView,
     handleBrowserRuntimeIdResolved,
     handleBrowserSessionOpenChange,
     handleHiddenBrowserSessionUnavailable,
