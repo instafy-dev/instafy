@@ -145,6 +145,7 @@ import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import { useChatRunStop } from "./useChatRunStop";
 import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, chatRunStopOnScreen, resolveChatRunStopTargets } from "./chatRunStopTargets";
+import { runIdsEndedByStop } from "./controllerConversationNotice";
 import { ChatRunStopNoticeProvider } from "./ChatRunStopNotice";
 import { useChatRunStopContinuation } from "./useChatRunStopContinuation";
 import {
@@ -4751,6 +4752,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeId: resolvedBrowserRuntimeId,
     pageId: browserHandoffPage?.id ?? null,
   }), [runs, activeProjectId, activeConversationEntry?.controllerId, resolvedBrowserRuntimeId, browserHandoffPage?.id]);
+  // The runs a person's Stop ended, as the chat's rows show them: a pause one
+  // of them asked for is over, and Continue under its row is the way on.
+  // The chat's latest messages hold it, whichever part of the chat is shown.
+  const browserHumanInputStoppedRunIds = useMemo(() => runIdsEndedByStop(recentMessages), [recentMessages]);
   // The sites of the cards the person pressed in this chat: their OK for
   // each one in the chat's later browser turns. Only a press that went out
   // counts.
@@ -5975,7 +5980,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     followOnTargets: stopFollowOnTargets,
     canStop: canStopRuns,
     viewerUserId: currentUserId,
-    active: chatRunStopOnScreen({ chatVisible, browserVisible, jobThread: Boolean(jobThread) }),
+    // Stop is in the composer, which every view of the chat keeps.
+    active: chatRunStopOnScreen({ jobThread: Boolean(jobThread) }),
     // The Browser view keeps Escape for the browser.
     escapeStops: !browserVisible,
     escapeBlocked: Boolean(messageMenu || imageLightbox || invitePrompt || connectSheetOpen
@@ -6824,6 +6830,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     currentUserId={currentUserId}
                     humanInputIdentityKey={browserHandoff.identityKey}
                     humanInputRunIds={browserHumanInputRunIds}
+                    humanInputStoppedRunIds={browserHumanInputStoppedRunIds}
                     onTakeOverAgent={browserHandoff.sharedJobWhileAgentHolds ? takeOverSharedBrowser : null}
                     onContinueAfterHumanInput={browserHandoff.continueSharedRun}
                     onPresenceChange={setSharedBrowserPresence}

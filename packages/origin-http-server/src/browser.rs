@@ -350,6 +350,14 @@ pub fn control_routes() -> Router<AppState> {
             "/browser/pages/:page_id/keep",
             post(crate::browser_approval::handle_keep_agent_tab),
         )
+        // A Stop ended the turn that paused on the person's fields: the
+        // outlines that pause drew come off the page.
+        .route(
+            "/browser/pages/:page_id/end-pause",
+            post(handle_end_browser_human_input).layer(DefaultBodyLimit::max(
+                BROWSER_HUMAN_INPUT_END_BODY_LIMIT_BYTES,
+            )),
+        )
         .route(
             "/browser/approval/decision",
             post(crate::browser_approval::handle_approval_decision).layer(DefaultBodyLimit::max(
@@ -365,6 +373,78 @@ pub fn control_routes() -> Router<AppState> {
 /// routes; their bounded input is separately lease-gated.
 pub fn interactive_transport_routes() -> Router<AppState> {
     Router::new().route("/browser/vnc", get(handle_vnc_ws))
+}
+
+const BROWSER_HUMAN_INPUT_END_BODY_LIMIT_BYTES: usize = 256;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserHumanInputEndRequest {
+    handoff_id: String,
+}
+
+/// Takes a pause's outlines off the page: each highlighted control gets back
+/// the outline it had, unless the page has changed it since. The same steps
+/// as the browser tools' own `clearHumanInputHighlights`
+/// (runtime-agent `assets/shared-browser-cli.js`), which runs them before a
+/// page is next read; a test holds the two together. It reads nothing of the
+/// page and answers nothing.
+const CLEAR_HUMAN_INPUT_HIGHLIGHTS_SCRIPT: &str = r#"(() => {
+    const key = "__instafyHumanInputHighlights";
+    const records = Array.isArray(globalThis[key]) ? globalThis[key].slice(0, 8) : [];
+    for (const record of records) {
+      if (!(record?.element instanceof HTMLElement)) continue;
+      if (record.element.style.outline === record.appliedOutline) record.element.style.outline = typeof record.outline === "string" ? record.outline : "";
+      if (record.element.style.outlineOffset === "3px") record.element.style.outlineOffset = typeof record.offset === "string" ? record.offset : "";
+    }
+    globalThis[key] = [];
+  })()"#;
+
+/// Whether `handoff_id` is the pause this page waits on, and `user_id` the
+/// person it asked: the page's newest pause in the browser's own log, with no
+/// reading of the page or move to another since (either took the outlines
+/// off already, and the page may be a later turn's by then). Never an older
+/// pause, another person's, or another page's.
+fn pause_is_the_pages_latest(
+    actions: &[BrowserActionResponse],
+    page_id: &str,
+    handoff_id: &str,
+    user_id: &str,
+) -> bool {
+    let on_page = |action: &&BrowserActionResponse| action.page_id.as_deref() == Some(page_id);
+    let Some(latest) = actions
+        .iter()
+        .rposition(|action| on_page(&action) && action.action_type == "human_input")
+    else {
+        return false;
+    };
+    let asked = actions[latest]
+        .human_input_request
+        .as_ref()
+        .is_some_and(|request| {
+            request.handoff_id == handoff_id && request.initiator_user_id == user_id
+        });
+    asked
+        && !actions[latest + 1..]
+            .iter()
+            .filter(on_page)
+            .any(|action| matches!(action.action_type.as_str(), "navigate" | "nav_result"))
+}
+
+async fn clear_human_input_highlights(websocket_url: &str) -> Result<(), OriginError> {
+    send_browser_cdp_command(
+        websocket_url,
+        "Runtime.evaluate",
+        serde_json::json!({
+            "expression": CLEAR_HUMAN_INPUT_HIGHLIGHTS_SCRIPT,
+            "silent": true,
+            "returnByValue": false,
+            "awaitPromise": false,
+            "userGesture": false
+        }),
+    )
+    .await
+    .map(|_| ())
 }
 
 fn browser_actions_file_path() -> String {
@@ -1736,6 +1816,49 @@ async fn handle_browser_page_command(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /browser/pages/:page_id/end-pause`: a Stop ended the turn that
+/// paused on a person's fields or step, so the outlines that pause drew on
+/// the page come off. The Stop itself went to the controller and stopped the
+/// turn; this only puts the page's own outline styles back, sends it no
+/// input, reads nothing of it and needs no approval. It asks for
+/// `browser.control`, and acts only for the person the pause asked, on the
+/// page's latest pause ([`pause_is_the_pages_latest`]): never another
+/// person's pause, another page's, or one a later pause replaced.
+async fn handle_end_browser_human_input(
+    _ready: BrowserHostReady,
+    State(state): State<AppState>,
+    Extension(claims): Extension<OriginClaims>,
+    Path(params): Path<BrowserTargetPathParams>,
+    Json(request): Json<BrowserHumanInputEndRequest>,
+) -> Result<StatusCode, OriginError> {
+    let page_id = params.page_id.trim();
+    if !valid_browser_action_page_id(page_id) {
+        return Err(OriginError::bad_request("page id is required"));
+    }
+    let actions = read_browser_actions(&browser_actions_file_path(), 0)
+        .await
+        .map(|log| log.actions)
+        .unwrap_or_default();
+    if !pause_is_the_pages_latest(&actions, page_id, request.handoff_id.trim(), &claims.sub) {
+        return Err(OriginError::conflict(
+            "this page waits on no such pause of yours",
+        ));
+    }
+
+    let targets = fetch_browser_cdp_targets(&state).await?;
+    let websocket_url = targets
+        .iter()
+        .find(|target| target.id == page_id)
+        .ok_or_else(|| OriginError::not_found("browser page not found"))?
+        .websocket_debugger_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| OriginError::unavailable("browser page CDP endpoint is unavailable"))?;
+    clear_human_input_highlights(websocket_url).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn bridge_vnc_ws(
     socket: WebSocket,
     host: String,
@@ -2236,6 +2359,120 @@ mod tests {
                 "fields": [{"label": "Highlighted field 1"}]
             }
         })
+    }
+
+    /// A local test, Nov 20: a Stop during a sign-in pause stopped the turn at
+    /// once, and the page kept its outlined fields. The pause a Stop ended
+    /// loses its outlines: the page's latest pause, for the person it asked.
+    #[test]
+    fn a_stopped_pause_is_ended_only_as_the_pages_latest_and_only_for_its_person() {
+        const HANDOFF: &str = "00000000-0000-4000-8000-000000000001";
+        const PERSON: &str = "00000000-0000-4000-8000-000000000003";
+        let action =
+            |value: JsonValue| parse_browser_action_line(&value.to_string()).expect("a log line");
+        let step = |kind: &str, page: &str| {
+            action(serde_json::json!({ "seq": 2, "type": kind, "pageId": page }))
+        };
+        let pause = || action(human_input_action_fixture());
+        let later_pause = || {
+            let mut value = human_input_action_fixture();
+            value["humanInputRequest"]["handoffId"] =
+                serde_json::json!("00000000-0000-4000-8000-000000000009");
+            action(value)
+        };
+
+        let log = vec![step("click", "page-1"), pause()];
+        assert!(pause_is_the_pages_latest(&log, "page-1", HANDOFF, PERSON));
+        // What another chat's turn does in its own tab changes nothing here.
+        let log = vec![
+            pause(),
+            step("nav_result", "page-2"),
+            step("click", "page-1"),
+        ];
+        assert!(pause_is_the_pages_latest(&log, "page-1", HANDOFF, PERSON));
+
+        // Never another person's pause, another page's, or one no log holds.
+        let log = vec![pause()];
+        assert!(!pause_is_the_pages_latest(
+            &log,
+            "page-1",
+            HANDOFF,
+            "00000000-0000-4000-8000-000000000004"
+        ));
+        assert!(!pause_is_the_pages_latest(&log, "page-2", HANDOFF, PERSON));
+        assert!(!pause_is_the_pages_latest(&[], "page-1", HANDOFF, PERSON));
+        // A later pause on the page took its place: that one's outlines stay.
+        let log = vec![pause(), later_pause()];
+        assert!(!pause_is_the_pages_latest(&log, "page-1", HANDOFF, PERSON));
+        // The page was read again or moved on: a later turn has it, and the
+        // outlines went with that reading.
+        for moved in ["nav_result", "navigate"] {
+            let log = vec![pause(), step(moved, "page-1")];
+            assert!(
+                !pause_is_the_pages_latest(&log, "page-1", HANDOFF, PERSON),
+                "{moved}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ending_a_pause_sends_the_page_only_the_fixed_outline_script() {
+        let (base, mut commands) = fake_cdp_browser("page-1").await;
+        let socket = format!("{}/devtools/browser/fake", base.replacen("http", "ws", 1));
+        clear_human_input_highlights(&socket)
+            .await
+            .expect("the page answers");
+        let command = commands.recv().await.expect("one command");
+        assert_eq!(command["method"], "Runtime.evaluate");
+        assert_eq!(
+            command["params"]["expression"],
+            CLEAR_HUMAN_INPUT_HIGHLIGHTS_SCRIPT
+        );
+        assert_eq!(command["params"]["returnByValue"], false);
+        assert_eq!(command["params"]["userGesture"], false);
+        assert!(commands.try_recv().is_err(), "nothing else is sent");
+        // It takes nothing in and reads nothing of the page but the outlines
+        // the pause recorded.
+        for word in [
+            "fetch(",
+            "XMLHttpRequest",
+            "document.cookie",
+            ".value",
+            "innerText",
+            "textContent",
+            "return ",
+        ] {
+            assert!(
+                !CLEAR_HUMAN_INPUT_HIGHLIGHTS_SCRIPT.contains(word),
+                "{word}"
+            );
+        }
+    }
+
+    /// The browser tools take a pause's outlines off before a page is next
+    /// read; ending a stopped pause takes the same steps.
+    #[test]
+    fn ending_a_pause_takes_the_browser_tools_own_steps() {
+        let tools = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../runtime-agent/assets/shared-browser-cli.js"
+        ))
+        .expect("the browser tools");
+        let start = tools
+            .find("async function clearHumanInputHighlights(page) {")
+            .expect("the tools' own clearing");
+        let body_start = start
+            + tools[start..]
+                .find("page.evaluate(() => {")
+                .expect("its page step")
+            + "page.evaluate(() => {".len();
+        let body_end = body_start + tools[body_start..].find("\n  });").expect("the step's end");
+        let squeeze = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let ours = CLEAR_HUMAN_INPUT_HIGHLIGHTS_SCRIPT
+            .strip_prefix("(() => {")
+            .and_then(|script| script.strip_suffix("})()"))
+            .expect("one function, called once");
+        assert_eq!(squeeze(ours), squeeze(&tools[body_start..body_end]));
     }
 
     #[test]

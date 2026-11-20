@@ -158,6 +158,63 @@ describe("BrowserHumanInputControls", () => {
     expect(container.textContent).toContain("Let Octo continue");
   });
 
+  // A local test, Nov 20: a Stop during a sign-in pause stopped the turn at
+  // once, and 1.5 s later Let Octo continue turned on beside the chat's own
+  // Continue under the stopped turn.
+  it("ends a pause whose turn a Stop ended, and never offers Let Octo continue for it", async () => {
+    const request = { version: 1 as const, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
+    props = { ...props, request, canTakeOver: false, humanControlConfirmed: false };
+    await render();
+    // The pause waits while its turn ends.
+    expect(container.querySelector('[role="status"].sr-only')?.textContent).toContain("Waiting for agent control to stop");
+    // The Stop: the pause is over at once, before Octo has let go...
+    props = { ...props, requestStopped: true };
+    await render();
+    expect(container.querySelector('[data-testid="browser-human-input-controls"]')).toBeNull();
+    // ...and once it has, with the person holding the browser.
+    props = { ...props, humanControlConfirmed: true };
+    await render();
+    expect(container.textContent).not.toContain("Let Octo continue");
+    expect(container.textContent).not.toContain("highlighted field");
+    expect(container.querySelector('[data-testid="browser-human-input-continue"]')).toBeNull();
+    expect(props.onContinue).not.toHaveBeenCalled();
+    // The chat's record of the Stop stays, so the pause stays over: after
+    // its request runs out of the log too.
+    props = { ...props, request: null, requestStopped: false };
+    await render();
+    expect(container.textContent).not.toContain("Let Octo continue");
+  });
+
+  it("keeps a pause through a take-over, which cancels its turn without a Stop", async () => {
+    props.request = { version: 1, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
+    props.requestStopped = false;
+    await render();
+    // They click into the page while the turn that paused still ends.
+    props.takeoverRequestId = "page-click"; await render();
+    await click("browser-human-input-takeover");
+    expect(props.onTakeOver).toHaveBeenCalledOnce();
+    props.canTakeOver = false; props.humanControlConfirmed = true; await render();
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!;
+    expect(button.disabled).toBe(false);
+    expect(button.title).toContain("Fill the highlighted field on the page");
+  });
+
+  it("offers Let Octo continue again after a take-over that follows a stopped pause", async () => {
+    const request = { version: 1 as const, handoffId: "handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] };
+    props = { ...props, request, requestStopped: true, canTakeOver: false, humanControlConfirmed: true };
+    await render();
+    expect(container.textContent).not.toContain("Let Octo continue");
+    // A later turn drives, and the person takes over: that is theirs to
+    // continue, as any take-over is; the stopped pause's guidance stays gone.
+    props = { ...props, canTakeOver: true, humanControlConfirmed: false };
+    await render(); await click("browser-human-input-takeover");
+    props = { ...props, canTakeOver: false, humanControlConfirmed: true };
+    await render();
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')!;
+    expect(button.disabled).toBe(false);
+    expect(button.title).toBe("You control the browser. Finish your changes on the page, then let Octo continue.");
+  });
+
   it("clears user-initiated continuation when page/identity changes", async () => {
     await render(); await click("browser-human-input-takeover");
     props = { ...props, identityKey: "another-page", humanControlConfirmed: true }; await render();

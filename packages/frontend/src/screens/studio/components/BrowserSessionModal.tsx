@@ -41,6 +41,7 @@ import {
 import type { StatusIntent } from "../../../status/useStatus";
 import { useToastClearanceRef } from "../../../status/toastClearance";
 import { useBrowserSessionActions } from "./useBrowserSessionActions";
+import { useEndStoppedBrowserPause } from "./useEndStoppedBrowserPause";
 import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { observeBrowserRfbFrames } from "./browserSessionRfbFrame";
@@ -56,7 +57,7 @@ import { RemoteControlSurface } from "./RemoteControlSurface";
 import { useBrowserHumanInput } from "./useBrowserHumanInput";
 import { BrowserReadingRow } from "./BrowserReadingRow";
 import { browserPageAnswered, browserReadingHost, resolveAgentReadingPages } from "./browserAgentTabs";
-import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
+import { browserPageOrigin, selectSharedBrowserHumanInput, sharedBrowserHumanInputStopped } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
 import { SharedBrowserCollaborationControls } from "./SharedBrowserCollaborationControls";
 import { SharedBrowserDataClearAction } from "./SharedBrowserDataClearAction";
@@ -489,6 +490,7 @@ export function BrowserSessionModal({
   sharedBrowserAvailableViewerKinds = DEFAULT_SHARED_BROWSER_VIEWER_KINDS,
   humanInputIdentityKey,
   humanInputRunIds = null,
+  humanInputStoppedRunIds = null,
   currentUserId = null,
   onTakeOverAgent,
   onContinueAfterHumanInput,
@@ -558,6 +560,8 @@ export function BrowserSessionModal({
   sharedBrowserAvailableViewerKinds?: SupportedSharedBrowserViewerKind[];
   humanInputIdentityKey?: string;
   humanInputRunIds?: ReadonlySet<string> | null;
+  /** The chat's runs a person's Stop ended (`runIdsEndedByStop`): a pause of one of them is over. */
+  humanInputStoppedRunIds?: ReadonlySet<string> | null;
   currentUserId?: string | null;
   /**
    * Take over. `agentHoldsBrowser`: the browser reports the agent's control,
@@ -1277,13 +1281,24 @@ export function BrowserSessionModal({
   const agentTurnActions = effectiveAgentControlOwner && agentActionFloor !== null
     ? browserActions.filter((action) => action.seq > agentActionFloor)
     : [];
+  const sharedHumanInputRequest = selectSharedBrowserHumanInput(
+    browserActions, currentUserId, sharedBrowserPageId,
+    browserPageOrigin(sharedBrowserChrome?.pages.find((page) => page.id === sharedBrowserPageId)?.url),
+    humanInputRunIds,
+  );
+  // A Stop ended the turn that paused: its pause ends with it, here and on
+  // the page, and the chat's Continue under the stopped turn is the way on.
+  const pauseStopped = sharedBrowserHumanInputStopped(sharedHumanInputRequest, humanInputStoppedRunIds);
+  useEndStoppedBrowserPause({
+    request: pauseStopped ? sharedHumanInputRequest : null,
+    projectId,
+    browserSessionId,
+    preferRuntimeId: forcedRuntimeId ?? preferRuntimeId,
+  });
   const browserHumanInputOptions = {
     identityKey: `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`,
-    request: selectSharedBrowserHumanInput(
-      browserActions, currentUserId, sharedBrowserPageId,
-      browserPageOrigin(sharedBrowserChrome?.pages.find((page) => page.id === sharedBrowserPageId)?.url),
-      humanInputRunIds,
-    ),
+    request: sharedHumanInputRequest,
+    requestStopped: pauseStopped,
     canTakeOver: transportActive && canControlBrowser && Boolean(effectiveAgentControlOwner && onTakeOverAgent),
     humanControlConfirmed: humanInputEnabled,
     canContinue: transportActive && Boolean(onContinueAfterHumanInput),

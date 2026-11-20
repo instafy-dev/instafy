@@ -5691,6 +5691,18 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+        // Ending a stopped pause changes the page's outlines, so it needs control.
+        assert_eq!(
+            client
+                .post(format!("{base}/browser/pages/TAB-A/end-pause"))
+                .bearer_auth(&view)
+                .json(&json!({ "handoffId": "00000000-0000-4000-8000-000000000001" }))
+                .send()
+                .await
+                .expect("view-only end pause request")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
         // A chat's new tab changes the browser too, so it needs control.
         assert_eq!(
             client

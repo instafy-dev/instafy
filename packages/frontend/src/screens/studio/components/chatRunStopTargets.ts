@@ -103,14 +103,14 @@ export function chatRunStopBetweenParts(chat: {
 }
 
 /**
- * Whether the chat offers Stop (useChatRunStop's `active`): the chat is on
- * screen, in Chat or in its Browser view, both above the one composer that
- * holds Stop. A pause on the person's fields brings the Browser view forward
- * by itself while its turn still writes its reply, and Stop stays there until
- * that turn ends. Never in a job thread's tab, which is not the chat.
+ * Whether the chat offers Stop (useChatRunStop's `active`): wherever the
+ * chat's composer is, which holds Stop. Chat, the chat's Browser view, a page
+ * or a file of the chat in front all keep that one composer, so a message
+ * sent from any of them can be stopped there, from Enter to its reply. Never
+ * in a job thread's tab, which is not the chat.
  */
-export function chatRunStopOnScreen(view: { chatVisible: boolean; browserVisible: boolean; jobThread: boolean }): boolean {
-  return (view.chatVisible || view.browserVisible) && !view.jobThread;
+export function chatRunStopOnScreen(view: { jobThread: boolean }): boolean {
+  return !view.jobThread;
 }
 
 export function groupChatRunStopTargets(targets: readonly ChatRunStopTarget[]) {

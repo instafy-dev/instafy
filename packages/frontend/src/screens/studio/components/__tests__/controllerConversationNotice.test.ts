@@ -6,6 +6,7 @@ import {
   resolveControllerConversationNoticeContent,
   resolveControllerConversationNoticeAction,
   resolveControllerConversationNoticeLabel,
+  runIdsEndedByStop,
 } from "../controllerConversationNotice";
 
 function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
@@ -569,5 +570,27 @@ describe("controllerConversationNotice", () => {
       );
       expect(action?.kind).toBe("desktop_runtime_help");
     });
+  });
+});
+
+// A pause's row follows this: a Stop ends the pause of the turn it stopped,
+// and a take-over, which cancels its run too, leaves its pause to go on.
+describe("the runs a person's Stop ended", () => {
+  const cancellation = (id: string, details: Record<string, unknown>, overrides: Partial<ChatMessage> = {}) =>
+    makeMessage({ id, content: "Stopped this run.", metadata: { source: "controller", kind: "run_cancellation", details }, ...overrides });
+
+  it("are the runs the chat's Stop notices name, and no run a take-over or anyone's message names", () => {
+    const messages = [
+      cancellation("stop-1", { reason: "Stopped", stopRequested: true, actorUserId: "user-1", runIds: ["run-stopped"], jobIds: ["job-1"] }),
+      // Take over cancels the browser's run and asks for no Stop.
+      cancellation("takeover-1", { reason: "User taking over the browser", runIds: ["run-taken-over"], jobIds: ["job-2"] }),
+      // Words a person or Octo wrote never count, whatever they carry.
+      cancellation("written-1", { stopRequested: true, runIds: ["run-claimed"] }, { authorId: "user-2" }),
+      makeMessage({ id: "octo-1", metadata: { kind: "run_cancellation", details: { stopRequested: true, runIds: ["run-claimed-too"] } } }),
+      makeMessage({ id: "alert-1" }),
+      cancellation("stop-2", { reason: "Stopped", stopRequested: true, runIds: ["run-stopped", "run-stopped-later"] }),
+    ];
+    expect([...runIdsEndedByStop(messages)].sort()).toEqual(["run-stopped", "run-stopped-later"]);
+    expect(runIdsEndedByStop([]).size).toBe(0);
   });
 });

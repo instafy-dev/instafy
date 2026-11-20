@@ -175,7 +175,7 @@ describe("useChatRunStop", () => {
     const pause = { id: "m1", role: "assistant", content: "Tool call completed: instafy_shared_browser/request_human_input",
       timestamp: 1, metadata: { runId: "r1", jobId: JOB, type: "mcp_tool_call",
         details: { tool: "request_human_input", status: "completed" } } } as unknown as ChatMessage;
-    const active = chatRunStopOnScreen({ chatVisible: false, browserVisible: true, jobThread: false });
+    const active = chatRunStopOnScreen({ jobThread: false });
     await render({ targets: resolveChatRunStopTargets([pausing("in_progress")], [pause]), active });
     expect(controller!.visible).toBe(true);
     // The turn ends by itself: Stop goes.
@@ -187,6 +187,41 @@ describe("useChatRunStop", () => {
     await render({ targets: resolveChatRunStopTargets([pausing("in_progress")], [pause]), active });
     await act(async () => controller!.requestStop());
     expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", [JOB]);
+  });
+
+  // Local tests, Nov 19 and 20: a note sent with the chat's map in front, and
+  // a change sent with one of its pages in front, had no Stop at any moment
+  // of their turns, so neither could be stopped. The composer there is the
+  // chat's own, and Stop is in it from Enter to the reply.
+  it("stays from Enter to the reply for a message sent with a page or a map of the chat in front", async () => {
+    // Neither Chat nor the Browser view is on screen: only the page, over the composer.
+    const active = chatRunStopOnScreen({ jobThread: false });
+    // Enter: the message's turn is queued, then runs.
+    await render({ targets: [octo], active });
+    expect(controller!.visible).toBe(true);
+    // Between two of its parts (a browser part, then its build).
+    await render({ targets: [], between: true, active });
+    expect(controller!.visible).toBe(true);
+    const build: ChatRunStopTarget = { ...octo, jobId: "build-1", runId: "r4" };
+    await render({ targets: [build], between: false, active });
+    expect(controller!.visible).toBe(true);
+    // A press there stops it at once.
+    cancel.mockResolvedValueOnce(accepted("build-1"));
+    await act(async () => controller!.requestStop());
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["build-1"]);
+    // Unpressed, it goes with the reply.
+    cancel.mockClear();
+    await render({ conversationId: "chat-2", targets: [octo], active });
+    expect(controller!.visible).toBe(true);
+    await render({ conversationId: "chat-2", targets: [], active });
+    await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS));
+    expect(controller!.visible).toBe(false);
+    expect(cancel).not.toHaveBeenCalled();
+    // A job thread's tab is not the chat: no Stop there, and no press stops.
+    await render({ conversationId: "chat-2", targets: [octo], active: chatRunStopOnScreen({ jobThread: true }) });
+    expect(controller!.visible).toBe(false);
+    await act(async () => controller!.requestStop());
+    expect(cancel).not.toHaveBeenCalled();
   });
 
   // A local test, Nov 10: between a message's routing step and its browser
