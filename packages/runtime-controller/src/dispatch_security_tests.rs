@@ -1,7 +1,7 @@
 use super::*;
 use crate::tests::{
-    build_app_config, build_test_state, ensure_test_user, require_origin_test_pool,
-    test_origin_private_key, test_origin_public_key,
+    build_app_config, build_test_state, ensure_test_user, eventually, require_origin_test_pool,
+    sql_one, test_origin_private_key, test_origin_public_key,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::Request;
@@ -576,4 +576,491 @@ async fn dispatch_security_credential_seeded_agents_take_the_agent_id_as_avatar_
 
     transaction.rollback().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn dispatch_security_owned_sandbox_sessions_grant_nothing() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("owned sandbox session regression").await?;
+    let owner_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_id).await?;
+    let result = AssertUnwindSafe(async {
+        let config = test_config();
+        let project_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        // A person's sandbox, as clients could create before only the service
+        // role could.
+        transaction
+            .execute(
+                "insert into projects (id, project_type, status, sandbox_session_id, owner_user_id)
+                 values ($1, 'sandbox', 'active', $2, $3)",
+                &[&project_id, &session_id, &owner_id],
+            )
+            .await?;
+        let anonymous = RequestContext {
+            user_id: None,
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        let denied = ensure_project_record_for_dispatch(
+            &transaction,
+            &config,
+            &normalized_request(project_id, session_id),
+            &anonymous,
+        )
+        .await
+        .err()
+        .expect("an owned sandbox's session must not grant access");
+        assert_eq!(denied.0, StatusCode::UNAUTHORIZED);
+        transaction.rollback().await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    pool.get()
+        .await?
+        .execute("delete from auth.users where id = $1", &[&owner_id])
+        .await?;
+    match result {
+        Ok(result) => result,
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
+#[tokio::test]
+async fn dispatch_security_only_the_service_role_creates_sandbox_projects() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("sandbox creation regression").await?;
+    let user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    ensure_test_user(&pool, &user_id).await?;
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into organizations (id, slug, name) values ($1, $2, 'Sandbox test team')",
+                &[&org_id, &format!("sandbox-{org_id}")],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into org_memberships (org_id, user_id, role) values ($1, $2, 'owner')",
+                &[&org_id, &user_id],
+            )
+            .await?;
+    }
+    let result = AssertUnwindSafe(async {
+        let config = test_config();
+        let token = crate::auth::issue_controller_token(&config, &user_id)
+            .expect("issue user token")
+            .token;
+        let app = crate::projects::router().with_state(build_test_state(pool.clone(), config));
+        for body in [
+            json!({ "projectType": "sandbox", "sandboxSessionId": Uuid::new_v4() }),
+            json!({ "projectType": " Sandbox " }),
+            json!({ "sandboxSessionId": Uuid::new_v4() }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/orgs/{org_id}/projects"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))?,
+                )
+                .await?;
+            let status = response.status();
+            let reply: JsonValue =
+                serde_json::from_slice(&to_bytes(response.into_body(), 16_384).await?)?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}: {reply}");
+            assert_eq!(
+                reply["message"], "Only service-role requests can create sandbox projects",
+                "{body}"
+            );
+        }
+        let created: i64 = pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*) from projects where org_id = $1",
+                &[&org_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(created, 0, "refused requests create no space");
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    let connection = pool.get().await?;
+    connection
+        .execute("delete from projects where org_id = $1", &[&org_id])
+        .await?;
+    connection
+        .execute("delete from organizations where id = $1", &[&org_id])
+        .await?;
+    connection
+        .execute("delete from auth.users where id = $1", &[&user_id])
+        .await?;
+    match result {
+        Ok(result) => result,
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
+/// The one-time sandbox credit seed follows the stored project, never the
+/// request: only a sandbox the controller provisioned (stored `sandbox`, no
+/// owner) is seeded. A client's `metadata.project_type`, a person's own
+/// "sandbox" space, a session id stored on a customer space and a userless
+/// caller on an ownerless customer space grant nothing. The seed's ledger row
+/// never records the space's session id, which is the way into a provisioned
+/// sandbox and which every reader of the team's ledger would see.
+#[tokio::test]
+async fn dispatch_security_sandbox_seed_follows_the_stored_project() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("sandbox seed regression").await?;
+    let owner_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_id).await?;
+    let result = AssertUnwindSafe(async {
+        let config = test_config();
+        let person = RequestContext {
+            user_id: Some(owner_id),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        let service = RequestContext {
+            user_id: None,
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        // (stored type, owned, stored session id, caller, metadata.project_type, seeded)
+        let cases: [(&str, bool, bool, &RequestContext, Option<&str>, bool); 7] = [
+            ("customer", true, false, &person, Some("sandbox"), false),
+            ("customer", true, false, &person, Some(" Demo "), false),
+            ("customer", true, true, &person, None, false),
+            ("sandbox", true, true, &person, Some("sandbox"), false),
+            ("customer", false, false, &service, None, false),
+            ("sandbox", false, true, &service, Some("customer"), true),
+            ("sandbox", false, false, &service, None, true),
+        ];
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        for (index, (project_type, owned, with_session, caller, claimed, seeded)) in
+            cases.into_iter().enumerate()
+        {
+            let org_id = Uuid::new_v4();
+            let project_id = Uuid::new_v4();
+            let stored_session = with_session.then(Uuid::new_v4);
+            let owner_user_id = owned.then_some(owner_id);
+            transaction
+                .execute(
+                    "insert into organizations (id, slug, name) values ($1, $2, 'Seed test team')",
+                    &[&org_id, &format!("seed-{org_id}")],
+                )
+                .await?;
+            transaction
+                .execute(
+                    "insert into projects
+                       (id, org_id, project_type, status, sandbox_session_id, owner_user_id)
+                     values ($1, $2, $3, 'active', $4, $5)",
+                    &[
+                        &project_id,
+                        &org_id,
+                        &project_type,
+                        &stored_session,
+                        &owner_user_id,
+                    ],
+                )
+                .await?;
+            // As on any dispatch, the team's subscription comes first; then its
+            // balance and refill limit are emptied, when a seed would be granted.
+            let project = crate::projects::load_project_record(&transaction, &project_id)
+                .await
+                .expect("load seed fixture");
+            ensure_project_org(&transaction, &project)
+                .await
+                .expect("set up the team's subscription");
+            transaction
+                .execute(
+                    "insert into org_credit_balances (org_id, balance, credit_limit) values ($1, 0, 0)
+                     on conflict (org_id) do update set balance = 0, credit_limit = 0",
+                    &[&org_id],
+                )
+                .await?;
+            let mut body = json!({
+                "projectId": project_id,
+                "promptText": "echo sandbox-seed",
+                "intent": "terminal_command",
+            });
+            if let Some(claimed) = claimed {
+                body["metadata"] = json!({ "project_type": claimed });
+            }
+            let request = normalize_dispatch_request(serde_json::from_value(body)?)
+                .expect("normalize seed request");
+            let _project =
+                ensure_project_record_for_dispatch(&transaction, &config, &request, caller)
+                    .await
+                    .unwrap_or_else(|error| panic!("case {index}: {error:?}"));
+            let row = transaction
+                .query_one(
+                    "select balance, credit_limit,
+                            (select count(*) from org_credit_ledger
+                              where org_id = $1 and reason = 'sandbox_seed') as seeds,
+                            (select count(*) from org_credit_ledger
+                              where org_id = $1 and metadata ? 'sandbox_session_id') as sessions
+                       from org_credit_balances where org_id = $1",
+                    &[&org_id],
+                )
+                .await?;
+            let observed: (i64, i32, i32) =
+                (row.get("seeds"), row.get("balance"), row.get("credit_limit"));
+            let expected = if seeded {
+                (
+                    1,
+                    config.sandbox_credit_seed_amount,
+                    config.sandbox_credit_seed_limit,
+                )
+            } else {
+                (0, 0, 0)
+            };
+            assert_eq!(
+                observed, expected,
+                "case {index}: {project_type}, owned={owned}"
+            );
+            assert_eq!(
+                row.get::<_, i64>("sessions"),
+                0,
+                "case {index}: the ledger must not record the session id"
+            );
+        }
+        transaction.rollback().await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    pool.get()
+        .await?
+        .execute("delete from auth.users where id = $1", &[&owner_id])
+        .await?;
+    match result {
+        Ok(result) => result,
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
+/// A service-role bootstrap stores only a type the row can hold: a named
+/// `sandbox` or `customer`, else a customer space for a caller with a user and
+/// a sandbox for one without. A `demo` falls back to that default instead of
+/// failing the insert.
+#[tokio::test]
+async fn dispatch_security_service_bootstrap_stores_a_storable_type() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("service bootstrap type regression").await?;
+    let user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &user_id).await?;
+    let result = AssertUnwindSafe(async {
+        let config = test_config();
+        let userless = RequestContext {
+            user_id: None,
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        let for_user = RequestContext {
+            user_id: Some(user_id),
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        // (caller, metadata.project_type, stored type)
+        let cases: [(&RequestContext, Option<&str>, &str); 4] = [
+            (&userless, None, "sandbox"),
+            (&userless, Some("demo"), "sandbox"),
+            (&userless, Some(" Customer "), "customer"),
+            (&for_user, Some("demo"), "customer"),
+        ];
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        for (index, (caller, named, expected)) in cases.into_iter().enumerate() {
+            let project_id = Uuid::new_v4();
+            let mut body = json!({
+                "projectId": project_id,
+                "promptText": "echo service-bootstrap",
+                "intent": "terminal_command",
+            });
+            if let Some(named) = named {
+                body["metadata"] = json!({ "project_type": named });
+            }
+            let request = normalize_dispatch_request(serde_json::from_value(body)?)
+                .expect("normalize bootstrap request");
+            ensure_project_record_for_dispatch(&transaction, &config, &request, caller)
+                .await
+                .unwrap_or_else(|error| panic!("case {index}: {error:?}"));
+            let row = transaction
+                .query_one(
+                    "select project_type, owner_user_id from projects where id = $1",
+                    &[&project_id],
+                )
+                .await?;
+            assert_eq!(
+                row.get::<_, String>("project_type"),
+                expected,
+                "case {index}: {named:?}"
+            );
+            assert_eq!(
+                row.get::<_, Option<Uuid>>("owner_user_id"),
+                caller.user_id,
+                "case {index}"
+            );
+        }
+        transaction.rollback().await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    pool.get()
+        .await?
+        .execute("delete from auth.users where id = $1", &[&user_id])
+        .await?;
+    match result {
+        Ok(result) => result,
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
+/// Concurrent dispatches to a provisioned sandbox seed its team once. Each
+/// used to find no seed and an empty balance before the other committed, and
+/// each granted one; the second now waits on the team's balance row and then
+/// finds the first one's seed.
+#[tokio::test]
+async fn dispatch_security_concurrent_dispatches_seed_a_sandbox_once() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("concurrent sandbox seed regression").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    // Both dispatches must see the sandbox, so it is committed, with its
+    // team's subscription and then an empty balance and refill limit.
+    {
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        transaction
+            .execute(
+                "insert into organizations (id, slug, name) values ($1, $2, 'Seed race team')",
+                &[&org_id, &format!("seed-race-{org_id}")],
+            )
+            .await?;
+        transaction
+            .execute(
+                "insert into projects (id, org_id, project_type, status, sandbox_session_id)
+                 values ($1, $2, 'sandbox', 'active', $3)",
+                &[&project_id, &org_id, &Uuid::new_v4()],
+            )
+            .await?;
+        let project = crate::projects::load_project_record(&transaction, &project_id)
+            .await
+            .expect("load seed race fixture");
+        ensure_project_org(&transaction, &project)
+            .await
+            .expect("set up the team's subscription");
+        transaction
+            .execute(
+                "insert into org_credit_balances (org_id, balance, credit_limit) values ($1, 0, 0)
+                 on conflict (org_id) do update set balance = 0, credit_limit = 0",
+                &[&org_id],
+            )
+            .await?;
+        transaction.commit().await?;
+    }
+    let result = AssertUnwindSafe(async {
+        let config = test_config();
+        let service = RequestContext {
+            user_id: None,
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        let request = normalize_dispatch_request(serde_json::from_value(json!({
+            "projectId": project_id,
+            "promptText": "echo sandbox-seed-race",
+            "intent": "terminal_command",
+        }))?)
+        .expect("normalize seed race request");
+        let mut first_connection = pool.get().await?;
+        let mut second_connection = pool.get().await?;
+        let first_pid: i32 = first_connection
+            .query_one("select pg_backend_pid()", &[])
+            .await?
+            .get(0);
+        let second_pid: i32 = second_connection
+            .query_one("select pg_backend_pid()", &[])
+            .await?
+            .get(0);
+        let first = first_connection.transaction().await?;
+        ensure_project_record_for_dispatch(&first, &config, &request, &service)
+            .await
+            .expect("the first dispatch seeds the team");
+        let second = second_connection.transaction().await?;
+        let (second_dispatch, first_commit) = tokio::join!(
+            async {
+                ensure_project_record_for_dispatch(&second, &config, &request, &service)
+                    .await
+                    .expect("the second dispatch is admitted");
+                second.commit().await
+            },
+            async {
+                // The first commits only once the second waits on it, so the
+                // second has looked at the team before the first seed shows.
+                eventually("the second dispatch to wait on the first", || async {
+                    let waiting: bool = sql_one(
+                        &pool,
+                        "select $2 = any(pg_blocking_pids($1))",
+                        &[&second_pid, &first_pid],
+                    )
+                    .await?;
+                    Ok(waiting.then_some(()))
+                })
+                .await?;
+                first.commit().await?;
+                Ok::<_, anyhow::Error>(())
+            }
+        );
+        first_commit?;
+        second_dispatch?;
+        let row = pool
+            .get()
+            .await?
+            .query_one(
+                "select balance, credit_limit,
+                        (select count(*) from org_credit_ledger
+                          where org_id = $1 and reason = 'sandbox_seed') as seeds
+                   from org_credit_balances where org_id = $1",
+                &[&org_id],
+            )
+            .await?;
+        let observed: (i64, i32, i32) = (
+            row.get("seeds"),
+            row.get("balance"),
+            row.get("credit_limit"),
+        );
+        assert_eq!(
+            observed,
+            (
+                1,
+                config.sandbox_credit_seed_amount,
+                config.sandbox_credit_seed_limit,
+            )
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    pool.get()
+        .await?
+        .execute("delete from organizations where id = $1", &[&org_id])
+        .await?;
+    match result {
+        Ok(result) => result,
+        Err(panic) => resume_unwind(panic),
+    }
 }
