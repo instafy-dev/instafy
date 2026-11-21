@@ -35,6 +35,36 @@ export function resolveSupabaseFlowType(
 }
 
 /**
+ * Keep recovery intent after auth-js consumes an implicit callback's hash.
+ * Supabase can fall back to the site's root when a requested redirect is not
+ * allow-listed. Normalize that browser callback before the client or router
+ * starts, retaining the hash for the SDK to validate and establish a session.
+ * Native deep links belong to their existing callback handlers.
+ */
+export function passwordRecoveryCallbackUrl(rawUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return null;
+  }
+  const params = new URLSearchParams(url.hash.slice(1));
+  if (
+    params.get("type") !== "recovery" ||
+    !params.get("access_token") ||
+    !params.get("refresh_token")
+  ) {
+    return null;
+  }
+  const target = new URL("/login?mode=recovery", url.origin);
+  target.hash = url.hash;
+  return target.toString();
+}
+
+/**
  * Maps raw GoTrue PKCE exchange failures to something a human can act on.
  *
  * The missing-verifier case deserves its own message: it means the exchange

@@ -3,6 +3,7 @@ import {
   describeExchangeError,
   hasImplicitAuthHash,
   loginEmailRedirectTo,
+  passwordRecoveryCallbackUrl,
   requestEmailOtp,
   requestEmailSignup,
   requestPasswordRecovery,
@@ -29,6 +30,41 @@ describe("flow type shim", () => {
     expect(hasImplicitAuthHash("access_token=a&type=recovery")).toBe(true);
     // A code param in the hash is not an implicit callback.
     expect(hasImplicitAuthHash("#code=abc")).toBe(false);
+  });
+});
+
+describe("password recovery callback routing", () => {
+  const recoveryHash = "#access_token=test-access&refresh_token=test-refresh&type=recovery";
+
+  it.each([
+    "https://app.example.test/",
+    "https://other.example.test/login",
+    "http://localhost:5173/",
+  ])("preserves recovery intent and the SDK fragment on the same origin: %s", (base) => {
+    const target = passwordRecoveryCallbackUrl(`${base}${recoveryHash}`);
+    expect(target).toBe(`${new URL(base).origin}/login?mode=recovery${recoveryHash}`);
+  });
+
+  it.each([
+    "https://app.example.test/?mode=recovery",
+    "https://app.example.test/#type=recovery",
+    "https://app.example.test/#access_token=test-access&type=recovery",
+    "https://app.example.test/#access_token=&refresh_token=test-refresh&type=recovery",
+    "https://app.example.test/login?code=test-code",
+    "https://app.example.test/login#access_token=test-access&refresh_token=test-refresh&type=signup",
+    "https://app.example.test/login?mode=extension#access_token=test-access&refresh_token=test-refresh&type=magiclink",
+    "not a URL",
+  ])("leaves non-recovery or incomplete callbacks unchanged: %s", (url) => {
+    expect(passwordRecoveryCallbackUrl(url)).toBeNull();
+  });
+
+  it.each([
+    "instafy://auth",
+    "dev.instafy.studio://auth",
+    "capacitor://localhost/",
+    "file:///app/index.html",
+  ])("leaves native callback handling intact: %s", (base) => {
+    expect(passwordRecoveryCallbackUrl(`${base}${recoveryHash}`)).toBeNull();
   });
 });
 
@@ -60,7 +96,7 @@ describe("password recovery request", () => {
     });
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("https://proj.supabase.co/auth/v1/recover");
-    expect(url).toContain("redirect_to=");
+    expect(new URL(url).searchParams.get("redirect_to")).toBe("https://instafy.dev/login?mode=recovery");
     const body = JSON.parse(String(init.body));
     // The whole point: no code_challenge, so the emailed link stays
     // token-shaped and works cross-device.
