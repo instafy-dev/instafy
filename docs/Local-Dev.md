@@ -9,6 +9,50 @@
   A recorded pid counts only while it is still that process: one that started after the pid file was
   written holds a reused pid (possibly another project's controller) and is left running.
   A provider already on the port when the stack starts is used as it is and left running on `stack:down`.
+- A first `pnpm stack:up` builds the controller and the provider service with Cargo before it starts them,
+  which can take several minutes. The wait that follows times only their startup: the controller gets
+  `RUNTIME_CONTROLLER_BOOT_ATTEMPTS` one-second attempts (120, or 300 in CI).
+
+### A second stack beside another
+A second checkout (a worktree, for example) can run its own Supabase, proxy and provider beside another
+stack. The stack never falls back to the default stack's ports for them, but the rest of the machine is
+shared unless you move it too.
+
+- Supabase: before anything starts in that checkout, give its `supabase/supabase/config.toml` its own
+  `project_id` and its own ports (`[api]`, `[db]` and the others). Keep the edit local and never commit it
+  (CI pins the file's hash), and keep it until after that checkout's `pnpm stack:down`, which stops the
+  project the file names. Write the ports there as plain numbers: the stack reads only `port = <number>`
+  lines, not the CLI's `SUPABASE_*_PORT` variables or `env()` values. The stack, the controller's database
+  and the provider seed use the file's `[api]` and `[db]` ports unless `SUPABASE_PROJECT_URL`,
+  `SUPABASE_URL`, `DATABASE_URL` or `TEST_DATABASE_URL` name others; for `pnpm dev`, see
+  [Frontend](#frontend). Without `psql` on the host, the provider seed runs it in that project's
+  database container (`supabase_db_<project_id>`) and refuses a database on another port unless
+  `SUPABASE_DB_CONTAINER` names the container.
+- Proxy: `PROXY_PORT` (8789 by default) moves the host proxy. A `PROXY_BASE_URL` you set must use the same
+  port.
+- Provider: `PROVIDER_PORT` (9090 by default) moves the provider service, which the stack starts with
+  `BIND_ADDR=0.0.0.0:<PROVIDER_PORT>`. A `BIND_ADDR` you set must be `0.0.0.0`, `127.0.0.1` or `[::]` on that
+  port. `pnpm stack:up` refuses a value that is not a port before it starts anything.
+- Shared unless you move it:
+  - Startup prunes every compose project named `instafy-runtime-*`: set `RUNTIME_PRUNE_ON_UP=0`, or your
+    own `DOCKER_PROJECT_PREFIX`.
+  - Redis, the git services and the static-auth proxy run in the compose project `instafy-runtime`, which
+    `pnpm stack:down` removes. Set your own `COMPOSE_PROJECT_NAME` (not starting with `instafy-runtime-`)
+    and `REDIS_PORT`, and `GIT_CANONICAL=0`, since the git services expect the controller on 8788.
+  - There is one tunnel broker per machine: set `RUNTIME_SKIP_TUNNEL_BROKER=1`.
+  - A controller already serving on `CONTROLLER_PORT` (8788) is used, whoever started it. Moving it takes a
+    fresh `docker/.env.local`.
+  - With `INSTAFY_ENV_DIR` set, every checkout shares `docker/.env.local` and the other env files: leave it
+    unset, or give each checkout a directory of its own.
+  - Image tags such as `runtime-agent:local` are shared.
+
+For example, with no other controller on 8788:
+
+```bash
+RUNTIME_PRUNE_ON_UP=0 COMPOSE_PROJECT_NAME=instafy-second REDIS_PORT=16379 GIT_CANONICAL=0 RUNTIME_SKIP_TUNNEL_BROKER=1 PROXY_PORT=18789 PROVIDER_PORT=19090 pnpm stack:up
+```
+
+Give `pnpm stack:check`, `pnpm runtime:status` and `pnpm stack:down` the same settings.
 
 ## Git-canonical (local git service)
 Git-canonical services (git-edge + git-shard-0 + origin-gateway) are on by default; set
@@ -27,6 +71,11 @@ Defaults:
 ## Frontend
 - Install deps: `pnpm install`
 - Run Studio: `pnpm dev`
+- `pnpm dev` takes Studio's Supabase URL and anon key from the first of `docker/.env.local`,
+  `.env.supabase.local` and `packages/frontend/.env.local` that names either. `pnpm stack:up` writes
+  `docker/.env.local` with an anon key and no URL. When the file it takes names no URL, or none names
+  either, Studio gets the `[api]` port in this checkout's `supabase/supabase/config.toml` (54321 as
+  committed). `pnpm dev` does not read `SUPABASE_URL` or `SUPABASE_PROJECT_URL` from the shell.
 
 ## Local production preview
 Use this when you want to dogfood production-mode frontend behavior locally without redeploying every UI change.
@@ -41,7 +90,13 @@ Use this when you want to dogfood production-mode frontend behavior locally with
 
 ## Supabase (local)
 - Start only Supabase: `pnpm supabase:up`
+- Apply new migrations to the running stack: `pnpm supabase:migrate`
+- Rebuild the running database from `supabase/migrations` (deletes its data): `pnpm supabase:reset`
 - Stop Supabase: `pnpm supabase:down`
+- The Supabase CLI reads migrations only from its ignored copy in `supabase/supabase/migrations`. These
+  commands and `pnpm stack:up` refresh that copy from `supabase/migrations` first and stop when they cannot
+  (the `pnpm supabase:*` commands exit with code 3); a raw `supabase start` or `supabase db reset` reads
+  whatever copy is there.
 
 ## Supabase release paths
 
@@ -59,7 +114,8 @@ For an isolated non-production Supabase project only:
 ## Runtime Notes
 - Do not background `pnpm dev:controller`; use `pnpm controller:up` and `pnpm controller:down`.
 - `pnpm controller:up` keeps a generated session signing secret in `tmp/user-token-secret`, a credential key in `tmp/credential-encryption-key.b64` and the author pseudonym keyring (`INSTAFY_AUTHOR_PSEUDONYM_KEYS`; without it saves keep the origin's own git identity) in `tmp/author-pseudonym-keys`, so local sessions are never signed with the published development value. A bare `pnpm dev:controller` needs exported `USER_TOKEN_SECRET` and `CREDENTIAL_ENCRYPTION_KEY`, or `DEV_MODE=1` on a machine nobody else can reach, because `DEV_MODE` signs sessions with that published development value.
-- For desktop runtimes, set `PROXY_BASE_URL=http://127.0.0.1:8789`.
+- For desktop runtimes, set `PROXY_BASE_URL=http://127.0.0.1:8789`, with the stack's `PROXY_PORT` in place of
+  8789 when it sets one.
 - Local proxy startup defaults to controller-backed `remote_dynamic` BYOC. It does not copy `~/.codex/auth.json` into the proxy; connect that login through the Studio/Desktop credential onboarding flow so it is encrypted and scoped to the signed-in user.
 - Legacy static proxy auth is only for isolated debugging and requires an explicit opt-in: `RUNTIME_PROXY_STATIC_AUTH=1 pnpm stack:up`. This mode may use `OPENAI_API_KEY` or mirror `~/.codex/auth.json` into `tmp/proxy-codex/`; do not use it for multi-user validation.
 - After changing runtime-agent, git-service, or origin-gateway code, run `pnpm stack:refresh`; it rebuilds both runtime variants and all local git-canonical service images while keeping Supabase running.

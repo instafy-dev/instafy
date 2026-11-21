@@ -17,12 +17,12 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   deleteEnvFileValue,
-  DEFAULT_SUPABASE_PROJECT_URL,
   ensureDevProxySecrets,
   ensureServiceRuntimeUserId,
   recordedProviderCheckoutRoot,
   recordProviderCheckoutRoot,
   relocateRuntimeCheckouts,
+  resolveDevSupabaseApiUrl,
   resolveRuntimeCheckoutRoot,
   setEnvFileValue,
   stampGatewayFolder,
@@ -45,7 +45,8 @@ import {
 } from "./lib/stackBrowserHost.mjs";
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
 import { computeGitServicesImageFingerprint } from "./lib/gitServicesImageFingerprint.mjs";
-import { resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
+import { localSupabasePorts } from "./lib/localSupabasePorts.mjs";
+import { buildBeforeLaunch, resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
 import { ensureLocalAuthorPseudonymKeys } from "./lib/localAuthorPseudonymKeys.mjs";
 import { ensureLocalUserTokenSecret } from "./lib/localUserTokenSecret.mjs";
 import { ensureLocalSecret } from "./lib/localSecret.mjs";
@@ -123,13 +124,41 @@ function hasConfiguredPrebuiltBinary(envKey, env = process.env) {
   return typeof env?.[envKey] === "string" && env[envKey].trim().length > 0;
 }
 
+/** A TCP port written as digits, 1-65535, else null. Not trimmed: docker compose uses PROXY_PORT as written. */
+function parsePortNumber(value) {
+  if (typeof value !== "string" || !/^\d{1,5}$/.test(value)) return null;
+  const port = Number(value);
+  return port >= 1 && port <= 65535 ? port : null;
+}
+
+/**
+ * A port variable. Unset or empty gives the fallback, as compose's ${PROXY_PORT:-8789} does. A
+ * value that is not a port gives `error`, with `port` its old Number() reading. getProxyConfig
+ * refuses a PROXY_PORT error in every command that reads the proxy settings, `status` and
+ * `stack:check` included; a PROVIDER_PORT error stops only `up` and `controller:start`.
+ */
+function portSetting(env, name, fallback) {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return { port: fallback, error: null };
+  const port = parsePortNumber(raw);
+  return port === null
+    ? { port: Number(raw), error: `${name}=${raw} is not a port (1-65535).` }
+    : { port, error: null };
+}
+
 // Provider service (external allocator) bits
 const providerManifest = path.join(repoRoot, "packages", "runtime-provider-service", "Cargo.toml");
 const providerPidFile = path.join(repoRoot, "tmp", ".provider.pid");
 // The checkout folder of the provider this script launched, by its pid.
 const providerCheckoutRootFile = path.join(repoRoot, "tmp", ".provider.checkout-root");
 const providerLogPath = path.join(logsDir, "provider.log");
-const providerPort = Number(process.env.PROVIDER_PORT || 9090);
+// The provider binary listens on BIND_ADDR. This launcher waits for it, looks it up and seeds it
+// on providerPort, and starts it with BIND_ADDR on that port (providerBindAddr). An invalid
+// PROVIDER_PORT keeps the old Number() reading here, so `down` and `status` behave as before;
+// `up` and `controller:start` refuse it (assertStackPorts) before anything starts.
+const DEFAULT_PROVIDER_PORT = 9090;
+const providerPortSetting = portSetting(process.env, "PROVIDER_PORT", DEFAULT_PROVIDER_PORT);
+const providerPort = providerPortSetting.port;
 const providerBaseUrl = hasConfiguredPrebuiltBinary(
   "INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN"
 )
@@ -145,7 +174,7 @@ const proxyManifest = path.join(
 );
 const proxyPidFile = path.join(repoRoot, "tmp", ".proxy.pid");
 const proxyLogPath = path.join(logsDir, "proxy.log");
-const proxyDefaultPort = Number(process.env.PROXY_PORT || 8789);
+const DEFAULT_PROXY_PORT = 8789;
 const stripeEnvPath = privateEnvPath(".env.stripe");
 const githubOauthEnvPath = path.join(repoRoot, ".env.github-oauth");
 const geminiEnvPath = path.join(repoRoot, ".env.gemini");
@@ -335,7 +364,16 @@ function tryCaptureSupabase(args, options = {}) {
   return tryCapture("pnpm", ["exec", "supabase", "--workdir", "supabase", ...args], options);
 }
 
-function ensureDefaultProviderSeed() {
+// The seed writes the provider rows the controller reads, so it gets the controller's database:
+// DATABASE_URL is that URL, and TEST_DATABASE_URL, the one variable providers-seed ranks above it,
+// is dropped.
+export function providerSeedEnv(dbUrl, env = process.env) {
+  const seedEnv = { ...env, DATABASE_URL: dbUrl };
+  delete seedEnv.TEST_DATABASE_URL;
+  return seedEnv;
+}
+
+function ensureDefaultProviderSeed(dbUrl) {
   try {
     const endpoint = process.env.DEV_PROVIDER_ENDPOINT;
     if (endpoint && endpoint.trim().length > 0) {
@@ -345,7 +383,7 @@ function ensureDefaultProviderSeed() {
     } else {
       console.log("[runtime-dev] Seeding default runtime providers (local docker)...");
     }
-    run("node", ["scripts/providers-seed.mjs", "default"]);
+    run("node", ["scripts/providers-seed.mjs", "default"], { env: providerSeedEnv(dbUrl) });
   } catch (error) {
     console.warn(
       `[runtime-dev] Failed to seed default provider: ${
@@ -399,9 +437,13 @@ function loadEnvFile(filePath) {
   }
 }
 
+// The Supabase CLI (--workdir supabase) reads migrations only from this ignored copy, so a copy
+// that cannot be refreshed stops the run instead of building or migrating an old schema.
 function syncSupabaseMigrationsDir() {
   if (!fileExists(supabaseMigrationsDir)) {
-    return;
+    throw new Error(
+      `${supabaseMigrationsDir} is missing; not running the Supabase CLI on ${supabaseProjectMigrationsDir}`
+    );
   }
   try {
     fs.mkdirSync(supabaseProjectDir, { recursive: true });
@@ -413,8 +455,8 @@ function syncSupabaseMigrationsDir() {
       recursive: true,
     });
   } catch (error) {
-    console.warn(
-      `[runtime-dev] Unable to mirror Supabase migrations into ${supabaseProjectMigrationsDir}: ${error.message}`
+    throw new Error(
+      `Unable to mirror Supabase migrations into ${supabaseProjectMigrationsDir}: ${error.message}; not running the Supabase CLI on a stale copy`
     );
   }
 }
@@ -551,13 +593,7 @@ async function waitForSupabaseAuthReady(
 }
 
 function resolveSupabaseBaseUrl(supabaseEnv = {}) {
-  const baseUrlRaw =
-    process.env.SUPABASE_PROJECT_URL ||
-    process.env.SUPABASE_URL ||
-    supabaseEnv.SUPABASE_PROJECT_URL ||
-    supabaseEnv.SUPABASE_URL ||
-    DEFAULT_SUPABASE_PROJECT_URL;
-  return baseUrlRaw ? baseUrlRaw.trim().replace(/\/$/, "") : "";
+  return resolveDevSupabaseApiUrl(supabaseEnv);
 }
 
 async function waitForSupabaseAdminReady(
@@ -1696,38 +1732,57 @@ function ensureComposeFile() {
     throw new Error(`Cannot find docker compose file at ${composeFile}`);
 }
 
-function getProxyConfig() {
-  const baseUrlRaw = process.env.PROXY_BASE_URL || "http://127.0.0.1:8789";
+/**
+ * This stack's host proxy. PROXY_PORT (8789 when unset) names its port; a PROXY_BASE_URL must
+ * agree with it, so a value meant for another stack's proxy is refused instead of reused.
+ */
+export function getProxyConfig(env = process.env) {
+  const setting = portSetting(env, "PROXY_PORT", DEFAULT_PROXY_PORT);
+  if (setting.error) throw new Error(setting.error);
+  const proxyPort = setting.port;
+  const portIsSet = env.PROXY_PORT !== undefined && env.PROXY_PORT !== "";
+  const baseUrlRaw = env.PROXY_BASE_URL || `http://127.0.0.1:${proxyPort}`;
+  let parsed;
   try {
-    const parsed = new URL(baseUrlRaw);
-    const protocol = parsed.protocol || "http:";
-    const defaultPort = protocol === "https:" ? 443 : 80;
-    const port = Number(parsed.port) || defaultPort;
-    const host = parsed.hostname || "127.0.0.1";
-    // `PROXY_BASE_URL=http://proxy:8789` is only meaningful inside docker-compose networks.
-    // For host-level controller/proxy checks, prefer loopback.
-    if (host === "proxy") {
-      return {
-        baseUrl: `http://127.0.0.1:${port}`,
-        host: "127.0.0.1",
-        port,
-        addr: `127.0.0.1:${port}`,
-      };
-    }
-    return {
-      baseUrl: parsed.toString().replace(/\/$/, ""),
-      host,
-      port,
-      addr: `${host}:${port}`,
-    };
+    parsed = new URL(baseUrlRaw);
   } catch {
+    throw new Error(`PROXY_BASE_URL=${baseUrlRaw} is not a URL.`);
+  }
+  const protocol = parsed.protocol || "http:";
+  const defaultPort = protocol === "https:" ? 443 : 80;
+  const port = Number(parsed.port) || defaultPort;
+  const host = parsed.hostname || "127.0.0.1";
+  // `PROXY_BASE_URL=http://proxy:8789`, which docker/.env.local sets and `up` therefore sees,
+  // names the proxy inside a compose network. On the host it is this stack's PROXY_PORT, or the
+  // URL's own port when PROXY_PORT is unset.
+  if (host === "proxy") {
+    const hostPort = portIsSet ? proxyPort : port;
     return {
-      baseUrl: baseUrlRaw,
+      baseUrl: `http://127.0.0.1:${hostPort}`,
       host: "127.0.0.1",
-      port: proxyDefaultPort,
-      addr: `127.0.0.1:${proxyDefaultPort}`,
+      port: hostPort,
+      addr: `127.0.0.1:${hostPort}`,
     };
   }
+  if (portIsSet && port !== proxyPort) {
+    throw new Error(
+      `PROXY_BASE_URL=${baseUrlRaw} does not use PROXY_PORT ${proxyPort}; make them agree, or unset one.`
+    );
+  }
+  return {
+    baseUrl: parsed.toString().replace(/\/$/, ""),
+    host,
+    port,
+    addr: `${host}:${port}`,
+  };
+}
+
+// `up` and `controller:start` refuse a port that is not a port, and a PROXY_BASE_URL that
+// disagrees with PROXY_PORT, before they prune, start or write anything. BIND_ADDR is checked
+// only when a provider is spawned (startProviderService), since one that is reused never reads it.
+function assertStackPorts() {
+  getProxyConfig(process.env);
+  if (providerPortSetting.error) throw new Error(providerPortSetting.error);
 }
 
 function readProxyPid() {
@@ -2710,13 +2765,36 @@ async function clearProviderPortForPrebuiltLaunch() {
   }
 }
 
+/**
+ * Where a provider this launcher spawns listens. The binary binds BIND_ADDR (0.0.0.0:9090 when
+ * unset) and reads PROVIDER_PORT only to register itself, which it does only when CONTROLLER_URL
+ * is set, and this launcher never sets that. The launcher waits for it, looks it up and seeds it
+ * on 127.0.0.1:<PROVIDER_PORT>, so BIND_ADDR must be 0.0.0.0, 127.0.0.1 or [::] on that port.
+ */
+export function providerBindAddr(env = process.env, port = providerPort) {
+  const bind = env.BIND_ADDR;
+  if (bind === undefined || bind === "") return { addr: `0.0.0.0:${port}`, error: null };
+  const match = /^(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):(\d+)$/.exec(bind);
+  if (match && parsePortNumber(match[1]) === port) return { addr: bind, error: null };
+  return {
+    addr: null,
+    error:
+      `BIND_ADDR=${bind} is not 0.0.0.0, 127.0.0.1 or [::] on PROVIDER_PORT ${port}, where this ` +
+      "launcher waits for the provider; make them agree, or unset BIND_ADDR.",
+  };
+}
+
 export function providerEnv(baseEnv = {}) {
   const env = { ...process.env, ...baseEnv };
   env.RUST_LOG = env.RUST_LOG || "info,runtime_provider=info";
   env.PROVIDER_ID = env.PROVIDER_ID || "instafy-cloud";
   env.PROVIDER_KIND = env.PROVIDER_KIND || "docker";
   env.PROVIDER_DISPLAY_NAME = env.PROVIDER_DISPLAY_NAME || "Local Provider";
-  env.PROVIDER_PORT = env.PROVIDER_PORT || String(providerPort);
+  env.PROVIDER_PORT = String(providerPort);
+  // The binary listens on BIND_ADDR (0.0.0.0:9090 when unset): give it this stack's port.
+  const bind = providerBindAddr(env);
+  if (bind.error) throw new Error(bind.error);
+  env.BIND_ADDR = bind.addr;
   env.PROVIDER_AUTH_TOKEN = env.PROVIDER_AUTH_TOKEN || "dev-provider-token";
   env.CONTROLLER_BASE_URL =
     env.CONTROLLER_BASE_URL || `http://host.docker.internal:${controllerPort}`;
@@ -2739,9 +2817,8 @@ export function providerEnv(baseEnv = {}) {
   // resolveRuntimeCheckoutRoot.
   env.DOCKER_REPO_HOST = resolveRuntimeCheckoutRoot({ env, repoRoot, sandboxDir });
   env.DOCKER_CODEX_ROOT = env.DOCKER_CODEX_ROOT || sandboxDir;
-  if (proxyByocModeEnabled()) {
-    const proxyPort = getProxyConfig().port;
-    env.PROXY_BASE_URL = `http://host.docker.internal:${proxyPort}`;
+  if (!localProxyStaticAuthEnabled(env)) {
+    env.PROXY_BASE_URL = `http://host.docker.internal:${getProxyConfig(env).port}`;
   }
   // Let runtime proxy bindings use random host ports to avoid conflicts with the host-level proxy.
   env.PROXY_PORT = env.PROXY_PORT || "0";
@@ -2804,8 +2881,11 @@ async function startProviderService() {
         label: "runtime provider service",
       })
     : null;
+  // Only a provider this launcher spawns reads BIND_ADDR; one it reuses or adopts does not.
+  const bind = providerBindAddr(process.env);
 
   if (prebuiltLaunch) {
+    if (bind.error) throw new Error(`${bind.error} Not starting the provider service.`);
     console.log(
       `[runtime-dev] Preparing a clean launch for prebuilt provider service: ${prebuiltLaunch.command}`
     );
@@ -2830,6 +2910,7 @@ async function startProviderService() {
     );
     return reuseRunningProvider(existingPid);
   }
+  if (bind.error) throw new Error(`${bind.error} Not starting the provider service.`);
 
   const stdio = ["ignore", providerLogFd(), providerLogFd()];
   console.log(`[runtime-dev] Starting provider service on ${providerBaseUrl}...`);
@@ -2852,6 +2933,14 @@ async function startProviderService() {
     });
   if (launch.source === "prebuilt") {
     console.log(`[runtime-dev] Using prebuilt provider service: ${launch.command}`);
+  } else {
+    // The wait below times startup only: a cold build of the crate can outlast it.
+    console.log("[runtime-dev] Building runtime provider service...");
+    try {
+      await buildBeforeLaunch(launch, { cwd: repoRoot, env, stdio, label: "runtime provider service" });
+    } catch (error) {
+      throw new Error(`${error.message}. Logs: ${providerLogPath}`);
+    }
   }
   const child = spawn(
     launch.command,
@@ -3060,7 +3149,9 @@ async function startControllerIfNeeded(
       const browserHostWarning = stackBrowserHostReuseWarning("controller");
       if (browserHostWarning) console.warn(browserHostWarning);
       try {
-        run("node", ["scripts/runtime-projects.mjs", "ensure", `--base-url=${controllerBaseUrl}`, "--quiet"]);
+        run("node", ["scripts/runtime-projects.mjs", "ensure", `--base-url=${controllerBaseUrl}`, "--quiet"], {
+          env: { ...process.env, SUPABASE_PROJECT_URL: resolveSupabaseBaseUrl(supabaseEnv) },
+        });
       } catch (error) {
         console.warn(
           `[runtime-dev] Warning: unable to ensure runtime project registry while reusing controller (${error.message}).`
@@ -3075,14 +3166,9 @@ async function startControllerIfNeeded(
     process.env.DATABASE_URL ||
     supabaseEnv.DB_URL ||
     supabaseEnv.DATABASE_URL ||
-    `postgresql://postgres:postgres@127.0.0.1:54322/postgres`;
+    localSupabasePorts().dbUrl;
 
-  const supabaseProjectUrl =
-    process.env.SUPABASE_PROJECT_URL ||
-    process.env.SUPABASE_URL ||
-    supabaseEnv.SUPABASE_PROJECT_URL ||
-    supabaseEnv.SUPABASE_URL ||
-    DEFAULT_SUPABASE_PROJECT_URL;
+  const supabaseProjectUrl = resolveSupabaseBaseUrl(supabaseEnv);
   if (
     !process.env.SUPABASE_PROJECT_URL &&
     !process.env.SUPABASE_URL &&
@@ -3090,7 +3176,7 @@ async function startControllerIfNeeded(
     !supabaseEnv.SUPABASE_URL
   ) {
     console.log(
-      `[runtime-dev] SUPABASE_PROJECT_URL not provided; defaulting to ${DEFAULT_SUPABASE_PROJECT_URL}.`
+      `[runtime-dev] SUPABASE_PROJECT_URL not provided; defaulting to ${supabaseProjectUrl}.`
     );
   }
 
@@ -3246,7 +3332,7 @@ async function startControllerIfNeeded(
 
   // ---- spawn detached with file-backed stdio so parent can exit ----
   ensureTmpDir();
-  ensureDefaultProviderSeed();
+  ensureDefaultProviderSeed(dbUrl);
   console.log(`[runtime-dev] Launching runtime controller (logs → ${controllerLogPath})...`);
   if (fileExists(controllerLogPath)) {
     try {
@@ -3286,6 +3372,24 @@ async function startControllerIfNeeded(
     });
   if (launch.source === "prebuilt") {
     console.log(`[runtime-dev] Using prebuilt runtime controller: ${launch.command}`);
+  } else {
+    // The wait below times startup only: a cold build of this crate outlasts it.
+    console.log("[runtime-dev] Building runtime controller (a first build takes several minutes)...");
+    const buildStartedAt = Date.now();
+    try {
+      await buildBeforeLaunch(launch, { cwd: repoRoot, env, stdio, label: "runtime controller" });
+    } catch (error) {
+      if (stopControllerLogStream) {
+        stopControllerLogStream();
+      }
+      if (fd != null) {
+        try { fs.closeSync(fd); } catch {}
+      }
+      throw new Error(`${error.message}. Check logs at: ${controllerLogPath}`);
+    }
+    console.log(
+      `[runtime-dev] Runtime controller built in ${Math.round((Date.now() - buildStartedAt) / 1000)} s.`
+    );
   }
   let child;
   try {
@@ -3332,7 +3436,7 @@ async function startControllerIfNeeded(
     const configuredDelayMs = Number(process.env.RUNTIME_CONTROLLER_BOOT_DELAY_MS);
     const ciValue = (process.env.CI || "").trim().toLowerCase();
     const isCi = ciValue === "1" || ciValue === "true" || process.env.GITHUB_ACTIONS === "true";
-    const defaultAttempts = isCi ? 300 : 120; // CI runners can take longer on cold Cargo builds.
+    const defaultAttempts = isCi ? 300 : 120; // Startup only: the controller is built before this wait.
     const maxAttempts =
       Number.isFinite(configuredAttempts) && configuredAttempts > 0
         ? configuredAttempts
@@ -3389,7 +3493,9 @@ async function startControllerIfNeeded(
     console.log(`[runtime-dev] Controller is listening on ${controllerPort}.`);
 
     try {
-      run("node", ["scripts/runtime-projects.mjs", "ensure", `--base-url=${controllerBaseUrl}`, "--quiet"]);
+      run("node", ["scripts/runtime-projects.mjs", "ensure", `--base-url=${controllerBaseUrl}`, "--quiet"], {
+        env: { ...process.env, SUPABASE_PROJECT_URL: resolveSupabaseBaseUrl(supabaseEnv) },
+      });
     } catch (error) {
       console.warn(`[runtime-dev] Warning: unable to ensure runtime project registry (${error.message}).`);
     }
@@ -4132,6 +4238,8 @@ async function runtimeComposeStatus() {
 
 // ───────────────────────── up / down / status / test ─────────────────────────
 async function up() {
+  // Refuse a bad port before anything is pruned, started or written.
+  assertStackPorts();
   // Before anything starts: the provider hands its environment to docker
   // compose, which gives each space's proxy these secrets.
   ensureDevProxySecrets(process.env);
@@ -4151,7 +4259,7 @@ async function up() {
   writeRuntimeProvenanceSnapshot();
 
   console.log("\nRuntime stack is running!\n");
-  console.log("- Supabase Edge functions via http://127.0.0.1:54321/functions/v1.\n");
+  console.log(`- Supabase Edge functions via ${resolveSupabaseBaseUrl(ctx.supabaseEnv)}/functions/v1.\n`);
 
   if (!ctx.supabaseStatus.started && !fileExists(supabaseFlag)) {
     console.log(
@@ -4344,6 +4452,9 @@ function printUsage() {
   console.log(
     `  GIT_CANONICAL=1             Start git-edge + git-shard-0 + origin-gateway (git-canonical)`
   );
+  console.log(`  PROXY_PORT=<port>           This stack's host proxy port (default 8789; a PROXY_BASE_URL must use it)`);
+  console.log(`  PROVIDER_PORT=<port>        This stack's provider port (default 9090; a BIND_ADDR must use it)`);
+  console.log(`  RUNTIME_CONTROLLER_BOOT_ATTEMPTS=<n> Attempts, 1 s apart, for a built controller to listen (default 120; 300 in CI)`);
   console.log(`\nRuntime start flags:`);
   console.log(`  --verbose                  Stream runtime container logs during startup`);
   console.log(`  --no-verbose | --quiet     Skip streaming logs (default)`);
@@ -4375,6 +4486,7 @@ async function main(argv = []) {
       await testCmd(args);
       break;
     case "controller:start": {
+      assertStackPorts();
       if ((process.env.GIT_CANONICAL || "").trim() === "") {
         process.env.GIT_CANONICAL = "1";
         console.log(

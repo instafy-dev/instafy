@@ -6,7 +6,11 @@
  * Usage:
  *   pnpm supabase:up      # launches Supabase, applies migrations, prints env hints
  *   pnpm supabase:migrate # applies pending migrations to the already-running local stack
+ *   pnpm supabase:reset   # rebuilds the running local database from supabase/migrations (deletes its data)
  *   pnpm supabase:down    # stops Supabase
+ *
+ * Each command exits with MIGRATIONS_COPY_EXIT_CODE (3) when it cannot refresh the Supabase CLI's
+ * copy of supabase/migrations, before the CLI runs on that copy.
  */
 
 import { spawnSync } from "node:child_process";
@@ -19,6 +23,7 @@ import {
   resolveLocalSupabaseDbUrl,
   resolveLocalSupabaseServiceRoleKey,
 } from "./lib/localSupabaseEnv.mjs";
+import { localSupabasePorts } from "./lib/localSupabasePorts.mjs";
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
 import { prepareSupabaseImageMirror } from "./lib/supabaseImageMirror.mjs";
 import { prepareSupabaseSerialPull } from "./lib/supabaseSerialPull.mjs";
@@ -36,6 +41,9 @@ const supabaseProjectMigrationsDir = path.join(supabaseProjectDir, "migrations")
 const supabaseFlag = path.join(repoRoot, "tmp", ".runtime-supabase-started");
 
 const action = process.argv[2] ?? "up";
+// `pnpm test:e2e:supabase` tells a copy it could not refresh from a failed reset by this code: the
+// stack is fine then, and recycling it would only stop it.
+const MIGRATIONS_COPY_EXIT_CODE = 3;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -67,9 +75,13 @@ function ensureTmpDir() {
   if (!fileExists(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
 }
 
+// The Supabase CLI (--workdir supabase) reads migrations only from this ignored copy, so a copy
+// that cannot be refreshed stops the run instead of building or migrating an old schema.
 function syncSupabaseMigrationsDir() {
   if (!fileExists(supabaseMigrationsDir)) {
-    return;
+    throw migrationsCopyError(
+      `${supabaseMigrationsDir} is missing; not running the Supabase CLI on ${supabaseProjectMigrationsDir}`
+    );
   }
   try {
     fs.mkdirSync(supabaseProjectDir, { recursive: true });
@@ -81,8 +93,8 @@ function syncSupabaseMigrationsDir() {
       recursive: true,
     });
   } catch (error) {
-    console.warn(
-      `[supabase-stack] Unable to copy migrations into ${supabaseProjectMigrationsDir}: ${error.message}`
+    throw migrationsCopyError(
+      `Unable to copy migrations into ${supabaseProjectMigrationsDir}: ${error.message}; not running the Supabase CLI on a stale copy`
     );
   }
 }
@@ -91,6 +103,11 @@ function applySupabaseMigrations() {
   syncSupabaseMigrationsDir();
   console.log("[supabase-stack] Applying Supabase migrations...");
   runSupabase(["migration", "up", "--local"]);
+}
+
+// Exits with MIGRATIONS_COPY_EXIT_CODE (see the end of this file).
+function migrationsCopyError(message) {
+  return Object.assign(new Error(message), { code: "INSTAFY_MIGRATIONS_COPY" });
 }
 
 function readSupabaseEnv() {
@@ -180,11 +197,24 @@ function stopSupabase() {
   }
 }
 
+function resetSupabase() {
+  // Only ever the local stack, as for migrate: a stack that is not running is reported, not started.
+  if (!readSupabaseEnv()) {
+    throw new Error("local Supabase is not running; start it with 'pnpm supabase:up'");
+  }
+  // A raw `supabase db reset` rebuilds from whatever copy is there, which may be stale.
+  syncSupabaseMigrationsDir();
+  console.log("[supabase-stack] Rebuilding the local database from supabase/migrations (its data is deleted)...");
+  runSupabase(["db", "reset", "--local", "--yes"]);
+}
+
 function printEnvHints(env) {
-  const dbUrl = resolveLocalSupabaseDbUrl({ statusEnv: env });
-  const projectUrl =
-    resolveLocalSupabaseApiUrl({ statusEnv: env }) || "http://127.0.0.1:54321";
-  const serviceRoleKey = resolveLocalSupabaseServiceRoleKey({ statusEnv: env });
+  // This stack's own status only. A shell may hold a hosted project's URL, database and
+  // service-role key, which the shared resolvers read first and which this must never print.
+  const local = { env: {}, statusEnv: env };
+  const dbUrl = resolveLocalSupabaseDbUrl(local);
+  const projectUrl = resolveLocalSupabaseApiUrl(local) || localSupabasePorts().apiUrl;
+  const serviceRoleKey = resolveLocalSupabaseServiceRoleKey(local);
 
   console.log("\n[supabase-stack] Supabase is ready.");
   if (dbUrl) {
@@ -223,10 +253,14 @@ try {
     applySupabaseMigrations();
     process.exit(0);
   }
+  if (action === "reset") {
+    resetSupabase();
+    process.exit(0);
+  }
 
   const { env } = ensureSupabase();
   printEnvHints(env);
 } catch (error) {
   console.error(`[supabase-stack] ${error.message ?? error}`);
-  process.exit(1);
+  process.exit(error?.code === "INSTAFY_MIGRATIONS_COPY" ? MIGRATIONS_COPY_EXIT_CODE : 1);
 }

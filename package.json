@@ -89,6 +89,7 @@
     "supabase:up": "node scripts/supabase-stack.mjs up",
     "supabase:down": "node scripts/supabase-stack.mjs down",
     "supabase:migrate": "node scripts/supabase-stack.mjs migrate",
+    "supabase:reset": "node scripts/supabase-stack.mjs reset",
     "providers:seed:default": "node scripts/providers-seed.mjs default",
     "providers:seed:hetzner": "node scripts/providers-seed.mjs hetzner",
     "controller:up": "pnpm runtime:controller:start",

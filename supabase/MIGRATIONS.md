@@ -257,4 +257,7 @@ cannot send a migration larger than 128 KiB, the most Linux passes in one argume
 a migration.
 
 `supabase/supabase/migrations/` is an ignored generated working directory for the Supabase
-CLI. Do not author or commit migrations there.
+CLI. Do not author or commit migrations there. `pnpm supabase:up`, `pnpm supabase:migrate`,
+`pnpm supabase:reset` and `pnpm stack:up` refresh it from `supabase/migrations/` before the CLI
+reads it, and stop when they cannot; a raw `supabase start` or `supabase db reset` reads whatever
+copy is there.

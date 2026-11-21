@@ -164,6 +164,7 @@ Studio can import GitHub repositories into the current space through the project
 ## Repo Scripts
 - `pnpm dev` — launch the Vite frontend.
 - `pnpm supabase:up` / `pnpm supabase:down` — start/stop the local Supabase stack + Postgres (applies migrations and prints connection info for `DATABASE_URL` / `TEST_DATABASE_URL`).
+- `pnpm supabase:reset` — rebuild the running local Supabase database from `supabase/migrations` (deletes its data).
 - `pnpm test:controller` — run `cargo test -p runtime-controller` with `TEST_DATABASE_URL` auto-populated from the running Supabase stack. If Supabase is not running yet, the wrapper starts it for you. Pass a focused test name the same way you would to `cargo test`, for example: `pnpm test:controller conversation_message_routes_preserve_inline_reference_content -- --nocapture`.
 - `pnpm stack:check` — verify Supabase, the controller, and the runtime container are all running
   (returns non-zero otherwise).
