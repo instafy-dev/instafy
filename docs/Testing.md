@@ -665,14 +665,18 @@ function in one of them passes the gate; finding that code still takes an audit.
 Every module that `packages/runtime-agent/tests/proxy_integration.rs` declares, and
 every test at its top level, runs under one filter of the runtime-agent test step or
 is named in `scripts/check-rust-ci.test.mjs` with the reason it does not: the five
-live probes need a switch and the machine's Codex login, the shared code-mode host
-support module's one test runs with `proxy_retry_budget`, the two embedded-proxy
-cases (`codex_embedded_via_proxy_creates_file`, `codex_embedded_retries_after_stream_error`)
-run a code-mode-only default model without staging the code-mode host, and
-`isolated_tool_workers` runs its workers' tools in Codex's sandbox, which on Linux
-needs bubblewrap and unprivileged user namespaces: no runtime-agent lane installs
-bubblewrap or lifts Ubuntu's AppArmor restriction on those namespaces, and the
-module has passed only on macOS. That test fails when one is in neither, or when a
+live probes need a switch and the machine's Codex login, and the shared code-mode host
+support module's one test runs with `proxy_retry_budget`. The live probes run on a
+thread with a 16 MiB stack, so a hand run reaches its switch in a debug build. The two
+embedded-proxy cases (`codex_embedded_`) stage the code-mode host for the own-AI
+default, the code-mode-only model the runtime falls back to for a job that names no
+model, as theirs do not, so a local run needs the host built first.
+`isolated_tool_workers::` runs its workers' tools in
+Codex's sandbox: Seatbelt on macOS, and on Linux Codex's bubblewrap view, which needs
+unprivileged user namespaces (GitHub's hosted Ubuntu runners, where the lane runs for
+the public repository, allow them). That view starts from a private tmpfs root, where a
+write outside the workspace lands in a throwaway file, so the module checks the
+outside file from the host. That test fails when one is in neither, or when a
 named one is gone or also run. It also fails when a filter matches no module
 (`module::`) and no top-level test name, when a line of the step that names
 `proxy_integration` is not exactly `cargo test --manifest-path
