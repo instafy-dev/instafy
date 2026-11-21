@@ -64,6 +64,79 @@ pub(crate) fn derive_origin_key_id_from_pem(pem: &str) -> String {
     format!("origin-{suffix}")
 }
 
+/// The PKCS#8 v1 (RFC 8410) header of an Ed25519 private key. The 32-byte
+/// seed follows it.
+const ED25519_PKCS8_V1_PREFIX: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+
+/// The signing key for the configured PKCS#8 PEM.
+///
+/// The PEM is read by jsonwebtoken's own reader, as in jsonwebtoken 9, so
+/// the same text still loads: it drops every whitespace character from the
+/// body, including the spaces left where a key's line breaks were pasted.
+///
+/// jsonwebtoken signs with AWS-LC, which parses an Ed25519 key as PKCS#8 v1
+/// or RFC 5958 v2 but not as the v2 layout ring 0.16 and earlier wrote (the
+/// public key under a constructed `[1]`). jsonwebtoken 9 signed through
+/// ring, which took all three. So the key is checked with that same ring
+/// parser, which also refuses a v2 key whose public key is not its own, and
+/// its seed is handed on as a v1 document. The configured PEM itself is not
+/// changed, so the key id derived from it stays the same.
+fn ed25519_encoding_key(private_key_pem: &str) -> anyhow::Result<EncodingKey> {
+    let pem_key = EncodingKey::from_ed_pem(private_key_pem.as_bytes())
+        .map_err(|error| anyhow::anyhow!("not an Ed25519 PKCS#8 PEM: {error}"))?;
+    let der = pem_key.inner();
+    ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(der)
+        .map_err(|error| anyhow::anyhow!("not a PKCS#8 Ed25519 private key: {error}"))?;
+    let seed = ed25519_pkcs8_seed(der)
+        .ok_or_else(|| anyhow::anyhow!("PKCS#8 Ed25519 private key has no 32-byte seed"))?;
+    let mut v1 = ED25519_PKCS8_V1_PREFIX.to_vec();
+    v1.extend_from_slice(seed);
+    Ok(EncodingKey::from_ed_der(&v1))
+}
+
+/// The seed of a PKCS#8 Ed25519 private key that ring has accepted:
+/// `SEQUENCE { version, algorithm, OCTET STRING { OCTET STRING seed }, .. }`.
+fn ed25519_pkcs8_seed(der: &[u8]) -> Option<&[u8]> {
+    let (0x30, info, _) = der_element(der)? else {
+        return None;
+    };
+    let (0x02, _version, info) = der_element(info)? else {
+        return None;
+    };
+    let (0x30, _algorithm, info) = der_element(info)? else {
+        return None;
+    };
+    let (0x04, private_key, _) = der_element(info)? else {
+        return None;
+    };
+    let (0x04, seed, _) = der_element(private_key)? else {
+        return None;
+    };
+    (seed.len() == 32).then_some(seed)
+}
+
+/// Splits the first DER element off `input` as (tag, contents, rest).
+fn der_element(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = input.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    let (length, rest) = match first {
+        0x00..=0x7f => (usize::from(first), rest),
+        0x81 => {
+            let (&length, rest) = rest.split_first()?;
+            (usize::from(length), rest)
+        }
+        0x82 => {
+            let (length, rest) = rest.split_at_checked(2)?;
+            ((usize::from(length[0]) << 8) | usize::from(length[1]), rest)
+        }
+        _ => return None,
+    };
+    let (contents, rest) = rest.split_at_checked(length)?;
+    Some((tag, contents, rest))
+}
+
 pub fn mint_scoped_token(
     config: &AppConfig,
     request: ScopedTokenRequest,
@@ -149,7 +222,7 @@ fn mint_scoped_token_inner(
         .as_ref()
         .ok_or_else(|| internal_error("origin token signing key not configured"))?;
 
-    let encoding_key = EncodingKey::from_ed_pem(private_key_pem.as_bytes()).map_err(|error| {
+    let encoding_key = ed25519_encoding_key(private_key_pem).map_err(|error| {
         internal_error(format!(
             "failed to construct Ed25519 encoding key from PEM: {error}"
         ))
@@ -253,6 +326,9 @@ pub fn decode_scoped_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD;
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
 
     fn request(ttl_seconds: i64) -> ScopedTokenRequest {
         ScopedTokenRequest {
@@ -334,6 +410,134 @@ mod tests {
             claims.runtime_generation.as_deref(),
             Some(runtime_generation.to_string().as_str())
         );
+    }
+
+    fn pem_block(label: &str, der: &[u8]) -> String {
+        let body = STANDARD.encode(der);
+        let lines = body
+            .as_bytes()
+            .chunks(64)
+            .map(|line| std::str::from_utf8(line).expect("base64 is ASCII"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("-----BEGIN {label}-----\n{lines}\n-----END {label}-----\n")
+    }
+
+    /// One Ed25519 key in each PKCS#8 layout jsonwebtoken 9 (ring) signed
+    /// with, and its public key as a PEM.
+    struct KeyLayouts {
+        /// RFC 8410 v1, as `openssl genpkey` and Node write it.
+        v1: Vec<u8>,
+        /// RFC 5958 v2, as ring 0.17 and aws-lc-rs write it: the public key
+        /// under a primitive `[1]`.
+        v2: Vec<u8>,
+        /// The v2 layout ring 0.16 and earlier wrote: the public key as a BIT
+        /// STRING under a constructed `[1]`.
+        ring_0_16_v2: Vec<u8>,
+        public_pem: String,
+    }
+
+    fn key_layouts() -> KeyLayouts {
+        let v2 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+            .expect("generate key")
+            .as_ref()
+            .to_vec();
+        assert_eq!(
+            &v2[..5],
+            &[0x30, 0x51, 0x02, 0x01, 0x01],
+            "ring's v2 header"
+        );
+        assert_eq!(&v2[48..51], &[0x81, 0x21, 0x00], "ring's v2 public key tag");
+        let public_key = Ed25519KeyPair::from_pkcs8(&v2)
+            .expect("parse key")
+            .public_key()
+            .as_ref()
+            .to_vec();
+        let seed = &v2[16..48];
+        let algorithm = [0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70];
+
+        let mut v1 = vec![0x30, 0x2e, 0x02, 0x01, 0x00];
+        v1.extend_from_slice(&algorithm);
+        v1.extend_from_slice(&[0x04, 0x22, 0x04, 0x20]);
+        v1.extend_from_slice(seed);
+
+        let mut ring_0_16_v2 = vec![0x30, 0x53, 0x02, 0x01, 0x01];
+        ring_0_16_v2.extend_from_slice(&algorithm);
+        ring_0_16_v2.extend_from_slice(&[0x04, 0x22, 0x04, 0x20]);
+        ring_0_16_v2.extend_from_slice(seed);
+        ring_0_16_v2.extend_from_slice(&[0xa1, 0x23, 0x03, 0x21, 0x00]);
+        ring_0_16_v2.extend_from_slice(&public_key);
+
+        let mut spki = vec![0x30, 0x2a];
+        spki.extend_from_slice(&algorithm);
+        spki.extend_from_slice(&[0x03, 0x21, 0x00]);
+        spki.extend_from_slice(&public_key);
+
+        KeyLayouts {
+            v1,
+            v2,
+            ring_0_16_v2,
+            public_pem: pem_block("PUBLIC KEY", &spki),
+        }
+    }
+
+    // The deployed RUNTIME_SIGNING_PRIVATE_KEY may be in any of these
+    // layouts, and every one of them signed under jsonwebtoken 9. AWS-LC
+    // alone refuses the ring 0.16 one. jsonwebtoken 9 read the PEM with the
+    // pem crate, which drops every whitespace character from the body, so a
+    // key whose line breaks became spaces, tabs or bare carriage returns (a
+    // value pasted into a one-line field) signed as well.
+    #[test]
+    fn every_pkcs8_layout_jsonwebtoken_9_signed_with_still_signs() {
+        let keys = key_layouts();
+        for (layout, der) in [
+            ("v1", &keys.v1),
+            ("v2", &keys.v2),
+            ("ring 0.16 v2", &keys.ring_0_16_v2),
+        ] {
+            let pem = pem_block("PRIVATE KEY", der);
+            for (spelling, private_pem) in [
+                ("wrapped at 64", pem.clone()),
+                ("line breaks as spaces", pem.trim_end().replace('\n', " ")),
+                ("line breaks as tabs", pem.trim_end().replace('\n', "\t")),
+                (
+                    "line breaks as bare CRs",
+                    pem.trim_end().replace('\n', "\r"),
+                ),
+            ] {
+                let config =
+                    crate::tests::build_app_config(&private_pem, &keys.public_pem, "layouts");
+                let minted = mint_scoped_token(&config, request(600))
+                    .unwrap_or_else(|error| panic!("{layout}, {spelling}: mint failed: {error:?}"));
+                decode_scoped_token(&config, &minted.token, "layout token").unwrap_or_else(
+                    |error| panic!("{layout}, {spelling}: token does not verify: {error:?}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_private_key_pem_whose_body_is_not_base64_is_refused() {
+        let keys = key_layouts();
+        let pem = pem_block("PRIVATE KEY", &keys.v2);
+        let corrupted = pem.replacen("-----\n", "-----\n!", 1);
+        assert_ne!(corrupted, pem);
+        let config = crate::tests::build_app_config(&corrupted, &keys.public_pem, "corrupt");
+        assert!(mint_scoped_token(&config, request(600)).is_err());
+    }
+
+    #[test]
+    fn a_v2_key_carrying_another_keys_public_key_is_refused() {
+        let keys = key_layouts();
+        let other = key_layouts();
+        let mut mismatched = keys.v2.clone();
+        mismatched[51..].copy_from_slice(&other.v2[51..]);
+        let config = crate::tests::build_app_config(
+            &pem_block("PRIVATE KEY", &mismatched),
+            &keys.public_pem,
+            "pkcs8-mismatch",
+        );
+        assert!(mint_scoped_token(&config, request(600)).is_err());
     }
 
     fn signed_payload(token: &str) -> serde_json::Value {

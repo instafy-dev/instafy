@@ -20,4 +20,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "pro
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
-jsonwebtoken = "9"
+# Only the aws_lc_rs backend may be on: with rust_crypto as well it still
+# builds, but every sign and verify panics.
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
