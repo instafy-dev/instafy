@@ -1958,13 +1958,22 @@ pub(crate) struct ManagedAiSettlement {
 /// Takes the prompt's row lock, so the settlements and refunds of one
 /// message's Instafy AI turns take turns: exactly one settlement goes against
 /// the reserve, and no refund races a settlement or another refund.
+///
+/// The lock is `for no key update`, which those writers still take one at a
+/// time, and which leaves the prompt's key free: it never waits for the
+/// key-share lock that a message, run or question naming the prompt takes. A
+/// caller that holds the turn's conversation by then
+/// (crate::conversations::lock_conversations_for_writes), such as a sweep's
+/// refund, would otherwise deadlock with a message naming the prompt, such as
+/// a dispatch's runtime alert, which holds that key-share lock while it waits
+/// for the conversation.
 async fn lock_prompt_for_managed_ai_billing(
     transaction: &Transaction<'_>,
     prompt_id: &Uuid,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     transaction
         .execute(
-            "select 1 from prompts where id = $1 for update",
+            "select 1 from prompts where id = $1 for no key update",
             &[prompt_id],
         )
         .await

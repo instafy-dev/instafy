@@ -5692,9 +5692,11 @@ pub(crate) async fn persist_run_managed_ai_credit_metadata(
     }
 
     for run_id in run_ids {
+        // Only the metadata changes, so a message or job naming the run still
+        // takes its key-share lock (`conversations::persist_canceled_run_metadata`).
         let row = transaction
             .query_typed_opt(
-                "select metadata from runs where id = $1 for update",
+                "select metadata from runs where id = $1 for no key update",
                 typed![run_id],
             )
             .await
@@ -5850,9 +5852,11 @@ pub(crate) async fn persist_run_ai_access_mode(
     }
 
     for run_id in run_ids {
+        // Only the metadata changes, so a message or job naming the run still
+        // takes its key-share lock (`conversations::persist_canceled_run_metadata`).
         let row = transaction
             .query_typed_opt(
-                "select metadata from runs where id = $1 for update",
+                "select metadata from runs where id = $1 for no key update",
                 typed![run_id],
             )
             .await
@@ -5909,9 +5913,11 @@ pub(crate) async fn persist_prompt_ai_access_mode(
     mode: &str,
     managed_ai_used: bool,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
+    // Only the metadata changes, so a message, run or job naming the prompt
+    // still takes its key-share lock (`conversations::persist_canceled_run_metadata`).
     let row = transaction
         .query_typed_opt(
-            "select metadata from prompts where id = $1 for update",
+            "select metadata from prompts where id = $1 for no key update",
             typed![prompt_id],
         )
         .await
