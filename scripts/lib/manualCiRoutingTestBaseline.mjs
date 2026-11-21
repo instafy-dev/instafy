@@ -59,8 +59,10 @@ export const MANUAL_CI_BASELINES = {
   // setup, research settings and local tunnel suites. Every Rust lane but
   // runtime-agent's denies dead code and unused imports, with --all-targets in
   // its check lanes, and runtime-agent's check lane denies them with clippy,
-  // which it installs (check-rust-ci binds that too).
-  "build.yml": { sha256: "f7326ca5ce6202783b5e75ae869098ad9df92b6776a7a4968a0de5c640b8a10b" },
+  // which it installs (check-rust-ci binds that too). The contracts lane checks a pull
+  // request's or merge group's added migrations against its base, which its checkout
+  // keeps by fetching two commits deep.
+  "build.yml": { sha256: "536dbe3d6214f3b6ac86634dafe453f50e8bcc332bf094bcb10d72deafb1b1ac" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper
