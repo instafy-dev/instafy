@@ -1074,6 +1074,7 @@ mod tests {
             git_remote_public_base_url: None,
             git_shards: vec![],
             hosted_origin_endpoint: None,
+            self_hosted_origin_networks: Default::default(),
             author_pseudonym_keys: None,
             browser_turn_rest: None,
             sandbox_credit_seed_amount: 0,

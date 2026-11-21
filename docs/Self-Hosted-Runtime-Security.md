@@ -161,6 +161,25 @@ Upgrading:
    lease it now. The proxy's `/healthz` reports the result as `platformLane.servedBy`: `static`
    or `controller_lease`.
 
+## Origin network boundary
+
+A private self-hosted runtime names its origin's endpoint itself, and the controller sends requests there: the `/origin/*` relays, GitHub imports and the project memory bootstrap. That endpoint must not become a way into the controller's own machine or network, so by default (`SELF_HOSTED_ORIGIN_NETWORKS=public`) the controller connects to it only at public addresses. Loopback, private (RFC 1918, IPv6 unique local), link-local (cloud metadata included), carrier-grade NAT, unspecified, multicast, documentation, benchmarking and other reserved addresses are refused. An IPv4-mapped IPv6 address is judged as the IPv4 address it stands for, and IPv6 must be global unicast. The IPv4 classes are the same ones the browser egress proxy refuses, and so is the well-known NAT64 prefix `64:ff9b::/96`, whatever IPv4 address it embeds. A controller whose resolver synthesizes NAT64 addresses (DNS64) therefore cannot reach an origin that has only IPv4 addresses; give it a resolver without DNS64, or set `private`.
+
+The check is made on the address each connection is opened to. A host name resolves through a resolver that refuses the whole answer when any address in it is not public, and the connection goes only to the addresses that resolver returned, so a later DNS answer cannot change the outcome. An IP literal never reaches that resolver, so it is checked before anything is sent. A WebSocket relay, a GitHub import and the memory bootstrap also check a name once before sending, as it resolves. An HTTP relay leaves a name to the resolver, which refuses it at the connection with the same answer, so a relayed request costs at most one lookup, and none when it reuses a kept-alive connection, which was checked when it was opened. The caller learns of a refusal:
+
+- an HTTP relay answers `403`;
+- a WebSocket relay answers `403` to the handshake, before the upgrade, and then connects only to the addresses it checked;
+- a GitHub import fails with `403`;
+- the project memory bootstrap answers `200` with `ok: false` and the refusal as its `reason`.
+
+A name that does not resolve, or not within the 10-second connect timeout, fails before anything is sent: a WebSocket relay or an import answers `502`, and the bootstrap `ok: false`. An HTTP relay learns this only when it opens a new connection, which then answers `502`. A request over a kept-alive connection the controller already checked still goes through. A name whose answer becomes non-public after an import's or the bootstrap's check is still refused at the connection: the import then fails with `500`, and the bootstrap answers `ok: false`. Proxy settings in the controller's environment do not apply to requests to these origins. The relays, GitHub imports and the bootstrap follow no redirect from any origin, since a redirect can name any address.
+
+Registration applies the same classes: a private self-hosted runtime cannot register an endpoint that is, or resolves to, an address that is not public. Loopback is the exception. Desktop registers `http://127.0.0.1:<port>` for its own machine, so that stays registrable, and the controller never relays to it. A name the controller cannot resolve at registration stays registrable, since a browser may still reach it directly; every connection the controller makes is checked again. A runtime whose endpoint is refused fails origin registration and keeps retrying, so an `instafy runtime` or a runtime container someone runs on a private network does not start until its endpoint is public, it uses an issued tunnel, or the controller allows private networks.
+
+Origins of provider-managed runtimes, the configured `HOSTED_ORIGIN_ENDPOINT` gateway and tunnels issued under `TUNNEL_DOMAIN` are the operator's own infrastructure and keep their addresses. A tunnel counts as issued only in the form the broker issues it: one label under `TUNNEL_DOMAIN`, at the scheme's default port (443 or 80). A broker whose `PUBLIC_INGRESS_PORT` is another port puts that port in its tunnel URLs, and those are held to public addresses like any other endpoint. An origin whose runtime can no longer be classified counts as self-hosted.
+
+An install whose controller shares a network with its people's runtimes, such as a single machine or a LAN, sets `SELF_HOSTED_ORIGIN_NETWORKS=private` on the controller to relay on that network as before; `pnpm stack:up` sets it for local development. Any other value, including one that is not valid Unicode, refuses startup. See the controller's [configuration](../packages/runtime-controller/README.md#configuration).
+
 ## Workspace path containment
 
 The origin HTTP/apply facade resolves workspace paths relative to an already-open root capability: descriptor-relative `openat` operations on Unix and capability directory handles on Windows. File reads, writes, archive apply, Git layout validation, rename, and delete open every untrusted component with no-follow semantics. Symlinks in the workspace cannot redirect those facade operations outside the canonical root, including through protected `.git` and `.instafy` paths. ZIP extraction is bounded and validates every entry before mutation.
@@ -210,6 +229,7 @@ cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-
 cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-controller \
   private_self_hosted_origin_tokens_are_owner_bound_and_revoked_on_rotation
 cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-controller runtime::revocation
+cargo test --manifest-path packages/runtime-controller/Cargo.toml --bin runtime-controller origin_network
 cargo test --manifest-path packages/origin-http-server/Cargo.toml
 cargo test --manifest-path packages/runtime-controller/Cargo.toml --test startup \
   startup_refuses_a_controller_that_cannot_sign_proxy_grants
@@ -219,5 +239,7 @@ cargo test --manifest-path packages/openai-proxy-server/Cargo.toml \
   --test proxy_static_platform_credentials
 pnpm --filter @instafy/frontend test:e2e:desktop:shared-browser-collaboration
 ```
+
+The origin network tests in `origin_network_boundary_tests` and `imports::tests::origin_network_boundary` need the database and fail without `TEST_DATABASE_URL`; `pnpm test:controller origin_network` runs them with it (see [DEV_SETUP](../DEV_SETUP.md)).
 
 The last command launches one normal Chromium Studio client and one real Electron Studio client as different users against the same managed Shared Browser runtime. It verifies shared runtime/origin/page identity, named cursors in both directions, driver-only input, request/grant handoff, and the ten-second reconnect grace while both pixel surfaces remain painted.

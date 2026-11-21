@@ -71,6 +71,7 @@ mod operator_admin;
 mod operator_metrics;
 mod org_limits;
 mod organization_deletion;
+mod origin_network;
 mod origins;
 mod ota;
 mod previews;
@@ -271,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
         jwks_refresh_seconds = config.supabase_jwks_refresh_seconds,
         jwks_on_demand_interval_seconds = config.supabase_jwks_on_demand_interval_seconds,
         auto_create_projects = config.auto_create_projects,
+        self_hosted_origin_networks = config.self_hosted_origin_networks.as_str(),
         redis_event_bus = config.redis_url.is_some(),
         redis_namespace = config.redis_namespace.as_deref(),
         redis_events_channel = config.redis_events_channel.as_deref(),
@@ -283,14 +285,8 @@ async fn main() -> anyhow::Result<()> {
     let http_client = Client::builder()
         .user_agent("instafy-runtime-controller")
         .build()?;
-    // Origin and speech proxying: no total deadline, since a large file or a
-    // slow answer that keeps arriving must go on. The answer's idle timeout is
-    // applied per request (see `proxy_read`).
-    let origin_proxy_client = Client::builder()
-        .user_agent("instafy-runtime-controller-origin-proxy")
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(proxy_read::ORIGIN_PROXY_CONNECT_TIMEOUT)
-        .build()?;
+    let origin_proxy_client = proxy_read::origin_proxy_client()?;
+    let public_origins = origin_network::PublicOriginNetwork::system()?;
     let (events, redis_event_bus) = match config.redis_url.clone() {
         Some(redis_url) => {
             let channel = config
@@ -337,6 +333,7 @@ async fn main() -> anyhow::Result<()> {
         follow,
         http_client,
         origin_proxy_client,
+        public_origins,
         runtime_activity: runtime_activity.clone(),
         local_workspaces: LocalWorkspaceRegistry::new(),
         runtime_preferences: RuntimePreferenceRegistry::new(),

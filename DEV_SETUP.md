@@ -324,6 +324,12 @@ can reach, because `DEV_MODE` signs sessions with the development value publishe
 - Desktop agents always boot the filesystem origin server. The controller injects `ORIGIN_ID`, `ORIGIN_LEASE_ID`,
   `ORIGIN_MODE`, `ORIGIN_PROTOCOLS`, and `ORIGIN_METADATA` into the container so the agent can register itself through
   `POST /origin/register`.
+- The controller relays to a self-hosted runtime's origin only at public addresses unless
+  `SELF_HOSTED_ORIGIN_NETWORKS=private` (see
+  [Origin network boundary](docs/Self-Hosted-Runtime-Security.md#origin-network-boundary)). `pnpm stack:up` and
+  `pnpm controller:up` set it; export it yourself for a bare `cargo run` or `pnpm dev:controller` that local
+  runtimes register with. Without it, a local runtime that registers a private-network endpoint keeps retrying its
+  registration instead of starting.
 - Provide `RUNTIME_ACCESS_TOKEN` (minted via `POST /projects/:id/runtime/token`) and ensure the controller is started with
   `RUNTIME_SIGNING_PRIVATE_KEY` / `RUNTIME_SIGNING_PUBLIC_KEY` so access tokens can be minted when Studio or Playwright calls
   `/projects/:id/access_token`.

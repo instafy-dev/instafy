@@ -2730,6 +2730,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "httpmock",
+ "hyper 0.14.32",
  "hyper 1.7.0",
  "jsonwebtoken",
  "notify",
