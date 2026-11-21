@@ -450,6 +450,14 @@ async fn main() -> anyhow::Result<()> {
             if let Err(error) = previews::prune_preview_sessions(&retention_state.pool).await {
                 tracing::warn!(?error, "runtime_preview_sessions retention prune failed");
             }
+            if let Err(error) =
+                runtime::prune_expired_pending_machine_mints(&retention_state.pool).await
+            {
+                tracing::warn!(
+                    ?error,
+                    "runtime_pending_machine_mints retention prune failed"
+                );
+            }
         }
     });
 

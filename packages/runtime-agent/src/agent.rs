@@ -25,8 +25,8 @@ use crate::active_turn_input::{
 use crate::agent_executor::{AgentExecutor, TurnEnd, is_lease_lost};
 use crate::config::Config;
 use crate::controller::{
-    AgentSecretInventoryItem, ControllerClient, JobSecrets, LeaseError, LeaseJob, Registration,
-    SpaceDeleted,
+    AgentSecretInventoryItem, ControllerClient, JobSecrets, LeaseError, LeaseJob,
+    MachineLifetimeEnded, Registration, SpaceDeleted,
 };
 use crate::job_cancel::JobCancelSignal;
 use crate::jobs::stopped_turn::StoppedTurnChanges;
@@ -48,6 +48,12 @@ fn runtime_reuse_is_safe() -> bool {
 /// report a failure. No other exit of the process uses it.
 pub const SPACE_DELETED_EXIT_CODE: i32 = 3;
 
+/// The exit status of a runtime-agent process that stopped because the
+/// controller stopped renewing its machine's credentials: the lifetime its
+/// person's mint gave it ended. Desktop and the CLI read it to mint the
+/// machine again with the person's sign-in. No other exit uses it.
+pub const MACHINE_LIFETIME_ENDED_EXIT_CODE: i32 = 4;
+
 /// How long a lazy browser host may take to stop at the runtime's shutdown.
 const BROWSER_HOST_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
@@ -59,6 +65,9 @@ pub enum AgentExit {
     /// The controller refused the runtime because its space was deleted.
     /// The origin and tunnel are down and no job is left.
     SpaceDeleted,
+    /// The controller stopped renewing the machine's credentials because its
+    /// lifetime ended. The agent stopped at an idle point, so no job is left.
+    MachineLifetimeEnded,
 }
 
 /// Whether the process should exit once its space is deleted. A runtime a
@@ -67,6 +76,13 @@ pub enum AgentExit {
 /// started again. Desktop, the CLI and other self-hosted runtimes have no
 /// one else to stop them.
 pub fn exits_when_space_deleted(config: &Config) -> bool {
+    config.runtime_lease_id.is_none()
+}
+
+/// Whether the process should exit once its machine's lifetime ends. Only a
+/// person's own machine has one, which a provider-launched runtime never is;
+/// one would wait for its provider like a deleted space's.
+pub fn exits_when_machine_lifetime_ends(config: &Config) -> bool {
     config.runtime_lease_id.is_none()
 }
 
@@ -693,6 +709,15 @@ impl RegistrationRenewalTask {
                             return;
                         }
                     }
+                    Err(error) if error.is::<MachineLifetimeEnded>() => {
+                        // Nothing renews this machine any more; the lease loop
+                        // stops at its next idle point.
+                        info!(
+                            runtime_id = %current.runtime_id,
+                            "the controller stopped renewing this machine's credentials: their lifetime ended"
+                        );
+                        return;
+                    }
                     Err(error) => {
                         last_attempt_failed = true;
                         warn!(
@@ -772,6 +797,9 @@ enum RegistrationOutcome {
     /// The delete stopped the runtime already, so nothing is stopped or
     /// snapshotted on the way out.
     SpaceDeleted,
+    /// The controller stopped renewing the machine's credentials because its
+    /// lifetime ended. The runtime was stopped like a shutdown stops it.
+    MachineLifetimeEnded,
 }
 
 impl RuntimeAgent {
@@ -879,6 +907,12 @@ impl RuntimeAgent {
                     info!("this runtime's space was deleted; the agent stops for good");
                     return Ok(AgentExit::SpaceDeleted);
                 }
+                Ok(RegistrationOutcome::MachineLifetimeEnded) => {
+                    info!(
+                        "this machine's credentials reached the end of their lifetime; the agent stops until a new mint starts it"
+                    );
+                    return Ok(AgentExit::MachineLifetimeEnded);
+                }
                 Ok(RegistrationOutcome::Reregister(Some(registered))) => {
                     info!(
                         runtime_id = %registered.registration.runtime_id,
@@ -923,6 +957,11 @@ impl RuntimeAgent {
                     // A deleted space has no use for its browser or a save of it.
                     crate::browser_host::kill_now();
                     return Ok(RegistrationOutcome::SpaceDeleted);
+                }
+                Err(error) if error.is::<MachineLifetimeEnded>() => {
+                    // No lease cycle is running to stop the browser host here.
+                    crate::browser_host::shutdown(BROWSER_HOST_SHUTDOWN_BUDGET).await;
+                    return Ok(RegistrationOutcome::MachineLifetimeEnded);
                 }
                 Err(error) => return Err(error.context("failed to register runtime")),
             },
@@ -1121,7 +1160,14 @@ impl RuntimeAgent {
             return Ok(RegistrationOutcome::SpaceDeleted);
         }
 
-        let shutdown_triggered = if !runtime_reuse_is_safe() {
+        // A machine whose lifetime ended stops like a shutdown stops it: its
+        // tokens still work, and nothing will renew them.
+        let lifetime_ended = lease_result
+            .as_ref()
+            .is_err_and(|error| error.is::<MachineLifetimeEnded>());
+        let shutdown_triggered = if lifetime_ended {
+            true
+        } else if !runtime_reuse_is_safe() {
             warn!("AI worker shutdown could not be confirmed; stopping this runtime before reuse");
             true
         } else {
@@ -1161,6 +1207,9 @@ impl RuntimeAgent {
             } else {
                 info!("runtime disposition deferred to parent after desktop process-tree shutdown");
             }
+            if lifetime_ended {
+                return Ok(RegistrationOutcome::MachineLifetimeEnded);
+            }
             return Ok(RegistrationOutcome::Shutdown);
         }
 
@@ -1173,8 +1222,10 @@ impl RuntimeAgent {
 
     /// Runs the lease loop until shutdown (`Ok(true)`), until a re-register is
     /// wanted (`Ok(false)`: tunnel refresh or a proactively renewed
-    /// registration), until the agent token is rejected (`Err`), or until the
-    /// space is deleted (an `Err` that is [`SpaceDeleted`]).
+    /// registration), until the agent token is rejected (`Err`), until the
+    /// space is deleted (an `Err` that is [`SpaceDeleted`]), or until the
+    /// machine's lifetime ended (an `Err` that is [`MachineLifetimeEnded`],
+    /// at the first idle point after a registration was refused for it).
     ///
     /// Renewal is only observed at the idle points between jobs, so adopting a
     /// renewed registration never interrupts an in-flight job.
@@ -1195,6 +1246,11 @@ impl RuntimeAgent {
             if !runtime_reuse_is_safe() {
                 warn!("AI worker cleanup requires attention; no more jobs will be leased");
                 return Ok(true);
+            }
+            // Between jobs: a machine nothing renews any more leases no more.
+            if client.machine_lifetime_ended() {
+                info!("this machine's lifetime ended; leasing no more jobs");
+                return Err(MachineLifetimeEnded.into());
             }
             let lease_started = std::time::Instant::now();
             let jobs = tokio::select! {

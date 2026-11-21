@@ -1,4 +1,10 @@
-import { spawn, spawnSync, type SpawnOptions, type StdioOptions } from "node:child_process";
+import {
+  spawn,
+  spawnSync,
+  type ChildProcess,
+  type SpawnOptions,
+  type StdioOptions,
+} from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import kleur from "kleur";
@@ -16,7 +22,11 @@ import {
 import { formatAuthRejectedError } from "./errors.js";
 import { findProjectManifest, type ProjectManifest } from "./project-manifest.js";
 import { resolveSpaceId } from "./space-id.js";
-import { fetchWithControllerAuth, refuseDotSegments } from "./controller-fetch.js";
+import {
+  fetchWithControllerAuth,
+  freshenStoredAccessToken,
+  refuseDotSegments,
+} from "./controller-fetch.js";
 
 export interface RuntimeStartOptions {
   project?: string;
@@ -168,6 +178,102 @@ function stopDockerContainer(containerId: string): void {
   } catch {
     // ignore
   }
+}
+
+/** The exit status of a container that stopped, or null while it runs or cannot be read. */
+function dockerContainerExitCode(containerId: string): number | null {
+  const id = containerId.trim();
+  if (!id) {
+    return null;
+  }
+  try {
+    const result = spawnSync(
+      "docker",
+      ["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", id],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (result.status !== 0) {
+      return null;
+    }
+    const [running, code] = String(result.stdout ?? "").trim().split(/\s+/);
+    const exitCode = Number(code);
+    return running === "false" && Number.isInteger(exitCode) ? exitCode : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The exit status runtime-agent uses when the controller would not renew its machine token
+ * because the machine's lifetime ended (`MACHINE_LIFETIME_ENDED_EXIT_CODE` in
+ * packages/runtime-agent/src/agent.rs).
+ */
+export const RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE = 4;
+
+/** How long after one restart for an ended lifetime `runtime start` refuses another. */
+export const RUNTIME_LIFETIME_RESTART_SPACING_MS = 10 * 60 * 1000;
+
+/** A saved session that ends within this long is refreshed before a runtime token is minted from it. */
+const RUNTIME_MINT_SESSION_MARGIN_MS = 15 * 60 * 1000;
+
+/**
+ * The signals that stop a foreground `runtime start` while it mints a new token: `runtime stop`'s
+ * SIGINT and SIGTERM, a terminal's interrupt, and its hangup (which Windows cannot raise again).
+ */
+const RUNTIME_STOP_SIGNALS: NodeJS.Signals[] =
+  process.platform === "win32" ? ["SIGINT", "SIGTERM"] : ["SIGINT", "SIGTERM", "SIGHUP"];
+
+/** How long after the agent starts again a stop that reaches `runtime start` is handed on to it. */
+const RUNTIME_LATE_STOP_WINDOW_MS = 1000;
+
+export type RuntimeLifetimeRestartDecision =
+  | { restart: true }
+  | { restart: false; reason: "other_exit" | "runtime_token_given" | "restarted_recently" };
+
+/**
+ * Whether `runtime start` mints a new runtime token and starts the agent again after it exited:
+ * only for the exit that says its machine's lifetime ended, only when this command minted the
+ * agent's token from a person's sign-in (a runtime token it was given is the person's to renew),
+ * and not again within the spacing. A new start begins a new lifetime, so a second end that soon
+ * means something else is wrong.
+ */
+export function decideRuntimeLifetimeRestart(params: {
+  exitCode: number | null;
+  runtimeTokenMinted: boolean;
+  lastRestartAtMs: number | null;
+  nowMs: number;
+}): RuntimeLifetimeRestartDecision {
+  if (params.exitCode !== RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE) {
+    return { restart: false, reason: "other_exit" };
+  }
+  if (!params.runtimeTokenMinted) {
+    return { restart: false, reason: "runtime_token_given" };
+  }
+  if (
+    params.lastRestartAtMs !== null &&
+    params.nowMs - params.lastRestartAtMs < RUNTIME_LIFETIME_RESTART_SPACING_MS
+  ) {
+    return { restart: false, reason: "restarted_recently" };
+  }
+  return { restart: true };
+}
+
+/**
+ * The agent's environment with a newly minted runtime token wherever the one whose lifetime
+ * ended was: as its runtime token and, unless one was given separately, as its origin's tokens.
+ */
+export function withRemintedRuntimeToken(
+  env: NodeJS.ProcessEnv,
+  previousToken: string,
+  nextToken: string,
+): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env, RUNTIME_ACCESS_TOKEN: nextToken };
+  for (const key of ["ORIGIN_ACCESS_TOKEN", "ORIGIN_INTERNAL_TOKEN"]) {
+    if (previousToken && next[key] === previousToken) {
+      next[key] = nextToken;
+    }
+  }
+  return next;
 }
 
 function printStatus(label: string, value: string) {
@@ -605,7 +711,20 @@ export async function mintOriginAccessToken(params: {
   return { token, endpoint };
 }
 
-function isProcessAlive(pid: number): boolean {
+/**
+ * Whether a runtime record's pid names one process: a positive integer. A spawn that failed has no
+ * pid (earlier versions recorded -1), and `process.kill` reads 0 as this process group and -1 as
+ * every process this user may signal, so a record with any other pid is stale: it never counts as
+ * running and is never signalled.
+ */
+function isProcessId(pid: unknown): pid is number {
+  return typeof pid === "number" && Number.isInteger(pid) && pid > 0;
+}
+
+function isProcessAlive(pid: unknown): boolean {
+  if (!isProcessId(pid)) {
+    return false;
+  }
   try {
     process.kill(pid, 0);
     return true;
@@ -834,7 +953,16 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     }
   }
 
+  let runtimeTokenMinted = false;
   if (!runtimeAccessToken && controllerAccessToken) {
+    controllerAccessToken = await freshenStoredAccessToken({
+      url: env["CONTROLLER_BASE_URL"],
+      accessToken: controllerAccessToken,
+      tokenSource: controllerAccessTokenSource,
+      profile,
+      cwd,
+      marginMs: RUNTIME_MINT_SESSION_MARGIN_MS,
+    });
     const mintedIdentity = await mintPrivateRuntimeIdentity({
       controllerUrl: env["CONTROLLER_BASE_URL"],
       controllerAccessToken,
@@ -847,6 +975,7 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     });
     runtimeAccessToken = mintedIdentity.token;
     env["RUNTIME_ID"] = mintedIdentity.runtimeId;
+    runtimeTokenMinted = true;
   }
   if (runtimeAccessToken) {
     env["RUNTIME_ACCESS_TOKEN"] = runtimeAccessToken;
@@ -926,6 +1055,203 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     env["ORIGIN_INTERNAL_TOKEN"] = originToken;
   }
 
+  // The same person's sign-in mints this runtime a new token, under the same runtime id, or null
+  // when the runtime was stopped first.
+  const remintRuntimeToken = async (stopped: () => boolean): Promise<string | null> => {
+    const current = resolveControllerAccessTokenForCliWithSource(
+      options,
+      env,
+      supabaseAccessToken,
+      profile,
+      cwd,
+    );
+    if (!current.token) {
+      throw new Error("Login required. Run `instafy login`, then `instafy runtime start`.");
+    }
+    const controllerUrl = env["CONTROLLER_BASE_URL"] ?? "";
+    const accessToken = await freshenStoredAccessToken({
+      url: controllerUrl,
+      accessToken: current.token,
+      tokenSource: current.source,
+      profile,
+      cwd,
+      marginMs: RUNTIME_MINT_SESSION_MARGIN_MS,
+    });
+    if (stopped()) {
+      return null;
+    }
+    const minted = await mintPrivateRuntimeIdentity({
+      controllerUrl,
+      controllerAccessToken: accessToken,
+      projectId,
+      runtimeId,
+      leaseId: env["RUNTIME_LEASE_ID"],
+      tokenSource: current.source,
+      profile,
+      cwd,
+    });
+    if (minted.runtimeId !== runtimeId) {
+      throw new Error(
+        "Controller runtime token identity does not match the runtime it starts again.",
+      );
+    }
+    return minted.token;
+  };
+  /**
+   * Hands on a stop that reaches this process just after the agent started again: true once it went
+   * to the new agent, or to the Docker runner's own handler, and false when this process should end
+   * by it instead.
+   */
+  type LateStop = (signal: NodeJS.Signals) => boolean;
+  /**
+   * Starts the agent again and records it, returning where a late stop goes, or throws (or rejects)
+   * with why it did not start, recording nothing.
+   */
+  type Relaunch = () => LateStop | Promise<LateStop>;
+  let lastLifetimeRestartAtMs: number | null = null;
+  // Mints a new token, then starts the agent again.
+  const restartAfterEndedLifetime = async (nowMs: number, relaunch: Relaunch) => {
+    lastLifetimeRestartAtMs = nowMs;
+    console.log(
+      kleur.yellow("The runtime's machine lifetime ended: minting a new runtime token to start it again."),
+    );
+    // No agent runs while the token is minted, so the runtime's state names this process: `runtime
+    // stop` signals it, and `runtime status` and `runtime start` find the runtime running. It is a
+    // process runner's record, which every version of the CLI stops by signalling its pid.
+    const holding: RuntimeState = {
+      runner: "process",
+      pid: process.pid,
+      projectId,
+      workspace,
+      controllerUrl: env["CONTROLLER_BASE_URL"],
+      originId,
+      runtimeId: env["RUNTIME_ID"] ?? null,
+      displayName: env["RUNTIME_DISPLAY_NAME"],
+      startedAt: new Date().toISOString(),
+      detached: false,
+    };
+    const holds = () => {
+      const current = readState();
+      return current?.pid === holding.pid && current.startedAt === holding.startedAt;
+    };
+    let stopSignal: NodeJS.Signals | null = null;
+    let lateStop: LateStop | null = null;
+    // A signal, or `runtime stop` clearing the state after the agent it signalled exited.
+    const stopped = () => stopSignal !== null || !holds();
+    const stopListening = () => {
+      for (const signal of RUNTIME_STOP_SIGNALS) {
+        process.off(signal, onStopSignal);
+      }
+    };
+    // Until the agent starts again nothing runs to stop, so this process ends as a stop of its
+    // runner ends: a Docker runner's with its exit code for the SIGINT and SIGTERM it handles, and
+    // otherwise by the signal.
+    const onStopSignal = (signal: NodeJS.Signals) => {
+      if (lateStop?.(signal)) {
+        return;
+      }
+      stopSignal = signal;
+      stopListening();
+      if (holds()) {
+        clearState();
+      }
+      if (useDocker && signal !== "SIGHUP") {
+        process.exit();
+      }
+      process.kill(process.pid, signal);
+    };
+    try {
+      writeState(holding);
+      for (const signal of RUNTIME_STOP_SIGNALS) {
+        process.on(signal, onStopSignal);
+      }
+      const nextToken = await remintRuntimeToken(stopped);
+      if (nextToken === null || stopped()) {
+        console.log(
+          kleur.yellow("The runtime was stopped while its new token was minted, so it stays stopped."),
+        );
+        return;
+      }
+      Object.assign(env, withRemintedRuntimeToken(env, env["RUNTIME_ACCESS_TOKEN"] ?? "", nextToken));
+      // The agent's record replaces this process's as it starts.
+      lateStop = await relaunch();
+    } catch (error) {
+      if (stopSignal !== null) {
+        return;
+      }
+      console.error(
+        kleur.red(
+          `The runtime did not start again: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+      process.exitCode = RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE;
+    } finally {
+      if (holds()) {
+        clearState();
+      }
+      if (lateStop) {
+        // A `runtime stop` that read this process's record just before the agent's replaced it
+        // signals this process, a little later on a busy machine, so for a while such a stop is
+        // handed on. libuv hands a signal to its listener only when the loop next polls, and drops
+        // it if the listener is gone by then, so the listener goes only after the loop has polled
+        // again (a second setImmediate turn runs after that poll; the first may run before it).
+        setTimeout(
+          () => setImmediate(() => setImmediate(stopListening)),
+          RUNTIME_LATE_STOP_WINDOW_MS,
+        ).unref();
+      } else {
+        stopListening();
+      }
+    }
+  };
+  /**
+   * After the agent exits. `owned` says whether the runtime's record still named it then, read
+   * before anything here changed the record: if not, a `runtime stop` cleared it or another start
+   * replaced it, so they took over, and nothing here starts the agent again or touches the record.
+   * Otherwise, when its machine's lifetime ended, a new token is minted and it starts again, its
+   * record replaced rather than cleared first; after any other exit, its record is cleared.
+   */
+  const afterAgentExit = async (exitCode: number | null, owned: boolean, relaunch: Relaunch) => {
+    if (!owned) {
+      if (exitCode === RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE) {
+        console.log(
+          kleur.yellow(
+            "The runtime's machine lifetime ended as it was stopped or started elsewhere, so this command does not start it again.",
+          ),
+        );
+      }
+      return;
+    }
+    const nowMs = Date.now();
+    const decision = decideRuntimeLifetimeRestart({
+      exitCode,
+      runtimeTokenMinted,
+      lastRestartAtMs: lastLifetimeRestartAtMs,
+      nowMs,
+    });
+    if (decision.restart === false) {
+      clearState();
+      if (decision.reason === "runtime_token_given") {
+        console.error(
+          kleur.yellow(
+            "The runtime's machine lifetime ended. Mint a new runtime token (`instafy runtime token`) and start it again.",
+          ),
+        );
+      } else if (decision.reason === "restarted_recently") {
+        console.error(
+          kleur.yellow(
+            "The runtime's machine lifetime ended again soon after it started again, so it stays stopped. Start it again with `instafy runtime start`.",
+          ),
+        );
+      }
+      if (decision.reason !== "other_exit") {
+        process.exitCode = RUNTIME_AGENT_MACHINE_LIFETIME_ENDED_EXIT_CODE;
+      }
+      return;
+    }
+    await restartAfterEndedLifetime(nowMs, relaunch);
+  };
+
   if (!useDocker) {
     if (!env["ORIGIN_ENDPOINT"]) {
       const ratholeResolved = await resolveRatholeBinaryForCli({
@@ -967,7 +1293,6 @@ export async function runtimeStart(options: RuntimeStartOptions) {
       stdio = ["ignore", out, out];
     }
 
-    const childEnvironment = buildRuntimeChildEnvironment(env);
     // Only a local process can read a file under this HOME; a container cannot.
     const sessionFile = runtimeAgentSessionFile({
       env,
@@ -976,39 +1301,72 @@ export async function runtimeStart(options: RuntimeStartOptions) {
       tokenSource: controllerAccessTokenSource,
       runtimeTokenGiven: Boolean(givenRuntimeToken),
     });
-    if (sessionFile) {
-      childEnvironment["INSTAFY_CLI_CONFIG"] = sessionFile;
-    }
-    const spawnOptions: SpawnOptions = { env: childEnvironment, stdio, detached };
-    const child = spawn(bin, spawnOptions);
+    // Starts the agent and records it, or rejects with why it did not start, recording nothing.
+    const launch = (): Promise<ChildProcess> =>
+      new Promise((resolve, reject) => {
+        const childEnvironment = buildRuntimeChildEnvironment(env);
+        if (sessionFile) {
+          childEnvironment["INSTAFY_CLI_CONFIG"] = sessionFile;
+        }
+        const spawnOptions: SpawnOptions = { env: childEnvironment, stdio, detached };
+        const child = spawn(bin, spawnOptions);
+        // A spawn that failed (its binary was removed, say) has no pid and reports 'error', which
+        // 'exit' may or may not follow. So it gets no record, and nothing listens for its 'exit'.
+        const pid = child.pid;
+        child.on("error", (error) => {
+          if (isProcessId(pid)) {
+            // The running agent's, such as a signal it could not be sent.
+            console.error(kleur.yellow(`runtime-agent: ${error.message}`));
+            return;
+          }
+          reject(error);
+        });
+        if (!isProcessId(pid)) {
+          return;
+        }
 
-    if (detached) {
-      child.unref();
-    }
+        if (detached) {
+          child.unref();
+        }
 
-    const startedAt = new Date().toISOString();
-    writeState({
-      runner: "process",
-      pid: child.pid ?? -1,
-      projectId,
-      workspace,
-      controllerUrl: env["CONTROLLER_BASE_URL"],
-      originId,
-      runtimeId: env["RUNTIME_ID"] ?? null,
-      displayName: env["RUNTIME_DISPLAY_NAME"],
-      startedAt,
-      logFile,
-      detached,
-    });
+        const record: RuntimeState = {
+          runner: "process",
+          pid,
+          projectId,
+          workspace,
+          controllerUrl: env["CONTROLLER_BASE_URL"],
+          originId,
+          runtimeId: env["RUNTIME_ID"] ?? null,
+          displayName: env["RUNTIME_DISPLAY_NAME"],
+          startedAt: new Date().toISOString(),
+          logFile,
+          detached,
+        };
+        writeState(record);
 
-    child.on("exit", (code, signal) => {
-      const msg = code !== null ? `code ${code}` : `signal ${signal}`;
-      console.log(kleur.yellow(`runtime-agent exited (${msg})`));
-      const current = readState();
-      if (current && current.pid === child.pid) {
-        clearState();
-      }
-    });
+        child.on("exit", (code, signal) => {
+          const msg = code !== null ? `code ${code}` : `signal ${signal}`;
+          console.log(kleur.yellow(`runtime-agent exited (${msg})`));
+          const current = readState();
+          const owned = current?.pid === record.pid && current.startedAt === record.startedAt;
+          if (detached) {
+            if (owned) {
+              clearState();
+            }
+            return;
+          }
+          void afterAgentExit(code, owned, async () => {
+            const next = await launch();
+            // A stop sent to this process as the new agent started is for that agent.
+            return (lateSignal) => {
+              next.kill(lateSignal);
+              return true;
+            };
+          });
+        });
+        resolve(child);
+      });
+    await launch();
     return;
   }
 
@@ -1017,66 +1375,71 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   const hostPort = String(options.bindPort ?? env["ORIGIN_BIND_PORT"] ?? 54332);
   const hostBindHost = options.bindHost ?? "127.0.0.1";
 
-  const dockerEnv = buildRuntimeChildEnvironment(env);
-  dockerEnv["WORKSPACE_DIR"] = "/workspace";
-  dockerEnv["CODEX_HOME"] = "/workspace/.codex";
-  dockerEnv["TMPDIR"] = "/tmp";
-  dockerEnv["TMP"] = "/tmp";
-  dockerEnv["TEMP"] = "/tmp";
-  dockerEnv["ORIGIN_BIND_HOST"] = "0.0.0.0";
-  dockerEnv["CONTROLLER_BASE_URL"] = normalizeControllerUrlForDocker(env["CONTROLLER_BASE_URL"] ?? "");
+  const runContainer = (): string => {
+    const dockerEnv = buildRuntimeChildEnvironment(env);
+    dockerEnv["WORKSPACE_DIR"] = "/workspace";
+    dockerEnv["CODEX_HOME"] = "/workspace/.codex";
+    dockerEnv["TMPDIR"] = "/tmp";
+    dockerEnv["TMP"] = "/tmp";
+    dockerEnv["TEMP"] = "/tmp";
+    dockerEnv["ORIGIN_BIND_HOST"] = "0.0.0.0";
+    dockerEnv["CONTROLLER_BASE_URL"] = normalizeControllerUrlForDocker(env["CONTROLLER_BASE_URL"] ?? "");
 
-  const envArgs: string[] = [];
-  for (const [key, value] of Object.entries(dockerEnv)) {
-    if (typeof value !== "string" || value.length === 0) continue;
-    envArgs.push("-e", `${key}=${value}`);
-  }
+    const envArgs: string[] = [];
+    for (const [key, value] of Object.entries(dockerEnv)) {
+      if (typeof value !== "string" || value.length === 0) continue;
+      envArgs.push("-e", `${key}=${value}`);
+    }
 
-  const runArgs = buildRuntimeDockerRunArgs({
-    containerName,
-    hostBindHost,
-    hostPort,
-    workspace,
-    envArgs,
-    image,
-  });
+    const runArgs = buildRuntimeDockerRunArgs({
+      containerName,
+      hostBindHost,
+      hostPort,
+      workspace,
+      envArgs,
+      image,
+    });
+
+    const started = spawnSync("docker", runArgs, { encoding: "utf8" });
+    if (started.status !== 0) {
+      const stderr = String(started.stderr ?? "").trim();
+      const normalized = (stderr || "").toLowerCase();
+      const hints: string[] = [];
+      if (image.startsWith("ghcr.io/") && (normalized.includes("not found") || normalized.includes("denied") || normalized.includes("unauthorized") || normalized.includes("manifest unknown"))) {
+        hints.push("If this is a GHCR image, ensure it's published and you are authenticated (`docker login ghcr.io`).");
+      }
+      hints.push("Override the image with `INSTAFY_RUNTIME_AGENT_IMAGE=... instafy runtime start`.");
+      const suffix = hints.length > 0 ? `\n\nNext:\n- ${hints.join("\n- ")}` : "";
+      throw new Error(`docker run failed: ${stderr || "unknown error"}${suffix}`);
+    }
+    const startedId = String(started.stdout ?? "").trim();
+    if (!startedId) {
+      throw new Error("docker run did not return a container id");
+    }
+
+    const startedAt = new Date().toISOString();
+    writeState({
+      runner: "docker",
+      pid: -1,
+      projectId,
+      workspace,
+      controllerUrl: env["CONTROLLER_BASE_URL"],
+      originId,
+      runtimeId: env["RUNTIME_ID"] ?? null,
+      displayName: env["RUNTIME_DISPLAY_NAME"],
+      startedAt,
+      detached: Boolean(options.detach),
+      containerId: startedId,
+      containerName,
+    });
+    return startedId;
+  };
 
   printStatus("Starting runtime-agent (docker):", image);
   printStatus("Space:", projectId);
   printStatus("Workspace:", workspace);
   printStatus("Origin:", originId);
-  const started = spawnSync("docker", runArgs, { encoding: "utf8" });
-  if (started.status !== 0) {
-    const stderr = String(started.stderr ?? "").trim();
-    const normalized = (stderr || "").toLowerCase();
-    const hints: string[] = [];
-    if (image.startsWith("ghcr.io/") && (normalized.includes("not found") || normalized.includes("denied") || normalized.includes("unauthorized") || normalized.includes("manifest unknown"))) {
-      hints.push("If this is a GHCR image, ensure it's published and you are authenticated (`docker login ghcr.io`).");
-    }
-    hints.push("Override the image with `INSTAFY_RUNTIME_AGENT_IMAGE=... instafy runtime start`.");
-    const suffix = hints.length > 0 ? `\n\nNext:\n- ${hints.join("\n- ")}` : "";
-    throw new Error(`docker run failed: ${stderr || "unknown error"}${suffix}`);
-  }
-  const containerId = String(started.stdout ?? "").trim();
-  if (!containerId) {
-    throw new Error("docker run did not return a container id");
-  }
-
-  const startedAt = new Date().toISOString();
-  writeState({
-    runner: "docker",
-    pid: -1,
-    projectId,
-    workspace,
-    controllerUrl: env["CONTROLLER_BASE_URL"],
-    originId,
-    runtimeId: env["RUNTIME_ID"] ?? null,
-    displayName: env["RUNTIME_DISPLAY_NAME"],
-    startedAt,
-    detached: Boolean(options.detach),
-    containerId,
-    containerName,
-  });
+  let containerId = runContainer();
 
   if (options.detach) {
     printStatus("Container:", containerId);
@@ -1084,25 +1447,45 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     return;
   }
 
-  const logs = spawn("docker", ["logs", "-f", containerId], { stdio: "inherit" });
-  const handleExit = async () => {
-    stopDockerContainer(containerId);
+  let stopping = false;
+  const removeContainer = (id: string) => {
+    stopDockerContainer(id);
     const current = readState();
-    if (current?.containerId === containerId) {
+    if (current?.containerId === id) {
       clearState();
     }
   };
+  const follow = (id: string) => {
+    const logs = spawn("docker", ["logs", "-f", id], { stdio: "inherit" });
+    logs.on("exit", () => {
+      // Read how it exited before the container, and its exit status, are removed.
+      const exitCode = stopping ? null : dockerContainerExitCode(id);
+      stopDockerContainer(id);
+      // Read after those docker calls, which take a while, and before anything here changes it.
+      const owned = readState()?.containerId === id;
+      if (stopping) {
+        if (owned) {
+          clearState();
+        }
+        return;
+      }
+      void afterAgentExit(exitCode, owned, () => {
+        containerId = runContainer();
+        follow(containerId);
+        // handleSignal removes the new container on SIGINT or SIGTERM; a hangup ends this command,
+        // as it did before the agent started again.
+        return (lateSignal) => lateSignal !== "SIGHUP";
+      });
+    });
+  };
+  const handleSignal = () => {
+    stopping = true;
+    removeContainer(containerId);
+  };
 
-  process.once("SIGINT", () => {
-    void handleExit();
-  });
-  process.once("SIGTERM", () => {
-    void handleExit();
-  });
-
-  logs.on("exit", () => {
-    void handleExit();
-  });
+  process.once("SIGINT", handleSignal);
+  process.once("SIGTERM", handleSignal);
+  follow(containerId);
 }
 
 function formatStatus(state: RuntimeState, running: boolean) {
@@ -1294,7 +1677,9 @@ export async function runtimeStop(options?: { json?: boolean }) {
     return;
   }
 
-  if (!isProcessAlive(state.pid)) {
+  // A record whose pid names no single process is stale: it is cleared, and nothing is signalled.
+  const pid = state.pid;
+  if (!isProcessId(pid) || !isProcessAlive(pid)) {
     clearState();
     if (options?.json) {
       console.log(JSON.stringify({ stopped: false, reason: "not_running" }));
@@ -1305,7 +1690,7 @@ export async function runtimeStop(options?: { json?: boolean }) {
   }
 
   try {
-    process.kill(state.pid, "SIGINT");
+    process.kill(pid, "SIGINT");
   } catch (error) {
     if (options?.json) {
       console.log(JSON.stringify({ stopped: false, error: String(error) }));
@@ -1314,23 +1699,23 @@ export async function runtimeStop(options?: { json?: boolean }) {
     throw error;
   }
 
-  const exited = await waitForExit(state.pid, 5000);
+  const exited = await waitForExit(pid, 5000);
   if (!exited) {
     try {
-      process.kill(state.pid, "SIGTERM");
+      process.kill(pid, "SIGTERM");
     } catch {
       // ignore
+    }
   }
-}
 
-  const alive = isProcessAlive(state.pid);
+  const alive = isProcessAlive(pid);
   if (!alive) {
     clearState();
   }
 
   await sendOfflineBeat(state);
 
-  const result = { stopped: !alive, pid: state.pid };
+  const result = { stopped: !alive, pid };
   if (options?.json) {
     console.log(JSON.stringify(result));
   } else {

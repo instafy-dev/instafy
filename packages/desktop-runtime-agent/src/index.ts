@@ -866,6 +866,36 @@ export async function startDesktopRuntime(
     process.env.CONTROLLER_ACCESS_TOKEN ??
     options.env?.CONTROLLER_ACCESS_TOKEN;
 
+  const explicitRatholeBin =
+    options.origin?.ratholeBin ?? options.env?.RATHOLE_BIN ?? process.env.RATHOLE_BIN;
+  let ratholeBin =
+    explicitRatholeBin && explicitRatholeBin.trim().length > 0
+      ? path.resolve(explicitRatholeBin)
+      : null;
+  if (ratholeBin && !fs.existsSync(ratholeBin)) {
+    throw new Error(
+      `rathole binary not found at ${ratholeBin}. Set RATHOLE_BIN or install rathole on PATH.`,
+    );
+  }
+  if (!ratholeBin) {
+    const fromPath = findRatholeOnPath();
+    if (fromPath) {
+      ratholeBin = fromPath;
+    }
+  }
+  if (!ratholeBin) {
+    ratholeBin = await ensureRatholeBinary({
+      version: options.rathole?.version,
+      cacheDir: options.rathole?.cacheDir,
+      logger:
+        options.rathole?.logger ?? ((message) => console.log(`[instafy-desktop] ${message}`)),
+    });
+  }
+
+  // The mint is the last await before the spawn, after the slow preparation
+  // above (a first start downloads rathole): a person's mint ends with their
+  // session, so a token minted earlier could expire before the agent first
+  // registers.
   const runtimeTokenResult = await resolveRuntimeAccessToken({
     explicitToken: options.origin?.internalToken ?? process.env.ORIGIN_INTERNAL_TOKEN,
     tokenProvider: options.origin?.internalTokenProvider,
@@ -912,32 +942,6 @@ export async function startDesktopRuntime(
     projectWorkspaceHasContent,
     gitRemoteUrl,
   });
-
-  const explicitRatholeBin =
-    options.origin?.ratholeBin ?? options.env?.RATHOLE_BIN ?? process.env.RATHOLE_BIN;
-  let ratholeBin =
-    explicitRatholeBin && explicitRatholeBin.trim().length > 0
-      ? path.resolve(explicitRatholeBin)
-      : null;
-  if (ratholeBin && !fs.existsSync(ratholeBin)) {
-    throw new Error(
-      `rathole binary not found at ${ratholeBin}. Set RATHOLE_BIN or install rathole on PATH.`,
-    );
-  }
-  if (!ratholeBin) {
-    const fromPath = findRatholeOnPath();
-    if (fromPath) {
-      ratholeBin = fromPath;
-    }
-  }
-  if (!ratholeBin) {
-    ratholeBin = await ensureRatholeBinary({
-      version: options.rathole?.version,
-      cacheDir: options.rathole?.cacheDir,
-      logger:
-        options.rathole?.logger ?? ((message) => console.log(`[instafy-desktop] ${message}`)),
-    });
-  }
 
   const baseEnv: Record<string, string> = {
     CONTROLLER_BASE_URL: controllerUrl,

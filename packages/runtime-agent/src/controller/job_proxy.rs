@@ -149,6 +149,7 @@ pub(crate) mod tests {
             agent_tokens: AgentTokenVerifier::new(base_url.join("/jwks").unwrap()),
             resources: Mutex::new(ResourceSampler::new(std::env::temp_dir())),
             browser_profile_session: tokio::sync::Mutex::new(Default::default()),
+            machine_lifetime_ended: std::sync::atomic::AtomicBool::new(false),
         };
         let registration = Registration {
             runtime_id: Uuid::new_v4(),

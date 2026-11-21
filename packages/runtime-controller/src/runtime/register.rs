@@ -16,7 +16,8 @@ use crate::auth::{
 };
 use crate::projects::{ensure_project_not_deleted, space_deleted};
 use crate::tokens::{
-    decode_scoped_token, mint_scoped_token_with_runtime_generation, ScopedTokenRequest,
+    decode_scoped_token_in_full, mint_runtime_machine_token,
+    mint_scoped_token_with_runtime_generation, ScopedTokenRequest,
 };
 use crate::{coerce_idle_ttl, forbidden, internal_error, load_project_record, unauthorized};
 use crate::{ApiError, AppState};
@@ -36,7 +37,7 @@ use super::utils::normalize_display_name_owned;
 #[cfg(test)]
 use crate::runtime::RUNTIME_TOKEN_DEFAULT_SCOPES;
 
-pub(super) const RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS: i64 = 3600;
+pub(super) use crate::config::RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS;
 
 /// The capability that says whether a runtime's own Claude Code can run
 /// local-engine turns (docs/Local-Engine-Turns.md 2.10, 3.2). Only
@@ -785,13 +786,13 @@ pub(crate) async fn runtime_register(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<RuntimeRegisterPayload>,
 ) -> Result<Json<RuntimeRegisterResponse>, (StatusCode, Json<ApiError>)> {
-    let scoped_claims = match bearer_token(&headers) {
-        Some(token) => match decode_scoped_token(&state.config, &token, "runtime token") {
-            Ok(claims) => {
-                if runtime_token_has_required_scopes(&claims) {
-                    Some(claims)
+    let (scoped_claims, presented_machine_expires_at) = match bearer_token(&headers) {
+        Some(token) => match decode_scoped_token_in_full(&state.config, &token, "runtime token") {
+            Ok(decoded) => {
+                if runtime_token_has_required_scopes(&decoded.claims) {
+                    (Some(decoded.claims), decoded.machine_expires_at)
                 } else {
-                    warn!(scopes = ?claims.scopes, "runtime token missing required scopes");
+                    warn!(scopes = ?decoded.claims.scopes, "runtime token missing required scopes");
                     return Err(unauthorized(
                         "runtime token is missing required registration scopes",
                     ));
@@ -803,10 +804,10 @@ pub(crate) async fn runtime_register(
                     message = %error.0.message,
                     "failed to decode scoped runtime token"
                 );
-                None
+                (None, None)
             }
         },
-        None => None,
+        None => (None, None),
     };
     let personal_browser_owner = attested_personal_browser_owner(scoped_claims.as_ref())?;
     let auth_context = if scoped_claims.is_some() {
@@ -986,16 +987,39 @@ pub(crate) async fn runtime_register(
         state.config.service_runtime_user_id,
     )?;
 
+    // The person whose machine this is, when it is a person's private
+    // machine: its credentials end at its lifetime (`super::revocation`).
+    let machine_person = if super::access::runtime_is_private_self_hosted(
+        &state,
+        &runtime.provider,
+        &runtime.capabilities,
+    ) {
+        super::revocation::self_hosted_person_owner(&state, self_hosted_owner)
+    } else {
+        None
+    };
+    // A first registration of a machine a person minted with a lifetime:
+    // no generation is stored yet, so the pending mint its token names
+    // stands in for one (`super::revocation`).
+    let mut first_machine_registration = None;
     let runtime_generation = if super::access::runtime_is_private_self_hosted(
         &state,
         &runtime.provider,
         &runtime.capabilities,
     ) {
         if let Some(claims) = scoped_claims.as_ref() {
-            Some(
-                ensure_runtime_generation_matches(&runtime.capabilities, claims)?
-                    .unwrap_or(effective_runtime_generation(claims)?),
-            )
+            match ensure_runtime_generation_matches(&runtime.capabilities, claims)? {
+                Some(current) => Some(current),
+                None => {
+                    let generation = effective_runtime_generation(claims)?;
+                    // A token minted before lifetimes carries no machine
+                    // expiry and names no pending mint.
+                    if let (Some(owner), Some(_)) = (machine_person, presented_machine_expires_at) {
+                        first_machine_registration = Some((owner, generation));
+                    }
+                    Some(generation)
+                }
+            }
         } else {
             Some(Uuid::new_v4())
         }
@@ -1006,17 +1030,41 @@ pub(crate) async fn runtime_register(
     // write the space: removed from it and its team, or made a viewer. Checked
     // after the deleted-space refusal and the generation, so a deleted space
     // still answers space_deleted and a rotated token its generation.
-    if super::access::runtime_is_private_self_hosted(
-        &state,
-        &runtime.provider,
-        &runtime.capabilities,
-    ) {
-        if let Some(owner) = super::revocation::self_hosted_person_owner(&state, self_hosted_owner)
-        {
-            super::revocation::ensure_self_hosted_owner_may_write(&transaction, &project, owner)
-                .await?;
-        }
+    if let Some(owner) = machine_person {
+        super::revocation::ensure_self_hosted_owner_may_write(&transaction, &project, owner)
+            .await?;
     }
+    // A membership change deletes the pending mint where its person lost
+    // write access, so a mint from before a removal stays ended once they
+    // are back. Checked after their write access, so a person who still
+    // cannot write hears that instead.
+    if let Some((owner, generation)) = first_machine_registration {
+        super::revocation::consume_pending_machine_mint(
+            &transaction,
+            runtime.id,
+            project_id,
+            owner,
+            generation,
+        )
+        .await?;
+    }
+    // A person's machine renews only while a renewed token cannot outlive
+    // its machine expiry. Checked last of the refusals, so a machine told to
+    // mint again is one nothing else refuses.
+    let renewed_runtime_token_ttl_seconds = state
+        .config
+        .agent_token_ttl_seconds
+        .max(RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS);
+    let machine_expires_at = machine_person
+        .map(|_| {
+            super::revocation::renewable_machine_expiry(
+                &state,
+                presented_machine_expires_at,
+                renewed_runtime_token_ttl_seconds,
+                Utc::now(),
+            )
+        })
+        .transpose()?;
 
     if let Some(expected) = runtime.active_lease_id {
         let provided = lease_details.as_ref().map(|lease| lease.id).or(lease_id);
@@ -1233,41 +1281,47 @@ pub(crate) async fn runtime_register(
         None,
     );
 
-    let runtime_token = mint_scoped_token_with_runtime_generation(
-        &state.config,
-        ScopedTokenRequest {
-            audience: updated_runtime.id.to_string(),
-            // Preserve the immutable authenticated owner on every renewed
-            // self-hosted token. Otherwise an ordinary desktop runtime would
-            // silently become service-owned after its first registration.
-            subject: renewed_runtime_token_subject(
-                self_hosted_owner,
-                state.config.service_runtime_user_id,
-            ),
-            project_id: project_id.to_string(),
-            origin_id: None,
-            runtime_id: Some(updated_runtime.id.to_string()),
-            protocol: None,
-            scopes: renewed_runtime_token_scopes(
-                scoped_claims.as_ref(),
-                personal_browser_owner.is_some(),
-                claude_code_owner.is_some(),
-            ),
-            lease_id: lease_details.as_ref().map(|lease| lease.id.to_string()),
-            run_id: None,
-            prefer_runtime: None,
-            // The runtime-agent keeps this token for its next agent-token
-            // renewal. It must outlive the agent token instead of inheriting
-            // the short origin-only default (typically five minutes).
-            ttl_seconds: Some(
-                state
-                    .config
-                    .agent_token_ttl_seconds
-                    .max(RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS),
-            ),
-        },
-        runtime_generation,
-    )
+    let renewed_runtime_token_request = ScopedTokenRequest {
+        audience: updated_runtime.id.to_string(),
+        // Preserve the immutable authenticated owner on every renewed
+        // self-hosted token. Otherwise an ordinary desktop runtime would
+        // silently become service-owned after its first registration.
+        subject: renewed_runtime_token_subject(
+            self_hosted_owner,
+            state.config.service_runtime_user_id,
+        ),
+        project_id: project_id.to_string(),
+        origin_id: None,
+        runtime_id: Some(updated_runtime.id.to_string()),
+        protocol: None,
+        scopes: renewed_runtime_token_scopes(
+            scoped_claims.as_ref(),
+            personal_browser_owner.is_some(),
+            claude_code_owner.is_some(),
+        ),
+        lease_id: lease_details.as_ref().map(|lease| lease.id.to_string()),
+        run_id: None,
+        prefer_runtime: None,
+        // The runtime-agent keeps this token for its next agent-token
+        // renewal. It must outlive the agent token instead of inheriting
+        // the short origin-only default (typically five minutes).
+        ttl_seconds: Some(renewed_runtime_token_ttl_seconds),
+    };
+    // A person's machine keeps its machine expiry, so its lifetime counts
+    // from the mint a person made.
+    let runtime_token = match machine_expires_at {
+        Some(machine_expires_at) => mint_runtime_machine_token(
+            &state.config,
+            renewed_runtime_token_request,
+            runtime_generation,
+            machine_expires_at,
+        ),
+        None => mint_scoped_token_with_runtime_generation(
+            &state.config,
+            renewed_runtime_token_request,
+            runtime_generation,
+        ),
+    }
     .ok();
 
     let response = RuntimeRegisterResponse {

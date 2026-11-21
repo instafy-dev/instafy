@@ -80,7 +80,9 @@ import {
   canResumeDesktopRuntimeAfterFailedQuit,
   confirmDesktopRuntimeReplacement,
   createDesktopQuitWaitControl,
+  decideDesktopRuntimeLifetimeRestart,
   desktopRuntimeExitedForDeletedSpace,
+  desktopRuntimeExitedForEndedLifetime,
   readDesktopRuntimeActiveJobCount,
   resolveRefreshedDesktopRuntimeAccessToken,
   resolveDesktopRuntimeControllerCredentialAction,
@@ -921,6 +923,9 @@ const deletedDesktopRuntimeSpaces = new Set<string>();
 // The space of the last runtime that stopped because its space was deleted,
 // until another runtime starts.
 let desktopRuntimeStoppedForDeletedSpace: string | null = null;
+// When Desktop last started each space's runtime again because its machine
+// lifetime ended, so another end soon after waits for the person.
+const desktopRuntimeLifetimeRestarts = new Map<string, number>();
 let desktopRuntimeMutationTail: Promise<void> = Promise.resolve();
 let personalBrowserMutationTail: Promise<void> = Promise.resolve();
 let desktopVoiceHostSupervisor: ReturnType<typeof createDesktopVoiceHostSupervisor> | null = null;
@@ -1765,6 +1770,7 @@ function registerDesktopRuntime(
           });
         }
         const spaceDeleted = desktopRuntimeExitedForDeletedSpace(exit);
+        const lifetimeEnded = desktopRuntimeExitedForEndedLifetime(exit);
         try {
           // Root exit is not process-tree exit. Sweep a stubborn descendant
           // before clearing the only record that retains the process-group ID.
@@ -1772,7 +1778,10 @@ function registerDesktopRuntime(
           // controller, so only its process tree is left to prove gone.
           await (spaceDeleted
             ? stopDesktopRuntime(handle)
-            : stopAndDispositionDesktopRuntime(record, "desktop_runtime_process_exit"));
+            : stopAndDispositionDesktopRuntime(
+                record,
+                lifetimeEnded ? "desktop_runtime_lifetime_ended" : "desktop_runtime_process_exit",
+              ));
         } catch (error) {
           desktopLog("error", "[instafy-desktop] failed to prove exited runtime tree is gone", {
             message: error instanceof Error ? error.message : String(error),
@@ -1795,6 +1804,8 @@ function registerDesktopRuntime(
         }
         if (spaceDeleted) {
           noteDesktopRuntimeSpaceDeleted(record);
+        } else if (lifetimeEnded) {
+          await restartDesktopRuntimeAfterEndedLifetime(record);
         }
       }),
   )
@@ -1827,6 +1838,102 @@ function noteDesktopRuntimeSpaceDeleted(record: DesktopRuntimeRecord): void {
     new Notification({
       title: "This space was deleted",
       body: "Instafy stopped the local runtime that was working in it.",
+      silent: true,
+    }).show();
+  }
+}
+
+/**
+ * The controller would not renew the runtime's machine token because the
+ * machine's lifetime ended, so the runtime stopped at an idle point. Only a
+ * new start mints a new lifetime: start it again from its own options, as a
+ * consent change's replacement does, when the Studio window still shows the
+ * session of the person the start was bound to. Otherwise tell them once.
+ * Runs inside the exit cleanup's runtime mutation.
+ */
+async function restartDesktopRuntimeAfterEndedLifetime(
+  record: DesktopRuntimeRecord,
+): Promise<void> {
+  const spaceKey = desktopRuntimeSpaceKey(record.projectId);
+  if (desktopRuntime || deletedDesktopRuntimeSpaces.has(spaceKey)) {
+    return;
+  }
+  const quitting = desktopQuitApproved || desktopQuitCoordination !== null;
+  const currentSession =
+    quitting || record.personalBrowser
+      ? null
+      : await readStudioWindowSession().catch((error: unknown) => {
+          desktopLog("warn", "[instafy-desktop] could not read the session for a runtime restart", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        });
+  const nowMs = Date.now();
+  const decision = decideDesktopRuntimeLifetimeRestart({
+    restartOptions: record.restartOptions,
+    launchGrantUserId: record.launchGrantUserId,
+    personalBrowser: Boolean(record.personalBrowser),
+    quitting,
+    lastRestartAtMs: desktopRuntimeLifetimeRestarts.get(spaceKey) ?? null,
+    nowMs,
+    currentSession,
+  });
+  if (!decision.restart) {
+    desktopLog("info", "[instafy-desktop] runtime stopped because its machine lifetime ended", {
+      projectId: record.projectId,
+      runtimeId: record.runtimeId,
+      reason: decision.reason,
+    });
+    if (decision.reason !== "quitting") {
+      noteDesktopRuntimeLifetimeEnded();
+    }
+    return;
+  }
+  desktopRuntimeLifetimeRestarts.set(spaceKey, nowMs);
+  try {
+    const launchGrants = await resolveDesktopRuntimeLaunchGrants({
+      projectId: record.projectId,
+      controllerOrigin: record.controllerUrl,
+      instafyUserId: record.launchGrantUserId,
+    });
+    const handle = await startDesktopRuntime({
+      ...decision.restartOptions,
+      launchGrants: desktopRuntimeLaunchGrantsForStart(launchGrants),
+    });
+    const runtimeId = handle.runtimeId;
+    if (!runtimeId) {
+      await stopDesktopRuntime(handle).catch(() => undefined);
+      throw new Error("Controller did not assign a desktop runtime id.");
+    }
+    registerDesktopRuntime(handle, {
+      projectId: record.projectId,
+      controllerUrl: record.controllerUrl,
+      controllerCredentialProvenance: record.controllerCredentialProvenance,
+      logFilePath: record.logFilePath,
+      runtimeId,
+      restartOptions: decision.restartOptions,
+      launchGrantUserId: record.launchGrantUserId,
+      launchGrants,
+    });
+    desktopLog("info", "[instafy-desktop] runtime started again after its machine lifetime ended", {
+      previousRuntimeId: record.runtimeId,
+      runtimeId,
+    });
+  } catch (error) {
+    desktopLog("warn", "[instafy-desktop] runtime did not start again after its machine lifetime ended", {
+      projectId: record.projectId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    noteDesktopRuntimeLifetimeEnded();
+  }
+}
+
+/** Desktop could not start a runtime whose lifetime ended: say how to go on. */
+function noteDesktopRuntimeLifetimeEnded(): void {
+  if (Notification.isSupported()) {
+    new Notification({
+      title: "Local runtime stopped",
+      body: "Its access on this computer ran out. Start it again from the space to keep working here.",
       silent: true,
     }).show();
   }
