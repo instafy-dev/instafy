@@ -19,9 +19,12 @@ This is **not GitHub**: we host the git servers and expose standard git remotes 
   storage. Replication is a later upgrade.
 
 Hosted runtimes are git-canonical only when the remote reaches them. The controller needs
-`GIT_REMOTE_BASE_URL`; it then adds `ORIGIN_GIT_REMOTE_URL=<base>/<project_id>.git` to each
-runtime's launch metadata. The provider's Compose file must forward `ORIGIN_GIT_REMOTE_URL` into
-the runtime container, as `docker/docker-compose.runtime.provider.yml` does. If either is
+`GIT_REMOTE_BASE_URL`; it then sets `ORIGIN_GIT_REMOTE_URL=<base>/<project_id>.git` in each
+runtime's launch metadata, in place of any value the launch or the provider row carried, and
+without it drops such a value (only the provider service's own environment, which its Compose
+file reads when the launch carries none, can then set one). The provider's Compose file must
+forward `ORIGIN_GIT_REMOTE_URL` into the runtime container, as
+`docker/docker-compose.runtime.provider.yml` does. If either is
 missing, the runtime's origin has no remote: files are written only to the node's disk, each save
 after a turn is recorded as failed ("git remote is not configured for this project"), and the
 files are lost when the node is replaced. See [Hosted Runtime Machines](Runtime-Machines.md#workspace-durability).
