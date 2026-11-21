@@ -678,3 +678,66 @@ async fn a_running_turns_save_lock_is_never_taken_over_by_the_same_person() -> a
     })
     .await
 }
+
+/// A turn's refresh before it starts takes the space's lease and gives it back.
+/// Each statement those calls run takes one round trip to the database
+/// (`crate::typed_sql`).
+#[tokio::test]
+async fn a_repeat_refresh_prepares_no_statement_on_its_own() -> anyhow::Result<()> {
+    use crate::tests_round_trips::{counting_hop, pool_through, test_database_address, Tally};
+    use std::sync::Arc;
+
+    let label = "lease-round-trips";
+    let pool = require_origin_test_pool(label).await?;
+    let space = Space::seed(&pool, label).await?;
+    let fixture = SharedDbFixture {
+        organizations: vec![space.org_id],
+        projects: vec![space.project_id],
+    };
+    let body_pool = pool.clone();
+    with_shared_db_fixture(fixture, async move {
+        let pool = body_pool;
+        let config = test_config(label);
+        let turn = space.running_turn(&pool).await?;
+        let token = space.job_token(&config, &turn)?;
+        let tally = Arc::new(Tally::default());
+        let hop = counting_hop(test_database_address().await?, tally.clone()).await?;
+        let state = build_test_state(pool_through(hop).await?, config);
+
+        let mut prepared_alone = Vec::new();
+        for round in 0..2 {
+            tally.reset();
+            let (status, body) = post(
+                &state,
+                &token,
+                "/lease/acquire",
+                space.job_lease_body(&turn, None),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let lease_id = lease_id_of(&body)?;
+            let acquire = tally.named_parses();
+
+            tally.reset();
+            let (status, body) = post(
+                &state,
+                &token,
+                "/lease/release",
+                space.job_lease_body(&turn, Some(&lease_id)),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let release = tally.named_parses();
+            if round == 1 {
+                prepared_alone = vec![("/lease/acquire", acquire), ("/lease/release", release)];
+            }
+        }
+        assert!(
+            prepared_alone.iter().all(|(_, count)| *count == 0),
+            "a repeat refresh prepared statements on their own, each an extra round trip to the \
+             database; run them with the typed calls (crate::typed_sql): {prepared_alone:?}"
+        );
+        Ok(())
+    })
+    .await
+}

@@ -34,9 +34,9 @@ pub(crate) async fn lock_capacity(
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let key = format!("multi-agent-capacity:{project_id}");
     transaction
-        .query_one(
+        .query_typed_one(
             "select pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&key],
+            typed![&key],
         )
         .await
         .map_err(|e| internal_error(format!("failed to lock team capacity: {e}")))?;
@@ -71,12 +71,12 @@ pub(crate) async fn worker_slot_available(
     lock_capacity(transaction, project_id).await?;
     let settings = load(transaction, project_id).await?;
     let active_workers: i64 = transaction
-        .query_one(
+        .query_typed_one(
             "select count(*) from agent_jobs where project_id = $1 and status = 'leased'
              and lease_expires_at > statement_timestamp()
              and coalesce(agent_role, payload #>> '{metadata,multiAgentPlan,role}') = 'worker'
              and ($2::uuid is null or id <> $2)",
-            &[project_id, &renewing_job_id],
+            typed![project_id, &renewing_job_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to count active team workers: {error}")))?

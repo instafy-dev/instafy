@@ -1610,14 +1610,14 @@ async fn ensure_runtime_can_lease(
     // `of r`: a lock on the project row too would make every poll hold up a
     // delete of the space.
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select r.provider, r.status, r.capabilities, r.active_lease_id,
                     p.status as project_status
              from runtimes r
              join projects p on p.id = r.project_id
              where r.id = $1 and r.project_id = $2
              for share of r",
-            &[runtime_id, project_id],
+            typed![runtime_id, project_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to validate leasing runtime: {error}")))?;
@@ -1681,14 +1681,14 @@ pub(crate) async fn ensure_runtime_can_heartbeat(
     // Only the runtime row (`of r`): a delete of the space never waits on a
     // heartbeat.
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select r.provider, r.status, r.capabilities, r.active_lease_id,
                     p.status as project_status
              from runtimes r
              join projects p on p.id = r.project_id
              where r.id = $1 and r.project_id = $2
              for share of r",
-            &[runtime_id, project_id],
+            typed![runtime_id, project_id],
         )
         .await
         .map_err(|error| {
@@ -1795,14 +1795,14 @@ async fn ensure_agent_token_matches_runtime_lease_for_use(
 
     // `of r`: no agent call holds up a delete of the space.
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select r.provider, r.status, r.capabilities, r.active_lease_id,
                     p.status as project_status
              from runtimes r
              join projects p on p.id = r.project_id
              where r.id = $1 and r.project_id = $2
              for share of r",
-            &[runtime_id, &context.project_id],
+            typed![runtime_id, &context.project_id],
         )
         .await
         .map_err(|error| {
@@ -2247,7 +2247,7 @@ pub(crate) async fn agent_heartbeat(
         .max(30.0);
 
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "update agent_jobs
              set heartbeat_at = statement_timestamp(),
                  lease_expires_at = greatest(
@@ -2266,7 +2266,7 @@ pub(crate) async fn agent_heartbeat(
                -- fails it (crate::claude_code_lane).
                and (engine is null or lease_expires_at > statement_timestamp())
              returning lease_expires_at",
-            &[
+            typed![
                 &job_uuid,
                 &project_id,
                 &runtime_uuid,
