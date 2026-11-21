@@ -90,6 +90,14 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   environment, `1` when unset. Set it to `0` there to stop holding another chat's pages on the runtimes the provider
   starts after that; see [Which chat made a page](../docs/Previews.md#which-chat-made-a-page).
   `docker/docker-compose.runtime.yml` takes it from `.env.local` instead.
+- The provider service (`docker/provider-service/Dockerfile`) launches and stops runtimes for
+  whoever reaches its port, so it refuses to start without `PROVIDER_AUTH_TOKEN`. Set it to a
+  long random secret (`openssl rand -hex 32`) and register the same value as the provider's
+  `authToken`. A provider that ran without one, or with only `CONTROLLER_INTERNAL_TOKEN` or
+  `CONTROLLER_SERVICE_ROLE_KEY`, needs its own token before you upgrade it. See
+  [Provider service authentication](../docs/runtime-plan-shared-vs-dedicated.md#provider-service-authentication)
+  for the upgrade steps and the loopback-only development mode
+  (`PROVIDER_ALLOW_UNAUTHENTICATED=1`).
 - The origin gateway (`docker/origin-gateway/Dockerfile`, `origin-http-server` with
   `ORIGIN_MULTI_TENANT=1`) is stateless: it serves every cloud space from its canonical repository
   under `ORIGIN_GIT_REMOTE_BASE_URL` and keeps no working copy. Leave `ORIGIN_GIT_REMOTE_URL`
