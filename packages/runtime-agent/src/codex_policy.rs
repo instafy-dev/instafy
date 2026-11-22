@@ -13,7 +13,9 @@
 use anyhow::{Context, Result, bail};
 use codex_core::config::{Config, ManagedFeatures};
 use codex_features::{FEATURES, Feature};
-use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::config_types::{
+    EnvironmentVariablePattern, ShellEnvironmentPolicy, WebSearchMode,
+};
 use codex_protocol::openai_models::{ModelInfo, ModelsResponse};
 use runtime_contracts::multi_agent::NativeSubagentLimit;
 
@@ -214,6 +216,11 @@ pub(crate) fn apply_runtime_codex_policy(
         .web_search_mode
         .set(search_mode)
         .context("Codex web-search requirements conflict with the authorized runtime policy")?;
+    // The run's commands are told whether it has that search, from this mode alone.
+    mark_commands_of_a_run_that_searches(
+        &mut config.permissions.shell_environment_policy,
+        search_mode == WebSearchMode::Live,
+    );
     // Native search follows the controller capability, including a custom-named proxy provider.
     // The feature flag below still lets the model choose its normal search transport.
     config.model_provider.supports_standalone_web_search = search_mode == WebSearchMode::Live;
@@ -229,6 +236,38 @@ pub(crate) fn apply_runtime_codex_policy(
     }
 
     apply_feature_policy(&mut config.features, bounded, native_search)
+}
+
+/// The mark on the commands of a run that has the AI's own web search, as
+/// [`apply_runtime_codex_policy`] decides its search mode: the job's grant allows it, and the run
+/// is no routing step, no bounded turn and no run that leaves search off. `instafy web search`
+/// reads it: with no search key in the space it then points to that search, where it otherwise
+/// tells the turn to go on without one. Turns that had their own search ran the command first,
+/// read "Go on without it", and never searched (a local test, Nov 20).
+///
+/// A fact about the run, never a credential, and only the runtime sets it: a run without that
+/// search passes none on, whatever the machine's, the space's or a config file's variables say.
+/// A grant that loses search while the run goes on (`JobProxyAuth`) leaves the mark until the
+/// run ends, and the proxy then answers the run's searches as not run, so the command's words
+/// promise nothing of the search and keep the way on without one.
+const AI_WEB_SEARCH_ENV: &str = "INSTAFY_TURN_AI_WEB_SEARCH";
+
+fn mark_commands_of_a_run_that_searches(policy: &mut ShellEnvironmentPolicy, searches: bool) {
+    policy
+        .r#set
+        .retain(|key, _| !key.eq_ignore_ascii_case(AI_WEB_SEARCH_ENV));
+    // `exclude` is applied before `set`: an inherited value never reaches a command, however
+    // it is spelled.
+    policy
+        .exclude
+        .push(EnvironmentVariablePattern::new_case_insensitive(
+            AI_WEB_SEARCH_ENV,
+        ));
+    if searches {
+        policy
+            .r#set
+            .insert(AI_WEB_SEARCH_ENV.to_string(), "1".to_string());
+    }
 }
 
 /// Pin the controller's child capacity after local configuration has loaded. V2
@@ -1365,12 +1404,15 @@ mod tests {
 
     /// Local files and legacy flags cannot authorize search. A verified ChatGPT grant enables
     /// live retrieval only on ordinary turns; bounded broker lanes retain their narrow tools.
+    /// The run's commands carry the mark of that search exactly when the mode is live, never
+    /// from a local setting, nor from a config file that sets the mark itself.
     #[tokio::test]
     async fn native_search_requires_controller_authority_and_an_unbounded_turn() {
         for local_setting in [
             "web_search = \"live\"\n",
             "web_search = \"disabled\"\n",
             "[features]\nweb_search_request = true\nweb_search_cached = true\nstandalone_web_search = true\n",
+            "web_search = \"live\"\n[shell_environment_policy.set]\nINSTAFY_TURN_AI_WEB_SEARCH = \"1\"\n",
         ] {
             for native_search in [false, true] {
                 for bounded in [false, true] {
@@ -1408,9 +1450,83 @@ mod tests {
                     if bounded {
                         assert!(!config.agents_enabled);
                     }
+                    let policy = &config.permissions.shell_environment_policy;
+                    let marks: Vec<(&str, &str)> = policy
+                        .r#set
+                        .iter()
+                        .filter(|(key, _)| key.eq_ignore_ascii_case(AI_WEB_SEARCH_ENV))
+                        .map(|(key, value)| (key.as_str(), value.as_str()))
+                        .collect();
+                    assert_eq!(
+                        marks,
+                        if allowed {
+                            vec![(AI_WEB_SEARCH_ENV, "1")]
+                        } else {
+                            Vec::new()
+                        },
+                        "native_search={native_search}, bounded={bounded}, local={local_setting}"
+                    );
+                    assert!(
+                        policy
+                            .exclude
+                            .iter()
+                            .any(|pattern| pattern.matches(AI_WEB_SEARCH_ENV)),
+                        "native_search={native_search}, bounded={bounded}, local={local_setting}"
+                    );
                 }
             }
         }
+    }
+
+    /// Only the commands of a run that has the AI's own web search carry its mark, which
+    /// `instafy web search` reads to point a turn with no search key to that search. A run
+    /// without it (a routing step, a browser turn, a run that leaves search off, a job whose grant
+    /// has none) passes no mark on, also when the machine, the space or a config file set one.
+    #[test]
+    fn only_a_run_that_has_the_ais_own_search_marks_its_commands() {
+        use codex_protocol::shell_environment::create_env_from_vars;
+
+        let inherited = |mark: Option<&str>| {
+            let mut vars = vec![("PATH".to_string(), "/usr/bin".to_string())];
+            if let Some(mark) = mark {
+                vars.push((AI_WEB_SEARCH_ENV.to_string(), mark.to_string()));
+                vars.push((AI_WEB_SEARCH_ENV.to_lowercase(), mark.to_string()));
+            }
+            vars
+        };
+        for mark in [None, Some("1"), Some("0")] {
+            let mut policy = ShellEnvironmentPolicy::default();
+            policy
+                .r#set
+                .insert(AI_WEB_SEARCH_ENV.to_lowercase(), "1".to_string());
+            mark_commands_of_a_run_that_searches(&mut policy, true);
+            let child = create_env_from_vars(inherited(mark), &policy, None);
+            let marks = child
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(AI_WEB_SEARCH_ENV))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                marks,
+                [(&AI_WEB_SEARCH_ENV.to_string(), &"1".to_string())],
+                "{mark:?}"
+            );
+
+            let mut policy = ShellEnvironmentPolicy::default();
+            policy
+                .r#set
+                .insert(AI_WEB_SEARCH_ENV.to_lowercase(), "1".to_string());
+            mark_commands_of_a_run_that_searches(&mut policy, false);
+            let child = create_env_from_vars(inherited(mark), &policy, None);
+            assert!(
+                !child
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case(AI_WEB_SEARCH_ENV)),
+                "{mark:?}: {child:?}"
+            );
+            assert_eq!(child.get("PATH").map(String::as_str), Some("/usr/bin"));
+        }
+        // The name the command reads (`packages/instafy-cli/src/web-search.ts`).
+        assert_eq!(AI_WEB_SEARCH_ENV, "INSTAFY_TURN_AI_WEB_SEARCH");
     }
 
     #[test]

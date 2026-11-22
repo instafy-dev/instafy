@@ -279,7 +279,10 @@ platform credential:
   searched across the whole web.
 - The answer is codex's `SearchResponse`. `output` gives what the search wrote for each query
   inside `<untrusted_page_content viewer="provider search" read_at="…">`, with the pages it cites,
-  and says what was removed, refused or not run; `encrypted_output` is `null`. `results`, which
+  and says what was removed, refused or not run; `encrypted_output` is `null`. When text came
+  back, its header marks that text as untrusted data and then says how a fact from it is said:
+  "a web search on <date> found, on <that result's site>: …" with that result's link and date, or
+  after reading the page (the web-research skill's own sentence). `results`, which
   codex hands to its clients and never to the model, starts with
   `{"type": "searched_queries", "queries": […]}`: the queries that searched, as they were sent
   (not one refused, repeated, past the limit, withheld by the controller or not run, nor one
