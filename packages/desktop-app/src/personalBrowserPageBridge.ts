@@ -59,6 +59,8 @@ export type PersonalBrowserPageSnapshot = {
   interactive: PersonalBrowserInteractiveElement[];
   /** Controls left out of `interactive`: above or below the view, which scrolling reaches, or past its 500. */
   omittedControls?: number;
+  /** That count for each reason, as the Shared Browser's reading splits its own: outside the view, and past the full list. */
+  leftOut?: { outsideView: number; listFull: number };
   /**
    * The frames the text cannot read, each named by its site ("[frame not read:
    * <site>]"). A site is an address, never page text, so these are kept apart
@@ -868,7 +870,8 @@ export async function snapshotPersonalBrowserPage(
       const outside = Array.from(document.querySelectorAll(interactiveSelector)).slice(0, 5_000)
         .filter((element) => element.ownerDocument === document && !forbiddenTarget(element) && drawn(element) && scrolledTo(element))
         .length;
-      const omittedControls = outside + Math.max(0, listed.length - 500);
+      const listFull = Math.max(0, listed.length - 500);
+      const omittedControls = outside + listFull;
       // What a person sees that the text cannot hold, in the words the
       // Shared Browser's reading uses where it shows them: a canvas, a
       // picture with no text, after the page's text, and a frame, named by its
@@ -914,7 +917,7 @@ export async function snapshotPersonalBrowserPage(
         title: clean(document.title, 1_000),
         text,
         interactive,
-        ...(omittedControls > 0 ? { omittedControls } : {}),
+        ...(omittedControls > 0 ? { omittedControls, leftOut: { outsideView: outside, listFull } } : {}),
         ...(frames.length ? { frames } : {}),
         ...(whole.length > 60_000 ? { textCut: whole.length - 60_000 } : {}),
         documentToken: registry.documentToken,

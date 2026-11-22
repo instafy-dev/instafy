@@ -346,7 +346,7 @@ test("a reading's control states and the controls it leaves out reach the agent;
     identity: `${documentToken}:${entry.index}`,
     descriptor: { found: true, identity: `${documentToken}:${entry.index}`, tag: entry.tag, text: entry.name },
   }));
-  let page = { ...snapshotPage({ text: "Order" }), interactive: entries("doc-a"), omittedControls: 3 };
+  let page = { ...snapshotPage({ text: "Order" }), interactive: entries("doc-a"), omittedControls: 3, leftOut: { outsideView: 2, listFull: 1 } };
   const { host } = fixture(undefined, { snapshotPersonalBrowserPage: async () => page });
   host.enablePreparedAgentControl(await host.prepareAgentControl("routine"));
   const states = (result) => result.snapshot.interactive.map(({ checked, selected, expanded }) => ({ checked, selected, expanded }));
@@ -357,11 +357,15 @@ test("a reading's control states and the controls it leaves out reach the agent;
     { checked: undefined, selected: undefined, expanded: false },
   ]);
   assert.equal(result.snapshot.omittedControls, 3);
+  // The count's split is passed on: how many lie outside the view, and how
+  // many past the full list.
+  assert.deepEqual({ ...result.snapshot.leftOut }, { outsideView: 2, listFull: 1 });
 
   page = {
     ...snapshotPage({ documentToken: "doc-b", text: "API-Schlüssel", signals: { ...NO_SECRET_SIGNALS, secretField: true } }),
     interactive: entries("doc-b"),
     omittedControls: 3,
+    leftOut: { outsideView: 3, listFull: 0, names: ["a page's words"] },
   };
   result = await host.handleControlOperation("snapshot", {});
   assert.equal(result.snapshot.secretScreen, true);
@@ -371,6 +375,8 @@ test("a reading's control states and the controls it leaves out reach the agent;
     { checked: undefined, selected: undefined, expanded: false },
   ]);
   assert.equal(result.snapshot.omittedControls, 3);
+  // Numbers alone, on a withheld page too: nothing else the page says of them is passed on.
+  assert.deepEqual({ ...result.snapshot.leftOut }, { outsideView: 3, listFull: 0 });
 });
 
 test("a reading names its frames and where its text is cut after the page's text is masked and judged", async () => {
