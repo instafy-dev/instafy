@@ -334,6 +334,7 @@ async fn sweep(app: &AppState) -> Result<(), Error> {
             &row.get::<_, PgJson<Value>>("payload").0,
             row.get("conversation_id"),
             outcome.as_deref().unwrap_or(fallback),
+            false,
         )
         .await?
         {

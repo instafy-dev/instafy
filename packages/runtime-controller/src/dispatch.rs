@@ -230,23 +230,37 @@ struct AgentTarget {
     display_name: Option<String>,
     description: Option<String>,
     avatar_seed: Option<String>,
-    /// The agent's owner chose Claude Code as its AI (crate::claude_code_lane):
-    /// its turn runs on their own computer, with no credential and no runtime
-    /// pin, and is never Instafy AI.
+    /// This turn runs on its owner's own Claude Code (crate::claude_code_lane):
+    /// the AI dispatch chose for it is one of their Claude Code logins, a
+    /// Claude Code agent's or one of any agent's backups
+    /// (crate::sign_in_room). It runs on their own computer, with no
+    /// credential and no runtime pin, and is never Instafy AI. Every rule
+    /// that reads whether a target is a Claude Code agent reads this.
     claude_code: bool,
-    /// A Claude Code agent's Claude Code logins, in the order its job may run
-    /// on them (`agent_jobs.claude_code_login_ids`, docs/Local-Engine-Turns.md
-    /// 11.19): the agent's own login when it names one of its owner's, else
-    /// the owner's first login, else none. Empty for every other target.
+    /// The Claude Code logins a lane turn may run on, in order
+    /// (`agent_jobs.claude_code_login_ids`, docs/Local-Engine-Turns.md 11.19,
+    /// 11.20): the stretch of consecutive logins of the agent's AIs that
+    /// holds the one chosen, which its lease picks among by room. Empty for
+    /// every other target.
     claude_code_login_ids: Vec<Uuid>,
+    /// The login chosen for a lane turn, one of
+    /// [`Self::claude_code_login_ids`]: the login its stamps name, its
+    /// session is looked for on, and its job takes while it has room. None
+    /// for every other target, and for a Claude Code agent whose person has
+    /// no login.
+    claude_code_login: Option<Uuid>,
+    /// The sign-in of its person's this turn runs on, as its run's `aiSignIn`
+    /// names it (crate::sign_in_room): a connection, or the login chosen.
+    /// None for Instafy AI.
+    sign_in: Option<crate::sign_in_room::Chosen>,
 }
 
 impl AgentTarget {
-    /// The first of [`Self::claude_code_login_ids`]: the login a Claude Code
-    /// target's stamps name, its session is looked for on, and its job
-    /// takes while it is still its owner's.
+    /// The login a Claude Code target's stamps name, its session is looked
+    /// for on, and its job takes while it has room
+    /// ([`Self::claude_code_login`]).
     fn first_claude_code_login(&self) -> Option<Uuid> {
-        self.claude_code_login_ids.first().copied()
+        self.claude_code_login
     }
 }
 
@@ -639,56 +653,58 @@ pub(crate) async fn selects_only_claude_code_agents(
     Ok(saved == handles.len() as i64 && claude_code == saved)
 }
 
+/// The agents a dispatch's handles reach, for `user_id`, its person, each
+/// with the AI its turn runs on (docs/Local-Engine-Turns.md 11.20): for a
+/// turn that runs an AI (`ai_turn`), the agent's first AI and its backups are
+/// walked in order, passing over any that is not one of its owner's live
+/// sign-ins, and the first with room is taken, else the one whose limit
+/// resets first (crate::sign_in_room::target_ai). A connection taken makes
+/// the turn a job on that credential; a login taken makes it a lane turn on
+/// the stretch of logins that holds it (`claude_code`), which then passes
+/// L1-L3 as any Claude Code agent's does. With none usable, and for a turn
+/// that runs no AI, the target keeps what it had before backups: its own
+/// usable connection, else the person's default, else Instafy AI, and a
+/// Claude Code agent its first login, or none.
 async fn resolve_agent_targets(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     user_id: Option<Uuid>,
     handles: Vec<String>,
     default_credential_id: Option<Uuid>,
+    ai_turn: bool,
 ) -> Result<Vec<AgentTarget>, (StatusCode, Json<ApiError>)> {
     let mut targets = Vec::new();
+    // The person's own sign-ins and their room, read once for every agent of
+    // theirs the dispatch reaches.
+    let owner_sign_ins = match user_id {
+        Some(user_uuid) => {
+            Some(crate::sign_in_room::OwnerSignIns::load(transaction, &user_uuid).await?)
+        }
+        None => None,
+    };
+    let default_credential_id = credentials::usable_user_credential_id(default_credential_id);
 
     for handle in handles {
         let mut agent_id: Option<Uuid> = None;
-        let mut credential_id: Option<Uuid> = None;
+        let mut agent_ai: Option<crate::sign_in_room::AgentAiRow> = None;
         let mut runtime_id: Option<Uuid> = None;
         let mut display_name: Option<String> = None;
         let mut description: Option<String> = None;
         let mut avatar_seed: Option<String> = None;
-        let mut claude_code = false;
-        let mut claude_code_login_ids: Vec<Uuid> = Vec::new();
 
         if let Some(user_uuid) = user_id {
-            // A Claude Code agent's logins (11.19): its own when it names one
-            // of its owner's, else the owner's first, their oldest, else none.
             let row = transaction
                 .query_typed_opt(
-                    "select ua.id as agent_id,
-                            uc.id as credential_id,
+                    concat!(
+                        "select ua.id as agent_id,
                             uaps.runtime_id as runtime_id,
                             ua.display_name as display_name,
                             ua.description as description,
                             ua.avatar_seed as avatar_seed,
-                            ua.provider = $4 and ua.credential_id is null as claude_code,
-                            case when ua.provider = $4 and ua.credential_id is null then
-                                coalesce(
-                                    (select array[agent_login.id]
-                                       from claude_code_logins agent_login
-                                      where agent_login.id = ua.claude_code_login_id
-                                        and agent_login.user_id = ua.user_id),
-                                    (select array[first_login.id]
-                                       from claude_code_logins first_login
-                                      where first_login.user_id = ua.user_id
-                                      order by first_login.created_at, first_login.id
-                                      limit 1),
-                                    '{}'::uuid[]
-                                )
-                            end as claude_code_login_ids
+                            ",
+                        crate::sign_in_room::agent_ai_columns!("ua"),
+                        "
                      from user_agents ua
-                     left join user_credentials uc
-                       on uc.id = ua.credential_id
-                      and uc.user_id = ua.user_id
-                      and uc.revoked_at is null
                      left join user_agent_project_settings uaps
                        on uaps.user_id = ua.user_id
                       and uaps.agent_id = ua.id
@@ -696,13 +712,9 @@ async fn resolve_agent_targets(
                      where ua.user_id = $1
                        and lower(ua.handle) = lower($2)
                        and ua.deleted_at is null
-                     limit 1",
-                    typed![
-                        &user_uuid,
-                        &handle,
-                        project_id,
-                        &crate::claude_code_lane::PROVIDER
-                    ],
+                     limit 1"
+                    ),
+                    typed![&user_uuid, &handle, project_id],
                 )
                 .await
                 .map_err(|error| {
@@ -710,15 +722,11 @@ async fn resolve_agent_targets(
                 })?;
             if let Some(row) = row {
                 agent_id = row.get("agent_id");
-                credential_id = credentials::usable_user_credential_id(row.get("credential_id"));
                 runtime_id = row.get("runtime_id");
                 display_name = row.get("display_name");
                 description = row.get("description");
                 avatar_seed = Some(row.get("avatar_seed"));
-                claude_code = row.get::<_, Option<bool>>("claude_code").unwrap_or(false);
-                claude_code_login_ids = row
-                    .get::<_, Option<Vec<Uuid>>>("claude_code_login_ids")
-                    .unwrap_or_default();
+                agent_ai = Some(crate::sign_in_room::AgentAiRow::of(&row));
             }
         }
 
@@ -737,26 +745,43 @@ async fn resolve_agent_targets(
             avatar_seed = Some("octo".to_string());
         }
 
-        // A Claude Code agent takes no credential, not even the person's
-        // default one, and no runtime pin (crate::claude_code_lane).
-        let (resolved_credential_id, runtime_id) = if claude_code {
-            (None, None)
-        } else {
-            (
-                credentials::usable_user_credential_id(credential_id.or(default_credential_id)),
-                runtime_id,
-            )
+        let (target_ai, chosen) = match (agent_ai.as_ref(), owner_sign_ins.as_ref()) {
+            (Some(agent_ai), Some(owner)) => {
+                crate::sign_in_room::target_ai(agent_ai, owner, ai_turn)
+            }
+            _ => (crate::sign_in_room::TargetAi::Fallback, None),
         };
+        // A turn on Claude Code takes no credential, not even the person's
+        // default one, and no runtime pin (crate::claude_code_lane).
+        let (credential_id, runtime_id, claude_code, claude_code_login_ids, claude_code_login) =
+            match target_ai {
+                crate::sign_in_room::TargetAi::Credential(credential_id) => {
+                    (Some(credential_id), runtime_id, false, Vec::new(), None)
+                }
+                crate::sign_in_room::TargetAi::ClaudeCode { login_ids, login } => {
+                    (None, None, true, login_ids, login)
+                }
+                crate::sign_in_room::TargetAi::Fallback => {
+                    (default_credential_id, runtime_id, false, Vec::new(), None)
+                }
+            };
+        let sign_in = chosen.or_else(|| {
+            credential_id
+                .filter(|_| !claude_code)
+                .map(crate::sign_in_room::Chosen::default_connection)
+        });
         targets.push(AgentTarget {
             handle,
             agent_id,
-            credential_id: resolved_credential_id,
+            credential_id,
             runtime_id,
             display_name,
             description,
             avatar_seed,
             claude_code,
             claude_code_login_ids,
+            claude_code_login,
+            sign_in,
         });
     }
 
@@ -772,13 +797,15 @@ async fn resolve_agent_targets(
         targets.push(AgentTarget {
             handle: "octo".to_string(),
             agent_id,
-            credential_id: credentials::usable_user_credential_id(default_credential_id),
+            credential_id: default_credential_id,
             runtime_id: None,
             display_name,
             description,
             avatar_seed: Some("octo".to_string()),
             claude_code: false,
             claude_code_login_ids: Vec::new(),
+            claude_code_login: None,
+            sign_in: default_credential_id.map(crate::sign_in_room::Chosen::default_connection),
         });
     }
 
@@ -2038,6 +2065,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
         context.user_id,
         agent_handles,
         default_credential_id,
+        dispatch_requires_ai_access(&request.intent),
     )
     .await?;
     // Before anything is stamped with them: each AI without a profile wears
@@ -2091,6 +2119,8 @@ pub(crate) async fn process_dispatch_prompt_timed(
         for target in agent_targets.iter_mut() {
             target.claude_code = false;
             target.claude_code_login_ids.clear();
+            target.claude_code_login = None;
+            target.sign_in = None;
         }
     }
     // A send whose every target is a Claude Code agent needs no runtime of
@@ -2220,6 +2250,16 @@ pub(crate) async fn process_dispatch_prompt_timed(
             crate::claude_code_lane::stamp(
                 ensure_object(&mut run_request.metadata),
                 target.first_claude_code_login(),
+            );
+        }
+        // The sign-in of its person's the turn runs on, and whether it is one
+        // of its agent's backups (crate::sign_in_room, 11.20): ids only, on
+        // the run alone. A turn that runs no AI names none.
+        if let Some(chosen) = target.sign_in {
+            crate::sign_in_room::stamp(
+                ensure_object(&mut run_request.metadata),
+                chosen.sign_in,
+                chosen.backup,
             );
         }
         apply_agent_write_scope_metadata(
@@ -2843,7 +2883,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // Code agent none of whose person's computers could take it now, on the
     // login its job would take, sits the message out: its run is closed, and
     // it gets no job that would wait (crate::claude_code_lane,
-    // docs/Local-Engine-Turns.md 11.7, 11.19).
+    // docs/Local-Engine-Turns.md 11.7, 11.19). Nor would a lease take it on a
+    // login with no room, chosen only because none of the agent's AIs has
+    // room (crate::sign_in_room, 11.20).
     let mut claude_code_skipped_runs: Vec<Uuid> = Vec::new();
     if skill_mode_ambient_evaluation {
         if let Some(person) = context.user_id {
@@ -2854,7 +2896,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
                     .iter()
                     .find(|(on, _)| *on == login)
                     .map(|(_, ready)| *ready);
+                let room = target.sign_in.is_none_or(|chosen| chosen.room);
                 let ready = match known {
+                    _ if !room => false,
                     Some(ready) => ready,
                     None => {
                         let ready = crate::claude_code_lane::a_computer_is_ready(
@@ -2935,6 +2979,17 @@ pub(crate) async fn process_dispatch_prompt_timed(
             CONVERSATION_VISIBILITY_KEY.to_string(),
             json!(conversation_visibility),
         );
+        // A job on a connection records the sign-in it runs on, as its run
+        // does, so its secrets can tell a backup of another provider from its
+        // agent's first AI (crate::sign_in_room, `secrets::agent_secrets`). A
+        // lane job's payload keeps none: its login is its lease's.
+        if let Some(chosen) = target.sign_in.filter(|_| !target.claude_code) {
+            crate::sign_in_room::stamp(
+                ensure_object(&mut agent_request.metadata),
+                chosen.sign_in,
+                chosen.backup,
+            );
+        }
         crate::multi_agent_plan::apply_worker_tool_requirement(
             &mut agent_request.metadata,
             &target.handle,
@@ -3013,7 +3068,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                         &conversation_id,
                         &person,
                         target.agent_id.as_ref(),
-                        target.claude_code_login_ids.first(),
+                        target.first_claude_code_login().as_ref(),
                     )
                     .await?
                 }
@@ -7215,6 +7270,8 @@ mod tests {
             avatar_seed: Some("hatchling:3".to_string()),
             claude_code: false,
             claude_code_login_ids: Vec::new(),
+            claude_code_login: None,
+            sign_in: None,
         };
         // The controller's stamp replaces whatever `agent` the request carried.
         let mut metadata =
@@ -8177,6 +8234,8 @@ mod tests {
             avatar_seed: None,
             claude_code: false,
             claude_code_login_ids: Vec::new(),
+            claude_code_login: None,
+            sign_in: None,
         };
 
         apply_agent_prompt_segment(&mut normalized, &segments, &target);
@@ -8255,6 +8314,8 @@ mod tests {
             avatar_seed: None,
             claude_code: false,
             claude_code_login_ids: Vec::new(),
+            claude_code_login: None,
+            sign_in: None,
         };
         let (managed, own_key, other_managed) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let runs = vec![

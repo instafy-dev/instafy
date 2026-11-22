@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usesTurnEngine } from "../../../conversations/runFailurePresentation";
+import { setViewerConnections, setViewerConnectionsOwner } from "../../../conversations/aiSignIns";
 import type { ControllerCredentialListItem } from "../../../sdk/instafy";
 import { controllerClient } from "../../../sdk/instafy";
 import type { StatusIntent } from "../../../status/useStatus";
@@ -551,6 +552,8 @@ export function useChatCredentialGate({
     }
 
     setAvailableCredentials(result.credentials);
+    // The chat names the viewer's own connection a turn ran on from this list (11.20).
+    setViewerConnections(currentUserId, result.credentials);
     const active = result.credentials.filter(
       (credential) =>
         !credential.revokedAt &&
@@ -567,7 +570,12 @@ export function useChatCredentialGate({
       return;
     }
     setCredentialGateStatus({ status: "missing", error: null });
-  }, [hasUser, runtimeControllerEnabled]);
+  }, [currentUserId, hasUser, runtimeControllerEnabled]);
+
+  useEffect(() => {
+    // Whose connections the chat may name: a list kept for anyone else goes.
+    setViewerConnectionsOwner(currentUserId);
+  }, [currentUserId]);
 
   useEffect(() => {
     if (!runtimeControllerEnabled) {

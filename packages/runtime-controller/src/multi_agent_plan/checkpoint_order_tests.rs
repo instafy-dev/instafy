@@ -733,7 +733,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                 let answered_at: chrono::DateTime<chrono::Utc> = tx.query_one("update agent_jobs
                     set status='completed',outcome='succeeded',completed_at=now() where id=$1 returning completed_at",
                     &[&answer]).await?.get(0);
-                crate::conversation_goals::state::settle_job(&tx, answer, &answer_payload, conversation, "succeeded").await
+                crate::conversation_goals::state::settle_job(&tx, answer, &answer_payload, conversation, "succeeded", false).await
                     .map_err(|e| controller_error("queued answer goal settlement", e))?;
                 tx.commit().await?;
                 drop(db);
@@ -810,7 +810,7 @@ async fn a_lost_final_lead_handoff_is_recovered_by_the_idle_sweep() -> anyhow::R
                         let tx = db.transaction().await?;
                         tx.execute("update agent_jobs set status='completed',outcome='succeeded',completed_at=now() where id=$1",
                             &[&lead]).await?;
-                        crate::conversation_goals::state::settle_job(&tx, lead, &payload, conversation, "succeeded").await
+                        crate::conversation_goals::state::settle_job(&tx, lead, &payload, conversation, "succeeded", false).await
                             .map_err(|e| controller_error("recovered lead goal settlement", e))?;
                         let pending: i64 = tx.query_one("select count(*) from conversation_goal_continuations
                             where source_job_id=$1 and goal_revision=$2 and status='pending'", &[&lead,&revision]).await?.get(0);

@@ -805,14 +805,25 @@ async fn execute_automation_once(
     // space's: it waits for its person's own computer, so no runtime is picked
     // or launched for it. While its last run still waits, a due run is
     // skipped rather than piled up behind it (crate::claude_code_lane,
-    // docs/Local-Engine-Turns.md 11.7).
+    // docs/Local-Engine-Turns.md 11.7): whenever one of its agents may run on
+    // Claude Code, as a Claude Code agent or through a Claude Code login
+    // among its backups, which takes its turns once its first AI reaches its
+    // plan's limit (crate::sign_in_room, 11.20).
     let runs_on_claude_code = crate::dispatch::selects_only_claude_code_agents(
         &*state.pool.get().await?,
         record.user_id,
         &metadata,
     )
     .await?;
-    if runs_on_claude_code {
+    let may_wait_for_a_computer = runs_on_claude_code
+        || crate::claude_code_lane::selects_a_claude_code_agent(
+            &*state.pool.get().await?,
+            record.user_id,
+            &metadata,
+        )
+        .await
+        .map_err(|(_, Json(error))| anyhow::anyhow!(error.message))?;
+    if may_wait_for_a_computer {
         if let Some(conversation_id) = record.conversation_id {
             if crate::claude_code_lane::a_turn_waits_in(state, &conversation_id, &record.user_id)
                 .await?

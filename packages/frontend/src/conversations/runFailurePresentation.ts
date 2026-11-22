@@ -1,3 +1,4 @@
+import type { AgentBackupAi } from "@instafy/sdk/agents";
 import {
   namesTurnEngineAccessMode,
   type FrontendTurnEnginePresentation,
@@ -5,6 +6,13 @@ import {
   type TurnEngineTurnOwner,
 } from "../features/frontendFeatureModule";
 import { registeredTurnEngines } from "../features/turnEngineRegistry";
+import {
+  AI_SIGN_IN_NEXT_KEY,
+  readAiSignInStamp,
+  sameSignIn,
+  viewerSignInLabel,
+  type ViewerSignIns,
+} from "./aiSignIns";
 import { isPersonRuntimeStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
 import { resolveProxyUpstreamErrorGuidance } from "../screens/studio/components/proxyError";
 import type { ChatMessage } from "../screens/studio/types";
@@ -48,6 +56,23 @@ export type RunFailurePresentation = {
    * ran it says.
    */
   turnEngine?: TurnEngineRunFailure;
+  /**
+   * The turn stopped at its sign-in's plan's limit, and the agent's next turns
+   * use another of its owner's sign-ins (docs/Local-Engine-Turns.md 11.20):
+   * its owner reads which, and Try again sends it there
+   * ({@link nextSignInForViewer}).
+   */
+  nextSignIn?: RunFailureNextSignIn;
+};
+
+/** What a failure at a plan's limit says of the agent's next sign-in, as the controller stamped it. */
+export type RunFailureNextSignIn = {
+  /** The sign-in that reached its plan's limit: the one the turn ran on (`aiSignIn`). */
+  stopped: AgentBackupAi;
+  /** The one the agent's next turns use (`aiSignInNext`). */
+  next: AgentBackupAi;
+  /** The agent's name as the failure names it, or null. */
+  agentName: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -495,6 +520,78 @@ export function runFailureSentenceForViewer(
   return viewer.owner?.isViewer === true
     ? turnEngine.authorText(viewer.runtime)
     : turnEngine.teammateText(viewer.owner?.name ?? null);
+}
+
+// ---------------------------------------------------------------------------
+// Backup AIs (docs/Local-Engine-Turns.md 11.20)
+//
+// Once completion recorded that the sign-in a turn ran on reached its plan's
+// limit, it stamps the failure with the sign-in the agent's next turns use
+// (`aiSignInNext`), beside the one the turn ran on (`aiSignIn`). Only the
+// controller writes either, so a failure that carries both stopped at a
+// plan's limit: a connection's usage limit, or the plan limit of a turn
+// engine's sign-in, whose own failure sentence the engine words.
+// ---------------------------------------------------------------------------
+
+const AGENT_HANDLE = /^[a-z0-9][a-z0-9_-]{0,19}$/;
+
+/** The agent the failure names, for "{Agent}'s next turns": its name, else its handle, or null. */
+function nextTurnsAgentName(metadata: Record<string, unknown> | null): string | null {
+  const name = failedAgentName(metadata);
+  if (name) {
+    return name;
+  }
+  const agent = metadata && isRecord(metadata["agent"]) ? metadata["agent"] : null;
+  const handle = typeof agent?.["handle"] === "string" ? agent["handle"].trim().toLowerCase() : "";
+  if (handle === "octo") {
+    return "Octo";
+  }
+  return AGENT_HANDLE.test(handle) ? `@${handle}` : null;
+}
+
+function readNextSignIn(metadata: Record<string, unknown> | null): RunFailureNextSignIn | null {
+  const next = readAiSignInStamp(metadata, AI_SIGN_IN_NEXT_KEY);
+  const stopped = readAiSignInStamp(metadata);
+  if (!next || !stopped || sameSignIn(next.signIn, stopped.signIn)) {
+    return null;
+  }
+  return { stopped: stopped.signIn, next: next.signIn, agentName: nextTurnsAgentName(metadata) };
+}
+
+function withNextSignIn(
+  presentation: RunFailurePresentation,
+  metadata: Record<string, unknown> | null,
+): RunFailurePresentation {
+  const nextSignIn = readNextSignIn(metadata);
+  return nextSignIn ? { ...presentation, nextSignIn } : presentation;
+}
+
+/**
+ * What a failure at a plan's limit shows the turn's own person when the
+ * agent's next turns use another of their sign-ins: "{Sign-in} reached its
+ * plan's limit, so this turn stopped. {Agent}'s next turns use {next
+ * sign-in}.", with Try again, since a resend goes there. Null for anyone
+ * else: both sign-ins must be the viewer's own (`signIns`), and the chat must
+ * not know the turn to be someone else's (`owner`). `sentence` is null when a
+ * name would not read plainly in a failure (docs/Chat-Activity.md), and the
+ * failure's own sentence shows instead, still with Try again.
+ */
+export function nextSignInForViewer(
+  presentation: Pick<RunFailurePresentation, "nextSignIn">,
+  viewer: { owner: TurnEngineTurnOwner | null; signIns: ViewerSignIns | null },
+): { sentence: string | null } | null {
+  const nextSignIn = presentation.nextSignIn;
+  if (!nextSignIn || !viewer.signIns || viewer.owner?.isViewer === false) {
+    return null;
+  }
+  const stopped = viewerSignInLabel(nextSignIn.stopped, viewer.signIns);
+  const next = viewerSignInLabel(nextSignIn.next, viewer.signIns);
+  if (!stopped || !next) {
+    return null;
+  }
+  const agent = nextSignIn.agentName ? `${nextSignIn.agentName}'s` : "This agent's";
+  const sentence = `${stopped} reached its plan's limit, so this turn stopped. ${agent} next turns use ${next}.`;
+  return { sentence: readsPlainlyForChatActivity(sentence) ? sentence : null };
 }
 
 export const RETRYING_STATUS_DISPLAY_TEXT = "Trying again…";
@@ -1212,7 +1309,7 @@ export function resolveRunFailurePresentation(params: {
   }
   const turnEngineFailure = turnEngineFailurePresentation(metadata, rawText);
   if (turnEngineFailure) {
-    return turnEngineFailure;
+    return withNextSignIn(turnEngineFailure, metadata);
   }
   const classified = classifyRunFailureText(rawText);
   if (normalizedStringField(metadata, "kind") !== INTERRUPTED_RUN_EXPIRED_KIND) {
@@ -1221,7 +1318,7 @@ export function resolveRunFailurePresentation(params: {
     const aiUnavailable =
       classified === "provider_usage_limit" ? null : aiUnavailablePresentation(rawText, metadata);
     if (aiUnavailable) {
-      return aiUnavailable;
+      return withNextSignIn(aiUnavailable, metadata);
     }
   }
   const kind =
@@ -1231,7 +1328,7 @@ export function resolveRunFailurePresentation(params: {
   if (!kind) {
     return null;
   }
-  return { kind, friendlyText: runFailureFriendlyText(kind, rawText, metadata), rawText };
+  return withNextSignIn({ kind, friendlyText: runFailureFriendlyText(kind, rawText, metadata), rawText }, metadata);
 }
 
 function runFailureFriendlyText(

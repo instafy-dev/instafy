@@ -33,6 +33,7 @@ import {
   TurnEngineSpeakerLine,
   type SpeakerStatusMarker,
 } from "./AssistantSpeakerIdentityPill";
+import { useReplySignInLineGate } from "./RunFailureNotice";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { HumanProfilePopover } from "../../../profile/HumanProfilePopover";
@@ -275,6 +276,9 @@ export function ConversationMessageRows({
     () => conversationLaterChanges(allConversationMessages ?? messages),
     [allConversationMessages, messages],
   );
+  // Which replies name, for the viewer alone, the sign-in they ran on
+  // (docs/Local-Engine-Turns.md 11.20).
+  const showsSignInLine = useReplySignInLineGate(messages);
 
   const rows: JSX.Element[] = [];
   const anchorMessageId = targetedMessageId ?? getConversationScrollAnchorMessageId(scrollSnapshotKey);
@@ -590,15 +594,17 @@ export function ConversationMessageRows({
           />
         ) : null;
         // A reply a turn engine ran says so in one line under its header
-        // (docs/Local-Engine-Turns.md 5.7). Where the header is not shown (a
-        // quiet reply in a chat of one, the same speaker again) the line still
-        // is, on its own. A turn's row shows its own.
+        // (docs/Local-Engine-Turns.md 5.7), and so does the one the viewer's
+        // own sign-in ran, once they have more than one (11.20). Where the
+        // header is not shown (a quiet reply in a chat of one, the same
+        // speaker again) the line still is, on its own. A turn's row shows
+        // its own.
         const turnEngineSpeakerLine =
           message.role === "assistant" &&
           inlineSpeakerIdentity === null &&
           !isAgentJobThreadMessage &&
           !isReplyDraft &&
-          showsTurnEngineSpeakerLine(messageMetadata) ? (
+          (showsTurnEngineSpeakerLine(messageMetadata) || showsSignInLine(messageMetadata)) ? (
             <TurnEngineSpeakerLine message={message} />
           ) : null;
         const speakerIdentity =

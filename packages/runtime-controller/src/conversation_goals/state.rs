@@ -270,12 +270,21 @@ pub(crate) async fn apply_runtime_update(
 
 /// The completion transaction atomically closes a job and records its wakeup.
 /// Planning receipts and provider retry requeues return before reaching this hook.
+///
+/// `goes_on_another_ai`: the job failed at its sign-in's plan's limit, which
+/// its completion has just recorded, while the goal's agent now has another
+/// AI with room (crate::sign_in_room::SignInEnd, docs/Local-Engine-Turns.md
+/// 11.20). The goal then records its next step as after a finished turn, and
+/// that step runs on the AI with room, instead of stopping. Any other failure
+/// blocks it as before; the recovery sweep, which knows nothing of limits,
+/// passes false.
 pub(crate) async fn settle_job(
     transaction: &Transaction<'_>,
     job_id: Uuid,
     payload: &Value,
     conversation_id: Uuid,
     outcome: &str,
+    goes_on_another_ai: bool,
 ) -> StateResult<Option<ConversationRecord>> {
     let Some(bound) = load_bound_goal(transaction, job_id, payload, conversation_id).await? else {
         return Ok(None);
@@ -291,11 +300,25 @@ pub(crate) async fn settle_job(
             if bound.planning_receipt {
                 return Ok(None);
             }
-            transaction.execute(
-                "insert into conversation_goal_continuations (source_job_id, conversation_id, goal_revision, owner_user_id)
-                 values ($1, $2, $3, $4) on conflict (source_job_id) do nothing",
-                &[&job_id, &conversation_id, &bound.revision, &bound.owner],
-            ).await.map_err(|error| internal_error(format!("failed to record goal continuation: {error}")))?;
+            record_continuation(
+                transaction,
+                job_id,
+                conversation_id,
+                bound.revision,
+                bound.owner,
+            )
+            .await?;
+            Ok(None)
+        }
+        ("failed", "failed") if goes_on_another_ai && !bound.planning_receipt => {
+            record_continuation(
+                transaction,
+                job_id,
+                conversation_id,
+                bound.revision,
+                bound.owner,
+            )
+            .await?;
             Ok(None)
         }
         ("failed", "failed") | ("canceled", "canceled") | ("expired", "expired" | "failed") => {
@@ -313,6 +336,22 @@ pub(crate) async fn settle_job(
         }
         _ => Ok(None),
     }
+}
+
+/// The goal's next step after `job_id`, which its wake-up dispatches.
+async fn record_continuation(
+    transaction: &Transaction<'_>,
+    job_id: Uuid,
+    conversation_id: Uuid,
+    revision: Uuid,
+    owner: Uuid,
+) -> StateResult<()> {
+    transaction.execute(
+        "insert into conversation_goal_continuations (source_job_id, conversation_id, goal_revision, owner_user_id)
+         values ($1, $2, $3, $4) on conflict (source_job_id) do nothing",
+        &[&job_id, &conversation_id, &revision, &owner],
+    ).await.map_err(|error| internal_error(format!("failed to record goal continuation: {error}")))?;
+    Ok(())
 }
 
 /// The Stop endpoint already authorized the human and locked its exact target

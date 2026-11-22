@@ -6803,3 +6803,8 @@ fn a_target_passes_only_as_its_owners_own_turn_on_the_switch() {
         refused(unsupported("browser"))
     );
 }
+
+/// Backup AIs (docs/Local-Engine-Turns.md 11.20), on this file's space and
+/// harness.
+#[path = "tests_backup_ais.rs"]
+mod backup_ais;

@@ -1209,9 +1209,38 @@ async fn apply_credential_default_model(
 /// Resolved per-agent runtime overrides loaded from `user_agents`. `model` is
 /// provider-resolved; `reasoning_effort` is the raw per-agent value (one of
 /// minimal|low|medium|high, already normalized on write) or None to inherit.
+/// `provider` is the provider they belong to, the agent's first AI's: its
+/// `user_agents.provider`, with `assistant` read as the default credential's.
 struct AgentRuntimeOverrides {
     model: Option<String>,
     reasoning_effort: Option<String>,
+    provider: Option<String>,
+}
+
+/// The provider of the person's connection `credential_id`, as a job on it
+/// runs it (`credentials::provider_for_credential`); None when it cannot be
+/// read.
+async fn credential_provider(
+    transaction: &tokio_postgres::Transaction<'_>,
+    credential_id: Uuid,
+) -> Option<String> {
+    match transaction
+        .query_opt(
+            "select kind, metadata from user_credentials where id = $1",
+            &[&credential_id],
+        )
+        .await
+    {
+        Ok(row) => row.map(|row| {
+            let kind: String = row.get("kind");
+            let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
+            crate::credentials::provider_for_credential(&kind, &metadata)
+        }),
+        Err(error) => {
+            tracing::warn!(?error, %credential_id, "could not load the job credential's provider");
+            None
+        }
+    }
 }
 
 fn read_agent_reasoning_effort(row: &tokio_postgres::Row) -> Option<String> {
@@ -1241,6 +1270,7 @@ async fn load_agent_model(
             return Ok(AgentRuntimeOverrides {
                 model: None,
                 reasoning_effort: None,
+                provider: None,
             });
         };
         let provider: String = row.get("provider");
@@ -1255,6 +1285,7 @@ async fn load_agent_model(
         return Ok(AgentRuntimeOverrides {
             model: resolve_agent_model_for_provider(&provider, model),
             reasoning_effort,
+            provider: Some(provider),
         });
     }
 
@@ -1262,6 +1293,7 @@ async fn load_agent_model(
         return Ok(AgentRuntimeOverrides {
             model: None,
             reasoning_effort: None,
+            provider: None,
         });
     };
     let trimmed = handle.trim().trim_start_matches('@').trim();
@@ -1269,6 +1301,7 @@ async fn load_agent_model(
         return Ok(AgentRuntimeOverrides {
             model: None,
             reasoning_effort: None,
+            provider: None,
         });
     }
 
@@ -1287,6 +1320,7 @@ async fn load_agent_model(
         return Ok(AgentRuntimeOverrides {
             model: None,
             reasoning_effort: None,
+            provider: None,
         });
     };
     let provider: String = row.get("provider");
@@ -1301,6 +1335,7 @@ async fn load_agent_model(
     Ok(AgentRuntimeOverrides {
         model: resolve_agent_model_for_provider(&provider, model),
         reasoning_effort,
+        provider: Some(provider),
     })
 }
 
@@ -1496,6 +1531,14 @@ async fn agent_secrets(
     let mut inventory_by_secret_id: std::collections::HashMap<Uuid, AgentSecretInventoryItem> =
         std::collections::HashMap::new();
 
+    // A job dispatch sent to one of its agent's backups runs that backup's own
+    // provider (crate::sign_in_room, docs/Local-Engine-Turns.md 11.20). The
+    // agent's model and reasoning effort belong to its first AI's provider, so
+    // they go with the job only when the backup is of that provider too; on
+    // another, the job takes the backup's default model below
+    // (`apply_credential_default_model`), as a job of an agent pinned to that
+    // connection with no model of its own does.
+    let backup_credential = crate::sign_in_room::job_backup_credential(&payload, credential_id);
     if let Some(user_id) = user_id.as_ref() {
         if let Ok(overrides) = load_agent_model(
             &transaction,
@@ -1505,6 +1548,22 @@ async fn agent_secrets(
         )
         .await
         {
+            let other_provider = match backup_credential {
+                Some(backup) => match credential_provider(&transaction, backup).await {
+                    Some(provider) => overrides.provider.as_deref() != Some(provider.as_str()),
+                    None => false,
+                },
+                None => false,
+            };
+            let overrides = if other_provider {
+                AgentRuntimeOverrides {
+                    model: None,
+                    reasoning_effort: None,
+                    provider: None,
+                }
+            } else {
+                overrides
+            };
             if let Some(model) = overrides.model {
                 env.entry("CODEX_MODEL".to_string())
                     .or_insert(JsonValue::String(model));

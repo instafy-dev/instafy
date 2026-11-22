@@ -3326,7 +3326,8 @@ const AGENT_COMPLETE_JOB_UPDATE_SQL: &str = "update agent_jobs
            lease_attempts,
            grant_ids,
            engine,
-           claude_code_login_id";
+           claude_code_login_id,
+           credential_id";
 
 /// Logs a completion that matched no job its runtime holds, with the job's
 /// status now. One back in the queue after a lease (`queued`, with
@@ -3619,6 +3620,43 @@ pub(crate) async fn agent_complete(
             return Ok(Json(AgentCompleteResponseBody { ok: true }));
         }
     }
+
+    // The sign-in of its person's the job ran on: its credential, or the
+    // Claude Code login its lease took, never one its runtime names
+    // (crate::sign_in_room, docs/Local-Engine-Turns.md 11.20). A failed turn
+    // that reported reaching that sign-in's plan's limit records it, and a
+    // completed one clears it, for the job's own person only, before the
+    // reply and the failure message are written, which name the sign-in and,
+    // after a limit, the agent's next AI with room.
+    let ran_on = if lane {
+        lane_login.map(crate::sign_in_room::SignIn::Login)
+    } else {
+        crate::credentials::usable_user_credential_id(row.get("credential_id"))
+            .map(crate::sign_in_room::SignIn::Credential)
+    };
+    let job_person = job_payload
+        .get("user_id")
+        .and_then(JsonValue::as_str)
+        .and_then(|value| Uuid::from_str(value).ok());
+    let job_agent = job_payload
+        .pointer("/metadata/agent/id")
+        .and_then(JsonValue::as_str)
+        .and_then(|value| Uuid::from_str(value).ok());
+    let sign_in_end = match (ran_on, job_person) {
+        (Some(ran_on), Some(person)) => Some(
+            crate::sign_in_room::settle_completion(
+                &transaction,
+                ran_on,
+                &person,
+                job_agent.as_ref(),
+                job_status,
+                lane,
+                &artifacts_value,
+            )
+            .await?,
+        ),
+        _ => None,
+    };
 
     let job_session_id = job_payload
         .get("session_id")
@@ -4025,6 +4063,17 @@ pub(crate) async fn agent_complete(
                     crate::claude_code_lane::stamp_failure(map, code, lane_login);
                 }
             }
+            // The reply, or the failure, names the sign-in the turn ran on,
+            // and a failure at its plan's limit the agent's next AI with room
+            // (crate::sign_in_room): ids only, which Studio names for their
+            // owner alone.
+            if let (Some(end), Some(map)) = (sign_in_end.as_ref(), message_metadata.as_object_mut())
+            {
+                crate::sign_in_room::stamp(map, end.ran_on, end.backup);
+                if let Some(next) = end.next.filter(|_| outcome_lower == "failed") {
+                    crate::sign_in_room::stamp_next(map, next);
+                }
+            }
             // The turn's steps go with its reply, so its done line reads the
             // same after a reload whose page of history starts mid-turn.
             if let Some(turn_steps) =
@@ -4059,6 +4108,9 @@ pub(crate) async fn agent_complete(
             &job_payload,
             conversation_id,
             &outcome_lower,
+            sign_in_end
+                .as_ref()
+                .is_some_and(crate::sign_in_room::SignInEnd::goes_on_another_ai),
         )
         .await?
     } else {
@@ -6647,6 +6699,7 @@ pub(crate) fn build_agent_job_payload(
             JsonValue::Object(crate::claude_code_lane::payload_metadata(
                 &request.metadata,
                 &request.execution_mode,
+                request.goal_wakeup.is_some(),
             )),
         );
     } else if let Some(metadata) = request.metadata.as_object() {

@@ -436,6 +436,42 @@ pub(crate) async fn insert_user_credential(
                         "failed to move agents to the replacement credential: {error}"
                     ))
                 })?;
+            // And their backups on it: every entry that names the replaced
+            // sign-in names this one, where it stood (crate::sign_in_room).
+            transaction
+                .execute(
+                    "update user_agents
+                        set backup_ais = (
+                                select coalesce(
+                                    jsonb_agg(
+                                        case when backup.entry = jsonb_build_object('credentialId', $2::text)
+                                             then jsonb_build_object('credentialId', $3::text)
+                                             else backup.entry
+                                        end
+                                        order by backup.position
+                                    ),
+                                    '[]'::jsonb
+                                )
+                                  from jsonb_array_elements(user_agents.backup_ais)
+                                       with ordinality as backup(entry, position)
+                            ),
+                            updated_at = now()
+                      where user_id = $1
+                        and deleted_at is null
+                        and jsonb_typeof(backup_ais) = 'array'
+                        and backup_ais @> jsonb_build_array(jsonb_build_object('credentialId', $2::text))",
+                    &[
+                        &user_id,
+                        &replaced_id.to_string(),
+                        &credential_id.to_string(),
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!(
+                        "failed to move backups to the replacement credential: {error}"
+                    ))
+                })?;
             if !retire_user_credential(&transaction, &user_id, &replaced_id).await? {
                 return Err(internal_error("the replaced credential is no longer live"));
             }
@@ -473,8 +509,11 @@ pub(crate) async fn insert_user_credential(
 
 /// Retires one of the person's live connections: it is revoked and stops
 /// being the default, and their agents pinned to it fall back to the
-/// default. A revoke (`revoke_my_credential`) and a ChatGPT sign-in that
-/// takes a sign-in's place (`insert_user_credential`) retire one alike, the
+/// default, which has no backups, so their backup lists are cleared as
+/// choosing the default clears them (crate::sign_in_room). An entry naming
+/// it in another agent's backups drops out of that list as it is read. A
+/// revoke (`revoke_my_credential`) and a ChatGPT sign-in that takes a
+/// sign-in's place (`insert_user_credential`) retire one alike, the
 /// connection's row before its agents' rows. Gives whether there was one to
 /// retire.
 pub(crate) async fn retire_user_credential(
@@ -497,7 +536,7 @@ pub(crate) async fn retire_user_credential(
     client
         .execute(
             "update user_agents
-             set credential_id = null, updated_at = now()
+             set credential_id = null, backup_ais = '[]'::jsonb, updated_at = now()
              where user_id = $1 and credential_id = $2 and deleted_at is null",
             &[user_id, credential_id],
         )

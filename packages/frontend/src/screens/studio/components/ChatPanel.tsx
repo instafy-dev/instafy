@@ -154,7 +154,7 @@ import {
   UserMessageBubble,
   ChatRuntimeActivityContext,
 } from "./ChatMessageEntries";
-import { RunFailureRetryProvider } from "./RunFailureNotice";
+import { RunFailureRetryProvider, useReplySignInLineGate } from "./RunFailureNotice";
 import { useRunFailureRetryActions } from "./useRunFailureRetryActions";
 import {
   buildTimedSyntheticChatRows,
@@ -6182,6 +6182,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     return visibleJobMessages;
   }, [activeConversationId, messages, normalizedJobThread]);
+  // Which of the trace's replies name, for the viewer alone, the sign-in they
+  // ran on (docs/Local-Engine-Turns.md 11.20).
+  const showsSignInLineInTrace = useReplySignInLineGate(jobThreadMessages);
 
   // A plan job the controller ran again (a continued turn, a rate-limit
   // retry) ends with a quiet line to the run that stands for it.
@@ -6424,8 +6427,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               // The trace shows an assistant's header only where its gutter
               // face is gone. A turn engine's reply keeps it everywhere, for
               // the line under it that says whose own engine ran the turn
-              // (docs/Local-Engine-Turns.md 5.7); its face stays in the gutter.
-              const assistantHeaderEverywhere = showsAssistantHeader && showsTurnEngineSpeakerLine(messageMetadata);
+              // (docs/Local-Engine-Turns.md 5.7), and so does a reply that
+              // names the viewer's own sign-in it ran on (11.20); its face
+              // stays in the gutter.
+              const assistantHeaderEverywhere =
+                showsAssistantHeader &&
+                (showsTurnEngineSpeakerLine(messageMetadata) || showsSignInLineInTrace(messageMetadata));
               const assistantSpeakerIdentity = showsAssistantHeader ? (
                 <AssistantSpeakerIdentityLabel
                   handle={messageAgentIdentity?.handle ?? getDefaultAssistantHandle()}
