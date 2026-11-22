@@ -2759,8 +2759,11 @@ and no Stop of its turn (a press of **Let Octo continue** is such a message). Wh
 Instafy's browser is not on screen, a row at the end of the chat offers **Open
 Instafy's browser**, which brings the Browser view forward and sends Octo
 nothing. The chat's Browser tab stays while the pause waits, also on a device
-with no view saved, and selecting it opens the view; a view the person closed
-on that device stays closed, and the row leads back. When the browser no longer
+with no view saved, and selecting it opens the view on Instafy's browser, as
+the row does. Desktop would otherwise open its own browser for a chat with no
+view saved, and that one has no page or pause. A tab for a view the device
+already has opens that view where it is. A view the person closed on that
+device stays closed, and the row leads back. When the browser no longer
 lists the paused tab (it stopped, and its tabs went with it), the empty stage
 says "The page Octo paused on closed when Instafy's browser stopped. Send your
 request again to start over." in place of "No page open". While it waits on

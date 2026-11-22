@@ -51,8 +51,8 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
   const closeBrowser = conversationBrowser.close;
   const dirty = new Set(workspace.files.filter(file => file.modified !== file.generated).map(file => file.path));
   const resources: ConversationSurface[] = [
-    // A tab a waiting pause offers opens the view once selected (ChatPanel);
-    // until then nothing else here counts it as a view.
+    // A tab a waiting pause offers opens the view on Instafy's browser once
+    // selected (ChatPanel); until then nothing else here counts it as a view.
     ...(hasBrowser || conversationBrowser.offered ? [{ id: "browser", label: "Browser", panelId: "conversation-workspace-browser", icon: <Globe className="h-3.5 w-3.5" />,
       ...browserViewTabDetails({ pageTitle: conversationBrowser.pageTitle ?? null, agentName: conversationBrowser.agentName ?? null }),
       attention: conversationBrowser.attention ? <span className="text-amber-600">Approve</span> : undefined,

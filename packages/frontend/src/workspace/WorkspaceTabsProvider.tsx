@@ -53,7 +53,8 @@ export type ConversationBrowserState = {
   available: boolean;
   /**
    * No view is open, but a pause in Instafy's browser still waits for the
-   * viewer: the tab shows, and selecting it opens the view (ChatPanel).
+   * viewer: the tab shows, and selecting it opens the view on Instafy's
+   * browser (ChatPanel, useBrowserPauseTab).
    */
   offered?: boolean;
   /** A browser approval waits for the viewer. */

@@ -10,8 +10,9 @@ import { describe, expect, it } from "vitest";
  * ChatPanel is wired to a dozen providers, so mounting it in jsdom is not
  * practical (see chatPanelBrowserTabClose.test.ts). These assertions read the
  * source; useShowBrowserOnRequest.test.tsx covers which pause still waits,
- * BrowserPauseRow.test.tsx the row, and ConversationWorkspaceViews.test.tsx
- * the conversation's view bar.
+ * BrowserPauseRow.test.tsx the row, useBrowserPauseTab.test.tsx which
+ * browser the row and the Browser tab open, and
+ * ConversationWorkspaceViews.test.tsx the conversation's view bar.
  *
  * Dogfood, Nov 22: after a reload the morning after Octo paused on a sign-in,
  * its reply had no button, the chat had no Browser tab, and only the
@@ -27,6 +28,13 @@ function section(source: string, start: string, end: string): string {
   const to = source.indexOf(end, from);
   expect(to).toBeGreaterThan(from);
   return source.slice(from, to);
+}
+
+/** ChatPanel's call of useBrowserPauseTab, from the names it takes back to its arguments. */
+function pauseTabCall(): string {
+  const call = section(chatPanel, "offersTab: pauseOffersBrowserTab,", "});");
+  expect(call).toContain("} = useBrowserPauseTab({");
+  return call;
 }
 
 describe("ChatPanel's way back to a paused browser task", () => {
@@ -46,17 +54,20 @@ describe("ChatPanel's way back to a paused browser task", () => {
   });
 
   it("only brings Instafy's browser forward, and sends Octo nothing", () => {
-    const press = section(chatPanel, "const openBrowserForPause = useCallback(() => {", "\n  }, [");
-    expect(press.split("\n").slice(1).map((line) => line.trim())).toEqual([
-      "revealSharedBrowserApproval();",
-      "showBrowserForHumanInput();",
-    ]);
+    const pauseTab = pauseTabCall();
+    expect(pauseTab).toContain("open: openBrowserForPause,");
+    expect(pauseTab).toContain("pause: openPause,");
+    expect(pauseTab).toContain("revealInstafyBrowser: revealSharedBrowserApproval,");
+    expect(pauseTab).toContain("selectView: handleBrowserSubtabChange,");
   });
 
   it("keeps the chat's Browser tab while the pause waits, unless the person closed the view here", () => {
-    expect(chatPanel).toContain(
-      "const pauseOffersBrowserTab = openPause !== null && !hasBrowserView && browserSessionStateHydrated && !browserViewClosed;",
-    );
+    const pauseTab = pauseTabCall();
+    expect(pauseTab).toContain("offersTab: pauseOffersBrowserTab,");
+    expect(pauseTab).toContain("hasView: hasBrowserView,");
+    expect(pauseTab).toContain("viewStateHydrated: browserSessionStateHydrated,");
+    expect(pauseTab).toContain("viewClosed: browserViewClosed,");
+    expect(chatPanel).toContain("const browserTabShown = hasBrowserView || pauseOffersBrowserTab;");
     const tabs = section(chatPanel, "const resourceTabs: ConversationSurface[] = [", "...surfaces.files.map(");
     expect(tabs).toContain("...(browserTabShown ? [{");
     expect(tabs).toContain("onClose: closeBrowserTab,");
@@ -68,10 +79,24 @@ describe("ChatPanel's way back to a paused browser task", () => {
     expect(chatPanel).toContain("showComposerNavigationButton && (hasResources || pauseOffersBrowserTab ||");
   });
 
-  it("opens the view when that tab is selected in the conversation's view bar", () => {
-    const opens = section(chatPanel, "conversationWorkspace && !jobThread && surfaces.activeId === \"browser\" && !browserSessionOpen &&", "}, [");
-    expect(opens).toContain("(hasHiddenBrowserSession || pauseOffersBrowserTab)");
-    expect(opens).toContain("handleToggleBrowserSession();");
+  // Review, Nov 22: on Desktop, which shows its own browser for a chat with
+  // no view saved, picking the tab opened that browser, with no pause in it.
+  it("opens Instafy's browser for the tab, from the chat's own tabs and from the conversation's view bar", () => {
+    const pauseTab = pauseTabCall();
+    expect(pauseTab).toContain("select: selectChatView,");
+    expect(chatPanel.match(/onSelect=\{selectChatView\}/g)).toHaveLength(2);
+    expect(chatPanel).not.toContain("onSelect={handleBrowserSubtabChange}");
+    expect(pauseTab).toContain(
+      'browserPicked: conversationWorkspace && !jobThread && surfaces.activeId === "browser" && !browserSessionOpen,',
+    );
+    // A hidden browser's own tab opens its view where it is, as before.
+    const hidden = section(
+      chatPanel,
+      'if (conversationWorkspace && !jobThread && surfaces.activeId === "browser" && hasHiddenBrowserSession && !browserSessionOpen) {',
+      "}, [",
+    );
+    expect(hidden).toContain("handleToggleBrowserSession();");
+    expect(hidden).not.toContain("pauseOffersBrowserTab");
   });
 
   it("tells the Browser view which tab the pause is on", () => {
