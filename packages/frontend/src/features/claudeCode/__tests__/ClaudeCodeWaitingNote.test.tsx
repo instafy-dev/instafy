@@ -182,7 +182,7 @@ describe("the note under a waiting Claude Code turn", () => {
 
   // 11.19: a computer runs a turn only on a login set up there.
   it("says the turn's login isn't set up here, rather than offering a start that wouldn't run it", async () => {
-    desktopStatus = { ...desktopStatus, logins: [{ id: PERSONAL, folder: "/Users/sam/.claude-personal" }] };
+    desktopStatus = { ...desktopStatus, logins: [{ id: PERSONAL, folder: "/home/sam/.claude-personal" }] };
     await render();
     expect(note()).toBe(
       "The Claude Code login this turn runs on isn't set up on this computer. Set it up in Your AI to run it here.",

@@ -116,7 +116,7 @@ describe("mapControllerRuntimeClaudeCode", () => {
     const mapped = mapControllerRuntimeClaudeCode({
       ...READY,
       logins: {
-        [WORK]: { ...SIGNED_IN, configDir: "/Users/sam/.claude-work", email: "sam@example.com" },
+        [WORK]: { ...SIGNED_IN, configDir: "/home/sam/.claude-work", email: "sam@example.com" },
         [PERSONAL.toUpperCase()]: SIGNED_IN,
         "not-a-uuid": SIGNED_IN,
         "__proto__": SIGNED_IN,

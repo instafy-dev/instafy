@@ -136,12 +136,12 @@ describe("the logins Desktop has set up here", () => {
     const parsed = parseClaudeCodeDesktopStatus({
       ...on,
       logins: [
-        { id: WORK, folder: "/Users/sam/.claude-work", problem: "writable_by_others" },
+        { id: WORK, folder: "/home/sam/.claude-work", problem: "writable_by_others" },
         { id: USUAL.toUpperCase(), folder: null },
       ],
     });
     expect(parsed?.logins).toEqual([
-      { id: WORK, folder: "/Users/sam/.claude-work", problem: "writable_by_others" },
+      { id: WORK, folder: "/home/sam/.claude-work", problem: "writable_by_others" },
       { id: USUAL, folder: null },
     ]);
     expect(parsed && claudeCodeLoginSetUpHere(parsed, USUAL)).toBe(true);
@@ -157,12 +157,12 @@ describe("the logins Desktop has set up here", () => {
         { id: WORK, folder: "relative/folder" },
         { id: WORK, folder: 42 },
         { id: WORK },
-        { id: WORK, folder: "/Users/sam/.claude-work", problem: "made_up" },
+        { id: WORK, folder: "/home/sam/.claude-work", problem: "made_up" },
         { id: WORK, folder: null },
         "not an entry",
       ],
     });
-    expect(parsed?.logins).toEqual([{ id: WORK, folder: "/Users/sam/.claude-work" }]);
+    expect(parsed?.logins).toEqual([{ id: WORK, folder: "/home/sam/.claude-work" }]);
     expect(parseClaudeCodeDesktopStatus({ ...on, logins: "all" })?.logins).toEqual([]);
     const many = Array.from({ length: 12 }, (_, index) => ({
       id: `aaaaaaaa-bbbb-4ccc-8ddd-${String(index).padStart(12, "0")}`,

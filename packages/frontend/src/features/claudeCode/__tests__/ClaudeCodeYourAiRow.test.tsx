@@ -44,7 +44,7 @@ const NOT_MADE =
 const LOGIN = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
 const WORK = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
 const ELSEWHERE = "3c9d1e58-2a7b-4f60-8c1d-9e2f3a4b5c03";
-const WORK_FOLDER = "/Users/sam/.claude-work";
+const WORK_FOLDER = "/home/sam/.claude-work";
 const FIRST = { id: LOGIN, label: "Claude Code", createdAt: "2026-11-01T09:00:00Z" };
 
 type DesktopLogin = { id: string; folder: string | null; problem?: string };
@@ -914,7 +914,7 @@ describe("Claude Code in Your AI", () => {
       expect(login(ELSEWHERE, "status")).toBe("Not set up on this computer");
 
       // With no login in the usual folder here, that folder is the one offered first.
-      desktopStatus = { ...ON, logins: [{ id: LOGIN, folder: "/Users/sam/.claude-personal" }] };
+      desktopStatus = { ...ON, logins: [{ id: LOGIN, folder: "/home/sam/.claude-personal" }] };
       desktopSetsUp();
       await act(async () => {
         window.dispatchEvent(new Event("focus"));

@@ -60,7 +60,7 @@ describe("the person's Claude Code logins", () => {
     answer(200, {
       logins: [
         { id: PERSONAL, label: "Personal", createdAt: "2026-11-01T09:00:00Z" },
-        { id: WORK.toUpperCase(), label: " Work ", createdAt: "2026-11-02T09:00:00Z", folder: "/Users/sam/.claude-work" },
+        { id: WORK.toUpperCase(), label: " Work ", createdAt: "2026-11-02T09:00:00Z", folder: "/home/sam/.claude-work" },
         { id: "not-a-uuid", label: "Odd", createdAt: "2026-11-03T09:00:00Z" },
         { id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", label: "", createdAt: "2026-11-03T09:00:00Z" },
         { id: PERSONAL, label: "Twice", createdAt: "2026-11-04T09:00:00Z" },
