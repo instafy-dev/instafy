@@ -165,11 +165,13 @@ const NO_SPAN_AFTER = `(?!(?:,?\\s*\\d{4})?\\s*(?:to|until|till|through|[–—-
  *  nor words put together while the page runs ("checked " + day), which the check cannot read. */
 export const TYPED_READ = new RegExp(`${NO_CAPTION_BEFORE}\\b(?:checked|seen)(?:\\s*:)?\\s+(?:on\\s+)?(?:${WEEKDAY}\\.?,?\\s+)?(?:the\\s+)?${DAY}${NO_SPAN_AFTER}`, "i");
 
-/** The typed words as a line holds them, for the check to say what to delete: "checked 20 Nov 2026 on maker.example",
- *  with the day's year and the site the caption names after it, which are part of what was typed. */
-const TYPED_WORDS = new RegExp(`${TYPED_READ.source}(?:(?:,?\\s+|-)\\d{4}\\b)?(?:\\s+on\\s+[\\w-]+(?:\\.[\\w-]+)+)?`, "i");
+/** The typed words as a line holds them, each time it has them, for the check to say what to delete: "checked 20 Nov
+ *  2026 on maker.example", with the day's year and the site the caption names after it, which are part of what was
+ *  typed. A line that has them twice names both: deleting only the first, a check would find the second and say that
+ *  rewording never passes. */
+const TYPED_WORDS = new RegExp(`${TYPED_READ.source}(?:(?:,?\\s+|-)\\d{4}\\b)?(?:\\s+on\\s+[\\w-]+(?:\\.[\\w-]+)+)?`, "gi");
 export function typedWords(line) {
-  return TYPED_WORDS.exec(String(line ?? ""))?.[0] ?? "";
+  return [...String(line ?? "").matchAll(TYPED_WORDS)].map((found) => found[0]);
 }
 
 /** A line of at most 160 characters that holds the words found in it at [at, end): the whole line when it is that
@@ -1168,8 +1170,8 @@ function typedLines(typed, { again = false } = {}) {
   const lines = [`TYPED: ${typed.length} line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:`];
   for (const { file, line, fact } of typed.slice(0, 8)) {
     const words = typedWords(line);
-    const where = words === line ? "the whole line" : `from "${line}"`;
-    lines.push(`- ${file}: delete "${words}", ${where}${fact ? '. Its fact says how its page was read, so site.trust(fact) or site.cite(fact) writes them from its "date" and "viewer"' : ""}.`);
+    const where = words.length === 1 && words[0] === line ? "the whole line" : `from "${line}"`;
+    lines.push(`- ${file}: delete ${words.map((w) => `"${w}"`).join(" and ")}, ${where}${fact ? '. Its fact says how its page was read, so site.trust(fact) or site.cite(fact) writes them from its "date" and "viewer"' : ""}.`);
   }
   if (typed.length > 8) lines.push(`- and ${typed.length - 8} more line(s): delete them there too.`);
   lines.push('Only site.trust(fact) and site.cite(fact) write those words, from a fact that says how its page was read ({"v", "src", "url", "date", "viewer"}): where a line is about such a fact, that call goes in the words\' place. A tool or a form nobody ran has no such fact: its line keeps its name and its link and says "not run", with no day. A day that is the page\'s own content, not when a source was read, goes in a cell or field of its own.');

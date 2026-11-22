@@ -560,7 +560,22 @@ test("the check says which words to delete on each typed line, quotes nothing th
     ["Tip: go on Thursday. Museum · checked 20 Nov 2026 on museum.example", "checked 20 Nov 2026 on museum.example"],
     ["Last checked: Thu 20 Nov", "checked: Thu 20 Nov"], ["Checked on November 8, 2026, by phone", "Checked on November 8, 2026"],
     ["€549 at Shop · seen 17 Oct", "seen 17 Oct"], ["checked 20-Nov-2026 on shop.example.net.", "checked 20-Nov-2026 on shop.example.net"],
-    ["Prices checked 2026-11-20 on the shop's page", "checked 2026-11-20"], ["Open daily", ""]]) assert.equal(typedWords(line), words, line);
+    ["Prices checked 2026-11-20 on the shop's page", "checked 2026-11-20"], ["Open daily", ""]]) assert.deepEqual(typedWords(line), words ? [words] : [], line);
+  // a line that has them twice names both, so deleting what the check names passes
+  assert.deepEqual(typedWords("Hours checked 20 Nov 2026 on museum.example · €12 · seen 20 Nov"), ["checked 20 Nov 2026 on museum.example", "seen 20 Nov"]);
+  const twice = blankSite(`(function () {
+  "use strict";
+  site.start({ data: null, render: function () {
+    site.head({ title: "Tickets" });
+    document.getElementById("list").replaceChildren(site.h("p", {}, "Hours checked 20 Nov 2026 · Prices seen 20 Nov"));
+  } });
+})();
+`);
+  try {
+    assert.match(run("check", twice).stdout, /^- app\.js: delete "checked 20 Nov 2026" and "seen 20 Nov", from "Hours checked 20 Nov 2026 · Prices seen 20 Nov"\.$/m);
+  } finally {
+    fs.rmSync(twice, { recursive: true, force: true });
+  }
 
   const page = (hours, planner) => `(function () {
   "use strict";

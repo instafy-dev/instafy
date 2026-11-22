@@ -66,10 +66,10 @@ own kind of page.
   missing and why. Check with `instafy bind check <dir> --expect "<item>,<item>"` (it also lists blank values, values
   without their page or date, a source line with no link, and a filter applied without `site.byFilter`) and fix what
   it lists; a check that passes posts the card. A failing check never holds the card back: it names the card's
-  command. Two findings are the exception: files loaded from outside the page's folder, and a typed "checked
-  <date>" or "seen <date>", which is always deleted, never reworded (the card's own command names it too). A site
-  with no binder, such as a map a builder skill hosts: post the card first (step 3), then run that skill's own
-  check.
+  command. Only two findings hold it until they are fixed: files loaded from outside the page's folder, and a typed
+  "checked <date>" or "seen <date>", which is always deleted, never reworded (then the card's own command posts no
+  card either). A site with no binder, such as a map a builder skill hosts: post the card first (step 3), then run
+  that skill's own check.
 - Facts come from pages you opened this turn, never from memory unless asked (above): the builder skill's source or
   fetch command when it has one, else `instafy-web-research` (`instafy-comparing` for prices and reviews per item)
   or Instafy's browser (`instafy-browser-automation`). Keep each fact's link and date.
