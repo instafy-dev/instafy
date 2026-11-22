@@ -4623,7 +4623,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do on each page it opens, named by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named. A card naming none is refused: search first, then hand over what it found. Never put the person's details, such as an order number or an e-mail address, in it.\n\
 - `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
-- With only this card, `summary` shows unless the person or your earlier replies gave every address it opens: such a card opens by itself. `summary` never says a page opened, or what it shows, before a browser tool saw it, or what the browser will submit, send or buy.\n\
+- With only this card, `summary` shows unless the person or your earlier replies gave every address it opens: such a card opens by itself. `summary` never says a page opened, or what it shows, before a browser tool saw it, what the browser will submit, send or buy, or that you hand pages to the browser: the card says what happens next.\n\
 - Skip it when a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
@@ -16061,8 +16061,20 @@ fn rules_its_refused_cards_broke(reply: &JsonValue) -> Vec<&'static str> {
 /// The line under the turn as the retry after a refused card begins: which of a card's rules it
 /// broke, and what the retry names instead. It said "named no page it opens or held an e-mail
 /// address" whichever it was, and nothing of what comes instead. No rule known names both.
-fn refused_card_retry_message(_broken: &[&str]) -> &'static str {
-    "Retrying: the browser card named no page it opens or held an e-mail address."
+fn refused_card_retry_message(broken: &[&str]) -> &'static str {
+    let named_no_page = broken.contains(&browser_request::NAMES_NO_PAGE);
+    let held_an_email = broken.contains(&browser_request::HOLDS_AN_EMAIL_ADDRESS);
+    match (named_no_page, held_an_email) {
+        (true, false) => {
+            "Retrying: the browser card named no page by its address. The retry names each page it opens, or the site's home page for an address it would only guess."
+        }
+        (false, true) => {
+            "Retrying: the browser card held an e-mail address. The retry names the page without the person's details."
+        }
+        _ => {
+            "Retrying: the browser card named no page by its address or held an e-mail address. The retry names each page it opens, or the site's home page for an address it would only guess, without the person's details."
+        }
+    }
 }
 
 /// What the retry after a refused card reads ([`refused_browser_card`]): which of a card's rules
@@ -16074,17 +16086,29 @@ fn refused_card_retry_message(_broken: &[&str]) -> &'static str {
 /// the first hadn't. A page whose address would be a guess, such as a shop's search page, is named
 /// by its site's home page, where the browser goes on from that site's own links and search box.
 /// No rule known names both.
-fn refused_card_retry_prompt(prompt: &str, _broken: &[&str]) -> String {
-    let requirement = "Your previous answer's `request_browser` card was refused: a card names each page it opens by its address, and never the person's details. For a page you have no address for, search first, then hand over what it found: answer from the pages you read, or end with one card naming each page it opens by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named, and what to do there. Never put the person's details, such as an order number or an e-mail address, in a card. If this card is refused too, only your words show: make them stand alone.";
+fn refused_card_retry_prompt(prompt: &str, broken: &[&str]) -> String {
+    let unknown = broken.is_empty();
+    let mut rules = String::new();
+    if unknown || broken.contains(&browser_request::NAMES_NO_PAGE) {
+        rules.push_str(
+            "\n- It named no page it opens. Name each page it opens by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named, and what to do there. For a page whose address you would only guess, such as a site's search page, name that site's home page.",
+        );
+    }
+    if unknown || broken.contains(&browser_request::HOLDS_AN_EMAIL_ADDRESS) {
+        rules.push_str(
+            "\n- It held an e-mail address: name the page and what to do there without the person's details.",
+        );
+    }
     format!(
         "{prompt}\n\nIMPORTANT RETRY REQUIREMENT:\n\
-        - {requirement}\n\
+        - Your previous answer's `request_browser` card was refused for what its task says. Fix only the card:{rules}\n\
+        - This turn's searches and reads are done: do not search or read any page again. Write the card from what they found, or answer from the pages you read with no card.\n\
+        - Say in a few plain words what you couldn't read, with its link, never how the reader was stopped or that you hand pages to the browser: the card says what happens next.\n\
+        - Never put the person's details, such as an order number or an e-mail address, in a card. If this card is refused too, only your words show: make them stand alone.\n\
         - Do not send an interim progress/status update as the final assistant message.\n\
-        - Complete the latest user request before the final response. If completion requires observing the workspace or running tools, do that tool work first.\n\
-        \n\
         - Finish with exactly one final assistant message that is valid JSON matching the required schema.\n\
         - Include a concrete `summary`, and include any `files` entries that describe the actual workspace changes.\n\n\
-        Retry the latest user request now."
+        Write the answer and its card now."
     )
 }
 
@@ -16096,9 +16120,17 @@ fn refused_card_retry_prompt(prompt: &str, _broken: &[&str]) -> String {
 /// again. A lane that keeps no thread starts its retry afresh, as any retry does, with what an
 /// Instafy AI turn's searches found in its prompt ([`findings_for_a_fresh_retry`]).
 fn refused_card_retry_options(
-    _retry: &mut CodexRunOptions,
-    _first_attempt_thread: Option<&JsonValue>,
+    retry: &mut CodexRunOptions,
+    first_attempt_thread: Option<&JsonValue>,
 ) {
+    if retry.persist_conversation_thread
+        && let Some(thread) = first_attempt_thread
+    {
+        retry.provider_conversation_state = Some(thread.clone());
+    }
+    retry.disable_native_web_search = true;
+    retry.disable_shell_tool = true;
+    retry.require_first_tool_call = false;
 }
 
 fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> String {
