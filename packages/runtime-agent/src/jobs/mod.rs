@@ -8924,6 +8924,7 @@ impl JobProcessor {
             // The turn's steps reach the chat, so it may search when the job's grant lets it
             // (`codex.rs`): never in a routing step or a browser or granted turn.
             disable_native_web_search: false,
+            disable_local_browser: false,
             // With Instafy AI each search costs the person credits, so the message keeps to its
             // allowance, which a hand-back goes on with.
             managed_web_search: managed_web_search_allowance(
@@ -9534,6 +9535,7 @@ impl JobProcessor {
         suppress_multi_agent_plan_actions_for_worker(job, &mut outcome);
         log_browser_requests_dropped_as_read(job, &output.final_json);
         suppress_browser_requests_where_unsupported(job, &mut outcome);
+        hold_cards_for_pages_its_reader_did_not_read(&mut outcome, &[&output.events]);
         let shared_browser_opened_no_page = shared_browser_execution_missing_after_attempt(
             explicit_shared_browser_execution,
             &interim_messages,
@@ -9928,9 +9930,10 @@ impl JobProcessor {
             } else {
                 "transient_upstream_error"
             };
-            // The retry after a refused card fixes only the card: its line and prompt name the
-            // rule the card broke, and it runs on the first attempt's thread with no search and no
-            // read of its own ([`refused_card_retry_options`]).
+            // The retry after a refused card fixes the card: its line and prompt name the rules
+            // the card broke, and it runs on the first attempt's thread, with no search and no
+            // read of its own after an attempt that searched or read
+            // ([`refused_card_retry_options`]).
             let fixes_a_refused_card = retry_reason
                 == codex_fallback_retry_reason(CodexFallbackSummaryKind::RefusedBrowserCard)
                 && final_output_mode != RuntimeFinalOutputMode::PlainTextWrite;
@@ -9939,6 +9942,8 @@ impl JobProcessor {
             } else {
                 Vec::new()
             };
+            let first_attempt_searched_or_read = fixes_a_refused_card
+                && attempt_searched_or_read(&codex_run_options, &output.events);
             let retry_message = if fixes_a_refused_card {
                 refused_card_retry_message(&refused_card_rules).to_string()
             } else if personal_browser_execution_missing {
@@ -10084,9 +10089,11 @@ impl JobProcessor {
                             )
                         }
                     }
-                    CodexFallbackSummaryKind::RefusedBrowserCard => {
-                        refused_card_retry_prompt(&prompt, &refused_card_rules)
-                    }
+                    CodexFallbackSummaryKind::RefusedBrowserCard => refused_card_retry_prompt(
+                        &prompt,
+                        &refused_card_rules,
+                        first_attempt_searched_or_read,
+                    ),
                     CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
                     | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
                         codex_fallback_retry_prompt(&prompt, kind)
@@ -10130,6 +10137,7 @@ impl JobProcessor {
                 refused_card_retry_options(
                     &mut retry_codex_run_options,
                     output_provider_conversation_state.as_ref(),
+                    first_attempt_searched_or_read,
                 );
             }
             let mut retry_prompt_context = prompt_context.clone();
@@ -10350,6 +10358,10 @@ impl JobProcessor {
             suppress_multi_agent_plan_actions_for_worker(job, &mut retry_outcome);
             log_browser_requests_dropped_as_read(job, &retry_output.final_json);
             suppress_browser_requests_where_unsupported(job, &mut retry_outcome);
+            hold_cards_for_pages_its_reader_did_not_read(
+                &mut retry_outcome,
+                &[&output.events, &retry_output.events],
+            );
             let mut retry_codex_fallback_summary_kind =
                 classify_internal_codex_fallback_summary(&retry_outcome.summary)
                     .or_else(|| declined_a_turn_that_needs_an_answer(job, &retry_outcome.summary));
@@ -10791,6 +10803,10 @@ impl JobProcessor {
                 suppress_multi_agent_plan_actions_for_worker(job, &mut finalization_outcome);
                 log_browser_requests_dropped_as_read(job, &finalization_output.final_json);
                 suppress_browser_requests_where_unsupported(job, &mut finalization_outcome);
+                hold_cards_for_pages_its_reader_did_not_read(
+                    &mut finalization_outcome,
+                    &[&output.events, &retry_output.events],
+                );
                 let finalization_fallback_kind =
                     classify_internal_codex_fallback_summary(&finalization_outcome.summary);
                 if finalization_fallback_kind.is_none() {
@@ -15049,6 +15065,35 @@ fn post_only_the_card(job: &LeaseJob, outcome: &mut CodexOutcome) {
     }
 }
 
+/// Leaves each card of an answer that opens a site whose page this turn's own reader didn't read
+/// for the person to press ([`browser_request::BrowserRequest::wait_for_a_press_where_it_opens`]),
+/// from the events of the turn's attempts so far (`events`). A page the reader couldn't read ends
+/// in a few plain words, its link and one card (the research skill's Stops), and Studio opens a
+/// card that names only addresses the person or an earlier reply gave by itself: on an address the
+/// person typed, the browser would read with no press a page robots.txt refused the reader. Such a
+/// card's turn keeps its words above it ([`card_waits_for_the_person`]).
+fn hold_cards_for_pages_its_reader_did_not_read(
+    outcome: &mut CodexOutcome,
+    events: &[&[JsonValue]],
+) {
+    if !outcome
+        .actions
+        .iter()
+        .any(|action| matches!(action, CodexAction::RequestBrowser(_)))
+    {
+        return;
+    }
+    let sites = browser_request::sites_its_reader_did_not_read(events);
+    if sites.is_empty() {
+        return;
+    }
+    for action in &mut outcome.actions {
+        if let CodexAction::RequestBrowser(request) = action {
+            request.wait_for_a_press_where_it_opens(&sites);
+        }
+    }
+}
+
 /// Whether the card a turn posts, its first `request_browser`
 /// ([`build_final_messages_from_actions`]), waits for the person to open it, as Studio decides
 /// by the hosts its task names (`browserAutoStartAddressesSeen`, `useChatBrowserRequest`): one
@@ -16062,13 +16107,49 @@ fn codex_fallback_retry_message(kind: CodexFallbackSummaryKind) -> &'static str 
 }
 
 /// Which of a card's rules ([`browser_request::REFUSED_FOR_ITS_TASK`]) an answer's refused cards
-/// broke, each once, in that order: what the retry's line and prompt name.
+/// broke, each once, in that order, a card's every one
+/// ([`browser_request::rules_refused_cards_broke`]): what the retry's line and prompt name.
 fn rules_its_refused_cards_broke(reply: &JsonValue) -> Vec<&'static str> {
-    let dropped = browser_request::dropped_requests(reply);
+    let broken = browser_request::rules_refused_cards_broke(reply);
     browser_request::REFUSED_FOR_ITS_TASK
         .into_iter()
-        .filter(|rule| dropped.contains(rule))
+        .filter(|rule| broken.contains(rule))
         .collect()
+}
+
+/// Whether a turn's attempt looked anything up: a web search of the AI's own (an Instafy AI
+/// message's counted searches included), or a command or tool that reads or searches pages
+/// (`instafy web read`, `instafy web search`, the owner-local browser's `observe`). Only after
+/// such an attempt does the retry after a refused card add no search and no read
+/// ([`refused_card_retry_options`]): an attempt that answered at once with a card naming no
+/// page found nothing to write the card from, and with no shell and no search its retry could
+/// neither read the shop's policy page nor find the hotels' own pages.
+fn attempt_searched_or_read(attempt: &CodexRunOptions, events: &[JsonValue]) -> bool {
+    if attempt
+        .managed_web_search
+        .as_ref()
+        .is_some_and(|searches| !searches.found().is_empty())
+    {
+        return true;
+    }
+    events.iter().any(|event| {
+        let item = &event["item"];
+        if event["type"] != "item.completed" {
+            return false;
+        }
+        match item["type"].as_str() {
+            Some("web_search") => true,
+            Some("command_execution") => activity_labels::command_activity(
+                item.get("command_argv"),
+                item["command"].as_str().unwrap_or_default(),
+            )
+            .is_some_and(|activity| {
+                activity["key"] == "instafy/web-read" || activity["key"] == "instafy/web-search"
+            }),
+            Some("mcp_tool_call") => item["server"] == crate::local_browser::MCP_SERVER_NAME,
+            _ => false,
+        }
+    })
 }
 
 /// The line under the turn as the retry after a refused card begins: which of a card's rules it
@@ -16091,15 +16172,17 @@ fn refused_card_retry_message(broken: &[&str]) -> &'static str {
 }
 
 /// What the retry after a refused card reads ([`refused_browser_card`]): which of a card's rules
-/// its card broke, what to name instead, and that only the card needs fixing. It runs on the first
-/// attempt's thread with no web search and no shell ([`refused_card_retry_options`]), so it writes
-/// the card again from what that attempt searched and read. Told only to "search first, then hand
-/// over what it found", a price question and a review question ran their whole lookup again after
-/// the retry line (60 and 91 s, a local test, Nov 20), and the second pass of one found nothing
-/// the first hadn't. A page whose address would be a guess, such as a shop's search page, is named
-/// by its site's home page, where the browser goes on from that site's own links and search box.
-/// No rule known names both.
-fn refused_card_retry_prompt(prompt: &str, broken: &[&str]) -> String {
+/// its card broke and what to name instead. After an attempt that searched or read
+/// (`searched_or_read`, [`attempt_searched_or_read`]), only the card needs fixing: the retry runs
+/// on the first attempt's thread with no web search and no shell ([`refused_card_retry_options`]),
+/// so it writes the card again from what that attempt searched and read. Told only to "search
+/// first, then hand over what it found", a price question and a review question ran their whole
+/// lookup again after the retry line (60 and 91 s, a local test, Nov 20), and the second pass of
+/// one found nothing the first hadn't. An attempt that looked nothing up is told to find the page
+/// first. A page whose address would be a guess, such as a shop's search page, is named by its
+/// site's home page, where the browser goes on from that site's own links and search box. No rule
+/// known names both.
+fn refused_card_retry_prompt(prompt: &str, broken: &[&str], searched_or_read: bool) -> String {
     let unknown = broken.is_empty();
     let mut rules = String::new();
     if unknown || broken.contains(&browser_request::NAMES_NO_PAGE) {
@@ -16112,10 +16195,20 @@ fn refused_card_retry_prompt(prompt: &str, broken: &[&str]) -> String {
             "\n- It held an e-mail address: name the page and what to do there without the person's details.",
         );
     }
+    let (fix, found) = if searched_or_read {
+        (
+            "Fix only the card:",
+            "\n- This turn's searches and reads are done: do not search or read any page again. Write the card from what they found, or answer from the pages you read with no card.",
+        )
+    } else {
+        (
+            "Fix the card:",
+            "\n- This turn read and searched nothing yet: find the page first, then answer from what you read, or name the page in the card.",
+        )
+    };
     format!(
         "{prompt}\n\nIMPORTANT RETRY REQUIREMENT:\n\
-        - Your previous answer's `request_browser` card was refused for what its task says. Fix only the card:{rules}\n\
-        - This turn's searches and reads are done: do not search or read any page again. Write the card from what they found, or answer from the pages you read with no card.\n\
+        - Your previous answer's `request_browser` card was refused for what its task says. {fix}{rules}{found}\n\
         - Say in a few plain words what you couldn't read, with its link, never how the reader was stopped or that you hand pages to the browser: the card says what happens next.\n\
         - Never put the person's details, such as an order number or an e-mail address, in a card. If this card is refused too, only your words show: make them stand alone.\n\
         - Do not send an interim progress/status update as the final assistant message.\n\
@@ -16127,23 +16220,30 @@ fn refused_card_retry_prompt(prompt: &str, broken: &[&str]) -> String {
 
 /// The options of the retry after a refused card ([`refused_card_retry_prompt`]): the first
 /// attempt's own thread, which holds what that attempt searched and read and the answer whose card
-/// was refused, with no web search and no shell, so the retry fixes the card from what was found
-/// and runs no new search or read (`instafy web read` and `instafy web search` are commands). A
-/// first message's retry started a thread of its own, which held none of it, and ran the lookup
-/// again. A lane that keeps no thread starts its retry afresh, as any retry does, with what an
-/// Instafy AI turn's searches found in its prompt ([`findings_for_a_fresh_retry`]).
+/// was refused. After an attempt that searched or read (`searched_or_read`,
+/// [`attempt_searched_or_read`]) the retry has no web search, no shell and no owner-local browser,
+/// so it fixes the card from what was found and runs no new search or read (`instafy web read`
+/// and `instafy web search` are commands). A first message's retry started a thread of its own,
+/// which held none of it, and ran the lookup again. After an attempt that looked nothing up it
+/// keeps them, to find the page its card names. A lane that keeps no thread starts its retry
+/// afresh, as any retry does, with what an Instafy AI turn's searches found in its prompt
+/// ([`findings_for_a_fresh_retry`]).
 fn refused_card_retry_options(
     retry: &mut CodexRunOptions,
     first_attempt_thread: Option<&JsonValue>,
+    searched_or_read: bool,
 ) {
     if retry.persist_conversation_thread
         && let Some(thread) = first_attempt_thread
     {
         retry.provider_conversation_state = Some(thread.clone());
     }
-    retry.disable_native_web_search = true;
-    retry.disable_shell_tool = true;
     retry.require_first_tool_call = false;
+    if searched_or_read {
+        retry.disable_native_web_search = true;
+        retry.disable_shell_tool = true;
+        retry.disable_local_browser = true;
+    }
 }
 
 fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> String {
@@ -16160,7 +16260,7 @@ fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> 
         // Its retry names the rules its card broke: these are the words for a card whose rules
         // aren't known.
         CodexFallbackSummaryKind::RefusedBrowserCard => {
-            return refused_card_retry_prompt(prompt, &[]);
+            return refused_card_retry_prompt(prompt, &[], true);
         }
     };
     let observation_requirement = match kind {
@@ -32306,6 +32406,74 @@ mod tests {
         );
     }
 
+    /// A page the turn's own reader couldn't read ends in a few plain words, its link and one card
+    /// (the research skill's Stops), and that card waits for the person's press, also where they
+    /// typed its address or an earlier reply gave it, with the turn's words above it. Studio opened
+    /// such a card by itself, so the browser read with no press a page robots.txt refused the
+    /// reader (the museum's page in a person's message, as a reader stop of a lookup drive's).
+    /// A card for a page the reader read opens by itself as before, with no words of its own.
+    #[test]
+    fn a_card_for_a_page_the_reader_was_refused_waits_for_the_persons_press() {
+        let page = "https://www.museum.example/en/visit";
+        let words = format!(
+            "Not read: the museum's visit page ({page}). I couldn't confirm its Sunday hours."
+        );
+        let raw = json!({
+            "summary": words.as_str(),
+            "files": [],
+            "actions": [{
+                "type": "request_browser",
+                "task": format!("Open {page} and find the museum's Sunday opening hours."),
+            }],
+        });
+        let read = |status: &str, exit_code: i64| {
+            let output = format!(
+                "{{\n \"ok\": true,\n \"viewer\": \"server fetch\",\n \"pages\": [\n  {{\n   \"requestedUrl\": \"{page}\",\n   \"status\": \"{status}\",\n   \"code\": \"robots\",\n   \"provenance\": {{\n    \"requestedUrl\": \"{page}\",\n    \"finalUrl\": \"{page}\"\n   }},\n   \"redirects\": [],\n   \"fromCache\": false\n  }}\n ]\n}}"
+            );
+            json!({"type": "item.completed", "item": {
+                "type": "command_execution",
+                "command": format!("instafy web read {page} --json --find 'Sunday'"),
+                "exit_code": exit_code,
+                "status": "completed",
+                "aggregated_output": output,
+            }})
+        };
+        let posted = |job: &LeaseJob, events: &[JsonValue]| {
+            let mut outcome = extract_codex_outcome(&raw).expect("extract outcome");
+            hold_cards_for_pages_its_reader_did_not_read(&mut outcome, &[events]);
+            post_only_the_card(job, &mut outcome);
+            let messages = build_final_messages_from_outcome(&outcome, None);
+            assert_eq!(messages.len(), 1, "{raw}");
+            let card =
+                messages[0].metadata.clone().expect("card")["details"]["browserRequest"].clone();
+            (outcome.summary, card["waitsForThePerson"] == json!(true))
+        };
+        let typed = chat_turn(
+            json!([]),
+            &format!("What are the museum's Sunday hours? {page}"),
+            1,
+        );
+        let earlier = chat_turn(
+            json!([
+                { "role": "user", "content": "Where are the museum's opening hours?" },
+                { "role": "assistant", "content": format!("They are on {page}.") },
+            ]),
+            "Check them for this Sunday.",
+            1,
+        );
+        let refused = [read("stopped", 2)];
+        for job in [&typed, &earlier] {
+            assert_eq!(posted(job, &refused), (words.clone(), true));
+            // Before the person's press nothing opens: as before for a page the reader read.
+            assert_eq!(posted(job, &[read("read", 0)]), (String::new(), false));
+            assert_eq!(posted(job, &[]), (String::new(), false));
+        }
+        // A page Octo found itself waited already, and now says why to Studio too.
+        let found = chat_turn(json!([]), "What are the museum's Sunday hours?", 1);
+        assert_eq!(posted(&found, &refused), (words.clone(), true));
+        assert_eq!(posted(&found, &[]), (words, false));
+    }
+
     /// Studio reads a host wherever a task holds a name with an ending: a page's file name
     /// (`…/connections.html`) and a query's value are hosts to it, as the site's own is, and a
     /// host under `localhost` is one it can't check. So it holds a card for such a page though
@@ -32849,9 +33017,12 @@ mod tests {
         let retry = refused_card_retry_prompt(
             "Latest user request: the return policy",
             &rules_its_refused_cards_broke(&no_page),
+            false,
         );
         for phrase in [
             "by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named",
+            // It named no page and held an e-mail address: both rules are named.
+            "- It held an e-mail address: name the page and what to do there without the person's details.",
             "Never put the person's details, such as an order number or an e-mail address, in a card.",
         ] {
             assert!(retry.contains(phrase), "{phrase}");
@@ -32891,7 +33062,24 @@ mod tests {
             rules_its_refused_cards_broke(&answer(vec![email.clone(), no_page.clone(), no_page])),
             [NAMES_NO_PAGE, HOLDS_AN_EMAIL_ADDRESS]
         );
-        assert!(rules_its_refused_cards_broke(&answer(vec![named])).is_empty());
+        assert!(rules_its_refused_cards_broke(&answer(vec![named.clone()])).is_empty());
+        // A card that names no page and holds an e-mail address breaks both, though it is refused
+        // for the first: its retry, told only of the page, kept the address and was refused again.
+        let both = card(
+            "Check the shop's return policy for order 123-4567 associated with ana@example.com.",
+        );
+        assert_eq!(
+            browser_request::dropped_requests(&answer(vec![both.clone()])),
+            [NAMES_NO_PAGE]
+        );
+        assert_eq!(
+            rules_its_refused_cards_broke(&answer(vec![both.clone(), named])),
+            [NAMES_NO_PAGE, HOLDS_AN_EMAIL_ADDRESS]
+        );
+        assert_eq!(
+            refused_card_retry_message(&rules_its_refused_cards_broke(&answer(vec![both]))),
+            "Retrying: the browser card named no page by its address or held an e-mail address. The retry names each page it opens, or the site's home page for an address it would only guess, without the person's details."
+        );
 
         let request = "Latest user request: the vacuum's price at the three shops";
         let fix_only_the_card = [
@@ -32919,7 +33107,7 @@ mod tests {
                 "Retrying: the browser card named no page by its address or held an e-mail address. The retry names each page it opens, or the site's home page for an address it would only guess, without the person's details.",
             ),
         ] {
-            let retry = refused_card_retry_prompt(request, &broken);
+            let retry = refused_card_retry_prompt(request, &broken, true);
             assert!(retry.starts_with(request), "{retry}");
             for words in fix_only_the_card.iter().chain(&rules) {
                 assert!(retry.contains(words), "{broken:?}: {words}\n{retry}");
@@ -32945,6 +33133,16 @@ mod tests {
                 assert!(!requirement.contains(gone), "{broken:?}: {gone}");
             }
             assert_eq!(refused_card_retry_message(&broken), line);
+            // After an attempt that looked nothing up, the retry is told to find the page first,
+            // with the same rules.
+            let unread = refused_card_retry_prompt(request, &broken, false);
+            for words in rules.iter().chain([
+                &"card was refused for what its task says. Fix the card:",
+                &"- This turn read and searched nothing yet: find the page first, then answer from what you read, or name the page in the card.",
+            ]) {
+                assert!(unread.contains(words), "{broken:?}: {words}\n{unread}");
+            }
+            assert!(!unread.contains("searches and reads are done"), "{unread}");
         }
         // A card whose rules aren't known names both, as before.
         let unknown =
@@ -32997,8 +33195,9 @@ mod tests {
             "status": "completed", "aggregated_output": "<untrusted_page_content url=\"https://shop.example/vacuum\" read_at=\"2026-11-20T15:47:10Z\" viewer=\"network\">\nIn stock\n</untrusted_page_content>"}}),
         ];
 
+        assert!(attempt_searched_or_read(&first, &read));
         let mut retry = first.clone();
-        refused_card_retry_options(&mut retry, Some(&first_thread));
+        refused_card_retry_options(&mut retry, Some(&first_thread), true);
         let (retry, prompt) = recovery_retry(&first, retry, None, "The request.".into(), &read);
         assert!(
             retry.resumes_provider_thread(),
@@ -33010,6 +33209,10 @@ mod tests {
         );
         assert!(retry.disable_native_web_search, "no new search");
         assert!(retry.disable_shell_tool, "no new read or keyed search");
+        assert!(
+            retry.disable_local_browser,
+            "no read with the owner-local browser"
+        );
         assert!(!retry.require_first_tool_call);
         // The thread holds what the first attempt found: nothing is added to the prompt.
         assert_eq!(prompt, "The request.");
@@ -33018,7 +33221,7 @@ mod tests {
         let mut unkept = first.clone();
         unkept.persist_conversation_thread = false;
         let mut retry = unkept.clone();
-        refused_card_retry_options(&mut retry, Some(&first_thread));
+        refused_card_retry_options(&mut retry, Some(&first_thread), true);
         let (retry, prompt) = recovery_retry(&unkept, retry, None, "The request.".into(), &read);
         assert!(!retry.resumes_provider_thread());
         assert_eq!(retry.provider_conversation_state, None);
@@ -33029,6 +33232,85 @@ mod tests {
         );
         assert!(prompt.contains("The vacuum costs 499 pounds."), "{prompt}");
         assert!(prompt.contains("In stock"), "{prompt}");
+    }
+
+    /// Only a retry whose first attempt looked something up adds no search and no read. One that
+    /// answered at once with a card naming no page ("Check the shop's return policy for my
+    /// order.") has nothing to write the card from: with no shell and no search its retry could
+    /// read neither the shop's policy page nor find a hotel's own page, and its card named a home
+    /// page for the browser to search, or none. It keeps them, on the first attempt's own thread.
+    /// What counts as looking up: a web search of the AI's own or a counted one, and a command or
+    /// tool that reads or searches pages; any other command doesn't.
+    #[test]
+    fn a_refused_cards_retry_keeps_its_readers_when_nothing_was_looked_up() {
+        let completed = |item: JsonValue| json!({"type": "item.completed", "item": item});
+        let command = |command: &str| {
+            completed(
+                json!({"type": "command_execution", "command": command, "exit_code": 0,
+                "status": "completed", "aggregated_output": ""}),
+            )
+        };
+        let first = CodexRunOptions {
+            persist_conversation_thread: true,
+            require_first_tool_call: true,
+            ..Default::default()
+        };
+        // An attempt that answered at once, or ran only a command that reads no page.
+        assert!(!attempt_searched_or_read(&first, &[]));
+        assert!(!attempt_searched_or_read(&first, &[command("ls -la")]));
+        assert!(!attempt_searched_or_read(
+            &first,
+            &[json!({"type": "item.started", "item": {"type": "web_search", "id": "ws_1"}})]
+        ));
+        // Each way of looking up counts.
+        for looked_up in [
+            command("instafy web read https://shop.example/help/returns --json"),
+            command("instafy web search \"shop return policy\" --json"),
+            completed(json!({"type": "web_search", "id": "ws_1", "query": "shop return policy"})),
+            completed(
+                json!({"type": "mcp_tool_call", "server": crate::local_browser::MCP_SERVER_NAME,
+                "tool": "observe", "status": "completed"}),
+            ),
+        ] {
+            assert!(
+                attempt_searched_or_read(&first, &[looked_up.clone()]),
+                "{looked_up}"
+            );
+        }
+        let searched = Arc::new(crate::managed_web_search::ManagedWebSearch::new(
+            crate::managed_web_search::SEARCHES_PER_MESSAGE,
+        ));
+        crate::managed_web_search::keep_found_for_test(&searched, "Web search: the policy page.");
+        assert!(attempt_searched_or_read(
+            &CodexRunOptions {
+                managed_web_search: Some(searched),
+                ..first.clone()
+            },
+            &[]
+        ));
+
+        let rollouts = tempdir().expect("rollout dir");
+        let rollout = rollouts.path().join("rollout.jsonl");
+        fs::write(&rollout, "").expect("rollout");
+        let first_thread = json!({
+            "defaultThreadId": "019a0000-0000-7000-8000-0000000000c2",
+            "defaultRolloutPath": rollout.display().to_string(),
+        });
+        let mut retry = first.clone();
+        refused_card_retry_options(&mut retry, Some(&first_thread), false);
+        let (retry, prompt) = recovery_retry(&first, retry, None, "The request.".into(), &[]);
+        assert!(
+            retry.resumes_provider_thread(),
+            "the first attempt's own thread"
+        );
+        assert!(
+            !retry.disable_native_web_search
+                && !retry.disable_shell_tool
+                && !retry.disable_local_browser,
+            "it may read the page and search for it"
+        );
+        assert!(!retry.require_first_tool_call);
+        assert_eq!(prompt, "The request.");
     }
 
     /// A card the retry writes is checked as the first one was and not tried again: refused too,

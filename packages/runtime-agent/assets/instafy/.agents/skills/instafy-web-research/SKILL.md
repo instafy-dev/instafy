@@ -33,7 +33,7 @@ For direct page reads use only these readers:
 - a reading command or open API an installed skill names for that source;
 - in a reply-only turn, for a `needs_browser` page or with none of these: one `request_browser` card listing the related reads, at most 6.
 
-Never fetch pages with `curl`, `wget` or ad-hoc scripts. Inspect `instafy web budget --json` for big or delegated work. Parent, helpers and continued workers share the allowance. At exhaustion, use evidence and name gaps; never bypass or raise limits.
+Never fetch pages with `curl`, `wget` or ad-hoc scripts. Inspect `instafy web budget --json` for big work. Parent, helpers and continued workers share the allowance. At exhaustion, use evidence and name gaps; never bypass or raise limits.
 
 ## Sources by need
 
@@ -96,11 +96,11 @@ Use the first that can answer, then the next for the rest:
 
 ## Stops
 
-For direct readers and browsers, a sign-in or paywall, a CAPTCHA or bot check, HTTP 401, 403 or 429, a robots.txt refusal, a private or local address, more than 5 redirects, a download instead of a page, a page showing passwords, keys or tokens, or an explicit workspace policy refusal ends that URL for this turn:
+For direct readers and browsers, a sign-in or paywall, a CAPTCHA or bot check, HTTP 401, 403 or 429, a robots.txt refusal, a private or local address, more than 5 redirects, a download, a page showing passwords, keys or tokens, or an explicit workspace policy refusal ends that URL for this turn:
 
 - never retry it another way (another reader, browser, user agent, cache, mirror or archive);
-- never ask for a password or code; the person may sign in in their own browser and paste what they choose to share;
-- list it in the reply as "not read: <page>", in a few plain words, with its link and, if public and open to Octo, one card (Readers): never how the reader was stopped (robots.txt) or that you hand it over: the card says what happens next.
+- never ask for a password or code; they may sign in in their own browser and paste what they choose to share;
+- list it in the reply as "not read: <page>", in a few plain words, with its link and, if public, open to Octo and showing no secrets, one card they may press (Readers): never how the reader was stopped (robots.txt) or that you hand it over: the card says what happens next.
 
 After a 429 or bot check, read nothing more from that site this turn.
 

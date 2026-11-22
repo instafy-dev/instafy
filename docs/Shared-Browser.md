@@ -1558,12 +1558,15 @@ runs once more, since its words were written for that card: a page it read,
 another card beside it and a skill setup's words don't keep it from running
 again (kept, an answer that had read a text-only results page said "I've opened
 a browser check of the official results", and nothing opened). The retry is
-told which rule its card broke and what to name instead, the site's home page
-for an address it would only guess, and fixes only the card: it runs on the
-first attempt's own thread, which holds what that attempt searched and read,
-with no web search and no shell, so it adds no search and no read. Told to
-search first, two lookups ran their whole turn again (a local test, Nov 20).
-The line under the turn names the same rule. A turn that changed files keeps
+told which rules its card broke (a card that names no page and holds an e-mail
+address broke both) and what to name instead, the site's home page for an
+address it would only guess. It runs on the first attempt's own thread, which
+holds what that attempt searched and read. After an attempt that searched or
+read, it fixes only the card, with no web search, no shell and no owner-local
+browser, so it adds no search and no read: told to search first, two lookups
+ran their whole turn again (a local test, Nov 20). After an attempt that
+answered at once, it keeps them and is told to find the page first. The line
+under the turn names the same rules. A turn that changed files keeps
 its answer, which says what it made. A card that retry writes is checked the
 same way and not tried again. An address only Octo read,
 a search result's among them, still leaves the card a button until the person
@@ -3509,7 +3512,15 @@ unless the policy is `"covered"`.
   replies show (the runtime reads the chat's history and each text's hosts as
   Studio does, a page's file name and a query's value included, and in a
   shared chat counts only the turn's own message of the person's), keeps the
-  turn's reply above it. A reply that does show beside a card never says a page
+  turn's reply above it. So does a card that opens a page the turn's own reader
+  (`instafy web read`) didn't read: one it marked stopped (a robots.txt
+  refusal, a sign-in, an HTTP 403…), where it redirected, every page of a read
+  that read nothing, and, where the turn's events kept only the end of a read of
+  several pages, each page that end doesn't show read. The card carries
+  `waitsForThePerson: true`, and Studio never opens it by itself, also for an
+  address the person wrote: the research skill ends such a page in its link and
+  one card, and opened by itself the browser would read with no press a page
+  robots.txt refused the reader. A reply that does show beside a card never says a page
   opened before a browser tool saw it, what the browser will submit, send or
   buy, or that pages are handed to the browser: the card says what happens
   next. A refused card's words leave the reply being written as its retry begins,

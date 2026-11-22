@@ -19,7 +19,9 @@
 //! The retry fixes only the card: a price question's first attempt read the shop's page, and its
 //! retry, on a thread of its own and told to "search first", read it all again (a local test,
 //! Nov 20). It now runs on the first attempt's own thread, which holds what that attempt read,
-//! with no shell and no web search, told which rule its card broke and what to name instead.
+//! with no shell and no web search, told which rule its card broke and what to name instead. A
+//! first attempt that looked nothing up has nothing to write the card from: its retry keeps the
+//! shell, told to find the page first.
 
 // The proxy fixtures of `tests/proxy_integration.rs`, as the evidence retry's own tests use them.
 use crate::*;
@@ -533,6 +535,10 @@ async fn run_case(case: Case) -> Result<()> {
                 retry_input.contains(STAND_ALONE),
                 "retry input: {retry_input}"
             );
+            // Its first attempt answered at once and looked nothing up: the retry keeps the shell
+            // to read or find the page its card names.
+            let tools = requests[1]["tools"].to_string();
+            assert!(tools.contains("\"exec_command\""), "{tools}");
             // What the retry found is the reply: above the card that waits for the person, or
             // alone when its card was refused too. Never the first answer's words.
             let words = if case == Case::AWaitingCard {
@@ -551,13 +557,22 @@ async fn run_case(case: Case) -> Result<()> {
                 vec![(json!("refused_browser_card"), json!("Working"))]
             );
             assert_eq!(requests.len(), 2, "the first answer, then the retry's");
-            // The retry was told why its card was refused, and what to name instead.
+            // The retry was told why its card was refused, and what to name instead. Its first
+            // attempt answered at once and looked nothing up, so it is told to find the page
+            // first, and keeps the shell to read it.
             let retry_input = requests[1]["input"].to_string();
             assert!(
-                retry_input.contains("`request_browser` card was refused for what its task says. Fix only the card:")
-                    && retry_input.contains("For a page whose address you would only guess, such as a site's search page, name that site's home page."),
+                retry_input.contains("`request_browser` card was refused for what its task says. Fix the card:")
+                    && retry_input.contains("For a page whose address you would only guess, such as a site's search page, name that site's home page.")
+                    && retry_input.contains("This turn read and searched nothing yet: find the page first"),
                 "retry input: {retry_input}"
             );
+            assert!(
+                !retry_input.contains("searches and reads are done"),
+                "retry input: {retry_input}"
+            );
+            let tools = requests[1]["tools"].to_string();
+            assert!(tools.contains("\"exec_command\""), "{tools}");
             // The person reads none of the first answer's words for a card that never came.
             let said: Vec<&str> = std::iter::once(execution.summary.as_str())
                 .chain(execution.final_messages.iter().map(|m| m.content.as_str()))

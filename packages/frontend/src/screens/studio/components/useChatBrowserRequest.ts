@@ -341,7 +341,9 @@ function autoStartStillApplies(current: Options, key: string): boolean {
  *   minutes, with no message after it and no continuation for it;
  * - never for a card a browser turn sent, so a pause or a denial cannot loop,
  *   nor for one a hand-back turn sent (useBrowserHandBack: one hop only);
- * - for an address the person could have seen ({@link browserAutoStartAddressesSeen});
+ * - for an address the person could have seen ({@link browserAutoStartAddressesSeen}),
+ *   and never for a page Octo's own reader couldn't read in that turn
+ *   (`waitsForThePerson`), whoever gave its address;
  * - once that run is finished, and once the tab is visible;
  * - once per card on this page, at most one start that opens the browser per
  *   conversation in ten minutes (a card that continues in Instafy's browser
@@ -831,6 +833,12 @@ export function useChatBrowserRequest(options: Options) {
       currentUserId: auto.currentUserId,
     })) {
       leave(BROWSER_AUTO_START_COPY.unseenAddress);
+      return DECIDED;
+    }
+    // A page Octo's own reader couldn't read is the person's to open, also
+    // one they wrote: the turn's words above the card say what wasn't read.
+    if (request.waitsForThePerson) {
+      leave(null);
       return DECIDED;
     }
     // The card says itself why no browser opens here.
