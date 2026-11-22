@@ -2502,8 +2502,9 @@ no more and says the same. A reading the turn takes itself waits for nothing
 and ends "Take a snapshot in a moment." An ordinary page, whose main part
 shows anything, reads as before and waits for nothing. The busy answer's words
 are unchanged, and the not-drawn words start as it does, or as a covered
-click's: the runtime reads both as a page that was still too busy to be read,
-or covered.
+click's, and hold no words of the page's own: the runtime finds those words
+anywhere in a step's `message` and reads it as a page that was still too busy
+to be read, or covered.
 
 Every control the page has (up to 5,000) is judged
 before the list is chosen, so a closed list's hundreds of options never crowd
