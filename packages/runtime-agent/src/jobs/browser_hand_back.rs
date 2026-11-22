@@ -1124,7 +1124,8 @@ fn answers_end_a_step(job: &LeaseJob) -> bool {
 /// answer to that step's prompt (they said no, didn't answer in time, or the page changed after
 /// their yes: `shared_browser_activity::ANSWER_CODES`), under a controller that hands such a
 /// turn back ([`AFTER_A_PROMPT_KEY`]). The turn then ends as any finished turn does: its build
-/// makes the change from what it read and says which step didn't run. Held back as a pause, a
+/// makes the change from what it read, and its reply ends in the runtime's line for that step
+/// ([`step_not_done_code`]). Held back as a pause, a
 /// page message whose part had read the hours it needed got no build and no page, for one
 /// planner step whose prompt ran out (a local test, Nov 19). Every other end holds the build
 /// back as it always did: a pause the person continues in the browser, a safety stop and a
@@ -6273,7 +6274,10 @@ mod tests {
             "{trip}\n{}",
             json!({ "unread": ["Plan a Trip's Fares tab", "a trip review's link"] })
         );
-        assert_eq!(take_pages_to_read(&mut summary), ["Plan a Trip's Fares tab"]);
+        assert_eq!(
+            take_pages_to_read(&mut summary),
+            ["Plan a Trip's Fares tab"]
+        );
         assert_eq!(
             not_found_of(&summary),
             ["I didn't find a trip review's link"]

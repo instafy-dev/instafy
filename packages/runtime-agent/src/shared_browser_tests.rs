@@ -3762,11 +3762,9 @@ fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
     );
     // And by that refusal only where a home page is the way on: never after a search nobody
     // gave on a site nobody gave (`a_refused_search_nobody_gave_is_told_of_no_home_page`).
-    assert!(
-        said.iter().any(|line| {
-            line.contains("const opens = home ? `, and ${home} always opens` : \"\";")
-        })
-    );
+    assert!(said.iter().any(|line| {
+        line.contains("const opens = home ? `, and ${home} always opens` : \"\";")
+    }));
     assert!(SHARED_BROWSER_SCRIPT.contains("is link-only: Octo never opens it, in any tab."));
 }
 

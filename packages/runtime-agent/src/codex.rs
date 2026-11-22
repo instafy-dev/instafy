@@ -8809,7 +8809,10 @@ mod tests {
             // ended a denied submit with its own account and next step ("submit the order on
             // the page yourself") right above that line and its "Tell Octo what to try
             // instead." (a local test, Nov 20).
-            assert!(!policy.contains("say in plain words which step"), "{policy}");
+            assert!(
+                !policy.contains("say in plain words which step"),
+                "{policy}"
+            );
         }
     }
 

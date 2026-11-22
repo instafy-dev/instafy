@@ -9589,7 +9589,7 @@ impl JobProcessor {
         }
         // Such an answer in a part with its build after it that read no page hands the person's
         // message to that build, as any part that read none does: the step isn't tried again,
-        // and the build says it didn't run.
+        // and the runtime's line for it ends the build's reply.
         let prompt_ended_a_part_that_read_nothing = answer_ended_a_step
             && !cancel_signal
                 .as_ref()
@@ -17009,8 +17009,9 @@ fn shared_browser_terminal_consent_failure(messages: &[JobMessage]) -> Option<&'
 /// The `browser/terminal-consent` artifact of a run that ended on `code`: the code, and the kind
 /// and site of the step that ended it, as its own facts name them (the call that ended the run,
 /// not a later one: `shared_browser::ENDED_EARLIER_KEY`). The controller reads them for a
-/// hand-back's `stepNotDone` (runtime-controller `browser_hand_back.rs`), so its build says
-/// which step didn't run without a word of the turn's.
+/// hand-back's `stepNotDone` (runtime-controller `browser_hand_back.rs`), so its build knows
+/// which step didn't run without a word of the turn's, and its reply ends in the runtime's line
+/// for it ([`end_with_the_step_not_done`]).
 fn terminal_consent_artifact(
     code: &str,
     messages: &[JobMessage],
@@ -17224,7 +17225,10 @@ fn end_with_the_step_not_done(job: &LeaseJob, summary: &mut String) {
     if summary.trim().is_empty() || participation_decline_sentinel(summary) {
         return;
     }
-    save_report::append_not_saved(summary, &[terminal_shared_browser_summary(code).to_string()]);
+    save_report::append_not_saved(
+        summary,
+        &[terminal_shared_browser_summary(code).to_string()],
+    );
 }
 
 /// What the person reads when a Shared Browser run ended on its approval
@@ -34277,9 +34281,10 @@ mod tests {
     /// prompt ran out, and no build and no page followed (a local test, Nov 19). The part keeps
     /// its own words, every line it wrote and what it didn't find. With its build after it and
     /// pages read, it posts nothing: its note goes to that build as any finished part's does,
-    /// without the runtime's line for the step, which its build says, and the step's prompt is
-    /// named in the run's `browser/terminal-consent` artifact, which the controller reads for the
-    /// build's `stepNotDone`. A question's turn posts its words with the line under them.
+    /// without the runtime's line for the step, which ends its build's reply
+    /// ([`end_with_the_step_not_done`]), and the step's prompt is named in the run's
+    /// `browser/terminal-consent` artifact, which the controller reads for the build's
+    /// `stepNotDone`. A question's turn posts its words with the line under them.
     #[test]
     fn a_prompt_that_ended_a_step_hands_back_what_the_part_read() {
         let museum = r#"{"url":"https://museum.example/visit","title":"Plan your visit","facts":["Open 10:00 to 18:00, Tuesday to Sunday.","Closed on Mondays."]}"#;
@@ -34306,7 +34311,7 @@ mod tests {
             end_on_the_persons_answer(&job, &mut summary, &mut fallback, code, &[]);
             assert_eq!(
                 summary, answer,
-                "{code}: its build says which step didn't run"
+                "{code}: the line ends its build's reply instead"
             );
             assert!(
                 !browser_hand_back::hands_its_message_to_its_build(
@@ -34520,7 +34525,8 @@ mod tests {
                 }),
             )
         };
-        let reply = "Added the Laptop 12's weight to the comparison. Its reviews read \"not checked\".";
+        let reply =
+            "Added the Laptop 12's weight to the comparison. Its reviews read \"not checked\".";
         for (answer, line) in [("expired", expired), ("denied", denied), ("stale", stale)] {
             let job = build_after(json!({
                 "answer": answer, "step": "search", "host": "search.example",
