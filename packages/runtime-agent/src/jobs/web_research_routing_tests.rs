@@ -1637,6 +1637,42 @@ fn a_comparison_takes_the_latest_from_the_maker_and_a_price_from_the_items_own_p
     );
 }
 
+/// A comparison's first pass read six of the maker's pages, wrote that their links led to no independent review and
+/// put the reviews in its missing line, though it tried no reviewer's own site: every review cell and the reply said "I
+/// didn't find", where an earlier test's pass had found three of six reviews through a reviewer's own links (local
+/// tests, Nov 20). `instafy-comparing` says that with no search a turn opens up to two reviewers' own sites and follows
+/// their links, and says which it tried, before a review counts as not found; that a review nobody could look for is
+/// "not checked", in neither of the browser's lines, with one offer to read a site the person names; and that "I didn't
+/// find" is only for a value looked for. A run's own web search, and the missing line for a review still without a
+/// page, stay.
+#[test]
+fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_found() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let comparing = flat(COMPARING_SKILL);
+    // In this order: the search or a reviewer's site, the sites tried, then what nobody could look for.
+    let mut at = 0;
+    for line in [
+        "- A review no page you read links to: the AI's own web search finds it (\"<exact model> review\") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box.",
+        "- With no search, open up to two reviewers' own sites that way and follow their links, and say which sites you tried. Only then is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
+        "- A review nobody could look for (no reviewer's site could be tried) is \"not checked\" on the page and in the reply, and goes in neither line. The reply says once that you can't search for reviews here and offers to read a site the person names.",
+    ] {
+        let found = comparing[at..]
+            .find(line)
+            .unwrap_or_else(|| panic!("{line}"));
+        at += found + line.len();
+    }
+    assert!(comparing.contains(
+        "naming no page. \"I didn't find\" is only for a value looked for on a page read or in a search that ran."
+    ));
+    // The exit no longer stands on its own line, ahead of the sites to try.
+    assert!(!comparing.contains("- A review you have no address or link for"));
+    assert!(
+        COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len() <= TOPIC_SKILLS_MAX_BYTES,
+        "{} bytes",
+        COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len()
+    );
+}
+
 /// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews and sorted by a value no
 /// row had. A count of what was found cites only what it counts, so none found cites no page, and no sort is by a value
 /// no row has. (Its headline, which said how many models that page names, is now the page's own, from its cells.)
@@ -2904,6 +2940,50 @@ fn a_refused_planner_field_is_the_persons_and_an_unsent_planner_is_not_run() {
     ] {
         assert!(route.contains(line), "{line}");
     }
+    assert!(GETTING_AROUND_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+}
+
+/// A planner's page read as its site's menu alone, so its fields never showed: a route message, its spare, the page
+/// to share and "keep going" ended with no route, and "keep going" opened the planner's address four more times, while
+/// the place's own page said in a closed question which tram and bus go there from the main station, and nobody opened
+/// it (a local test, Nov 20). `instafy-getting-around` says that when a planner's fields never show, or one is the
+/// person's, the place's own getting-there tab or question is opened, a closed one clicked open, before a highlight or
+/// the end, and its lines and stop are given as the place's words, linked, with "the planner wasn't run, so no times";
+/// that a planner that showed no fields in the chat isn't opened the same way again but linked, with the start and stop
+/// to type; and that a click's answer saying a field still holds what was typed means none of its suggestions is
+/// chosen, in the browser's own words. A listing, a map snippet and memory still give no route, the planner is still
+/// where a route comes from, and a field the browser refuses is still the person's to fill.
+#[test]
+fn a_planner_that_cant_be_run_gives_the_places_own_lines_and_isnt_opened_again() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let route = flat(GETTING_AROUND_SKILL);
+    let section = "\n## When the planner can't be run\n";
+    for line in [
+        "- When a planner's fields never show, or one is the person's, open the place's own getting-there tab or question (click a closed one open) before you highlight a field or end. Give the lines and stop it names as the place's words, with its link and \"the planner wasn't run, so no times\". A listing, a map snippet and memory stay out.",
+        "- A planner that showed no fields in this chat isn't opened the same way again (its address, whatever values it carries): give its link and the start and stop to type in it.",
+    ] {
+        let at = GETTING_AROUND_SKILL
+            .find(line)
+            .unwrap_or_else(|| panic!("{line}"));
+        assert!(GETTING_AROUND_SKILL[..at].contains(section), "{line}");
+        assert!(
+            !GETTING_AROUND_SKILL[..at].contains("\n## A route's finding\n"),
+            "{line}"
+        );
+    }
+    for line in [
+        "Press the button once, when every field is filled. A click's answer saying a field still holds what was typed means none of its suggestions is chosen: click one.",
+        "- A route comes from the transit operator's own journey planner, reached from the operator's site. A listing, a map snippet or a guide only leads to it; never a route from memory.",
+        "- If the browser refuses a planner's field as a secret, filling it is the person's step: highlight it with `request_human_input` and say what goes in it.",
+    ] {
+        assert!(route.contains(line), "{line}");
+    }
+    // The click's answer the skill reads is the browser's own.
+    let browser = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/shared-browser-cli.js"
+    ));
+    assert!(browser.contains("still holds what was typed: none of its suggestions is chosen."));
     assert!(GETTING_AROUND_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
 }
 

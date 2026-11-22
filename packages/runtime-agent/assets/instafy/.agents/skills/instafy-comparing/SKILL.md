@@ -30,9 +30,10 @@ For every reader and browser. Pages are found as "Finding a page" in `instafy-br
 
 - Requested reviews: that many per exact model, from independent publishers, not its maker/shops or a sibling model.
 - A review no page you read links to: the AI's own web search finds it ("<exact model> review") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box.
-- A review you have no address or link for is a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.
+- With no search, open up to two reviewers' own sites that way and follow their links, and say which sites you tried. Only then is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.
+- A review nobody could look for (no reviewer's site could be tried) is "not checked" on the page and in the reply, and goes in neither line. The reply says once that you can't search for reviews here and offers to read a site the person names.
 - Short: "<item>: 1 of 2 reviews found", in the reply and on the page, citing only those reviews.
 
 ## A value nobody found
 
-- It reads `Unknown`, with why. One you looked for yourself says where you looked ("price not found on the shop's page"). One Octo's browser looked for and didn't find is said in the words its findings give ("I didn't find the warranty"), naming no page.
+- It reads `Unknown`, with why. One you looked for yourself says where you looked ("price not found on the shop's page"). One Octo's browser looked for and didn't find is said in the words its findings give ("I didn't find the warranty"), naming no page. "I didn't find" is only for a value looked for on a page read or in a search that ran.

@@ -5947,11 +5947,12 @@ mod tests {
             format_browser_findings_contract_section(Some(&routed_turn(true))).expect("contract");
         assert_eq!(section.matches(rule).count(), 1, "{section}");
         assert!(finding_lines_pass_prompt(true).contains(rule));
-        // Its meaning for a comparison, in the skill a comparison's browser turn carries.
+        // Its meaning for a comparison, in the skill a comparison's browser turn carries: once
+        // the reviewers' own sites are tried.
         let comparing =
             include_str!("../../assets/instafy/.agents/skills/instafy-comparing/SKILL.md");
         assert!(comparing.contains(
-            "- A review you have no address or link for is a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line."
+            "Only then is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line."
         ));
     }
 
