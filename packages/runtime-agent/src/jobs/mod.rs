@@ -32414,8 +32414,8 @@ mod tests {
     /// (the research skill's Stops), and that card waits for the person's press, also where they
     /// typed its address or an earlier reply gave it, with the turn's words above it. Studio opened
     /// such a card by itself, so the browser read with no press a page robots.txt refused the
-    /// reader (the museum's page in a person's message, as a reader stop of a lookup drive's).
-    /// A card for a page the reader read opens by itself as before, with no words of its own.
+    /// reader, a museum's page the person's message named among them. A card for a page the
+    /// reader read opens by itself as before, with no words of its own.
     #[test]
     fn a_card_for_a_page_the_reader_was_refused_waits_for_the_persons_press() {
         let page = "https://www.museum.example/en/visit";
