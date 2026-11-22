@@ -70,7 +70,7 @@ Use the first that can answer, then the next for the rest:
 3. The AI's own web search, when this run has it (above).
 4. `instafy web read` for a page whose address you have: the official page a source gives, reviewers' homepages and links, an exact quote, or a page search couldn't read. An address that does not answer: once with `www.` added or removed, as its `tell` says.
 5. Open data: `instafy web search "<words>" --chain reference-search --json` for Wikipedia and Wikivoyage articles and the official websites Wikidata records (no key needed); OpenStreetMap or a national open-data portal; `instafy web search` with the space's own key (Searching). Then at most 2 guessed official domains, confirmed by reading the business name.
-6. Instafy's browser, one card (Readers), only for what these can't reach: a site to use (a form, a journey planner), bookings and availability for dates (unnamed hotels: search first, then one card for their own pages), a sign-in and the person's own account, a page nothing else read. A policy question beside an order number or e-mail: the shop's policy page; neither goes in a card. Name each page by its address (a page read, a search result or the official site of what the person named), never a guessed one (its site's home page instead), and what to do there.
+6. Instafy's browser, one card (Readers), only for what these can't reach: a site to use (a form, a journey planner), bookings and availability for dates (unnamed hotels: search first, then one card for their own pages), a sign-in and the person's own account, a page nothing else read. A policy question beside an order number or e-mail: the shop's policy page; neither goes in a card. Name each page by its address (a page read, a search result or the official site of what the person named), never a guessed one (its home page instead), and what to do there.
 7. The person's own search: they open the pages they pick and press **Send page to Octo**.
 
 ## Searching
@@ -100,7 +100,7 @@ For direct readers and browsers, a sign-in or paywall, a CAPTCHA or bot check, H
 
 - never retry it another way (another reader, browser, user agent, cache, mirror or archive);
 - never ask for a password or code; the person may sign in in their own browser and paste what they choose to share;
-- list it in the reply as "not read: <page>", in a few plain words, with its link and one card for such pages (Readers): never how the reader was stopped (robots.txt) or that you hand them over: the card says what happens next.
+- list it in the reply as "not read: <page>", in a few plain words, with its link and, if public and open to Octo, one card (Readers): never how the reader was stopped (robots.txt) or that you hand it over: the card says what happens next.
 
 After a 429 or bot check, read nothing more from that site this turn.
 

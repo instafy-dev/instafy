@@ -32024,7 +32024,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/assets/instafy/.agents/skills/instafy-web-research/SKILL.md"
         ));
-        assert!(research.contains("or that you hand them over: the card says what happens next."));
+        assert!(research.contains("or that you hand it over: the card says what happens next."));
         let evaluated = test_lease_job(
             Some("feature"),
             json!({ "metadata": { "groupParticipation": {
